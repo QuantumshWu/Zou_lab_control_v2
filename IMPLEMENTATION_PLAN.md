@@ -4,10 +4,10 @@
 
 ## 1. Persistent Checkpoint
 
-更新时间：2026-08-20
+更新时间：2026-08-21
 启动HEAD：`af54e24787de67270c54eb154f2b23f43508fc3e`
 Branch：`master`
-用户执行边界：Milestone 1–6及各自post-milestone residual sweep均已完成；M4 cleanup、performance、M5与M6均为独立commit。M5于2026-08-20 14:31 PDT完成验证，满足用户15:30门并进入M6；M6以`Converge USB SLM context, feedback, and simulation truth`单独提交。用户本轮四项要求至此完成，不自动进入M7；不得访问真实SLM或其它hardware。
+用户执行边界：Milestone 1–6及各自post-milestone residual sweep均已完成；M4 cleanup、performance、M5与M6均为独立commit。M5于2026-08-20 14:31 PDT完成验证，满足用户15:30门并进入M6；M6以`Converge USB SLM context, feedback, and simulation truth`单独提交。2026-08-21用户已完成Plot projection/fit baseline手工验收并授权其独立commit；当前只收口该baseline，不自动进入M7，不得访问真实SLM或其它hardware。
 
 ### 当前状态
 
@@ -23,6 +23,7 @@ Branch：`master`
 - Milestone 5：`COMPLETE / SWEEP COMPLETE` — Pulse执行词汇、camera cadence、Remote takeover、Stop/SAFE、RTL/build与strict transport均闭合。
 - Milestone 6：`COMPLETE / SWEEP COMPLETE` — USB-only SLM、command truth、Science Context、robust Feedback与immutable Simulation已闭合。
 - Plot performance closure：`COMPLETE / SWEEP COMPLETE` — active+latest solve timeout、live FitEvent/raster解耦、renderer/fit直接热路径、重复测试及冻结树残余均已闭合。
+- Plot projection/fit baseline：`READY TO COMMIT / SWEEP COMPLETE` — 用户手工验收已完成；large projection、Histogram/Rolling pool、regular-image bounds/exact retry与最终两处first-frame copy均闭合，当前冻结candidate等待独立baseline commit。
 - Milestone 7：`PENDING`；single distribution、wheel/fresh install、evidence lanes和final docs等待用户后续指令。
 
 ### Milestone 3完成边界
@@ -31,7 +32,7 @@ Milestone 3主体从clean HEAD `23e820d`开始并由`ca66c7d Unify Runtime live 
 
 ### 当前停止门
 
-Milestone 6与Plot performance closure已完成；本轮不自动进入M7。不得运行真实SLM、camera或FPGA side effect。100 ms仍是Plot profile警戒线，不是硬验收门。
+Milestone 6与Plot performance closure已完成；Plot projection/fit baseline已获用户手工验收并只待commit。本轮不自动进入M7，不得运行真实SLM、camera或FPGA side effect。100 ms仍是Plot profile警戒线，不是硬验收门。
 
 ## 2. Milestone状态
 
@@ -277,6 +278,15 @@ M4 cleanup follow-up commit：`Remove residual M4 adapters and duplicate tests`�
 - 已提交的performance commit `69d5514..5be8bb7`真实为36 files `+1585/-214`（净增1371）：production 20 files净增824、tests 7 files净增525、docs 9 files净增22；旧Checkpoint少记22行，现已更正。本次final closure冻结树为19 files `+840/-503`（净增337）：production 7 files净删35、tests 4 files净增333、docs 8 files净增39；无新增production file/net class/kind/model lane，tests删除多frame队列政策及重复白盒，新增函数净数只覆盖pixel parity、fit order/race与active+latest生命周期。Plot全套407、Runtime/Workbench跨层140、全树1524 passed/4 skipped/6个既有vendor warnings。
 
 Performance commit：`Make derived history continuous and presentation capacity-one`。完成后进入M5，不把indexed Dataset、gap或window放进任何Plot-kind/Logic plugin/Workbench专用lane。
+
+### Projection/Fit baseline follow-up（2026-08-21）
+
+- 用户已完成手工验收并授权把当前baseline作为独立commit落盘；本节记录的是文档reconciliation前冻结的code/test candidate：7 files `+735/-78`（净增657），其中production 3 files `+290/-75`（净增215），tests 4 files `+445/-3`（净增442）。无新增file/class；production只新增2个private helper和1个DataView cache state，均有唯一owner/consumer；无plot-kind、fit-model或Workbench专用lane。
+- Dense singleton Image保留native values与boolean validity；连续Facet cells保留views，sparse domain只gather请求位置；integer Histogram用native min/max与严格aligned `bincount`，所有float/nonuniform/sparse-span/超`int64`情况保留`np.histogram` fallback；ungrouped Rolling复用一个valid pool，repeat/primary-index history仍按source index语义投影。R=1初始history不再先建全尺寸positions，dense Histogram facet不再boolean-copy contiguous cell。
+- Regular-image默认radius lower改为native sampling resolution/2，moment bounds仍拥有upper与其它参数，显式bounds最终覆盖。Full-image cold candidate已经在exact objective成功时，若随后retry只以相同cost返回failure，不再把成功FitResult/FitEvent误写成invalid；只有无实质cost改善时保留原成功，规则由separable kernel metadata共享，不按model id特判。
+- 同一fresh-process 10-case A/B中，2048² Image complete P50/P95为35.42/38.05→21.60/22.39 ms，Facet×4为183.48/191.71→24.05/27.13 ms，Facet×8为366.48/377.69→45.24/46.98 ms，Histogram为175.79/178.02→33.13/34.80 ms，Rolling为111.80/112.77→15.14/17.30 ms；完整矩阵与allocation peak见`packages/zlc_plot/docs/performance.md`。R=1 2048² initial pool为11.02/12.79→0.117/0.130 ms、32.01→0.005 MiB；4×1200×1920 Histogram facet为50.43/51.13→40.15/41.26 ms、19.79→17.59 MiB，numeric parity exact。
+- 当前验证：Plot全套`418 passed`；跨层定向`5 passed`；最终fit gate focused `50 passed`，data/facet/history focused `96 passed`；全树`1535 passed, 4 skipped, 6 warnings`，warnings仍仅既有vendor SWIG deprecation。独立随机矩阵为194个dense/sparse/grid/validity/group/reduction projection checks、954个Histogram fast/fallback cases、21个Fit parity/success cases，另有repeat 2/3/7与primary-index exact parity；`uint64 > int64.max` fallback blocker已回修。`git diff --check`、AST与active old-name scan均green。
+- Gate 17最终分类：新增9个test functions与1个shared fixture helper全部KEEP；唯一重复dense-facet proof已先并入existing route test并净删11行，之后MERGE/DELETE为0。`_all_positions`、`_flat_cache`、`_masked_leading_reduce`、`_histogram_from_positions`、generic grouped/repeat/primary paths和moment bounds均有可达fallback consumer，不存在待删dead branch。用户验收前刻意未提交、未把pending baseline冒充HEAD；本次active docs同步完成后唯一下一步是baseline commit。
 
 ## 10. Milestone 5完成证据
 

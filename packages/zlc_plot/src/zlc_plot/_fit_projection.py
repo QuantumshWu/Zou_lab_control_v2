@@ -738,13 +738,53 @@ class FitProjection:
         count = int(state["bin_count"])
         samples = view.samples
         if pooled is None:
-            canonical = np.asarray(samples.value.canonical).reshape(-1)
-            valid = np.asarray(samples.valid_mask, dtype=bool).reshape(-1)
-            finite = valid & np.isfinite(canonical)
-            values = np.asarray(canonical[finite], dtype=float)
+            canonical = np.asarray(samples.value.canonical)
+            valid = np.asarray(samples.valid_mask, dtype=bool)
         else:
-            canonical = np.asarray(pooled, dtype=float).reshape(-1)
-            values = canonical[np.isfinite(canonical)]
+            canonical = np.asarray(pooled)
+            valid = None
+        integral = canonical.dtype.kind in "biu"
+        if integral:
+            has_values = bool(canonical.size) and (
+                valid is None or bool(np.any(valid))
+            )
+            if has_values:
+                if valid is None:
+                    data_low = float(np.min(canonical))
+                    data_high = float(np.max(canonical))
+                else:
+                    limits = (
+                        (True, False)
+                        if canonical.dtype.kind == "b"
+                        else (
+                            np.iinfo(canonical.dtype).max,
+                            np.iinfo(canonical.dtype).min,
+                        )
+                    )
+                    data_low = float(
+                        np.min(canonical, where=valid, initial=limits[0])
+                    )
+                    data_high = float(
+                        np.max(canonical, where=valid, initial=limits[1])
+                    )
+            # The edge helper only needs the dtype to choose integer-aligned
+            # bins once exact native min/max have been found.
+            edge_values = np.empty(
+                0,
+                dtype=canonical.dtype if has_values else float,
+            )
+        else:
+            if valid is None:
+                flat = np.asarray(canonical, dtype=float).reshape(-1)
+                edge_values = flat[np.isfinite(flat)]
+            else:
+                flat = np.asarray(canonical).reshape(-1)
+                finite = np.asarray(valid).reshape(-1) & np.isfinite(flat)
+                edge_values = np.asarray(flat[finite], dtype=float)
+            has_values = bool(edge_values.size)
+            if has_values:
+                data_low = float(np.min(edge_values))
+                data_high = float(np.max(edge_values))
         previous = self._histogram_projection
         mode = str(state["relim_mode"])
         retain_domain = (
@@ -756,9 +796,7 @@ class FitProjection:
             assert previous is not None
             low = float(previous.edges[0])
             high = float(previous.edges[-1])
-            if values.size:
-                data_low = float(np.min(values))
-                data_high = float(np.max(values))
+            if has_values:
                 if data_low < low or data_high > high:
                     envelope_low = min(low, data_low)
                     envelope_high = max(high, data_high)
@@ -771,10 +809,7 @@ class FitProjection:
                     if data_high > high:
                         high = data_high + padding
         else:
-            if values.size:
-                data_low = float(np.min(values))
-                data_high = float(np.max(values))
-            else:
+            if not has_values:
                 data_low, data_high = 0.0, 1.0
             if data_low == data_high:
                 half = max(abs(data_low) * 0.05, 0.5)
@@ -789,7 +824,7 @@ class FitProjection:
                 low -= padding
                 high += padding
 
-        edges = aligned_histogram_edges(values, count, limits=(low, high))
+        edges = aligned_histogram_edges(edge_values, count, limits=(low, high))
         selected = HistogramProjection(
             len(edges) - 1,
             edges,

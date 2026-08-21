@@ -158,13 +158,18 @@ def test_dense_facet_equals_the_generic_path(spec, bins) -> None:
     _assert_facets_equal(dense, generic)
 
 
-def test_facet_projection_takes_the_dense_path_for_scan_cells() -> None:
+def test_facet_projection_takes_the_dense_path_for_scan_cells(monkeypatch) -> None:
     """facet() itself must route these cells densely, not just allow it."""
 
     view = DataView(_scan_of_frames())
     spec = FacetGridPlot(AxisRef.point_dimension("bias_x"), _IMAGE_CELL)
     routed = {}
     original = DataView._dense_facet
+
+    def forbidden(_self):
+        raise AssertionError("dense facet allocated generic element positions")
+
+    monkeypatch.setattr(DataView, "_all_positions", forbidden)
 
     def spying(self, *args, **kwargs):
         result = original(self, *args, **kwargs)

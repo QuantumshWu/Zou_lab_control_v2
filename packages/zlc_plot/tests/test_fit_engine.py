@@ -245,6 +245,70 @@ def _separable_image(
     return x, y, signal + rng.normal(0.0, noise, size=signal.shape)
 
 
+@pytest.mark.parametrize(
+    ("model", "radii", "permissive_bounds"),
+    (
+        (
+            "radial_gaussian_center",
+            (18.0,),
+            {"one_over_e_radius": (0.5, None)},
+        ),
+        (
+            "anisotropic_gaussian_center",
+            (24.0, 12.0),
+            {"radius_x": (0.5, None), "radius_y": (0.5, None)},
+        ),
+    ),
+)
+def test_large_regular_image_defaults_keep_a_narrow_peak_in_bounds(
+    model: str,
+    radii: tuple[float, ...],
+    permissive_bounds: dict[str, tuple[float | None, float | None]],
+) -> None:
+    """A camera-sized noise floor must not set a peak's minimum width."""
+
+    height, width = 1200, 1920
+    x = np.arange(width, dtype=float)
+    y = np.arange(height, dtype=float)
+    center_x, center_y = 0.5 * (width - 1), 0.5 * (height - 1)
+    radius_x, radius_y = (radii * 2)[:2]
+    x_profile = np.exp(-((x - center_x) / radius_x) ** 2)
+    y_profile = np.exp(-((y - center_y) / radius_y) ** 2)
+    rng = np.random.default_rng(20260820)
+    image = rng.standard_normal((height, width), dtype=np.float32)
+    image *= 1.5
+    image += 7.0 + 90.0 * y_profile[:, None] * x_profile[None, :]
+    image = np.clip(image, 0.0, 255.0).astype(np.uint8)
+
+    engine = FitEngine()
+    full = RegularImageFitInput(x, y, image)
+    roi = RegularImageFitInput(
+        x[704:1216],
+        y[344:856],
+        image[344:856, 704:1216],
+    )
+    roi_result = engine.fit(model, roi)
+    full_result = engine.fit(model, full)
+    roi_seeded_full = engine.fit(
+        model,
+        full,
+        initial=roi_result.parameter_values,
+        bounds=permissive_bounds,
+    )
+
+    assert roi_result.success and full_result.success and roi_seeded_full.success
+    assert (
+        full_result.reduced_chi_square
+        <= roi_seeded_full.reduced_chi_square * (1.0 + 1.0e-10)
+    )
+    np.testing.assert_allclose(
+        full_result.parameter_values[2 : 2 + len(radii)],
+        radii,
+        rtol=0.03,
+        atol=0.2,
+    )
+
+
 def test_anisotropic_regular_image_matches_coordinate_path() -> None:
     engine = FitEngine()
     x, y, image = _separable_image(radial=False)
@@ -278,6 +342,28 @@ def test_regular_image_rejects_models_without_the_capability() -> None:
     x, y, image = _separable_image(radial=True, size=24)
     with pytest.raises(ValueError, match="regular-image capability"):
         FitEngine().fit("lorentzian", RegularImageFitInput(x, y, image))
+
+
+@pytest.mark.parametrize(
+    ("model", "radial", "bound_name", "parameter_index"),
+    (
+        ("radial_gaussian_center", True, "one_over_e_radius", 2),
+        ("anisotropic_gaussian_center", False, "radius_x", 2),
+    ),
+)
+def test_regular_image_explicit_radius_bound_overrides_sampling_default(
+    model: str,
+    radial: bool,
+    bound_name: str,
+    parameter_index: int,
+) -> None:
+    x, y, image = _separable_image(radial=radial, size=48)
+    result = FitEngine().fit(
+        model,
+        RegularImageFitInput(x, y, image),
+        bounds={bound_name: (1.5, 1.7)},
+    )
+    assert 1.5 <= result.parameter_values[parameter_index] <= 1.7
 
 
 def test_rectangular_mask_crops_to_the_closed_form_and_keeps_original_indices() -> None:

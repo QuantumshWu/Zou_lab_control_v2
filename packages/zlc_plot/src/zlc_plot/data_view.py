@@ -381,6 +381,7 @@ class DataView:
         "_samples",
         "_axis_cache",
         "_flat_cache",
+        "_pooled_cache",
     )
 
     def __init__(
@@ -440,6 +441,7 @@ class DataView:
             AxisRef,
             tuple[NDArray[Any], NDArray[np.int64]],
         ] = {}
+        self._pooled_cache: NDArray[Any] | None = None
         self._samples = SampleProjection(
             revision=snapshot_revision(snapshot),
             generation=snapshot_generation(snapshot),
@@ -819,8 +821,14 @@ class DataView:
             (-1, ny, nx),
             order="C",
         )
-        z, counts = _masked_leading_reduce(moved, moved_usable, aggregation)
-        valid = (counts > 0) & np.isfinite(z)
+        if moved.shape[0] == 1:
+            z = np.asarray(moved[0])
+            valid = np.asarray(moved_usable[0], dtype=np.bool_)
+            if z.dtype.kind in "fc":
+                valid = valid & np.isfinite(z)
+        else:
+            z, counts = _masked_leading_reduce(moved, moved_usable, aggregation)
+            valid = (counts > 0) & np.isfinite(z)
         # Reductions may promote their result; the singleton camera path keeps
         # the producer's native dtype and immutable storage.
         z = np.asarray(z)
@@ -927,7 +935,11 @@ class DataView:
     ) -> HistogramData:
         """Distribution of every acquired value: the whole box is the pool."""
 
-        return self._histogram_from_positions(bins, self._all_positions())
+        return self._histogram_from_values(
+            bins,
+            self._samples.value.canonical,
+            valid=self._samples.valid_mask,
+        )
 
     def pooled_values(self) -> NDArray[Any]:
         """Every value this revision would pool, in canonical units.
@@ -938,10 +950,22 @@ class DataView:
         the display conversion happens once, where the edges are made.
         """
 
-        positions = self._all_positions()
-        flat_valid = self._samples.valid_mask.reshape(-1)
-        flat_values = self._samples.value.canonical.reshape(-1)
-        return flat_values[positions[flat_valid[positions]]]
+        cached = self._pooled_cache
+        if cached is not None:
+            return cached
+        valid = self._samples.valid_mask
+        values = self._samples.value.canonical
+        if (
+            valid.size
+            and all(stride == 0 for stride in valid.strides)
+            and bool(valid.flat[0])
+        ) or bool(np.all(valid)):
+            pooled = values.reshape(-1).view()
+        else:
+            pooled = values[valid].reshape(-1)
+        pooled.setflags(write=False)
+        self._pooled_cache = pooled
+        return pooled
 
     def pooled_values_by_repeat(self) -> tuple[NDArray[Any], ...]:
         """The values each repeat of this revision would pool, oldest first.
@@ -952,28 +976,28 @@ class DataView:
         repeat.  A snapshot without repeats degenerates to the single pool.
         """
 
-        positions = self._all_positions()
         flat_valid = self._samples.valid_mask.reshape(-1)
         flat_values = self._samples.value.canonical.reshape(-1)
-        if self.has_primary_index:
-            primary = self._domain(self._primary_index_ref(), positions)
-            return tuple(
-                flat_values[
-                    positions[
-                        flat_valid[positions] & (primary.codes == index)
-                    ]
-                ]
-                for index in range(len(primary.values))
-            )
         repeats = schema_repeat_count(self._schema)
-        if repeats <= 1:
-            return (self.pooled_values(),)
-        block = flat_values.size // repeats
-        repeat_of_position = positions // block
-        usable = flat_valid[positions]
+        if not self.has_primary_index:
+            if repeats <= 1:
+                return (self.pooled_values(),)
+            block = flat_values.size // repeats
+            return tuple(
+                flat_values[start : start + block][
+                    flat_valid[start : start + block]
+                ]
+                for start in range(0, flat_values.size, block)
+            )
+        positions = self._all_positions()
+        primary = self._domain(self._primary_index_ref(), positions)
         return tuple(
-            flat_values[positions[usable & (repeat_of_position == repeat)]]
-            for repeat in range(repeats)
+            flat_values[
+                positions[
+                    flat_valid[positions] & (primary.codes == index)
+                ]
+            ]
+            for index in range(len(primary.values))
         )
 
     def histogram_of(
@@ -1017,18 +1041,23 @@ class DataView:
 
         self.validate_rolling(group)
         aggregation = _validate_aggregation(aggregation)
+        if group is None:
+            pooled = self.pooled_values()
+            value = _reduce_scalar(pooled, aggregation)
+            return RollingSample(
+                revision=self._samples.revision,
+                generation=self._samples.generation,
+                values=np.asarray([value], dtype=np.float64),
+                valid=np.asarray([pooled.size > 0 and np.isfinite(value)]),
+                group_keys=((),),
+            )
         positions = self._all_positions()
         flat_values = self._samples.value.canonical.reshape(-1)
         flat_valid = self._samples.valid_mask.reshape(-1)
-        if group is None:
-            codes = np.zeros(positions.size, dtype=np.int64)
-            domain_size = 1
-            keys: tuple[tuple[AxisValue, ...], ...] = ((),)
-        else:
-            domain = self._domain(group, positions)
-            codes = domain.codes
-            domain_size = len(domain.values)
-            keys = tuple((value,) for value in domain.values)
+        domain = self._domain(group, positions)
+        codes = domain.codes
+        domain_size = len(domain.values)
+        keys = tuple((value,) for value in domain.values)
         usable = flat_valid[positions] & (codes >= 0)
         values, counts = _aggregate_by_codes(
             flat_values[positions],
@@ -1167,6 +1196,8 @@ class DataView:
         self,
         bins: int | Sequence[float],
         values: NDArray[Any],
+        *,
+        valid: NDArray[np.bool_] | None = None,
     ) -> HistogramData:
         _require_real_numeric(values, None)
         canonical_bins: int | NDArray[Any]
@@ -1187,7 +1218,21 @@ class DataView:
             if np.any(np.diff(edges) <= 0):
                 raise ValueError("histogram edges must be strictly increasing")
             canonical_bins = edges
-        counts, edges = np.histogram(values, bins=canonical_bins)
+        counts = (
+            None
+            if isinstance(canonical_bins, int)
+            else _uniform_integer_counts(values, valid, canonical_bins)
+        )
+        if counts is None:
+            source = np.asarray(values)
+            selected = (
+                source.reshape(-1)
+                if valid is None
+                else source[np.asarray(valid, dtype=np.bool_)].reshape(-1)
+            )
+            counts, edges = np.histogram(selected, bins=canonical_bins)
+        else:
+            edges = canonical_bins
         centers = (edges[:-1] + edges[1:]) / 2.0
         display_edges = self._samples.value.canonical_unit.convert_value_to(
             edges, self._samples.value.display_unit
@@ -1276,7 +1321,6 @@ class DataView:
         bins: int | Sequence[float] | None = None,
     ) -> FacetData:
         self.validate_facet(spec)
-        base_positions = self._all_positions()
         cell = spec.cell
         if not isinstance(cell, HistogramPlot) and bins is not None:
             raise ValueError("bins are accepted only for Histogram facet cells")
@@ -1299,7 +1343,11 @@ class DataView:
         dense = self._dense_facet(spec, shared_bins)
         if dense is not None:
             return dense
-        return self._facet_from_positions(spec, shared_bins, base_positions)
+        return self._facet_from_positions(
+            spec,
+            shared_bins,
+            self._all_positions(),
+        )
 
     def _facet_from_positions(
         self,
@@ -1433,12 +1481,20 @@ class DataView:
         cells: list[FacetCell] = []
         for facet_index, facet_value in enumerate(domain.values):
             selector = np.flatnonzero(domain.codes == facet_index)
+            contiguous = bool(selector.size) and (
+                selector.size == 1 or bool(np.all(np.diff(selector) == 1))
+            )
+            selected: slice | NDArray[np.int64] = (
+                slice(int(selector[0]), int(selector[-1]) + 1)
+                if contiguous
+                else selector
+            )
             if slice_axis == 0:
-                cell_values = values[selector]
-                cell_valid = valid_mask[selector]
+                cell_values = values[selected]
+                cell_valid = valid_mask[selected]
             else:
-                cell_values = values[:, selector]
-                cell_valid = valid_mask[:, selector]
+                cell_values = values[:, selected]
+                cell_valid = valid_mask[:, selected]
             if isinstance(cell, CurvePlot):
                 payload: FacetPayload = self._dense_curve_data(
                     cell.x, x_resolved, cell_values, cell_valid, cell.reduction
@@ -1456,7 +1512,9 @@ class DataView:
             else:
                 assert shared_bins is not None
                 payload = self._histogram_from_values(
-                    shared_bins, cell_values[cell_valid]
+                    shared_bins,
+                    cell_values,
+                    valid=cell_valid,
                 )
             cells.append(
                 FacetCell(
@@ -1539,7 +1597,11 @@ class DataView:
         # Grouping is flat and hot, so the one materialization lives in this
         # cache and every domain call reuses the immutable planes.
         cached_flat = self._flat_cache.get(ref)
-        if cached_flat is None:
+        sparse = (
+            cached_flat is None
+            and positions.size < resolved.coordinate.canonical.size
+        )
+        if cached_flat is None and not sparse:
             cached_flat = (
                 _readonly(np.array(resolved.coordinate.canonical, copy=True).reshape(-1)),
                 _readonly(
@@ -1551,7 +1613,16 @@ class DataView:
                 ),
             )
             self._flat_cache[ref] = cached_flat
-        canonical, indices_flat = cached_flat
+        if sparse:
+            selected = np.asarray(resolved.coordinate.canonical).flat[positions]
+            selected_indices = np.asarray(resolved.coordinate.indices).flat[
+                positions
+            ]
+        else:
+            assert cached_flat is not None
+            canonical, indices_flat = cached_flat
+            selected = canonical[positions]
+            selected_indices = indices_flat[positions]
         # A declared, all-finite domain (checked once, at domain size) makes
         # every element's coordinate valid by construction, so the
         # per-element canonical gather and isfinite pass -- two full-size
@@ -1561,9 +1632,8 @@ class DataView:
         if resolved.declared_domain and bool(
             _finite_coordinate(resolved.domain_canonical).all()
         ):
-            declared = indices_flat[positions]
+            declared = selected_indices
         else:
-            selected = canonical[positions]
             coordinate_valid = _finite_coordinate(selected)
             valid_local = np.flatnonzero(coordinate_valid)
             if valid_local.size == 0:
@@ -1571,7 +1641,7 @@ class DataView:
                 codes.setflags(write=False)
                 return _Domain((), codes)
             declared = (
-                indices_flat[positions[valid_local]]
+                selected_indices[valid_local]
                 if resolved.declared_domain
                 else None
             )
@@ -1816,6 +1886,81 @@ def aligned_histogram_edges(
     return (first - 0.5) + width * np.arange(count + 1, dtype=float)
 
 
+def _uniform_integer_counts(
+    values: NDArray[Any],
+    valid: NDArray[np.bool_] | None,
+    edges: NDArray[Any],
+) -> NDArray[np.int64] | None:
+    """Count an aligned integer histogram without sorting every sample."""
+
+    source = np.asarray(values)
+    flat = source.reshape(-1)
+    if source.dtype.kind not in "biu" or edges.size < 2:
+        return None
+    widths = np.diff(edges)
+    int64 = np.iinfo(np.int64)
+    if (
+        not np.all(np.isfinite(widths))
+        or float(edges[0]) < int64.min
+        or float(edges[-1]) > int64.max
+    ):
+        return None
+    width = int(round(float(widths[0])))
+    first = int(round(float(edges[0]) + 0.5))
+    expected = (first - 0.5) + width * np.arange(edges.size, dtype=float)
+    if width <= 0 or not np.array_equal(edges, expected):
+        return None
+
+    usable = None if valid is None else np.asarray(valid, dtype=np.bool_)
+    if usable is None or (
+        usable.size
+        and all(stride == 0 for stride in usable.strides)
+        and bool(usable.flat[0])
+    ) or bool(np.all(usable)):
+        selected = flat
+    else:
+        selected = source[usable].reshape(-1)
+    counts = np.zeros(edges.size - 1, dtype=np.int64)
+    if not selected.size:
+        return counts
+
+    low = int(np.min(selected))
+    high = int(np.max(selected))
+    if low < int64.min or high > int64.max:
+        return None
+    span = high - low + 1
+    if span > selected.size + 1:
+        return None
+    shifted = selected if low == 0 else np.subtract(selected, low, dtype=np.int64)
+    frequency = np.bincount(shifted, minlength=span)
+    for index in range(counts.size):
+        start = max(first + index * width, low) - low
+        stop = min(first + (index + 1) * width, high + 1) - low
+        if stop > start:
+            counts[index] = np.sum(frequency[start:stop], dtype=np.int64)
+    return counts
+
+
+def _reduce_scalar(values: NDArray[Any], aggregation: Reduction) -> float:
+    """Reduce one already-valid flat pool with the canonical rolling rules."""
+
+    if not values.size:
+        return math.nan
+    if aggregation is Reduction.MEAN:
+        return float(np.mean(values, dtype=np.float64))
+    if aggregation is Reduction.MEDIAN:
+        return float(np.median(values))
+    if aggregation is Reduction.SUM:
+        return float(np.sum(values, dtype=np.float64))
+    if aggregation is Reduction.MIN:
+        return float(np.min(values))
+    if aggregation is Reduction.MAX:
+        return float(np.max(values))
+    if aggregation is Reduction.FIRST:
+        return float(values[0])
+    raise AssertionError(f"unsupported reduction: {aggregation!r}")
+
+
 def _broadcast_1d(
     values: ArrayLike,
     dimension: int,
@@ -1857,13 +2002,13 @@ def _masked_leading_reduce(
 ) -> tuple[NDArray[Any], NDArray[np.int64]]:
     """Reduce the leading axis under a validity mask: THE dense reduction.
 
-    ``values``/``usable`` are ``(samples, *cell_shape)``.  Every dense
-    projection -- curve, image, and each facet cell -- reduces through this
-    one kernel, so they cannot disagree.  A single leading sample
-    short-circuits to that sample in its native dtype, which is what keeps a
-    live camera frame from acquiring float64 companions on its way to the
-    renderer; values where ``counts`` is zero are unspecified, validity is
-    the contract.
+    ``values``/``usable`` are ``(samples, *cell_shape)``.  Dense curves and
+    multi-sample dense images/facet cells reduce through this one kernel.  A
+    single leading curve sample still needs its count plane, so it
+    short-circuits here; a singleton image bypasses the helper one level up
+    to retain native values and boolean validity without allocating that
+    int64 plane.  Values where ``counts`` is zero are unspecified; validity
+    is the contract.
     """
 
     if values.shape[0] == 1:
@@ -1970,9 +2115,9 @@ def _aggregate_by_codes(
             counts = np.bincount(selected_codes, minlength=bucket_count)
             if int(counts.max(initial=0)) <= 1:
                 # At most one member per group: every Reduction is identity,
-                # and the sort below is pure overhead.  This is the dense
-                # image case -- one sample per pixel -- so it is also the
-                # case where the overhead is millions of elements large.
+                # and the sort below is pure overhead.  This remains the
+                # generic one-member image/grid fallback; regular dense data
+                # axes route through _dense_image_data before reaching it.
                 output[selected_codes] = values[positions].astype(
                     output_dtype, copy=False
                 )

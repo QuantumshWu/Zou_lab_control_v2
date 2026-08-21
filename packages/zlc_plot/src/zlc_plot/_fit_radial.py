@@ -805,10 +805,36 @@ def fit_regular_separable_image(
     seed_coordinates, seed_values = _regular_image_sample(proxy, check)
 
     default_bounds = (
-        model.bounds_initializer(seed_coordinates, seed_values)
+        dict(model.bounds_initializer(seed_coordinates, seed_values))
         if model.bounds_initializer is not None
-        else None
+        else {}
     )
+    # A moment seed measures every positive noise excursion in a large image.
+    # When a narrow peak occupies little of that image, its moment radius
+    # therefore approaches the frame size; using a fraction of that seed as a
+    # hard lower bound excludes the peak before the exact objective can see it.
+    # Sampling resolution is the actual generic identifiability floor.  Keep
+    # an explicitly requested bound and the model's existing upper bound
+    # authoritative through _solver_bounds.
+    radius_floors: dict[int, float] = {}
+    for index, coordinates in (
+        (kernel.x_radius_index, data.x_coordinates),
+        (kernel.y_radius_index, data.y_coordinates),
+    ):
+        differences = np.abs(np.diff(coordinates))
+        resolution = (
+            float(np.min(differences))
+            if differences.size
+            else _span(coordinates)
+        )
+        radius_floors[index] = max(
+            radius_floors.get(index, 0.0),
+            0.5 * resolution,
+        )
+    for index, floor in radius_floors.items():
+        name = model.parameters[index].name
+        _low, high = default_bounds.get(name, (None, None))
+        default_bounds[name] = (floor, high)
     lower, upper = _solver_bounds(model, default_bounds, bounds)
     lower_inside, upper_inside = np.nextafter(lower, upper), np.nextafter(upper, lower)
 
@@ -1090,12 +1116,21 @@ def fit_regular_separable_image(
             raise RuntimeError(
                 "regular-image optimizer failed for every initializer"
             )
-        _cost, solved, parameters = min(
+        cost, solved, parameters = min(
             candidates, key=lambda item: (not bool(item[1].success), item[0])
         )
-        return refine_to_full(
-            parameters, _SolverStatus(bool(solved.success), str(solved.message))
-        )
+        status = _SolverStatus(bool(solved.success), str(solved.message))
+        refined = refine_to_full(parameters, status)
+        if proxy is data and status.success and not refined[1].success:
+            # This candidate already solved the exact full-resolution
+            # objective.  A no-improvement retry may terminate ABNORMAL at
+            # the same point; that status cannot invalidate the successful
+            # exact solve it retried.
+            refined_cost = refined[2]
+            tie_scale = max(1.0, abs(cost), abs(refined_cost))
+            if refined_cost >= cost - _REGULAR_IMAGE_FTOL * tie_scale:
+                return parameters, status, cost
+        return refined
 
     warm_candidate: tuple[np.ndarray, _SolverStatus, float] | None = None
     if warm_start is not None:

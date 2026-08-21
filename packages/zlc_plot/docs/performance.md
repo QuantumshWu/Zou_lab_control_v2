@@ -375,6 +375,18 @@ information matrix; masked and robust-loss fits retain the bounded-row exact
 information pass. Thus optimization avoids repeatedly sweeping millions of
 pixels without turning a display-decimated raster into fit authority.
 
+For regular images, the default lower radius bound is half the finest native
+coordinate spacing, not a fraction of the noise-sensitive moment seed. The
+moment initializer still supplies the upper radius and every other model
+bound; an explicitly authored bound remains authoritative. Radial and
+anisotropic Gaussian kernels use the same metadata-driven rule. When the
+bounded proxy is already the full image, a successful exact solve is also not
+invalidated merely because a retry without material cost improvement returns
+an unsuccessful status. A materially better retry is still retained and must
+pass its own status. This prevents a valid FitEvent from becoming a false gap
+without weakening the full-resolution objective or adding a model-specific
+acceptance path.
+
 The `soft_l1` objective uses the stable equivalent
 `2*squared/(sqrt(1+squared)+1)`, avoiding cancellation close to an exact fit.
 Isolated warm solver medians were 53.2 ms at 1024² and 211.8 ms at 2048² for an
@@ -395,8 +407,9 @@ one latest complete input, never a full-frame FIFO. Its worker wakes on the
 fit for that source index, cancels the stale analysis generation and continues
 from latest. The regular-image objective evaluates bounded
 stripes serially inside that analysis task; there is no global stripe pool to
-oversubscribe 4/8-panel runs or outlive sessions. Reference 2048² stage costs
-remain paint 15–25 ms, projection 10–25 ms and warm radial solve about 33 ms.
+oversubscribe 4/8-panel runs or outlive sessions. Current large-component
+projection and complete-update measurements are recorded below; the former
+10–25 ms blanket projection estimate is no longer current.
 Custom Image models stay on the general coordinate-expansion solver path unless
 they provide a specialization.
 
@@ -411,58 +424,50 @@ same immutable schema object makes ingress validation constant-time:
 that camera pixels belong in dense data axes rather than flattened point rows;
 the old cadence harness's promotion counts are not a current queue contract.
 
-## Grouped reduction is vectorised (2026-08-11)
+## Large-component projection matrix (2026-08-21)
 
-A FacetGrid over a scan of camera frames reduces one group PER PIXEL: a
-`(1, 9, 1200, 1920)` scan faceted on one axis with image cells reduces
-2.3 million single-pixel groups per cell.  `_aggregate_by_codes` looped
-those groups through Python, one `np.mean` call each -- 6.9 million calls
-and ~30 s of a 39.7 s session build; the whole facet-image path measured
-22.5 s through the console's raster host.
+The frozen baseline was compared with `e8e5517` using the same script and one
+fresh process per case. Each process warmed one replace/capture, measured the
+listed number of complete `session.update_data` plus front captures, profiled
+three separate frames, and measured one separate allocation frame. Times are
+P50/P95 milliseconds; allocation is the `tracemalloc` peak in MiB. The source
+shape, dtype and frame count were identical on both sides.
 
-Three fixes, all in `data_view.py` and all measured on that same scan:
+| Case | Shape / frames | Complete update, old → current | Projection, old → current | Allocation peak, old → current |
+|---|---|---:|---:|---:|
+| qCMOS virtual Image | 96×128 `uint16` / 20 | 10.43/12.15 → 10.14/11.57 | 0.202/0.268 → 0.163/0.229 | 0.87 → 0.86 |
+| qCMOS Image | 2048² `uint16` / 12 | 35.42/38.05 → 21.60/22.39 | 15.89/16.78 → 0.319/0.725 | 44.13 → 5.37 |
+| MOT Image | 1200×1920 `uint8` / 12 | 26.81/28.83 → 19.13/20.98 | 8.84/9.49 → 0.311/0.451 | 24.27 → 4.15 |
+| MOT FacetGrid ×1 | 1200×1920 `uint8` / 10 | 49.97/51.55 → 10.33/11.76 | 38.42/39.74 → 0.363/0.417 | 81.40 → 2.21 |
+| MOT FacetGrid ×4 | 1200×1920 `uint8` / 10 | 183.48/191.71 → 24.05/27.13 | 153.85/158.19 → 0.489/0.921 | 281.35 → 1.99 |
+| MOT FacetGrid ×8 | 1200×1920 `uint8` / 10 | 366.48/377.69 → 45.24/46.98 | 309.99/315.49 → 0.821/0.970 | 562.60 → 2.55 |
+| qCMOS Curve | 2048² `uint16` / 12 | 9.05/10.10 → 8.97/10.34 | 5.75/6.46 → 5.39/6.77 | 0.94 → 0.94 |
+| qCMOS Histogram | 2048² `uint16` / 12 | 175.79/178.02 → 33.13/34.80 | 163.65/165.54 → 21.90/22.62 | 72.00 → 32.13 |
+| qCMOS Rolling | 2048² `uint16` / 12 | 111.80/112.77 → 15.14/17.30 | 97.30/99.08 → 2.42/3.19 | 148.00 → 0.72 |
+| indexed Rolling | 1×100 `float64` / 20 | 14.79/17.14 → 15.13/16.90 | 1.71/3.18 → 1.73/2.93 | 0.81 → 0.81 |
 
-* `_reduce_segments` reduces every code-sorted segment in one ufunc pass
-  (`add/minimum/maximum.reduceat`, segment-start gather for FIRST, one
-  in-segment lexsort for MEDIAN).  Sums accumulate in the output dtype
-  because camera bytes wrap at 256 under their own arithmetic.
-* Groups with at most one member (the dense image case) skip the sort
-  entirely: `bincount` proves the multiplicity and the reduction is
-  identity for every `Reduction`.
-* `_domain` on a declared, all-finite domain takes codes straight off the
-  index plane (bincount + remap) instead of `np.unique` over one value per
-  element, and skips the per-element canonical gather + isfinite pass.
+The large gains come from geometry- and dtype-based shared kernels, not
+plot-kind scheduling lanes. A singleton dense Image retains the producer's
+native values and boolean validity. Contiguous FacetGrid rows remain views;
+multi-sample cells reduce through the common dense reducer, while irregular,
+grouped and DATA-faceted cases retain the generic grouping fallback. Sparse
+domain queries gather only the requested positions, whereas a full-domain
+generic projection retains its flat-coordinate cache.
 
-Session construct for the facet-image case: 39.7 s -> 3.3 s in-process;
-the console acceptance probe's first rendered front: 22.5 s -> 3.0 s.
-Curve and histogram cells on the same dataset build in 1.7 s / 1.4 s.
-`tests/test_aggregate_by_codes.py` pins every vectorised branch against
-the plain per-group loop, including the uint8 non-wrapping sums.
+Histogram domain discovery takes native integer min/max without first making
+a full `float64` pool. Strictly integer-aligned edges use one bounded
+`bincount`; floats, non-uniform or nearly aligned edges, sparse integer spans
+and values outside the safe `int64` range fall back to `np.histogram` exactly.
+Rolling reduces one cached valid pool directly when it is ungrouped; grouped,
+repeat-seeded and primary-index history retain their authored index semantics.
+Randomized comparison covered 194 dense/sparse/grid/validity/group/reduction
+projections, 954 Histogram fast/fallback cases and 21 Fit cases without a
+numeric mismatch.
 
-Still open: the remaining ~3 s is the position-projection machinery
-itself (per-cell domain derivation and several full-size passes over the
-20.7 M-element expansion); a dense fast lane that recognises "x/y are the
-data axes, reduce the rest" as a reshape+mean would take it to tens of
-milliseconds, at the cost of a second projection path that must prove
-equivalence.
-
-### Superseded: the facet now reuses the dense projections (2026-08-11, later)
-
-The "still open" paragraph above is resolved the right way round: instead
-of a faster generic aggregator, `facet()` now routes through the SAME dense
-mechanism the single kinds already had.  A facet over the repeat axis or a
-point-domain axis slices whole rows, which preserves the regularity
-`_dense_data_image`/`_dense_data_curve` rely on -- so each cell reduces
-through the one shared kernel (`_masked_leading_reduce`, now also the single
-implementation behind both single-kind dense paths, which had duplicated
-the reduction chain).  Facets over DATA axes and grouped curve cells keep
-the generic algorithm.
-
-Measured on the same `(1, 9, 1200, 1920)` scan: session construct
-3.3 s -> 0.87 s (projection itself 0.39 s; the rest is Matplotlib
-composition).  Image cells 0.72 s, histogram cells 0.77 s; curve cells over
-a scan dimension stay generic (1.66 s) because their x is not a data axis.
-`tests/test_facet_dense_equivalence.py` proves the dense path ENGAGES for
-scan-of-frames cells and agrees with the generic path cell for cell --
-image (mean/median/sum), repeat facets, curve cells, histogram cells,
-invalid cells included.
+The final residual sweep also removed two first-frame copies. For an R=1
+2048² initial history, pool projection fell from 11.02/12.79 to 0.117/0.130 ms
+P50/P95 and its allocation peak from 32.01 MiB to 0.005 MiB; complete initial
+Rolling session construction fell from 44.24/44.53 to 31.97/34.00 ms. Four
+1200×1920 Histogram facet cells now pass their contiguous values and validity
+views directly: projection fell from 50.43/51.13 to 40.15/41.26 ms and peak
+allocation from 19.79 MiB to 17.59 MiB, with exact edges and counts.
