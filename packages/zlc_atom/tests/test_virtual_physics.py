@@ -2624,7 +2624,10 @@ def test_one_slm_solver_selects_sparse_wgs_and_dense_mraf() -> None:
     )
     assert dense_metadata["method"] == "mraf"
     assert dense_metadata["early_stopped"] is True
-    assert dense_metadata["stop_reason"] == "fom-stagnation"
+    # A target with a real flat interior now stops on the physical interior
+    # uniformity gate (the image analogue of the spots support gate), not on
+    # merit stagnation -- the quality assertions below are what it guarantees.
+    assert dense_metadata["stop_reason"] == "interior-uniformity"
     assert dense_metadata["iterations"] < dense_metadata["max_iterations"]
     assert dense_metadata["signal_pixels"] > 0
     assert dense_metadata["noise_pixels"] > 0

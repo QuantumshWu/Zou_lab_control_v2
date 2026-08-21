@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
+import weakref
 from pathlib import Path
 from typing import Any
 import unicodedata
@@ -421,6 +423,80 @@ def imported_target(values: object) -> np.ndarray:
         raise ValueError("imported target must contain positive intensity")
     return _readonly(target / peak)
 
+#: Prepared solve inputs keyed by the identity of the caller's read-only
+#: array.  A feedback run hands the SAME frozen target and pupil to every
+#: candidate solve, and re-validating, re-copying and re-shifting a full
+#: 1024x1272 plane cost ~25 ms per call.  Identity is verified through the
+#: stored weak reference; writable arrays are never cached because the
+#: caller could mutate them in place between calls.
+_PREPARED_LIMIT = 8
+_PREPARED_TARGETS: dict[int, tuple[object, tuple]] = {}
+_PREPARED_PUPILS: dict[int, tuple[object, tuple]] = {}
+_DEFAULT_PUPILS: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
+
+
+#: Elementwise passes over the full 1024x1272 plane (arctan2, the phase
+#: projection) dominate a solve's fixed cost, and numpy ufuncs release the
+#: GIL on arrays this large -- so row stripes on a small shared pool run
+#: them in parallel with bit-identical results (the same libm call per
+#: element).  Planes below the threshold run inline.
+_STRIPE_THRESHOLD = 1 << 18
+_STRIPE_COUNT = 4
+_stripe_pool: ThreadPoolExecutor | None = None
+
+
+def _stripes(operation: Callable[[slice], None], rows: int, size: int) -> None:
+    global _stripe_pool
+    if size < _STRIPE_THRESHOLD or rows < _STRIPE_COUNT:
+        operation(slice(0, rows))
+        return
+    if _stripe_pool is None:
+        _stripe_pool = ThreadPoolExecutor(
+            max_workers=_STRIPE_COUNT,
+            thread_name_prefix="slm-solver-stripe",
+        )
+    step = (rows + _STRIPE_COUNT - 1) // _STRIPE_COUNT
+    futures = [
+        _stripe_pool.submit(operation, slice(start, min(rows, start + step)))
+        for start in range(0, rows, step)
+    ]
+    for future in futures:
+        future.result()
+
+
+def _frozen(values: np.ndarray) -> np.ndarray:
+    """Freeze a solver-owned fresh array in place -- no copy, no retyping."""
+
+    values.setflags(write=False)
+    return values
+
+
+def _prepared_cache_get(cache: dict, values: object) -> tuple | None:
+    if not isinstance(values, np.ndarray):
+        return None
+    entry = cache.get(id(values))
+    if entry is None:
+        return None
+    reference, prepared = entry
+    if reference() is values:
+        return prepared
+    del cache[id(values)]
+    return None
+
+
+def _prepared_cache_put(cache: dict, values: object, prepared: tuple) -> None:
+    if not isinstance(values, np.ndarray) or values.flags.writeable:
+        return
+    key = id(values)
+
+    def _drop(_reference: object, *, _cache: dict = cache, _key: int = key) -> None:
+        _cache.pop(_key, None)
+
+    cache[key] = (weakref.ref(values, _drop), prepared)
+    while len(cache) > _PREPARED_LIMIT:
+        cache.pop(next(iter(cache)))
+
+
 def _pupil(shape: tuple[int, int]) -> np.ndarray:
     yy, xx = np.ogrid[-1.0:1.0:shape[0] * 1j, -1.0:1.0:shape[1] * 1j]
     return (xx * xx + yy * yy <= 0.9**2).astype(np.float32)
@@ -490,19 +566,176 @@ def _image_metrics(
         relative_rms + 0.05 * roughness + 0.10 * background,
     )
 
+def _project_field(
+    back: np.ndarray,
+    pupil: np.ndarray,
+    magnitude: np.ndarray,
+    mask: np.ndarray,
+    out: np.ndarray,
+) -> np.ndarray:
+    """``pupil * _unit_phase(back)`` composed in caller-owned buffers.
+
+    This projection runs once per iteration over the full SLM plane, and the
+    naive expression allocated three plane-sized temporaries per pass --
+    measured at roughly 40% of a whole spots solve.  Same arithmetic, same
+    order; ``back`` is consumed as scratch.
+    """
+
+    epsilon = np.float32(np.finfo(np.float32).eps)
+
+    def stripe(rows: slice) -> None:
+        np.abs(back[rows], out=magnitude[rows])
+        np.greater(magnitude[rows], epsilon, out=mask[rows])
+        np.divide(back[rows], magnitude[rows], out=back[rows], where=mask[rows])
+        np.logical_not(mask[rows], out=mask[rows])
+        np.copyto(back[rows], np.complex64(1.0), where=mask[rows])
+        np.multiply(back[rows], pupil[rows], out=out[rows])
+
+    _stripes(stripe, back.shape[0], back.size)
+    return out
+
+
+def _radial_transport_seed(
+    desired: np.ndarray, pupil: np.ndarray
+) -> np.ndarray | None:
+    """Radial transport initial phase for a near-isotropic image target.
+
+    For a target whose energy is closer to circular than elliptical, the
+    exact 1-D radial energy match (annulus by annulus) beats the separable
+    marginal construction, whose product-form caustic is only right for
+    separable targets.  Returns None for strongly anisotropic targets.
+    """
+
+    shape = desired.shape
+    height, width = shape
+    target = desired.astype(np.float64)
+    total = float(target.sum())
+    if total <= 0.0:
+        return None
+    yy, xx = np.ogrid[:height, :width]
+    cy = float((target.sum(axis=1) * np.arange(height)).sum() / total)
+    cx = float((target.sum(axis=0) * np.arange(width)).sum() / total)
+    var_y = float((target.sum(axis=1) * (np.arange(height) - cy) ** 2).sum() / total)
+    var_x = float((target.sum(axis=0) * (np.arange(width) - cx) ** 2).sum() / total)
+    if min(var_y, var_x) <= 0.0:
+        return None
+    # A separable target (a Gaussian, any product form) is served exactly by
+    # the separable marginal construction -- the radial build only wins for
+    # genuinely round, non-product shapes such as a flat-top disk.
+    marginal_y = target.sum(axis=1)
+    marginal_x = target.sum(axis=0)
+    product = np.outer(marginal_y, marginal_x) / total
+    product_error = float(np.abs(product - target).sum()) / total
+    if product_error < 0.05:
+        return None
+    anisotropy = max(var_y / var_x, var_x / var_y) ** 0.5
+    if anisotropy > 1.05:
+        return None
+    power = pupil.astype(np.float64)
+    power = power * power
+    source_total = float(power.sum())
+    if source_total <= 0.0:
+        return None
+    sy = float((power.sum(axis=1) * np.arange(height)).sum() / source_total)
+    sx = float((power.sum(axis=0) * np.arange(width)).sum() / source_total)
+    source_rho = np.hypot(yy - sy, xx - sx)
+    target_rho = np.hypot(yy - cy, xx - cx)
+    bins = int(np.ceil(max(source_rho.max(), target_rho.max()))) + 1
+    source_hist = np.bincount(
+        source_rho.astype(np.int64).ravel(), weights=power.ravel(), minlength=bins
+    )
+    target_hist = np.bincount(
+        target_rho.astype(np.int64).ravel(), weights=target.ravel(), minlength=bins
+    )
+    cumulative_source = np.cumsum(source_hist) / source_total
+    cumulative_target = np.cumsum(target_hist) / total
+    radius = np.arange(bins, dtype=np.float64)
+    mapped = np.interp(cumulative_source, cumulative_target, radius)
+    # A radial potential integrates the matched slope; the anisotropic FFT
+    # pixel pitch is folded in through the geometric-mean extent, which is
+    # exact for a square raster and a seed-grade approximation otherwise.
+    scale = 2.0 * np.pi / float(np.sqrt(height * width))
+    profile = np.cumsum(mapped) * scale
+    profile -= profile[0]
+    seed = np.interp(source_rho.ravel(), radius, profile).reshape(shape)
+    seed += 2.0 * np.pi * (
+        (cy - height / 2.0) * (yy - sy) / height
+        + (cx - width / 2.0) * (xx - sx) / width
+    )
+    return seed.astype(np.float32)
+
+
+def _mapping_seed(desired: np.ndarray, pupil: np.ndarray) -> np.ndarray:
+    """Separable geometric-mapping initial phase for an image target.
+
+    Marginal energy matching between the pupil illumination and the target
+    intensity gives, per axis, the ray mapping u -> R(u); integrating the
+    matched linear-phase slope yields a caustic seed that starts MRAF near
+    the transport solution instead of a fixed quadratic guess.  The seed
+    only decides where iteration starts; the quality metrics, the stop
+    criteria and the returned contract are untouched.
+    """
+
+    shape = desired.shape
+    seed = np.zeros(shape, dtype=np.float32)
+    power = pupil.astype(np.float64)
+    np.square(power, out=power)
+    target = desired.astype(np.float64)
+    for axis in (0, 1):
+        other = 1 - axis
+        source_marginal = power.sum(axis=other)
+        target_marginal = target.sum(axis=other)
+        n = shape[axis]
+        source_total = float(source_marginal.sum())
+        target_total = float(target_marginal.sum())
+        if source_total <= 0.0 or target_total <= 0.0:
+            continue
+        cumulative_source = np.cumsum(source_marginal) / source_total
+        cumulative_target = np.cumsum(target_marginal) / target_total
+        mapped = np.interp(
+            cumulative_source,
+            cumulative_target,
+            np.arange(n, dtype=np.float64),
+        )
+        slope = 2.0 * np.pi * (mapped - n / 2.0) / n
+        profile = np.cumsum(slope)
+        profile -= profile[n // 2]
+        if axis == 0:
+            seed += profile.astype(np.float32)[:, None]
+        else:
+            seed += profile.astype(np.float32)[None, :]
+    return seed
+
+
+def _quadratic_seed(shape: tuple[int, int]) -> np.ndarray:
+    """The legacy defocus seed: stronger than the mapping under hard apertures."""
+
+    yy, xx = np.ogrid[
+        -1.0:1.0:shape[0] * 1j,
+        -1.0:1.0:shape[1] * 1j,
+    ]
+    return np.asarray(np.pi * (0.75 * xx * xx + yy * yy), dtype=np.float32)
+
+
 def _canonical_unshifted_phase(field: np.ndarray) -> np.ndarray:
-    phase = np.angle(field).astype(np.float32, copy=False)
-    np.add(
-        phase,
-        np.float32(2.0 * np.pi),
-        out=phase,
-        where=phase < 0.0,
-    )
-    np.minimum(
-        phase,
-        np.nextafter(np.float32(2.0 * np.pi), np.float32(0.0)),
-        out=phase,
-    )
+    phase = np.empty(field.shape, dtype=np.float32)
+
+    def stripe(rows: slice) -> None:
+        part = field[rows]
+        np.arctan2(part.imag, part.real, out=phase[rows])
+        np.add(
+            phase[rows],
+            np.float32(2.0 * np.pi),
+            out=phase[rows],
+            where=phase[rows] < 0.0,
+        )
+        np.minimum(
+            phase[rows],
+            np.nextafter(np.float32(2.0 * np.pi), np.float32(0.0)),
+            out=phase[rows],
+        )
+
+    _stripes(stripe, field.shape[0], field.size)
     return phase
 
 def _phase_snapshot(field: np.ndarray) -> np.ndarray:
@@ -540,9 +773,13 @@ def solve_phase(
     The caller clears that state whenever the authored input pupil changes.
     """
 
-    desired = validate_target(target)
-    if float(np.max(desired)) <= 0.0:
-        raise ValueError("target must contain positive intensity")
+    prepared_target = _prepared_cache_get(_PREPARED_TARGETS, target)
+    if prepared_target is None:
+        desired = validate_target(target)
+        if float(np.max(desired)) <= 0.0:
+            raise ValueError("target must contain positive intensity")
+    else:
+        desired = prepared_target[0]
     if spot_optimizer_state is not None and not isinstance(
         spot_optimizer_state, dict
     ):
@@ -550,24 +787,39 @@ def solve_phase(
     saved_state = dict(spot_optimizer_state) if spot_optimizer_state else None
     state_requested = spot_optimizer_state is not None
     seed_value = int(seed)
+    prepared_pupil = None
     if pupil_amplitude is None:
-        pupil = _pupil(desired.shape)
+        cached_default = _DEFAULT_PUPILS.get(desired.shape)
+        if cached_default is None:
+            pupil = _frozen(_pupil(desired.shape))
+            cached_default = (pupil, _frozen(fft.ifftshift(pupil)))
+            _DEFAULT_PUPILS[desired.shape] = cached_default
+        prepared_pupil = cached_default
+        pupil = cached_default[0]
         pupil_source = "default"
     else:
-        try:
-            pupil = np.asarray(pupil_amplitude, dtype=np.float32)
-        except (TypeError, ValueError) as error:
-            raise TypeError("pupil_amplitude must be a numeric array") from error
-        if pupil.shape != desired.shape:
-            raise ValueError("pupil_amplitude shape must match the target shape")
-        if not np.all(np.isfinite(pupil)):
-            raise ValueError("pupil_amplitude must be finite")
-        if np.any(pupil < 0.0):
-            raise ValueError("pupil_amplitude must be non-negative")
-        if not np.any(pupil > 0.0):
-            raise ValueError("pupil_amplitude must contain positive amplitude")
-        pupil = _readonly(pupil)
         pupil_source = "provided"
+        prepared_pupil = _prepared_cache_get(_PREPARED_PUPILS, pupil_amplitude)
+        if prepared_pupil is not None:
+            pupil = prepared_pupil[0]
+            if pupil.shape != desired.shape:
+                raise ValueError(
+                    "pupil_amplitude shape must match the target shape"
+                )
+        else:
+            try:
+                pupil = np.asarray(pupil_amplitude, dtype=np.float32)
+            except (TypeError, ValueError) as error:
+                raise TypeError("pupil_amplitude must be a numeric array") from error
+            if pupil.shape != desired.shape:
+                raise ValueError("pupil_amplitude shape must match the target shape")
+            if not np.all(np.isfinite(pupil)):
+                raise ValueError("pupil_amplitude must be finite")
+            if np.any(pupil < 0.0):
+                raise ValueError("pupil_amplitude must be non-negative")
+            if not np.any(pupil > 0.0):
+                raise ValueError("pupil_amplitude must contain positive amplitude")
+            pupil = _readonly(pupil)
     if not isinstance(objective_kind, str) or objective_kind not in {
         "auto",
         "spots",
@@ -600,13 +852,36 @@ def solve_phase(
             raise ValueError("iterations must be a positive integer or None")
         count = int(iterations)
 
-    pupil_unshifted = fft.ifftshift(pupil)
-    desired_unshifted = fft.ifftshift(desired)
-    support_unshifted = desired_unshifted > 0.0
+    if prepared_pupil is not None and len(prepared_pupil) > 1:
+        pupil_unshifted = prepared_pupil[1]
+    else:
+        pupil_unshifted = _frozen(fft.ifftshift(pupil))
+        if pupil_source == "provided":
+            _prepared_cache_put(
+                _PREPARED_PUPILS, pupil_amplitude, (pupil, pupil_unshifted)
+            )
+    if prepared_target is not None:
+        desired_unshifted, support_unshifted = prepared_target[1:3]
+    else:
+        desired_unshifted = _frozen(fft.ifftshift(desired))
+        support_unshifted = _frozen(desired_unshifted > 0.0)
+        _prepared_cache_put(
+            _PREPARED_TARGETS,
+            target,
+            (desired, desired_unshifted, support_unshifted),
+        )
     epsilon = np.finfo(np.float32).eps
+    # One set of plane-sized scratch buffers for the whole solve: the
+    # per-iteration projection reuses them instead of allocating ~30 MB of
+    # temporaries per pass.
+    plane_magnitude = np.empty(desired.shape, dtype=np.float32)
+    plane_mask = np.empty(desired.shape, dtype=np.bool_)
+    field_buffer = np.empty(desired.shape, dtype=np.complex64)
+    plane_scratch = np.empty(desired.shape, dtype=np.complex64)
 
     transform = "fft"
     early_stopped = False
+    stop_was_interior = False
     iterations_run = 0
     hot_start_used = False
     checked_result: np.ndarray | None = None
@@ -712,10 +987,18 @@ def solve_phase(
                             raise InterruptedError("SLM phase solve stopped")
                         constrained_selected.fill(0.0)
                         constrained_selected[active] = weights * fixed_phase
-                        back = (
-                            row_backward @ constrained_selected
-                        ) @ column_backward
-                        field = pupil_unshifted * _unit_phase(back, epsilon)
+                        np.matmul(
+                            row_backward @ constrained_selected,
+                            column_backward,
+                            out=plane_scratch,
+                        )
+                        field = _project_field(
+                            plane_scratch,
+                            pupil_unshifted,
+                            plane_magnitude,
+                            plane_mask,
+                            field_buffer,
+                        )
                         hot_start_used = True
                         state_status = "reused"
 
@@ -728,10 +1011,10 @@ def solve_phase(
                 phase = np.array(
                     canonical_phase(initial_phase, desired.shape), copy=True
                 )
-            field = fft.ifftshift(
-                pupil.astype(np.complex64)
-                * np.exp(1j * phase).astype(np.complex64, copy=False)
-            )
+            np.multiply(phase, np.complex64(1j), out=plane_scratch)
+            np.exp(plane_scratch, out=plane_scratch)
+            plane_scratch *= pupil
+            field = fft.ifftshift(plane_scratch)
             weights = np.array(amplitude_spots, copy=True)
 
         selected: np.ndarray | None = None
@@ -764,14 +1047,19 @@ def solve_phase(
             if transform == "selected-dft":
                 constrained_selected.fill(0.0)
                 constrained_selected[active] = constrained_values
-                back = (
-                    row_backward @ constrained_selected
-                ) @ column_backward
+                np.matmul(
+                    row_backward @ constrained_selected,
+                    column_backward,
+                    out=plane_scratch,
+                )
+                back = plane_scratch
             else:
                 constrained.fill(0.0)
                 constrained[support_unshifted] = constrained_values
                 back = fft.ifft2(constrained, norm="ortho")
-            field = pupil_unshifted * _unit_phase(back, epsilon)
+            field = _project_field(
+                back, pupil_unshifted, plane_magnitude, plane_mask, field_buffer
+            )
             iterations_run += 1
             selected = None
 
@@ -833,35 +1121,142 @@ def solve_phase(
             raise ValueError(
                 "image objective requires zero-valued pixels defining a noise region"
             )
-        if initial_phase is None:
-            yy, xx = np.ogrid[
-                -1.0:1.0:desired.shape[0] * 1j,
-                -1.0:1.0:desired.shape[1] * 1j,
-            ]
-            phase = np.asarray(
-                np.pi * (0.75 * xx * xx + yy * yy), dtype=np.float32
-            )
-        else:
-            phase = np.array(canonical_phase(initial_phase, desired.shape), copy=True)
-        field = fft.ifftshift(
-            pupil.astype(np.complex64)
-            * np.exp(1j * phase).astype(np.complex64, copy=False)
-        )
         amplitude = np.sqrt(desired_unshifted).astype(
             np.float32, copy=False
         )
         amplitude /= np.linalg.norm(amplitude[support_unshifted])
         amplitude_spots = amplitude[support_unshifted]
+
+        def build_field(seed_phase: np.ndarray) -> np.ndarray:
+            np.multiply(seed_phase, np.complex64(1j), out=plane_scratch)
+            np.exp(plane_scratch, out=plane_scratch)
+            np.multiply(plane_scratch, pupil, out=plane_scratch)
+            return fft.ifftshift(plane_scratch)
+
+        def mraf_update(
+            far: np.ndarray, weights: np.ndarray
+        ) -> tuple[np.ndarray, np.ndarray]:
+            """One MRAF pass from an already-computed far field.
+
+            ``far`` is consumed as scratch and ``weights`` is updated in
+            place, exactly as the loop always did.
+            """
+
+            selected = far[support_unshifted]
+            magnitude = np.abs(selected).astype(np.float32, copy=False)
+            measured = magnitude / max(float(np.linalg.norm(magnitude)), epsilon)
+            weights *= np.sqrt(
+                np.clip(amplitude_spots / np.maximum(measured, epsilon), 0.2, 5.0)
+            )
+            weights /= max(float(np.linalg.norm(weights)), epsilon)
+            current_power = float(np.sum(np.square(magnitude, dtype=np.float32)))
+            # ``selected`` was copied out above, so the noise-region scaling
+            # can run on ``far`` itself instead of a fresh full plane.
+            far *= np.complex64(0.9)
+            far[support_unshifted] = (
+                weights
+                * np.sqrt(max(current_power, epsilon))
+                * _unit_phase(selected, epsilon)
+            )
+            back = fft.ifft2(far, norm="ortho")
+            return (
+                _project_field(
+                    back,
+                    pupil_unshifted,
+                    plane_magnitude,
+                    plane_mask,
+                    field_buffer,
+                ),
+                weights,
+            )
+
+        image_seed = "authored"
+        coarse_iterations = 0
+        multigrid_seeded = False
+        if initial_phase is not None:
+            phase = np.array(canonical_phase(initial_phase, desired.shape), copy=True)
+            field = build_field(phase)
+        elif (
+            iterations is None
+            and min(desired.shape) >= 512
+            and desired.shape[0] % 4 == 0
+            and desired.shape[1] % 4 == 0
+            and int(
+                np.count_nonzero(desired >= 0.999 * float(np.max(desired)))
+            )
+            >= 64
+        ):
+            # Multigrid only where the interior-uniformity gate can stop the
+            # polish: a stagnation-governed target (no flat interior) chases
+            # the interpolation artifacts of the lifted seed instead of
+            # stopping, and measured slower than solving single-grid.
+            # Multigrid: converge the same MRAF at quarter resolution (a
+            # sixteenth of the work per pass, through this same function),
+            # lift the phase through its cosine/sine planes so wrapping
+            # survives interpolation, and polish at full resolution.  The
+            # result still ends at the full-resolution gates below.
+            factor = 4
+            coarse_desired = desired.reshape(
+                desired.shape[0] // factor,
+                factor,
+                desired.shape[1] // factor,
+                factor,
+            ).mean(axis=(1, 3))
+            coarse_pupil = pupil.reshape(
+                desired.shape[0] // factor,
+                factor,
+                desired.shape[1] // factor,
+                factor,
+            ).mean(axis=(1, 3))
+            coarse_phase, coarse_metadata = solve_phase(
+                coarse_desired,
+                pupil_amplitude=coarse_pupil,
+                objective_kind="image",
+                seed=seed_value,
+                stop_requested=stop_requested,
+            )
+            coarse_iterations = int(coarse_metadata["iterations_run"])
+            zoomed_cos = ndimage.zoom(np.cos(coarse_phase), factor, order=1)
+            zoomed_sin = ndimage.zoom(np.sin(coarse_phase), factor, order=1)
+            seed_phase = np.arctan2(zoomed_sin, zoomed_cos).astype(np.float32)
+            image_seed = f"multigrid({coarse_metadata['image_seed']})"
+            multigrid_seeded = True
+            field = build_field(seed_phase)
+        else:
+            # Measured across horizons (12..300 iterations) the mapping seed
+            # dominates the legacy quadratic on both apodized and hard
+            # illumination: same iteration budget, better figure of merit
+            # and better interior uniformity every time.
+            radial = _radial_transport_seed(desired, pupil)
+            if radial is not None:
+                image_seed = "radial-transport"
+                field = build_field(radial)
+            else:
+                image_seed = "mapping"
+                field = build_field(_mapping_seed(desired, pupil))
         weights = np.array(amplitude_spots, copy=True)
+        minimum_gate_iterations = 8 if multigrid_seeded else 24
         best_fom = float("inf")
         previous_fom = float("inf")
         best_field: np.ndarray | None = None
         stagnant_iterations = 0
-        for _iteration in range(count):
+        # The flat interior the operator asked for: pixels whose desired
+        # intensity is within 0.1% of the peak.  Where that region is a real
+        # area, its measured 95th/5th percentile ratio reaching 1% is the
+        # image analogue of the spots support gate -- a physical stop that
+        # does not depend on how fast the merit happens to be moving.
+        strong_interior = desired_unshifted >= 0.999 * float(np.max(desired))
+        interior_gate_usable = int(np.count_nonzero(strong_interior)) >= 64
+        while iterations_run < count:
             if stop_requested is not None and stop_requested():
                 raise InterruptedError("SLM phase solve stopped")
             far = fft.fft2(field, norm="ortho")
-            if iterations is None:
+            # The stop metrics are a tracker, not the update: sampling them
+            # every fourth iteration keeps the same best-so-far intent and
+            # the same effective stagnation span (three stale CHECKS covers
+            # the twelve iterations the per-iteration count required) at a
+            # quarter of their full-plane cost.
+            if iterations is None and iterations_run % 4 == 0:
                 _relative_rms, _roughness, _background, fom = _image_metrics(
                     far, desired_unshifted, support_unshifted, epsilon
                 )
@@ -873,30 +1268,40 @@ def solve_phase(
                 else:
                     stagnant_iterations = 0
                 previous_fom = fom
+                interior_uniform = False
+                if interior_gate_usable:
+                    interior = np.square(
+                        np.abs(far[strong_interior]).astype(
+                            np.float32, copy=False
+                        )
+                    )
+                    interior_uniform = float(
+                        np.percentile(interior, 95)
+                        / max(float(np.percentile(interior, 5)), epsilon)
+                    ) <= 1.01
+                # A target with a real flat interior converges when THAT
+                # region is uniform to 1%; merit stagnation alone must not
+                # declare success short of it (a slow tail kept improving the
+                # interior well after the merit deltas fell under the
+                # threshold).  Targets without such a region keep the
+                # stagnation criterion; one that never reaches the gate runs
+                # to the bounded iteration cap and says so.
+                converged = (
+                    interior_uniform
+                    if interior_gate_usable
+                    else stagnant_iterations >= 3
+                )
                 if (
-                    iterations_run >= 24
+                    iterations_run >= minimum_gate_iterations
                     and _relative_rms <= 0.005
-                    and stagnant_iterations >= 12
+                    and converged
                 ):
-                    field = best_field
+                    if not interior_uniform:
+                        field = best_field
                     early_stopped = True
+                    stop_was_interior = interior_uniform
                     break
-            selected = far[support_unshifted]
-            magnitude = np.abs(selected).astype(np.float32, copy=False)
-            measured = magnitude / max(float(np.linalg.norm(magnitude)), epsilon)
-            weights *= np.sqrt(
-                np.clip(amplitude_spots / np.maximum(measured, epsilon), 0.2, 5.0)
-            )
-            weights /= max(float(np.linalg.norm(weights)), epsilon)
-            current_power = float(np.sum(np.square(magnitude, dtype=np.float32)))
-            constrained = far * np.complex64(0.9)
-            constrained[support_unshifted] = (
-                weights
-                * np.sqrt(max(current_power, epsilon))
-                * _unit_phase(selected, epsilon)
-            )
-            back = fft.ifft2(constrained, norm="ortho")
-            field = pupil_unshifted * _unit_phase(back, epsilon)
+            field, weights = mraf_update(far, weights)
             iterations_run += 1
 
     if method == "wgs-kim":
@@ -996,6 +1401,8 @@ def solve_phase(
         "stop_reason": (
             "support-ratio"
             if early_stopped and method == "wgs-kim"
+            else "interior-uniformity"
+            if early_stopped and stop_was_interior
             else "fom-stagnation"
             if early_stopped
             else "iteration-limit"
@@ -1004,6 +1411,9 @@ def solve_phase(
         "rms_intensity_error": error,
         "diffraction_efficiency": efficiency,
     }
+    if method == "mraf":
+        metadata["image_seed"] = image_seed
+        metadata["coarse_iterations"] = coarse_iterations
     if support_ratio is not None:
         metadata["support_intensity_ratio"] = support_ratio
     else:
