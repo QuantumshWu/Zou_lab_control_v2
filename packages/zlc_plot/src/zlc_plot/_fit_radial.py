@@ -172,6 +172,29 @@ def _kernel_for(model: FitModelSpec) -> _SeparableKernel:
     raise ValueError("this model does not declare a regular-image capability")
 
 
+def _promoted_c_contiguous(values: np.ndarray) -> np.ndarray:
+    """Float64 C-contiguous copy; transposed planes copy by column blocks.
+
+    ``ascontiguousarray`` walks a transposed view in cache-hostile order --
+    measured ~35 ms for a 2048 squared float64 plane.  Copying column blocks
+    rides the source's own fast axis instead, which is the same values in a
+    cache-aware visiting order: bit-identical, several times faster.
+    """
+
+    if (
+        values.ndim == 2
+        and values.dtype == np.float64
+        and values.T.flags.c_contiguous
+    ):
+        out = np.empty(values.shape, dtype=np.float64)
+        step = 128
+        for start in range(0, values.shape[1], step):
+            stop = min(values.shape[1], start + step)
+            out[:, start:stop] = values[:, start:stop]
+        return out
+    return np.ascontiguousarray(values, dtype=np.float64)
+
+
 def _axis_terms(
     coordinates: np.ndarray,
     center: float,
@@ -185,7 +208,7 @@ def _axis_terms(
 class _ImageContext:
     """Per-input cache: one float64 promotion plus stripe geometry."""
 
-    __slots__ = ("data", "check", "_float_observations")
+    __slots__ = ("data", "check", "_float_observations", "_all_finite")
 
     def __init__(
         self,
@@ -195,6 +218,7 @@ class _ImageContext:
         self.data = data
         self.check = check
         self._float_observations: np.ndarray | None = None
+        self._all_finite: bool | None = None
 
     def float_observations(self) -> np.ndarray:
         """Promote the image to float64 exactly once so '@' hits BLAS.
@@ -208,7 +232,7 @@ class _ImageContext:
         if cached is None:
             cached = np.asarray(self.data.observations)
             if cached.dtype != np.float64 or not cached.flags.c_contiguous:
-                cached = np.ascontiguousarray(cached, dtype=np.float64)
+                cached = _promoted_c_contiguous(cached)
             self._float_observations = cached
             return cached
         return cached
@@ -223,12 +247,25 @@ class _ImageContext:
     def stripe_mask(self, start: int, stop: int) -> np.ndarray | None:
         data = self.data
         mask = None if data.valid_mask is None else data.valid_mask[start:stop]
-        if data.observations.dtype.kind == "f":
+        if data.observations.dtype.kind == "f" and not self.finite_everywhere():
             finite = np.isfinite(self.float_observations()[start:stop])
             mask = finite if mask is None else mask & finite
         if mask is not None and bool(np.all(mask)):
             mask = None
         return mask
+
+    def finite_everywhere(self) -> bool:
+        """One whole-plane finiteness check instead of one per stripe pass.
+
+        The answer is a property of the plane, not of a stripe; asking it
+        stripe by stripe re-derived the same fact dozens of times per fit.
+        """
+
+        cached = self._all_finite
+        if cached is None:
+            cached = bool(np.isfinite(self.float_observations()).all())
+            self._all_finite = cached
+        return cached
 
 
 def _regular_image_summary(context: _ImageContext) -> _RegularImageSummary:
@@ -357,16 +394,22 @@ def _regular_image_subsample(
     data: RegularImageFitInput,
     check: Callable[[], None],
     limit: int,
+    observed: np.ndarray | None = None,
 ) -> RegularImageFitInput:
-    """Bounded-index subsample used for seeding and the multigrid ladder."""
+    """Bounded-index subsample used for seeding and the multigrid ladder.
+
+    ``observed`` is the caller's already-promoted float64 plane of the same
+    values; gathering from it skips re-reading the possibly strided source.
+    """
 
     height, width = data.observations.shape
     if height <= limit and width <= limit:
         return data
     check()
+    source = data.observations if observed is None else observed
     mask = data.valid_mask
     if data.observations.dtype.kind == "f":
-        finite = np.isfinite(data.observations)
+        finite = np.isfinite(source)
         mask = finite if mask is None else mask & finite
     if mask is None:
         y_index = _bounded_indices(np.ones(height, dtype=np.bool_), limit)
@@ -377,7 +420,7 @@ def _regular_image_subsample(
     if y_index.size == 0 or x_index.size == 0:
         raise ValueError("regular image has no finite valid observations")
     observations = np.asarray(
-        data.observations[np.ix_(y_index, x_index)], dtype=np.float64
+        source[np.ix_(y_index, x_index)], dtype=np.float64
     )
     valid = np.isfinite(observations)
     if data.valid_mask is not None:
@@ -393,11 +436,13 @@ def _regular_image_subsample(
 def _regular_image_sample(
     data: RegularImageFitInput,
     check: Callable[[], None],
+    observed: np.ndarray | None = None,
 ) -> tuple[ArrayTuple, np.ndarray]:
     check()
+    source = data.observations if observed is None else observed
     selection = data.valid_mask
     if data.observations.dtype.kind == "f":
-        finite = np.isfinite(data.observations)
+        finite = np.isfinite(source)
         selection = finite if selection is None else selection & finite
     if selection is None:
         valid_y, valid_x = np.arange(data.y_coordinates.size), np.arange(data.x_coordinates.size)
@@ -406,7 +451,7 @@ def _regular_image_sample(
         valid_x = np.flatnonzero(np.any(selection, axis=0))
 
     y_index, x_index = valid_y, valid_x
-    sampled = np.asarray(data.observations[np.ix_(y_index, x_index)], dtype=np.float64)
+    sampled = np.asarray(source[np.ix_(y_index, x_index)], dtype=np.float64)
     valid = np.isfinite(sampled)
     if selection is not None:
         valid &= selection[np.ix_(y_index, x_index)]
@@ -796,13 +841,17 @@ def fit_regular_separable_image(
     if summary.count <= len(model.parameters):
         raise ValueError("fit requires more finite observations than parameters")
 
-    proxy = _regular_image_subsample(data, check, _REGULAR_IMAGE_SAMPLE_LIMIT)
+    proxy = _regular_image_subsample(
+        data, check, _REGULAR_IMAGE_SAMPLE_LIMIT, context.float_observations()
+    )
     if proxy is data:
         proxy_context, proxy_summary = context, summary
     else:
         proxy_context = _ImageContext(proxy, check)
         proxy_summary = _regular_image_summary(proxy_context)
-    seed_coordinates, seed_values = _regular_image_sample(proxy, check)
+    seed_coordinates, seed_values = _regular_image_sample(
+        proxy, check, proxy_context.float_observations()
+    )
 
     default_bounds = (
         dict(model.bounds_initializer(seed_coordinates, seed_values))
@@ -1012,7 +1061,9 @@ def fit_regular_separable_image(
             limit = _REGULAR_IMAGE_SAMPLE_LIMIT * _REGULAR_IMAGE_LADDER_FACTOR
             largest = max(data.observations.shape)
             while limit < largest:
-                stage = _regular_image_subsample(data, check, limit)
+                stage = _regular_image_subsample(
+                    data, check, limit, context.float_observations()
+                )
                 if stage is data:
                     break
                 stage_context = _ImageContext(stage, check)
@@ -1031,14 +1082,16 @@ def fit_regular_separable_image(
     def build_result(
         parameters: np.ndarray,
         status: _SolverStatus,
+        final_cost: float | None = None,
     ) -> FitResult:
         if summary.all_valid and loss == "linear":
             information = _regular_image_linear_information(
                 kernel, context, parameters, full_scale
             )
-            final_cost, _gradient = _regular_image_linear_objective(
-                kernel, context, summary, parameters
-            )
+            if final_cost is None:
+                final_cost, _gradient = _regular_image_linear_objective(
+                    kernel, context, summary, parameters
+                )
             normalized_rss = 2.0 * final_cost
         else:
             _cost, _gradient, normalized_rss, information = (
@@ -1155,6 +1208,7 @@ def fit_regular_separable_image(
                         True,
                         "warm start satisfies full-resolution convergence",
                     ),
+                    final_cost=warm_cost,
                 )
             # The scene changed under the warm seed.  A bounded Gauss-Newton
             # descent from it tracks small displacements at full-resolution
@@ -1196,7 +1250,7 @@ def fit_regular_separable_image(
         for candidate in (warm_candidate, cold_candidate)
         if candidate is not None
     ]
-    parameters, status, _cost = min(
+    parameters, status, cost = min(
         finalists, key=lambda item: (not item[1].success, item[2])
     )
-    return build_result(parameters, status)
+    return build_result(parameters, status, final_cost=cost)
