@@ -1381,10 +1381,10 @@ class FitEngine:
             )
             return jacobian * scale[:, None]
 
-        successful: list[tuple[float, Any, np.ndarray, np.ndarray]] = []
-        unsuccessful: list[tuple[float, Any, np.ndarray, np.ndarray]] = []
+        successful: list[tuple[float, Any]] = []
+        unsuccessful: list[tuple[float, Any]] = []
         last_error: Exception | None = None
-        for seed in seeds:
+        for seed_index, seed in enumerate(seeds):
             check()
             try:
                 candidate = least_squares(
@@ -1404,24 +1404,20 @@ class FitEngine:
                     or bool(np.all(solver_residual == invalid_residual))
                 ):
                     continue
-                # The model and the data residual, as such.  What the
-                # solver minimises is a likelihood, which cannot be inverted
-                # back into counts -- so the reported curve is evaluated, not
-                # reconstructed from the objective.
-                fitted_candidate = spec.evaluate(coords, candidate.x).reshape(-1)
-                if (
-                    fitted_candidate.shape != values.shape
-                    or not np.all(np.isfinite(fitted_candidate))
-                ):
-                    continue
-                residual_candidate = values - fitted_candidate
                 # Candidates compete on the quantity being minimised.
                 rss = float(np.dot(solver_residual, solver_residual))
                 if not math.isfinite(rss):
                     continue
                 (successful if candidate.success else unsuccessful).append(
-                    (rss, candidate, fitted_candidate, residual_candidate)
+                    (rss, candidate)
                 )
+                if (
+                    warm_start is not None
+                    and seed_index == 0
+                    and candidate.success
+                    and rss <= _FIT_RSS_TIE_RELATIVE
+                ):
+                    break
             except (FitCancelled, FitDeadlineExceeded):
                 raise
             except (ValueError, RuntimeError, FloatingPointError) as error:
@@ -1436,7 +1432,14 @@ class FitEngine:
             scale = max(1.0, abs(best[0]))
             if candidate[0] < best[0] - _FIT_RSS_TIE_RELATIVE * scale:
                 best = candidate
-        _rss, solved, fitted, residuals = best
+        _rss, solved = best
+        # The model and data residual are needed only for the winner.  Solver
+        # residuals may encode a likelihood (histograms), so evaluate rather
+        # than trying to invert ``solved.fun``.
+        fitted = spec.evaluate(coords, solved.x).reshape(-1)
+        if fitted.shape != values.shape or not np.all(np.isfinite(fitted)):
+            raise RuntimeError("winning fit evaluation is non-finite")
+        residuals = values - fitted
         degrees = max(values.size - solved.x.size, 1)
         reduced = float(_rss / degrees)
         covariance, covariance_valid = _covariance(solved.jac, reduced)

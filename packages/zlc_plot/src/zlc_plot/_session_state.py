@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class FitEvent:
-    """A fit result accepted and painted for the current data revision."""
+    """Exact result: live after solve/before raster, manual after overlay."""
 
     result: "FitResult | FacetFitBatchResult"
     selection: FitSelection | None
@@ -125,7 +125,6 @@ class _LiveFrameFinalization:
     #: front is promoted (``publish_live_frame``) so a waiting fit future
     #: never observes a front older than its result.
     fit_resolution: "_FitResolution | None" = None
-    fit_event: "FitEvent | None" = None
 
 
 @dataclass(frozen=True, slots=True)

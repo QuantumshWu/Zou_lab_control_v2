@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from importlib import import_module
 from pathlib import Path
 
 import numpy as np
@@ -33,6 +34,9 @@ _ANCHOR_PATH = Path(__file__).with_name("fixtures") / "fit_anchors.json"
 
 # Models whose origin is the start of the window they are fitted over.
 _ANCHORED_MODELS = ("damped_sine", "exponential_decay")
+_GENERIC_WARM_MODELS = tuple(
+    model for model in PARAMETERS if model != "radial_gaussian_center"
+)
 
 
 def _anchors() -> dict[str, object]:
@@ -107,6 +111,72 @@ def test_every_builtin_model_recovers_synthetic_parameters(model: str) -> None:
     else:
         assert np.allclose(result.parameter_values, expected, rtol=2e-3, atol=2e-3)
     assert np.all(np.isfinite(result.standard_errors))
+
+
+@pytest.mark.parametrize("model", _GENERIC_WARM_MODELS)
+def test_globally_unbeatable_warm_seed_skips_redundant_cold_candidates(
+    monkeypatch, model: str
+) -> None:
+    engine = FitEngine()
+    coordinates, observations, _parameters = _anchor(model)
+    cold = engine.fit(model, coordinates, observations)
+    fit_module = import_module("zlc_plot.fit")
+    least_squares = fit_module.least_squares
+    calls = 0
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return least_squares(*args, **kwargs)
+
+    monkeypatch.setattr(fit_module, "least_squares", counted)
+    warm = engine.fit(
+        engine.registry.get(model),
+        coordinates,
+        observations,
+        warm_start=tuple(float(value) for value in cold.parameter_values),
+    )
+    assert calls == 1
+    for field in (
+        "parameter_values",
+        "standard_errors",
+        "covariance",
+        "fitted_values",
+        "residuals",
+        "selected_indices",
+    ):
+        assert np.array_equal(
+            getattr(warm, field), getattr(cold, field), equal_nan=True
+        ), field
+    assert warm.model.model_id == cold.model.model_id
+    assert warm.success == cold.success
+    assert warm.message == cold.message
+    assert warm.reduced_chi_square == cold.reduced_chi_square
+    assert warm.covariance_valid == cold.covariance_valid
+
+
+def test_misleading_warm_seed_keeps_every_cold_candidate(monkeypatch) -> None:
+    engine = FitEngine()
+    coordinates, observations, _parameters = _anchor("lorentzian")
+    cold = engine.fit("lorentzian", coordinates, observations)
+    fit_module = import_module("zlc_plot.fit")
+    least_squares = fit_module.least_squares
+    calls = 0
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return least_squares(*args, **kwargs)
+
+    monkeypatch.setattr(fit_module, "least_squares", counted)
+    recovered = engine.fit(
+        engine.registry.get("lorentzian"),
+        coordinates,
+        observations,
+        warm_start=(2.5, 0.1, 0.1, 1.5),
+    )
+    assert calls == 3
+    np.testing.assert_array_equal(recovered.parameter_values, cold.parameter_values)
 
 
 def test_fit_bounds_are_enforced() -> None:
@@ -293,13 +363,19 @@ def test_regular_image_result_arrays_are_deferred_until_first_access() -> None:
     assert np.all(np.isnan(invalid.standard_errors))
 
 
-def test_regular_image_warm_start_reproduces_the_cold_solution() -> None:
+@pytest.mark.parametrize(
+    ("model", "radial"),
+    (("radial_gaussian_center", True), ("anisotropic_gaussian_center", False)),
+)
+def test_regular_image_warm_start_reproduces_the_cold_solution(
+    model: str, radial: bool
+) -> None:
     engine = FitEngine()
-    x, y, image = _separable_image(radial=True, size=96)
+    x, y, image = _separable_image(radial=radial, size=96)
     data = RegularImageFitInput(x, y, image)
-    cold = engine.fit("radial_gaussian_center", data)
+    cold = engine.fit(model, data)
     warm = engine.fit(
-        "radial_gaussian_center",
+        engine.registry.get(model),
         data,
         warm_start=tuple(float(value) for value in cold.parameter_values),
     )

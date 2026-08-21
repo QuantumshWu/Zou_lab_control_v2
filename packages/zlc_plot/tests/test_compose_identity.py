@@ -19,7 +19,16 @@ import pytest
 
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
 
-from zlc_plot import AxisRef, ImagePlot, PlotLabels, PlotSession
+from zlc_plot import (
+    AxisRef,
+    CurvePlot,
+    FacetGridPlot,
+    HistogramPlot,
+    ImagePlot,
+    PlotLabels,
+    PlotSession,
+    RollingPlot,
+)
 from zlc_plot.rendering import MatplotlibRenderer
 from zlc_plot.selectors import NumericRange
 
@@ -218,6 +227,105 @@ def test_tight_fit_and_area_selector_remain_full_draw_exact(
 
         session.update_data(fitted_snapshot(2, 0.4))
         assert renderer._background_region is background
+        assert _composed_matches_full_draw(session) == 0
+    finally:
+        session.close()
+
+
+def test_tight_colorbar_updates_its_proxy_once_per_frame(monkeypatch) -> None:
+    """A stable colormap must not rebuild the Colorbar before its new clim."""
+
+    from matplotlib.colorbar import Colorbar
+
+    size = 64
+    schema = _image_contract(size)
+    session = PlotSession(
+        _snapshot(schema, size, 4000.0, 1, seed=31),
+        ImagePlot(AxisRef.data("camera_x"), AxisRef.data("camera_y")),
+    )
+    try:
+        draws = 0
+        native = Colorbar._draw_all
+
+        def counted(colorbar) -> None:
+            nonlocal draws
+            draws += 1
+            native(colorbar)
+
+        monkeypatch.setattr(Colorbar, "_draw_all", counted)
+        session.update_data(_snapshot(schema, size, 3000.0, 2, seed=32))
+        assert draws == 1
+        assert _composed_matches_full_draw(session) == 0
+    finally:
+        session.close()
+
+
+def _generic_kind_pair(kind: str):
+    if kind == "facet":
+        schema = DatasetSchema.create(
+            Axis.create("repeat", size=1),
+            PointTable.from_columns({"facet": (0.0, 1.0)}),
+            data_axes=(
+                Axis.create("y", values=np.arange(8.0)),
+                Axis.create("x", values=np.arange(12.0)),
+            ),
+            dtype=np.float64,
+            generation="compose-facet-kinds",
+        )
+        first = np.arange(192.0).reshape(1, 2, 8, 12)
+        second = first[::-1].copy() + 3.0
+        return (
+            DatasetSnapshot(schema, first, revision=1),
+            DatasetSnapshot(schema, second, revision=2),
+            FacetGridPlot(
+                AxisRef.point("facet"),
+                ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
+            ),
+        )
+    if kind == "rolling":
+        schema = DatasetSchema.create(
+            Axis.create("repeat", size=12),
+            PointTable.from_columns({"sample": (0.0,)}),
+            dtype=np.float64,
+            generation="compose-rolling-kind",
+        )
+        first = np.arange(12.0).reshape(12, 1)
+        return (
+            DatasetSnapshot(schema, first, revision=1),
+            DatasetSnapshot(schema, first + 1.0, revision=2),
+            RollingPlot(),
+        )
+    points = np.arange(16.0)
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns({"x": points}),
+        dtype=np.float64,
+        generation=f"compose-{kind}-kind",
+    )
+    first = DatasetSnapshot(schema, np.sin(points)[np.newaxis, :], revision=1)
+    second = DatasetSnapshot(
+        schema,
+        np.cos(points)[np.newaxis, :],
+        revision=2,
+    )
+    spec = (
+        CurvePlot(AxisRef.point("x"))
+        if kind == "curve"
+        else HistogramPlot()
+    )
+    return first, second, spec
+
+
+@pytest.mark.parametrize("kind", ("curve", "histogram", "rolling", "facet"))
+@pytest.mark.parametrize("device_pixel_ratio", (1.0, 2.0))
+def test_generic_kind_updates_remain_full_draw_exact(
+    kind: str,
+    device_pixel_ratio: float,
+) -> None:
+    first, second, spec = _generic_kind_pair(kind)
+    session = PlotSession(first, spec, device_pixel_ratio=device_pixel_ratio)
+    try:
+        session.update_data(second)
         assert _composed_matches_full_draw(session) == 0
     finally:
         session.close()

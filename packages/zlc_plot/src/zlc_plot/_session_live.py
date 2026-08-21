@@ -217,6 +217,8 @@ class LiveSessionMixin:
                     solved,
                     prepared.projection,
                 )
+            if fit_event is not None:
+                self._notify_fit(fit_event)
             try:
                 presentation = self._present_projection_transaction(
                     prepared.projection,
@@ -236,7 +238,6 @@ class LiveSessionMixin:
             self._session_identity,
             presentation,
             resolution,
-            fit_event,
         )
 
     def publish_live_frame(self, finalization: _LiveFrameFinalization) -> None:
@@ -246,8 +247,6 @@ class LiveSessionMixin:
             raise TypeError("finalization must be a live-frame finalization token")
         if finalization.session_identity is not self._session_identity:
             raise ValueError("live-frame finalization belongs to another PlotSession")
-        if finalization.fit_event is not None:
-            self._notify_fit(finalization.fit_event)
         if finalization.fit_resolution is not None:
             self._resolve_fit_completion(finalization.fit_resolution)
 

@@ -2895,6 +2895,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     solved,
                     projection,
                 )
+            if fit_event is not None:
+                self._notify_fit(fit_event)
             try:
                 self._present_projection_transaction(
                     projection,
@@ -2910,8 +2912,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 request_generation=solved.started.request_generation,
                 selections=accepted_fit.selections,
             )
-        if fit_event is not None:
-            self._notify_fit(fit_event)
         if resolution is not None:
             self._resolve_fit_completion(resolution)
 

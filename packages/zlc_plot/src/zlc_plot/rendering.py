@@ -1460,7 +1460,6 @@ class MatplotlibRenderer:
         """Update semantic data artists in place for one complete frame."""
         key, axes, _index = self.primary_surface
         handler_for(self.spec).render(self, payload, state, axes=axes, key=key)
-        self._apply_common_axes(state)
 
     def end_selector_gesture(self) -> None:
         self._forget_gesture_region()
@@ -1604,15 +1603,19 @@ class MatplotlibRenderer:
         if isinstance(self.spec, FacetGridPlot):
             for name, value in (("x", x_label), ("y", y_label)):
                 artist = self._artists.get(f"facet:outer_{name}")
-                if artist is not None:
+                if artist is not None and artist.get_text() != value:
                     artist.set_text(value)
             if self._facet_focus_index is not None:
                 axis = self._axes["facet_cell"][self._facet_focus_index]
-                axis.set_xlabel(x_label, fontsize=self.style.fonts.axis_label_pt)
-                axis.set_ylabel(y_label, fontsize=self.style.fonts.axis_label_pt)
+                if axis.get_xlabel() != x_label:
+                    axis.set_xlabel(x_label, fontsize=self.style.fonts.axis_label_pt)
+                if axis.get_ylabel() != y_label:
+                    axis.set_ylabel(y_label, fontsize=self.style.fonts.axis_label_pt)
         else:
-            self.primary_axes.set_xlabel(x_label)
-            self.primary_axes.set_ylabel(y_label)
+            if self.primary_axes.get_xlabel() != x_label:
+                self.primary_axes.set_xlabel(x_label)
+            if self.primary_axes.get_ylabel() != y_label:
+                self.primary_axes.set_ylabel(y_label)
         if value_label is not None:
             for key, value in self._artists.items():
                 if key.endswith(":colorbar") and hasattr(value, "set_label"):
@@ -1670,10 +1673,13 @@ class MatplotlibRenderer:
                 alpha=self.style.artists.curve.alpha,
                 linestyle=self.style.artists.curve.linestyle,
                 marker=self.style.artists.curve.marker,
+                markersize=self.style.artists.curve_marker_size_pt,
             )
             lines.append(line)
         for index, line in enumerate(lines):
-            line.set_visible(index < count)
+            visible = index < count
+            if line.get_visible() != visible:
+                line.set_visible(visible)
         return lines
 
     def _update_curve(
@@ -1685,6 +1691,7 @@ class MatplotlibRenderer:
         *,
         limits: tuple[tuple[float, float], tuple[float, float]] | None = None,
         prepared_series: tuple[_PreparedSeries, ...] | None = None,
+        paint_labels: bool = True,
     ) -> None:
         source = self._series(payload)
         series = (
@@ -1701,6 +1708,7 @@ class MatplotlibRenderer:
             x_label=x_label,
             y_label=y_label,
             limits=limits,
+            paint_labels=paint_labels,
         )
 
     def _mutate_series_artists(
@@ -1713,12 +1721,9 @@ class MatplotlibRenderer:
         x_label: str,
         y_label: str,
         limits: tuple[tuple[float, float], tuple[float, float]] | None = None,
+        paint_labels: bool = True,
     ) -> None:
         lines = self._ensure_lines(axes, len(series), key)
-        curve_style = self.style.artists.curve
-        width = curve_style.linewidth
-        marker_size = self.style.artists.curve_marker_size_pt
-        marker = "None" if curve_style.marker is None else curve_style.marker
         all_x: list[np.ndarray] = []
         all_y: list[np.ndarray] = []
         for index, item in enumerate(series):
@@ -1726,11 +1731,8 @@ class MatplotlibRenderer:
             plotted_x = np.where(item.valid, item.x, np.nan)
             plotted_y = np.where(item.valid, item.y, np.nan)
             lines[index].set_data(plotted_x, plotted_y)
-            lines[index].set_linewidth(width)
-            lines[index].set_alpha(self.style.artists.curve.alpha)
-            lines[index].set_markersize(marker_size)
-            lines[index].set_marker(marker)
-            lines[index].set_label(item.label)
+            if lines[index].get_label() != item.label:
+                lines[index].set_label(item.label)
             all_x.append(item.x[item.valid])
             all_y.append(item.y[item.valid])
         if limits is not None:
@@ -1760,8 +1762,11 @@ class MatplotlibRenderer:
         # panel-sized plot it covers the data it names.
         if axes.get_legend() is not None:
             axes.get_legend().remove()
-        axes.set_xlabel(x_label)
-        axes.set_ylabel(y_label)
+        if paint_labels:
+            if axes.get_xlabel() != x_label:
+                axes.set_xlabel(x_label)
+            if axes.get_ylabel() != y_label:
+                axes.set_ylabel(y_label)
         apply_smart_ticks(axes, label_pt=self.style.fonts.tick_pt)
 
     def _histogram_arrays(
@@ -1803,6 +1808,7 @@ class MatplotlibRenderer:
         *,
         arrays: tuple[np.ndarray, np.ndarray] | None = None,
         limits: tuple[tuple[float, float], tuple[float, float]] | None = None,
+        paint_labels: bool = True,
     ) -> None:
         from matplotlib.collections import PolyCollection
 
@@ -1820,7 +1826,6 @@ class MatplotlibRenderer:
             self._artists[key] = collection
         else:
             collection.set_verts(_histogram_vertices(edges, counts))
-            collection.set_alpha(alpha)
         self._artists[f"{key}:projection"] = (edges, counts)
         if limits is not None:
             selected_x = limits[0]
@@ -1869,7 +1874,7 @@ class MatplotlibRenderer:
         quantity = getattr(payload, "edges", None)
         if quantity is None:
             quantity = getattr(payload, "values", payload)
-        axes.set_xlabel(_quantity_label(quantity, "value", explicit_x))
+        x_label = _quantity_label(quantity, "value", explicit_x)
         y_label = _state_label(
             state,
             "y_label",
@@ -1877,7 +1882,11 @@ class MatplotlibRenderer:
         )
         if y_label is None:
             y_label = "density" if bool(state["density"]) else "Shots"
-        axes.set_ylabel(y_label)
+        if paint_labels:
+            if axes.get_xlabel() != x_label:
+                axes.set_xlabel(x_label)
+            if axes.get_ylabel() != y_label:
+                axes.set_ylabel(y_label)
         apply_smart_ticks(axes, label_pt=self.style.fonts.tick_pt)
 
     def _resolve_histogram_y_limits(
@@ -2148,11 +2157,14 @@ class MatplotlibRenderer:
             x_limits, y_limits = requested
         self._set_xlim(axes, *x_limits)
         self._set_ylim(axes, *y_limits)
-        axes.set_anchor(policy.image_anchor)
-        axes.set_aspect(
-            "auto" if coordinate_aspect is None else coordinate_aspect,
-            adjustable="box",
-        )
+        if axes.get_anchor() != policy.image_anchor:
+            axes.set_anchor(policy.image_anchor)
+        wanted_aspect = "auto" if coordinate_aspect is None else coordinate_aspect
+        if (
+            axes.get_aspect() != wanted_aspect
+            or axes.get_adjustable() != "box"
+        ):
+            axes.set_aspect(wanted_aspect, adjustable="box")
         # Equal aspect changes the actual drawable box.  Resolve that box
         # before choosing a source reduction so one prepared sample maps to at
         # roughly one physical output pixel at the current DPR.
@@ -2242,7 +2254,8 @@ class MatplotlibRenderer:
                 self._artists[applied_key] = shown
             if previous_mapping is None or previous_mapping[1] != interpolation:
                 image.set_interpolation(interpolation)
-            image.set_interpolation_stage(prepared.interpolation_stage)
+            if image.get_interpolation_stage() != prepared.interpolation_stage:
+                image.set_interpolation_stage(prepared.interpolation_stage)
             # The artist's cmap/clim stay authoritative in both modes: RGBA
             # rendering ignores them, but selector handles, rail guides and
             # pointer snapshots all read the painted limits off the artist.
@@ -2429,6 +2442,7 @@ class MatplotlibRenderer:
         key: str,
         *,
         color_limits: tuple[float, float] | None = None,
+        paint_labels: bool = True,
     ) -> None:
         labels = getattr(self.semantic_spec, "labels", None)
         explicit_x = _state_label(
@@ -2463,6 +2477,7 @@ class MatplotlibRenderer:
             ),
             coordinate_aspect=_image_coordinate_aspect(payload.x, payload.y),
             color_limits=color_limits,
+            paint_labels=paint_labels,
         )
 
     def _mutate_image_artists(
@@ -2480,6 +2495,7 @@ class MatplotlibRenderer:
         value_label: str,
         coordinate_aspect: float | None,
         color_limits: tuple[float, float] | None = None,
+        paint_labels: bool = True,
     ) -> None:
         source_values, source_valid = z, valid
         z, valid, extent = _image_arrays(x, y, z, valid)
@@ -2512,8 +2528,11 @@ class MatplotlibRenderer:
             square_view=coordinate_aspect is not None,
             coordinate_aspect=coordinate_aspect,
         )
-        axes.set_xlabel(x_label)
-        axes.set_ylabel(y_label)
+        if paint_labels:
+            if axes.get_xlabel() != x_label:
+                axes.set_xlabel(x_label)
+            if axes.get_ylabel() != y_label:
+                axes.set_ylabel(y_label)
         self._update_image_chrome(
             axes,
             key,
@@ -2620,7 +2639,8 @@ class MatplotlibRenderer:
                 self._artists[guide_key] = guides
             show_guides = data_range is not None
             for index, guide in enumerate(guides):
-                guide.set_visible(show_guides)
+                if guide.get_visible() != show_guides:
+                    guide.set_visible(show_guides)
                 if show_guides:
                     assert data_range is not None
                     value = data_range[index]
@@ -2643,7 +2663,6 @@ class MatplotlibRenderer:
                 self._artists[mappable_key] = mappable
                 colorbar = self._figure.colorbar(mappable, cax=colorbar_axes[0])
                 self._artists[colorbar_key] = colorbar
-                self._artists[f"{key}:colorbar_dynamic_axis"] = colorbar.ax
             colorbar_state = (
                 cmap_name,
                 (vmin, vmax),
@@ -2653,21 +2672,46 @@ class MatplotlibRenderer:
             previous_colorbar_state = self._artists.get(state_key)
             if colorbar_state != previous_colorbar_state:
                 if mappable is not None:
-                    mappable.set_cmap(cmap)
-                    mappable.set_clim(vmin, vmax)
-                colorbar.set_label(
-                    value_label,
-                    labelpad=policy.colorbar_endpoint_label_pad_pt,
-                )
-                colorbar.set_ticks((vmin, vmax))
-                label_chars = policy.colorbar_endpoint_label_chars
-                colorbar.set_ticklabels(
-                    (
-                        _compact_engineering(vmin, length=label_chars),
-                        _compact_engineering(vmax, length=label_chars),
+                    if (
+                        previous_colorbar_state is None
+                        or previous_colorbar_state[0] != cmap_name
+                    ):
+                        mappable.set_cmap(cmap)
+                    if (
+                        previous_colorbar_state is None
+                        or previous_colorbar_state[1] != (vmin, vmax)
+                    ):
+                        mappable.set_clim(vmin, vmax)
+                if (
+                    previous_colorbar_state is None
+                    or previous_colorbar_state[2] != value_label
+                ):
+                    colorbar.set_label(
+                        value_label,
+                        labelpad=policy.colorbar_endpoint_label_pad_pt,
                     )
-                )
+                if (
+                    previous_colorbar_state is None
+                    or previous_colorbar_state[1] != (vmin, vmax)
+                ):
+                    colorbar.set_ticks((vmin, vmax))
+                    label_chars = policy.colorbar_endpoint_label_chars
+                    colorbar.set_ticklabels(
+                        (
+                            _compact_engineering(vmin, length=label_chars),
+                            _compact_engineering(vmax, length=label_chars),
+                        )
+                    )
                 self._artists[state_key] = colorbar_state
+            # Only the colorbar parts whose pixels can change belong above
+            # the cached background.  Repainting its whole Axes repeated the
+            # patch, hidden short Axis and empty title children every frame.
+            self._artists[f"{key}:colorbar_dynamic_artists"] = (
+                colorbar.solids,
+                colorbar.dividers,
+                colorbar.outline,
+                colorbar.long_axis,
+            )
         self._apply_colorbar_visibility(state)
         # A tick configuration has ONE owner per axes: it writes the axis'
         # ``_zlc_tick_signature`` and installs its locator only when that
@@ -2819,7 +2863,7 @@ class MatplotlibRenderer:
         "colorbar",
         "colorbar_mappable",
         "colorbar_state",
-        "colorbar_dynamic_axis",
+        "colorbar_dynamic_artists",
     )
 
     def _sync_facet_focus_chrome(self, index: int | None) -> None:
@@ -2904,8 +2948,11 @@ class MatplotlibRenderer:
         else:
             bounds = facet_focus_box(self.plan).matplotlib_bounds()
         for index, axis in enumerate(axes):
-            axis.set_visible(index == selected_index)
-        axes[selected_index].set_position(bounds)
+            visible = index == selected_index
+            if axis.get_visible() != visible:
+                axis.set_visible(visible)
+        if tuple(axes[selected_index].get_position().bounds) != tuple(bounds):
+            axes[selected_index].set_position(bounds)
 
     def _update_facets(self, payload: Any, state: DisplayState) -> None:
 
@@ -3050,8 +3097,10 @@ class MatplotlibRenderer:
             )
             cell_options = tuple({"color_limits": image_limits} for _cell in cells)
 
-        outer_x = ""
-        outer_y = ""
+        cell_options = tuple(
+            {**options, "paint_labels": False} for options in cell_options
+        )
+        outer_x, outer_y, _value_label = self._effective_labels(payload, state)
         visible_axes: list[tuple[int, Any]] = []
         # ONE call draws a cell, and it is the same call that draws the
         # standalone plot of that kind.  The hand-copied per-kind chain that
@@ -3070,13 +3119,11 @@ class MatplotlibRenderer:
                 key=key,
                 **cell_options[index],
             )
-            # The cell just labelled its own axes exactly as the standalone
-            # plot does; the grid lifts the first one out to its shared outer
-            # label and leaves the cells clean.
-            outer_x = outer_x or axis.get_xlabel()
-            outer_y = outer_y or axis.get_ylabel()
-            axis.set_xlabel("")
-            axis.set_ylabel("")
+            if not focused:
+                if axis.get_xlabel():
+                    axis.set_xlabel("")
+                if axis.get_ylabel():
+                    axis.set_ylabel("")
             visible_axes.append((index, axis))
         typography = self.plan.facet_typography
         rows, columns = self.plan.facet_shape or (1, max(len(cells), 1))
@@ -3092,15 +3139,23 @@ class MatplotlibRenderer:
                 )
             else:
                 title_text, title_pt = label, self.style.fonts.tick_pt
-            axis.set_title(
-                title_text,
-                fontsize=title_pt,
-                pad=self.style.render.compact_axes_title_pad_pt,
-            )
+            if (
+                axis.get_title() != title_text
+                or axis.title.get_fontsize() != title_pt
+            ):
+                axis.set_title(
+                    title_text,
+                    fontsize=title_pt,
+                    pad=self.style.render.compact_axes_title_pad_pt,
+                )
             # The tick MARKS are the grid's; their label SIZE belongs to the
             # tick policy below, which may shrink it to keep two labels
             # apart and must be the last writer.
-            axis.tick_params(axis="both", length=2)
+            if any(
+                item.get_tick_params().get("length") != 2
+                for item in (axis.xaxis, axis.yaxis)
+            ):
+                axis.tick_params(axis="both", length=2)
             row, column = divmod(index, columns)
             if focused:
                 # The focused cell's ticks belong to the standalone-kind
@@ -3134,8 +3189,10 @@ class MatplotlibRenderer:
                     else self.style.fonts.tick_pt
                 ),
             )
-            axis.tick_params(axis="y", labelleft=label_left)
-            axis.tick_params(axis="x", labelbottom=label_bottom)
+            if axis.yaxis.get_tick_params().get("labelleft") != label_left:
+                axis.tick_params(axis="y", labelleft=label_left)
+            if axis.xaxis.get_tick_params().get("labelbottom") != label_bottom:
+                axis.tick_params(axis="x", labelbottom=label_bottom)
             # The cells share one x span and one y span, so they share
             # whatever offset the tick policy took out of their labels: it is
             # written once, by the corner cell that carries both sets of tick
@@ -3143,8 +3200,10 @@ class MatplotlibRenderer:
             # axis and the top of the shared y axis.  (The tick policy places
             # it; where a cell's own margin is, its neighbour is.)
             corner = label_bottom and label_left
-            axis.xaxis.get_offset_text().set_visible(corner)
-            axis.yaxis.get_offset_text().set_visible(corner)
+            if axis.xaxis.get_offset_text().get_visible() != corner:
+                axis.xaxis.get_offset_text().set_visible(corner)
+            if axis.yaxis.get_offset_text().get_visible() != corner:
+                axis.yaxis.get_offset_text().set_visible(corner)
 
         outer_labels = (("x", outer_x, 0.5, 0.012, 0.0), ("y", outer_y, 0.008, 0.5, 90.0))
         for name, value, x_pos, y_pos, rotation in outer_labels:
@@ -3165,23 +3224,33 @@ class MatplotlibRenderer:
                     ),
                 )
                 self._artists[artist_key] = artist
-            artist.set_text(value)
-            artist.set_visible(self._facet_focus_index is None)
+            if artist.get_text() != value:
+                artist.set_text(value)
+            visible = self._facet_focus_index is None
+            if artist.get_visible() != visible:
+                artist.set_visible(visible)
 
         if self._facet_focus_index is None:
             return
 
         selected_index = self._facet_focus_index
         selected = axes[selected_index]
-        selected.set_xlabel(outer_x, fontsize=self.style.fonts.axis_label_pt)
-        selected.set_ylabel(outer_y, fontsize=self.style.fonts.axis_label_pt)
-        selected.set_title(
-            # The focused cell owns the whole panel: its title is the FULL
-            # label again, not whatever fitted the grid cell's room.
-            str(_facet_cell_title(cells[selected_index], selected_index)),
-            fontsize=self.style.fonts.figure_title_pt,
-            pad=self.style.render.compact_axes_title_pad_pt,
-        )
+        if selected.get_xlabel() != outer_x:
+            selected.set_xlabel(outer_x, fontsize=self.style.fonts.axis_label_pt)
+        if selected.get_ylabel() != outer_y:
+            selected.set_ylabel(outer_y, fontsize=self.style.fonts.axis_label_pt)
+        focused_title = str(_facet_cell_title(cells[selected_index], selected_index))
+        if (
+            selected.get_title() != focused_title
+            or selected.title.get_fontsize() != self.style.fonts.figure_title_pt
+        ):
+            selected.set_title(
+                # The focused cell owns the whole panel: its title is the FULL
+                # label again, not whatever fitted the grid cell's room.
+                focused_title,
+                fontsize=self.style.fonts.figure_title_pt,
+                pad=self.style.render.compact_axes_title_pad_pt,
+            )
         if isinstance(semantic, ImagePlot):
             # The chrome authority already applied the standalone image
             # kind's spatial tick budget; restating it keeps the signature
@@ -3190,11 +3259,15 @@ class MatplotlibRenderer:
                 selected, "x", label_pt=self.style.fonts.tick_pt, prune_edges=True
             )
             apply_smart_ticks(selected, "y", label_pt=self.style.fonts.tick_pt)
-        selected.tick_params(
-            axis="both",
-            labelbottom=True,
-            labelleft=True,
-        )
+        if (
+            not selected.xaxis.get_tick_params().get("labelbottom", False)
+            or not selected.yaxis.get_tick_params().get("labelleft", False)
+        ):
+            selected.tick_params(
+                axis="both",
+                labelbottom=True,
+                labelleft=True,
+            )
 
     def _update_image_point_overlay(
         self,
@@ -3460,10 +3533,6 @@ class MatplotlibRenderer:
                     axis.grid(False, axis="x")
             else:
                 axis.grid(show_grid)
-
-    def _apply_common_axes(self, state: DisplayState) -> None:
-        self._update_title_artist(state)
-        self._apply_grid(state)
 
     def _remove_artists(self, artists: Iterable[Any]) -> None:
         for artist in tuple(artists):

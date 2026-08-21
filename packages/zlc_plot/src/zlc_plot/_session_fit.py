@@ -115,8 +115,8 @@ class _DeferredStartedFitRequest(_StartedFitRequest):
 
 class FitSessionMixin:
 
-    def resynchronize_live_fit(self) -> None:
-        """Cancel only the active pair while keeping its live request armed."""
+    def expire_active_live_fit(self) -> None:
+        """Expire the current live solve while keeping its request armed."""
 
         with self._lock:
             prepare_cancel = self._live_prepare_cancel
@@ -800,9 +800,10 @@ class FitSessionMixin:
 
         The selection freeze runs inside the solver task (from the captured
         immutable projection), so neither the caller nor the render worker
-        pays for it.  The cancellation token is the request-scoped live token:
-        every accepted frame keeps its FIFO position while earlier pairs solve,
-        and turns over only for backlog resync, re-arm, replace_spec, or close.
+        pays for it.  Capacity-one admission keeps one solve active; its
+        deadline rotates the request-scoped cancellation token so the retained
+        latest input inherits a fresh one. Re-arm, replace_spec and close also
+        retire the previous request token.
         """
 
         with self._lock:
@@ -829,7 +830,7 @@ class FitSessionMixin:
             if started.cancellation.is_set() or (
                 cancelled is not None and bool(cancelled())
             ):
-                raise FitCancelled("live fit pair was resynchronized")
+                raise FitCancelled("live fit pair was cancelled")
         except Exception as error:
             if not isinstance(error, (FitCancelled, FitDeadlineExceeded)):
                 self._forget_fit_warm_starts(started.request_generation)
@@ -888,6 +889,8 @@ class FitSessionMixin:
             )
             if not request_current:
                 raise FitCancelled("fit request changed before pair acceptance")
+            if solved.started.projection is not projection:
+                raise FitCancelled("solved fit does not match the prepared projection")
             accepted, _selections = self._resolved_accepted_fit(
                 result,
                 solved.started,
@@ -1724,8 +1727,13 @@ class FitSessionMixin:
             )
 
     def subscribe_fit(self, callback: FitCallback) -> Callable[[], None]:
-        """Observe results after they are accepted and painted, and their
-        withdrawal (``None``) when the accepted fit is taken away."""
+        """Observe exact fit results at their one authoritative completion.
+
+        A live data-pair event follows its solve and precedes that pair's
+        raster; an explicit/manual fit event follows its accepted overlay
+        presentation.  ``None`` withdraws the answer when its request is
+        removed.
+        """
 
         return self._subscribe_callback(self._fit_callbacks, callback)
 

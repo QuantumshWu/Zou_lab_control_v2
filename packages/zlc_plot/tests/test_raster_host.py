@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import Future
 from threading import Event
 from pathlib import Path
 import time
@@ -79,7 +80,14 @@ def _fit_curve_series(generation: str, *, offset: float = 0.0):
 def blocked_fit_host(monkeypatch):
     owned = []
 
-    def build(generation: str, *, offset: float = 0.0, fail_revision=None):
+    def build(
+        generation: str,
+        *,
+        offset: float = 0.0,
+        fail_revision=None,
+        block_revision: int = 1,
+        cooperative: bool = True,
+    ):
         snapshots = _fit_curve_series(generation, offset=offset)
         engine = FitEngine()
         solve = engine.fit
@@ -89,12 +97,12 @@ def blocked_fit_host(monkeypatch):
         def controlled(model, coordinates, observations=None, **kwargs):
             revision = int(kwargs["data_revision"])
             solved.append(revision)
-            if revision == 1:
+            if revision == block_revision:
                 started.set()
                 cancelled = kwargs.get("cancelled")
                 deadline = time.monotonic() + 5.0
                 while not release.wait(0.005):
-                    if callable(cancelled) and cancelled():
+                    if cooperative and callable(cancelled) and cancelled():
                         raise FitCancelled("forced cooperative cancellation")
                     assert time.monotonic() < deadline
             if revision == fail_revision:
@@ -248,28 +256,43 @@ def test_host_facet_live_fit_promotes_one_batch_front_and_future() -> None:
         host.close(timeout=10)
 
 
-def test_live_fit_pairs_every_queued_revision_in_order(
+def test_live_fit_keeps_only_the_latest_successor_while_active(
     blocked_fit_host,
 ) -> None:
-    """A fit-armed frame is data@N with fit@N, born complete.
+    """Direct callers get capacity-one success and close semantics."""
 
-    The publish gate holds while revision 1 solves, but the following burst
-    stays in the exact FIFO.  Every caller receives its own matching data+fit
-    front.  Elapsed lag, not an arbitrary frame count, decides whether the
-    host must resync.
-    """
+    snapshot, normal, started, release, solved = blocked_fit_host(
+        "raster-live-fit-latest-success", offset=0.1
+    )
+    events: list[object] = []
+    try:
+        normal.wait_for_front(timeout=10)
+        normal.fit("gaussian_offset", live=True).result(timeout=30)
+        normal.subscribe_fit(events.append).result(timeout=10)
+        active = normal.update_data(snapshot(1, 0.1))
+        assert started.wait(2.0)
+        superseded = normal.update_data(snapshot(2, 0.2))
+        latest = normal.update_data(snapshot(3, 0.3))
+        assert superseded.cancelled()
+        release.set()
+        active.result(timeout=10)
+        latest.result(timeout=10)
+        assert [event.result.source_revision for event in events] == [1, 3]
+        assert solved[-2:] == [1, 3]
+        assert normal.front is not None
+        assert normal.front.identity.data_revision == 3
+    finally:
+        release.set()
+        normal.close(timeout=10)
 
     snapshot, host, first_started, release_first, solved_revisions = blocked_fit_host(
-        "raster-live-fit-pairs", offset=0.1
+        "raster-live-fit-pairs", offset=0.1, cooperative=False
     )
-    accepted: list[int] = []
-    release_subscription = None
+    fit_events: list[object] = []
     try:
         host.wait_for_front(timeout=10)
         host.fit("gaussian_offset", live=True).result(timeout=30)
-        release_subscription = host.subscribe_fit(
-            lambda event: accepted.append(int(event.result.source_revision))
-        ).result(timeout=10).value
+        host.subscribe_fit(fit_events.append).result(timeout=10)
 
         first = host.update_data(snapshot(1, 0.1))
         assert first_started.wait(2.0)
@@ -278,51 +301,33 @@ def test_live_fit_pairs_every_queued_revision_in_order(
         assert host.front is not None
         assert host.front.identity.data_revision == 0
 
-        queued = [
-            host.update_data(snapshot(revision, revision * 0.1))
-            for revision in range(2, 13)
-        ]
-        assert all(not future.done() for future in queued)
+        superseded = host.update_data(snapshot(2, 0.2))
+        latest = host.update_data(snapshot(3, 0.3))
+        assert superseded.cancelled()
+        assert not latest.done()
 
+        close_started = time.monotonic()
+        assert not host.close(timeout=0.05)
+        assert time.monotonic() - close_started < 0.5
+        assert first.cancelled()
+        assert latest.cancelled()
         release_first.set()
-        first.result(timeout=10)
-        for future in queued:
-            future.result(timeout=10)
-        assert host.front is not None
-        assert host.front.identity.data_revision == 12
-        assert accepted == list(range(1, 13))
-        assert solved_revisions[-12:] == list(range(1, 13))
+        assert host.close(timeout=2.0)
+        assert fit_events == []
+        assert solved_revisions == [0, 1]
     finally:
         release_first.set()
-        if release_subscription is not None:
-            release_subscription().result(timeout=10)
         host.close(timeout=10)
 
 
-@pytest.mark.parametrize("limit", ("wait", "bytes"))
-def test_exact_fit_backlog_resyncs_to_latest_and_recovers(
+def test_active_fit_times_out_without_a_successor_and_recovers(
     monkeypatch,
     blocked_fit_host,
-    limit: str,
 ) -> None:
-    snapshot, host, first_started, release_first, _solved = blocked_fit_host(
-        f"exact-fit-{limit}-budget"
-    )
-    clock = [0.0]
-    monkeypatch.setattr("zlc_plot.raster.monotonic", lambda: clock[0])
-    monkeypatch.setattr(
-        RasterPlotHost,
-        "MAX_EXACT_WAIT_SECONDS",
-        1.0,
-    )
-    monkeypatch.setattr(
-        RasterPlotHost,
-        "MAX_PENDING_INPUT_BYTES",
-        (
-            64 << 20
-            if limit == "wait"
-            else 2 * int(snapshot(0).block.values.nbytes)
-        ),
+    """Only solve has a deadline; slow data prepare completes normally."""
+
+    snapshot, host, first_started, release_first, solved = blocked_fit_host(
+        "active-fit-deadline", block_revision=2
     )
     release_subscription = None
     accepted: list[tuple[int, bool]] = []
@@ -336,46 +341,52 @@ def test_exact_fit_backlog_resyncs_to_latest_and_recovers(
 
     try:
         host.wait_for_front(timeout=10)
+        session = host._session
+        assert session is not None
+        original_prepare = PlotSession.prepare_live_frame
+        prepared = original_prepare(session, snapshot(1)).result(timeout=10)
+        slow_prepare: Future = Future()
+        monkeypatch.setattr(
+            PlotSession,
+            "prepare_live_frame",
+            lambda _session, _data, **_kwargs: slow_prepare,
+        )
+        data_only = host.update_data(snapshot(1))
+        time.sleep(1.1)
+        assert not data_only.done()
+        slow_prepare.set_result(prepared)
+        data_only.result(timeout=10)
+        assert host.front is not None
+        assert host.front.identity.data_revision == 1
+        monkeypatch.setattr(PlotSession, "prepare_live_frame", original_prepare)
+
         host.fit("gaussian_offset", live=True).result(timeout=30)
         release_subscription = host.subscribe_fit(observe_fit).result(timeout=10).value
 
-        first = host.update_data(snapshot(1))
+        started_at = time.monotonic()
+        first = host.update_data(snapshot(2))
         assert first_started.wait(2.0)
-        skipped = host.update_data(snapshot(2))
-        superseded = host.update_data(snapshot(3))
-        if limit == "wait":
-            clock[0] = 1.01
-        latest = host.update_data(snapshot(4))
-
-        # Crossing the budget is itself the recovery edge.  It must not wait
-        # for the slow fit to return before reporting its current/queued gaps,
-        # and a cooperative solver must observe cancellation without this test
-        # opening its old gate.
-        with pytest.raises(RuntimeError, match="resynchronized"):
+        with pytest.raises(RuntimeError, match="active deadline"):
             first.result(timeout=2.0)
+        elapsed = time.monotonic() - started_at
+        assert 0.9 <= elapsed < 1.8, elapsed
         assert not release_first.is_set()
-        assert skipped.cancelled()
-        assert superseded.cancelled()
-
+        latest = host.update_data(snapshot(3))
         latest.result(timeout=10)
-        host.update_data(snapshot(5)).result(timeout=10)
         assert accepted == [
-            (1, False),
             (2, False),
-            (3, False),
-            (4, True),
-            (5, True),
+            (3, True),
         ]
-        assert [event.result.batch_revision for event in fit_events] == sorted(
-            event.result.batch_revision for event in fit_events
-        )
-        assert all(
-            np.isnan(event.result.parameter_values).all()
-            for event in fit_events
-            if not event.result.success
-        )
+        assert np.isnan(fit_events[0].result.parameter_values).all()
         assert host.front is not None
-        assert host.front.identity.data_revision == 5
+        assert host.front.identity.data_revision == 3
+        assert solved[-2:] == [2, 3]
+
+        release_subscription().result(timeout=10)
+        release_subscription = None
+        close_started = time.monotonic()
+        assert host.close(timeout=2.0)
+        assert time.monotonic() - close_started < 2.0
     finally:
         release_first.set()
         if release_subscription is not None:
@@ -407,13 +418,13 @@ def test_solver_failure_is_loud_for_that_revision_and_the_tail_continues(
 
         first = host.update_data(snapshot(1))
         assert first_started.wait(2.0)
-        second = host.update_data(snapshot(2))
-        third = host.update_data(snapshot(3))
         release_first.set()
-
         first.result(timeout=10)
+
+        second = host.update_data(snapshot(2))
         with pytest.raises(RuntimeError, match="forced revision-2 failure"):
             second.result(timeout=10)
+        third = host.update_data(snapshot(3))
         third.result(timeout=10)
         host.update_data(snapshot(4)).result(timeout=10)
 

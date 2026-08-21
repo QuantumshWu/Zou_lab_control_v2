@@ -553,7 +553,7 @@ Scalar`FitResult`公开自己的参数向量、standard errors和source/batch re
 prepare/solve/commit入口与匹配的fit原子呈现。selector、viewport、unit和resize
 不会因为没有新data而自动求解；需要立刻按新选择重算时显式调用`fit()`。
 
-`zlc_plot.fit.FitResult.parameters` 始终使用 canonical units。外部 GUI/Notebook 若要显示与图内一致的公式、参数、单位和 uncertainty，应订阅 accepted fit event：
+`zlc_plot.fit.FitResult.parameters` 始终使用 canonical units。外部数据消费者若要取得exact solve的公式、参数、单位和uncertainty，应订阅`FitEvent`：
 
 ```python
 def show_fit(event):
@@ -565,6 +565,8 @@ def show_fit(event):
 
 unsubscribe = session.subscribe_fit(show_fit)
 ```
+
+Live data pair的event在solve结果通过request/projection identity检查后发布，因此Rolling可以与main raster并行准备；此时主图仍保持旧front，直到owner把`data@N + fit@N`一起commit/present。显式manual `fit()`则仍在accepted overlay transaction之后通知。两种路径都只发布一次同一source revision；event callback不得被当成“像素已呈现”的信号。
 
 Histogram fit 使用 count projection；`density=True` 或 `cumulative=True` 时会明确拒绝 fit，切回两者均为 `False` 后再调用。Threshold classifier 同样要求 `cumulative=False`，但不依赖普通 fit 的启停或 model choice。
 
@@ -722,7 +724,7 @@ size.currentTextChanged.connect(
 ```
 
 Runtime通过`plot_host.update_data(snapshot)`提交revision。事件订阅使用
-`plot_host.subscribe_display/subscribe_selection/subscribe_fit`，回调若要修改 Qt 控件，
+`plot_host.subscribe_display/subscribe_selection/subscribe_fit`；fit callback表示exact analysis completion，display/front callback才表示raster presentation。回调若要修改 Qt 控件，
 再经 `widget.dispatch` 回到 UI thread。Notebook 与 Qt 同时打开时，应基于同一 immutable
 snapshot 分别创建 session。
 

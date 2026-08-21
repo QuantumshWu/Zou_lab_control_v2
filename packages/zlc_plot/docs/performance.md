@@ -1,6 +1,6 @@
 # Plot performance
 
-## Current M4 guardrails (2026-08-20)
+## Current M4 performance closure (2026-08-20)
 
 - One `PlotSession` owns one serial analysis executor. Frame preparation,
   manual fit and live fit submit to that same lane; there is no package-global
@@ -11,29 +11,54 @@
   first, and a startup no-op reuses it instead of creating a ghost front.
 - Indexed-derived data preserves every Measurement primary index as value or
   invalid. A busy same-shot Surface group never queues another full frame; it
-  keeps Plane latest and stages it on completion. Active timeout remains loud,
-  but cadence/backpressure gaps are ordinary invalid Dataset cells.
+  keeps Plane latest and stages it on completion. `RasterPlotHost` likewise
+  owns only one active pair and one latest input. Its existing worker Condition
+  enforces the 1 s active deadline without waiting for another frame: timeout
+  publishes one loud invalid result, cancels that solve, then releases latest.
+  Cadence/backpressure skips remain ordinary invalid Dataset cells.
 - Selector Off means the plot consumes no pointer gesture. Its wheel belongs to
   the outer page. Selector On permits only double-click focus in a FacetGrid
   overview; area/pan/zoom begin only on a focused cell or non-grid surface.
-- The formal 96x128 Camera -> 26x26 Area fit + parallel ROI image -> Rolling
-  chain uses 100 ms as a profiling warning, not a hard acceptance deadline.
-  A same-harness A/B with an independent 66 ms virtual source measured the
-  pre-follow-up `69d5514` tree against the indexed/capacity-one candidate:
-  source-publication -> main P50/P95 fell from 338/435 to 131/163 ms and
-  source-publication -> Rolling from 339/435 to 191/224 ms. Main full-frame
-  retention fell from three to one and both Raster/Port queues from three to
-  one, with every source primary index retained as valid or invalid. The
-  Rolling tail remains a measured optimisation candidate; these numbers do
-  not claim the previously estimated 80--105 ms target has been reached.
-- Tight-color + Area-fit renderer A/B under cProfile fell from 80.5/89.4 to
-  63.6/69.0 ms while DPR1/2, selectors, fit overlays and colorbar ticks remained
-  pixel-identical to the old native draw. Changes smaller than normal run-to-run
-  noise remain no grounds for another executor, cache or pool.
+- A low-disturbance formal 96x128 Camera -> 26x26 Area fit + parallel ROI
+  image -> Rolling harness uses the real 100 ms TaskConsole timer. Across
+  three fresh 60-revision runs, clean HEAD -> candidate same-shot joint
+  P50/P95 was 76.46/99.95 -> 74.85/93.10 ms; pooled all-three Rolling was
+  93.11/113.03 -> 87.83/96.15 ms. Of 180 source indices, 174 produced valid
+  fit values and six solver-invalid cells; there were zero busy misses, FIFO
+  entries or panel errors. The 100 ms value is a profiling warning, not a hard
+  acceptance deadline.
+- Timeline accounting observed all 300/300 expected occurrences of each
+  stage exactly once. Admission P50 was about 3.3 ms (sampled P95 about 54 ms),
+  FitEvent -> Rolling was 0.52/about 38.7 ms, and last promote -> owner accept
+  was 0.34/1.33 ms. One generation-2 GC per run took 78--81 ms and affected
+  only maxima, not the reported percentiles. A live `FitEvent` is published
+  after exact solve and before the slower owner raster; the main Panel still
+  presents only an atomic data/fit pair. Manual fit retains accepted-overlay-
+  then-event ordering.
+- Direct-host resource gates separated contention from TaskConsole latency.
+  One Image+fit host completed at 36.90/40.03 ms P50/P95 and four mixed hosts
+  at 71.02/78.47 ms, both with 90/90 complete revisions. Eight mixed hosts
+  saturated one Python core at 145.18/192.51 ms and completed 88/90 main-fit
+  revisions; every other host reached 90/90, FIFO stayed zero, and final latest
+  healed without an error. Supporting eight 10 Hz Matplotlib surfaces would
+  require a materially different renderer/process architecture and is not a
+  hidden same-shot scheduling defect.
+- Isolated renderer P50 A/B in milliseconds was: Image+fit 34.37 -> 32.49,
+  Curve 2.74 -> 2.40, Histogram 3.18 -> 2.82, Rolling 16.55 -> 15.18 and a
+  four-cell FacetGrid 11.84 -> 9.59. DPR1/2 parity across Image, Curve,
+  Histogram, Rolling and FacetGrid remained pixel-exact, including Area/fit
+  and tight colorbar updates. Series/Histogram unbeatable warm seeds reduced
+  warm P50 by about 62--91%; cold starts and Image fits did not regress.
+- Three larger alternatives were measured and rejected. A third foreground
+  layer offered only about 1.5--4 ms theoretically, increased pixel-order risk,
+  and its prototype left zero useful residual. A separate wall-deadline
+  admission scheduler adds state despite no admission miss or owner bottleneck. Full backend ingress
+  would add roughly 300--500 lines despite zero observed busy misses. None has
+  enough benefit to justify its complexity.
 
 The older tables below remain dated numeric references for projection and
-render costs. Their former queue/lifecycle policies have been removed; the
-guardrails above are the current product contract.
+render costs. Their former queue/lifecycle policies are not product contracts;
+the closure above is authoritative.
 
 ## Overhaul reference measurements (2026-08-10)
 
@@ -206,7 +231,7 @@ the 100 ms display cadence measured projection 0.77 / 1.06 ms, artist render
 15.21 / 17.24 ms, complete render pipeline 16.35 / 18.42 ms, and observed
 front interval 101.11 / 111.26 ms median/p95. It observed 11 fronts,
 reached revision 30, and reported no error or timeout. These render-stage
-numbers predate the current exact queue and are not queue-policy acceptance.
+numbers predate current active+latest admission and are not policy acceptance.
 
 The fit/classifier cases used ten warm complete session transactions. The Image
 case was an anisotropic Gaussian over a regular `96 x 128` field. Distribution
@@ -273,7 +298,7 @@ failure and closed without a timeout. The `2x2` render stages sustained the
 100 ms budget; the `8x8` stages remained below 400 ms while rendering roughly
 sixteen times as many prepared scalar samples. Promotion counts from that old
 cadence harness are intentionally omitted because they do not describe the
-current exact queue.
+current active+latest contract.
 
 The final presentation-transaction pass was also rerun at DPR 2 with a `2x2`
 surface. A 1024² source measured projection, artist render and complete
@@ -364,10 +389,11 @@ all-pixel sample count, full fitted/residual/index arrays, finite parameter
 uncertainties and a current overlay. An armed live fit makes every data
 frame a pair. One Session-owned serial analysis executor performs prepare and
 solve in order while the render worker remains free; commit then accepts the
-overlay into the same front as its data. Within the 1 second / 64 MiB support
-budget every admitted revision remains FIFO exact. Beyond it the host reports
-one resync and continues from the then-latest input rather than growing without
-bound or permanently stopping. The regular-image objective evaluates bounded
+overlay into the same front as its data. The host retains one active pair and
+one latest complete input, never a full-frame FIFO. Its worker wakes on the
+1 second active deadline even when no successor arrives, publishes an invalid
+fit for that source index, cancels the stale analysis generation and continues
+from latest. The regular-image objective evaluates bounded
 stripes serially inside that analysis task; there is no global stripe pool to
 oversubscribe 4/8-panel runs or outlive sessions. Reference 2048² stage costs
 remain paint 15–25 ms, projection 10–25 ms and warm radial solve about 33 ms.

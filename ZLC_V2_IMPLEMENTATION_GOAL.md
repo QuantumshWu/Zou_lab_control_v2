@@ -247,7 +247,7 @@ Profiling：
 实现用户批准的exact paired pipeline：
 
 - 每个Measurement source index在普通indexed-derived Dataset中有value或invalid；昂贵Fit只保持一个active与Plane latest完整输入；
-- 每revision有一个FitResult，带source parent/revision；
+- 每个source revision在indexed Dataset中有valid FitResult值或invalid cell；成功结果带source parent/revision，cadence skip不伪造FitResult；
 - Panel只present matching data+fit；正常负载下Rolling trace无revision gap；
 - Active Fit超过1秒loud写invalid并从latest继续；不建立完整frame FIFO，不永久latch，raw data不丢；
 - Fit计算后台执行，Qt不阻塞；
@@ -382,7 +382,7 @@ Docs：
 1. 当前tree不存在审计确认的dead parallel frameworks/pipelines/launchers/docs；
 2. 每个核心事实只有一个owner：dataset accumulation、live/final seal、PanelState decode、owner wake、figure codec、pulse execution、SLM context；
 3. Node只提交新数据，但Panel随时可从Runtime访问完整截至当前数据；
-4. Data/Fit在1秒预算内逐revision exact paired；超预算loud resync到latest且不断Qt/原始数据，Rolling断点不冒充成功fit；Overlay投影与Data一致；
+4. Surface只保留active+latest，主Panel始终原子显示matching `data@N + fit@N`；active solve超过1秒由worker自行loud写invalid并继续latest，不依赖新frame触发、不阻断Qt/原始数据，Rolling按source index连续且断点不冒充成功fit；Overlay投影与Data一致；
 5. 新Logic Node由框架强制live/preview/terminal contract；
 6. Pulse Stop UI不阻塞，disconnect自动SAFE，second client takeover正确；
 7. FPGA source具有clock/SAFE/DONE/error/board/build闭合contract和自动RTL evidence；

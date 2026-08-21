@@ -270,15 +270,17 @@ robust losses and covariance, without a full meshgrid or dense Jacobian. Custom
 Image models remain on the general expansion/solver path unless they provide
 their own specialization.
 
-Live data 的source primary index由Runtime indexed-derived Dataset连续保存；每个index是value或invalid，Plot不建立自己的gap/history lane。Surface host只保持一个active complete pair；busy时Board不排第二张完整frame，只保留Plane latest并在completion wake后stage。同一个Session-owned serial analysis executor依次prepare/solve，render worker再以短commit同时画data@N、fit@N、capture并promote。普通Monitor仍latest；axis fate/window只投影同一Dataset。live对求解的取消只发生在timeout/resync、re-arm、`replace_spec`与close。
+Live data 的source primary index由Runtime indexed-derived Dataset连续保存；每个index是value或invalid，Plot不建立自己的gap/history lane。Surface host只保持一个active complete pair和一个latest完整输入；busy时Board不排第二张完整frame，只保留Plane latest并在completion wake后stage。同一个Session-owned serial analysis executor依次prepare/solve，render worker再以短commit同时画data@N、fit@N、capture并promote。Raster worker用自己的Condition等待active deadline；超过1秒时不依赖successor到达即取消、loud发布invalid并释放latest。普通Monitor仍latest；axis fate/window只投影同一Dataset。
 
-Manual fit and data-frame fit completions use the same host presentation transaction:
-accept and render, capture/promote the complete raster front, then publish the
-`FitEvent` and resolve the logical fit Future. Selector motion has no fit
-completion lane; it only updates the selector scene. This ordering also applies when
-an analysis Future is already complete while a raster-worker task is still on
-the stack; an event can never announce a fit that the current front does not
-yet contain.
+Live data fit has two deliberately distinct completion boundaries. Once the
+exact solve for source N is accepted, its `FitEvent` may wake data consumers
+such as Rolling before the owner raster finishes; that event is an immutable
+analysis result, not a claim that the main pixels have landed. The main Panel
+still commits, captures and promotes only the atomic visual pair
+`data@N + fit@N`. An explicit manual `fit()` continues to publish its event
+after the accepted overlay transaction. The logical live-fit Future resolves
+after the paired front is promoted, and selector motion has no fit-completion
+lane of its own.
 
 ## Style and runtime configuration
 

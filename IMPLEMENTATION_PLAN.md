@@ -22,6 +22,7 @@ Branch：`master`
 - Milestone 4：`COMPLETE / SWEEP COMPLETE` — exact pair/resync、原子PanelState、canonical selector/threshold、streaming archive以及Qt worker/close均已闭合；全树1498 tests通过。
 - Milestone 5：`COMPLETE / SWEEP COMPLETE` — Pulse执行词汇、camera cadence、Remote takeover、Stop/SAFE、RTL/build与strict transport均闭合。
 - Milestone 6：`COMPLETE / SWEEP COMPLETE` — USB-only SLM、command truth、Science Context、robust Feedback与immutable Simulation已闭合。
+- Plot performance closure：`COMPLETE / SWEEP COMPLETE` — active+latest solve timeout、live FitEvent/raster解耦、renderer/fit直接热路径、重复测试及冻结树残余均已闭合。
 - Milestone 7：`PENDING`；single distribution、wheel/fresh install、evidence lanes和final docs等待用户后续指令。
 
 ### Milestone 3完成边界
@@ -30,7 +31,7 @@ Milestone 3主体从clean HEAD `23e820d`开始并由`ca66c7d Unify Runtime live 
 
 ### 当前停止门
 
-Milestone 6已完成；本轮停止，不自动进入M7。不得运行真实SLM、camera或FPGA side effect。100 ms仍是Plot profile警戒线，不是硬验收门。
+Milestone 6与Plot performance closure已完成；本轮不自动进入M7。不得运行真实SLM、camera或FPGA side effect。100 ms仍是Plot profile警戒线，不是硬验收门。
 
 ## 2. Milestone状态
 
@@ -217,7 +218,7 @@ Milestone 3 commits：`Unify Runtime live data and task previews`；验收follow
 
 ### 已明确归属后续milestone，不算未记录残余
 
-- M4：Plot-owned原子PanelState operation、首mount多front、exact data+fit queue、selector Off/FacetGrid overview、Viewer唯一PanelState parser、Qt/executor bounded close与whole-archive bytes materialization的性能/owner收口。
+- M4：Plot-owned原子PanelState operation、首mount多front、atomic data+fit pair与active+latest admission、selector Off/FacetGrid overview、Viewer唯一PanelState parser、Qt/executor bounded close与whole-archive bytes materialization的性能/owner收口。
 - M7：单distribution package-data（含scan JSON templates）、fresh notebook lane、`save_npz(path)` persistence/public-API policy、Calibration/figure format version migration与最终安装文档。
 
 Fix commit：`Fix post-milestone residuals`。该commit之后经用户明确确认才开始Milestone 4；目前M4也已完成。
@@ -242,7 +243,8 @@ Fix commit：`Fix post-milestone residuals`。该commit之后经用户明确确�
 
 ### Profile与验证
 
-- 正式offscreen TaskConsole链：repeat=0 Camera 96×128、主图26×26 Area radial fit、并行ROI image、fit amplitude Rolling，真实100 ms timer。去掉两个额外cadence wait后，24个稳态revision总延迟P50/P95为149.97/166.83 ms；source→coherent prepare 46.99/62.91，fit 23.61/30.51，paired render/publish 54.31/58.25，fit publication→Rolling prepare 0.33/1.29，Rolling render→accept 18.88/21.11 ms。剩余是authored beat、必要fit与两个实际raster/Qt surface，不为边际收益增加新调度框架。
+- 正式低扰动offscreen TaskConsole链使用真实100 ms timer、96×128 Camera、主图26×26 Area radial fit、并行ROI image与fit amplitude Rolling。三次fresh 60-revision run的clean HEAD→candidate same-shot joint P50/P95为76.46/99.95→74.85/93.10 ms，三轮合并Rolling为93.11/113.03→87.83/96.15 ms；174/180 valid，6个真实solver invalid，busy miss、完整frame FIFO和Panel error均为0。100 ms是profile警戒线，不是硬验收门。
+- 300/300 timeline样本的每个stage恰好一次：admission P50约3.3 ms、sampled P95约54 ms；FitEvent→Rolling 0.52/约38.7 ms；last-promote→owner-accept 0.34/1.33 ms。Generation-2 GC每轮一次、耗时78–81 ms，只影响maxima，不改变上述percentile。
 - First mount的1/4/8 panels从5/20/40 fronts降为2/8/16（initial+真实DPR）；title为0 front，display为1，fit arm为1 solve+1 front，fit-armed Edit为2。invalid target与final-render failure均保持旧state/front。
 - 全仓current checkout八包一次完整运行：`1498 passed, 6 warnings in 427.82s`；warnings仅vendor SWIG deprecation。Runtime+Plot单组484 passed，UI+Workbench单组488 passed，Atom全套310 passed。
 - 81个changed Python文件AST解析通过；八包import均解析到本checkout；59个active Markdown relative links全部存在；旧API/alias/test-only wake与pending probes搜索为0；无新增production file/class，删除3个历史文件；`git diff --check`无error，仅line-ending warnings。未访问hardware、real camera/SLM/FPGA或real-screen。
@@ -251,13 +253,13 @@ Fix commit：`Fix post-milestone residuals`。该commit之后经用户明确确�
 
 - Candidate相对启动HEAD `af54e24`：98 files，`+7965/-3349`，净增4616行；其中production 46 files `+4070/-2199`（净增1871）、tests 38 files `+3657/-1035`（净增2622）、active docs 14 files `+238/-115`（净增123）。
 - Production增量主要是Plot exact-pair/atomic transaction/coordinate selector（zlc_plot净增1046）与Workbench completion-driven Console/Viewer/Save/device/Pulse ownership（zlc_workbench净增736）；Runtime净增74用于publication catch-up与owed presentation，UI与Data净增0，Atom净增15。没有新增file/class或plugin-specific Workbench framework。
-- Test分类：KEEP真实Camera Area→main fit→invalid gap→Rolling断线、active backlog即时resync、atomic rollback/no-op、restored N→latest catch-up、formal Qt Save/Viewer/close与Selector interaction；MERGE wait/bytes resync为参数化gate并共享blocked-fit fixture、合并重复semantic/rollback/Qt window setup；DELETE capacity-one/latest-drop旧政策、private helper/Port/container窥视、OwnerChannels/SelectionBridge self-tests、旧event-snapshot直喂Plot、package-local launcher保活与陈旧绝对随机阈值。全树test函数只从1246增至1270（净增24）；测试LOC增长来自真实跨层Qt/lifecycle/lineage纵向，而非数千个新测试。
+- Test分类：KEEP真实Camera Area→main fit→invalid gap→Rolling断线、无successor的worker active timeout、direct Host capacity-one、atomic rollback/no-op、restored N→latest catch-up、formal Qt Save/Viewer/close与Selector interaction；KEEP tight-colorbar一次更新及Image/Curve/Histogram/Rolling/FacetGrid DPR1/2逐像素parity；MERGE clear-after-solve进Gaussian/Lorentzian/Decay callback-before-render race；DELETE旧wait/bytes多frame队列和private setter-count白盒。原M4阶段全树test函数从1246增至1270；本次closure最终函数/LOC由root冻结树重算。
 - Consumer/owner sweep删除package-global fit pool、second prepare/fit executor、`apply_panel_fit`/`compose_panel_spec`、`PanelPlotAnnotations`、OwnerChannels wrapper、SelectionBridge test-only Event/introspection、arbiter/port pending probes及同步Figure/Pulse preview路径；active旧名均为0。
 
 ### 明确defer与停止门
 
-- 用户随后授权的M4 cleanup已完成：删除单消费者`_WorkerSessionAdapter`并让Host直接调用现有PlotSession owner，production净删260行；九个高增长测试文件及一条gesture白盒共净删538行，保留exact backlog、ROI→Fit→invalid gap→Rolling、atomic rollback、Viewer/Pulse/Qt close与coordinate threshold核心证据。Plot全套383 passed，四个Plot/Viewer/Pulse文件149 passed，Console/Selection/TaskConsole三文件100 passed。
-- 100 ms只保留为正式链profile警戒线；原150/167数字来自不同source harness，不能作为A/B基线。当前同harness结果与未达到的目标均记录在下方Performance follow-up。
+- 用户随后授权的M4 cleanup已完成：删除单消费者`_WorkerSessionAdapter`并让Host直接调用现有PlotSession owner，production净删260行；九个高增长测试文件及一条gesture白盒共净删538行。后续performance closure又删除旧wait/bytes多frame队列测试和setter-count白盒，保留ROI→Fit→invalid gap→Rolling、无successor active timeout、capacity-one、atomic rollback、Viewer/Pulse/Qt close、五kind像素parity与coordinate threshold核心证据。
+- 100 ms只保留为正式链profile警戒线；早期不同source harness的数字已删除，不作为A/B基线。可信同harness结果记录在下方Performance follow-up。
 - 不可中断的vendor discovery保持window可见并拒绝close，直到真实future结束；hardware transport cancellation/priority属于M5，不把`shutdown(wait=False)`冒充安全退出。
 - 普通Pulse Stop/FIRE wire priority、Camera/Remote/FPGA归M5；SLM USB/context/feedback归M6；single distribution/fresh install/notebook与final docs归M7。M4未访问hardware，也不把offscreen/virtual证据冒充实验机验收。
 
@@ -268,10 +270,11 @@ M4 cleanup follow-up commit：`Remove residual M4 adapters and duplicate tests`�
 ### Performance follow-up
 
 - Runtime新增中立`primary-index` indexed-derived Dataset：每个Measurement source index有value或invalid，普通Monitor仍latest；64 MiB/100k retention按display请求lazy materialize，10,000 publications的window=100为0.393 ms/900 bytes。所有Plot读取同一OwnedSnapshot；普通Plot默认latest，声明window的history projection读取同一axis；同publication扩大window或改fate立即原子rematerialize，Save冻结同一Dataset。
-- Surface admission改为capacity-one same-shot group：任一member仍有重绘在途就不排第二张完整frame，只留Plane latest与admission debt；atomic publication wake在deadline已到时立即stage，Pause/closing不admit新Surface。TaskConsole删除第二个`--interval-ms`时钟真相。
-- Tight colorbar保留原actual vmin/vmax norm、ticks与逐像素表现，但把其Axes纳入现有dynamic composition，避免整张Figure native redraw；renderer同条件cProfile P50/P95 80.5/89.4→63.6/69.0 ms，DPR1/2、Area/Fit与golden逐像素一致。
-- 同一formal harness（独立66 ms virtual source、100 ms Board、96×128 Camera、26×26 Area fit、并行ROI、Rolling）对比`69d5514`：publication→main 338/435→131/163 ms，publication→Rolling 339/435→191/224 ms；full frames与Host/Port pending最大值3→1，primary index连续、无error。未达到80–105 ms估计，Rolling tail继续作为未来profile对象，不能冒充已完成收益。
-- Candidate相对`69d5514`为36 files `+1563/-214`（净增1349）：production 20 files净增821、tests 7 files净增506、docs 9 files净增22；无新增production file/class/lane。完整current-checkout全树`1497 passed, 6 warnings in 412.35s`，warnings仍仅vendor SWIG deprecation；Data+Runtime+Plot 557、UI+Workbench 483均独立全绿。10k NoScanDeque gate证明commit摊还O(1)、window=W最多O(W) lookup；renderer逐像素parity属于KEEP，clock override/完整frame FIFO旧政策测试已删除或改写。
+- Surface admission改为capacity-one same-shot group：任一member仍有重绘在途就不排第二张完整frame，只留Plane latest与admission debt；atomic publication wake在deadline已到时立即stage，Pause/closing不admit新Surface。Raster Host同步删除旧多frame/bytes队列，只保留active+latest；现有worker Condition在active超过1秒时不依赖successor到达即取消、loud发布invalid并继续latest。TaskConsole删除第二个`--interval-ms`时钟真相。
+- Renderer只跳过未变化的artist/chrome写入并缩小colorbar dynamic set，不改变图形：isolated P50 Image+fit 34.37→32.49、Curve 2.74→2.40、Histogram 3.18→2.82、Rolling 16.55→15.18、FacetGrid(4) 11.84→9.59 ms；五kind DPR1/2、Area/Fit与tight colorbar逐像素一致。Series/Histogram在全局不可超越warm seed上P50下降约62–91%，cold与Image fit不回退。
+- 正式100 ms链的可信A/B与stage timeline见上方Profile：joint和Rolling P95均改善，174/180 valid+6 solver invalid，0 busy miss/FIFO/error；live FitEvent在exact solve后、owner raster前发布以允许Rolling并行，manual fit仍在accepted overlay后通知，main visual保持atomic `data@N + fit@N`。
+- 已评估并拒绝三个方向：third foreground layer全矩阵理论仅约1.5–4 ms，增加像素顺序风险且prototype留下0 residual；独立wall-deadline admission scheduler在0 admission miss/owner bottleneck下只增加state；full backend ingress需约300–500行而当前busy miss为0。均不实施。
+- 已提交的performance commit `69d5514..5be8bb7`真实为36 files `+1585/-214`（净增1371）：production 20 files净增824、tests 7 files净增525、docs 9 files净增22；旧Checkpoint少记22行，现已更正。本次final closure冻结树为19 files `+840/-503`（净增337）：production 7 files净删35、tests 4 files净增333、docs 8 files净增39；无新增production file/net class/kind/model lane，tests删除多frame队列政策及重复白盒，新增函数净数只覆盖pixel parity、fit order/race与active+latest生命周期。Plot全套407、Runtime/Workbench跨层140、全树1524 passed/4 skipped/6个既有vendor warnings。
 
 Performance commit：`Make derived history continuous and presentation capacity-one`。完成后进入M5，不把indexed Dataset、gap或window放进任何Plot-kind/Logic plugin/Workbench专用lane。
 
