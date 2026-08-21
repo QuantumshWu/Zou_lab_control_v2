@@ -87,6 +87,10 @@ def test_create_project_deletes_only_its_marked_child_and_requires_geometry() ->
     assert ".zlc_generated_project" in guard
     assert "file dirname $out" in guard and "file tail $out" in guard
     assert "file normalize $project_root" in guard
+    assert "${project_name}.xpr" in guard
+    assert "${project_name}.runs" in guard
+    assert "${project_name}.srcs" in guard
+    assert "migrating legacy generated Vivado project" in guard
     assert "ZLC_PS_GEOM_TCL is required" in source
     assert "source $zlc_geom_tcl" in source
     assert "if {![info exists zlc_edge_addr_width]}" not in source

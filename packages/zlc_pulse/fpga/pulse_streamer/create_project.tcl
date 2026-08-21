@@ -72,13 +72,28 @@ proc zlc_safe_project_dir {project_dir project_root project_name} {
     if {[file exists $out]} {
         set marker [file join $out .zlc_generated_project]
         if {![file isfile $marker]} {
-            error "Refusing to delete unmarked directory: $out"
-        }
-        set handle [open $marker r]
-        set marker_text [string trim [read $handle]]
-        close $handle
-        if {$marker_text ne "zlc_pulse_vivado_project_v1"} {
-            error "Refusing to delete directory with an invalid generated-project marker: $out"
+            # Builds created before the marker was introduced are already on
+            # experiment machines.  Recognise only Vivado's exact legacy
+            # project signature at the already-approved <root>/ps path; an
+            # arbitrary unmarked directory remains untouchable.
+            set legacy_xpr [file join $out ${project_name}.xpr]
+            set legacy_runs [file join $out ${project_name}.runs]
+            set legacy_srcs [file join $out ${project_name}.srcs]
+            if {
+                ![file isfile $legacy_xpr]
+                || ![file isdirectory $legacy_runs]
+                || ![file isdirectory $legacy_srcs]
+            } {
+                error "Refusing to delete unmarked directory: $out"
+            }
+            puts "ZLC migrating legacy generated Vivado project: $out"
+        } else {
+            set handle [open $marker r]
+            set marker_text [string trim [read $handle]]
+            close $handle
+            if {$marker_text ne "zlc_pulse_vivado_project_v1"} {
+                error "Refusing to delete directory with an invalid generated-project marker: $out"
+            }
         }
     }
     return $out
