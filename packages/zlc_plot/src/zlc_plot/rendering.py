@@ -631,6 +631,16 @@ class MatplotlibRenderer:
             tuple[float, float], tuple[float, float]
         ] | None = None
         self._chrome_dirty_axes: set[Any] = set()
+        #: Per-axes boundary chrome (ticks, gridlines, spines) collected for
+        #: the dynamic compose, cached under the same two facts the chrome
+        #: itself depends on: the axes' view limits (chrome-dirty tracking)
+        #: and the canvas signature (size/DPR).  ``_update_ticks`` runs the
+        #: locator and formatter, and a 35-cell facet paid for seventy such
+        #: runs per steady frame in which nothing had moved.
+        self._boundary_chrome_cache: dict[
+            int, tuple[tuple[Any, Any, float], ...]
+        ] = {}
+        self._boundary_chrome_signature: tuple[object, ...] | None = None
         self._raster_generation = 0
         self._focused_facet_index: int | None = None
         self._facet_focus_index: int | None = None
@@ -1156,11 +1166,30 @@ class MatplotlibRenderer:
             for _key, artist in collected
             if isinstance(artist, Axes)
         }
+        canvas = self._figure.canvas
+        signature = (
+            id(canvas),
+            int(round(float(self._figure.bbox.width))),
+            int(round(float(self._figure.bbox.height))),
+        )
+        if signature != self._boundary_chrome_signature:
+            self._boundary_chrome_cache.clear()
+            self._boundary_chrome_signature = signature
         for axes in {entry[1].axes for entry in tuple(collected)}:
             if not axes.get_visible():
                 continue
             if id(axes) in dynamic_full_axes_ids:
                 continue
+            cached = (
+                None
+                if axes in self._chrome_dirty_axes
+                else self._boundary_chrome_cache.get(id(axes))
+            )
+            if cached is not None:
+                for artist, owner, zorder in cached:
+                    keyed(artist, owner, zorder)
+                continue
+            entries: list[tuple[Any, Any, float]] = []
             for axis in (axes.xaxis, axes.yaxis):
                 if id(axis) in dynamic_axis_ids:
                     continue
@@ -1169,13 +1198,20 @@ class MatplotlibRenderer:
                 # refreshed and clipped to the current view interval.  The
                 # raw ``majorTicks`` list keeps stale instances parked at
                 # out-of-view locations after a limit change, and painting
-                # those leaks mark segments outside the axes box.
+                # those leaks mark segments outside the axes box.  Tick
+                # geometry is a function of the view limits and canvas size
+                # alone, so the refresh runs when one of those moved (the
+                # axes is chrome-dirty, or the signature above changed) and
+                # the collected artists are replayed verbatim in between.
                 for tick in axis._update_ticks():
-                    keyed(tick.gridline, axes, axis_z)
-                    keyed(tick.tick1line, axes, axis_z)
-                    keyed(tick.tick2line, axes, axis_z)
+                    entries.append((tick.gridline, axes, axis_z))
+                    entries.append((tick.tick1line, axes, axis_z))
+                    entries.append((tick.tick2line, axes, axis_z))
             for spine in axes.spines.values():
-                keyed(spine, axes, spine.get_zorder())
+                entries.append((spine, axes, spine.get_zorder()))
+            self._boundary_chrome_cache[id(axes)] = tuple(entries)
+            for artist, owner, zorder in entries:
+                keyed(artist, owner, zorder)
         return collected
 
     def _compose_frame(self, *, chrome_stable: bool) -> None:
@@ -1200,13 +1236,20 @@ class MatplotlibRenderer:
             int(round(float(self._figure.bbox.width))),
             int(round(float(self._figure.bbox.height))),
         )
-        dynamics = self._dynamic_artists()
         reusable = (
             chrome_stable
             and self._background_region is not None
             and self._background_signature == signature
             and not self._chrome_dirty_axes
         )
+        if not reusable:
+            # Anything that invalidates the background (layout, text, chrome
+            # effects, limit moves) may also have moved tick geometry through
+            # a locator or formatter change, which the per-axes dirty set does
+            # not see.  The boundary cache is only ever trusted between two
+            # consecutive reusable frames.
+            self._boundary_chrome_cache.clear()
+        dynamics = self._dynamic_artists()
         ordered = sorted(dynamics, key=lambda entry: entry[0])
         # Where the gesture's own artists begin, in the one z-order a full
         # draw uses.  The frame below that point is captured on the way past,
