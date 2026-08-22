@@ -875,8 +875,11 @@ class CameraMeasurementNode:
     def _configure_capture(self) -> CameraWorkingPoint:
         """Apply and freeze the requested working point without arming."""
 
-        self._configure_for_run()
-        self._freeze_working_point(self.camera.working_point())
+        # ``set_exposure_seconds`` already returns the authoritative readback
+        # after ROI and exposure have been applied.  Reading the complete
+        # qCMOS property surface again made every finite Start pay a third
+        # full working-point query before ARM.
+        self._freeze_working_point(self._configure_for_run())
         assert self._actual_working_point is not None
         return self._actual_working_point
 

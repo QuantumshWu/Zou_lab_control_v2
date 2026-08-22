@@ -204,13 +204,27 @@ def test_working_point_is_live_readback_and_all_sdk_calls_share_owner() -> None:
         assert adapter.photoelectron_conversion == (200.0, 0.107)
         assert point.offset_counts == 200.0
         assert point.electrons_per_count == 0.107
+        driver.calls.clear()
+        adapter.set_roi((4, 4, 8, 8))
+        assert not any(name.startswith("set:") for name, _thread in driver.calls)
         # A region can only be placed and sized on the steps the sensor
         # declares, so it is snapped OUTWARDS to COVER what was asked for.
         # Rounded inwards, x 5..11 came back as 4..7 and the right of the
         # region was simply not read -- silently, since the applied ROI is
         # what everything downstream then measures.
+        driver.calls.clear()
         adapter.set_roi((5, 5, 7, 7))
+        roi_writes = {
+            name.removeprefix("set:")
+            for name, _thread in driver.calls
+            if name.startswith("set:")
+        }
+        assert roi_writes and all(name.startswith("SUBARRAY_") for name in roi_writes)
+        driver.calls.clear()
         point = adapter.set_exposure_seconds(0.015)
+        assert {
+            name for name, _thread in driver.calls if name.startswith("set:")
+        } == {"set:EXPOSURE_TIME"}
         assert point.exposure_seconds == 0.015
         assert point.roi_origin_yx == (4, 4)
         assert point.roi_shape_yx == (8, 8)

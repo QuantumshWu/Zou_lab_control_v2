@@ -300,7 +300,21 @@ class DcamCameraAdapter:
                 config.trigger_global_exposure,
             )
 
+        self._apply_roi_on_owner(config.roi_xywh)
+        return self._read_working_point_on_owner()
+
+    def _apply_roi_on_owner(
+        self, roi_xywh: tuple[int, int, int, int] | None
+    ) -> None:
+        """Apply only sensor geometry; exposure/trigger/readout stay untouched."""
+
+        if self._armed:
+            raise RuntimeError("qCMOS settings cannot change while armed")
+        device = self._require_device()
+
         self._set_exact(device, DcamProperty.SUBARRAY_MODE, int(DcamValue.MODE_OFF))
+        if roi_xywh is None:
+            return
         (
             h_origin_step,
             v_origin_step,
@@ -309,32 +323,29 @@ class DcamCameraAdapter:
             sensor_width,
             sensor_height,
         ) = self._sensor_grid_on_owner()
-        roi = config.roi_xywh
-        if roi is not None:
-            requested = tuple(int(value) for value in roi)
-            x, y, width, height = requested
-            x, width = _snap_roi_axis(
-                x,
-                width,
-                origin_step=h_origin_step,
-                extent_step=h_size_step,
-                sensor_extent=sensor_width,
-            )
-            y, height = _snap_roi_axis(
-                y,
-                height,
-                origin_step=v_origin_step,
-                extent_step=v_size_step,
-                sensor_extent=sensor_height,
-            )
-            self._set_exact(device, DcamProperty.SUBARRAY_HPOS, 0)
-            self._set_exact(device, DcamProperty.SUBARRAY_VPOS, 0)
-            self._set_exact(device, DcamProperty.SUBARRAY_HSIZE, width)
-            self._set_exact(device, DcamProperty.SUBARRAY_VSIZE, height)
-            self._set_exact(device, DcamProperty.SUBARRAY_HPOS, x)
-            self._set_exact(device, DcamProperty.SUBARRAY_VPOS, y)
-            self._set_exact(device, DcamProperty.SUBARRAY_MODE, int(DcamValue.MODE_ON))
-        return self._read_working_point_on_owner()
+        requested = tuple(int(value) for value in roi_xywh)
+        x, y, width, height = requested
+        x, width = _snap_roi_axis(
+            x,
+            width,
+            origin_step=h_origin_step,
+            extent_step=h_size_step,
+            sensor_extent=sensor_width,
+        )
+        y, height = _snap_roi_axis(
+            y,
+            height,
+            origin_step=v_origin_step,
+            extent_step=v_size_step,
+            sensor_extent=sensor_height,
+        )
+        self._set_exact(device, DcamProperty.SUBARRAY_HPOS, 0)
+        self._set_exact(device, DcamProperty.SUBARRAY_VPOS, 0)
+        self._set_exact(device, DcamProperty.SUBARRAY_HSIZE, width)
+        self._set_exact(device, DcamProperty.SUBARRAY_VSIZE, height)
+        self._set_exact(device, DcamProperty.SUBARRAY_HPOS, x)
+        self._set_exact(device, DcamProperty.SUBARRAY_VPOS, y)
+        self._set_exact(device, DcamProperty.SUBARRAY_MODE, int(DcamValue.MODE_ON))
 
     def _read_working_point_on_owner(self) -> CameraWorkingPoint:
         device = self._require_device()
@@ -452,12 +463,22 @@ class DcamCameraAdapter:
     def set_exposure_seconds(self, seconds: float) -> CameraWorkingPoint:
         """Integrate for this long on every trigger, leaving the geometry."""
 
-        return self._reconfigure(
-            replace(
-                self._config,
-                exposure_seconds=positive_real(seconds, "exposure_seconds"),
+        requested = positive_real(seconds, "exposure_seconds")
+
+        def apply() -> CameraWorkingPoint:
+            if self._armed:
+                raise RuntimeError("qCMOS settings cannot change while armed")
+            if requested != self._config.exposure_seconds:
+                self._require_device().set_get_property(
+                    DcamProperty.EXPOSURE_TIME, requested
+                )
+            point = self._read_working_point_on_owner()
+            self._config = replace(
+                self._config, exposure_seconds=point.exposure_seconds
             )
-        )
+            return point
+
+        return self._lane.call(apply)
 
     def set_roi(
         self, roi_xywh: tuple[int, int, int, int] | None
@@ -468,13 +489,14 @@ class DcamCameraAdapter:
         ROI at all.
         """
 
-        return self._reconfigure(replace(self._config, roi_xywh=roi_xywh))
-
-    def _reconfigure(self, candidate: "DcamCameraConfig") -> CameraWorkingPoint:
-        """Apply one changed field and keep the config at what the sensor did."""
+        candidate = replace(self._config, roi_xywh=roi_xywh)
 
         def apply() -> CameraWorkingPoint:
-            point = self._apply_settings_on_owner(candidate)
+            if self._armed:
+                raise RuntimeError("qCMOS settings cannot change while armed")
+            if candidate.roi_xywh != self._config.roi_xywh:
+                self._apply_roi_on_owner(candidate.roi_xywh)
+            point = self._read_working_point_on_owner()
             actual_roi = None
             if candidate.roi_xywh is not None:
                 actual_roi = (
