@@ -30,6 +30,12 @@ from zlc_plot import (
 from zlc_atom.devices.camera.photoelectrons import PHOTOELECTRONS
 from zlc_atom.nodes.calibration import ReadoutModelKind, TrapCalibration
 from zlc_atom.nodes.calibration.calibration import classify_threshold
+
+# Exact delivery means every camera cycle is classified; it does not change a
+# live Monitor's public geometry into history.  All three siblings therefore
+# retain the latest complete cycle, just like their camera parent.  Runtime's
+# source-index history is an explicit declaration used by fit/selection outputs,
+# not an implicit property of being a Processor.
 OCCUPANCY_OUTPUTS = (
     DatasetOutputDeclaration("counts", "occupancy.counts.v1"),
     DatasetOutputDeclaration("occupied", IMAGE_POINT_OVERLAY_CONTRACT),

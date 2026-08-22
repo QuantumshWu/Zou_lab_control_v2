@@ -745,9 +745,10 @@ class ConsolePresenter:
         # Exact producers publish event chunks for scientific Processors, but
         # every display consumer sees the canonical run geometry.  Whether an
         # axis is scoped, reduced, faceted, or grouped changes only the plot
-        # projection; it never chooses a different data entity.  Producer
-        # Monitors remain latest-event displays; derived Monitors resolve the
-        # same Runtime-owned indexed Dataset at the panel's generic target.
+        # projection; it never chooses a different data entity.  Ordinary
+        # Monitors, including Processor outputs, remain latest-event displays;
+        # explicitly source-indexed outputs resolve the same Runtime-owned
+        # history Dataset at the panel's generic target.
         snapshot = self._presentation_snapshot(
             selected.signal,
             value,

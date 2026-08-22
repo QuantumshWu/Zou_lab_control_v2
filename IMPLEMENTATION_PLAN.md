@@ -4,7 +4,7 @@
 
 ## 1. Persistent Checkpoint
 
-更新时间：2026-08-21
+更新时间：2026-08-22
 启动HEAD：`af54e24787de67270c54eb154f2b23f43508fc3e`
 Branch：`master`
 本次Feedback修复起点HEAD：`289f9a5 fix(slm): retain feedback previews across runs`（起点相对`origin/master` ahead 1）
@@ -32,6 +32,7 @@ Branch：`master`
 - Registered SLM Feedback：`REPAIRED / SWEEP COMPLETE` — Calibration仍只产生camera/readout artifact；Feedback在自己的边界完成Target→camera BOX注册并自行apply Context。历史milestone前artifact证明可用路径是500 shots、固定`0.25`，`5.484→2.513→1.478→1.185`；未经裁决的`301c5e0`把默认降到100/100，M6再加入hard shrink/rollback。当前恢复500-shot coarse、`0.25`、8 updates、3000-shot/300秒validation；每轮直接更新current Target，normal terminal/Stop保留最后valid state，terminal validation写回curve。
 - Simulation物理根修：删除逐site gain/ellipse/angle/skew、target-specific 21-cycle ripple与nominal/extra双状态。唯一dynamic trap roster来自commanded phase经共同pupil、共同low-order wavefront aberration和FFT得到的dominant peaks；统一Fourier→camera affine与一个shared非对称imaging PSF。用户实际spacing-15 Context的新Calibration exact 35 sites、顺序全等、center error <0.18 pixel。默认stochastic链 coarse `1.683→1.330→1.235→...`，1000-shot validation `1.241`；hidden expected BOX `1.445→1.123`、depth `1.166→1.074`、mean signal `+1.6%`。Missing-site链 `2748.33→...→1.088`，validation `1.096 [1.066,1.126]`。
 - Gate 17/18冻结：12 files `+682/-887`（净删205）；production净删233、tests净删6、active docs/规则净增34；无新增file/class/lane，production helper净增1、test function净增1。旧`_extra_*`、nominal peak state、逐site PSF/gain、adaptive gain/rollback、`best_uniformity` production引用为0。当前checkout验证：Atom `324 passed`、physics `45 passed`、Feedback `33+1 passed`、Runtime/host `18 passed`、正式Qt generation-gap/terminal 4-panel通过，AST/diff-check green。
+- Camera/Occupancy live geometry follow-up：`COMPLETE / SWEEP COMPLETE` — Runtime不再由“Processor + Monitor”隐式制造`primary-index`；只有输出契约显式`index_by_source`的Fit/selection-derived信号保留bounded history。`frames_per_cycle=3`的Camera与Occupancy分别保持`1×3×Y×X`和`1×3×SITE`，overlay使用同一cycle leading geometry。Runtime+Logic 133项、Workbench Presenter 56项、Camera/Occupancy/保存跨包48项及最终exact 23项通过；7个changed Python文件AST与diff-check green。
 
 ### Milestone 3完成边界
 
@@ -235,7 +236,7 @@ Fix commit：`Fix post-milestone residuals`。该commit之后经用户明确确�
 
 ### Exact pair、selector与presentation
 
-- `display_interval`只控制Surface deadline；Runtime普通indexed-derived Dataset保存每个source primary index及validity。Surface同一same-shot group只保持一个active完整front，忙时只保留Plane latest和admission debt，中间indices invalid且不排完整frame。
+- `display_interval`只控制Surface deadline；显式声明history的Runtime indexed-derived Dataset保存每个source primary index及validity，普通Monitor/Occupancy仍为latest cycle。Surface同一same-shot group只保持一个active完整front，忙时只保留Plane latest和admission debt，中间indices invalid且不排完整frame。
 - PlotSession只保留一个serial analysis executor。prepare、manual fit与live fit不再由第二executor或package-global stripe/facet pool并行；fit request、warm state、accepted fit与render仍由PlotSession唯一拥有。
 - PanelState作为一个原子Plot target应用：no-op为0 solve/0 render/0 front；title/interval不触发Plot；display/semantic/fit各最多一个完整front；最终render失败会完整rollback，旧fit cancellation/Future settlement只在commit后发生。Startup initial front先于adaptive task，same-front Qt handoff幂等，不再依赖ghost front。
 - Fit范围唯一优先级为committed Area ROI（或X-range）→viewport→full range。Plot-native selector在Workbench ack前保持authority；FacetGrid selector保留focused-cell identity。真实Area后立即点击Fit的old-red证明26×26 ROI、676 samples，不会被空PanelState重放成full frame。
@@ -277,7 +278,7 @@ M4 cleanup follow-up commit：`Remove residual M4 adapters and duplicate tests`�
 
 ### Performance follow-up
 
-- Runtime新增中立`primary-index` indexed-derived Dataset：每个Measurement source index有value或invalid，普通Monitor仍latest；64 MiB/100k retention按display请求lazy materialize，10,000 publications的window=100为0.393 ms/900 bytes。所有Plot读取同一OwnedSnapshot；普通Plot默认latest，声明window的history projection读取同一axis；同publication扩大window或改fate立即原子rematerialize，Save冻结同一Dataset。
+- Runtime新增显式声明的中立`primary-index` indexed-derived Dataset：需要history的Fit/selection-derived输出对每个Measurement source index有value或invalid，普通Monitor与Occupancy仍latest；64 MiB/100k retention按display请求lazy materialize，10,000 publications的window=100为0.393 ms/900 bytes。所有Plot读取同一OwnedSnapshot；普通Plot默认latest，声明window的history projection读取同一axis；同publication扩大window或改fate立即原子rematerialize，Save冻结同一Dataset。
 - Surface admission改为capacity-one same-shot group：任一member仍有重绘在途就不排第二张完整frame，只留Plane latest与admission debt；atomic publication wake在deadline已到时立即stage，Pause/closing不admit新Surface。Raster Host同步删除旧多frame/bytes队列，只保留active+latest；现有worker Condition在active超过1秒时不依赖successor到达即取消、loud发布invalid并继续latest。TaskConsole删除第二个`--interval-ms`时钟真相。
 - Renderer只跳过未变化的artist/chrome写入并缩小colorbar dynamic set，不改变图形：isolated P50 Image+fit 34.37→32.49、Curve 2.74→2.40、Histogram 3.18→2.82、Rolling 16.55→15.18、FacetGrid(4) 11.84→9.59 ms；五kind DPR1/2、Area/Fit与tight colorbar逐像素一致。Series/Histogram在全局不可超越warm seed上P50下降约62–91%，cold与Image fit不回退。
 - 正式100 ms链的可信A/B与stage timeline见上方Profile：joint和Rolling P95均改善，174/180 valid+6 solver invalid，0 busy miss/FIFO/error；live FitEvent在exact solve后、owner raster前发布以允许Rolling并行，manual fit仍在accepted overlay后通知，main visual保持atomic `data@N + fit@N`。

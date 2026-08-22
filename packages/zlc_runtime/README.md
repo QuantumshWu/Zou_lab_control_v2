@@ -9,11 +9,12 @@ their generation/revision identity and, for finite data, places them into one
 canonical run dataset using the declared schema and `(repeat, point)` origin.
 Exact scientific processors consume the immutable event; every display
 consumer sees the same publication's canonical full geometry through
-`current_dataset()`, with unwritten cells invalid. Ordinary Monitor outputs have
-no finite canonical extent and retain only their latest event. Indexed-derived
-Monitors additionally expose a byte-bounded ordinary Dataset over a neutral
-`primary-index`; missing computations are invalid cells and bounded window
-materialization is independent of run length. Display
+`current_dataset()`, with unwritten cells invalid. Ordinary Monitor outputs,
+including Processor outputs, have no finite canonical extent and retain only
+their latest event. A display-derived output must explicitly declare
+`index_by_source` before Runtime exposes a byte-bounded ordinary Dataset over a
+neutral `primary-index`; missing computations are invalid cells and bounded
+window materialization is independent of run length. Display
 materialization is presentation-paced, cached, and performed off the UI owner;
 `freeze()` only reads committed state and never calls plugin science or a
 plugin materializer.

@@ -65,7 +65,7 @@
 
 ### 3.3 Data/Fit/Overlay
 
-- `display_interval`只定义Surface deadline；Measurement primary index全部进入通用indexed-derived Dataset，未计算/失败位置invalid。Surface同一same-shot group保持一个active并只保留latest完整输入，不排完整frame FIFO；
+- `display_interval`只定义Surface deadline；需要history的display-derived输出显式声明后，Measurement primary index才进入通用indexed-derived Dataset，未计算/失败位置invalid。普通Monitor与Occupancy保持latest cycle且不得凭空增加source轴。Surface同一same-shot group保持一个active并只保留latest完整输入，不排完整frame FIFO；
 - Panel只原子显示`data@N + fit@N`；不得出现data无fit或fit与data不对应；
 - Fit数据范围严格按committed Area ROI（或显式X-range）→viewport→full range；FacetGrid重放selector必须携带focused cell identity，不得静默降级；
 - FitResult保留source parent/revision；任何window/history按source primary index连续，invalid位置为NaN且计入window；
@@ -247,7 +247,7 @@ Profiling：
 
 实现用户批准的exact paired pipeline：
 
-- 每个Measurement source index在普通indexed-derived Dataset中有value或invalid；昂贵Fit只保持一个active与Plane latest完整输入；
+- 对显式声明history的Fit/display-derived输出，每个Measurement source index在普通indexed-derived Dataset中有value或invalid；昂贵Fit只保持一个active与Plane latest完整输入；
 - 每个source revision在indexed Dataset中有valid FitResult值或invalid cell；成功结果带source parent/revision，cadence skip不伪造FitResult；
 - Panel只present matching data+fit；正常负载下Rolling trace无revision gap；
 - Active Fit超过1秒loud写invalid并从latest继续；不建立完整frame FIFO，不永久latch，raw data不丢；

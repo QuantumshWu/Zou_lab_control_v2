@@ -52,8 +52,10 @@ semantics: Logic shape, live Panel, Edit/Refresh/Save, selector, fit and overlay
 all use the accepted canonical full Dataset for that publication. Event chunks
 remain internal to acquisition and exact processors. Scope/reduction/fate only
 change how the canonical Dataset is drawn; they never switch the data source.
-Ordinary Monitor signals remain latest-event views. Indexed-derived signals
-expose the same Runtime-owned ordinary Dataset to every Plot; generic
+Ordinary Monitor signals, including Occupancy results, remain latest-event
+views and keep the camera cycle's frame geometry. Outputs that explicitly
+declare source-index history expose the same Runtime-owned ordinary Dataset to
+every Plot; generic
 primary-index fate/window chooses latest or history and every skipped/failed
 source index remains invalid rather than disappearing. Canonical assembly and companion
 projection run on the board-owned presentation worker at panel cadence, not in

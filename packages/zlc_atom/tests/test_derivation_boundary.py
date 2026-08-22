@@ -48,6 +48,7 @@ from zlc_atom.nodes.occupancy.processor import OCCUPANCY_OUTPUTS, OccupancyProce
 from zlc_plot import (
     IMAGE_POINT_OVERLAY_GEOMETRY_RECORD,
     image_point_overlay_geometry,
+    image_point_overlay_from_signal,
 )
 from zlc_data import AxisId, AxisSpec, DatasetSchema, SITE, owned_snapshot_from_arrays
 from zlc_runtime import DatasetCoverage, LiveDatasetOutput, MonitorCoverage
@@ -221,6 +222,20 @@ def test_occupancy_classifies_only_event_cells_and_runtime_owns_full_history(
     assert not np.any(
         invalid["occupied"].snapshot.expanded_validity()[:, 0]
     )
+    assert all(not declaration.index_by_source for declaration in OCCUPANCY_OUTPUTS)
+    assert invalid["frame_judged"].snapshot.block.values.shape[:2] == (1, windows)
+    assert invalid["occupied"].snapshot.block.values.shape == (1, windows, 1)
+    assert tuple(
+        column.name
+        for column in invalid["occupied"].snapshot.block.schema.point_table.columns
+    ) == ("frame",)
+    overlay = image_point_overlay_from_signal(
+        invalid["occupied"].run_record[IMAGE_POINT_OVERLAY_GEOMETRY_RECORD],
+        invalid["occupied"].snapshot,
+        invalid["frame_judged"].snapshot,
+        revision=1,
+    )
+    assert overlay.count == 1
 
     class EventCamera:
         instance_id = "event-camera"

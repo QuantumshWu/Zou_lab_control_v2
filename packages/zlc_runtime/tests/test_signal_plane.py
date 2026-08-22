@@ -149,7 +149,12 @@ def _large_latest(
 
 def test_derived_monitor_materializes_every_source_primary_index() -> None:
     source_declaration = DatasetOutputDeclaration("frame", "test.frame")
-    derived_declaration = DatasetOutputDeclaration("value", "test.value")
+    derived_declaration = DatasetOutputDeclaration(
+        "value",
+        "test.value",
+        index_by_source=True,
+    )
+    latest_declaration = DatasetOutputDeclaration("latest", "test.latest")
 
     class Source:
         instance_id = "indexed-source"
@@ -161,7 +166,7 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
 
     class Derived:
         instance_id = "indexed-derived"
-        dataset_output_declarations = (derived_declaration,)
+        dataset_output_declarations = (derived_declaration, latest_declaration)
 
         @staticmethod
         def signal_key(name: str) -> str:
@@ -209,7 +214,10 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
         )
         plane.commit_processor(
             derived,
-            {"value": _latest(derived_declaration, 11.0)},
+            {
+                "value": _latest(derived_declaration, 11.0),
+                "latest": _latest(latest_declaration, 111.0),
+            },
             source_publication=first,
         )
 
@@ -222,7 +230,10 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
         assert fourth is not None
         plane.commit_processor(
             derived,
-            {"value": _latest(derived_declaration, 44.0)},
+            {
+                "value": _latest(derived_declaration, 44.0),
+                "latest": _latest(latest_declaration, 444.0),
+            },
             source_publication=fourth,
         )
 
@@ -257,7 +268,10 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
         old_publication = publication
         plane.commit_processor(
             derived,
-            {"value": _latest(derived_declaration, 55.0)},
+            {
+                "value": _latest(derived_declaration, 55.0),
+                "latest": _latest(latest_declaration, 555.0),
+            },
             source_publication=fourth,
             trigger=("refit", 1),
         )
@@ -273,6 +287,16 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
         np.testing.assert_allclose(new_tail.block.values.reshape(-1), (55.0,))
         assert bool(old_tail.expanded_validity().reshape(-1)[0])
         assert bool(new_tail.expanded_validity().reshape(-1)[0])
+        latest_value = new_publication.value("indexed-derived/latest")
+        assert latest_value is not None and latest_value.primary_index == 4
+        latest = plane.current_dataset("indexed-derived/latest", new_publication)
+        assert latest is latest_value.snapshot
+        assert latest.block.values.shape == (1, 1, 1)
+        assert latest.block.values.item() == 555.0
+        assert all(
+            str(column.coordinate_id) != "zlc_data.primary-index"
+            for column in latest.block.schema.point_table.columns
+        )
         assert len(wakes) == 7  # four source and three atomic derived publications
     finally:
         unsubscribe()
@@ -286,7 +310,11 @@ def test_indexed_history_commit_is_constant_and_window_reads_only_its_range(
     import zlc_runtime.plane as plane_module
 
     source_declaration = DatasetOutputDeclaration("frame", "test.frame")
-    derived_declaration = DatasetOutputDeclaration("value", "test.value")
+    derived_declaration = DatasetOutputDeclaration(
+        "value",
+        "test.value",
+        index_by_source=True,
+    )
     source = _node("bounded-source", source_declaration)
 
     class Derived:

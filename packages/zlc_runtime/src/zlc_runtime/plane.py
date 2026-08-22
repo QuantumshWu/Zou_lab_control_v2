@@ -8,11 +8,12 @@ however, a newer source and its active descendants replace the previous
 component together. A slow Processor therefore cannot expose source revision N
 beside its own derived revision N-1.
 
-A producer Monitor retains only its current event.  A derived Monitor also
-inherits its source generation's primary index; Runtime can therefore
-materialize a bounded ordinary Dataset in which every source index is present
-and an uncomputed index is invalid.  Signals from different runs still advance
-independently; there is no cross-run global counter.
+A Monitor retains only its current event unless its output contract explicitly
+requests source-index history.  Such a derived output inherits its source
+generation's primary index; Runtime can therefore materialize a bounded ordinary
+Dataset in which every source index is present and an uncomputed index is
+invalid.  Signals from different runs still advance independently; there is no
+cross-run global counter.
 """
 
 from __future__ import annotations
@@ -1387,6 +1388,7 @@ class SignalDataPlane:
                 )
                 if (
                     source_publication is not None
+                    and output.declaration.index_by_source
                     and isinstance(output.coverage, MonitorCoverage)
                 ):
                     event_schema = event.block.schema

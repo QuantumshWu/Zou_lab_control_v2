@@ -493,7 +493,11 @@ class _BridgeProcessor:
         self._role = role
         self.instance_id = instance_id
         self.dataset_output_declarations = tuple(
-            DatasetOutputDeclaration(name, bridge._contract_id(role, name))
+            DatasetOutputDeclaration(
+                name,
+                bridge._contract_id(role, name),
+                index_by_source=True,
+            )
             for name in output_names
         )
 
@@ -1603,6 +1607,7 @@ class SelectionBridge:
                 DatasetOutputDeclaration(
                     name,
                     self._contract_id("selection", name),
+                    index_by_source=True,
                 ),
                 derived,
                 MonitorCoverage(total, total),
@@ -1644,6 +1649,7 @@ class SelectionBridge:
                 DatasetOutputDeclaration(
                     name,
                     self._contract_id("selection", name),
+                    index_by_source=True,
                 ),
                 derived,
                 MonitorCoverage(total, total),
@@ -1793,7 +1799,11 @@ class SelectionBridge:
             ),
         )
         return LiveDatasetOutput(
-            DatasetOutputDeclaration(name, contract_id),
+            DatasetOutputDeclaration(
+                name,
+                contract_id,
+                index_by_source=True,
+            ),
             derived,
             coverage,
         )

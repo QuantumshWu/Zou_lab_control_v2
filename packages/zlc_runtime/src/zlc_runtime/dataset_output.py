@@ -7,7 +7,7 @@ reconstruct arrays, axes, coverage, or lineage.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping
 
 from zlc_data import DatasetSchema, OwnedSnapshot
@@ -27,10 +27,19 @@ def _bare_output_name(value: str, *, kind: str = "output") -> str:
 
 @dataclass(frozen=True, slots=True)
 class DatasetOutputDeclaration:
-    """One owner-paired public output name and semantic contract identity."""
+    """One owner-paired public output and its live-history semantics.
+
+    A Monitor normally means exactly what its producer publishes: the latest
+    complete event.  Some display derivations (for example fit parameters used
+    by a Rolling plot) instead need a bounded Dataset containing one cell for
+    every parent event.  Those outputs opt in with ``index_by_source``; Runtime
+    must never infer that extra scientific axis merely because an output came
+    from a Processor.
+    """
 
     name: str
     contract_id: str
+    index_by_source: bool = field(default=False, kw_only=True)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -43,6 +52,8 @@ class DatasetOutputDeclaration:
             "contract_id",
             canonical_text(self.contract_id, "dataset output contract id"),
         )
+        if type(self.index_by_source) is not bool:
+            raise TypeError("dataset output index_by_source must be bool")
 
 
 @dataclass(frozen=True, slots=True)
