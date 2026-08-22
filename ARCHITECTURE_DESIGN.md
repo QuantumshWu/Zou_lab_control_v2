@@ -166,9 +166,9 @@ Node new chunk
 ### 7.2 Camera
 
 - Same-shot保证采用continuous best-effort，不新增hardware marker或逐cycle arm/fire。
-- 每个run核compiled trigger windows、frames-per-cycle和received ordinal；gap/cardinality错误立即失败。
-- Temperature保留约20ms exposure并增加足够trigger/recapture gap，使用相容Calibration。
-- Virtual按真实cadence逐cycle、支持Stop并模拟camera busy。
+- Camera Measurement只按自己的authored frames-per-cycle/repeat采集并核实际返回cardinality；Camera adapter不解析Pulse window数量，也不以exposure审查Pulse cadence。Adapter的source ordinal只编号实际采到的frames，必须从本次arm的0连续递增。
+- Temperature保留约20ms authored exposure；Pulse timing与camera exposure是各自owner的独立输入。
+- Virtual sequencer按compiled wall cadence逐cycle并支持Stop；每个到达virtual camera的frame event都被采集，不根据Pulse时间或camera exposure私自skip、制造ordinal gap。
 
 ### 7.3 Remote
 
@@ -181,7 +181,7 @@ Node new chunk
 
 ### 7.4 Host/RTL/build invariants
 
-- Load前核target ABI、clock、geometry、counts、camera cadence和delay FIFO capacity。
+- Load前核target ABI、clock、geometry、counts和delay FIFO capacity；不把camera exposure或frames-per-cycle反向解释进Pulse program。
 - Count必须是合法hardware range内整数，不clamp/wrap。
 - Hardware SAFE独立gate TTL/DAC data/clock；LOAD/FIRE前pins保持safe。
 - Public DONE等待delay FIFOs和final DAC latch完成并进入安全态。

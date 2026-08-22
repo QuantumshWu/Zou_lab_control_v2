@@ -45,8 +45,6 @@ class VirtualPulseStreamer(PulseStreamer):
         self.camera_trigger_channel = channel
         self._world_thread: threading.Thread | None = None
         self._world_error: BaseException | None = None
-        self._logical_time_seconds = 0.0
-        self._logical_wall_at = time.monotonic()
         super().__init__(
             MemoryRegisterTransport(
                 geom=geometry,
@@ -124,25 +122,17 @@ class VirtualPulseStreamer(PulseStreamer):
                     if self._stop.is_set():
                         return
                     cycle_start = time.monotonic()
-                    with self._lock:
-                        logical_cycle_start = self._logical_time_seconds + max(
-                            0.0, cycle_start - self._logical_wall_at
-                        )
                     if callable(callback):
                         callback(
                             applied.program,
                             table=point,
                             camera_channel=self.camera_trigger_channel,
-                            cycle_start_seconds=logical_cycle_start,
                         )
                     duration = run_duration_seconds(
                         applied.program,
                         None if point is None else point,
                     )
                     cycle_end = cycle_start + duration
-                    with self._lock:
-                        self._logical_time_seconds = logical_cycle_start + duration
-                        self._logical_wall_at = cycle_end
                     if self._stop.wait(max(0.0, cycle_end - time.monotonic())):
                         return
                 if not forever:

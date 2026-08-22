@@ -911,7 +911,6 @@ class SimulationWorld:
         *,
         table: object | None = None,
         camera_channel: str = "emCCD",
-        cycle_start_seconds: float | None = None,
     ) -> None:
         """Play one applied board point through the shared physical world."""
 
@@ -1013,12 +1012,6 @@ class SimulationWorld:
                         device.trigger(
                             1,
                             frame=frame,
-                            source_time_seconds=(
-                                None
-                                if cycle_start_seconds is None
-                                else float(cycle_start_seconds)
-                                + start_tick / clock
-                            ),
                         )
 
             self._dac_values.update(_final_dac_values(program, row))

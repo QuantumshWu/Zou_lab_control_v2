@@ -1338,7 +1338,7 @@ def test_unslotted_cycles_are_independent_three_frame_shots(monkeypatch) -> None
         installation.close()
 
 
-def test_camera_cycle_source_preflights_compiled_windows_and_cadence() -> None:
+def test_camera_cycle_source_does_not_interpret_pulse_windows_or_exposure() -> None:
     world = _world(seed=5)
     camera = VirtualCamera(frame_source=world.render_frame)
     streamer = VirtualPulseStreamer(world=world)
@@ -1373,19 +1373,7 @@ def test_camera_cycle_source_preflights_compiled_windows_and_cadence() -> None:
                 or SimpleNamespace(close=lambda: None),
             )
 
-        mismatched = CameraCycleSource(node(frames_per_cycle=2))
-        mismatched.open(context, cycles=2)
-        with pytest.raises(ValueError, match="camera window"):
-            mismatched.validate(program, np.empty((2, 0), dtype=np.int64))
-        assert prepared == [], "an invalid program armed the camera"
-
-        too_slow = CameraCycleSource(node(frames_per_cycle=3, exposure=0.021))
-        too_slow.open(context, cycles=2)
-        with pytest.raises(ValueError, match="trigger interval"):
-            too_slow.validate(program, np.empty((2, 0), dtype=np.int64))
-        assert prepared == [], "an invalid cadence armed the camera"
-
-        source = CameraCycleSource(node(frames_per_cycle=3))
+        source = CameraCycleSource(node(frames_per_cycle=2, exposure=0.1))
         source.open(context, cycles=2)
         source.validate(program, np.empty((2, 0), dtype=np.int64))
         source.arm()
@@ -1394,7 +1382,7 @@ def test_camera_cycle_source_preflights_compiled_windows_and_cadence() -> None:
         streamer.close()
 
 
-def test_virtual_camera_busy_edges_leave_physical_ordinal_gaps() -> None:
+def test_virtual_camera_counts_collected_frames_not_pulse_edges() -> None:
     target = IMAGING_PULSE_RESOURCE.value.target
     lane = target.raw_lanes.index(target.by_key[CAMERA_CHANNEL].lanes[0])
 
@@ -1423,20 +1411,15 @@ def test_virtual_camera_busy_edges_leave_physical_ordinal_gaps() -> None:
     world = _world(seed=7)
     camera = VirtualCamera(frame_source=world.render_frame)
     world.register_camera(camera)
+    camera.set_exposure_seconds(0.1)
     camera.arm(2, source_group_sizes=(2,), buffer_frame_count=2, timeout=1.0)
     world.fire(
         program,
         camera_channel=CAMERA_CHANNEL,
-        cycle_start_seconds=0.0,
-    )
-    world.fire(
-        program,
-        camera_channel=CAMERA_CHANNEL,
-        cycle_start_seconds=1.0,
     )
     records = camera.read_frame_records(2, timeout=1.0, exact=True)
     terminal = camera.finish_record_capture()
-    assert [record.source_ordinal for record in records] == [0, 2]
+    assert [record.source_ordinal for record in records] == [0, 1]
     assert terminal.produced_count == 2
 
 

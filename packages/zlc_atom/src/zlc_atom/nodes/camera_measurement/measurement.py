@@ -29,7 +29,6 @@ from zlc_runtime import SignalPublication
 
 from zlc_atom.devices.camera.contract import (
     CameraAdapter,
-    CameraCaptureSpec,
     CameraCaptureTerminalRecord,
     CameraFrameRecord,
     CameraWorkingPoint,
@@ -418,20 +417,13 @@ class CameraCycleSource:
         *,
         cycles: int | None = None,
     ) -> None:
-        """Reject an actual played program before LOAD or camera arm."""
+        """Freeze the camera working point before the plan arms devices."""
 
         if self._cycles is None:
             raise RuntimeError("the camera cycle source was not opened")
+        del program, table, cycles
         if self._capture is None:
             self.camera_node._configure_capture()
-        request = self.camera_node.request
-        CameraCaptureSpec.for_program(
-            program,
-            table,
-            cycles=self._cycles if cycles is None else cycles,
-            frames_per_cycle=request.frames_per_cycle,
-            working_point=self.camera_node.actual_working_point,
-        )
 
     def arm(self) -> None:
         """Arm the already-configured camera once for the whole run."""

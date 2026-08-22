@@ -26,104 +26,6 @@ class CameraAcquisitionMode(str, Enum):
 
 
 @dataclass(frozen=True)
-class CameraCaptureSpec:
-    mode: CameraAcquisitionMode
-    expected_frames: int
-    source_group_sizes: tuple[int, ...]
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.mode, CameraAcquisitionMode):
-            raise TypeError("mode must be CameraAcquisitionMode")
-        frames = int(self.expected_frames)
-        groups = tuple(int(item) for item in self.source_group_sizes)
-        if frames <= 0 or not groups or any(item <= 0 for item in groups) or sum(groups) != frames:
-            raise ValueError("source_group_sizes must contain positive groups that cover expected_frames")
-        object.__setattr__(self, "expected_frames", frames)
-        object.__setattr__(self, "source_group_sizes", groups)
-
-    @classmethod
-    def for_program(
-        cls,
-        program: object,
-        table: object,
-        *,
-        cycles: int,
-        frames_per_cycle: int,
-        working_point: "CameraWorkingPoint",
-        trigger_channel: str = "emCCD",
-    ) -> "CameraCaptureSpec":
-        """Freeze and verify the camera plan the board will actually play."""
-
-        from zlc_pulse.compile import CompiledProgram
-        from zlc_pulse.schedule import trigger_windows
-
-        if not isinstance(program, CompiledProgram):
-            raise TypeError("program must be a CompiledProgram")
-        if not isinstance(working_point, CameraWorkingPoint):
-            raise TypeError("working_point must be CameraWorkingPoint")
-        cycle_count = int(cycles)
-        group_size = int(frames_per_cycle)
-        if cycle_count <= 0 or group_size <= 0:
-            raise ValueError("cycles and frames_per_cycle must be positive")
-        channel = str(trigger_channel).strip()
-        if not channel:
-            raise ValueError("trigger_channel must be non-empty")
-        if not str(working_point.acquisition_mode).upper().endswith(
-            CameraAcquisitionMode.EXTERNAL_TRIGGERED.value
-        ):
-            raise ValueError("a pulse-driven camera capture must be external-triggered")
-
-        width = int(program.slot_count)
-        if table is None:
-            if width:
-                raise ValueError("a slotted camera program requires its played table")
-            rows = ((),)
-            played_table = None
-        else:
-            array = np.asarray(table)
-            if array.ndim == 1:
-                array = array.reshape(1, -1)
-            if array.ndim != 2 or array.shape[1] != width:
-                raise ValueError("camera plan table width differs from the program")
-            rows = tuple(tuple(int(value) for value in row) for row in array)
-            if not rows:
-                raise ValueError("the played camera table must not be empty")
-            played_table = array
-        for index, row in enumerate(rows[: min(cycle_count, len(rows))]):
-            one = np.asarray(row, dtype=np.int64).reshape(1, width)
-            count = len(trigger_windows(program, channel, one))
-            if count != group_size:
-                raise ValueError(
-                    f"compiled camera window count for cycle {index} is {count}; "
-                    f"the camera expects {group_size}"
-                )
-
-        windows = trigger_windows(
-            program,
-            channel,
-            played_table,
-            cycles=min(cycle_count, len(rows) + 1),
-        )
-        required = working_point.required_external_trigger_interval_seconds
-        if required is not None and len(windows) > 1:
-            starts = tuple(start for start, _end in windows)
-            shortest = min(
-                (later - earlier) / float(program.clock_hz)
-                for earlier, later in zip(starts, starts[1:])
-            )
-            if shortest < float(required):
-                raise ValueError(
-                    f"compiled camera trigger interval {shortest:g}s is shorter "
-                    f"than the camera requires ({float(required):g}s)"
-                )
-        return cls(
-            CameraAcquisitionMode.EXTERNAL_TRIGGERED,
-            cycle_count * group_size,
-            (group_size,) * cycle_count,
-        )
-
-
-@dataclass(frozen=True)
 class CameraWorkingPoint:
     acquisition_mode: str
     frame_shape_yx: tuple[int, int]
@@ -298,7 +200,6 @@ class CameraAdapter(Protocol):
 __all__ = [
     "CameraAcquisitionMode",
     "CameraAdapter",
-    "CameraCaptureSpec",
     "CameraCaptureTerminalRecord",
     "CameraFrameRecord",
     "CameraWorkingPoint",

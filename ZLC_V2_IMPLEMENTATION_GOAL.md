@@ -92,8 +92,8 @@ SLM Feedback必须复用canonical Camera Measurement `repeat=N`及其同一Runti
 ### 3.5 Pulse/Camera/Remote
 
 - same-shot采用continuous best-effort；不增加hardware marker或逐cycle arm/fire；
-- 仍核compiled windows、frames-per-cycle和received ordinal，错误立即失败；
-- Temperature保留约20ms exposure，增加足够trigger/recapture gap；
+- Camera按自己authored cardinality采集，不解析compiled Pulse windows或用exposure审查Pulse cadence；actual frame count错误才失败；
+- Temperature保留约20ms authored exposure，Pulse timing独立；
 - Pulse Stop任意时刻立即响应，Qt不得阻塞；高优先级Stop/SAFE可取消普通wait/worker/transport；
 - UI立即进入Stopping，hardware ack后台完成；timeout显示错误但不冻结UI；未确认不能显示Safe；
 - Remote不加密码、认证、TLS或权限UI；
@@ -272,9 +272,9 @@ Host/Python：
 - RepeatRegion、cycles/shots、sweeps、dataset repeats分开；一个finite cycle执行入口；
 - load前核target ABI、clock、geometry、counts、actual windows/cadence、delay FIFO capacity；
 - count严格int/range，不silent clamp/wrap；
-- Camera continuous best-effort分组核window count/ordinal，错误loud fail；
+- Camera continuous best-effort按actual collected frames分组；ordinal编号实际frames且连续，不把Pulse edge编号冒充camera ordinal；
 - Temperature 20ms exposure配足够gap并用相容Calibration；
-- Virtual按真实cadence逐cycle、支持Stop、模拟camera busy；
+- Virtual按真实cadence逐cycle、支持Stop，但camera不因Pulse时间/exposure耦合而skip frame；
 - Pulse Stop Qt入口快速返回，优先取消/SAFE，hardware ack后台且有bounded timeout；
 - Remote无密码；last-client-wins；旧handler失效；takeover必须先Stop/SAFE；
 - 正常连接无idle timeout，真实disconnect/crash由后台检测后自动SAFE；

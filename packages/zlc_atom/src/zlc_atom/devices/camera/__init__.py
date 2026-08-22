@@ -3,7 +3,6 @@
 from .contract import (
     CameraAcquisitionMode,
     CameraAdapter,
-    CameraCaptureSpec,
     CameraCaptureTerminalRecord,
     CameraFrameRecord,
     CameraWorkingPoint,
@@ -14,7 +13,6 @@ from .pylon import PylonCameraAdapter, PylonCameraConfig
 __all__ = [
     "CameraAcquisitionMode",
     "CameraAdapter",
-    "CameraCaptureSpec",
     "CameraCaptureTerminalRecord",
     "CameraFrameRecord",
     "CameraWorkingPoint",
