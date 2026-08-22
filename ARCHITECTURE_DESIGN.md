@@ -215,7 +215,7 @@ Node new chunk
 
 - 保留sparse WGS-Kim、fixed far-field phase、selected DFT和caller-owned optimizer state。
 - Inner solve走到canonical numerical gate，不为省几十毫秒增加physical candidate。
-- Feedback mode是leaf-owned显式字段；当前唯一mode为`qcmos_bright_dark`。Pulse由operator显式选择，camera exposure由operator独立显式填写；Task不从Pulse或Calibration猜exposure，也不做Pulse/exposure科学“兼容性”判断。
+- Feedback mode是leaf-owned显式字段；当前唯一mode为`qcmos_bright_dark`。Pulse由operator显式选择；camera exposure是独立、可见、可编辑的authored字段，默认`0.1 s`。Task不从Pulse或Calibration猜exposure，也不做Pulse/exposure科学“兼容性”判断。
 - 当前mode复用canonical Camera Measurement `repeat=N`，每cycle严格一张camera frame；preview与估计读取同一sealed Dataset，不另写camera average或三帧reference判据。
 - Calibration只提供Target→camera注册所需的site centers、BOX半宽/积分方式和frame坐标几何；Feedback不读取其dark/bright/threshold、exposure、photoelectron mode、camera identity或readout working-point provenance。实际camera requested/actual exposure、effective unit与conversion进入本run metadata；saturation只由本次actual raw integer maximum转换到本次effective unit判断。
 - 每个site使用本candidate全部shot的raw BOX值拟合双高斯；observable是`bright_mean-dark_mean`，loading probability只作为mixture fraction。BIC、峰分离与simultaneous mean error共同决定valid/uncertain/censored；不把单峰硬拆成有效bright response。

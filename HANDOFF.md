@@ -18,7 +18,7 @@ SLM server candidate已收敛为Pulse同款入口：apparatus只有`slm.hamamats
 
 Registered SLM Feedback candidate已根修：Calibration只产生通用camera/readout artifact，无Science Context UI/Task参数。Feedback同时选Calibration+Science Context，在自己的组合边界做Target X/Y→camera X/Y直接注册，不枚举翻转/旋转/轴交换。普通Calibration只观测34/35 sites时，Feedback可恢复第35个weak site；规则对称grid不需fiducial。
 
-当前Feedback follow-up已冻结并随本阶段实现提交。用户确认probe相对atomic transition红失谐，trap light只会把失谐进一步推红；因此当前mode改为single-frame多shot BOX双高斯的`bright_mean-dark_mean`。Calibration只提供site BOX geometry；Pulse与camera exposure均为operator显式字段，Feedback不读取Calibration dark/threshold/exposure/photoelectron/working point。Controller保存每site的weight/contrast/error/fit/action与局部响应历史：有效site按“contrast大→trap浅→增加Target”更新；uncertain fit hold；never-valid单峰最多三次1.4x bootstrap；曾有效且加权后bright峰消失则回到上一有效weight。默认500-shot coarse、12 updates、3000-shot/300秒validation。
+当前Feedback follow-up已冻结并随本阶段实现提交。用户确认probe相对atomic transition红失谐，trap light只会把失谐进一步推红；因此当前mode改为single-frame多shot BOX双高斯的`bright_mean-dark_mean`。Calibration只提供site BOX geometry；Pulse由operator显式选择，camera exposure是独立可编辑字段并默认`0.1 s`，Feedback不读取Calibration dark/threshold/exposure/photoelectron/working point。Controller保存每site的weight/contrast/error/fit/action与局部响应历史：有效site按“contrast大→trap浅→增加Target”更新；uncertain fit hold；never-valid单峰最多三次1.4x bootstrap；曾有效且加权后bright峰消失则回到上一有效weight。默认500-shot coarse、12 updates、3000-shot/300秒validation。
 
 SimulationWorld保持同一physical roster/Fourier→camera affine/shared aberrated PSF；默认正的trap light-shift参数现在作为进一步红移的幅度，occupied bright-dark随depth单调下降，loading随depth上升，Camera shot产生真实dark/bright mixture。产品默认500-shot missing-site链的valid coarse ratio为`2.092→1.971→1.687→1.474→1.331→1.243→1.169→1.128→1.090`；independent validation在2000/3000 shots时为`1.09126 [1.08293,1.09989]`并accepted，validation墙钟84.0秒。
 

@@ -68,8 +68,7 @@ SLM_FEEDBACK_SCHEMA = AuthoringSchema(
             "exposure_seconds",
             "float",
             "Camera exposure seconds",
-            None,
-            required=True,
+            0.1,
             minimum=1e-9,
         ),
         AuthoringField(

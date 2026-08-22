@@ -1008,6 +1008,27 @@ def test_calibration_pulse_is_a_workspace_file_picker(
     assert any("not-calibration.json" in issue for issue in projection["issues"])
 
 
+def test_slm_feedback_form_has_a_visible_numeric_exposure_default(presenter) -> None:
+    node_id = presenter.add_logic("slm_feedback")
+    projection = presenter.logic_editor_projection(node_id)
+    exposure = next(
+        field
+        for field in projection["form_spec"].fields
+        if field.key == "exposure_seconds"
+    )
+    pulse = next(
+        field
+        for field in projection["form_spec"].fields
+        if field.key == "pulse_template"
+    )
+    assert exposure.kind == "float"
+    assert exposure.default == pytest.approx(0.1)
+    assert projection["form_values"]["exposure_seconds"] == pytest.approx(0.1)
+    assert pulse.kind == "path"
+    assert projection["form_values"]["pulse_template"] == ""
+    assert projection["can_start"] is False
+
+
 
 def test_artifact_contract_resolves_once_and_passes_exact_typed_value(
     presenter,

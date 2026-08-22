@@ -249,9 +249,10 @@ pre-existing device-state requirement. Every coarse or validation measurement
 is a canonical Camera Measurement generation under the stable companion
 producer `<task>/camera`: current mode `qcmos_bright_dark` requires exactly one
 camera frame per cycle, commits all `repeat=N` cycles, seals them, and uses the
-same single-frame Dataset for preview and estimation. The Pulse resource and
-camera exposure are separate required operator fields; Feedback neither derives
-one from the other nor reuses Calibration exposure.
+same single-frame Dataset for preview and estimation. The Pulse resource is an
+explicit operator selection; camera exposure is a separate visible/editable
+field with a `0.1 s` default. Feedback neither derives one from the other nor
+reuses Calibration exposure.
 
 Calibration contributes only registered site centers, BOX half-width/reducer
 and image-coordinate geometry. It contributes no dark/bright level, threshold,
