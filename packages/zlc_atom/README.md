@@ -292,16 +292,18 @@ published after terminal.
 Starting the next run keeps the previous Monitor surfaces visible until the
 replacement generation has rendered its first values.
 
-The loop defaults to 100 shots and at most 12 updates. A candidate is accepted
-when all sites have a finite selected fit and that one authored batch measures
-a maximum/minimum bright-dark ratio at or below `1.10`. The simultaneous
-interval is recorded as uncertainty but never triggers an extra acquisition.
+The loop defaults to 100 shots and 12 updates and normally completes every one.
+Afterwards it retains the all-site candidate with the smallest measured ratio,
+or the most observable measured candidate if no all-site ratio exists. No
+built-in ratio threshold ends a run early. The simultaneous interval is
+recorded as uncertainty but never triggers an extra acquisition.
 
 With `calibration-5.json` (23 detected sites) registered to
 `science-context_5x7.npz` (35 Target sites), the exact virtual 100-shot chain
-reached observable counts `23→26→29→32→32→33→35` and accepted candidate 7 at
-an all-site ratio of `1.098487`. Every candidate used one 100-shot batch and a
-distinct phase. This is software/virtual evidence, not hardware acceptance.
+reached observable counts `23→26→29→32→32→33→35`; candidate 7 measured an
+all-site ratio of `1.098487`. The Task continues through the authored update
+count before selecting the best result. Every candidate used one 100-shot batch
+and a distinct phase. This is software/virtual evidence, not hardware acceptance.
 
 The supported product path discovers seven logic descriptors: `calibration`,
 `camera_measurement`, `occupancy`, `seamless_scan`, `slm_feedback`,

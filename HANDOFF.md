@@ -20,6 +20,6 @@ Registered SLM Feedback candidate已根修：Calibration只产生通用camera/re
 
 当前Feedback follow-up使用single-frame多shot BOX分布的`bright_mean-dark_mean`。Calibration只提供site BOX geometry；Pulse、camera exposure、shots、single-Gaussian boost、feedback gain和普通单步上限均由operator显式设置。每candidate严格一批shots；单/双高斯只要返回有限fit即valid，只有数值失败hold。Controller在归一化Target intensity share上保证dark-only site按用户参数绝对增加，invalid share不变，loaded site只在剩余功率内相对配平；per-site dark/loaded历史形成不可下穿的loading floor。默认100 shots、12 updates，无retry或独立validation采集。
 
-SimulationWorld保持同一physical roster/Fourier→camera affine/shared aberrated PSF；occupied bright-dark随depth单调下降，loading随depth上升。使用用户真实`calibration-5.json`（23个detected sites）和`science-context_5x7.npz`（35个Target sites）的100-shot链，observable sites为`23→26→29→32→32→33→35`，candidate 7以全阵列ratio `1.098487` accepted；每轮phase内容均不同。
+SimulationWorld保持同一physical roster/Fourier→camera affine/shared aberrated PSF；occupied bright-dark随depth单调下降，loading随depth上升。使用用户真实`calibration-5.json`（23个detected sites）和`science-context_5x7.npz`（35个Target sites）的100-shot链，observable sites为`23→26→29→32→32→33→35`，candidate 7测得全阵列ratio `1.098487`；Task仍完成全部authored updates后再选择最佳candidate。
 
 本长任务另有三个已提交阶段：`bf3133e`使repeat默认reduce、只允许operator显式repeat facet；`78a71fd`在Camera Restart前排空旧causal generation的在途surface，消除publication generation race；`ace4a19`闭合persisted point-facet Histogram与真实NodeHost test-contract残余。Feedback为35项、Simulation physics 45项、Atom 325项、Plot 428项green；Workbench排除既有batch CRLF参数项后的392项完成无失败。最终diff/AST/active-name与Gate 17/18审计均已闭合。

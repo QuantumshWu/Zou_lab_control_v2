@@ -10,7 +10,7 @@ Calibration Task -> one result -> calibration JSON + six report images
 Camera Measurement -> frames signal
 Occupancy Processor(frames + calibration path) -> occupancy data
 SLM Editor Pattern -> base phase + optional Zernike -> science phase -> explicit Send
-SLM Feedback(calibration + Science Context + pulse + exposure) -> single-frame qCMOS bright-dark -> accepted/inconclusive Science Context
+SLM Feedback(calibration + Science Context + pulse + exposure) -> single-frame qCMOS bright-dark -> completed/stalled Science Context
 Image/other Plot Panel -> Panel Edit Save Fig
 ```
 
@@ -29,10 +29,11 @@ authored absolute share increase; loaded sites divide the remaining power by
 their authored feedback gain, and learned dark/loaded brackets prevent later
 normalization from pushing a site below its loading floor. Each candidate uses
 exactly the authored shots once (100 by default), then must solve and apply a
-different phase before another acquisition. The all-site bright-dark ratio
-targets 1.10; a separately named observable-site progress curve remains live
-while some sites have not loaded. There is no automatic retry or independent
-validation acquisition.
+different phase before another acquisition. The Task normally completes every
+authored update and then retains the best measured candidate; it has no
+built-in uniformity magic number. A separately named observable-site progress
+curve remains live while some sites have not loaded. There is no automatic
+retry or independent validation acquisition.
 
 The real SLM device type is `slm.hamamatsu_x15213`. Like the real Pulse
 sequencer, its apparatus parameters are the server host and port; the process

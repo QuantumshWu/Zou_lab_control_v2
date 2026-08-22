@@ -323,7 +323,7 @@ Solver/Feedback：
 - current Feedback mode明确为single-frame qCMOS shot distribution的`bright-dark`，loading probability只是mixture fraction；
 - 复用Camera Measurement统一projection，每cycle一张frame；Pulse与camera exposure分别由operator显式设置且不做二者科学兼容性判断；
 - Calibration只提供Target site对应的BOX geometry；controller用本轮单/双高斯结果及跨轮per-site normalized share/contrast/loading bracket更新，不读取Calibration dark/threshold/exposure/working point；
-- 默认100 shots、12 updates；每candidate只采一批且下一批前必须apply不同phase，全部site有效时contrast ratio目标为`<=1.10`。真实all-site curve与显式observable-site progress curve分离，无独立validation采集；
+- 默认100 shots、12 updates；每candidate只采一批且下一批前必须apply不同phase。正常运行完成全部authored updates后选择全site ratio最低的candidate，不以内置magic ratio提前停止；真实all-site curve与显式observable-site progress curve分离；
 - Task取得SLM后自己apply Context起始phase；normal terminal与Stop保留最后一个valid controller state，异常failure恢复该Context起始phase；
 - sparse-only contract明确；
 - dense Gaussian/Flat Top先修signal/noise region、FOM、initial phase和early stop，再profile CPU；不引GPU。

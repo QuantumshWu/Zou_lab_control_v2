@@ -221,7 +221,7 @@ Node new chunk
 - 每个site使用本candidate唯一一批authored shots的raw BOX值选择单高斯或双高斯；能返回有限fit即为valid，只有数值失败才hold。双高斯observable为`bright_mean-dark_mean`；单高斯结合本批dark基线与per-site历史判为dark-only或bright-only。
 - Controller保存每site的归一化Target share、bright-dark、fit选择、动作、局部`d log C / d log share`及dark/loaded边界。dark-only按用户`single_gaussian_boost`保证绝对份额增加；loaded按用户`feedback_gain`只作相对配平并受`maximum_weight_change`限制；invalid保持实际份额。历史边界形成loading floor，归一化不得把site压到floor以下。
 - mode、Pulse、exposure或任一控制参数变化时不复用旧响应历史；用户要求的dark增幅若在固定总功率下不可行，静默缩到本轮最大可行值。
-- 默认每candidate为100 shots、最多12次update；每个phase严格一批shots，下一批前必须确认不同phase。全部site valid且bright-dark ratio `<= 1.10`即accepted；normal terminal与Stop保留最佳已测candidate。置信区间只作为同批数据的不确定度记录，不触发retry或独立validation采集。
+- 默认每candidate为100 shots、12次update；每个phase严格一批shots，下一批前必须确认不同phase。正常运行完成全部authored updates后选择全site ratio最低的candidate；没有内置ratio停止阈值。Stop保留最佳已测candidate，置信区间只作记录，不触发额外采集。
 - Feedback取得SLM后自己apply并确认frozen Science Context phase，并在shot前发布该phase；Context receipt是provenance，不要求operator事先Send/Save。normal terminal与Stop只从完整测量过的candidate中保留最佳/最可观测状态，异常failure恢复Context起始phase。
 - Sparse-only contract明确；dense Gaussian/Flat Top先修算法定义和early stop，再profile CPU，不引GPU。
 

@@ -61,7 +61,6 @@ OBSERVABLE_UNIFORMITY_HISTORY_OUTPUT = DatasetOutputDeclaration(
     "observable_uniformity_history",
     "slm-feedback.observable-uniformity-history.v1",
 )
-_TARGET_RATIO = 1.10
 _CONTROLLER_VERSION = 2
 READOUT_FRAME_COORDINATE = 0
 
@@ -769,7 +768,6 @@ class SlmFeedbackTask:
                 "slm": self.slm_key,
             },
             "max_updates": self.max_updates,
-            "target_uniformity_ratio": _TARGET_RATIO,
             "feedback_controller_version": _CONTROLLER_VERSION,
             "feedback_mode": self.feedback_mode,
             "exposure_seconds": self.exposure_seconds,
@@ -798,7 +796,6 @@ class SlmFeedbackTask:
             },
             "candidate": int(candidate),
             "status": str(status),
-            "target_uniformity_ratio": _TARGET_RATIO,
             "feedback_controller_version": _CONTROLLER_VERSION,
             "feedback_mode": self.feedback_mode,
             "exposure_seconds": self.exposure_seconds,
@@ -1230,7 +1227,6 @@ class SlmFeedbackTask:
                 else None
             ),
             "updates": len(history),
-            "target_uniformity_ratio": _TARGET_RATIO,
             "feedback_mode": self.feedback_mode,
             "requested_exposure_seconds": self.exposure_seconds,
             "actual_exposure_seconds": self._actual_exposure_seconds,
@@ -1242,8 +1238,8 @@ class SlmFeedbackTask:
         history: list[dict[str, object]] = []
         retained_valid: dict[str, object] | None = None
         most_visible_observed: dict[str, object] | None = None
-        converged: dict[str, object] | None = None
-        termination_reason = "maximum feedback updates reached"
+        stalled = False
+        termination_reason = "all authored feedback updates completed"
         try:
             _check_cancelled(context)
             # Science Context is the requested starting CONTENT, not proof of
@@ -1531,10 +1527,6 @@ class SlmFeedbackTask:
                         minimum_control_weight=loading_floor,
                     )
                 )
-                if valid and score <= _TARGET_RATIO:
-                    log_correction[:] = 0.0
-                    decisions[:] = "converged"
-                    proposed_target = current_target
                 history.append({
                     "iteration": candidate_number,
                     "shots": self.shots,
@@ -1683,12 +1675,6 @@ class SlmFeedbackTask:
                         f"{self._site_count} site fits valid; applying only "
                         "history-supported site updates"
                     )
-                if valid and score <= _TARGET_RATIO:
-                    converged = completed
-                    termination_reason = (
-                        "all-site bright-dark ratio reached target"
-                    )
-                    break
                 if candidate_number == self._candidate_capacity:
                     break
                 previous_weights[observable_valid] = current_control_weights[
@@ -1702,6 +1688,7 @@ class SlmFeedbackTask:
                     fitted["dark_standard_error"], dtype=float
                 )[fit_valid]
                 if np.array_equal(proposed_target, current_target):
+                    stalled = True
                     termination_reason = (
                         "all sites held because this shot batch supplied no "
                         "actionable update"
@@ -1718,6 +1705,7 @@ class SlmFeedbackTask:
                 )
                 next_phase = self._science_phase(next_pattern)
                 if np.array_equal(next_phase, applied):
+                    stalled = True
                     history[-1]["next_phase_changed"] = False
                     termination_reason = (
                         "the target correction produced no different SLM phase; "
@@ -1740,10 +1728,10 @@ class SlmFeedbackTask:
                 current_target = proposed_target
                 current_pattern = next_pattern
                 current_phase = next_phase
-            selected = converged or retained_valid or most_visible_observed
+            selected = retained_valid or most_visible_observed
             if selected is None:
                 raise RuntimeError("qCMOS feedback produced no completed candidate")
-            status = "accepted" if converged is not None else "inconclusive"
+            status = "stalled" if stalled else "completed"
             selected["history"]["outcome"] = {
                 "status": status,
                 "reason": termination_reason,

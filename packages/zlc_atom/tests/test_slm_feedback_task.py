@@ -940,7 +940,7 @@ def test_uniformity_history_is_one_latest_curve_paired_with_candidate_phase(
     )
     try:
         result = task.execute(context)
-        assert result["feedback_status"] == "accepted"
+        assert result["feedback_status"] == "completed"
         output = context.commits[-1]["uniformity_history"]
         np.testing.assert_allclose(output.snapshot.block.values[0, :2, 0], (4.0, 2.0))
         assert output.snapshot.block.values[0, 2, 0] <= 1.10
@@ -1447,11 +1447,11 @@ def test_single_gaussian_site_updates_after_one_batch_and_next_capture_has_new_p
         plane=plane,
         calibration=calibration,
         science_context=context_mapping,
-        updates=2,
+        updates=1,
     )
     try:
         result = task.execute(_Context())
-        assert result["feedback_status"] == "accepted"
+        assert result["feedback_status"] == "completed"
         assert len(measured_phases) == 2
         assert not np.array_equal(measured_phases[0], measured_phases[1])
         rows, columns = np.nonzero(target > 0.0)
@@ -1525,7 +1525,7 @@ def test_unchanged_solved_phase_stops_without_a_second_shot_batch(
     try:
         result = task.execute(_Context())
         assert calls == 1
-        assert result["feedback_status"] == "inconclusive"
+        assert result["feedback_status"] == "stalled"
         _phase, metadata = _load_candidate(result["artifact_path"])
         assert "no different SLM phase" in metadata["retained"]["outcome"]["reason"]
     finally:
@@ -1591,7 +1591,7 @@ def test_persistently_dark_site_updates_every_phase_and_retains_latest_candidate
         result = task.execute(context)
         artifact = load_science_context(result["artifact_path"])
         metadata = artifact["pattern_metadata"]
-        assert result["feedback_status"] == "inconclusive"
+        assert result["feedback_status"] == "completed"
         assert len(measured_phases) == 5
         assert all(
             not np.array_equal(left, right)
@@ -1609,7 +1609,7 @@ def test_persistently_dark_site_updates_every_phase_and_retains_latest_candidate
         plane.close()
 
 
-def test_virtual_feedback_drives_bright_dark_ratio_below_1p10_from_missing_site(
+def test_virtual_feedback_recovers_missing_sites_and_retains_best_candidate(
     tmp_path: Path,
 ) -> None:
     plane = SignalDataPlane()
@@ -1677,7 +1677,7 @@ def test_virtual_feedback_drives_bright_dark_ratio_below_1p10_from_missing_site(
         saved, metadata = _load_candidate(result["artifact_path"])
         np.testing.assert_array_equal(slm.last_commanded_phase, saved)
         assert not np.array_equal(saved, pattern)
-        assert result["feedback_status"] in {"accepted", "inconclusive"}
+        assert result["feedback_status"] in {"completed", "stalled"}
         assert metadata["status"] == result["feedback_status"]
         history = metadata["history"]
         assert 5 <= len(history) <= 13  # baseline plus at most twelve updates
@@ -1697,10 +1697,8 @@ def test_virtual_feedback_drives_bright_dark_ratio_below_1p10_from_missing_site(
                 float(np.min(finite))
             )
         else:
-            assert result["feedback_status"] == "inconclusive"
+            assert result["feedback_status"] in {"completed", "stalled"}
             assert result["terminal_uniformity"] is None
-        if result["feedback_status"] == "accepted":
-            assert metadata["retained"]["uniformity_ratio"] <= 1.10
         assert not camera.capture_state()
         incomplete_messages = [
             args[0]
@@ -1711,7 +1709,7 @@ def test_virtual_feedback_drives_bright_dark_ratio_below_1p10_from_missing_site(
         artifacts = tuple(tmp_path.glob("slm_feedback_candidate_*.npz"))
         assert len(artifacts) == len(history)
         assert { _load_candidate(path)[1]["status"] for path in artifacts } <= {
-            "measured", "accepted", "inconclusive"
+            "measured", "completed", "stalled"
         }
     finally:
         plane.close()
@@ -1720,7 +1718,7 @@ def test_virtual_feedback_drives_bright_dark_ratio_below_1p10_from_missing_site(
         calibration_installation.close()
 
 
-def test_success_saves_converged_candidate_without_extra_shots(
+def test_completed_run_selects_best_candidate_without_extra_shots(
     tmp_path: Path, monkeypatch
 ) -> None:
     slm = _Slm((17, 23))
@@ -1773,6 +1771,7 @@ def test_success_saves_converged_candidate_without_extra_shots(
         sequencer=SimpleNamespace(describe=lambda: object()),
         plane=plane,
         target=_grid_target(slm.shape_yx),
+        updates=2,
     )
     try:
         result = task.execute(_Context())
@@ -1783,6 +1782,7 @@ def test_success_saves_converged_candidate_without_extra_shots(
         assert requested_shots == [10, 10, 10]
         assert resolved_api_values == [{}]
         assert result["updates"] == 3
+        assert result["feedback_status"] == "completed"
         assert np.array_equal(slm.commands[-1], saved)
     finally:
         plane.close()
@@ -1957,7 +1957,8 @@ def test_stop_after_terminal_commit_keeps_host_success_and_artifact(
     tmp_path: Path, monkeypatch
 ) -> None:
     slm = _Slm((17, 23), incoming=0.125)
-    best = np.full(slm.shape_yx, 0.5, dtype=np.float32)
+    first_phase = np.full(slm.shape_yx, 0.5, dtype=np.float32)
+    best = np.full(slm.shape_yx, 0.75, dtype=np.float32)
     plane = SignalDataPlane()
     wake = Event()
     save_entered = Event()
@@ -1967,14 +1968,16 @@ def test_stop_after_terminal_commit_keeps_host_success_and_artifact(
         "resolve_pulse",
         lambda *args, **kwargs: SimpleNamespace(program=object()),
     )
+    phases = iter((first_phase, best))
     monkeypatch.setattr(
         feedback_module,
         "solve_phase",
-        lambda *args, **kwargs: (best, {"method": "test"}),
+        lambda *args, **kwargs: (next(phases), {"method": "test"}),
     )
     fit_results = iter(
         (
             _fitted_result(np.concatenate(([2.0], np.ones(34)))),
+            _fitted_result(np.concatenate(([1.2], np.ones(34)))),
             _fitted_result(np.ones(35)),
         )
     )
@@ -1995,7 +1998,7 @@ def test_stop_after_terminal_commit_keeps_host_success_and_artifact(
     original_save = feedback_module.save_science_context
 
     def blocking_save(path, phase, **kwargs):
-        if kwargs["pattern_metadata"]["status"] == "accepted":
+        if kwargs["pattern_metadata"]["status"] == "completed":
             save_entered.set()
             assert release_save.wait(2.0)
         return original_save(path, phase, **kwargs)
@@ -2036,7 +2039,8 @@ def test_terminal_save_failure_restores_incoming_and_fails_host(
 ) -> None:
     slm = _Slm((17, 23), incoming=0.125)
     incoming = np.array(slm.last_commanded_phase, copy=True)
-    best = np.full(slm.shape_yx, 0.5, dtype=np.float32)
+    first_phase = np.full(slm.shape_yx, 0.5, dtype=np.float32)
+    best = np.full(slm.shape_yx, 0.75, dtype=np.float32)
     plane = SignalDataPlane()
     wake = Event()
     monkeypatch.setattr(
@@ -2044,14 +2048,16 @@ def test_terminal_save_failure_restores_incoming_and_fails_host(
         "resolve_pulse",
         lambda *args, **kwargs: SimpleNamespace(program=object()),
     )
+    phases = iter((first_phase, best))
     monkeypatch.setattr(
         feedback_module,
         "solve_phase",
-        lambda *args, **kwargs: (best, {"method": "test"}),
+        lambda *args, **kwargs: (next(phases), {"method": "test"}),
     )
     fit_results = iter(
         (
             _fitted_result(np.concatenate(([2.0], np.ones(34)))),
+            _fitted_result(np.concatenate(([1.2], np.ones(34)))),
             _fitted_result(np.ones(35)),
         )
     )
@@ -2081,7 +2087,7 @@ def test_terminal_save_failure_restores_incoming_and_fails_host(
     original_save = feedback_module.save_science_context
 
     def fail_terminal_save(path, phase, **kwargs):
-        if kwargs["pattern_metadata"]["status"] == "accepted":
+        if kwargs["pattern_metadata"]["status"] == "completed":
             raise OSError("terminal save failed")
         return original_save(path, phase, **kwargs)
 
@@ -2097,11 +2103,11 @@ def test_terminal_save_failure_restores_incoming_and_fails_host(
         assert not host.final_result_resolved
         np.testing.assert_array_equal(slm.last_commanded_phase, incoming)
         artifacts = tuple(tmp_path.glob("slm_feedback_candidate_*.npz"))
-        assert len(artifacts) == 2
+        assert len(artifacts) == 3
         candidates = {
             _load_candidate(path)[1]["candidate"]: path for path in artifacts
         }
-        saved, metadata = _load_candidate(candidates[2])
+        saved, metadata = _load_candidate(candidates[3])
         np.testing.assert_array_equal(saved, best)
         assert metadata["status"] == "measured"
     finally:
@@ -2146,7 +2152,7 @@ def test_invalid_site_holds_weight_and_never_retries_the_same_phase(
     )
     try:
         result = task.execute(_Context())
-        assert result["feedback_status"] == "inconclusive"
+        assert result["feedback_status"] in {"completed", "stalled"}
         assert measured_phases
         assert all(
             not np.array_equal(left, right)
