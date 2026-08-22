@@ -562,8 +562,8 @@ def test_slm_coherent_plant_owns_the_twofold_site_error_and_caches_propagation()
             1.0 - (corrected_ratio - 1.0) / (initial_ratio - 1.0)
         )
 
-    assert min(ratios) >= 4.5
-    assert max(ratios) <= 5.5
+    assert min(ratios) >= 1.8
+    assert max(ratios) <= 2.2
     assert min(correctable_fractions) >= 0.90
     assert not hasattr(SimulationWorld, "trap_plane_intensity")
     assert not hasattr(SimulationWorld, "site_trap_intensities")

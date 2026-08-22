@@ -234,7 +234,7 @@ Node new chunk
 - Scan正常完成、Stop或失败都默认restore pre-run device values。
 - SimulationWorld保持一个类和一个state owner，不拆层。
 - SimulationWorld的物理site只有当前SLM phase经共同pupil illumination、共同low-order wavefront aberration和FFT得到的dominant local peaks这一份动态roster；trap位置、强度、occupancy与Camera位置不得再拆成nominal/extra双状态。所有peaks经过同一个Fourier→camera affine；fluorescence imaging使用一个由共同imaging pupil/aberration生成的shared非对称PSF，不存在逐site随机gain/ellipse/angle/skew。Probe为红失谐，正的trap light-shift参数只把detuning进一步推红，因此occupied bright-dark随trap depth单调下降；loading probability随depth上升。Camera shot真实混合dark/bright population，Feedback不得读取hidden depth/occupancy truth。
-- 默认plant的全部不均匀度必须来自FFT前同一个pupil amplitude/wavefront phase；不得在far-field后乘site或field gain。固定20 µK cooling温度下，低于500 µK的trap不load，超过阈值后按一个cooling-temperature尺度指数趋近全局loading ceiling。默认均匀Target必须自然产生至少4/35不可见site，其余可加载site的`bright-dark`跨site约4倍，不得由测试手改Target weight制造。
+- 默认plant的全部不均匀度必须来自FFT前同一个固定pupil amplitude/wavefront phase；该world wavefront与SLM command、Target和grid完全独立，并在每次propagation中始终相加。不得使用grid-resonant phase、target-specific correction或far-field site/field gain。默认nominal depth为620 µK；固定20 µK cooling温度下，低于500 µK的trap不load，超过阈值后按一个cooling-temperature尺度指数趋近全局loading ceiling。因此普通光学不均匀即可让默认35-site阵列中4个site不可见，不得由测试手改Target weight制造；`bright-dark`继续由现有probe参数决定，不为凑比例修改。
 - Apparatus root `simulation`是image/grid geometry、seed与profile的唯一持久化owner；virtual qCMOS只声明camera事实并消费world image geometry，virtual MOT保持独立的camera geometry。旧的camera-owned world字段不保留双owner或静默migration，必须loud refusal并给出root grammar。
 - Simulation参数在init前通过单一API/immutable config确定；workspace-relative profile必须在任何device factory前解析且保持在workspace内，Device Manager Init不运行时改写。
 - Tests使用config override，不修改public mutable world attributes；hidden truth不泄漏给production算法。

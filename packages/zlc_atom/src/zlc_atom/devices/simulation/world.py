@@ -42,7 +42,7 @@ BOLTZMANN_J_PER_K = 1.380649e-23
 #: apparatus -- a measurement asks the bench what happened, it does not tell
 #: the bench what the answer should be.
 DEFAULT_ATOM_TEMPERATURE_K = 2.0e-5
-DEFAULT_TRAP_DEPTH_K = 1.0e-3
+DEFAULT_TRAP_DEPTH_K = 6.2e-4
 DEFAULT_TRAP_WAIST_M = 1.0e-6
 _WORLD_PROFILE_FORMAT = "zlc.simulation.world_profile"
 _SIMULATION_FLOAT_FIELDS = (
@@ -457,18 +457,6 @@ class SimulationWorld:
             + coefficients[1] * astigmatism
             + coefficients[2] * coma_x
             + coefficients[3] * coma_y
-        )
-        pixel_y, pixel_x = np.ogrid[:height, :width]
-        aberration += (
-            0.256 * np.cos(2.0 * np.pi * 16.0 * pixel_x / width + 4.201)
-            + 0.317 * np.cos(2.0 * np.pi * 21.0 * pixel_y / height + 3.227)
-            + 0.155
-            * np.cos(
-                2.0
-                * np.pi
-                * (16.0 * pixel_x / width + 21.0 * pixel_y / height)
-                + 3.261
-            )
         )
         return (
             _immutable(amplitude, "<f4"),
