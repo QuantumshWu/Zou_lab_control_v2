@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from concurrent.futures import Future
 import os
+from threading import Event
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -498,6 +499,108 @@ def _settle_panel_hosts(presenter, predicate=lambda: True) -> None:
             return
         time.sleep(0.005)
     raise AssertionError("panel hosts did not settle")
+
+
+def test_camera_restart_drains_the_old_generation_before_replacement(
+    presenter, session
+) -> None:
+    """Restart must not retire a publication still travelling to its Panel."""
+
+    session.load_pulse(PULSE_NAME)
+    node_id = presenter.add_logic(
+        "camera_measurement",
+        values={
+            "exposure_seconds": 0.013,
+            "repeat": 0,
+            "frames_per_cycle": CAMERA_WINDOWS,
+        },
+    )
+    assert presenter.start_logic(node_id) is True
+    old_host = presenter.logic[node_id].host
+    assert old_host is not None and old_host.running
+    signal = old_host.signal_key("frames")
+
+    _settle_panel_hosts(presenter, lambda: bool(session.camera.capture_state()))
+    session.fire(shots=1)
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        presenter.beat()
+        if (
+            len(presenter.panels) == 1
+            and (panel := next(iter(presenter.panels.values()))).port is not None
+            and panel.port.presented_publication() is not None
+        ):
+            break
+        time.sleep(0.005)
+    assert len(presenter.panels) == 1, (
+        presenter.logic[node_id].host.observation,
+        presenter.view.status,
+        session.signal_plane.latest_publication(signal),
+    )
+    panel = next(iter(presenter.panels.values()))
+    shown = panel.port.presented_publication()
+    assert shown is not None
+
+    # Hold the board's sole projection worker, then put one old-generation
+    # publication behind it.  This makes the real race deterministic: the
+    # Runtime replacement used to retire the publication before the Panel's
+    # queued current_dataset(publication) call could consume it.
+    release_projection = Event()
+    blocker = presenter.board.submit_projection(
+        lambda: release_projection.wait(5.0)
+    )
+    session.fire(shots=1)
+    deadline = time.monotonic() + 5.0
+    latest = shown
+    while latest is shown and time.monotonic() < deadline:
+        latest = session.signal_plane.latest_publication(signal)
+        time.sleep(0.002)
+    assert latest is not shown
+    presenter.board.tick()
+    presenter.board.commit()
+    assert panel.port.surface_busy
+    assert (
+        old_host.instance_id,
+        old_host.generation,
+    ) in {
+        (root.stream_id.value, root.generation)
+        for root in session.signal_plane.publication_roots(latest)
+    }
+
+    assert presenter.update_logic_draft(
+        node_id, values={"exposure_seconds": 0.012}
+    )
+    assert presenter.restart_panel_producer(panel.panel_id) is True
+    presenter.poll_logic()
+    assert panel.port.surface_busy
+    assert (
+        session.signal_plane.latest_publication(signal) is latest
+    ), old_host.observation
+    assert presenter.logic[node_id].host is old_host
+
+    release_projection.set()
+    blocker.result(5.0)
+    _settle_panel_hosts(
+        presenter,
+        lambda: presenter.logic[node_id].host is not old_host,
+    )
+    replacement = presenter.logic[node_id].host
+    assert replacement is not None and replacement.running
+    assert replacement.generation != old_host.generation
+
+    session.fire(shots=1)
+    _settle_panel_hosts(
+        presenter,
+        lambda: (
+            (publication := panel.port.presented_publication()) is not None
+            and publication.event_ref.generation == replacement.generation
+        ),
+    )
+    assert panel.port.last_error is None
+    assert not any(
+        "another signal generation" in text
+        for _severity, text in presenter.view.status
+    )
 
 
 def _wait_for_panel_save(presenter, path: Path) -> None:

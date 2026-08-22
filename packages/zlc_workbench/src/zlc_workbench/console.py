@@ -4404,7 +4404,18 @@ class ConsolePresenter:
         for binding in tuple(self.logic.values()):
             if binding.host is not None:
                 try:
-                    binding.host.poll()
+                    # A cancelled Monitor may retire its Plane generation in
+                    # poll().  Keep that terminal acknowledgement behind any
+                    # already-admitted Panel projection from the same causal
+                    # run; otherwise its queued current_dataset(publication)
+                    # wakes up after the generation has disappeared.  The
+                    # plot is already travelling, so this delays only owner
+                    # bookkeeping, never camera cancellation or disarm.
+                    if not (
+                        binding.host.cancel_requested
+                        and self._generation_surface_busy(binding.host)
+                    ):
+                        binding.host.poll()
                 except Exception as error:
                     self._report(
                         f"{binding.node_id}: {_error_text(error)}",
@@ -4431,6 +4442,30 @@ class ConsolePresenter:
                 self._activate_candidate(binding, candidate)
         self._sync_task_takeover()
         self._refresh_console_projection()
+
+    def _generation_surface_busy(self, host: object) -> bool:
+        """Whether a Panel is still consuming this Host's causal generation."""
+
+        generation = host.generation
+        if generation is None:
+            return False
+        owner = host.instance_id
+        for panel in self.panels.values():
+            port = panel.port
+            if port is None or not port.surface_busy:
+                continue
+            for signal in port.front_signals:
+                publication = self.session.signal_plane.latest_publication(signal)
+                if publication is None:
+                    continue
+                roots = self.session.signal_plane.publication_roots(publication)
+                if any(
+                    root.stream_id.value == owner
+                    and root.generation == generation
+                    for root in roots
+                ):
+                    return True
+        return False
 
     @staticmethod
     def _observation_status(observed: object) -> str:
@@ -4671,6 +4706,17 @@ class ConsolePresenter:
         old_host = binding.host
         if old_host is not None:
             if old_host.running:
+                binding.pending = candidate
+                self._refresh_console_projection()
+                return True
+            # Beginning the replacement generation retires this run and its
+            # whole derived closure from the Plane.  A Panel projection that
+            # already reserved the old publication still has to materialize
+            # it there, so let only those causally-related surfaces finish
+            # before withdrawing the generation.  Manual Stop then Start had
+            # this drain interval naturally; Restart must provide the same
+            # lifecycle boundary without blanking or rebuilding the Panel.
+            if self._generation_surface_busy(old_host):
                 binding.pending = candidate
                 self._refresh_console_projection()
                 return True
