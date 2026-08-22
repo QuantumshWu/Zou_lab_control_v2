@@ -228,7 +228,7 @@ Node new chunk
 
 - 不重设计Calibration对外流程、主要artifact、默认raw policy或三帧report。
 - 允许不改变外部行为的dependency解耦、明确corruption修复和内存优化。
-- Calibration只产生与SLM无关的camera/readout artifact，UI和Task都不接受Science Context。SLM Feedback在同时拿到Calibration与Context后才做Target→camera注册，并为未观测site生成predicted BOX。Registration有alternate mapping时必须loud要求asymmetric spatial fiducial。
+- Calibration只产生与SLM无关的camera/readout artifact，UI和Task都不接受Science Context。SLM Feedback在同时拿到Calibration与Context后做Target X/Y→camera X/Y直接正向注册，并为未观测site生成predicted BOX；不枚举翻转、旋转或轴交换，规则对称grid不需fiducial。
 - BOX model持久化可观测site的dark sample count与sample variance；Feedback对predicted site使用最近已测dark baseline并加入保守spatial systematic variance，不伪造该site在Calibration中被采集过。
 - Scan正常完成、Stop或失败都默认restore pre-run device values。
 - SimulationWorld保持一个类和一个state owner，不拆层。

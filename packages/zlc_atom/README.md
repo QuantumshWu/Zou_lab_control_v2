@@ -184,21 +184,13 @@ The runtime has one direction of responsibility:
 For a manually controlled experiment, the notebook calls `resolve_pulse`,
 `sequencer.load`, and `sequencer.fire` around a pure camera measurement. For
 an automated experiment, `CalibrationTask.run()` owns that whole sequence and
-returns a saved calibration artifact. Without registration artifacts,
-Calibration discovers its site count and centers from acquired images and
-accepts no authored grid rows, columns, or site count. Optionally, one strict
-Science Context v2 registers its frozen Target as the full stable roster; there
-is no second Target input. Sites not captured in the calibration remain
-explicit predicted boxes instead of disappearing. One topology validator runs
-both when that SiteMap is created and when it is loaded, rechecking geometry,
-rounded BOX overlap/bounds and runner-up uniqueness. The mapping trusts the
-apparatus convention of positive Target x/y to camera x/y with no reflection,
-shear or axis swap. An incompletely observed x/y/180°-symmetric support, or
-another equally plausible alternate mapping, is refused until the Target has
-an asymmetric spatial fiducial. Calibration capture does not claim or command
-the SLM, so the experiment
-workflow must keep the selected Context command unchanged throughout capture;
-Feedback checks it again before starting. While hosted Calibration publishes
+returns a saved calibration artifact. Calibration discovers its site count and
+centers from acquired images and accepts no Target, Science Context, authored
+grid rows, columns, or site count. Feedback later combines that ordinary
+Calibration with its selected Science Context and directly maps positive Target
+X/Y to camera X/Y; flips, rotations and axis exchange are not considered.
+Missing weak sites become predicted boxes, so a regular symmetric grid needs
+no artificial fiducial. While hosted Calibration publishes
 only the current `capture_preview` for Monitor. When the loop finishes it
 computes one result, writes one plain JSON, and passes that same result to
 `zlc_plot` for the six reports. Workbench neither renders nor opens those files,

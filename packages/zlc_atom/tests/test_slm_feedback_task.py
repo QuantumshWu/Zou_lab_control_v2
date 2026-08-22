@@ -774,85 +774,36 @@ def test_registration_refuses_colliding_predicted_site_boxes() -> None:
         )
 
 
-def test_unresolved_regular_grid_requires_an_asymmetric_fiducial() -> None:
-    target = np.zeros((20, 20), dtype=np.float32)
-    target[np.ix_((4, 10, 16), (3, 9, 15))] = 1.0
-    centers = np.asarray(
-        [(15.0 + 10.0 * column, 15.0 + 10.0 * row)
-         for row in range(3) for column in range(3)]
-    )
+def test_regular_nine_by_nine_grid_registers_directly_with_one_missing_site() -> None:
+    coordinates = np.arange(3, 30, 3)
+    target = np.zeros((33, 33), dtype=np.float32)
+    target[np.ix_(coordinates, coordinates)] = 1.0
+    rows, columns = np.nonzero(target)
+    centers = np.column_stack((10.0 + 2.0 * columns, 12.0 + 2.0 * rows))
+    missing = 40
     detected = SiteMap(
-        tuple(f"site_{index}" for index in range(8)),
-        np.delete(centers, 4, axis=0),
-        np.ones(8, dtype=bool),
-        np.ones(8),
+        tuple(f"site_{index}" for index in range(80)),
+        np.delete(centers, missing, axis=0),
+        np.ones(80, dtype=bool),
+        np.ones(80),
     )
-    with pytest.raises(ValueError, match="asymmetric spatial fiducial"):
-        _register_target_sites(
-            detected,
-            target,
-            {"science_context_path": "c", "command_receipt": {}},
-            frame_shape=(64, 64),
-            measurement_radius=0,
-        )
-    shifted = np.zeros((12, 12), dtype=np.float32)
-    shifted[6, (2, 3, 4, 6)] = 1.0
-    shifted_detected = SiteMap(
-        ("a", "b", "c"),
-        np.asarray(((10.0, 20.0), (20.0, 20.0), (30.0, 20.0))),
-        np.ones(3, dtype=bool),
-        np.ones(3),
+
+    registered = _register_target_sites(
+        detected,
+        target,
+        {"science_context_path": "c", "command_receipt": {}},
+        frame_shape=(80, 80),
+        measurement_radius=0,
     )
-    with pytest.raises(ValueError, match="ambiguous.*fiducial"):
-        _register_target_sites(
-            shifted_detected,
-            shifted,
-            {"science_context_path": "c", "command_receipt": {}},
-            frame_shape=(64, 64),
-            measurement_radius=0,
-        )
-    wrong_loaded = SiteMap(
-        tuple(f"site_{index:04d}" for index in range(4)),
-        np.asarray(((18.0, 18.0), (18.0, 22.0), (54.0, 62.0), (50.4, 65.6))),
-        np.asarray((True, True, True, False)),
-        np.ones(4),
-        topology={
-            "kind": "slm_target_registration",
-            "version": 1,
-            "target_support_yx": [[2, 2], [3, 2], [12, 12], [13, 11]],
-            "target_site_intensity": [1.0] * 4,
-            "observed_sites": [True, True, True, False],
-            "affine_target_xy_to_image_xy": [
-                [3.6, 0.4], [0.0, 4.0], [10.8, 9.2]
-            ],
-            "provenance": {
-                "science_context_path": "c",
-                "command_receipt": {},
-            },
-        },
+    support, _provenance = validate_target_registration(
+        registered,
+        frame_shape=(80, 80),
+        box_half_width=0,
     )
-    with pytest.raises(ValueError, match="ambiguous.*fiducial"):
-        validate_target_registration(
-            wrong_loaded, frame_shape=(80, 80), box_half_width=0
-        )
-    support_yx = np.asarray(((2, 2), (3, 2), (12, 12), (13, 11)))
-    two_dimensional = np.zeros((16, 16), dtype=np.float32)
-    two_dimensional[support_yx[:, 0], support_yx[:, 1]] = 1.0
-    camera_xy = 10.0 + 4.0 * support_yx[:, ::-1]
-    two_dimensional_detected = SiteMap(
-        ("a", "b", "c"),
-        np.delete(camera_xy, 2, axis=0),
-        np.ones(3, dtype=bool),
-        np.ones(3),
-    )
-    with pytest.raises(ValueError, match="ambiguous.*fiducial"):
-        _register_target_sites(
-            two_dimensional_detected,
-            two_dimensional,
-            {"science_context_path": "c", "command_receipt": {}},
-            frame_shape=(80, 80),
-            measurement_radius=0,
-        )
+
+    assert len(support) == 81
+    assert np.flatnonzero(~registered.valid_sites).tolist() == [missing]
+    np.testing.assert_allclose(registered.centers_xy[missing], centers[missing])
 
 
 def test_sparse_geometry_refuses_a_large_global_shear(
@@ -1476,10 +1427,7 @@ def test_virtual_feedback_runs_repeated_real_qcmos_candidates_and_restores(
     try:
         target = preset_grid(slm.shape_yx, (5, 7))
         support = np.argwhere(target > 0.0)
-        row, column = support[0]
         target = np.array(target, copy=True)
-        target[row, column] = 0.0
-        target[row - 2, column + 3] = 1.0  # asymmetric spatial fiducial
         weak_row, weak_column = support[17]
         target[weak_row, weak_column] = 0.1
         pattern, _metadata = solve_phase(

@@ -2275,7 +2275,6 @@ def validate_target_registration(
     *,
     frame_shape: tuple[int, int],
     box_half_width: int,
-    _check_uniqueness: bool = True,
 ) -> tuple[np.ndarray, Mapping[str, Any]]:
     """Validate and return one registered Target roster in stable site order."""
 
@@ -2348,26 +2347,6 @@ def validate_target_registration(
     )
     if int(np.sum(observed)) < target_rank + 1:
         raise ValueError("too few observed sites span the registered Target geometry")
-    if not np.all(observed):
-        rows, columns = support.T
-        points = {tuple(point) for point in target_xy.tolist()}
-        reflected_x = np.column_stack(
-            (np.min(columns) + np.max(columns) - columns, rows)
-        )
-        reflected_y = np.column_stack(
-            (columns, np.min(rows) + np.max(rows) - rows)
-        )
-        reflected_xy = np.column_stack((reflected_x[:, 0], reflected_y[:, 1]))
-        if any(
-            not np.array_equal(reflected, target_xy)
-            and {tuple(point) for point in reflected.tolist()} == points
-            for reflected in (reflected_x, reflected_y, reflected_xy)
-        ):
-            raise ValueError(
-                "unresolved symmetric Target registration needs an asymmetric "
-                "spatial fiducial or trusted registered calibration"
-            )
-
     measured = centers[observed]
     residuals = np.linalg.norm(predicted[observed] - measured, axis=1)
     if len(measured) > 1:
@@ -2447,97 +2426,6 @@ def validate_target_registration(
         overlaps[np.diag_indices_from(overlaps)] = False
         if np.any(overlaps):
             raise ValueError("registered Target BOX windows overlap in camera pixels")
-    if _check_uniqueness and len(measured) < len(support):
-        initial_cost = np.sum(
-            (
-                normalized_target[:, np.newaxis, :]
-                - normalized_measured[np.newaxis, :, :]
-            )
-            ** 2,
-            axis=2,
-        )
-        observed_indices = np.flatnonzero(observed)
-        primary = set(zip(observed_indices.tolist(), range(len(measured))))
-        for forbidden_target, forbidden_measured in primary:
-            alternate_cost = np.array(initial_cost, copy=True)
-            alternate_cost[forbidden_target, forbidden_measured] = np.inf
-            try:
-                alternate_target, alternate_measured = linear_sum_assignment(
-                    alternate_cost
-                )
-            except ValueError:
-                continue
-            alternate_affine = None
-            for _iteration in range(6):
-                alternate_design = design[alternate_target]
-                if np.linalg.matrix_rank(alternate_design) < target_rank + 1:
-                    alternate_affine = None
-                    break
-                alternate_affine, *_unused = np.linalg.lstsq(
-                    alternate_design, measured[alternate_measured], rcond=None
-                )
-                alternate_prediction = design @ alternate_affine
-                alternate_cost = np.sum(
-                    (
-                        alternate_prediction[:, np.newaxis, :]
-                        - measured[np.newaxis, :, :]
-                    )
-                    ** 2,
-                    axis=2,
-                )
-                alternate_cost[forbidden_target, forbidden_measured] = np.inf
-                try:
-                    updated_target, updated_measured = linear_sum_assignment(
-                        alternate_cost
-                    )
-                except ValueError:
-                    alternate_affine = None
-                    break
-                if np.array_equal(updated_target, alternate_target) and np.array_equal(
-                    updated_measured, alternate_measured
-                ):
-                    break
-                alternate_target, alternate_measured = (
-                    updated_target, updated_measured
-                )
-            if alternate_affine is None:
-                continue
-            alternate_affine, *_unused = np.linalg.lstsq(
-                design[alternate_target], measured[alternate_measured], rcond=None
-            )
-            alternate_prediction = design @ alternate_affine
-            alternate_observed = np.zeros(len(support), dtype=bool)
-            alternate_observed[alternate_target] = True
-            alternate_centers = np.array(alternate_prediction, copy=True)
-            alternate_centers[alternate_target] = measured[alternate_measured]
-            alternate_topology = dict(topology)
-            alternate_topology["observed_sites"] = alternate_observed.tolist()
-            alternate_topology[
-                "affine_target_xy_to_image_xy"
-            ] = alternate_affine.tolist()
-            alternate_site_map = replace(
-                site_map,
-                centers_xy=alternate_centers,
-                valid_sites=alternate_observed,
-                topology=alternate_topology,
-            )
-            try:
-                validate_target_registration(
-                    alternate_site_map,
-                    frame_shape=shape,
-                    box_half_width=radius,
-                    _check_uniqueness=False,
-                )
-            except (TypeError, ValueError):
-                continue
-            alternate = set(
-                zip(alternate_target.tolist(), alternate_measured.tolist())
-            )
-            if alternate != primary:
-                raise ValueError(
-                    "Calibration target registration is ambiguous; add an "
-                    "asymmetric spatial fiducial or trusted registered calibration"
-                )
     return _immutable_array(support, "<i8"), provenance
 
 
