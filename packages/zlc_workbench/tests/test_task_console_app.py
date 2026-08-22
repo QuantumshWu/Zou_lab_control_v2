@@ -369,11 +369,17 @@ def test_formal_console_close_keeps_qt_turning_until_every_owner_retires(
         warnings=(),
     )
     host = SimpleNamespace()
+    host.instance_id = node_id
+    host.generation = None
+    host.cancel_requested = False
     host.running = True
     host.observation = observation
     host.dataset_output_declarations = ()
     host.published_signals = lambda: ()
-    host.cancel = lambda _reason: cancelled.append(True)
+    host.cancel = lambda _reason: (
+        setattr(host, "cancel_requested", True),
+        cancelled.append(True),
+    )[-1]
 
     def poll() -> None:
         polls.append(True)

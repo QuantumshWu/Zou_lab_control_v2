@@ -68,10 +68,10 @@ def test_offscreen_semantic_combos_use_unique_labeled_choices() -> None:
 def test_offscreen_semantic_kind_combo_offers_only_usable_kinds() -> None:
     """The kind combo lists exactly the kinds that can be switched to.
 
-    An editor never shows an option that cannot be used.  A scalar series has
-    no non-repeat facet axis left, so FacetGrid is not offered merely because
-    repeats exist.  An image likewise cannot be drawn from a scalar point
-    table with no second dimension.
+    An editor never shows an option that cannot be used.  A repeated scalar
+    series can use its authored point coordinate as the facet and a histogram
+    as each cell; repeat remains reduced.  With only one repeat there is no
+    distribution cell, and an image still needs a second dimension.
     """
 
     try:
@@ -84,7 +84,7 @@ def test_offscreen_semantic_kind_combo_offers_only_usable_kinds() -> None:
     try:
         panel = Qt5ParameterPanel(session.describe_display())
         editor = panel.semantic_editor("kind")
-        assert editor.findData(FacetGridPlot.kind) < 0
+        assert editor.findData(FacetGridPlot.kind) >= 0
     finally:
         if panel is not None:
             panel.deleteLater()

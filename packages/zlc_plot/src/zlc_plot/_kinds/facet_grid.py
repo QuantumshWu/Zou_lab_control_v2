@@ -212,7 +212,20 @@ def default_spec(schema: Any) -> FacetGridPlot | None:
             if len(live) >= 3:
                 return FacetGridPlot(AxisRef.point_dimension(live[0]), heatmap)
             return None
-        cell = curve_default_spec(schema)
+        # A scalar measured repeatedly at authored point coordinates is a
+        # distribution per point.  A curve would consume that point axis and
+        # leave only repeat, which must not become the automatic facet.  The
+        # histogram cell consumes values instead, leaving the authored point
+        # coordinate as the honest facet (and also seeds persisted explicit
+        # point-facet Histogram panels on reopen).
+        cell = (
+            HistogramPlot()
+            if not live_data_axes
+            and not live
+            and schema.point_table.columns
+            and schema.repeat_axis.size > 1
+            else curve_default_spec(schema)
+        )
     if cell is None:
         return None
     facet = _facet_axis(schema, cell)

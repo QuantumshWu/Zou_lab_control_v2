@@ -2839,6 +2839,8 @@ def test_a_running_task_freezes_logic_identity_but_not_panels(
 
     class TaskHost:
         def __init__(self) -> None:
+            self.instance_id = "calibration"
+            self.generation = "calibration-test-generation"
             self.dataset_output_declarations = ()
             self.running = False
             self.terminal = False
@@ -2846,6 +2848,10 @@ def test_a_running_task_freezes_logic_identity_but_not_panels(
             self.cancelled = False
             self.fail = False
             self.observation = LogicNodeObservation(False, False, "starting")
+
+        @property
+        def cancel_requested(self) -> bool:
+            return self.cancelled
 
         def start(self) -> None:
             self.cancelled = False
