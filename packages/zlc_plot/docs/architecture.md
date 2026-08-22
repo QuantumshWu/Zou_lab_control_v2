@@ -270,7 +270,7 @@ robust losses and covariance, without a full meshgrid or dense Jacobian. Custom
 Image models remain on the general expansion/solver path unless they provide
 their own specialization.
 
-需要history的live fit/selection-derived输出在契约中显式声明，source primary index才由Runtime indexed-derived Dataset连续保存；每个index是value或invalid，Plot不建立自己的gap/history lane。Surface host只保持一个active complete pair和一个latest完整输入；busy时Board不排第二张完整frame，只保留Plane latest并在completion wake后stage。同一个Session-owned serial analysis executor依次prepare/solve，render worker再以短commit同时画data@N、fit@N、capture并promote。Raster worker用自己的Condition等待active deadline；超过1秒时不依赖successor到达即取消、loud发布invalid并释放latest。普通Monitor（包括Occupancy）仍是latest cycle；axis fate/window只投影已声明history的同一Dataset。
+需要history的live fit/selection-derived输出先在契约中声明能力，再由真实window consumer取得lease；Runtime只从lease当时的current event开始连续保存source primary index，每个lease区间内的index是value或invalid，Plot不建立另一条gap/history lane。Surface host只保持一个active complete pair和一个latest完整输入；busy时Board不排第二张完整frame，只保留Plane latest并在completion wake后stage。同一个Session-owned serial analysis executor依次prepare/solve，render worker再以短commit同时画data@N、fit@N、capture并promote。Raster worker用自己的Condition等待active deadline；超过1秒时不依赖successor到达即取消、loud发布invalid并释放latest。普通Monitor（包括Occupancy）仍是latest cycle；无lease不记录历史，最后一个consumer关闭即释放Runtime buffer。
 
 Live data fit has two deliberately distinct completion boundaries. Once the
 exact solve for source N is accepted, its `FitEvent` may wake data consumers

@@ -8,6 +8,7 @@ from .dataset_output import (
     LiveDatasetOutput,
 )
 from .plane import (
+    IndexedHistoryLease,
     SignalDataPlane,
     SignalDescription,
     SignalPublication,
@@ -34,6 +35,7 @@ __all__ = (
     "DatasetCoverage",
     "DatasetOutputDeclaration",
     "HarmonicClock",
+    "IndexedHistoryLease",
     "LiveDatasetOutput",
     "MonitorCoverage",
     "SurfaceBatchArbiter",

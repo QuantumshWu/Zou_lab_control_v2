@@ -140,7 +140,7 @@ session.set_size("2x4")
 
 `session.fit_models` 与 `plot_host.fit_models()` 只返回当前 plot 语义和坐标单位都兼容的模型，并把该语义的默认模型排在第一位。Curve/Rolling 提供 Lorentzian、Gaussian with offset、symmetric Lorentzian doublet、damped sine 和 exponential decay；Histogram 提供 bimodal 与 single Gaussian；Image 仅在 x/y 坐标量纲兼容时提供 radial Gaussian center；PulseTimeline 不伪造可用的数值 fit。
 
-Live fit 的唯一自动触发源是宿主的通用 indexed-derived signal。每个 Measurement primary index 都在同一个普通 Dataset 中有 value 或 invalid cell；`display_interval`只控制 Surface deadline。Host 只保留一个 active pair 和一个 latest 完整输入，中间输入不排 FIFO；现有 Raster worker 的 active deadline 超过 1 秒会 loud 发布 invalid、取消该 solve 并继续 latest。任何 window/history 按 source index 连续，cadence skip 与 solver failure 都显示为 invalid/NaN，但只有后者是错误。主 Panel 的 commit 仍把 `fit@N` 与 `data@N` 原子画进同一 front。
+Live fit 的唯一自动触发源是宿主的通用 indexed-derived signal。只有真实Rolling/Histogram等history consumer取得window lease后，Runtime才从当时的current event开始记录；lease区间内每个Measurement primary index都在同一个普通Dataset中有value或invalid cell，之前的shot不回填。`display_interval`只控制Surface deadline。Host只保留一个active pair和一个latest完整输入，中间输入不排FIFO；现有Raster worker的active deadline超过1秒会loud发布invalid、取消该solve并继续latest。任何window/history按lease内source index连续，cadence skip与solver failure都显示为invalid/NaN，但只有后者是错误。主Panel的commit仍把`data@N + fit@N`原子画进同一front。
 
 Rolling 的静态快照也保留 R 轴的逐 shot 历史种子，因此 static 与 live 共用同一
 projection 语义；Runtime以严格递增revision提交新快照。Notebook拖拽候选由

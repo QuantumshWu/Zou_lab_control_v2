@@ -53,9 +53,11 @@ all use the accepted canonical full Dataset for that publication. Event chunks
 remain internal to acquisition and exact processors. Scope/reduction/fate only
 change how the canonical Dataset is drawn; they never switch the data source.
 Ordinary Monitor signals, including Occupancy results, remain latest-event
-views and keep the camera cycle's frame geometry. Outputs that explicitly
-declare source-index history expose the same Runtime-owned ordinary Dataset to
-every Plot; generic
+views and keep the camera cycle's frame geometry. A capable derived output
+exposes a Runtime-owned source-index Dataset only while a panel's generic
+fate/window target holds a bounded history lease. Recording starts at that
+panel's current event, never backfills earlier shots, and stops when the last
+such panel closes; generic
 primary-index fate/window chooses latest or history and every skipped/failed
 source index remains invalid rather than disappearing. Canonical assembly and companion
 projection run on the board-owned presentation worker at panel cadence, not in
@@ -65,8 +67,14 @@ the Qt owner callback.
 When a same-shot group is still rendering, Workbench does not enqueue another
 full frame; it keeps admission debt and stages Plane latest on completion. The
 Runtime indexed Dataset, not Workbench, preserves every source primary index and
-its validity. Processor/surface completion wakes spend already-due work without
+its validity during that lease. Processor/surface completion wakes spend already-due work without
 waiting for another interval.
+
+A standing Plot host receives both the complete coalescing-safe target and the
+fields authored by the current edit; new/replacement/save hosts need only the
+complete PanelState. This distinction lets Plot's one transition owner clear
+Fixed color bounds when Tight/Normal is selected and prevents a window edit from
+asking Runtime to rematerialize a publication whose generation has retired.
 
 Plot hosts are the native event authority for committed Area, viewport,
 coordinate threshold and facet focus. Their immutable event is queued to the

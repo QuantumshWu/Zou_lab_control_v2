@@ -11,10 +11,12 @@ Exact scientific processors consume the immutable event; every display
 consumer sees the same publication's canonical full geometry through
 `current_dataset()`, with unwritten cells invalid. Ordinary Monitor outputs,
 including Processor outputs, have no finite canonical extent and retain only
-their latest event. A display-derived output must explicitly declare
-`index_by_source` before Runtime exposes a byte-bounded ordinary Dataset over a
-neutral `primary-index`; missing computations are invalid cells and bounded
-window materialization is independent of run length. Display
+their latest event. `index_by_source` declares only that a display-derived
+output is capable of history. Runtime exposes a byte-bounded ordinary Dataset
+over a neutral `primary-index` only while a consumer holds a window lease;
+retention begins at the current event, uses the largest active window, and is
+dropped with the last lease. Missing computations inside that interval are
+invalid cells and bounded window materialization is independent of run length. Display
 materialization is presentation-paced, cached, and performed off the UI owner;
 `freeze()` only reads committed state and never calls plugin science or a
 plugin materializer.
@@ -22,7 +24,8 @@ plugin materializer.
 Presentation cadence is a Surface deadline, not a Dataset-index filter. A busy
 same-shot group does not enqueue another full frame; `BoardScheduler` records
 admission debt and stages Plane latest on the processor/surface completion wake.
-Runtime accounts every intervening primary index as valid or invalid. Completion
+During an active history lease, Runtime accounts every intervening primary
+index as valid or invalid. Completion
 wakes are coalesced into one owner turn and do not advance the display clock.
 
 `seal_committed()` closes that same run truth as complete or explicitly

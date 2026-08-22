@@ -1311,6 +1311,7 @@ class RasterPlotHost:
         data: "PlotInput | object" = _UNSET,
         semantic: Mapping[str, object] | None = None,
         parameters: Mapping[str, object] | None = None,
+        parameter_updates: Mapping[str, object] | None = None,
         size: str | None = None,
         image_overlay: "ImagePointOverlay | None | object" = _UNSET,
         classifier_thresholds: object = _UNSET,
@@ -1320,11 +1321,19 @@ class RasterPlotHost:
         fit: Mapping[str, object] | None | object = _UNSET,
         fit_live: bool = True,
     ) -> Future[RasterOperation["DisplayDescription"]]:
-        """Submit one complete desired plot target as one raster operation."""
+        """Submit one complete desired plot target as one raster operation.
+
+        ``parameter_updates`` identifies the fields authored in this
+        transaction while ``parameters`` remains the coalescing-safe complete
+        target. Plot, not the embedder, resolves transition-generated values.
+        """
 
         configuration = {
             "semantic": None if semantic is None else dict(semantic),
             "parameters": None if parameters is None else dict(parameters),
+            "parameter_updates": (
+                None if parameter_updates is None else dict(parameter_updates)
+            ),
             "size": size,
         }
         if data is not _UNSET:

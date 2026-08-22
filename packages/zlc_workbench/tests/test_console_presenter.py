@@ -1039,6 +1039,71 @@ def test_plot_materialized_fixed_limits_become_the_panel_state(
     assert binding.state.display["color_min"] is not None
     assert binding.state.display["color_max"] is not None
 
+    natural = _operation_value(binding.host.resolved_color_limits())
+    huge = float(natural.high) + max(1.0, abs(float(natural.high))) * 1000.0
+    for mode in ("tight", "normal"):
+        assert presenter.update_panel_state(
+            binding.panel_id,
+            {
+                "display": {
+                    "relim_mode": "fixed",
+                    "color_min": float(natural.low),
+                    "color_max": huge,
+                }
+            },
+        )
+        _settle_panel_hosts(presenter, lambda: binding.configuration is None)
+        fixed = _operation_value(binding.host.resolved_color_limits())
+        assert float(fixed.high) == huge
+
+        assert presenter.update_panel_state(
+            binding.panel_id,
+            {"display": {"relim_mode": mode}},
+        )
+        _settle_panel_hosts(presenter, lambda: binding.configuration is None)
+        assert binding.state.display["relim_mode"] == mode
+        assert binding.state.display["color_min"] is None
+        assert binding.state.display["color_max"] is None
+        automatic = _operation_value(binding.host.resolved_color_limits())
+        assert float(automatic.high) < huge
+
+    colormap = next(
+        entry
+        for entry in binding.parameter_surface["display"]
+        if entry["key"] == "colormap"
+    )
+    alternate = next(
+        value
+        for _label, value in colormap["choices"]
+        if value != binding.state.display["colormap"]
+    )
+    assert presenter.update_panel_state(
+        binding.panel_id,
+        {
+            "display": {
+                "relim_mode": "fixed",
+                "color_min": float(natural.low),
+                "color_max": huge,
+            }
+        },
+    )
+    _settle_panel_hosts(presenter, lambda: binding.configuration is None)
+    # Two coalesced edits: the complete target keeps the first edit while the
+    # second edit's delta remains the authority for Fixed -> Tight cleanup.
+    assert presenter.update_panel_state(
+        binding.panel_id,
+        {"display": {"colormap": alternate}},
+    )
+    assert presenter.update_panel_state(
+        binding.panel_id,
+        {"display": {"relim_mode": "tight"}},
+    )
+    _settle_panel_hosts(presenter, lambda: binding.configuration is None)
+    assert binding.state.display["colormap"] == alternate
+    assert binding.state.display["relim_mode"] == "tight"
+    assert binding.state.display["color_min"] is None
+    assert binding.state.display["color_max"] is None
+
 
 def test_selector_interaction_does_not_disconnect_panel_signals(
     presenter, session
@@ -1209,6 +1274,11 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
     )
     fit_publication = session.signal_plane.latest_publication(fit_signal)
     assert fit_publication is not None
+    before_history = session.signal_plane.current_dataset(fit_signal)
+    assert all(
+        str(column.coordinate_id) != "zlc_data.primary-index"
+        for column in before_history.block.schema.point_table.columns
+    )
     accepted = main.host._session._accepted_fit
     assert accepted is not None and accepted.selection is not None
     assert accepted.selection.selector_kind is SelectorKind.AREA
@@ -1226,6 +1296,7 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
             and rolling.port.presented_publication() is not None
         ),
     )
+    assert rolling.history_lease is not None
 
     original_fit = FitEngine.fit
     fail_once = [True]
@@ -1327,8 +1398,9 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
     assert np.isfinite(plotted[[previous_valid, recovered_index]]).all()
     assert np.isnan(plotted[previous_valid + 1 : recovered_index]).all()
 
-    # A generic window/fate edit rematerializes the SAME source publication;
-    # it neither waits for another measurement nor invents a local trace.
+    # Runtime demand follows the window.  The mounted Plot may still reproject
+    # history it already owns; it never asks Runtime to resurrect an old
+    # publication, and the cache disappears with this consumer.
     shown_before_edit = rolling.port.presented_publication()
     assert presenter.update_panel_state(
         rolling.panel_id,
@@ -1375,6 +1447,162 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
             and rolling.host._session._payload.source_revisions == revisions
         ),
     )
+    lease = rolling.history_lease
+    presenter.remove_panel(rolling.panel_id)
+    assert lease is not None and lease.closed
+    latest_only = session.signal_plane.current_dataset(fit_signal)
+    assert all(
+        str(column.coordinate_id) != "zlc_data.primary-index"
+        for column in latest_only.block.schema.point_table.columns
+    )
+
+
+def test_roi_histogram_window_growth_waits_for_current_signal_generation(
+    presenter,
+    session,
+) -> None:
+    """A display edit never rematerializes a retired ROI publication."""
+
+    from zlc_workbench.logic import stable_signal_key
+
+    camera_id = presenter.add_logic(
+        "camera_measurement",
+        node_id="roi-monitor",
+        values={
+            "exposure_seconds": 0.002,
+            "repeat": 0,
+            "frames_per_cycle": 1,
+        },
+        device_keys={"camera": "camera"},
+        open_editor=False,
+    )
+    session.load_pulse(PULSE_NAME)
+    assert presenter.start_logic(camera_id)
+    camera_signal = stable_signal_key(camera_id, "frames")
+    deadline = time.monotonic() + 10.0
+    camera_publication = None
+    while camera_publication is None and time.monotonic() < deadline:
+        session.fire(shots=1)
+        presenter.beat()
+        camera_publication = session.signal_plane.latest_publication(camera_signal)
+        time.sleep(0.005)
+    assert camera_publication is not None
+
+    image = presenter.add_panel(
+        camera_signal,
+        camera_publication.value(camera_signal).snapshot,
+        kind="image",
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: image.host is not None and image.bridge is not None,
+    )
+    presenter.set_deriving(True)
+    _commit_area(image.host, lower_fraction=0.35, upper_fraction=0.65)
+    presenter.commit_surfaces()
+    roi_signal = f"@logic/{image.panel_id}/roi_frame"
+    _settle_panel_hosts(
+        presenter,
+        lambda: session.signal_plane.latest_publication(roi_signal) is not None,
+    )
+    first_roi = session.signal_plane.latest_publication(roi_signal)
+    assert first_roi is not None
+    for _index in range(3):
+        previous_roi = session.signal_plane.latest_publication(roi_signal)
+        assert previous_roi is not None
+        session.fire(shots=1)
+        _settle_panel_hosts(
+            presenter,
+            lambda: (
+                (candidate := session.signal_plane.latest_publication(roi_signal))
+                is not None
+                and candidate.event_ref != previous_roi.event_ref
+            ),
+        )
+    first_roi = session.signal_plane.latest_publication(roi_signal)
+    assert first_roi is not None
+    before_panel = session.signal_plane.current_dataset(roi_signal)
+    assert all(
+        str(column.coordinate_id) != "zlc_data.primary-index"
+        for column in before_panel.block.schema.point_table.columns
+    )
+
+    histogram = presenter.add_panel(
+        roi_signal,
+        first_roi.value(roi_signal).snapshot,
+        kind="histogram",
+        display={"window": 1},
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: (
+            histogram.host is not None
+            and histogram.port is not None
+            and histogram.port.presented_publication() is not None
+        ),
+    )
+    shown = histogram.port.presented_publication()
+    assert shown is not None
+    assert histogram.history_lease is not None
+    assert histogram.history_lease.window == 1
+    assert histogram.host._session._history == ()
+    retained = session.signal_plane.current_dataset(roi_signal)
+    primary = next(
+        column
+        for column in retained.block.schema.point_table.columns
+        if str(column.coordinate_id) == "zlc_data.primary-index"
+    )
+    assert len(tuple(dict.fromkeys(primary.values))) == 1
+
+    # Re-committing the Area intentionally replaces the selection-derived
+    # generation.  Pause prevents the board from swapping the Histogram host,
+    # leaving the exact old publication on screen while the new one exists.
+    presenter.set_paused(True)
+    _commit_area(image.host, lower_fraction=0.25, upper_fraction=0.75)
+    presenter.commit_surfaces()
+    deadline = time.monotonic() + 5.0
+    current_roi = first_roi
+    while (
+        current_roi.event_ref.generation == first_roi.event_ref.generation
+        and time.monotonic() < deadline
+    ):
+        session.signal_plane.freeze()
+        time.sleep(0.005)
+        candidate = session.signal_plane.latest_publication(roi_signal)
+        if candidate is not None:
+            current_roi = candidate
+    assert current_roi.event_ref.generation != first_roi.event_ref.generation
+    assert histogram.port.presented_publication() is shown
+
+    assert presenter.update_panel_state(
+        histogram.panel_id,
+        {"display": {"window": 100}},
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: (
+            histogram.configuration is None
+            and histogram.state.display["window"] == 100
+        ),
+    )
+    assert histogram.port.presented_publication() is shown
+    assert histogram.history_lease is not None
+    assert histogram.history_lease.window == 100
+    assert histogram.port.last_error is None
+    assert not any(
+        "another signal generation" in text
+        for _severity, text in presenter.view.status
+    )
+
+    presenter.set_paused(False)
+    _settle_panel_hosts(
+        presenter,
+        lambda: (
+            (accepted := histogram.port.presented_publication()) is not None
+            and accepted.event_ref.generation == current_roi.event_ref.generation
+        ),
+    )
+    assert histogram.port.last_error is None
 
 
 def test_committed_selection_outputs_enter_the_real_occupancy_input(

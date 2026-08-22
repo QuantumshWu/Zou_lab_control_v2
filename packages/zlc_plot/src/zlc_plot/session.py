@@ -1476,6 +1476,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         data: PlotInput | object = _UNSET,
         semantic: Mapping[str, object] | None = None,
         parameters: Mapping[str, object] | None = None,
+        parameter_updates: Mapping[str, object] | None = None,
         size: str | None = None,
         image_overlay: ImagePointOverlay | None | object = _UNSET,
         classifier_thresholds: object = _UNSET,
@@ -1485,7 +1486,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         fit: Mapping[str, object] | None | object = _UNSET,
         fit_live: bool = True,
     ) -> DisplayDescription:
-        """Apply one target once; an identical target does no work."""
+        """Apply one target once; an identical target does no work.
+
+        A complete parameter target may carry its current authored delta so
+        transition normalization stays exact even when queued targets coalesce.
+        """
 
         if selectors is not _UNSET:
             if isinstance(selectors, (str, bytes)):
@@ -1530,6 +1535,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._apply_configuration(
                     semantic=semantic,
                     parameters=parameters,
+                    parameter_updates=parameter_updates,
                     size=size,
                     image_overlay=image_overlay,
                     classifier_thresholds=threshold_target,
@@ -1690,6 +1696,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         *,
         semantic: Mapping[str, object] | None = None,
         parameters: Mapping[str, object] | None = None,
+        parameter_updates: Mapping[str, object] | None = None,
         size: str | None = None,
         image_overlay: ImagePointOverlay | None | object = _UNSET,
         classifier_thresholds: object = _UNSET,
@@ -1705,6 +1712,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             raise TypeError("semantic must be a mapping or None")
         if parameters is not None and not isinstance(parameters, Mapping):
             raise TypeError("parameters must be a mapping or None")
+        if parameter_updates is not None and not isinstance(
+            parameter_updates,
+            Mapping,
+        ):
+            raise TypeError("parameter_updates must be a mapping or None")
         semantic_values = {} if semantic is None else dict(semantic)
         display_values = {} if parameters is None else dict(parameters)
         with self._lock:
@@ -1731,6 +1743,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         else:
             self._set_configuration_values(
                 display_values,
+                authored_values=parameter_updates,
                 size=_UNSET if size is None else size,
                 image_overlay=image_overlay,
                 classifier_thresholds=classifier_thresholds,
@@ -1933,6 +1946,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         self,
         values: Mapping[str, object],
         *,
+        authored_values: Mapping[str, object] | None = None,
         size: str | object = _UNSET,
         image_overlay: ImagePointOverlay | None | object = _UNSET,
         classifier_thresholds: object = _UNSET,
@@ -1943,12 +1957,40 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             with self._lock:
                 self._assert_open()
                 prepared = self._parameter_schema.prepare_updates(values)
+                authored = (
+                    prepared
+                    if authored_values is None
+                    else self._parameter_schema.prepare_updates(authored_values)
+                )
                 authored_names = frozenset(
-                    name for name, value in prepared.items() if value is not None
+                    name for name, value in authored.items() if value is not None
                 )
                 previous = self.display_state
                 self._validate_projection_unit_updates(prepared)
                 self._materialize_fixed_limits(prepared, previous)
+                if authored_values is not None:
+                    transition_values = dict(authored)
+                    if transition_values.get("relim_mode") == "fixed":
+                        for low_name in self._parameter_schema.names:
+                            if not low_name.endswith("_min"):
+                                continue
+                            high_name = f"{low_name[:-4]}_max"
+                            if high_name not in self._parameter_schema:
+                                continue
+                            if transition_values.get(low_name) is None:
+                                transition_values[low_name] = prepared[low_name]
+                            if transition_values.get(high_name) is None:
+                                transition_values[high_name] = prepared[high_name]
+                    authored_candidate = self._parameter_schema._transition_prepared(
+                        previous.values,
+                        transition_values,
+                    )
+                    for name in self._parameter_schema.names:
+                        if (
+                            name in transition_values
+                            or authored_candidate[name] != previous[name]
+                        ):
+                            prepared[name] = authored_candidate[name]
                 self._prepare_value_unit_ranges(
                     prepared,
                     previous,

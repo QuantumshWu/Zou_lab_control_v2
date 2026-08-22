@@ -8,12 +8,13 @@ however, a newer source and its active descendants replace the previous
 component together. A slow Processor therefore cannot expose source revision N
 beside its own derived revision N-1.
 
-A Monitor retains only its current event unless its output contract explicitly
-requests source-index history.  Such a derived output inherits its source
-generation's primary index; Runtime can therefore materialize a bounded ordinary
-Dataset in which every source index is present and an uncomputed index is
-invalid.  Signals from different runs still advance independently; there is no
-cross-run global counter.
+A Monitor retains only its current event.  A capable derived output gains
+source-index history only while at least one consumer holds a bounded lease;
+retention begins at that lease's current event, follows the largest active
+window, and disappears with the last lease. Runtime can then materialize an
+ordinary Dataset in which every retained source index is present and an
+uncomputed index is invalid. Signals from different runs still advance
+independently; there is no cross-run global counter.
 """
 
 from __future__ import annotations
@@ -62,6 +63,7 @@ from .streams import (
 from zlc_data import canonical_text
 
 __all__ = [
+    "IndexedHistoryLease",
     "LatestProcessorControl",
     "SignalDataPlane",
     "SignalFront",
@@ -264,6 +266,62 @@ class SignalDescription:
         """Whether this signal is cut from another rather than acquired."""
 
         return self.source_name is not None
+
+
+class IndexedHistoryLease:
+    """One consumer's explicit demand for bounded source-index history.
+
+    The output declaration says history *can* be built.  This lease says a
+    current consumer actually needs it.  Release is idempotent; resizing never
+    fabricates events that were not retained under an earlier demand.
+    """
+
+    __slots__ = ("_closed", "_plane", "_signal_name", "_token", "_window")
+
+    def __init__(
+        self,
+        plane: "SignalDataPlane",
+        signal_name: str,
+        token: object,
+        window: int,
+    ) -> None:
+        self._plane = plane
+        self._signal_name = signal_name
+        self._token = token
+        self._window = window
+        self._closed = False
+
+    @property
+    def signal_name(self) -> str:
+        return self._signal_name
+
+    @property
+    def window(self) -> int:
+        return self._window
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def resize(self, window: int) -> None:
+        if self._closed:
+            raise RuntimeError("indexed history lease is closed")
+        selected = self._plane._resize_indexed_history_lease(
+            self._signal_name,
+            self._token,
+            window,
+        )
+        self._window = selected
+
+    def close(self) -> bool:
+        if self._closed:
+            return False
+        released = self._plane._release_indexed_history_lease(
+            self._signal_name,
+            self._token,
+        )
+        self._closed = True
+        return released
 
 
 @dataclass(frozen=True, eq=False)
@@ -892,6 +950,7 @@ class SignalDataPlane:
             tuple[SignalPublication, ...],
         ] = WeakKeyDictionary()
         self._states: dict[str, _GenerationState] = {}
+        self._indexed_history_demands: dict[str, dict[object, int]] = {}
         self._front_signals: frozenset[str] = frozenset()
         self._membership_changed = False
         self._closed = False
@@ -921,6 +980,179 @@ class SignalDataPlane:
                 self._publication_callbacks.discard(callback)
 
         return unsubscribe
+
+    @staticmethod
+    def _indexed_history_window(value: object) -> int:
+        if type(value) is not int or value <= 0:
+            raise TypeError("indexed history window must be a positive integer")
+        return value
+
+    def supports_indexed_history(self, signal_name: str) -> bool:
+        """Whether this signal's owner permits consumer-demanded history."""
+
+        name = canonical_text(signal_name, "signal name")
+        with self._lock:
+            state = self._state_for_signal_locked(name)
+            if state is None or state.retired:
+                return False
+            declaration = state.declarations.get(name)
+            return bool(
+                declaration is not None and declaration.index_by_source
+            )
+
+    def acquire_indexed_history(
+        self,
+        signal_name: str,
+        window: int,
+    ) -> IndexedHistoryLease:
+        """Start retaining this capable signal from its current event onward."""
+
+        name = canonical_text(signal_name, "signal name")
+        selected = self._indexed_history_window(window)
+        token = object()
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("signal data plane is closed")
+            state = self._state_for_signal_locked(name)
+            if state is None or state.retired:
+                raise LookupError(f"signal {name!r} is not retained")
+            declaration = state.declarations.get(name)
+            if declaration is None or not declaration.index_by_source:
+                raise ValueError(
+                    f"signal {name!r} does not declare source-index history"
+                )
+            demands = self._indexed_history_demands.setdefault(name, {})
+            demands[token] = selected
+            try:
+                self._refresh_indexed_history_locked(state, name)
+            except BaseException:
+                demands.pop(token, None)
+                if not demands:
+                    self._indexed_history_demands.pop(name, None)
+                self._refresh_indexed_history_locked(state, name)
+                raise
+        return IndexedHistoryLease(self, name, token, selected)
+
+    def _resize_indexed_history_lease(
+        self,
+        signal_name: str,
+        token: object,
+        window: int,
+    ) -> int:
+        selected = self._indexed_history_window(window)
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("signal data plane is closed")
+            demands = self._indexed_history_demands.get(signal_name)
+            if demands is None or token not in demands:
+                raise RuntimeError("indexed history lease is not active")
+            previous = demands[token]
+            demands[token] = selected
+            state = self._state_for_signal_locked(signal_name)
+            try:
+                if state is not None:
+                    self._refresh_indexed_history_locked(state, signal_name)
+            except BaseException:
+                demands[token] = previous
+                if state is not None:
+                    self._refresh_indexed_history_locked(state, signal_name)
+                raise
+        return selected
+
+    def _release_indexed_history_lease(
+        self,
+        signal_name: str,
+        token: object,
+    ) -> bool:
+        with self._lock:
+            demands = self._indexed_history_demands.get(signal_name)
+            if demands is None or token not in demands:
+                return False
+            previous = demands.pop(token)
+            if not demands:
+                self._indexed_history_demands.pop(signal_name, None)
+            state = self._state_for_signal_locked(signal_name)
+            try:
+                if state is not None:
+                    self._refresh_indexed_history_locked(state, signal_name)
+            except BaseException:
+                self._indexed_history_demands.setdefault(signal_name, {})[
+                    token
+                ] = previous
+                if state is not None:
+                    self._refresh_indexed_history_locked(state, signal_name)
+                raise
+            return True
+
+    def _indexed_history_demand_locked(self, signal_name: str) -> int | None:
+        demands = self._indexed_history_demands.get(signal_name)
+        return None if not demands else max(demands.values())
+
+    @staticmethod
+    def _drop_indexed_history_locked(
+        state: _GenerationState,
+        signal_name: str,
+    ) -> None:
+        state.indexed_event_schemas.pop(signal_name, None)
+        state.indexed_events.pop(signal_name, None)
+        state.indexed_event_values.pop(signal_name, None)
+        state.indexed_first_indices.pop(signal_name, None)
+        state.indexed_capacities.pop(signal_name, None)
+        state.indexed_materialized.pop(signal_name, None)
+
+    def _refresh_indexed_history_locked(
+        self,
+        state: _GenerationState,
+        signal_name: str,
+    ) -> None:
+        """Apply the active maximum demand without retaining older excess."""
+
+        demand = self._indexed_history_demand_locked(signal_name)
+        declaration = state.declarations.get(signal_name)
+        if (
+            demand is None
+            or declaration is None
+            or not declaration.index_by_source
+            or state.publication is None
+        ):
+            self._drop_indexed_history_locked(state, signal_name)
+            return
+        value = state.publication.value(signal_name)
+        if value is None or not isinstance(value.coverage, MonitorCoverage):
+            self._drop_indexed_history_locked(state, signal_name)
+            return
+        if value.primary_index is None:
+            raise RuntimeError("indexed signal lost its source primary index")
+        event = value.snapshot
+        event_schema = event.block.schema
+        previous_schema = state.indexed_event_schemas.get(signal_name)
+        if previous_schema is not None and previous_schema != event_schema:
+            raise ValueError(
+                "indexed Processor event schema changed inside one generation"
+            )
+        capacity = min(demand, _indexed_capacity(event))
+        primary_index = value.primary_index
+        sequence = state.publication.event_ref.sequence
+        indices = state.indexed_events.setdefault(signal_name, deque())
+        event_values = state.indexed_event_values.setdefault(signal_name, {})
+        if not indices or indices[-1] != primary_index:
+            if indices and primary_index < indices[-1]:
+                raise RuntimeError(
+                    "indexed Processor source primary index moved backwards"
+                )
+            indices.append(primary_index)
+        event_values[primary_index] = (sequence, event)
+        first_index = state.indexed_first_indices.get(
+            signal_name,
+            primary_index,
+        )
+        start = max(first_index, primary_index - capacity + 1)
+        while indices and indices[0] < start:
+            event_values.pop(indices.popleft(), None)
+        state.indexed_event_schemas[signal_name] = event_schema
+        state.indexed_first_indices[signal_name] = start
+        state.indexed_capacities[signal_name] = capacity
+        state.indexed_materialized.pop(signal_name, None)
 
     def set_front_signals(self, signal_names) -> None:
         """Set the connected continuous signal set whose front must be coherent."""
@@ -1386,10 +1618,12 @@ class SignalDataPlane:
                     generation=state.generation,
                     revision=sequence,
                 )
+                history_demand = self._indexed_history_demand_locked(qualified)
                 if (
                     source_publication is not None
                     and output.declaration.index_by_source
                     and isinstance(output.coverage, MonitorCoverage)
+                    and history_demand is not None
                 ):
                     event_schema = event.block.schema
                     previous_event_schema = state.indexed_event_schemas.get(qualified)
@@ -1409,7 +1643,8 @@ class SignalDataPlane:
                         qualified, primary_index
                     )
                     capacity = state.indexed_capacities.get(
-                        qualified, _indexed_capacity(event)
+                        qualified,
+                        min(history_demand, _indexed_capacity(event)),
                     )
                     indexed_updates[qualified] = (
                         event_schema,
@@ -1521,7 +1756,7 @@ class SignalDataPlane:
                 start = max(first_index, primary_index - capacity + 1)
                 while indices and indices[0] < start:
                     event_values.pop(indices.popleft(), None)
-                state.indexed_first_indices[qualified] = first_index
+                state.indexed_first_indices[qualified] = start
                 state.indexed_capacities[qualified] = capacity
                 state.indexed_materialized.pop(qualified, None)
             if source_publication is not None:
@@ -1559,7 +1794,11 @@ class SignalDataPlane:
         *,
         primary_window: int | None = None,
     ) -> OwnedSnapshot:
-        """Materialize one exact finite prefix or bounded indexed view."""
+        """Materialize one exact finite prefix or active bounded indexed view.
+
+        ``primary_window`` limits a lease-backed view; reading is never an
+        implicit subscription and therefore cannot create or backfill history.
+        """
 
         if primary_window is not None and (
             type(primary_window) is not int or primary_window <= 0
@@ -1604,6 +1843,10 @@ class SignalDataPlane:
                     else min(capacity, primary_window)
                 )
                 first_index = state.indexed_first_indices[name]
+                if value.primary_index < first_index:
+                    raise ValueError(
+                        "publication precedes retained indexed history"
+                    )
                 start = max(
                     first_index,
                     value.primary_index - retained + 1,
@@ -2509,6 +2752,7 @@ class SignalDataPlane:
             self._closed = True
             states = tuple(self._states.values())
             self._states.clear()
+            self._indexed_history_demands.clear()
             self._front_signals = frozenset()
             self._front = SignalFront({}, {})
             self._publication_parents.clear()

@@ -154,7 +154,11 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
         "test.value",
         index_by_source=True,
     )
-    latest_declaration = DatasetOutputDeclaration("latest", "test.latest")
+    latest_declaration = DatasetOutputDeclaration(
+        "latest",
+        "test.latest",
+        index_by_source=True,
+    )
 
     class Source:
         instance_id = "indexed-source"
@@ -201,6 +205,7 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
     plane = SignalDataPlane()
     wakes: list[int] = []
     unsubscribe = plane.subscribe_publications(lambda: wakes.append(1))
+    history = small_history = None
     try:
         plane.reserve(source)
         plane.commit_live(source, {"frame": _latest(source_declaration, 1.0)})
@@ -220,8 +225,33 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
             },
             source_publication=first,
         )
+        plane.commit_live(
+            source,
+            {"frame": _latest(source_declaration, 2.0)},
+        )
+        second = plane.latest_publication("indexed-source/frame")
+        assert second is not None
+        plane.commit_processor(
+            derived,
+            {
+                "value": _latest(derived_declaration, 22.0),
+                "latest": _latest(latest_declaration, 222.0),
+            },
+            source_publication=second,
+        )
+        second_derived = plane.latest_publication("indexed-derived/value")
+        assert second_derived is not None
+        before_demand = plane.current_dataset("indexed-derived/value")
+        assert before_demand.block.values.item() == 22.0
+        assert all(
+            str(column.coordinate_id) != "zlc_data.primary-index"
+            for column in before_demand.block.schema.point_table.columns
+        )
+        assert not plane._states[derived.instance_id].indexed_event_values
+        assert plane.supports_indexed_history("indexed-derived/value")
+        history = plane.acquire_indexed_history("indexed-derived/value", 4)
 
-        for revision in (2, 3, 4):
+        for revision in (3, 4):
             plane.commit_live(
                 source,
                 {"frame": _latest(source_declaration, float(revision))},
@@ -244,14 +274,14 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
             AxisId("zlc_data.primary-index")
         )
         assert source_index.role == PRIMARY_INDEX
-        assert source_index.values == (1, 2, 3, 4)
+        assert source_index.values == (2, 3, 4)
         np.testing.assert_allclose(
             snapshot.block.values.reshape(-1),
-            (11.0, 0.0, 0.0, 44.0),
+            (22.0, 0.0, 44.0),
         )
         np.testing.assert_array_equal(
             snapshot.expanded_validity().reshape(-1),
-            (True, False, False, True),
+            (True, False, True),
         )
         bounded = plane.current_dataset(
             "indexed-derived/value",
@@ -297,8 +327,32 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
             str(column.coordinate_id) != "zlc_data.primary-index"
             for column in latest.block.schema.point_table.columns
         )
-        assert len(wakes) == 7  # four source and three atomic derived publications
+        assert "indexed-derived/latest" not in plane._states[
+            derived.instance_id
+        ].indexed_event_values
+        small_history = plane.acquire_indexed_history("indexed-derived/value", 2)
+        assert history.close()
+        trimmed = plane.current_dataset("indexed-derived/value")
+        assert trimmed.block.schema.point_table.column(
+            AxisId("zlc_data.primary-index")
+        ).values == (3, 4)
+        with pytest.raises(ValueError, match="precedes retained"):
+            plane.current_dataset("indexed-derived/value", second_derived)
+        assert small_history.close()
+        released = plane.current_dataset("indexed-derived/value")
+        assert released.block.values.item() == 55.0
+        assert all(
+            str(column.coordinate_id) != "zlc_data.primary-index"
+            for column in released.block.schema.point_table.columns
+        )
+        state = plane._states[derived.instance_id]
+        assert not state.indexed_event_values
+        assert len(wakes) == 8  # four source and four atomic derived publications
     finally:
+        if history is not None:
+            history.close()
+        if small_history is not None:
+            small_history.close()
         unsubscribe()
         plane.close()
 
@@ -344,6 +398,7 @@ def test_indexed_history_commit_is_constant_and_window_reads_only_its_range(
     monkeypatch.setattr(plane_module, "deque", NoScanDeque)
     derived = Derived()
     plane = SignalDataPlane()
+    history = None
     materialized_event_counts: list[int] = []
     original_materialize = plane_module._materialize_indexed_dataset
 
@@ -380,6 +435,11 @@ def test_indexed_history_commit_is_constant_and_window_reads_only_its_range(
                 {"value": _latest(derived_declaration, float(revision))},
                 source_publication=publication,
             )
+            if revision == 1:
+                history = plane.acquire_indexed_history(
+                    "bounded-derived/value",
+                    100,
+                )
         snapshot = plane.current_dataset(
             "bounded-derived/value",
             primary_window=100,
@@ -388,8 +448,13 @@ def test_indexed_history_commit_is_constant_and_window_reads_only_its_range(
             AxisId("zlc_data.primary-index")
         )
         assert primary.values == tuple(range(9_901, 10_001))
+        state = plane._states[derived.instance_id]
+        assert state.indexed_capacities["bounded-derived/value"] == 100
+        assert len(state.indexed_events["bounded-derived/value"]) == 100
         assert materialized_event_counts == [100]
     finally:
+        if history is not None:
+            history.close()
         plane.close()
 
 

@@ -32,9 +32,10 @@ class DatasetOutputDeclaration:
     A Monitor normally means exactly what its producer publishes: the latest
     complete event.  Some display derivations (for example fit parameters used
     by a Rolling plot) instead need a bounded Dataset containing one cell for
-    every parent event.  Those outputs opt in with ``index_by_source``; Runtime
-    must never infer that extra scientific axis merely because an output came
-    from a Processor.
+    every parent event.  ``index_by_source`` only declares that capability;
+    Runtime retains nothing beyond latest until a real consumer acquires a
+    bounded history lease.  It must never infer that extra scientific axis
+    merely because an output came from a Processor.
     """
 
     name: str

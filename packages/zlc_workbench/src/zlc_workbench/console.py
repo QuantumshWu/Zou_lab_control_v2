@@ -29,7 +29,7 @@ from zlc_plot import (
 )
 from zlc_plot.primitives import ImageFrame
 from zlc_plot.ui import parameter_controls, parameter_controls_for_kind
-from zlc_runtime import selection_output_catalog
+from zlc_runtime import IndexedHistoryLease, selection_output_catalog
 from zlc_ui import FormFieldProps, FormSpec
 
 from .board import LiveBoard
@@ -150,6 +150,10 @@ class PanelBinding:
     state: PanelState
     host: Any = None
     port: PlotPanelPort | None = None
+    #: Runtime-owned source-index retention exists only while this panel asks
+    #: for a history window.  The lease, not the signal declaration, is the
+    #: resource owner.
+    history_lease: IndexedHistoryLease | None = None
     #: Edit deliberately keeps one frozen data revision until Refresh.  It is
     #: not panel configuration and therefore does not live in ``PanelState``.
     frozen_data: PanelFrozenData | None = None
@@ -653,7 +657,7 @@ class ConsolePresenter:
     def _make_panel_port(self, binding: PanelBinding) -> PlotPanelPort:
         """Wire one panel to the board through the single product path."""
 
-        return PlotPanelPort(
+        port = PlotPanelPort(
             binding.panel_id,
             binding.state.signal,
             display_interval_ms=binding.state.interval_ms,
@@ -677,6 +681,12 @@ class ConsolePresenter:
                 binding, operation
             ),
         )
+        try:
+            self._sync_panel_history(binding)
+        except BaseException:
+            port.close()
+            raise
+        return port
 
     def _presentation_snapshot(
         self,
@@ -722,6 +732,43 @@ class ConsolePresenter:
         if type(window) is int and window > 0:
             return window
         return None
+
+    @staticmethod
+    def _release_panel_history(binding: PanelBinding) -> None:
+        lease = binding.history_lease
+        binding.history_lease = None
+        if lease is not None:
+            lease.close()
+
+    def _sync_panel_history(
+        self,
+        binding: PanelBinding,
+        state: PanelState | None = None,
+    ) -> None:
+        """Make Runtime retention exactly match this panel's current demand."""
+
+        selected = binding.state if state is None else state
+        signal = str(selected.signal)
+        window = self._panel_primary_window(binding, selected)
+        capable = bool(
+            signal
+            and window is not None
+            and self.session.signal_plane.supports_indexed_history(signal)
+        )
+        lease = binding.history_lease
+        if not capable:
+            self._release_panel_history(binding)
+            return
+        assert window is not None
+        if lease is not None and lease.signal_name == signal:
+            if lease.window != window:
+                lease.resize(window)
+            return
+        self._release_panel_history(binding)
+        binding.history_lease = self.session.signal_plane.acquire_indexed_history(
+            signal,
+            window,
+        )
 
     def _project_panel_input(
         self,
@@ -940,6 +987,7 @@ class ConsolePresenter:
         data: object = _UNCHANGED,
         overlay: object = _UNCHANGED,
         viewport: object = _UNCHANGED,
+        display_updates: object = _UNCHANGED,
         present: bool = False,
         live: bool = True,
         restore_interaction: bool = False,
@@ -991,6 +1039,19 @@ class ConsolePresenter:
             live=live,
             restore_interaction=restore_interaction,
         )
+        if display_updates is not _UNCHANGED:
+            if not isinstance(display_updates, Mapping):
+                raise TypeError("display_updates must be a mapping")
+            # Keep the complete desired target so coalescing cannot lose an
+            # earlier edit, and separately identify this transaction's authored
+            # delta so Plot's transition owner can distinguish "switch away
+            # from Fixed" from an explicit request to keep numeric bounds.
+            # Treating the full PanelState as newly authored made Tight/Normal
+            # retain old fixed bounds until remount.
+            configuration["parameter_updates"] = self._declared_only(
+                display_updates,
+                surface.get("display", ()),
+            )
         if data is not _UNCHANGED:
             configuration["data"] = data
         pending = host.configure(**configuration)
@@ -1729,6 +1790,7 @@ class ConsolePresenter:
         else:
             if candidate.interval_ms != current.interval_ms and binding.port is not None:
                 binding.port.set_display_interval(candidate.interval_ms)
+            self._sync_panel_history(binding, candidate)
             if binding.host is None or binding.port is None:
                 binding.state = candidate
                 binding.parameter_surface = self._unbound_panel_parameters(candidate)
@@ -1738,34 +1800,12 @@ class ConsolePresenter:
             if plot_changed:
                 live_data: object = _UNCHANGED
                 editor_data: object = _UNCHANGED
-                if self._panel_primary_window(
-                    binding, candidate
-                ) != self._panel_primary_window(binding, current):
-                    publication = binding.display_publication
-                    value = self._publication_value(
-                        publication, candidate.signal
-                    )
-                    if publication is not None and value is not None:
-                        live_data = self._project_panel_input(
-                            binding,
-                            value,
-                            publication,
-                            None,
-                            state=candidate,
-                        )
-                    frozen = binding.frozen_data
-                    if frozen is not None:
-                        frozen_value = self._publication_value(
-                            frozen.publication, candidate.signal
-                        )
-                        if frozen_value is not None:
-                            editor_data = self._project_panel_input(
-                                binding,
-                                frozen_value,
-                                frozen.publication,
-                                frozen.front,
-                                state=candidate,
-                            )
+                # Both hosts already own the immutable Dataset they display. A
+                # history-window edit is a Plot projection over those bytes;
+                # Runtime's lease controls only what future publications retain.
+                # Asking Runtime to re-materialize ``display_publication`` here
+                # raced generation replacement and tried to resurrect retired
+                # ROI/Fit publications.
                 live_overlay: object = _UNCHANGED
                 editor_overlay: object = _UNCHANGED
                 if (
@@ -1787,6 +1827,7 @@ class ConsolePresenter:
                     state=candidate,
                     data=live_data,
                     overlay=live_overlay,
+                    display_updates=changes.get("display", _UNCHANGED),
                     present=True,
                 )
                 if binding.editor_host is not None:
@@ -1796,6 +1837,7 @@ class ConsolePresenter:
                         state=candidate,
                         data=editor_data,
                         overlay=editor_overlay,
+                        display_updates=changes.get("display", _UNCHANGED),
                     )
             binding.state = candidate
 
@@ -2705,6 +2747,7 @@ class ConsolePresenter:
     def _release_panel(self, binding: PanelBinding) -> None:
         """Let go of one panel's derivation and its plotting host."""
 
+        self._release_panel_history(binding)
         if binding.selections is not None:
             binding.selections.close()
         if binding.bridge is not None:
@@ -3001,10 +3044,7 @@ class ConsolePresenter:
                 binding.port = self._make_panel_port(binding)
         except Exception as error:
             for binding in panels:
-                if binding.host is not None:
-                    binding.host.close()
-                    binding.host = None
-                    binding.port = None
+                self._release_panel(binding)
             raise LayoutError(
                 f"cannot prepare the layout panels: {_error_text(error)}"
             ) from error

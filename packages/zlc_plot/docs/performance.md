@@ -248,10 +248,10 @@ The primary live camera-cycle contract is
 `(R=1, P=frames_per_cycle, camera_y, camera_x)`.  The frame identity is one
 `READOUT_EVENT` point column; both spatial axes are declared dense `data_dim`
 axes and the `ImagePlot` refers to them with `AxisRef.data(...)`. Every public
-live camera cycle keeps that fixed event geometry. Outputs that explicitly
-declare source-index history separately materialize a bounded ordinary Dataset
-over their source primary index; the Surface host never retains a FIFO of full
-camera frames.
+live camera cycle keeps that fixed event geometry. A capable derived output
+materializes a bounded ordinary Dataset over its source primary index only
+while a real window consumer holds a lease; before that it retains latest only.
+The Surface host never retains a FIFO of full camera frames.
 
 The comparison also covered flattened `P=H*W` plus `GridTopology`, but that is
 not the recommended camera representation.
