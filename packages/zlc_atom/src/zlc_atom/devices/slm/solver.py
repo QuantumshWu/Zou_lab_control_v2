@@ -1569,12 +1569,12 @@ def _command_receipt(value: object) -> dict[str, object]:
     missing = required - set(result)
     if missing:
         raise ValueError(f"SLM command receipt is missing {sorted(missing)!r}")
-    wavelength_policy = {"usb": True, "virtual": False}
+    wavelength_policy = {"dvi": True, "usb": True, "virtual": False}
     try:
         requires_wavelength = wavelength_policy[result["transport"]]
     except (KeyError, TypeError) as error:
         raise ValueError(
-            "SLM command receipt transport must be usb or virtual"
+            "SLM command receipt transport must be dvi, usb, or virtual"
         ) from error
     if result["outcome"] not in {"known-old", "known-new", "unknown"}:
         raise ValueError("SLM command receipt has an invalid outcome")
@@ -1590,7 +1590,7 @@ def _command_receipt(value: object) -> dict[str, object]:
     wavelength = result["wavelength_nm"]
     if requires_wavelength and wavelength is None:
         raise ValueError(
-            "USB SLM command receipt wavelength_nm must be finite and positive"
+            "physical SLM command receipt wavelength_nm must be finite and positive"
         )
     if wavelength is not None and (
         type(wavelength) not in (int, float)

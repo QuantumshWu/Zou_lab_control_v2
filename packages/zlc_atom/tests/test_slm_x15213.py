@@ -99,6 +99,8 @@ class _Handle:
 
 def _config(**changes: object) -> dict[str, object]:
     values: dict[str, object] = {
+        "transport": "usb",
+        "display_name": "",
         "sdk_directory": "",
         "device_profile": "LSH0804382",
         "wavelength_nm": 852.0,
@@ -219,6 +221,7 @@ def test_real_installation_dials_its_server_endpoint_and_starts_unknown(
             "phase_curve_source": (
                 "Repository calibration values; measurement provenance not recorded"
             ),
+            "dvi_controller_mode_proven": False,
             "outcome": "unknown",
             "command_revision": 0,
             "stage": "uncommanded",
@@ -411,6 +414,101 @@ def test_sdk_loading_does_not_require_a_second_dll_preflight(
     assert sdk is sentinel
     assert handle is None
     assert loaded == ["hpkSLMdaLV.dll"]
+
+
+def test_dvi_server_transport_needs_no_vendor_dll_and_preserves_the_raster_path(
+    monkeypatch,
+) -> None:
+    import zlc_atom.devices.slm.device_types as module
+
+    endpoint = {
+        "name": r"\\.\DISPLAY2",
+        "attached": True,
+        "primary": False,
+        "width": 1280,
+        "height": 1024,
+        "frequency": 60,
+        "x": 1920,
+        "y": 0,
+    }
+    frames: list[np.ndarray] = []
+    closed: list[bool] = []
+    monkeypatch.setattr(module, "_windows_displays", lambda: (endpoint,))
+    monkeypatch.setattr(module, "_prepare_dvi_controller", lambda *_args: False)
+    monkeypatch.setattr(
+        module,
+        "_load_sdk",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("DVI loaded the SDK")),
+    )
+    monkeypatch.setattr(
+        module,
+        "_open_dvi_presenter",
+        lambda _name: (
+            lambda frame: frames.append(frame.copy()),
+            lambda: closed.append(True),
+        ),
+    )
+
+    adapter = X15213Adapter(_config(transport="dvi"))
+    server, worker = _running_server(adapter)
+    installation = None
+    try:
+        assert adapter.identity == r"hamamatsu-x15213:dvi-display:\\.\DISPLAY2"
+        installation = create_installation(
+            (
+                {
+                    "key": "slm",
+                    "type_id": "slm.hamamatsu_x15213",
+                    "config": {
+                        "host": "127.0.0.1",
+                        "port": server.server_address[1],
+                    },
+                },
+            )
+        )
+        assert installation.failures == {}
+        remote = installation.capability("slm.phase", key="slm")
+        commanded = remote.apply_phase(
+            np.full(adapter.shape_yx, np.pi, dtype=np.float32)
+        )
+        assert len(frames) == 1
+        assert frames[0].shape == (1024, 1280)
+        assert np.all(frames[0][:, 1272:] == 0)
+        np.testing.assert_array_equal(commanded, remote.last_commanded_phase)
+        np.testing.assert_array_equal(commanded, adapter.last_commanded_phase)
+        assert adapter.last_command_receipt["transport"] == "dvi"
+        assert adapter.last_command_receipt["outcome"] == "known-new"
+        assert adapter.last_command_receipt["readback"] == "presenter-ack"
+        from zlc_atom.devices.slm.solver import _command_receipt
+
+        assert _command_receipt(adapter.last_command_receipt)["transport"] == "dvi"
+    finally:
+        if installation is not None:
+            installation.close()
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=2.0)
+        adapter.close()
+    assert not worker.is_alive()
+    assert closed == [True]
+
+
+def test_broken_or_missing_usb_sdk_cannot_block_the_default_dvi_transport(
+    monkeypatch,
+) -> None:
+    import zlc_atom.devices.slm.device_types as module
+
+    monkeypatch.setattr(
+        module, "_find_sdk_directory", lambda _authored="": Path("sdk")
+    )
+    monkeypatch.setattr(
+        module,
+        "_load_sdk",
+        lambda _directory: (_ for _ in ()).throw(
+            OSError("could not find hpkSLMdaLV.dll")
+        ),
+    )
+    assert module._prepare_dvi_controller("", "LSH0804382") is False
 
 
 def test_usb_mode_switch_reboots_reopens_and_rechecks_identity(monkeypatch) -> None:
@@ -833,9 +931,37 @@ def test_slm_server_check_uses_the_windows_loader_without_a_pair_preflight(
         lambda directory: (calls.append(directory) or object(), None),
     )
 
-    assert module.main(["--check-config", "--host", "127.0.0.1"]) == 0
+    assert module.main(
+        ["--check-config", "--transport", "usb", "--host", "127.0.0.1"]
+    ) == 0
     assert calls == [None]
-    assert "SDK=Windows loader" in capsys.readouterr().out
+    assert "USB SDK=Windows loader" in capsys.readouterr().out
+
+
+def test_slm_server_check_defaults_to_dvi_without_loading_the_sdk(
+    monkeypatch, capsys
+) -> None:
+    import zlc_atom.devices.slm.device_types as module
+
+    endpoint = {
+        "name": r"\\.\DISPLAY2",
+        "attached": True,
+        "primary": False,
+        "width": 1280,
+        "height": 1024,
+        "frequency": 60,
+        "x": 1920,
+        "y": 0,
+    }
+    monkeypatch.setattr(module, "_windows_displays", lambda: (endpoint,))
+    monkeypatch.setattr(
+        module,
+        "_load_sdk",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("DVI loaded the SDK")),
+    )
+
+    assert module.main(["--check-config", "--host", "127.0.0.1"]) == 0
+    assert r"DVI display=\\.\DISPLAY2" in capsys.readouterr().out
 
 
 def test_slm_server_cli_validates_before_hardware_and_closes_after_bind_failure(

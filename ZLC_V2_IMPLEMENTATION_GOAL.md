@@ -104,7 +104,7 @@ SLM Feedback必须复用canonical Camera Measurement `repeat=N`及其同一Runti
 
 ### 3.6 SLM
 
-- 实验机正式transport是USB；删除DVI production/discovery/UI/tests/docs路径，不留Experimental或兼容入口；
+- 实验机server默认使用已实际可用的DVI exact-raster路径；USB SDK仅作显式可选server transport；
 - real command state支持known/unknown，未send/read不能虚构zero；
 - correction mutation取得同一DeviceUse claim，并冻结进command receipt；
 - 当前Feedback优化all-shot fluorescence，不称trap depth；
@@ -297,11 +297,11 @@ RTL/build：
 
 建议commit：`Close pulse, camera, remote, FPGA stop, timing, and ownership semantics`
 
-## 12. Milestone 6 — USB-only SLM、Science Context与Robust Feedback
+## 12. Milestone 6 — SLM command、Science Context与Robust Feedback
 
 Device：
 
-- 删除全部DVI schema/discovery/presenter/mode/transport/tests/docs；
+- 保留DVI exact-raster presenter为server默认transport，USB只在显式选择时启用；
 - USB SDK ABI按官方header收口，command outcome区分known-old/known-new/unknown；
 - initial unknown，成功write/display/readback/settle后才known；
 - correction load/enable取得DeviceUse claim并冻结mapping revision；
@@ -329,9 +329,9 @@ Solver/Feedback：
 
 SimulationWorld保持单类owner；只收口immutable init config/local profile和test diagnostics，不拆physics state层。
 
-不得运行真SLM；输出USB实验机验收runbook：serial/SDK、profile来源、correction、orientation、gray readback、optical settle、system correction。
+不得运行真SLM；输出DVI/USB实验机验收runbook：display geometry/SDK、profile来源、correction、orientation、gray evidence、optical settle、system correction。
 
-建议commit：`Make SLM USB command context and fluorescence feedback reproducible`
+建议commit：`Make SLM command context and fluorescence feedback reproducible`
 
 ## 13. Milestone 7 — 单一产品、测试证据与文档替换
 
@@ -386,7 +386,7 @@ Docs：
 5. 新Logic Node由框架强制live/preview/terminal contract；
 6. Pulse Stop UI不阻塞，disconnect自动SAFE，second client takeover正确；
 7. FPGA source具有clock/SAFE/DONE/error/board/build闭合contract和自动RTL evidence；
-8. SLM只保留USB正式路径，known/unknown/context/receipt正确，Feedback复用Camera Measurement并稳健处理100-shot噪声；
+8. SLM默认DVI、显式可选USB，known/unknown/context/receipt正确，Feedback复用Camera Measurement并稳健处理100-shot噪声；
 9. Calibration外部骨架未被重设计，Scan默认restore，SimulationWorld未拆层；
 10. 一个installable locked product在fresh environment通过全部software gates；
 11. 旧docs/tests已删除或重写，没有compatibility/history残余；

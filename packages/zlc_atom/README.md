@@ -52,17 +52,20 @@ correction mapping, the Editor shows the divergence and refuses the old draft
 until explicit Adopt or Context reload; closing preserves the currently
 commanded phase.
 
-The X15213 server supports the series' `1272 x 1024` active LCOS raster only
-through the official USB frame-memory SDK. It loads the primary vendor library
-from an optional explicit directory, `HAMAMATSU_SLM_SDK`, `PATH`, a discovered
-vendor installation, or the normal Windows loader; it does not reject a valid
-installation by preflighting a second DLL in the same folder. A new real
-adapter starts with unknown command truth. A command becomes known only after
-write, display-slot selection, exact active-frame readback, and the profile's
-settle wait all complete.
+The X15213 server defaults to the established DVI path: it selects the sole
+non-primary `1280 x 1024` display at approximately 60 Hz, presents an exact
+native raster with the active `1272 x 1024` pixels and eight black trailing
+columns, and requires no vendor DLL. Multiple eligible displays require an
+explicit `--display-name`. USB frame memory remains available only through an
+explicit `--transport usb`; that mode locates the primary vendor library from
+an explicit directory, `HAMAMATSU_SLM_SDK`, `PATH`, a vendor installation, or
+the normal Windows loader. A new real adapter starts with unknown command
+truth. A DVI command becomes known after presenter acknowledgement and the
+profile settle wait; USB additionally requires display-slot selection and exact
+active-frame readback.
 
-The computer attached to the USB controller runs `bin/slm_server.bat` and is
-the only process that loads the SDK. Like `sequencer.hardware`, the single real
+The computer driving the SLM display runs `bin/slm_server.bat` and is the only
+process that owns the output. Like `sequencer.hardware`, the single real
 device type `slm.hamamatsu_x15213` stores only its server host and port (default
 `18862`) in the apparatus; `127.0.0.1` is the same-machine form. The proxy reads
 identity, shape, current
@@ -89,22 +92,22 @@ settle provenance. Authored wavelength builds the nonlinear
 phase-code-to-drive LUT from that curve; `two_pi_gray` remains computed rather
 than authored. A native `L 1272 x 1024` correction BMP is added modulo 256
 before the LUT. Loading or toggling correction advances a mapping revision, and
-each command receipt freezes the USB/profile/wavelength/orientation/correction
+each command receipt freezes the transport/profile/wavelength/orientation/correction
 facts it used. A map labelled for another wavelength is rejected because the
 repository has no measured two-dimensional unwrap authority. The bundled
 LSH0804382 provenance is explicitly incomplete; development mocks prove the
 software byte path, not the vendor ABI, controller, or optical acceptance.
 
-USB experiment-machine acceptance remains an unexecuted runbook:
+DVI/USB experiment-machine acceptance remains an unexecuted runbook:
 
-1. Record the full head model/serial, controller and SDK/DLL versions, then
-   bind every ctypes function from that installed official header.
+1. Record the full head model/serial, controller, selected DVI display geometry,
+   and (only if USB is selected) SDK/DLL versions and official ctypes ABI.
 2. Confirm the selected profile's curve source, measurement wavelength and
    uncertainty instead of treating the bundled values as a calibration claim.
 3. Verify vendor-correction encoding, serial, wavelength, sign and native pixel
    orientation; exercise correction Off/On under the same device claim.
-4. Send asymmetric corner/gray patterns and confirm X/Y orientation plus exact
-   active-frame USB readback at the controller.
+4. Send asymmetric corner/gray patterns and confirm X/Y orientation plus the
+   exact native DVI raster; for optional USB, also confirm frame-memory readback.
 5. Measure optical response for representative increasing and decreasing gray
    transitions, then replace the pending settle value with the accepted worst
    case and its source.

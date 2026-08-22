@@ -4,19 +4,21 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+from ctypes import wintypes
 import json
 import os
 from pathlib import Path
+from queue import Empty, Queue
 import re
 import socket
-from threading import Lock
+from threading import Event, Lock, Thread
 import time
-from typing import Mapping
+from typing import Callable, Mapping
 
 import numpy as np
 from PIL import Image
 
-from zlc_atom.authoring import AuthoringField, AuthoringSchema
+from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
 
 from . import open_slm_control
@@ -24,6 +26,7 @@ from .device import _RemoteSlmAdapter, _open_slm_server, bind_slm, canonical_pha
 
 
 _SHAPE_YX = (1024, 1272)
+_RASTER_YX = (1024, 1280)
 _TWO_PI = 2.0 * np.pi
 _TYPE_ID = "slm.hamamatsu_x15213"
 _PROFILE_FORMAT = "zlc.slm.hamamatsu_x15213.device_profile"
@@ -31,6 +34,54 @@ _PROFILE_VERSION = 2
 _PROFILE_DIRECTORY = Path(__file__).resolve().parent / "profiles"
 _SDK_LIBRARY = "hpkSLMdaLV.dll"
 _REMOTE_TIMEOUT_SECONDS = 10.0
+
+
+class _DisplayDeviceW(ctypes.Structure):
+    _fields_ = (
+        ("cb", wintypes.DWORD),
+        ("DeviceName", wintypes.WCHAR * 32),
+        ("DeviceString", wintypes.WCHAR * 128),
+        ("StateFlags", wintypes.DWORD),
+        ("DeviceID", wintypes.WCHAR * 128),
+        ("DeviceKey", wintypes.WCHAR * 128),
+    )
+
+
+class _DevModeW(ctypes.Structure):
+    """Complete Unicode DEVMODE through dmPanningHeight."""
+
+    _fields_ = (
+        ("dmDeviceName", wintypes.WCHAR * 32),
+        ("dmSpecVersion", wintypes.WORD),
+        ("dmDriverVersion", wintypes.WORD),
+        ("dmSize", wintypes.WORD),
+        ("dmDriverExtra", wintypes.WORD),
+        ("dmFields", wintypes.DWORD),
+        ("dmPositionX", wintypes.LONG),
+        ("dmPositionY", wintypes.LONG),
+        ("dmDisplayOrientation", wintypes.DWORD),
+        ("dmDisplayFixedOutput", wintypes.DWORD),
+        ("dmColor", ctypes.c_short),
+        ("dmDuplex", ctypes.c_short),
+        ("dmYResolution", ctypes.c_short),
+        ("dmTTOption", ctypes.c_short),
+        ("dmCollate", ctypes.c_short),
+        ("dmFormName", wintypes.WCHAR * 32),
+        ("dmLogPixels", wintypes.WORD),
+        ("dmBitsPerPel", wintypes.DWORD),
+        ("dmPelsWidth", wintypes.DWORD),
+        ("dmPelsHeight", wintypes.DWORD),
+        ("dmDisplayFlags", wintypes.DWORD),
+        ("dmDisplayFrequency", wintypes.DWORD),
+        ("dmICMMethod", wintypes.DWORD),
+        ("dmICMIntent", wintypes.DWORD),
+        ("dmMediaType", wintypes.DWORD),
+        ("dmDitherType", wintypes.DWORD),
+        ("dmReserved1", wintypes.DWORD),
+        ("dmReserved2", wintypes.DWORD),
+        ("dmPanningWidth", wintypes.DWORD),
+        ("dmPanningHeight", wintypes.DWORD),
+    )
 
 
 HAMAMATSU_X15213_SCHEMA = AuthoringSchema(
@@ -45,6 +96,17 @@ HAMAMATSU_X15213_SCHEMA = AuthoringSchema(
 
 X15213_SERVER_SCHEMA = AuthoringSchema(
     (
+        AuthoringField(
+            "transport",
+            "choice",
+            "Server transport",
+            "dvi",
+            choices=(
+                AuthoringChoice("dvi", "DVI display"),
+                AuthoringChoice("usb", "USB frame memory"),
+            ),
+        ),
+        AuthoringField("display_name", "str", "DVI display name", ""),
         AuthoringField(
             "sdk_directory",
             "folder",
@@ -69,6 +131,213 @@ X15213_SERVER_SCHEMA = AuthoringSchema(
         AuthoringField("flip_y", "bool", "Flip Y", False),
     ),
 )
+
+
+def _windows_displays() -> tuple[dict[str, object], ...]:
+    """Return current Windows display endpoints without guessing an EDID."""
+
+    user32 = getattr(getattr(ctypes, "windll", None), "user32", None)
+    if user32 is None:
+        return ()
+    found: list[dict[str, object]] = []
+    index = 0
+    while True:
+        device = _DisplayDeviceW()
+        device.cb = ctypes.sizeof(device)
+        if not user32.EnumDisplayDevicesW(None, index, ctypes.byref(device), 0):
+            break
+        index += 1
+        mode = _DevModeW()
+        mode.dmSize = ctypes.sizeof(mode)
+        if not user32.EnumDisplaySettingsW(device.DeviceName, -1, ctypes.byref(mode)):
+            continue
+        found.append(
+            {
+                "name": str(device.DeviceName),
+                "attached": bool(device.StateFlags & 0x1),
+                "primary": bool(device.StateFlags & 0x4),
+                "width": int(mode.dmPelsWidth),
+                "height": int(mode.dmPelsHeight),
+                "frequency": int(mode.dmDisplayFrequency),
+                "x": int(mode.dmPositionX),
+                "y": int(mode.dmPositionY),
+            }
+        )
+    return tuple(found)
+
+
+def _eligible_dvi_displays() -> tuple[dict[str, object], ...]:
+    return tuple(
+        item
+        for item in _windows_displays()
+        if bool(item["attached"])
+        and (int(item["width"]), int(item["height"])) == _RASTER_YX[::-1]
+        and 55 <= int(item["frequency"]) <= 65
+    )
+
+
+def _display(name: str) -> dict[str, object]:
+    """Resolve an explicit display or the sole eligible non-primary display."""
+
+    requested = str(name).strip()
+    eligible = _eligible_dvi_displays()
+    if requested:
+        for item in eligible:
+            if str(item["name"]).casefold() == requested.casefold():
+                return item
+        raise RuntimeError(
+            f"{requested!r} is not an attached 1280 x 1024 display at approximately 60 Hz"
+        )
+    non_primary = tuple(item for item in eligible if not bool(item.get("primary")))
+    candidates = non_primary or eligible
+    if len(candidates) == 1:
+        return candidates[0]
+    names = ", ".join(str(item["name"]) for item in candidates) or "none"
+    raise RuntimeError(
+        "X15213 DVI auto-selection needs exactly one eligible 1280 x 1024 "
+        f"display; found {names}. Pass --display-name explicitly."
+    )
+
+
+def _set_dvi_thread_dpi_awareness() -> None:
+    user32 = getattr(getattr(ctypes, "windll", None), "user32", None)
+    setter = getattr(user32, "SetThreadDpiAwarenessContext", None)
+    if setter is None:
+        raise RuntimeError(
+            "X15213 DVI requires per-monitor-v2 DPI awareness for an unscaled raster"
+        )
+    try:
+        setter.argtypes = (ctypes.c_void_p,)
+        setter.restype = ctypes.c_void_p
+    except AttributeError:
+        pass
+    if not setter(ctypes.c_void_p(-4)):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _native_dvi_client_geometry(hwnd: int) -> tuple[int, int, int, int]:
+    user32 = getattr(getattr(ctypes, "windll", None), "user32", None)
+    if user32 is None:
+        raise RuntimeError("X15213 DVI native display checks require Windows")
+    rect = wintypes.RECT()
+    native_hwnd = wintypes.HWND(hwnd)
+    if not user32.GetClientRect(native_hwnd, ctypes.byref(rect)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    origin = wintypes.POINT(rect.left, rect.top)
+    if not user32.ClientToScreen(native_hwnd, ctypes.byref(origin)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return (
+        int(origin.x),
+        int(origin.y),
+        int(rect.right - rect.left),
+        int(rect.bottom - rect.top),
+    )
+
+
+def _open_dvi_presenter(
+    display_name: str,
+) -> tuple[Callable[[np.ndarray], None], Callable[[], None]]:
+    """Restore the exact physical-raster presenter used before USB-only M6."""
+
+    geometry = _display(display_name)
+    commands: Queue[object] = Queue()
+    ready = Event()
+    startup: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            _set_dvi_thread_dpi_awareness()
+            import tkinter as tk
+            from PIL import ImageTk
+
+            root = tk.Tk(className="ZLC-X15213-DVI")
+            root.withdraw()
+            root.overrideredirect(True)
+            root.configure(background="black", cursor="none")
+            root.geometry(
+                f"1280x1024{int(geometry['x']):+d}{int(geometry['y']):+d}"
+            )
+            root.attributes("-topmost", True)
+            label = tk.Label(
+                root, borderwidth=0, highlightthickness=0, background="black"
+            )
+            label.pack(fill="both", expand=True)
+
+            def poll() -> None:
+                try:
+                    command = commands.get_nowait()
+                except Empty:
+                    root.after(2, poll)
+                    return
+                if command is None:
+                    root.destroy()
+                    return
+                frame, done, result = command
+                try:
+                    photo = ImageTk.PhotoImage(
+                        Image.fromarray(frame, mode="L"), master=root
+                    )
+                    label.configure(image=photo)
+                    label.image = photo
+                    root.update_idletasks()
+                    root.update()
+                    logical = (
+                        root.winfo_width(),
+                        root.winfo_height(),
+                        label.winfo_width(),
+                        label.winfo_height(),
+                    )
+                    native = _native_dvi_client_geometry(root.winfo_id())
+                    expected = (
+                        int(geometry["x"]),
+                        int(geometry["y"]),
+                        _RASTER_YX[1],
+                        _RASTER_YX[0],
+                    )
+                    if logical != (1280, 1024, 1280, 1024) or native != expected:
+                        raise RuntimeError(
+                            "X15213 DVI presenter was scaled instead of producing "
+                            "an exact 1280 x 1024 physical raster "
+                            f"(logical={logical!r}, native={native!r}, expected={expected!r})"
+                        )
+                except BaseException as error:
+                    result.append(error)
+                finally:
+                    done.set()
+                root.after(0, poll)
+
+            root.deiconify()
+            root.lift()
+            ready.set()
+            root.after(0, poll)
+            root.mainloop()
+        except BaseException as error:
+            startup.append(error)
+            ready.set()
+
+    thread = Thread(target=run, name="x15213-dvi-presenter", daemon=True)
+    thread.start()
+    if not ready.wait(5.0):
+        raise TimeoutError("X15213 DVI presenter did not start within 5 seconds")
+    if startup:
+        raise RuntimeError("X15213 DVI presenter failed to start") from startup[0]
+
+    def present(frame: np.ndarray) -> None:
+        done = Event()
+        result: list[BaseException] = []
+        commands.put((np.array(frame, copy=True), done, result))
+        if not done.wait(5.0):
+            raise TimeoutError("X15213 DVI transport did not acknowledge the frame")
+        if result:
+            raise RuntimeError("X15213 DVI transport rejected the frame") from result[0]
+
+    def close() -> None:
+        commands.put(None)
+        thread.join(5.0)
+        if thread.is_alive():
+            raise TimeoutError("X15213 DVI presenter did not close within 5 seconds")
+
+    return present, close
 
 
 def _find_sdk_directory(authored: str = "") -> Path | None:
@@ -284,6 +553,45 @@ def _connect_usb(sdk, serial: str) -> tuple[int, str]:
     ) from last_error
 
 
+def _prepare_dvi_controller(sdk_directory: str, serial: str) -> bool:
+    """Switch a reachable controller to DVI; DVI itself does not require the SDK."""
+
+    directory = _find_sdk_directory(sdk_directory)
+    if directory is None:
+        return False
+    try:
+        sdk, handle = _load_sdk(directory)
+    except OSError:
+        return False
+    board_id: int | None = None
+    try:
+        try:
+            board_id = _usb_open(sdk)
+        except RuntimeError:
+            return False
+        observed = _usb_serial(sdk, board_id)
+        if observed != serial:
+            raise RuntimeError(
+                f"X15213 profile serial {serial!r} differs from connected head {observed!r}"
+            )
+        mode = _usb_mode(sdk, board_id)
+        if mode == 0:
+            return True
+        if mode != 1:
+            raise RuntimeError(f"Hamamatsu X15213 reported unknown controller mode {mode}")
+        _check(sdk.Mode_Select(board_id, 0), "Mode_Select(DVI)")
+        _check(sdk.Reboot(board_id), "Reboot")
+        board_id = None  # Reboot has already invalidated the USB session.
+        return True
+    finally:
+        try:
+            if board_id is not None:
+                _usb_close(sdk, board_id)
+        finally:
+            if handle is not None:
+                handle.close()
+
+
 _PROFILE_FIELDS = frozenset(
     {
         "format",
@@ -447,7 +755,7 @@ def _load_correction(
 
 
 class X15213Adapter:
-    """One USB frame-memory X15213 with explicit command knowledge."""
+    """One server-owned X15213 using the proven DVI path or explicit USB."""
 
     shape_yx = _SHAPE_YX
 
@@ -486,20 +794,34 @@ class X15213Adapter:
         self._command_revision = 0
         self._phase: np.ndarray | None = None
         self._last_gray: np.ndarray | None = None
+        self._transport = str(authored["transport"])
+        self._presenter: tuple[
+            Callable[[np.ndarray], None], Callable[[], None]
+        ] | None = None
+        self._display_name = ""
+        self._dvi_controller_mode_proven = False
         self._sdk = None
         self._dll_handle = None
         self._board_id: int | None = None
         self._closed = False
 
-        directory = _find_sdk_directory(str(authored["sdk_directory"]))
-        self._sdk, self._dll_handle = _load_sdk(directory)
-        try:
-            self._board_id, serial = _connect_usb(self._sdk, self._profile_serial)
-        except BaseException:
-            if self._dll_handle is not None:
-                self._dll_handle.close()
-            raise
-        self.identity = f"hamamatsu-x15213:usb:{serial}"
+        if self._transport == "dvi":
+            geometry = _display(str(authored["display_name"]))
+            self._display_name = str(geometry["name"]).strip()
+            self._dvi_controller_mode_proven = _prepare_dvi_controller(
+                str(authored["sdk_directory"]), self._profile_serial
+            )
+            self.identity = f"hamamatsu-x15213:dvi-display:{self._display_name}"
+        else:
+            directory = _find_sdk_directory(str(authored["sdk_directory"]))
+            self._sdk, self._dll_handle = _load_sdk(directory)
+            try:
+                self._board_id, serial = _connect_usb(self._sdk, self._profile_serial)
+            except BaseException:
+                if self._dll_handle is not None:
+                    self._dll_handle.close()
+                raise
+            self.identity = f"hamamatsu-x15213:usb:{serial}"
         self._last_receipt = self._receipt(
             self._mapping_snapshot(),
             outcome="unknown",
@@ -525,7 +847,7 @@ class X15213Adapter:
         readback: str,
     ) -> dict[str, object]:
         return {
-            "transport": "usb",
+            "transport": self._transport,
             "identity": self.identity,
             "profile": self._profile_name,
             "model": self._model,
@@ -539,6 +861,7 @@ class X15213Adapter:
             "settle_seconds": self._settle,
             "settle_source": self._settle_source,
             "phase_curve_source": self._phase_curve_source,
+            "dvi_controller_mode_proven": self._dvi_controller_mode_proven,
             "outcome": outcome,
             "command_revision": self._command_revision,
             "stage": stage,
@@ -693,6 +1016,23 @@ class X15213Adapter:
                 readback=readback,
             )
 
+    def _record_unknown(
+        self,
+        *,
+        stage: str,
+        mapping: Mapping[str, object],
+        readback: str,
+    ) -> None:
+        with self._state_lock:
+            self._phase = None
+            self._last_gray = None
+            self._last_receipt = self._receipt(
+                mapping,
+                outcome="unknown",
+                stage=stage,
+                readback=readback,
+            )
+
     def apply_phase(self, radians: object) -> np.ndarray:
         if self._closed:
             raise RuntimeError("X15213 is closed")
@@ -711,6 +1051,41 @@ class X15213Adapter:
                 stage="write-pending",
                 readback="not-run",
             )
+
+        if self._transport == "dvi":
+            try:
+                if self._presenter is None:
+                    self._presenter = _open_dvi_presenter(self._display_name)
+                raster = np.zeros(_RASTER_YX, dtype=np.uint8)
+                raster[:, : _SHAPE_YX[1]] = gray
+                self._presenter[0](raster)
+            except BaseException:
+                self._record_unknown(
+                    stage="display",
+                    mapping=mapping,
+                    readback="not-available",
+                )
+                raise
+            try:
+                if self._settle:
+                    time.sleep(self._settle)
+            except BaseException:
+                self._record_unknown(
+                    stage="settle",
+                    mapping=mapping,
+                    readback="not-available",
+                )
+                raise
+            with self._state_lock:
+                self._phase = canonical
+                self._last_gray = gray
+                self._last_receipt = self._receipt(
+                    mapping,
+                    outcome="known-new",
+                    stage="complete",
+                    readback="presenter-ack",
+                )
+            return canonical
 
         source = gray.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
         try:
@@ -798,6 +1173,12 @@ class X15213Adapter:
     def close(self) -> None:
         if self._closed:
             return
+        if self._transport == "dvi":
+            if self._presenter is not None:
+                self._presenter[1]()
+                self._presenter = None
+            self._closed = True
+            return
         if self._board_id is not None:
             _usb_close(self._sdk, self._board_id)
             self._board_id = None
@@ -832,11 +1213,19 @@ DEVICE_TYPES = (
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Serve one local Hamamatsu USB SLM to local or LAN clients."
+        description="Serve one local Hamamatsu SLM to local or LAN clients."
     )
     parser.add_argument("--host", default=os.environ.get("ZLC_SLM_HOST", "0.0.0.0"))
     parser.add_argument(
         "--port", type=int, default=int(os.environ.get("ZLC_SLM_PORT", "18862"))
+    )
+    parser.add_argument(
+        "--transport",
+        choices=("dvi", "usb"),
+        default=os.environ.get("ZLC_SLM_TRANSPORT", "dvi"),
+    )
+    parser.add_argument(
+        "--display-name", default=os.environ.get("ZLC_SLM_DISPLAY", "")
     )
     parser.add_argument("--sdk-directory", default="")
     parser.add_argument("--device-profile", default="LSH0804382")
@@ -856,6 +1245,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("SLM server port must be from 1 through 65535")
     authored = X15213_SERVER_SCHEMA.project_values(
         {
+            "transport": arguments.transport,
+            "display_name": arguments.display_name,
             "sdk_directory": arguments.sdk_directory,
             "device_profile": arguments.device_profile,
             "wavelength_nm": arguments.wavelength_nm,
@@ -877,15 +1268,19 @@ def main(argv: list[str] | None = None) -> int:
             wavelength_nm=float(authored["wavelength_nm"]),
         )
     if arguments.check_config:
-        directory = _find_sdk_directory(str(authored["sdk_directory"]))
-        sdk, dll_handle = _load_sdk(directory)
-        del sdk
-        if dll_handle is not None:
-            dll_handle.close()
+        if authored["transport"] == "dvi":
+            display = _display(str(authored["display_name"]))
+            detail = f"DVI display={display['name']}"
+        else:
+            directory = _find_sdk_directory(str(authored["sdk_directory"]))
+            sdk, dll_handle = _load_sdk(directory)
+            del sdk
+            if dll_handle is not None:
+                dll_handle.close()
+            detail = f"USB SDK={directory if directory is not None else 'Windows loader'}"
         print(
             "SLM server config OK: "
-            f"{profile['serial']} at {arguments.host}:{arguments.port}; "
-            f"SDK={directory if directory is not None else 'Windows loader'}"
+            f"{profile['serial']} at {arguments.host}:{arguments.port}; {detail}"
         )
         return 0
 

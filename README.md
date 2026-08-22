@@ -30,10 +30,12 @@ not infer unmeasured dense-target pixels or a hidden wavefront.
 
 The real SLM device type is `slm.hamamatsu_x15213`. Like the real Pulse
 sequencer, its apparatus parameters are the server host and port; the process
-started by `bin/slm_server.bat` is the sole owner of the USB SDK and controller.
-A newly connected real adapter reports its command state as unknown; only a
-completed USB write, display-slot selection, byte readback, and authored
-optical-settle wait establishes known command truth. The Editor
+started by `bin/slm_server.bat` is the sole SLM output owner. It defaults to the
+previously working exact-raster DVI presenter and uses the vendor DLL only when
+the server is explicitly started with `--transport usb`. A newly connected
+real adapter reports its command state as unknown; only an acknowledged DVI
+presentation (or USB write/readback) and authored optical-settle wait establish
+known command truth. The Editor
 has only **Pattern** and **Wavefront** pages. Pattern keeps the independent
 target and pre-correction science-phase plots at the established
 `2x2 = 490 x 357` logical size; a shared **Size** selector also controls the
@@ -46,7 +48,7 @@ artifact does not write the SLM; only **Send to SLM** establishes a known comman
 The vendor correction BMP stays on the SLM-server computer and is selected by
 the server configuration; it is composed by the adapter only on the next
 explicit Send. Each correction mutation advances the device mapping revision; a command
-receipt freezes the USB identity, profile, wavelength, orientation, correction
+receipt freezes the transport identity, profile, wavelength, orientation, correction
 and mapping revision used by that command. The serial profile records the model,
 head serial, phase-curve wavelength and source, and settle source. The current
 LSH0804382 curve and settle provenance are explicitly unverified, so the

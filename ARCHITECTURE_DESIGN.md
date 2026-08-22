@@ -193,10 +193,10 @@ Node new chunk
 
 ## 8. SLM
 
-### 8.1 USB-only device
+### 8.1 Server-owned device
 
-- 正式transport只有Hamamatsu USB SDK；DVI production/discovery/UI/tests/docs删除。
-- 和Pulse一样，真实SLM只有一个apparatus device type，其init参数是server host/port；只有server process持有USB SDK与profile/correction。客户端通过bounded length-prefix、strict-JSON metadata和canonical `float32`相位payload做握手与command代理，不形成第二个hardware owner。普通state读取使用握手cache；apply携带expected command/mapping revision并拒绝stale writer，不确定transport outcome后必须采样真实hardware state再继续。
+- server默认使用原本可用的DVI exact-raster presenter，不依赖vendor DLL；USB frame memory仅在显式`--transport usb`时使用。
+- 和Pulse一样，真实SLM只有一个apparatus device type，其init参数是server host/port；只有server process持有DVI/USB输出与profile/correction。客户端通过bounded length-prefix、strict-JSON metadata和canonical `float32`相位payload做握手与command代理，不形成第二个hardware owner。普通state读取使用握手cache；apply携带expected command/mapping revision并拒绝stale writer，不确定transport outcome后必须采样真实hardware state再继续。
 - SLM proxy无authentication/TLS，只能部署在trusted laboratory LAN，不得暴露到public Internet。
 - Initial command state是unknown，只有成功write/display/readback/settle后才known。
 - Side effect失败区分known-old、known-new和unknown outcome。
