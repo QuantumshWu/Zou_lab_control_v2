@@ -338,8 +338,11 @@ rem interpreter path has been quoted.  A plain redirect parses the command line 
 set "ZLC_HASH_TMP=%ZLC_PS_BUILD_ROOT%\.zlc_src_hash.tmp"
 set "ZLC_VIVADO_ID_TMP=%ZLC_PS_BUILD_ROOT%\.zlc_vivado_id.tmp"
 del "%ZLC_HASH_TMP%" "%ZLC_VIVADO_ID_TMP%" >nul 2>nul
+pushd "!ZLC_PS_BUILD_ROOT!" || exit /b 1
 call "%ZLC_PS_VIVADO_BIN%" -version > "%ZLC_VIVADO_ID_TMP%" 2>&1
-if errorlevel 1 (
+set "ZLC_VIVADO_VERSION_STATUS=!ERRORLEVEL!"
+popd
+if not "!ZLC_VIVADO_VERSION_STATUS!"=="0" (
   echo ERROR: could not read the selected Vivado build identity.
   del "%ZLC_VIVADO_ID_TMP%" >nul 2>nul
   exit /b 1
@@ -455,5 +458,8 @@ if not exist "%ZLC_PS_LOG_DIR%" mkdir "%ZLC_PS_LOG_DIR%" >nul 2>nul
 
 echo ZLC direct Vivado path: %DIRECT_TCL%
 echo ZLC project dir: !ZLC_PS_PROJECT_DIR!
+pushd "!ZLC_PS_BUILD_ROOT!" || exit /b 1
 call "%ZLC_PS_VIVADO_BIN%" -mode batch -journal "!ZLC_PS_LOG_DIR!\!TCL_STEM!.jou" -log "!ZLC_PS_LOG_DIR!\!TCL_STEM!.log" -source "%DIRECT_TCL%"
-exit /b %ERRORLEVEL%
+set "ZLC_TCL_STATUS=!ERRORLEVEL!"
+popd
+exit /b !ZLC_TCL_STATUS!

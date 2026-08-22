@@ -123,3 +123,8 @@ def test_build_launcher_fails_closed_and_programs_by_default() -> None:
     assert require_at < program_at and require_at < flash_at
     assert "duplicate key" in source
     assert "if errorlevel 1 exit /b 1" in source[require_at:]
+    vivado_call = source.index('call "%ZLC_PS_VIVADO_BIN%" -mode batch')
+    assert source.rfind('pushd "!ZLC_PS_BUILD_ROOT!"', 0, vivado_call) >= 0
+    assert 'set "ZLC_TCL_STATUS=!ERRORLEVEL!"' in source[vivado_call:]
+    version_call = source.index('call "%ZLC_PS_VIVADO_BIN%" -version')
+    assert source.rfind('pushd "!ZLC_PS_BUILD_ROOT!"', 0, version_call) >= 0
