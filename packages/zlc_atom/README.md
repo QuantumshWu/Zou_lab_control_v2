@@ -247,32 +247,34 @@ phase before measuring its baseline; the operator does not have to pre-Send or
 re-save that Context, and its command receipt remains provenance rather than a
 pre-existing device-state requirement. Every coarse or validation measurement
 is a canonical Camera Measurement generation under the stable companion
-producer `<task>/camera`: it commits all `repeat=N` three-frame cycles, seals
-them, selects readout-event `frame=1`, and uses every shot in the repeat
-statistics. The displayed preview applies that same selection and repeat mean.
-The estimator integrates raw BOX samples. Observed sites subtract their
-persisted Calibration dark mean; a predicted zero-capture site uses the nearest
-measured dark baseline with an added conservative spatial systematic variance.
-It neither thresholds through Occupancy nor divides by Calibration bright mean.
-Its total SEM combines shot SEM with dark calibration uncertainty exactly once, so
-loading and occupied-atom brightness remain part of the measured all-shot
-fluorescence observable. Every measurement must replay Calibration's effective
-raw/photoelectron mode and exact raw dtype/count-unit provenance; electron mode
-also requires the same offset and scale. Saturation is derived from the raw
-integer maximum and transformed into the effective unit, never inferred from a
-converted floating-point dtype.
+producer `<task>/camera`: current mode `qcmos_bright_dark` requires exactly one
+camera frame per cycle, commits all `repeat=N` cycles, seals them, and uses the
+same single-frame Dataset for preview and estimation. The Pulse resource and
+camera exposure are separate required operator fields; Feedback neither derives
+one from the other nor reuses Calibration exposure.
 
-Each candidate may accumulate at most three coarse batches. A site whose
-simultaneous lower fluorescence bound still crosses zero is censored, not
-fabricated as a valid value. Before any valid candidate exists, at most three
-bootstrap updates double only censored target sites while renormalizing total
-target power; after a valid state exists, a censored candidate returns to that
-latest valid state.
-Every other valid candidate directly updates the current Target from its own
-dark-subtracted `xx-shot` BOX averages using a fixed `0.25` geometric exponent.
-Uncertainty is recorded and used by final validation, but it does not zero a
-real update, change the exponent, or roll back one noisy max/min. The controller
-performs no Zernike, modal, hidden-aberration or continuous-wavefront fit.
+Calibration contributes only registered site centers, BOX half-width/reducer
+and image-coordinate geometry. It contributes no dark/bright level, threshold,
+exposure, photoelectron choice or camera working-point authority. For each
+candidate, Feedback integrates every site's BOX on every shot and fits the two
+Gaussian populations of empty (`dark`) and loaded (`bright`) shots. The metric
+is `bright_mean - dark_mean`; loading probability is reported as the mixture
+fraction but is not multiplied into that metric. A fit is usable only when the
+two-component model wins its BIC check, has populated/separated peaks, and its
+simultaneous contrast error excludes zero.
+
+The controller records every site's actual Target weight, contrast, error,
+fit quality, action and local log-response slope. A high contrast means the
+trap is shallow at the experiment's red-detuned probe point, so its Target
+weight increases; a low contrast makes it decrease. A trustworthy historical
+`d log(contrast) / d log(weight)` is used when available, otherwise the base
+gain is `0.25`, with a 1.5x per-site step cap and total Target power preserved.
+An uncertain two-peak fit holds that site. A never-valid single peak receives
+at most three 1.4x shallow-trap bootstrap steps. If a previously valid bright
+peak disappears after its weight increased, that site returns toward its last
+valid weight; other unidentifiable cases hold. Comparable history survives in
+the Candidate Context, but changing mode, Pulse or exposure resets it.
+
 If the run ends or is stopped without a valid result, Context-start candidate 0 is
 saved with no invented measurement. With a valid state, normal terminal and Stop
 accept and reapply the latest valid controller state rather than the noisiest
@@ -286,8 +288,8 @@ while Feedback runs, but their final values remain published after terminal.
 Starting the next run keeps the previous Monitor surfaces visible until the
 replacement generation has rendered its first values.
 
-The coarse loop defaults to 500 shots, a fixed `0.25` update exponent and at
-most eight updates; it targets a measured maximum/minimum site ratio of `1.10`.
+The coarse loop defaults to 500 shots and at most 12 updates; it targets a
+maximum/minimum bright-dark site ratio of `1.10` with every site valid.
 The held-out validation defaults to at most 3000 shots/300 seconds and applies
 its 95% family correction across both sites and
 the maximum number of looks. It uses bounded batches without dropping a tail
@@ -296,15 +298,15 @@ shot limit and time budget. Its point estimate replaces the final coarse point
 in the retained `uniformity_history`. The terminal Science Context reports
 `accepted` or `inconclusive` with the measured estimate and simultaneous interval.
 
-The default stochastic-loading vertical built from an arbitrary spacing-15
-Science Context and a fresh 35-site Calibration measured coarse ratios
-`1.683, 1.330, 1.235, 1.308, 1.208, 1.332, 1.196, 1.317, 1.288`; independent
-1000-shot validation measured `1.241`. The simulator-only hidden oracle confirms
-that the same phase changed expected BOX ratio `1.445→1.123`, trap-depth ratio
-`1.166→1.074`, and mean expected fluorescence by `+1.6%`. A separate missing-site
-vertical observed 34/35 sites and recovered its measured ratio to `1.088`, with
-80-shot validation `1.096 [1.066,1.126]`. These are software/virtual evidence,
-not hardware or optical acceptance.
+The product-default virtual missing-site vertical starts from a Calibration
+that observed only 34/35 sites. Two bounded bootstrap rounds preceded valid
+coarse bright-dark ratios `2.092, 1.971, 1.687, 1.474, 1.331, 1.243, 1.169,
+1.128, 1.090`; site 17's actual Target weight moved `0.100→0.140→0.195→…→0.768`.
+Independent validation accepted after 2000 of the allowed 3000 shots: estimate
+`1.09126`, simultaneous 95% interval `[1.08293, 1.09989]`, in 84.0 seconds.
+The 35-site/500-shot double-Gaussian+BIC estimator itself measured about
+0.714 seconds median per candidate; acquisition remains the dominant time.
+This is software/virtual evidence, not hardware or optical acceptance.
 
 The supported product path discovers seven logic descriptors: `calibration`,
 `camera_measurement`, `occupancy`, `seamless_scan`, `slm_feedback`,

@@ -215,12 +215,13 @@ Node new chunk
 
 - 保留sparse WGS-Kim、fixed far-field phase、selected DFT和caller-owned optimizer state。
 - Inner solve走到canonical numerical gate，不为省几十毫秒增加physical candidate。
-- Current Feedback observable是all-shot fluorescence，不宣称trap depth。
-- SLM Feedback复用canonical Camera Measurement `repeat=N`及同一Runtime dataset/projection；不另写camera average。
-- Feedback使用raw BOX integration减persisted dark mean，不除Calibration bright mean；total SEM只合并shot SEM与`dark sample variance / n`一次。
-- Feedback camera必须重放Calibration的effective raw/photoelectron mode、raw dtype/count unit与working-point provenance；photoelectron时offset/scale必须exact一致，saturation由raw integer maximum转换到当前effective unit判断，不得用converted dtype猜上界。
-- Censored site最多累积三个coarse batches，然后最多三次总power守恒的两倍bootstrap boost；已有valid candidate后若下一candidate censored，回到上一个valid state。其余每个valid candidate都直接用本轮`xx-shot` readout-frame average的dark-subtracted BOX值，以固定`0.25`几何指数更新当前Target；不再用uncertainty裁掉更新，也不因一轮noisy max/min回选旧candidate。
-- 默认每candidate为500 shots、最多8次update；coarse目标是实测site ratio `<= 1.10`。Normal terminal与Stop保留最后一个valid controller state，不把极值噪声最小值冒充physical best。Final validation默认最多3000 shots/300秒，按sites × maximum looks做simultaneous family correction，输出estimate、uncertainty或inconclusive。
+- Feedback mode是leaf-owned显式字段；当前唯一mode为`qcmos_bright_dark`。Pulse由operator显式选择，camera exposure由operator独立显式填写；Task不从Pulse或Calibration猜exposure，也不做Pulse/exposure科学“兼容性”判断。
+- 当前mode复用canonical Camera Measurement `repeat=N`，每cycle严格一张camera frame；preview与估计读取同一sealed Dataset，不另写camera average或三帧reference判据。
+- Calibration只提供Target→camera注册所需的site centers、BOX半宽/积分方式和frame坐标几何；Feedback不读取其dark/bright/threshold、exposure、photoelectron mode、camera identity或readout working-point provenance。实际camera requested/actual exposure、effective unit与conversion进入本run metadata；saturation只由本次actual raw integer maximum转换到本次effective unit判断。
+- 每个site使用本candidate全部shot的raw BOX值拟合双高斯；observable是`bright_mean-dark_mean`，loading probability只作为mixture fraction。BIC、峰分离与simultaneous mean error共同决定valid/uncertain/censored；不把单峰硬拆成有效bright response。
+- Controller保存并落盘每site的实际Target weight、bright-dark、误差、fit状态、动作与局部`d log C / d log weight`。有效site按实验已确认的单调方向更新：bright-dark偏大表示trap偏浅，因此增加Target；可信历史斜率优先，斜率不可辨识时使用固定`0.25`基准增益，单步最多1.5倍并保持总Target power。
+- 已有双峰但fit error过大的site本轮hold。此前从未有效的单峰site按浅阱先验最多三次、每次1.4倍bootstrap；曾经有效且在增加weight后bright峰消失的site回到其上一有效weight，其余不可辨识site hold。mode、Pulse或exposure变化时不复用旧响应历史。
+- 默认每candidate为500 shots、最多12次update；只有全部site valid时才以bright-dark ratio `<= 1.10`结束coarse。Normal terminal与Stop保留最后一个全site-valid controller state；无valid state保存Context-start candidate 0。Final validation默认最多3000 shots/300秒，对独立single-frame shots重新双高斯拟合，并按sites × maximum looks做simultaneous family correction，输出estimate、uncertainty或inconclusive。
 - Feedback取得SLM后自己apply并确认frozen Science Context phase，再测baseline、更新Target、solve并继续camera闭环；Context receipt是provenance，不要求operator事先Send/Save或保持某条旧command。无valid candidate的normal terminal或Stop以该Context起始phase的candidate 0落盘，measurement为None；有valid state时保留并apply最后一轮，异常failure恢复该Context起始phase。
 - Sparse-only contract明确；dense Gaussian/Flat Top先修算法定义和early stop，再profile CPU，不引GPU。
 
@@ -229,10 +230,10 @@ Node new chunk
 - 不重设计Calibration对外流程、主要artifact、默认raw policy或三帧report。
 - 允许不改变外部行为的dependency解耦、明确corruption修复和内存优化。
 - Calibration只产生与SLM无关的camera/readout artifact，UI和Task都不接受Science Context。SLM Feedback在同时拿到Calibration与Context后做Target X/Y→camera X/Y直接正向注册，并为未观测site生成predicted BOX；不枚举翻转、旋转或轴交换。
-- BOX model持久化可观测site的dark sample count与sample variance；Feedback对predicted site使用最近已测dark baseline并加入保守spatial systematic variance，不伪造该site在Calibration中被采集过。
+- BOX model仍为Calibration/Occupancy持久化自己的readout事实；Feedback只取BOX geometry。未观测Target site由注册产生predicted BOX，并与实测site一起接受本次run的双高斯估计，不伪造Calibration dark/bright样本。
 - Scan正常完成、Stop或失败都默认restore pre-run device values。
 - SimulationWorld保持一个类和一个state owner，不拆层。
-- SimulationWorld的物理site只有当前SLM phase经共同pupil illumination、共同low-order wavefront aberration和FFT得到的dominant local peaks这一份动态roster；trap位置、强度、occupancy与Camera位置不得再拆成nominal/extra双状态。所有peaks经过同一个Fourier→camera affine；fluorescence imaging使用一个由共同imaging pupil/aberration生成的shared非对称PSF，不存在逐site随机gain/ellipse/angle/skew。Trap intensity再经loading与AC-Stark detuning决定all-shot fluorescence。
+- SimulationWorld的物理site只有当前SLM phase经共同pupil illumination、共同low-order wavefront aberration和FFT得到的dominant local peaks这一份动态roster；trap位置、强度、occupancy与Camera位置不得再拆成nominal/extra双状态。所有peaks经过同一个Fourier→camera affine；fluorescence imaging使用一个由共同imaging pupil/aberration生成的shared非对称PSF，不存在逐site随机gain/ellipse/angle/skew。Probe为红失谐，正的trap light-shift参数只把detuning进一步推红，因此occupied bright-dark随trap depth单调下降；loading probability随depth上升。Camera shot真实混合dark/bright population，Feedback不得读取hidden depth/occupancy truth。
 - Apparatus root `simulation`是image/grid geometry、seed与profile的唯一持久化owner；virtual qCMOS只声明camera事实并消费world image geometry，virtual MOT保持独立的camera geometry。旧的camera-owned world字段不保留双owner或静默migration，必须loud refusal并给出root grammar。
 - Simulation参数在init前通过单一API/immutable config确定；workspace-relative profile必须在任何device factory前解析且保持在workspace内，Device Manager Init不运行时改写。
 - Tests使用config override，不修改public mutable world attributes；hidden truth不泄漏给production算法。

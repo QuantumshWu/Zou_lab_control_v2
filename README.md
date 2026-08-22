@@ -10,24 +10,26 @@ Calibration Task -> one result -> calibration JSON + six report images
 Camera Measurement -> frames signal
 Occupancy Processor(frames + calibration path) -> occupancy data
 SLM Editor Pattern -> base phase + optional Zernike -> science phase -> explicit Send
-SLM Feedback(calibration + target + Science Context + pulse) -> grouped qCMOS fluorescence -> accepted/inconclusive Science Context
+SLM Feedback(calibration + Science Context + pulse + exposure) -> single-frame qCMOS bright-dark -> accepted/inconclusive Science Context
 Image/other Plot Panel -> Panel Edit Save Fig
 ```
 
 TaskConsole and every device Control share the same `Experiment` session,
 named devices, virtual world, and sequencer; Pulse and SLM Editors open on
 demand from their loaded device cards and do not create a second session or IPC
-service. SLM feedback consumes every finite readout shot from the canonical
-Camera Measurement dataset and subtracts the calibrated per-site dark mean.
-That all-shot fluorescence includes loading probability and occupied brightness;
-it is not trap depth. Each valid candidate directly updates the current Target
-from that candidate's dark-subtracted BOX averages with a fixed geometric
-exponent; measurement uncertainty does not erase the command and one noisy
-max/min does not roll the loop back. Coarse measurements use 500 shots by default,
-retain the latest valid controller state, and target a measured site ratio of
-1.10; one held-out validation then grows in 100-shot batches up to its authored
-3000-shot maximum or 300-second budget. Its terminal estimate is republished into
-the visible uniformity curve.
+service. SLM feedback consumes every finite single-frame shot from the canonical
+Camera Measurement dataset. Calibration supplies only registered site BOX
+geometry; the selected Pulse and camera exposure are explicit operator inputs.
+For every candidate, each site's BOX values across shots are fitted as dark and
+bright Gaussian populations, and `bright - dark` is the feedback observable;
+the mixture fraction is loading probability, not the optimization metric.
+Per-site Target weight, contrast, fit quality and response history determine
+whether to update, hold, bootstrap a never-bright shallow site, or undo a weight
+increase after a previously visible bright peak disappears. Coarse measurements
+use 500 shots and at most 12 updates by default and target a measured contrast
+ratio of 1.10; an independent validation then grows in 100-shot batches up to
+3000 shots or 300 seconds. Its terminal estimate is republished into the visible
+uniformity curve.
 It returns an estimate and simultaneous confidence interval as `accepted` or
 `inconclusive`, never promotes a noisy point estimate into a confidence claim, and does
 not infer unmeasured dense-target pixels or a hidden wavefront.

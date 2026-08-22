@@ -204,6 +204,8 @@ class SimulationWorldConfig:
                 raise ValueError(f"{name} must be non-negative")
         if not 0.0 <= self.loading_probability <= 1.0:
             raise ValueError("loading_probability must be between zero and one")
+        if self.trap_light_shift_linewidths < 0.0:
+            raise ValueError("trap_light_shift_linewidths must be non-negative")
 
     @classmethod
     def from_profile(
@@ -645,11 +647,14 @@ class SimulationWorld:
         # The probe is fixed at the apparatus working point selected for the
         # ideal uniform reference array.  It never follows a candidate phase or
         # the current array mean, so absolute depth remains observable.
-        detuning = probe_detuning + light_shift * relative_depth
+        # On the experiment's red-detuned probe working point, trap light can
+        # only move the atomic transition farther to the red.  The configured
+        # light shift is therefore a positive magnitude, not a signed knob.
+        detuning = probe_detuning - light_shift * relative_depth
         scattering = saturation / (
             1.0 + saturation + np.square(2.0 * detuning)
         )
-        reference_detuning = probe_detuning + light_shift
+        reference_detuning = probe_detuning - light_shift
         reference_scattering = saturation / (
             1.0 + saturation + (2.0 * reference_detuning) ** 2
         )

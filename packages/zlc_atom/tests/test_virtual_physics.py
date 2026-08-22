@@ -202,6 +202,7 @@ def test_qcmos_parameters_and_derived_poisson_signal_are_single_world_physics() 
         ("probe_saturation", np.inf),
         ("probe_detuning_linewidths", np.nan),
         ("trap_light_shift_linewidths", np.inf),
+        ("trap_light_shift_linewidths", -0.1),
         ("fluorescence_lifetime_seconds", 0.0),
     ):
         with pytest.raises(ValueError, match=field):
@@ -501,10 +502,10 @@ def test_slm_coherent_plant_owns_the_twofold_site_error_and_caches_propagation()
         assert np.all(np.diff(initial_loading[order]) >= 0.0)
         assert float(np.max(initial_loading) / np.min(initial_loading)) > 1.2
         initial_fluorescence = world._fluorescence_scales(sites)
-        assert np.all(np.diff(initial_fluorescence[order]) >= 0.0)
+        assert np.all(np.diff(initial_fluorescence[order]) <= 0.0)
         initial_depth_interval = np.linspace(np.min(sites), np.max(sites), 128)
         assert np.all(
-            np.diff(world._fluorescence_scales(initial_depth_interval)) > 0.0
+            np.diff(world._fluorescence_scales(initial_depth_interval)) < 0.0
         )
         fixed_probe_depths = world._loading_intensity_scale * np.linspace(
             0.70, 1.55, 128
@@ -843,6 +844,7 @@ def test_occupied_qcmos_box_brightness_tracks_physical_trap_depth() -> None:
     fluorescence = world._fluorescence_scales(world._trap_intensities)
 
     assert float(np.corrcoef(fluorescence, box_means)[0, 1]) > 0.90
+    assert float(np.corrcoef(depths, fluorescence)[0, 1]) < -0.99
     assert float(np.max(box_means) / np.min(box_means)) > 1.5
 
 
@@ -1513,12 +1515,14 @@ def test_calibration_bracket_keeps_one_shot_occupancy_and_exposure_scaling() -> 
         installation.close()
 
 
-def test_public_repeat_reduction_exposes_the_planted_trap_depth_contrast() -> None:
-    """Fifty real qCMOS cycles make the initial coherent error visible.
+def test_public_repeat_reduction_conflates_loading_and_bright_dark_contrast() -> None:
+    """Fifty all-shot means are visible but are not the Feedback observable.
 
     Each cycle is a real fresh load.  The reduced image therefore contains the
-    physical combination the operator sees: depth-dependent capture and the
-    occupied atom's Stark-shifted fluorescence.
+    physical product the operator sees: depth-dependent capture times the
+    occupied atom's Stark-shifted fluorescence.  The two factors move in
+    opposite directions, which is why Feedback must fit bright-dark rather
+    than treating this repeat mean as trap response.
     """
 
     installation = create_installation("virtual")
@@ -1592,8 +1596,11 @@ def test_public_repeat_reduction_exposes_the_planted_trap_depth_contrast() -> No
         observed_raw_count_ratio = float(
             np.max(site_boxes) / np.min(site_boxes)
         )
-        assert float(np.corrcoef(site_boxes, expected_site_signal)[0, 1]) > 0.85
-        assert observed_raw_count_ratio > 2.0
+        assert float(
+            np.corrcoef(expected_site_signal, world._trap_intensities)[0, 1]
+        ) < -0.99
+        assert float(np.max(expected_site_signal) / np.min(expected_site_signal)) > 1.2
+        assert observed_raw_count_ratio > 1.3
 
         # The acceptance oracle may remove the planted coherent screen, but it
         # still observes the result only through the same public camera path.
@@ -2773,7 +2780,7 @@ def test_science_context_roundtrip_freezes_layers_pupil_receipt_and_correction(
             **correction,
             "kind": "target_response_map",
             "reference": "workspace/corrections/site_response.npz",
-            "measurement_method": "all-shot fluorescence",
+            "measurement_method": "bright-dark fluorescence",
         },
         command_receipt={
             **receipt,

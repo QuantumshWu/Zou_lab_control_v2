@@ -5,7 +5,7 @@ from __future__ import annotations
 from zlc_pulse import PulseSequence
 from zlc_plot import Reduction
 
-from zlc_atom.authoring import AuthoringField, AuthoringSchema
+from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
 from zlc_atom.devices.slm.solver import load_science_context
 from zlc_atom.nodes._framework.descriptor import (
     ArtifactCodec,
@@ -50,7 +50,27 @@ _PULSE_RESOURCE = WorkspaceResourceSpec(
 SLM_FEEDBACK_SCHEMA = AuthoringSchema(
     (
         AuthoringField(
-            "pulse_template", "resource", "Imaging pulse", "imaging_template.json", required=True
+            "feedback_mode",
+            "choice",
+            "Feedback mode",
+            "qcmos_bright_dark",
+            choices=(
+                AuthoringChoice(
+                    "qcmos_bright_dark",
+                    "qCMOS fluorescence (bright - dark)",
+                ),
+            ),
+        ),
+        AuthoringField(
+            "pulse_template", "resource", "Imaging pulse", "", required=True
+        ),
+        AuthoringField(
+            "exposure_seconds",
+            "float",
+            "Camera exposure seconds",
+            None,
+            required=True,
+            minimum=1e-9,
         ),
         AuthoringField(
             "shots_per_candidate", "int", "qCMOS shots per candidate", 500, minimum=10
@@ -62,7 +82,7 @@ SLM_FEEDBACK_SCHEMA = AuthoringSchema(
             3000,
             minimum=10,
         ),
-        AuthoringField("max_updates", "int", "Maximum feedback updates", 8, minimum=1),
+        AuthoringField("max_updates", "int", "Maximum feedback updates", 12, minimum=1),
     )
 )
 
@@ -107,6 +127,8 @@ def _build(
         science_context_path=science_context.path,
         pulse_sequence=pulse_resource.value,
         pulse_path=pulse_resource.path,
+        feedback_mode=str(authored["feedback_mode"]),
+        exposure_seconds=float(authored["exposure_seconds"]),
         shots_per_candidate=int(authored["shots_per_candidate"]),
         validation_shots=int(authored["validation_shots"]),
         max_updates=int(authored["max_updates"]),

@@ -1,4 +1,4 @@
-"""Repeat-mean site-brightness feedback; no hidden-plant inference."""
+"""Single-frame, multi-shot bright-dark fluorescence feedback."""
 
 from __future__ import annotations
 
@@ -37,10 +37,10 @@ from zlc_atom.nodes.calibration import (
     SiteMap,
     TrapCalibration,
     extract_box_signals,
+    fit_bimodal,
 )
 from zlc_atom.nodes.calibration.calibration import (
     _register_target_sites,
-    reads_photoelectrons,
     validate_target_registration,
 )
 from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
@@ -60,12 +60,13 @@ UNIFORMITY_HISTORY_OUTPUT = DatasetOutputDeclaration(
 )
 _TARGET_RATIO = 1.10
 _FEEDBACK_EXPONENT = 0.25
-_CENSORED_BOOST_LOG_STEP = float(np.log(2.0))
+_BOOTSTRAP_LOG_STEP = float(np.log(1.4))
+_MAX_FEEDBACK_LOG_STEP = float(np.log(1.5))
 _COARSE_MAX_BATCHES = 3
 _MAX_BOOTSTRAP_UPDATES = 3
 _VALIDATION_BATCH_SHOTS = 100
 _VALIDATION_MAX_SECONDS = 300.0
-READOUT_FRAME_COORDINATE = 1
+READOUT_FRAME_COORDINATE = 0
 
 
 def _check_cancelled(context: object) -> None:
@@ -74,7 +75,7 @@ def _check_cancelled(context: object) -> None:
 
 
 def _readout_frames(snapshot: object, *, shots: int) -> np.ndarray:
-    """Apply the preview's frame=1 scope to one sealed Camera dataset."""
+    """Select the sole frame from one sealed single-frame Camera dataset."""
 
     selection = value_selection(
         snapshot.block.schema,
@@ -123,7 +124,7 @@ def _ratio_interval(
         or type(looks) is not int
         or looks < 1
     ):
-        raise ValueError("fluorescence estimate and uncertainty must be finite and positive")
+        raise ValueError("bright-dark contrast and uncertainty must be finite and positive")
     relative = error / measured
     z = float(
         special.ndtri(1.0 - 0.05 / (2.0 * len(measured) * int(looks)))
@@ -139,44 +140,102 @@ def _ratio_interval(
     return estimate, max(1.0, lower), upper, float(np.max(relative))
 
 
-def _censored_sites(
-    values: np.ndarray,
-    standard_error: np.ndarray,
-    *,
-    looks: int = 1,
-) -> tuple[int, ...]:
-    measured = np.asarray(values, dtype=float)
-    error = np.asarray(standard_error, dtype=float)
-    if (
-        measured.ndim != 1
-        or error.shape != measured.shape
-        or type(looks) is not int
-        or looks < 1
-    ):
-        raise ValueError("fluorescence estimate and uncertainty shapes differ")
-    invalid = ~np.isfinite(measured) | ~np.isfinite(error) | (error < 0.0)
-    z = float(
-        special.ndtri(1.0 - 0.05 / (2.0 * len(measured) * int(looks)))
-    )
-    return tuple(
-        int(index)
-        for index in np.flatnonzero(invalid | (measured - z * error <= 0.0))
-    )
+def _fit_contrasts(samples: object, *, looks: int = 1) -> dict[str, np.ndarray]:
+    """Fit this run's two shot populations without Calibration statistics."""
 
-
-def _boost_target(
-    target: np.ndarray,
-    censored_sites: tuple[int, ...],
-    rows: np.ndarray,
-    columns: np.ndarray,
-) -> np.ndarray:
-    updated = np.array(target, dtype=np.float32, copy=True)
-    indices = np.asarray(censored_sites, dtype=int)
-    updated[rows[indices], columns[indices]] *= np.float32(
-        np.exp(_CENSORED_BOOST_LOG_STEP)
-    )
-    updated *= float(np.sum(target)) / float(np.sum(updated))
-    return validate_target(updated)
+    values = np.asarray(samples, dtype=float)
+    if values.ndim != 2 or values.shape[0] < 4 or values.shape[1] < 1:
+        raise ValueError("feedback box samples must have shape (shots, sites)")
+    if type(looks) is not int or looks < 1:
+        raise ValueError("feedback looks must be a positive integer")
+    sites = values.shape[1]
+    contrast = np.full(sites, np.nan, dtype=float)
+    error = np.full(sites, np.nan, dtype=float)
+    dark_mean = np.full(sites, np.nan, dtype=float)
+    bright_mean = np.full(sites, np.nan, dtype=float)
+    bright_fraction = np.full(sites, np.nan, dtype=float)
+    fidelity = np.full(sites, np.nan, dtype=float)
+    bic_gain = np.full(sites, np.nan, dtype=float)
+    separated = np.zeros(sites, dtype=bool)
+    uncertain = np.zeros(sites, dtype=bool)
+    z = float(special.ndtri(1.0 - 0.05 / (2.0 * sites * int(looks))))
+    for site in range(sites):
+        column = values[:, site]
+        column = column[np.isfinite(column)]
+        if column.size < 4:
+            continue
+        fit = fit_bimodal(column, min_component_fraction=0.01)
+        dark_mean[site] = fit.dark_mean
+        bright_mean[site] = fit.bright_mean
+        bright_fraction[site] = fit.bright_fraction
+        fidelity[site] = fit.fidelity
+        if not all(
+            np.isfinite(value)
+            for value in (
+                fit.dark_mean,
+                fit.dark_sigma,
+                fit.bright_mean,
+                fit.bright_sigma,
+                fit.bright_fraction,
+            )
+        ):
+            continue
+        fraction = float(fit.bright_fraction)
+        count_bright = max(fraction * column.size, 1.0)
+        count_dark = max((1.0 - fraction) * column.size, 1.0)
+        estimate = float(fit.bright_mean - fit.dark_mean)
+        sem = float(
+            np.sqrt(
+                fit.bright_sigma**2 / count_bright
+                + fit.dark_sigma**2 / count_dark
+            )
+        )
+        contrast[site], error[site] = estimate, sem
+        sigma_one = max(float(np.std(column)), np.finfo(float).tiny)
+        log_one = float(
+            np.sum(
+                -0.5 * np.square((column - np.mean(column)) / sigma_one)
+                - np.log(sigma_one * np.sqrt(2.0 * np.pi))
+            )
+        )
+        dark_density = (
+            np.exp(-0.5 * np.square((column - fit.dark_mean) / fit.dark_sigma))
+            / (fit.dark_sigma * np.sqrt(2.0 * np.pi))
+        )
+        bright_density = (
+            np.exp(-0.5 * np.square((column - fit.bright_mean) / fit.bright_sigma))
+            / (fit.bright_sigma * np.sqrt(2.0 * np.pi))
+        )
+        mixture = (1.0 - fraction) * dark_density + fraction * bright_density
+        if np.all(np.isfinite(mixture)) and np.all(mixture > 0.0):
+            log_two = float(np.sum(np.log(mixture)))
+            bic_gain[site] = (
+                2.0 * log_two
+                - 5.0 * np.log(column.size)
+                - (2.0 * log_one - 2.0 * np.log(column.size))
+            )
+        credible_pair = bool(
+            fit.ok
+            and fit.bright_above
+            and estimate > 0.0
+            and np.isfinite(sem)
+            and sem >= 0.0
+            and bic_gain[site] > 10.0
+        )
+        separated[site] = credible_pair and estimate > z * sem
+        uncertain[site] = credible_pair and not separated[site]
+    return {
+        "contrast": contrast,
+        "standard_error": error,
+        "dark_mean": dark_mean,
+        "bright_mean": bright_mean,
+        "bright_fraction": bright_fraction,
+        "fidelity": fidelity,
+        "bic_gain": bic_gain,
+        "valid": separated,
+        "uncertain": uncertain,
+        "censored": ~(separated | uncertain),
+    }
 
 
 def _json_floats(values: object) -> list[float | None]:
@@ -195,26 +254,13 @@ def _support(
     np.ndarray,
     np.ndarray,
     np.ndarray,
-    np.ndarray,
-    np.ndarray,
 ]:
-    """Register a generic camera calibration to this Feedback Target."""
+    """Register only the Calibration's site boxes to this Feedback Target."""
 
     model = calibration.select_model(ReadoutModelKind.BOX)
-    dark_mean = np.asarray(model.dark_mean, dtype=float)
-    dark_count = np.asarray(model.dark_sample_count)
-    dark_variance = np.asarray(model.dark_sample_variance, dtype=float)
-    usable = (
-        np.asarray(calibration.site_map.valid_sites, dtype=bool)
-        & np.isfinite(dark_mean)
-        & (dark_count >= 2)
-        & np.isfinite(dark_variance)
-        & (dark_variance >= 0.0)
-    )
+    usable = np.asarray(calibration.site_map.valid_sites, dtype=bool)
     if not np.any(usable):
-        raise ValueError(
-            "SLM Feedback requires at least one calibrated BOX site with dark statistics"
-        )
+        raise ValueError("SLM Feedback requires at least one calibrated BOX site")
     source_indices = np.flatnonzero(usable)
     source_map = SiteMap(
         tuple(calibration.site_map.site_ids[index] for index in source_indices),
@@ -247,82 +293,110 @@ def _support(
     if provenance["command_receipt"] != dict(command_receipt):
         raise RuntimeError("Feedback registration lost its Science Context receipt")
 
-    observed = np.asarray(registered.topology["observed_sites"], dtype=bool)
     centers = np.asarray(registered.centers_xy, dtype=float)
-    roster_dark = np.full(len(centers), np.nan, dtype=float)
-    roster_sem_squared = np.full(len(centers), np.nan, dtype=float)
-    used_sources: set[int] = set()
-    for roster_index in np.flatnonzero(observed):
-        distance = np.linalg.norm(
-            np.asarray(source_map.centers_xy, dtype=float) - centers[roster_index],
-            axis=1,
-        )
-        local_index = int(np.argmin(distance))
-        if distance[local_index] > 1e-9 or local_index in used_sources:
-            raise RuntimeError("Feedback registration lost a measured Calibration site")
-        used_sources.add(local_index)
-        source_index = int(source_indices[local_index])
-        roster_dark[roster_index] = dark_mean[source_index]
-        roster_sem_squared[roster_index] = (
-            dark_variance[source_index] / dark_count[source_index]
-        )
-
-    missing = np.flatnonzero(~observed)
-    if len(missing):
-        observed_indices = np.flatnonzero(observed)
-        observed_dark = roster_dark[observed_indices]
-        spatial_scale = 1.4826 * float(
-            np.median(np.abs(observed_dark - np.median(observed_dark)))
-        )
-        systematic_variance = max(
-            spatial_scale * spatial_scale,
-            float(np.max(roster_sem_squared[observed_indices])),
-        )
-        for roster_index in missing:
-            nearest = int(
-                observed_indices[
-                    np.argmin(
-                        np.linalg.norm(
-                            centers[observed_indices] - centers[roster_index], axis=1
-                        )
-                    )
-                ]
-            )
-            roster_dark[roster_index] = roster_dark[nearest]
-            roster_sem_squared[roster_index] = (
-                roster_sem_squared[nearest] + systematic_variance
-            )
-    if not np.all(np.isfinite(roster_dark)) or not np.all(
-        np.isfinite(roster_sem_squared)
-    ):
-        raise RuntimeError("Feedback registration produced invalid dark statistics")
-    return rows, columns, centers, roster_dark, roster_sem_squared
+    return rows, columns, centers
 
 
 def _updated_target(
     target: np.ndarray,
-    fluorescence: np.ndarray,
+    contrast: np.ndarray,
+    standard_error: np.ndarray,
+    valid: np.ndarray,
+    censored: np.ndarray,
     rows: np.ndarray,
     columns: np.ndarray,
-) -> np.ndarray:
-    values = np.asarray(fluorescence, dtype=float)
+    *,
+    previous_weights: np.ndarray,
+    previous_contrast: np.ndarray,
+    bootstrap_counts: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Update one Target using both the current fit and each site's history."""
+
+    values = np.asarray(contrast, dtype=float)
+    errors = np.asarray(standard_error, dtype=float)
+    fit_valid = np.asarray(valid, dtype=bool)
+    fit_censored = np.asarray(censored, dtype=bool)
+    prior_weights = np.asarray(previous_weights, dtype=float)
+    prior_values = np.asarray(previous_contrast, dtype=float)
+    bootstraps = np.asarray(bootstrap_counts, dtype=int)
+    site_shape = (len(rows),)
     if (
-        values.shape != (len(rows),)
-        or not np.all(np.isfinite(values))
-        or np.any(values <= 0.0)
+        values.shape != site_shape
+        or errors.shape != site_shape
+        or fit_valid.shape != site_shape
+        or fit_censored.shape != site_shape
+        or prior_weights.shape != site_shape
+        or prior_values.shape != site_shape
+        or bootstraps.shape != site_shape
+        or np.any(fit_valid & fit_censored)
     ):
-        raise ValueError("feedback fluorescence must be finite and positive at every site")
-    geometric_mean = float(np.exp(np.mean(np.log(values))))
+        raise ValueError("feedback site history shapes differ")
+    if not np.any(fit_valid):
+        reference = float("nan")
+    else:
+        if np.any(~np.isfinite(values[fit_valid]) | (values[fit_valid] <= 0.0)):
+            raise ValueError("valid feedback contrasts must be finite and positive")
+        reference = float(np.exp(np.mean(np.log(values[fit_valid]))))
+    current_weights = np.asarray(target[rows, columns], dtype=float)
+    log_correction = np.zeros(site_shape, dtype=float)
+    response_slope = np.full(site_shape, np.nan, dtype=float)
+    decision = np.full(site_shape, "hold_uncertain", dtype="<U32")
+    for site in range(len(rows)):
+        if fit_valid[site]:
+            residual = float(np.log(values[site] / reference))
+            relative_error = max(float(errors[site]), 0.0) / values[site]
+            quality = float(np.clip(1.0 - 4.0 * relative_error, 0.1, 1.0))
+            correction = _FEEDBACK_EXPONENT * quality * residual
+            if (
+                np.isfinite(prior_weights[site])
+                and prior_weights[site] > 0.0
+                and np.isfinite(prior_values[site])
+                and prior_values[site] > 0.0
+            ):
+                moved = float(np.log(current_weights[site] / prior_weights[site]))
+                if abs(moved) >= 0.02:
+                    slope = float(np.log(values[site] / prior_values[site]) / moved)
+                    if -4.0 <= slope <= -0.20:
+                        response_slope[site] = slope
+                        correction = -_FEEDBACK_EXPONENT * quality * residual / slope
+                        decision[site] = "feedback_history_slope"
+                    else:
+                        decision[site] = "feedback_assumed_slope"
+                else:
+                    decision[site] = "feedback_assumed_slope"
+            else:
+                decision[site] = "feedback_assumed_slope"
+            log_correction[site] = float(
+                np.clip(correction, -_MAX_FEEDBACK_LOG_STEP, _MAX_FEEDBACK_LOG_STEP)
+            )
+        elif fit_censored[site] and not np.isfinite(prior_values[site]):
+            if bootstraps[site] < _MAX_BOOTSTRAP_UPDATES:
+                log_correction[site] = _BOOTSTRAP_LOG_STEP
+                decision[site] = "bootstrap_shallow"
+            else:
+                decision[site] = "hold_bootstrap_limit"
+        elif (
+            fit_censored[site]
+            and np.isfinite(prior_weights[site])
+            and prior_weights[site] > 0.0
+            and current_weights[site] > 1.01 * prior_weights[site]
+        ):
+            log_correction[site] = float(
+                np.clip(
+                    np.log(prior_weights[site] / current_weights[site]),
+                    -_MAX_FEEDBACK_LOG_STEP,
+                    0.0,
+                )
+            )
+            decision[site] = "rollback_after_disappearance"
     updated = np.array(target, dtype=np.float32, copy=True)
-    updated[rows, columns] *= np.asarray(
-        (geometric_mean / values) ** _FEEDBACK_EXPONENT, dtype=np.float32
-    )
+    updated[rows, columns] *= np.exp(log_correction).astype(np.float32)
     updated *= float(np.sum(target)) / float(np.sum(updated))
-    return validate_target(updated)
+    return validate_target(updated), log_correction, response_slope, decision
 
 
 class SlmFeedbackTask:
-    """Apply candidates, measure exact qCMOS cycles, and retain the best phase."""
+    """Apply candidates, measure exact qCMOS cycles, and retain a valid phase."""
 
     instance_id = "slm_feedback"
 
@@ -342,6 +416,8 @@ class SlmFeedbackTask:
         science_context_path: str | Path,
         pulse_sequence: PulseSequence,
         pulse_path: str | Path,
+        feedback_mode: str,
+        exposure_seconds: float,
         shots_per_candidate: int,
         validation_shots: int,
         max_updates: int,
@@ -399,8 +475,6 @@ class SlmFeedbackTask:
             self._rows,
             self._columns,
             self._site_centers_xy,
-            self._dark_mean,
-            self._dark_sem_squared,
         ) = _support(
             frozen_target,
             calibration,
@@ -409,8 +483,6 @@ class SlmFeedbackTask:
         )
         self._site_count = len(self._rows)
         self._site_centers_xy.setflags(write=False)
-        self._dark_mean.setflags(write=False)
-        self._dark_sem_squared.setflags(write=False)
         self.camera, self.sequencer, self.slm = camera, sequencer, slm
         self.camera_key, self.sequencer_key, self.slm_key = camera_key, sequencer_key, slm_key
         self.signal_plane, self.calibration, self.model = signal_plane, calibration, model
@@ -430,18 +502,23 @@ class SlmFeedbackTask:
         self._pattern_metadata = dict(science_context.get("pattern_metadata", {}))
         self._operator_metadata = dict(science_context.get("operator_metadata", {}))
         self._mapping_revision = int(slm.mapping_revision)
+        self.feedback_mode = str(feedback_mode)
+        if self.feedback_mode != "qcmos_bright_dark":
+            raise ValueError("unsupported SLM feedback mode")
+        self.exposure_seconds = float(exposure_seconds)
+        if not np.isfinite(self.exposure_seconds) or self.exposure_seconds <= 0.0:
+            raise ValueError("feedback exposure_seconds must be finite and positive")
         self.shots = int(shots_per_candidate)
         self.validation_shots = int(validation_shots)
         self.max_updates = int(max_updates)
         self._candidate_capacity = self.max_updates + 1
         self._publication_revision = 0
+        self._actual_exposure_seconds: float | None = None
+        self._effective_photoelectrons: bool | None = None
+        self._effective_count_unit: str | None = None
         if self.shots < 10 or self.validation_shots < 10 or self.max_updates < 1:
             raise ValueError("feedback needs at least 10 coarse/validation shots and one update")
         contract = calibration.frame_contract
-        if contract.camera_id is not None and self.camera_key != contract.camera_id:
-            raise ValueError(
-                f"calibration belongs to camera {contract.camera_id!r}, not {self.camera_key!r}"
-            )
         height, width = contract.image_shape
         site_mask = np.zeros((height, width), dtype=bool)
         windows: list[tuple[slice, slice]] = []
@@ -474,6 +551,11 @@ class SlmFeedbackTask:
             },
             "max_updates": self.max_updates,
             "target_uniformity_ratio": _TARGET_RATIO,
+            "feedback_mode": self.feedback_mode,
+            "exposure_seconds": self.exposure_seconds,
+            "actual_exposure_seconds": self._actual_exposure_seconds,
+            "effective_photoelectrons": self._effective_photoelectrons,
+            "effective_count_unit": self._effective_count_unit,
         }
 
     def _candidate_metadata(
@@ -496,6 +578,11 @@ class SlmFeedbackTask:
             "candidate": int(candidate),
             "status": str(status),
             "target_uniformity_ratio": _TARGET_RATIO,
+            "feedback_mode": self.feedback_mode,
+            "exposure_seconds": self.exposure_seconds,
+            "actual_exposure_seconds": self._actual_exposure_seconds,
+            "effective_photoelectrons": self._effective_photoelectrons,
+            "effective_count_unit": self._effective_count_unit,
             "measurement": next(
                 (
                     item
@@ -677,6 +764,8 @@ class SlmFeedbackTask:
         return applied
 
     def _assert_camera_contract(self, actual: object) -> None:
+        """The Calibration constrains box coordinates, not the camera physics."""
+
         contract = self.calibration.frame_contract
         roi = contract.roi_xywh
         expected_roi = None if roi is None else (roi[1], roi[0], roi[3], roi[2])
@@ -688,18 +777,10 @@ class SlmFeedbackTask:
             actual.acquisition_mode == "EXTERNAL_TRIGGERED"
             and tuple(actual.frame_shape_yx) == contract.image_shape
             and tuple(actual.binning_yx) == contract.binning_yx
-            and (contract.sensor_shape is None or tuple(actual.sensor_shape_yx) == contract.sensor_shape)
             and (expected_roi is None or actual_roi == expected_roi)
-            and np.isclose(
-                float(actual.exposure_seconds),
-                float(contract.exposure_seconds),
-                rtol=1e-9,
-                atol=0.0,
-            )
-            and (contract.readout_mode is None or actual.readout_mode == contract.readout_mode)
         )
         if not matches:
-            raise ValueError("selected camera working point differs from the frozen calibration")
+            raise ValueError("selected camera geometry differs from the calibrated site boxes")
 
     def _saturated_sites(
         self, image: np.ndarray, saturation_value: object
@@ -722,26 +803,23 @@ class SlmFeedbackTask:
         shots: int | None = None,
     ) -> tuple[
         np.ndarray,
-        np.ndarray,
         tuple[int, ...],
         tuple[int, ...],
     ]:
         contract = self.calibration.frame_contract
-        if contract.exposure_seconds is None:
-            raise ValueError("calibration does not record its readout exposure")
         requested = self.shots if shots is None else int(shots)
-        if requested < 2:
-            raise ValueError("qCMOS fluorescence statistics require at least two shots")
+        if requested < 4:
+            raise ValueError("qCMOS bright-dark statistics require at least four shots")
         camera_owner = f"{context.instance_id}/camera"
         node = CameraMeasurementNode(
             camera=self.camera,
             request=CameraMeasurementRequest(
                 camera_key=self.camera_key,
-                exposure_seconds=float(contract.exposure_seconds),
+                exposure_seconds=self.exposure_seconds,
                 roi_xywh=contract.roi_xywh,
                 repeat=requested,
-                frames_per_cycle=3,
-                photoelectrons=reads_photoelectrons(self.calibration),
+                frames_per_cycle=1,
+                photoelectrons=True,
             ),
             signal_plane=self.signal_plane,
             producer=camera_owner,
@@ -755,11 +833,11 @@ class SlmFeedbackTask:
             if actual is None:
                 raise RuntimeError("camera did not freeze its actual working point")
             self._assert_camera_contract(actual)
-            expected_photoelectrons = reads_photoelectrons(self.calibration)
-            if node.reads_photoelectrons != expected_photoelectrons:
-                raise ValueError(
-                    "camera effective photoelectron mode differs from Calibration"
-                )
+            self._actual_exposure_seconds = float(actual.exposure_seconds)
+            self._effective_photoelectrons = bool(node.reads_photoelectrons)
+            self._effective_count_unit = (
+                "photoelectron" if node.reads_photoelectrons else actual.count_unit
+            )
             raw_dtype = np.dtype(actual.dtype)
             if raw_dtype.kind not in "iu":
                 raise ValueError(
@@ -767,39 +845,12 @@ class SlmFeedbackTask:
                 )
             if not isinstance(actual.count_unit, str) or not actual.count_unit:
                 raise ValueError("Feedback camera count_unit is invalid")
-            run_record = self.calibration.report.get("run_record")
-            recorded_camera = None
-            if isinstance(run_record, Mapping):
-                devices = run_record.get("actual_devices")
-                if isinstance(devices, Mapping):
-                    recorded_camera = devices.get(self.camera_key)
-            if not isinstance(recorded_camera, Mapping):
-                raise ValueError("Calibration lacks camera working-point provenance")
-            if (
-                recorded_camera.get("dtype") != raw_dtype.str
-                or recorded_camera.get("count_unit") != actual.count_unit
-            ):
-                raise ValueError("camera raw dtype/count unit differs from Calibration")
             raw_maximum = np.iinfo(raw_dtype).max
-            if expected_photoelectrons:
-                recorded_offset = recorded_camera.get("offset_counts")
-                recorded_scale = recorded_camera.get("electrons_per_count")
+            if node.reads_photoelectrons:
                 current_offset = actual.offset_counts
                 current_scale = actual.electrons_per_count
-                if (
-                    type(recorded_offset) not in (int, float)
-                    or type(recorded_scale) not in (int, float)
-                    or current_offset is None
-                    or current_scale is None
-                    or not np.isfinite(recorded_offset)
-                    or not np.isfinite(recorded_scale)
-                    or recorded_scale <= 0.0
-                    or float(recorded_offset) != float(current_offset)
-                    or float(recorded_scale) != float(current_scale)
-                ):
-                    raise ValueError(
-                        "camera photoelectron conversion differs from Calibration"
-                    )
+                if current_offset is None or current_scale is None:
+                    raise RuntimeError("camera lost its effective photoelectron conversion")
                 saturation_value = (
                     np.float32(raw_maximum) - np.float32(current_offset)
                 ) * np.float32(current_scale)
@@ -850,20 +901,8 @@ class SlmFeedbackTask:
         )
         complete = np.all(np.isfinite(box_samples), axis=0)
         missing_sites = set(int(index) for index in np.flatnonzero(~complete))
-        mean = np.full(self._site_count, np.nan, dtype=float)
-        mean[complete] = (
-            np.mean(box_samples[:, complete], axis=0) - self._dark_mean[complete]
-        )
-        variance = np.full(self._site_count, np.nan, dtype=float)
-        variance[complete] = np.var(box_samples[:, complete], axis=0, ddof=1)
-        standard_error = np.full_like(mean, np.nan)
-        standard_error[complete] = np.sqrt(
-            variance[complete] / requested
-            + self._dark_sem_squared[complete]
-        )
         return (
-            mean,
-            standard_error,
+            box_samples,
             tuple(sorted(saturated_sites)),
             tuple(sorted(missing_sites)),
         )
@@ -874,104 +913,60 @@ class SlmFeedbackTask:
         context: object,
         iteration: int,
     ) -> tuple[
-        np.ndarray,
-        np.ndarray,
-        tuple[int, ...],
+        dict[str, np.ndarray],
         tuple[int, ...],
         tuple[int, ...],
         int,
         int,
     ]:
         for attempt in range(2):
-            mean = np.zeros(self._site_count, dtype=float)
-            m2 = np.zeros_like(mean)
-            error = np.full_like(mean, np.nan)
-            count = 0
+            batches: list[np.ndarray] = []
             saturated: tuple[int, ...] = ()
             missing: tuple[int, ...] = ()
-            censored = tuple(range(self._site_count))
             for batch in range(_COARSE_MAX_BATCHES):
-                batch_mean, batch_error, saturated, missing = self._measure(
+                samples, saturated, missing = self._measure(
                     pulse,
                     context,
                     iteration,
                     shots=None if batch == 0 else self.shots,
                 )
-                finite = (
-                    np.all(np.isfinite(batch_mean))
-                    and np.all(np.isfinite(batch_error))
-                    and np.all(np.asarray(batch_error) >= 0.0)
-                )
-                if saturated or missing or not finite:
-                    mean = np.array(batch_mean, dtype=float, copy=True)
-                    error = np.array(batch_error, dtype=float, copy=True)
-                    if not missing:
-                        missing = tuple(
-                            int(index)
-                            for index in np.flatnonzero(
-                                ~np.isfinite(batch_mean)
-                                | ~np.isfinite(batch_error)
-                            )
-                        )
+                if saturated or missing:
                     break
-                batch_m2 = (
-                    np.maximum(
-                        np.square(batch_error) - self._dark_sem_squared,
-                        0.0,
-                    )
-                    * self.shots
-                    * (self.shots - 1)
+                batches.append(np.asarray(samples, dtype=float))
+                fitted = _fit_contrasts(
+                    np.concatenate(batches, axis=0),
+                    looks=_COARSE_MAX_BATCHES,
                 )
-                combined = count + self.shots
-                delta = batch_mean - mean
-                mean += delta * self.shots / combined
-                m2 += (
-                    batch_m2
-                    + np.square(delta) * count * self.shots / combined
-                )
-                count = combined
-                error = np.sqrt(
-                    m2 / (count - 1) / count + self._dark_sem_squared
-                )
-                censored = _censored_sites(
-                    mean, error, looks=_COARSE_MAX_BATCHES
-                )
-                if not censored:
+                if bool(np.all(fitted["valid"])):
                     return (
-                        mean,
-                        error,
-                        (),
+                        fitted,
                         (),
                         (),
                         attempt + 1,
-                        count,
+                        sum(item.shape[0] for item in batches),
                     )
-            if not saturated and not missing and count:
+            if not saturated and not missing and batches:
+                fitted = _fit_contrasts(
+                    np.concatenate(batches, axis=0),
+                    looks=_COARSE_MAX_BATCHES,
+                )
                 return (
-                    mean,
-                    np.sqrt(
-                        m2 / (count - 1) / count + self._dark_sem_squared
-                    ),
+                    fitted,
                     (),
                     (),
-                    censored,
                     attempt + 1,
-                    count,
+                    sum(item.shape[0] for item in batches),
                 )
             if attempt == 0:
                 context.report_progress(
-                    f"Candidate {iteration + 1} fluorescence invalid; "
+                    f"Candidate {iteration + 1} camera samples invalid; "
                     "retrying the same applied phase"
                 )
-        return (
-            mean,
-            error,
-            saturated,
-            missing,
-            (),
-            2,
-            0,
+        invalid = _fit_contrasts(
+            np.full((4, self._site_count), np.nan),
+            looks=_COARSE_MAX_BATCHES,
         )
+        return invalid, saturated, missing, 2, 0
 
     def _finish_candidate(
         self,
@@ -1025,6 +1020,9 @@ class SlmFeedbackTask:
             ),
             "updates": len(history),
             "target_uniformity_ratio": _TARGET_RATIO,
+            "feedback_mode": self.feedback_mode,
+            "requested_exposure_seconds": self.exposure_seconds,
+            "actual_exposure_seconds": self._actual_exposure_seconds,
         }
 
     def execute(self, context: object) -> dict[str, object]:
@@ -1032,7 +1030,7 @@ class SlmFeedbackTask:
         incoming_pattern = self._pattern_phase
         history: list[dict[str, object]] = []
         retained_valid: dict[str, object] | None = None
-        best_observed: dict[str, object] | None = None
+        most_visible_observed: dict[str, object] | None = None
         try:
             _check_cancelled(context)
             # Science Context is the requested starting CONTENT, not proof of
@@ -1040,15 +1038,10 @@ class SlmFeedbackTask:
             # the SLM now, so establish and confirm that starting state itself.
             self._mapping_revision = int(self.slm.mapping_revision)
             incoming = self._apply_exact(incoming)
-            exposure = self.calibration.frame_contract.exposure_seconds
-            if exposure is None:
-                raise ValueError("calibration does not record its readout exposure")
             pulse = resolve_pulse(
                 self.sequence,
                 path=self.pulse_path,
                 board=self.sequencer.describe(),
-                # Pulse timing is authored by the operator.  The calibration's
-                # exposure is a sensor integration readback, not a probe gate.
                 api_values={},
             )
             _check_cancelled(context)
@@ -1057,7 +1050,59 @@ class SlmFeedbackTask:
             current_pattern = incoming_pattern
             current_phase = incoming
             solver_metadata: Mapping[str, object] | None = None
-            bootstrap_updates = 0
+            previous_weights = np.full(self._site_count, np.nan, dtype=float)
+            previous_contrast = np.full(self._site_count, np.nan, dtype=float)
+            bootstrap_counts = np.zeros(self._site_count, dtype=int)
+            prior_history = self._pattern_metadata.get("history")
+            comparable_history = bool(
+                self._pattern_metadata.get("feedback_mode") == self.feedback_mode
+                and self._pattern_metadata.get("pulse_path") == str(self.pulse_path)
+                and type(self._pattern_metadata.get("exposure_seconds"))
+                in (int, float)
+                and float(self._pattern_metadata["exposure_seconds"])
+                == self.exposure_seconds
+                and isinstance(prior_history, list)
+                and prior_history
+                and isinstance(prior_history[-1], Mapping)
+            )
+            if comparable_history:
+                prior = prior_history[-1]
+                try:
+                    previous_weights = np.asarray(
+                        prior["previous_valid_weight"], dtype=float
+                    ).reshape(self._site_count)
+                    previous_contrast = np.asarray(
+                        prior["previous_valid_bright_minus_dark"], dtype=float
+                    ).reshape(self._site_count)
+                    bootstrap_counts = np.asarray(
+                        prior["bootstrap_count"], dtype=int
+                    ).reshape(self._site_count)
+                    decisions = np.asarray(prior["decision"], dtype=str).reshape(
+                        self._site_count
+                    )
+                    prior_weights = np.asarray(
+                        prior["target_weight"], dtype=float
+                    ).reshape(self._site_count)
+                    prior_contrast = np.asarray(
+                        prior["bright_minus_dark"], dtype=float
+                    ).reshape(self._site_count)
+                    prior_valid = np.asarray(
+                        prior["fit_valid"], dtype=bool
+                    ).reshape(self._site_count)
+                except (KeyError, TypeError, ValueError):
+                    previous_weights[:] = np.nan
+                    previous_contrast[:] = np.nan
+                    bootstrap_counts[:] = 0
+                else:
+                    usable = (
+                        prior_valid
+                        & np.isfinite(prior_weights)
+                        & np.isfinite(prior_contrast)
+                    )
+                    previous_weights[usable] = prior_weights[usable]
+                    previous_contrast[usable] = prior_contrast[usable]
+                    bootstrap_counts += decisions == "bootstrap_shallow"
+                    bootstrap_counts = np.maximum(bootstrap_counts, 0)
             for iteration in range(self._candidate_capacity):
                 _check_cancelled(context)
                 applied = (
@@ -1088,54 +1133,68 @@ class SlmFeedbackTask:
                     f"Candidate {candidate_number} phase saved to {artifact_path}"
                 )
                 (
-                    fluorescence,
-                    error,
+                    fitted,
                     saturated_sites,
                     missing_sites,
-                    censored_sites,
                     attempts,
                     coarse_shots,
                 ) = self._coarse_measure(pulse, context, iteration)
+                contrast = fitted["contrast"]
+                error = fitted["standard_error"]
+                fit_valid = fitted["valid"]
+                fit_uncertain = fitted["uncertain"]
+                fit_censored = fitted["censored"]
                 saturated = bool(saturated_sites)
                 missing = bool(missing_sites)
-                valid = bool(not saturated and not missing and not censored_sites)
+                valid = bool(not saturated and not missing and np.all(fit_valid))
                 observed_score = (
-                    float(np.max(fluorescence) / np.min(fluorescence))
-                    if np.all(np.isfinite(fluorescence))
-                    and np.all(fluorescence > 0.0)
+                    float(np.max(contrast) / np.min(contrast))
+                    if valid
                     else float("nan")
                 )
                 if valid:
                     score, confidence_lower, confidence_upper, relative_sem = (
                         _ratio_interval(
-                            fluorescence,
+                            contrast,
                             error,
                             looks=_COARSE_MAX_BATCHES,
                         )
                     )
                 else:
                     score = confidence_lower = confidence_upper = relative_sem = float("inf")
-                visibility = self._site_count - len(censored_sites)
+                visibility = int(np.count_nonzero(fit_valid))
+                visible_margin = contrast[fit_valid] - float(
+                    special.ndtri(
+                        1.0
+                        - 0.05
+                        / (2.0 * self._site_count * _COARSE_MAX_BATCHES)
+                    )
+                ) * error[fit_valid]
                 visibility_margin = (
                     None
-                    if saturated or missing
-                    else float(
-                        np.min(
-                            fluorescence
-                            - float(
-                                special.ndtri(
-                                    1.0
-                                    - 0.05
-                                    / (
-                                        2.0
-                                        * self._site_count
-                                        * _COARSE_MAX_BATCHES
-                                    )
-                                )
-                            )
-                            * error
-                        )
+                    if saturated or missing or not len(visible_margin)
+                    else float(np.min(visible_margin))
+                )
+                proposed_target, log_correction, response_slope, decisions = (
+                    _updated_target(
+                        current_target,
+                        contrast,
+                        error,
+                        fit_valid,
+                        fit_censored,
+                        self._rows,
+                        self._columns,
+                        previous_weights=previous_weights,
+                        previous_contrast=previous_contrast,
+                        bootstrap_counts=bootstrap_counts,
                     )
+                )
+                if valid and score <= _TARGET_RATIO:
+                    log_correction[:] = 0.0
+                    decisions[:] = "converged"
+                    proposed_target = current_target
+                current_weights = np.asarray(
+                    current_target[self._rows, self._columns], dtype=float
                 )
                 history.append({
                     "iteration": candidate_number,
@@ -1157,11 +1216,36 @@ class SlmFeedbackTask:
                         None if not valid else relative_sem
                     ),
                     "feedback_exponent": _FEEDBACK_EXPONENT,
-                    "bootstrap_updates": bootstrap_updates,
-                    "fluorescence": _json_floats(fluorescence),
-                    "standard_error": _json_floats(error),
+                    "feedback_mode": self.feedback_mode,
+                    "requested_exposure_seconds": self.exposure_seconds,
+                    "actual_exposure_seconds": self._actual_exposure_seconds,
+                    "effective_photoelectrons": self._effective_photoelectrons,
+                    "effective_count_unit": self._effective_count_unit,
+                    "target_weight": _json_floats(current_weights),
+                    "dark_mean": _json_floats(fitted["dark_mean"]),
+                    "bright_mean": _json_floats(fitted["bright_mean"]),
+                    "bright_minus_dark": _json_floats(contrast),
+                    "contrast_standard_error": _json_floats(error),
+                    "bright_fraction": _json_floats(fitted["bright_fraction"]),
+                    "fit_fidelity": _json_floats(fitted["fidelity"]),
+                    "fit_bic_gain": _json_floats(fitted["bic_gain"]),
+                    "fit_valid": [bool(value) for value in fit_valid],
+                    "fit_uncertain": [bool(value) for value in fit_uncertain],
+                    "decision": [str(value) for value in decisions],
+                    "requested_log_correction": _json_floats(log_correction),
+                    "response_log_slope": _json_floats(response_slope),
+                    "previous_valid_weight": _json_floats(previous_weights),
+                    "previous_valid_bright_minus_dark": _json_floats(
+                        previous_contrast
+                    ),
+                    "bootstrap_count": [int(value) for value in bootstrap_counts],
                     "missing_sites": list(missing_sites),
-                    "censored_sites": list(censored_sites),
+                    "censored_sites": [
+                        int(value) for value in np.flatnonzero(fit_censored)
+                    ],
+                    "uncertain_sites": [
+                        int(value) for value in np.flatnonzero(fit_uncertain)
+                    ],
                     "minimum_visibility_confidence": visibility_margin,
                     "artifact_path": str(artifact_path),
                 })
@@ -1192,91 +1276,73 @@ class SlmFeedbackTask:
                     "solver": solver_metadata,
                     "history": history[-1],
                     "score": observed_score,
-                    "fluorescence": np.array(fluorescence, copy=True),
+                    "contrast": np.array(contrast, copy=True),
                     "standard_error": np.array(error, copy=True),
                 }
                 if saturated or missing:
                     raise RuntimeError(
-                        "qCMOS fluorescence remained invalid after two measurements "
+                        "qCMOS site samples remained invalid after two measurements "
                         "of the same candidate"
                     )
-                completed["visibility_rank"] = (visibility, visibility_margin)
-                if (
-                    best_observed is None
-                    or completed["visibility_rank"]
-                    > best_observed["visibility_rank"]
-                ):
-                    best_observed = completed
-                if not valid:
-                    if retained_valid is not None:
-                        history[-1]["rollback_to_candidate"] = int(
-                            retained_valid["candidate"]
-                        )
-                        self._apply_exact(retained_valid["phase"])
-                        context.report_progress(
-                            f"Candidate {candidate_number} was censored at "
-                            f"{len(censored_sites)} site(s); retaining candidate "
-                            f"{retained_valid['candidate']}"
-                        )
-                        break
-                    context.report_progress(
-                        f"Candidate {candidate_number} was censored at "
-                        f"{len(censored_sites)} site(s) after {coarse_shots} shots; "
-                        "applying one bounded bootstrap step"
-                    )
-                    if (
-                        candidate_number == self._candidate_capacity
-                        or bootstrap_updates >= _MAX_BOOTSTRAP_UPDATES
-                    ):
-                        break
-                    current_target = _boost_target(
-                        current_target,
-                        censored_sites,
-                        self._rows,
-                        self._columns,
-                    )
-                    bootstrap_updates += 1
-                    current_pattern, solver_metadata = solve_phase(
-                        current_target,
-                        pupil_amplitude=self._pupil_amplitude,
-                        initial_phase=current_pattern,
-                        objective_kind="spots",
-                        iterations=None,
-                        stop_requested=context.cancel_requested,
-                        spot_optimizer_state=spot_optimizer_state,
-                    )
-                    current_phase = self._science_phase(current_pattern)
-                    continue
-                retained_valid = completed
-                context.report_progress(
-                    f"qCMOS fluorescence ratio {score:.5f}; "
-                    f"simultaneous 95% upper {confidence_upper:.5f}"
+                completed["visibility_rank"] = (
+                    visibility,
+                    float("-inf") if visibility_margin is None else visibility_margin,
                 )
+                if (
+                    most_visible_observed is None
+                    or completed["visibility_rank"]
+                    > most_visible_observed["visibility_rank"]
+                ):
+                    most_visible_observed = completed
+                if valid:
+                    retained_valid = completed
+                    context.report_progress(
+                        f"qCMOS bright-dark ratio {score:.5f}; "
+                        f"simultaneous 95% upper {confidence_upper:.5f}"
+                    )
+                else:
+                    context.report_progress(
+                        f"Candidate {candidate_number}: {visibility}/"
+                        f"{self._site_count} site fits valid; applying only "
+                        "history-supported site updates"
+                    )
                 if score <= _TARGET_RATIO:
                     break
                 if candidate_number == self._candidate_capacity:
                     break
-                if valid:
-                    current_target = _updated_target(
-                        current_target,
-                        fluorescence,
-                        self._rows,
-                        self._columns,
-                    )
-                    current_pattern, solver_metadata = solve_phase(
-                        current_target,
-                        pupil_amplitude=self._pupil_amplitude,
-                        initial_phase=current_pattern,
-                        objective_kind="spots",
-                        iterations=None,
-                        stop_requested=context.cancel_requested,
-                        spot_optimizer_state=spot_optimizer_state,
-                    )
-                    current_phase = self._science_phase(current_pattern)
+                visible_ratio = (
+                    float(np.max(contrast[fit_valid]) / np.min(contrast[fit_valid]))
+                    if np.any(fit_valid)
+                    else float("inf")
+                )
+                site_action = np.isin(
+                    decisions,
+                    ("bootstrap_shallow", "rollback_after_disappearance"),
+                )
+                if not valid and visible_ratio <= _TARGET_RATIO and not np.any(site_action):
+                    break
+                previous_weights[fit_valid] = current_weights[fit_valid]
+                previous_contrast[fit_valid] = contrast[fit_valid]
+                bootstrap_counts[
+                    np.asarray(decisions) == "bootstrap_shallow"
+                ] += 1
+                if np.allclose(proposed_target, current_target, rtol=0.0, atol=0.0):
+                    break
+                current_target = proposed_target
+                current_pattern, solver_metadata = solve_phase(
+                    current_target,
+                    pupil_amplitude=self._pupil_amplitude,
+                    initial_phase=current_pattern,
+                    objective_kind="spots",
+                    iterations=None,
+                    stop_requested=context.cancel_requested,
+                    spot_optimizer_state=spot_optimizer_state,
+                )
+                current_phase = self._science_phase(current_pattern)
             if retained_valid is None:
-                if best_observed is None:
+                if most_visible_observed is None:
                     raise RuntimeError("qCMOS feedback produced no observable candidate")
-                best_observed["history"]["validation"] = {
+                most_visible_observed["history"]["validation"] = {
                     "status": "inconclusive",
                     "reason": "censored sites remained after bounded bootstrap",
                     "shots": 0,
@@ -1291,11 +1357,13 @@ class SlmFeedbackTask:
                     "uniformity_confidence_lower": None,
                     "uniformity_confidence_upper": None,
                     "maximum_relative_standard_error": None,
-                    "fluorescence": _json_floats(best_observed["fluorescence"]),
-                    "standard_error": _json_floats(
-                        best_observed["standard_error"]
+                    "bright_minus_dark": _json_floats(
+                        most_visible_observed["contrast"]
                     ),
-                    "censored_sites": best_observed["history"][
+                    "contrast_standard_error": _json_floats(
+                        most_visible_observed["standard_error"]
+                    ),
+                    "censored_sites": most_visible_observed["history"][
                         "censored_sites"
                     ],
                 }
@@ -1304,7 +1372,7 @@ class SlmFeedbackTask:
                         stem="slm_feedback_inconclusive",
                         status="inconclusive",
                         history=history,
-                        observed=best_observed,
+                        observed=most_visible_observed,
                         phase=incoming,
                         pattern=incoming_pattern,
                     ),
@@ -1324,10 +1392,10 @@ class SlmFeedbackTask:
                 )
             _check_cancelled(context)
             self._apply_exact(retained_valid["phase"])
-            validation_mean = np.zeros(self._site_count, dtype=float)
-            validation_m2 = np.zeros_like(validation_mean)
+            validation_batches: list[np.ndarray] = []
             validation_count = 0
-            validation_error = np.full_like(validation_mean, np.nan)
+            validation_contrast = np.full(self._site_count, np.nan, dtype=float)
+            validation_error = np.full(self._site_count, np.nan, dtype=float)
             validation_estimate = validation_lower = validation_upper = float("inf")
             validation_relative_sem = float("inf")
             validation_censored = tuple(range(self._site_count))
@@ -1350,8 +1418,7 @@ class SlmFeedbackTask:
                     else min(_VALIDATION_BATCH_SHOTS, remaining_shots)
                 )
                 (
-                    batch_mean,
-                    batch_error,
+                    batch_samples,
                     saturated_sites,
                     missing_sites,
                 ) = self._measure(
@@ -1360,81 +1427,56 @@ class SlmFeedbackTask:
                     int(retained_valid["candidate"]) - 1,
                     shots=batch_shots,
                 )
-                batch_valid = bool(
-                    not saturated_sites
-                    and not missing_sites
-                    and np.all(np.isfinite(batch_mean))
-                    and np.all(np.isfinite(batch_error))
-                    and np.all(batch_error >= 0.0)
-                )
-                if not batch_valid:
+                if saturated_sites or missing_sites:
                     validation_reason = "independent validation data were invalid"
                     break
-                batch_m2 = (
-                    np.maximum(
-                        np.square(batch_error) - self._dark_sem_squared,
-                        0.0,
-                    )
-                    * batch_shots
-                    * (batch_shots - 1)
+                validation_batches.append(np.asarray(batch_samples, dtype=float))
+                validation_count += int(batch_samples.shape[0])
+                validation_fitted = _fit_contrasts(
+                    np.concatenate(validation_batches, axis=0),
+                    looks=validation_max_looks,
                 )
-                combined_count = validation_count + batch_shots
-                delta = batch_mean - validation_mean
-                validation_mean += delta * batch_shots / combined_count
-                validation_m2 += (
-                    batch_m2
-                    + np.square(delta)
-                    * validation_count
-                    * batch_shots
-                    / combined_count
+                validation_contrast = validation_fitted["contrast"]
+                validation_error = validation_fitted["standard_error"]
+                validation_censored = tuple(
+                    int(value)
+                    for value in np.flatnonzero(~validation_fitted["valid"])
                 )
-                validation_count = combined_count
-                if validation_count >= 2:
-                    validation_error = np.sqrt(
-                        validation_m2
-                        / (validation_count - 1)
-                        / validation_count
-                        + self._dark_sem_squared
-                    )
-                    validation_censored = _censored_sites(
-                        validation_mean,
-                        validation_error,
-                        looks=validation_max_looks,
-                    )
-                    if validation_censored:
-                        validation_reason = (
-                            "independent validation sites remained censored"
-                        )
-                        context.report_progress(
-                            f"Independent validation {validation_count}/"
-                            f"{self.validation_shots}: "
-                            f"{len(validation_censored)} censored site(s)"
-                        )
-                        continue
-                    (
-                        validation_estimate,
-                        validation_lower,
-                        validation_upper,
-                        validation_relative_sem,
-                    ) = _ratio_interval(
-                        validation_mean,
-                        validation_error,
-                        looks=validation_max_looks,
+                if validation_censored:
+                    validation_reason = (
+                        "independent validation sites remained unresolved"
                     )
                     context.report_progress(
                         f"Independent validation {validation_count}/"
-                        f"{self.validation_shots}: ratio {validation_estimate:.5f}, "
-                        f"95% upper {validation_upper:.5f}"
+                        f"{self.validation_shots}: "
+                        f"{len(validation_censored)} unresolved site fit(s)"
                     )
-                    if validation_upper <= _TARGET_RATIO:
-                        validation_status = "accepted"
-                        validation_reason = "simultaneous confidence bound passed"
-                        break
-                    if validation_lower > _TARGET_RATIO:
-                        validation_reason = (
-                            "simultaneous confidence bound excludes 1.10"
-                        )
-                        break
+                    continue
+                (
+                    validation_estimate,
+                    validation_lower,
+                    validation_upper,
+                    validation_relative_sem,
+                ) = _ratio_interval(
+                    validation_contrast,
+                    validation_error,
+                    looks=validation_max_looks,
+                )
+                context.report_progress(
+                    f"Independent validation {validation_count}/"
+                    f"{self.validation_shots}: bright-dark ratio "
+                    f"{validation_estimate:.5f}, 95% upper "
+                    f"{validation_upper:.5f}"
+                )
+                if validation_upper <= _TARGET_RATIO:
+                    validation_status = "accepted"
+                    validation_reason = "simultaneous confidence bound passed"
+                    break
+                if validation_lower > _TARGET_RATIO:
+                    validation_reason = (
+                        "simultaneous confidence bound excludes 1.10"
+                    )
+                    break
             if time.monotonic() >= deadline and validation_status != "accepted":
                 validation_reason = "validation time budget reached"
             retained_valid["history"]["validation"] = {
@@ -1462,8 +1504,8 @@ class SlmFeedbackTask:
                     if not np.isfinite(validation_relative_sem)
                     else validation_relative_sem
                 ),
-                "fluorescence": _json_floats(validation_mean),
-                "standard_error": _json_floats(validation_error),
+                "bright_minus_dark": _json_floats(validation_contrast),
+                "contrast_standard_error": _json_floats(validation_error),
                 "censored_sites": list(validation_censored),
             }
             accepted = {
@@ -1505,7 +1547,7 @@ class SlmFeedbackTask:
                             stem="slm_feedback_stopped",
                             status="stopped-before-measurement",
                             history=history,
-                            observed=best_observed,
+                            observed=most_visible_observed,
                             phase=incoming,
                             pattern=incoming_pattern,
                         )

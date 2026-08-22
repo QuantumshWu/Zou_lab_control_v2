@@ -107,8 +107,8 @@ SLM Feedback必须复用canonical Camera Measurement `repeat=N`及其同一Runti
 - 实验机server默认使用已实际可用的DVI exact-raster路径；USB SDK仅作显式可选server transport；
 - real command state支持known/unknown，未send/read不能虚构zero；
 - correction mutation取得同一DeviceUse claim，并冻结进command receipt；
-- 当前Feedback优化all-shot fluorescence，不称trap depth；
-- 500 shots默认作为coarse；controller直接用当前candidate的dark-subtracted BOX average和固定`0.25`几何指数更新当前Target，uncertainty只进入最终validation；
+- 当前Feedback mode为single-frame qCMOS `bright_mean-dark_mean`；loading fraction与occupied brightness由本run双高斯分开，不把all-shot mean冒充metric；
+- Calibration只供site BOX geometry；Pulse与camera exposure由operator分别显式设置。默认500-shot coarse、12 updates；controller使用per-site weight/contrast/fit历史、固定`0.25`基准增益、有限bootstrap/rollback/hold策略更新当前Target；
 - Task自行apply Context起始phase；normal terminal与Stop接受并apply最后一个valid controller state、写正式artifact，不按noisy max/min回选旧phase；异常失败恢复Context起始phase；
 - Feedback只更新Pattern/base并compose明确Science Context；
 - Target、pupil、operator wavefront、vendor correction、device mapping各有唯一owner。
@@ -320,10 +320,10 @@ Solver/Feedback：
 
 - 保留sparse WGS-Kim、fixed far-field phase、selected DFT和caller-owned state；
 - initial/hot inner solve走到canonical numerical gate，不为省几十毫秒增加physical candidate；
-- current Feedback observable明确all-shot fluorescence；
-- 复用Camera Measurement统一projection；
-- Calibration只提供Target site对应的BOX几何和dark baseline；controller直接使用本轮Camera Measurement `xx-shot` readout average的dark-subtracted BOX值，以固定几何指数更新当前Target，不用bright-dark response归一化，也不用uncertainty clip或noisy单轮rollback；
-- 默认500-shot coarse、8 updates，实测ratio目标为`<=1.10`；final validation默认最多3000 shots/300秒，根据实测variance输出estimate+uncertainty/inconclusive并写回terminal curve；
+- current Feedback mode明确为single-frame qCMOS shot distribution的`bright-dark`，loading probability只是mixture fraction；
+- 复用Camera Measurement统一projection，每cycle一张frame；Pulse与camera exposure分别由operator显式设置且不做二者科学兼容性判断；
+- Calibration只提供Target site对应的BOX geometry；controller用本轮双高斯contrast以及跨轮per-site weight/contrast/fit历史决定update、hold、有限bootstrap或disappearance rollback，不读取Calibration dark/threshold/exposure/working point；
+- 默认500-shot coarse、12 updates，全部site有效时contrast ratio目标为`<=1.10`；final validation默认最多3000 shots/300秒，重新拟合独立shots并输出estimate+uncertainty/inconclusive并写回terminal curve；
 - Task取得SLM后自己apply Context起始phase；normal terminal与Stop保留最后一个valid controller state，异常failure恢复该Context起始phase；
 - sparse-only contract明确；
 - dense Gaussian/Flat Top先修signal/noise region、FOM、initial phase和early stop，再profile CPU；不引GPU。
