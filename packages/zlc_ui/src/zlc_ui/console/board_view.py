@@ -134,8 +134,17 @@ class ConsoleBoardView(QtWidgets.QWidget):
         )
         by_id: dict[str, GeomProxy] = {}
         right = bottom = 0
-        updates_enabled = self.updatesEnabled()
-        self.setUpdatesEnabled(False)
+        # ``updatesEnabled()`` is an effective state: it is also false while
+        # an ancestor (not this board) temporarily suppresses painting during
+        # a tab/scroll-area relayout.  Calling ``setUpdatesEnabled(False)`` in
+        # that state would turn the ancestor's transient state into a sticky
+        # board-local disable, leaving every card present but permanently
+        # unpainted after the ancestor resumes.  Only acquire update
+        # suppression when this board currently owns an enabled state; then
+        # this scope also owns the matching re-enable.
+        suppress_updates = self.updatesEnabled()
+        if suppress_updates:
+            self.setUpdatesEnabled(False)
         try:
             for panel_id in order:
                 proxy = proxies[panel_id]
@@ -148,8 +157,8 @@ class ConsoleBoardView(QtWidgets.QWidget):
                 card = self._cards[panel_id]
                 card.setGeometry(rect)
         finally:
-            self.setUpdatesEnabled(updates_enabled)
-            if updates_enabled:
+            if suppress_updates:
+                self.setUpdatesEnabled(True)
                 self.update()
         # Do not use the current right extent as the minimum width: that would
         # ratchet a wide two-column board and make a later window resize unable

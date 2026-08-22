@@ -434,6 +434,49 @@ assert not board.grab_board().isNull()
     )
 
 
+def test_board_does_not_capture_ancestor_update_suppression() -> None:
+    _run_qt(
+        """
+from PyQt5 import QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.console import ConsoleBoardView, PanelCardView
+app = ensure_qt_app(['ancestor-update-suppression'])
+
+class CountingCard(PanelCardView):
+    def __init__(self, panel_id):
+        self.paint_count = 0
+        super().__init__(panel_id)
+
+    def paintEvent(self, event):
+        self.paint_count += 1
+        super().paintEvent(event)
+
+host = QtWidgets.QWidget()
+board = ConsoleBoardView(host)
+card = CountingCard('panel-1')
+host.resize(640, 480)
+board.setGeometry(host.rect())
+
+# QTabWidget/QScrollArea may suppress their descendants while changing the
+# visible page.  Packing during that interval must not record the inherited
+# state as a permanent board-local disable.
+host.setUpdatesEnabled(False)
+board.set_cards((card,))
+assert not board.updatesEnabled()
+host.setUpdatesEnabled(True)
+host.show()
+app.processEvents()
+
+assert board.updatesEnabled()
+assert card.updatesEnabled()
+assert card.paint_count > 0
+assert card.geometry().width() > 0 and card.geometry().height() > 0
+host.close()
+app.processEvents()
+"""
+    )
+
+
 def test_board_qtest_drop_intent_payload() -> None:
     _run_qt(
         """
