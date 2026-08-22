@@ -52,18 +52,20 @@ correction mapping, the Editor shows the divergence and refuses the old draft
 until explicit Adopt or Context reload; closing preserves the currently
 commanded phase.
 
-The X15213 leaf supports the series' `1272 x 1024` active LCOS raster only
-through the official USB frame-memory SDK. Generic **Scan hardware** reports a
-candidate only when local `hpkSLMdaLV.dll` and `hpkSLMda.dll` can open a
-controller and read its head serial; scanning does not send a phase. A new real
+The X15213 server supports the series' `1272 x 1024` active LCOS raster only
+through the official USB frame-memory SDK. It loads the primary vendor library
+from an optional explicit directory, `HAMAMATSU_SLM_SDK`, `PATH`, a discovered
+vendor installation, or the normal Windows loader; it does not reject a valid
+installation by preflighting a second DLL in the same folder. A new real
 adapter starts with unknown command truth. A command becomes known only after
 write, display-slot selection, exact active-frame readback, and the profile's
 settle wait all complete.
 
-When the USB controller is attached to another computer, that computer runs
-`bin/slm_server.bat` and is the only process that loads the SDK.  An apparatus
-uses `slm.remote` with its host, port (default `18862`), and command timeout;
-`127.0.0.1` is the same-machine form.  The proxy reads identity, shape, current
+The computer attached to the USB controller runs `bin/slm_server.bat` and is
+the only process that loads the SDK. Like `sequencer.hardware`, the single real
+device type `slm.hamamatsu_x15213` stores only its server host and port (default
+`18862`) in the apparatus; `127.0.0.1` is the same-machine form. The proxy reads
+identity, shape, current
 phase and receipt once when the installation opens, then serves all Editor
 display/state reads from that local immutable cache.  Target edits never cross
 the network. A healthy **Send to SLM** or Task phase command sends one bounded
@@ -77,7 +79,9 @@ profile paths remain server-local and are fixed by the server command line
 rather than being sent from a remote UI. As required by the experiment remote
 policy, this service deliberately has no authentication or TLS and belongs
 only on the trusted laboratory LAN; it must not be exposed to the public
-Internet.
+Internet. With the default `0.0.0.0` listen bind, startup prints both the
+same-machine endpoint and every discovered LAN IPv4 address in the exact
+host/port form entered in the device configuration.
 
 Each supported head has a strict profile under `devices/slm/profiles/` with
 model, serial, working and phase-curve wavelengths, curve provenance, and

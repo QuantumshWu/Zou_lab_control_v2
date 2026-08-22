@@ -28,12 +28,12 @@ It returns an estimate and simultaneous confidence interval as `accepted` or
 `inconclusive`, never promotes a noisy point estimate into a 1% claim, and does
 not infer unmeasured dense-target pixels or a hidden wavefront.
 
-The real SLM device type is `slm.hamamatsu_x15213`. **Scan hardware** uses the
-same descriptor route as every other device and reports a candidate only when
-the official USB SDK opens a controller and reads the head serial. Discovery
-does not send a phase. A newly connected real adapter reports its command state
-as unknown; only a completed USB write, display-slot selection, byte readback,
-and authored optical-settle wait establishes known command truth. The Editor
+The real SLM device type is `slm.hamamatsu_x15213`. Like the real Pulse
+sequencer, its apparatus parameters are the server host and port; the process
+started by `bin/slm_server.bat` is the sole owner of the USB SDK and controller.
+A newly connected real adapter reports its command state as unknown; only a
+completed USB write, display-slot selection, byte readback, and authored
+optical-settle wait establishes known command truth. The Editor
 has only **Pattern** and **Wavefront** pages. Pattern keeps the independent
 target and pre-correction science-phase plots at the established
 `2x2 = 490 x 357` logical size; a shared **Size** selector also controls the
@@ -43,9 +43,9 @@ a strict Science Context stores Pattern, numeric pupil, operator wavefront,
 typed system-correction reference and command receipt. Loading or saving either
 artifact does not write the SLM; only **Send to SLM** establishes a known command.
 
-The vendor correction BMP stays on the experiment computer, can be loaded and
-A/B enabled in the Editor, and is composed by the adapter only on the next
-explicit Send. Each mutation advances the device mapping revision; a command
+The vendor correction BMP stays on the SLM-server computer and is selected by
+the server configuration; it is composed by the adapter only on the next
+explicit Send. Each correction mutation advances the device mapping revision; a command
 receipt freezes the USB identity, profile, wavelength, orientation, correction
 and mapping revision used by that command. The serial profile records the model,
 head serial, phase-curve wavelength and source, and settle source. The current

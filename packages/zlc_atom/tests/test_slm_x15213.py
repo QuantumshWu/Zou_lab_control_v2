@@ -14,11 +14,13 @@ from zlc_atom.devices.slm.device import _RemoteSlmAdapter, _open_slm_server
 from zlc_atom.devices.slm.device_types import (
     DEVICE_TYPES,
     HAMAMATSU_X15213_SCHEMA,
-    REMOTE_SLM_SCHEMA,
+    X15213_SERVER_SCHEMA,
     X15213Adapter,
-    _discover_x15213,
+    _find_sdk_directory,
+    _load_sdk,
     _load_correction,
     _load_profile,
+    _print_client_endpoints,
 )
 from zlc_atom.install import create_installation
 
@@ -124,20 +126,20 @@ def _running_server(adapter: SlmAdapter):
     return server, worker
 
 
-def test_slm_descriptors_offer_local_usb_and_remote_proxy() -> None:
-    assert len(DEVICE_TYPES) == 2
-    descriptor, remote = DEVICE_TYPES
+def test_real_slm_descriptor_matches_the_pulse_server_endpoint_model() -> None:
+    assert len(DEVICE_TYPES) == 1
+    descriptor = DEVICE_TYPES[0]
     assert descriptor.type_id == "slm.hamamatsu_x15213"
     assert descriptor.domain == "slm"
     assert descriptor.capabilities == ("slm.phase",)
-    assert descriptor.discover is _discover_x15213
+    assert descriptor.discover is None
     assert descriptor.control_factory is not None
-    assert set(HAMAMATSU_X15213_SCHEMA.field_names) == set(_config())
-    assert remote.type_id == "slm.remote"
-    assert remote.capabilities == ("slm.phase",)
-    assert set(REMOTE_SLM_SCHEMA.field_names) == {
-        "host", "port", "timeout_seconds",
+    assert HAMAMATSU_X15213_SCHEMA.field_names == ("host", "port")
+    assert HAMAMATSU_X15213_SCHEMA.project_values({}) == {
+        "host": "127.0.0.1",
+        "port": 18862,
     }
+    assert set(X15213_SERVER_SCHEMA.field_names) == set(_config())
 
 
 def test_profile_is_strict_and_records_physical_provenance_boundaries(
@@ -173,21 +175,27 @@ def test_profile_is_strict_and_records_physical_provenance_boundaries(
         _load_profile("coerced")
 
 
-def test_real_installation_starts_unknown_without_fabricating_zero(
+def test_real_installation_dials_its_server_endpoint_and_starts_unknown(
     monkeypatch,
 ) -> None:
     sdk = _UsbSdk()
     handle = _patch_usb(monkeypatch, sdk)
-    installation = create_installation(
-        (
-            {
-                "key": "slm",
-                "type_id": "slm.hamamatsu_x15213",
-                "config": _config(),
-            },
-        )
-    )
+    physical = X15213Adapter(_config())
+    server, worker = _running_server(physical)
+    installation = None
     try:
+        installation = create_installation(
+            (
+                {
+                    "key": "slm",
+                    "type_id": "slm.hamamatsu_x15213",
+                    "config": {
+                        "host": "127.0.0.1",
+                        "port": server.server_address[1],
+                    },
+                },
+            )
+        )
         assert installation.failures == {}
         slm = installation.capability("slm.phase", key="slm")
         assert isinstance(slm, SlmAdapter)
@@ -218,7 +226,13 @@ def test_real_installation_starts_unknown_without_fabricating_zero(
         }
         assert sdk.write_count == 0
     finally:
-        installation.close()
+        if installation is not None:
+            installation.close()
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=2.0)
+        physical.close()
+    assert not worker.is_alive()
     assert sdk.close_count == 1
     assert handle.close_count == 1
 
@@ -376,25 +390,27 @@ def test_correction_rejects_unproven_cross_wavelength_conversion(
         )
 
 
-def test_discovery_is_usb_only_and_does_not_send_a_phase(monkeypatch) -> None:
-    sdk = _UsbSdk()
-    handle = _patch_usb(monkeypatch, sdk)
-    found = _discover_x15213()
-    assert len(found) == 1
-    candidate = found[0]
-    assert candidate.instance_id == "x15213_usb_LSH0804382"
-    assert candidate.type_id == "slm.hamamatsu_x15213"
-    assert set(candidate.parameters) == set(_config())
-    assert candidate.parameters["device_profile"] == "LSH0804382"
-    assert candidate.parameters["wavelength_nm"] == 852.0
-    assert sdk.write_count == 0
-    assert sdk.close_count == 1
-    assert handle.close_count == 1
-
+def test_sdk_loading_does_not_require_a_second_dll_preflight(
+    monkeypatch, tmp_path: Path
+) -> None:
     import zlc_atom.devices.slm.device_types as module
 
-    monkeypatch.setattr(module, "_find_sdk_directory", lambda _authored="": None)
-    assert _discover_x15213() == ()
+    primary = tmp_path / "hpkSLMdaLV.dll"
+    primary.write_bytes(b"vendor library placeholder")
+    assert _find_sdk_directory(str(tmp_path)) == tmp_path.resolve()
+
+    loaded: list[str] = []
+    sentinel = object()
+    monkeypatch.setattr(
+        module.ctypes,
+        "WinDLL",
+        lambda library: loaded.append(str(library)) or sentinel,
+        raising=False,
+    )
+    sdk, handle = _load_sdk(None)
+    assert sdk is sentinel
+    assert handle is None
+    assert loaded == ["hpkSLMdaLV.dll"]
 
 
 def test_usb_mode_switch_reboots_reopens_and_rechecks_identity(monkeypatch) -> None:
@@ -455,11 +471,10 @@ def test_remote_slm_caches_reads_and_only_calls_the_server_to_send_phase(
             (
                 {
                     "key": "slm",
-                    "type_id": "slm.remote",
+                    "type_id": "slm.hamamatsu_x15213",
                     "config": {
                         "host": "127.0.0.1",
                         "port": server.server_address[1],
-                        "timeout_seconds": 2.0,
                     },
                 },
             )
@@ -786,6 +801,43 @@ def test_slm_server_launcher_uses_the_product_entry() -> None:
     assert TOOLS["slm_server"] == "zlc_atom.devices.slm.device_types"
 
 
+def test_slm_server_prints_copyable_same_machine_and_lan_device_addresses(
+    monkeypatch, capsys
+) -> None:
+    import zlc_atom.devices.slm.device_types as module
+
+    monkeypatch.setattr(
+        module,
+        "_local_ipv4_addresses",
+        lambda: ("192.168.0.20", "10.0.0.5"),
+    )
+    _print_client_endpoints("0.0.0.0", 18862)
+    output = capsys.readouterr().out
+    assert "SLM LISTEN BIND 0.0.0.0:18862" in output
+    assert "same computer: host=127.0.0.1 port=18862" in output
+    assert "another computer: host=192.168.0.20 port=18862" in output
+    assert "another computer: host=10.0.0.5 port=18862" in output
+    assert "0.0.0.0 is listen-only" in output
+
+
+def test_slm_server_check_uses_the_windows_loader_without_a_pair_preflight(
+    monkeypatch, capsys
+) -> None:
+    import zlc_atom.devices.slm.device_types as module
+
+    calls: list[Path | None] = []
+    monkeypatch.setattr(module, "_find_sdk_directory", lambda _authored="": None)
+    monkeypatch.setattr(
+        module,
+        "_load_sdk",
+        lambda directory: (calls.append(directory) or object(), None),
+    )
+
+    assert module.main(["--check-config", "--host", "127.0.0.1"]) == 0
+    assert calls == [None]
+    assert "SDK=Windows loader" in capsys.readouterr().out
+
+
 def test_slm_server_cli_validates_before_hardware_and_closes_after_bind_failure(
     monkeypatch,
 ) -> None:
@@ -815,7 +867,6 @@ def test_slm_server_cli_validates_before_hardware_and_closes_after_bind_failure(
             self.closed += 1
 
     adapter = FakeAdapter()
-    monkeypatch.setattr(module, "_find_sdk_directory", lambda _authored="": Path("sdk"))
     monkeypatch.setattr(module, "X15213Adapter", lambda _authored: adapter)
     monkeypatch.setattr(
         module,

@@ -76,6 +76,10 @@ def test_a_real_apparatus_writes_its_endpoint_and_its_sensor_settings(tmp_path) 
                 "sequencer", "sequencer", "sequencer.hardware",
                 {"host": "10.0.0.7", "port": 18861},
             ),
+            DeviceInstanceConfig(
+                "slm", "slm", "slm.hamamatsu_x15213",
+                {"host": "10.0.0.8", "port": 18862},
+            ),
         )
     )
     path = save_installation_config(config, tmp_path / "bench.json")
@@ -83,6 +87,10 @@ def test_a_real_apparatus_writes_its_endpoint_and_its_sensor_settings(tmp_path) 
     assert written["format"] == DOCUMENT_FORMAT
     assert written["devices"][0]["parameters"]["roi_width"] == 512
     assert written["devices"][1]["parameters"]["host"] == "10.0.0.7"
+    assert written["devices"][2]["parameters"] == {
+        "host": "10.0.0.8",
+        "port": 18862,
+    }
     assert load_installation_config(path) == config
 
 

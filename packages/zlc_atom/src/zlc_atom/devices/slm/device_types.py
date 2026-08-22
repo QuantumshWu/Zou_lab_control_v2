@@ -1,4 +1,4 @@
-"""Local USB X15213 and the thin remote SLM device leaf."""
+"""The network-installed X15213 leaf and its server-owned USB adapter."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
 from threading import Lock
 import time
 from typing import Mapping
@@ -16,7 +17,6 @@ import numpy as np
 from PIL import Image
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
-from zlc_atom.install.configuration import DeviceInstanceConfig
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
 
 from . import open_slm_control
@@ -29,9 +29,21 @@ _TYPE_ID = "slm.hamamatsu_x15213"
 _PROFILE_FORMAT = "zlc.slm.hamamatsu_x15213.device_profile"
 _PROFILE_VERSION = 2
 _PROFILE_DIRECTORY = Path(__file__).resolve().parent / "profiles"
+_SDK_LIBRARY = "hpkSLMdaLV.dll"
+_REMOTE_TIMEOUT_SECONDS = 10.0
 
 
 HAMAMATSU_X15213_SCHEMA = AuthoringSchema(
+    (
+        AuthoringField("host", "str", "SLM server host", "127.0.0.1", required=True),
+        AuthoringField(
+            "port", "int", "SLM server port", 18862, minimum=1, maximum=65535
+        ),
+    )
+)
+
+
+X15213_SERVER_SCHEMA = AuthoringSchema(
     (
         AuthoringField(
             "sdk_directory",
@@ -58,67 +70,135 @@ HAMAMATSU_X15213_SCHEMA = AuthoringSchema(
     ),
 )
 
-REMOTE_SLM_SCHEMA = AuthoringSchema(
-    (
-        AuthoringField("host", "str", "SLM server host", "127.0.0.1", required=True),
-        AuthoringField(
-            "port", "int", "SLM server port", 18862, minimum=1, maximum=65535
-        ),
-        AuthoringField(
-            "timeout_seconds",
-            "float",
-            "SLM command timeout (s)",
-            10.0,
-            minimum=0.001,
-        ),
-    )
-)
-
 
 def _find_sdk_directory(authored: str = "") -> Path | None:
-    direct = (
+    """Locate the primary SDK DLL without inventing a second dependency check."""
+
+    direct = [
         authored,
         os.environ.get("HAMAMATSU_SLM_SDK", ""),
+        *os.environ.get("PATH", "").split(os.pathsep),
         str(Path.cwd()),
         str(Path(__file__).resolve().parent),
-    )
+    ]
+    seen: set[Path] = set()
     for text in direct:
         if text:
             path = Path(text).expanduser()
             path = path.parent if path.is_file() else path
-            if (path / "hpkSLMdaLV.dll").is_file() and (path / "hpkSLMda.dll").is_file():
-                return path.resolve()
+            try:
+                resolved = path.resolve()
+            except OSError:
+                continue
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            if (resolved / _SDK_LIBRARY).is_file():
+                return resolved
     for variable in ("ProgramFiles", "ProgramFiles(x86)"):
         root_text = os.environ.get(variable, "")
         if not root_text:
             continue
         root = Path(root_text)
-        seen: set[Path] = set()
         for pattern in ("*Hamamatsu*", "*LCOS*", "*SLM*"):
             for vendor in root.glob(pattern):
                 resolved = vendor.resolve()
                 if resolved in seen:
                     continue
                 seen.add(resolved)
-                for dll in vendor.rglob("hpkSLMdaLV.dll"):
-                    if (dll.parent / "hpkSLMda.dll").is_file():
-                        return dll.parent.resolve()
+                for dll in vendor.rglob(_SDK_LIBRARY):
+                    return dll.parent.resolve()
     return None
 
 
-def _load_sdk(directory: Path):
+def _load_sdk(directory: Path | None):
+    """Load through an explicit SDK folder or the normal Windows DLL search."""
+
     if not hasattr(ctypes, "WinDLL"):
         raise OSError("Hamamatsu X15213 USB control requires Windows")
-    handle = os.add_dll_directory(str(directory)) if hasattr(os, "add_dll_directory") else None
+    handle = (
+        os.add_dll_directory(str(directory))
+        if directory is not None and hasattr(os, "add_dll_directory")
+        else None
+    )
+    library = str(directory / _SDK_LIBRARY) if directory is not None else _SDK_LIBRARY
     try:
         # The repository and this development machine contain no official SDK
         # header. Do not manufacture ctypes signatures: experiment-machine
         # acceptance must bind them from the installed vendor header first.
-        return ctypes.WinDLL(str(directory / "hpkSLMdaLV.dll")), handle
-    except BaseException:
+        return ctypes.WinDLL(library), handle
+    except BaseException as error:
         if handle is not None:
             handle.close()
-        raise
+        source = str(directory) if directory is not None else "the Windows DLL search path"
+        raise OSError(
+            f"could not load {_SDK_LIBRARY} from {source}: "
+            f"{type(error).__name__}: {error}"
+        ) from error
+
+
+def _local_ipv4_addresses() -> tuple[str, ...]:
+    """Return unique non-loopback IPv4 addresses clients can actually use."""
+
+    addresses: list[str] = []
+
+    def add(value: object) -> None:
+        address = str(value).strip()
+        try:
+            socket.inet_aton(address)
+        except OSError:
+            return
+        if address == "0.0.0.0" or address.startswith("127.") or address in addresses:
+            return
+        addresses.append(address)
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("8.8.8.8", 80))
+            add(probe.getsockname()[0])
+    except OSError:
+        pass
+    try:
+        for info in socket.getaddrinfo(
+            socket.gethostname(), None, socket.AF_INET, socket.SOCK_STREAM
+        ):
+            add(info[4][0])
+    except OSError:
+        pass
+    return tuple(addresses)
+
+
+def _print_client_endpoints(bind_host: str, port: int) -> None:
+    """Print the same-machine and LAN values to enter in the SLM device form."""
+
+    host = str(bind_host).strip()
+    port = int(port)
+    wildcard = host == "0.0.0.0"
+    same_host = "127.0.0.1" if wildcard or host.lower() == "localhost" else host
+    print(f"SLM LISTEN BIND {host}:{port}", flush=True)
+    print(
+        f"SLM DEVICE ADDRESS same computer: host={same_host} port={port}",
+        flush=True,
+    )
+    lan_addresses = (
+        _local_ipv4_addresses()
+        if wildcard
+        else (() if same_host.startswith("127.") else (same_host,))
+    )
+    if wildcard:
+        print("SLM NOTE 0.0.0.0 is listen-only; do not enter it as the device host", flush=True)
+    if lan_addresses:
+        for address in lan_addresses:
+            print(
+                f"SLM DEVICE ADDRESS another computer: host={address} port={port}",
+                flush=True,
+            )
+    elif wildcard:
+        print(
+            "SLM DEVICE ADDRESS another computer: NOT DISCOVERED; "
+            "run ipconfig and use this computer's LAN IPv4",
+            flush=True,
+        )
 
 
 def _check(result: object, operation: str) -> None:
@@ -372,7 +452,7 @@ class X15213Adapter:
     shape_yx = _SHAPE_YX
 
     def __init__(self, values: Mapping[str, object]) -> None:
-        authored = HAMAMATSU_X15213_SCHEMA.project_values(values)
+        authored = X15213_SERVER_SCHEMA.project_values(values)
         profile = _load_profile(str(authored["device_profile"]))
         self._profile_name = str(profile["profile_name"])
         self._model = str(profile["model"])
@@ -412,12 +492,6 @@ class X15213Adapter:
         self._closed = False
 
         directory = _find_sdk_directory(str(authored["sdk_directory"]))
-        if directory is None:
-            raise FileNotFoundError(
-                "the official Hamamatsu installation's hpkSLMdaLV.dll and "
-                "hpkSLMda.dll were not found together; set sdk_directory or "
-                "HAMAMATSU_SLM_SDK"
-            )
         self._sdk, self._dll_handle = _load_sdk(directory)
         try:
             self._board_id, serial = _connect_usb(self._sdk, self._profile_serial)
@@ -734,69 +808,14 @@ class X15213Adapter:
         self._closed = True
 
 
-def _candidate_values(**changes: object) -> dict[str, object]:
-    values = HAMAMATSU_X15213_SCHEMA.project_values({})
-    values.update(changes)
-    return values
-
-
-def _slug(value: str) -> str:
-    return re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_") or "candidate"
-
-
-def _discover_x15213() -> tuple[DeviceInstanceConfig, ...]:
-    directory = _find_sdk_directory()
-    if directory is None:
-        return ()
-    sdk, handle = _load_sdk(directory)
-    board_id: int | None = None
-    try:
-        board_id = _usb_open(sdk)
-        serial = _usb_serial(sdk, board_id)
-        profile = _load_profile(serial)
-        return (
-            DeviceInstanceConfig(
-                f"x15213_usb_{_slug(serial)}",
-                f"x15213_usb_candidate_{_slug(serial)}",
-                _TYPE_ID,
-                _candidate_values(
-                    sdk_directory=str(directory),
-                    device_profile=serial,
-                    wavelength_nm=float(profile["default_wavelength_nm"]),
-                ),
-            ),
-        )
-    finally:
-        try:
-            if board_id is not None:
-                _usb_close(sdk, board_id)
-        finally:
-            if handle is not None:
-                handle.close()
-
-
 def _factory(context, key: str, values: Mapping[str, object]) -> InstalledLeaf:
-    allowed = set(HAMAMATSU_X15213_SCHEMA.field_names)
-    unknown = set(values) - allowed
-    if unknown:
-        raise ValueError(f"unknown X15213 configuration fields: {sorted(unknown)}")
-    authored = {
-        name: values[name]
-        for name in HAMAMATSU_X15213_SCHEMA.field_names
-        if name in values
-    }
-    adapter = X15213Adapter(authored)
-    return bind_slm(context, key, adapter, _TYPE_ID)
-
-
-def _remote_factory(context, key: str, values: Mapping[str, object]) -> InstalledLeaf:
-    authored = REMOTE_SLM_SCHEMA.project_values(values)
+    authored = HAMAMATSU_X15213_SCHEMA.project_values(values)
     adapter = _RemoteSlmAdapter(
         str(authored["host"]),
         int(authored["port"]),
-        float(authored["timeout_seconds"]),
+        _REMOTE_TIMEOUT_SECONDS,
     )
-    return bind_slm(context, key, adapter, "slm.remote")
+    return bind_slm(context, key, adapter, _TYPE_ID)
 
 
 DEVICE_TYPES = (
@@ -806,15 +825,6 @@ DEVICE_TYPES = (
         HAMAMATSU_X15213_SCHEMA,
         ("slm.phase",),
         factory=_factory,
-        discover=_discover_x15213,
-        control_factory=open_slm_control,
-    ),
-    DeviceTypeDescriptor(
-        "slm.remote",
-        "slm",
-        REMOTE_SLM_SCHEMA,
-        ("slm.phase",),
-        factory=_remote_factory,
         control_factory=open_slm_control,
     ),
 )
@@ -844,7 +854,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("SLM server host must be non-empty text without whitespace")
     if not 1 <= arguments.port <= 65535:
         parser.error("SLM server port must be from 1 through 65535")
-    authored = HAMAMATSU_X15213_SCHEMA.project_values(
+    authored = X15213_SERVER_SCHEMA.project_values(
         {
             "sdk_directory": arguments.sdk_directory,
             "device_profile": arguments.device_profile,
@@ -860,12 +870,6 @@ def main(argv: list[str] | None = None) -> int:
         float(authored["wavelength_nm"]),
         float(profile["phase_curve_wavelength_nm"]),
     )
-    directory = _find_sdk_directory(str(authored["sdk_directory"]))
-    if directory is None:
-        parser.error(
-            "Hamamatsu hpkSLMdaLV.dll and hpkSLMda.dll were not found; "
-            "set --sdk-directory or HAMAMATSU_SLM_SDK"
-        )
     if authored["correction_path"]:
         _load_correction(
             str(authored["correction_path"]),
@@ -873,9 +877,15 @@ def main(argv: list[str] | None = None) -> int:
             wavelength_nm=float(authored["wavelength_nm"]),
         )
     if arguments.check_config:
+        directory = _find_sdk_directory(str(authored["sdk_directory"]))
+        sdk, dll_handle = _load_sdk(directory)
+        del sdk
+        if dll_handle is not None:
+            dll_handle.close()
         print(
             "SLM server config OK: "
-            f"{profile['serial']} at {arguments.host}:{arguments.port}"
+            f"{profile['serial']} at {arguments.host}:{arguments.port}; "
+            f"SDK={directory if directory is not None else 'Windows loader'}"
         )
         return 0
 
@@ -888,6 +898,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"device={adapter.identity}",
                 flush=True,
             )
+            _print_client_endpoints(arguments.host, int(address[1]))
             try:
                 server.serve_forever(poll_interval=0.1)
             except KeyboardInterrupt:
@@ -900,7 +911,7 @@ def main(argv: list[str] | None = None) -> int:
 __all__ = [
     "DEVICE_TYPES",
     "HAMAMATSU_X15213_SCHEMA",
-    "REMOTE_SLM_SCHEMA",
+    "X15213_SERVER_SCHEMA",
     "X15213Adapter",
 ]
 
