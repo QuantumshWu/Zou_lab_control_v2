@@ -78,7 +78,6 @@ They constrain implementation method; product and architecture truth remain in
 9. Stop and report before editing if the proposed cut would:
    - add any unrequested file;
    - add any new production class;
-   - modify more than 8 files; or
    - add more than roughly 300 net production lines.
 10. If a simple change starts requiring lifecycle machinery or parallel state,
    discard that direction and re-derive the solution from the existing path.

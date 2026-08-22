@@ -23,11 +23,9 @@ DEFAULT_SIMULATION_MOT_IMAGE_SHAPE_YX = (1200, 1920)
 DEFAULT_MOT_FIELD_OPTIMUM_DAC = (0, 0, 0)
 DEFAULT_SIMULATION_SITE_SPACING_PIXELS = 9.0
 DEFAULT_SIMULATION_SLM_SHAPE_YX = (128, 128)
-# Calibrated nominal anchors remain recognizable at lower depth than a blind
-# off-grid candidate.  The latter must clear the stronger dominance gate so a
-# coherent sidelobe is not promoted into a new atom trap.
-_NOMINAL_TRAP_PEAK_FRACTION = 0.10
-_EXTRA_TRAP_PEAK_FRACTION = 0.20
+# Every physical trap is one dominant local maximum of the propagated field.
+# There is no second nominal-site roster beside those peaks.
+_TRAP_PEAK_FRACTION = 0.20
 _TRAP_PEAK_NEIGHBORHOOD = 7
 
 #: 87-Rb, the atom this bench traps: 86.909 180 5 u.
@@ -95,11 +93,11 @@ def _immutable(values: object, dtype: object) -> np.ndarray:
 
 
 @lru_cache(maxsize=None)
-def _nominal_slm_command(
+def _initial_slm_command(
     shape_yx: tuple[int, int],
     grid_shape_yx: tuple[int, int],
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Solve each apparatus geometry once; the nominal target is seed-independent."""
+    """Solve the configured startup target once; it is not a second site roster."""
 
     from zlc_atom.devices.slm.solver import preset_grid, solve_phase
 
@@ -296,10 +294,9 @@ class SimulationWorld:
         self._mot_field_optimum = dict(
             zip(("da_bias_x", "da_bias_y", "da_bias_z"), optimum)
         )
-        static_seed, atom_seed, qcmos_seed, mot_seed = np.random.SeedSequence(
+        _static_seed, atom_seed, qcmos_seed, mot_seed = np.random.SeedSequence(
             seed
         ).spawn(4)
-        self._static_rng = np.random.default_rng(static_seed)
         self._atom_rng = np.random.default_rng(atom_seed)
         self._qcmos_rng = np.random.default_rng(qcmos_seed)
         self._mot_rng = np.random.default_rng(mot_seed)
@@ -308,96 +305,52 @@ class SimulationWorld:
         self._fire_count = 0
         site_count = len(self.geometry.site_centers_xy)
         self._slm_shape_yx = DEFAULT_SIMULATION_SLM_SHAPE_YX
-        self._slm_site_indices_yx, nominal_phase = _nominal_slm_command(
+        self._reference_slm_indices_yx, initial_phase = _initial_slm_command(
             self._slm_shape_yx,
             self.geometry.grid_shape_yx,
         )
-        if len(self._slm_site_indices_yx) != site_count:
-            raise RuntimeError("nominal SLM target differs from simulation site geometry")
-        self._commanded_phase = _immutable(nominal_phase, "<f4")
+        if len(self._reference_slm_indices_yx) != site_count:
+            raise RuntimeError("initial SLM target differs from simulation site geometry")
+        self._commanded_phase = _immutable(initial_phase, "<f4")
         self._slm_phase_revision = 0
         self._propagated_revision = -1
         self._propagation_count = 0
         self._trap_plane_intensity: np.ndarray | None = None
-        self._site_trap_intensities: np.ndarray | None = None
-        self._slm_nominal_peak_indices_yx = _immutable(
-            np.full((site_count, 2), -1, dtype=np.intp), np.intp
-        )
+        self._trap_indices_yx = _immutable(np.empty((0, 2), dtype=np.intp), np.intp)
+        self._trap_intensities = _immutable(np.empty(0), "<f4")
         self._loading_intensity_scale: float | None = None
         self._slm_pupil_amplitude, self._hidden_slm_aberration = (
             self._slm_plant(seed)
         )
-        efficiency_log = self._static_rng.normal(0.0, 1.0, site_count)
-        efficiency_log -= float(np.min(efficiency_log))
-        span = float(np.ptp(efficiency_log))
-        if span:
-            efficiency_log *= np.log(1.02) / span
-        efficiency_log -= 0.5 * np.log(1.02)
-        self._detector_efficiency = _readonly(np.exp(efficiency_log))
-        aspect = np.sqrt(1.25)
-        base_sigma = np.asarray(
-            (self.atom_sigma_px / aspect, self.atom_sigma_px * aspect),
-            dtype=float,
-        )
-        self._site_psf_sigma_xy = _readonly(
-            base_sigma[np.newaxis, :]
-            * np.exp(self._static_rng.normal(0.0, 0.10, (site_count, 2)))
-        )
-        self._site_psf_angle_radians = _readonly(
-            np.deg2rad(
-                18.0 + self._static_rng.normal(0.0, 5.0, site_count)
+        imaging_y, imaging_x = np.ogrid[
+            -1.0 : 1.0 : self._slm_shape_yx[0] * 1j,
+            -1.0 : 1.0 : self._slm_shape_yx[1] * 1j,
+        ]
+        imaging_radius_squared = imaging_x * imaging_x + imaging_y * imaging_y
+        imaging_amplitude = np.exp(-2.5 * imaging_radius_squared)
+        imaging_coma_x = (3.0 * imaging_radius_squared - 2.0) * imaging_x
+        imaging_astigmatism = imaging_x * imaging_x - imaging_y * imaging_y
+        imaging_aberration = 0.30 * imaging_coma_x + 0.12 * imaging_astigmatism
+        imaging_field = imaging_amplitude * np.exp(1j * imaging_aberration)
+        imaging_psf = np.abs(
+            np.fft.fftshift(
+                np.fft.fft2(np.fft.ifftshift(imaging_field), norm="ortho")
             )
-        )
-        self._site_psf_skew = _readonly(
-            np.clip(
-                0.45 + self._static_rng.normal(0.0, 0.08, site_count),
-                0.15,
-                0.75,
-            )
-        )
+        ) ** 2
+        imaging_psf /= float(np.max(imaging_psf))
+        self._camera_psf = _readonly(imaging_psf)
         height, width = self.geometry.image_shape_yx
-        yy, xx = np.mgrid[:height, :width]
-        site_psf_spots = []
-        for (x, y), gain, sigma_xy, angle, skew in zip(
-            self.geometry.site_centers_xy,
-            self._detector_efficiency,
-            self._site_psf_sigma_xy,
-            self._site_psf_angle_radians,
-            self._site_psf_skew,
-            strict=True,
-        ):
-            sigma_x, sigma_y = (float(value) for value in sigma_xy)
-            cosine, sine = np.cos(angle), np.sin(angle)
-            dx = (xx - x) * cosine + (yy - y) * sine
-            dy = -(xx - x) * sine + (yy - y) * cosine
-            core = np.exp(
-                -0.5 * ((dx / sigma_x) ** 2 + (dy / sigma_y) ** 2)
-            )
-            spot = np.clip(
-                core * (1.0 + float(skew) * dx / sigma_x), 0.0, None
-            )
-            site_psf_spots.append(spot)
-        self._site_psf_spots = _readonly(site_psf_spots)
-        self._occupancy = np.zeros(site_count, dtype=bool)
-        self._extra_slm_site_indices_yx = _immutable(
-            np.empty((0, 2), dtype=np.intp), np.intp
-        )
-        self._extra_site_trap_intensities = _immutable(np.empty(0), "<f4")
-        self._extra_site_centers_xy = _readonly(np.empty((0, 2), dtype=float))
-        self._extra_detector_efficiency = _readonly(np.empty(0, dtype=float))
-        self._extra_site_psf_sigma_xy = _readonly(
-            np.empty((0, 2), dtype=float)
-        )
-        self._extra_site_psf_spots = _readonly(
+        self._trap_centers_xy = _readonly(np.empty((0, 2), dtype=float))
+        self._trap_psf_spots = _readonly(
             np.empty((0, height, width), dtype=float)
         )
-        self._extra_occupancy = np.zeros(0, dtype=bool)
+        self._occupancy = np.zeros(0, dtype=bool)
         self._mot_population = 1.0
         self._dac_values = {"da_bias_x": 0, "da_bias_y": 0, "da_bias_z": 0}
         #: Read-only pixel coordinate vectors per MOT frame shape.  A frame
         #: shape is a configuration fact, so this holds one or two entries.
         self._mot_axis_cache: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
-        # Establish the physical intensity scale once from the nominal command.
+        # Establish the physical intensity scale once from the startup command.
         # Later commands are compared against that fixed bench scale, rather
         # than renormalized per phase (which would erase diffraction loss).
         self._ensure_slm_propagation()
@@ -471,7 +424,7 @@ class SimulationWorld:
         return self._config.dark_current_e_per_s
 
     def _slm_plant(self, seed: int) -> tuple[np.ndarray, np.ndarray]:
-        """Materialize fixed illumination and one apparatus wavefront ripple."""
+        """Materialize one common pupil illumination and low-order aberration."""
 
         height, width = self._slm_shape_yx
         yy, xx = np.ogrid[
@@ -489,17 +442,19 @@ class SimulationWorld:
         illumination *= np.clip(1.0 - 0.20 * radius_squared, 0.0, None)
         amplitude = np.where(pupil, illumination, 0.0)
 
-        # One small, target-independent mid-spatial wavefront ripple coherently
-        # redistributes power among the nominal diffraction orders without a
-        # per-site gain, a second hologram, or per-command normalization.
-        # Bounded seed jitter changes the hidden bench while preserving that
-        # fixed apparatus-scale error.
-        phase_rng = np.random.default_rng(seed ^ 0x5A17)
-        ripple_amplitude = 0.186 + phase_rng.uniform(-0.005, 0.005)
-        ripple_phase = 5.69 + phase_rng.uniform(-0.05, 0.05)
-        panel_row = np.arange(height, dtype=float)[:, np.newaxis]
-        aberration = ripple_amplitude * np.cos(
-            2.0 * np.pi * 21.0 * panel_row / float(height) + ripple_phase
+        coefficients = np.asarray((2.34, -1.56, 2.135, 0.955), dtype=float)
+        coefficients += np.random.default_rng(seed ^ 0x5A17).uniform(
+            -0.02, 0.02, coefficients.shape
+        )
+        defocus = 2.0 * radius_squared - 1.0
+        astigmatism = xx * xx - yy * yy
+        coma_x = (3.0 * radius_squared - 2.0) * xx
+        coma_y = (3.0 * radius_squared - 2.0) * yy
+        aberration = (
+            coefficients[0] * defocus
+            + coefficients[1] * astigmatism
+            + coefficients[2] * coma_x
+            + coefficients[3] * coma_y
         )
         return (
             _immutable(amplitude, "<f4"),
@@ -527,135 +482,71 @@ class SimulationWorld:
             self._propagated_revision = -1
             return self._commanded_phase
 
-    def _resolved_trap_geometry(
-        self,
-        intensity: np.ndarray,
-        local_peak_plane: np.ndarray,
-        nominal_cutoff: float,
-        extra_cutoff: float,
-    ) -> tuple[np.ndarray, ...]:
-        """Match calibrated anchors, then admit only dominant blind peaks."""
+    def _camera_centers(self, indices_yx: np.ndarray) -> np.ndarray:
+        """Project every physical Fourier peak through one camera geometry."""
 
-        peaks = np.argwhere(
-            (intensity == local_peak_plane) & (intensity >= nominal_cutoff)
-        )
-        nominal_indices = np.full(
-            self._slm_site_indices_yx.shape, -1, dtype=np.intp
-        )
-        used_peaks = np.zeros(len(peaks), dtype=bool)
-        if peaks.size:
-            squared_distance = np.sum(
-                (
-                    peaks[:, np.newaxis, :]
-                    - self._slm_site_indices_yx[np.newaxis, :, :]
-                )
-                ** 2,
-                axis=2,
-            )
-            pairs = np.argwhere(squared_distance <= 9)
-            used_nominal = np.zeros(len(self._slm_site_indices_yx), dtype=bool)
-            if len(pairs):
-                pair_distances = squared_distance[pairs[:, 0], pairs[:, 1]]
-                for peak_index, nominal_index in pairs[
-                    np.argsort(pair_distances, kind="stable")
-                ]:
-                    if used_peaks[peak_index] or used_nominal[nominal_index]:
-                        continue
-                    nominal_indices[nominal_index] = peaks[peak_index]
-                    used_peaks[peak_index] = True
-                    used_nominal[nominal_index] = True
-
-        nominal_depths = np.zeros(len(self._slm_site_indices_yx), dtype=float)
-        matched = np.all(nominal_indices >= 0, axis=1)
-        if np.any(matched):
-            matched_rows, matched_columns = nominal_indices[matched].T
-            nominal_depths[matched] = intensity[matched_rows, matched_columns]
-
-        extra_mask = ~used_peaks
-        if peaks.size:
-            # A split coherent spot can contain two local maxima inside one
-            # calibrated trap's matching neighborhood.  Only the one-to-one
-            # match is physical topology; the residual lobe is not an extra
-            # atom site.  A blind off-grid candidate also needs the stronger
-            # dominant-peak gate used for an uncalibrated location.
-            extra_mask &= np.min(squared_distance, axis=1) > 9
-            extra_mask &= intensity[peaks[:, 0], peaks[:, 1]] >= extra_cutoff
-        extra_indices = peaks[extra_mask]
-        if not extra_indices.size:
-            empty = np.empty(0, dtype=float)
-            return (
-                nominal_indices,
-                nominal_depths,
-                np.empty((0, 2), dtype=np.intp),
-                empty,
-                np.empty((0, 2), dtype=float),
-                empty,
-                np.empty((0, 2), dtype=float),
-            )
-
-        rows, columns = self._slm_site_indices_yx.T
-        camera = self.geometry.site_centers_xy
-        scale_x = float(np.ptp(camera[:, 0]) / np.ptp(columns))
-        scale_y = float(np.ptp(camera[:, 1]) / np.ptp(rows))
-        centers = np.column_stack(
+        indices = np.asarray(indices_yx, dtype=float).reshape(-1, 2)
+        if not len(indices):
+            return np.empty((0, 2), dtype=float)
+        anchor_rows, anchor_columns = self._reference_slm_indices_yx.T
+        camera = np.asarray(self.geometry.site_centers_xy, dtype=float)
+        scale_x = float(np.ptp(camera[:, 0]) / np.ptp(anchor_columns))
+        scale_y = float(np.ptp(camera[:, 1]) / np.ptp(anchor_rows))
+        return np.column_stack(
             (
                 np.mean(camera[:, 0])
-                + (extra_indices[:, 1] - np.mean(columns)) * scale_x,
+                + (indices[:, 1] - np.mean(anchor_columns)) * scale_x,
                 np.mean(camera[:, 1])
-                + (extra_indices[:, 0] - np.mean(rows)) * scale_y,
+                + (indices[:, 0] - np.mean(anchor_rows)) * scale_y,
             )
         )
-        nearest = np.argmin(
-            np.sum(
-                (
-                    extra_indices[:, np.newaxis, :]
-                    - self._slm_site_indices_yx[np.newaxis, :, :]
-                )
-                ** 2,
-                axis=2,
-            ),
-            axis=1,
-        )
-        extra_rows, extra_columns = extra_indices.T
-        depths = np.asarray(intensity[extra_rows, extra_columns], dtype=float)
-        return (
-            nominal_indices,
-            nominal_depths,
-            extra_indices,
-            depths,
-            centers,
-            np.asarray(self._detector_efficiency)[nearest],
-            np.asarray(self._site_psf_sigma_xy)[nearest],
-        )
 
-    def _extra_psf_spots(
-        self,
-        centers_xy: np.ndarray,
-        nearest_indices: np.ndarray,
-    ) -> np.ndarray:
-        """Cache qCMOS spots for phase-created traps outside the calibration."""
+    def _camera_spots(self, centers_xy: np.ndarray) -> np.ndarray:
+        """Translate one shared aberrated optical PSF to every physical site."""
+
+        from scipy.ndimage import map_coordinates
 
         height, width = self.geometry.image_shape_yx
-        if not len(centers_xy):
+        centers = np.asarray(centers_xy, dtype=float).reshape(-1, 2)
+        if not len(centers):
             return np.empty((0, height, width), dtype=float)
         yy, xx = np.mgrid[:height, :width]
-        spots = []
-        for (x, y), nearest in zip(centers_xy, nearest_indices, strict=True):
-            sigma_x, sigma_y = (
-                float(value) for value in self._site_psf_sigma_xy[nearest]
-            )
-            angle = float(self._site_psf_angle_radians[nearest])
-            skew = float(self._site_psf_skew[nearest])
-            cosine, sine = np.cos(angle), np.sin(angle)
-            dx = (xx - x) * cosine + (yy - y) * sine
-            dy = -(xx - x) * sine + (yy - y) * cosine
-            core = np.exp(
-                -0.5 * ((dx / sigma_x) ** 2 + (dy / sigma_y) ** 2)
-            )
-            spots.append(
-                np.clip(core * (1.0 + skew * dx / sigma_x), 0.0, None)
-            )
-        return np.asarray(spots, dtype=float)
+        psf = np.asarray(self._camera_psf, dtype=float)
+        origin_y, origin_x = np.unravel_index(int(np.argmax(psf)), psf.shape)
+        scale = float(self.atom_sigma_px) / 0.7
+        return np.asarray(
+            [
+                map_coordinates(
+                    psf,
+                    (
+                        origin_y + (yy - float(y)) / scale,
+                        origin_x + (xx - float(x)) / scale,
+                    ),
+                    order=1,
+                    mode="constant",
+                    cval=0.0,
+                    prefilter=False,
+                )
+                for x, y in centers
+            ],
+            dtype=float,
+        )
+
+    @staticmethod
+    def _resolved_traps(
+        intensity: np.ndarray,
+        local_peak_plane: np.ndarray,
+        cutoff: float,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return the one physical trap roster from dominant local peaks."""
+
+        peaks = np.argwhere(
+            (intensity == local_peak_plane) & (intensity >= cutoff)
+        )
+        if not len(peaks):
+            return np.empty((0, 2), dtype=np.intp), np.empty(0, dtype=float)
+        rows, columns = peaks.T
+        return peaks, np.asarray(intensity[rows, columns], dtype=float)
 
     def _ensure_slm_propagation(self) -> None:
         if self._propagated_revision == self._slm_phase_revision:
@@ -683,75 +574,47 @@ class SimulationWorld:
             mode="constant",
             cval=-np.inf,
         )
-        peak_reference = max(
-            float(np.max(intensity)), self._loading_intensity_scale or 0.0
-        )
-        nominal_cutoff = _NOMINAL_TRAP_PEAK_FRACTION * peak_reference
-        extra_cutoff = _EXTRA_TRAP_PEAK_FRACTION * peak_reference
-        (
-            nominal_indices,
-            sites,
-            extra_indices,
-            extra_intensities,
-            extra_centers,
-            extra_efficiency,
-            extra_sigma,
-        ) = self._resolved_trap_geometry(
+        peak_reference = max(float(np.max(intensity)), self._loading_intensity_scale or 0.0)
+        trap_indices, trap_intensities = self._resolved_traps(
             intensity,
             local_peak_plane,
-            nominal_cutoff,
-            extra_cutoff,
+            _TRAP_PEAK_FRACTION * peak_reference,
         )
         if self._loading_intensity_scale is None:
-            active_sites = sites[sites > 0.0]
-            if not len(active_sites):
-                raise RuntimeError("nominal SLM command produced no site intensity")
-            self._loading_intensity_scale = float(np.mean(active_sites))
+            if not len(trap_intensities):
+                raise RuntimeError("reference SLM command produced no trap intensity")
+            self._loading_intensity_scale = float(np.mean(trap_intensities))
         scale = self._loading_intensity_scale
         if not np.isfinite(scale) or scale <= 0.0:
-            raise RuntimeError("nominal SLM command produced no site intensity")
-        if len(extra_indices):
-            nearest = np.argmin(
-                np.sum(
-                    (
-                        extra_indices[:, np.newaxis, :]
-                        - self._slm_site_indices_yx[np.newaxis, :, :]
-                    )
-                    ** 2,
-                    axis=2,
-                ),
-                axis=1,
+            raise RuntimeError("reference SLM command produced no trap intensity")
+        occupancy = np.zeros(len(trap_indices), dtype=bool)
+        if len(self._trap_indices_yx) and len(trap_indices):
+            squared_distance = np.sum(
+                (
+                    trap_indices[:, np.newaxis, :]
+                    - self._trap_indices_yx[np.newaxis, :, :]
+                )
+                ** 2,
+                axis=2,
             )
-        else:
-            nearest = np.empty(0, dtype=np.intp)
-        old_occupancy = {
-            tuple(index): bool(occupied)
-            for index, occupied in zip(
-                self._extra_slm_site_indices_yx,
-                self._extra_occupancy,
-                strict=True,
-            )
-        }
+            pairs = np.argwhere(squared_distance <= 9)
+            used_new = np.zeros(len(trap_indices), dtype=bool)
+            used_old = np.zeros(len(self._trap_indices_yx), dtype=bool)
+            if len(pairs):
+                distances = squared_distance[pairs[:, 0], pairs[:, 1]]
+                for new_index, old_index in pairs[np.argsort(distances, kind="stable")]:
+                    if used_new[new_index] or used_old[old_index]:
+                        continue
+                    occupancy[new_index] = self._occupancy[old_index]
+                    used_new[new_index] = True
+                    used_old[old_index] = True
+        trap_centers = self._camera_centers(trap_indices)
         self._trap_plane_intensity = _immutable(intensity, "<f4")
-        self._slm_nominal_peak_indices_yx = _immutable(
-            nominal_indices, np.intp
-        )
-        self._site_trap_intensities = _immutable(sites, "<f4")
-        self._occupancy &= np.asarray(sites > 0.0, dtype=bool)
-        self._extra_slm_site_indices_yx = _immutable(extra_indices, np.intp)
-        self._extra_site_trap_intensities = _immutable(
-            extra_intensities, "<f4"
-        )
-        self._extra_site_centers_xy = _readonly(extra_centers)
-        self._extra_detector_efficiency = _readonly(extra_efficiency)
-        self._extra_site_psf_sigma_xy = _readonly(extra_sigma)
-        self._extra_site_psf_spots = _readonly(
-            self._extra_psf_spots(extra_centers, nearest)
-        )
-        self._extra_occupancy = np.asarray(
-            [old_occupancy.get(tuple(index), False) for index in extra_indices],
-            dtype=bool,
-        )
+        self._trap_indices_yx = _immutable(trap_indices, np.intp)
+        self._trap_intensities = _immutable(trap_intensities, "<f4")
+        self._trap_centers_xy = _readonly(trap_centers)
+        self._trap_psf_spots = _readonly(self._camera_spots(trap_centers))
+        self._occupancy = occupancy
         self._propagated_revision = self._slm_phase_revision
         self._propagation_count += 1
 
@@ -759,7 +622,7 @@ class SimulationWorld:
         base = float(self.loading_probability)
         scale = self._loading_intensity_scale
         if scale is None or not np.isfinite(scale) or scale <= 0.0:
-            raise RuntimeError("nominal SLM command produced no site intensity")
+            raise RuntimeError("reference SLM command produced no trap intensity")
         relative_depth = np.clip(np.asarray(intensities) / scale, 0.0, None)
         if base == 1.0:
             return np.asarray(relative_depth > 0.0, dtype=float)
@@ -774,31 +637,31 @@ class SimulationWorld:
 
         scale = self._loading_intensity_scale
         if scale is None or not np.isfinite(scale) or scale <= 0.0:
-            raise RuntimeError("nominal SLM command produced no site intensity")
+            raise RuntimeError("reference SLM command produced no trap intensity")
         relative_depth = np.clip(np.asarray(intensities) / scale, 0.0, None)
         saturation = float(self.probe_saturation)
         probe_detuning = float(self.probe_detuning_linewidths)
         light_shift = float(self.trap_light_shift_linewidths)
         # The probe is fixed at the apparatus working point selected for the
-        # ideal uniform nominal array.  It never follows a candidate phase or
+        # ideal uniform reference array.  It never follows a candidate phase or
         # the current array mean, so absolute depth remains observable.
         detuning = probe_detuning + light_shift * relative_depth
         scattering = saturation / (
             1.0 + saturation + np.square(2.0 * detuning)
         )
-        nominal_detuning = probe_detuning + light_shift
-        nominal_scattering = saturation / (
-            1.0 + saturation + (2.0 * nominal_detuning) ** 2
+        reference_detuning = probe_detuning + light_shift
+        reference_scattering = saturation / (
+            1.0 + saturation + (2.0 * reference_detuning) ** 2
         )
         return np.where(
             relative_depth > 0.0,
-            scattering / nominal_scattering,
+            scattering / reference_scattering,
             0.0,
         )
 
     def _site_loading_probabilities(self) -> np.ndarray:
         self._ensure_slm_propagation()
-        return self._loading_probabilities(self._site_trap_intensities)
+        return self._loading_probabilities(self._trap_intensities)
 
     def register_camera(
         self,
@@ -812,17 +675,10 @@ class SimulationWorld:
     def _load_shot(self) -> np.ndarray:
         self._ensure_slm_propagation()
         shot = (
-            self._atom_rng.random(len(self.geometry.site_centers_xy))
+            self._atom_rng.random(len(self._trap_intensities))
             < self._site_loading_probabilities()
         )
-        extra = (
-            self._atom_rng.random(len(self._extra_site_trap_intensities))
-            < self._loading_probabilities(
-                self._extra_site_trap_intensities
-            )
-        )
-        self._occupancy = shot
-        self._extra_occupancy = np.asarray(extra, dtype=bool)
+        self._occupancy = np.asarray(shot, dtype=bool)
         return np.array(shot, copy=True)
 
     def _release_survival(self, trap_off_seconds: float, relative_depth: float) -> float:
@@ -858,9 +714,7 @@ class SimulationWorld:
 
     def _site_survival_probabilities(self, trap_off_seconds: float) -> np.ndarray:
         self._ensure_slm_propagation()
-        return self._survival_probabilities(
-            self._site_trap_intensities, trap_off_seconds
-        )
+        return self._survival_probabilities(self._trap_intensities, trap_off_seconds)
 
     def _survival_probabilities(
         self,
@@ -869,7 +723,7 @@ class SimulationWorld:
     ) -> np.ndarray:
         scale = self._loading_intensity_scale
         if scale is None or not np.isfinite(scale) or scale <= 0.0:
-            raise RuntimeError("nominal SLM command produced no site intensity")
+            raise RuntimeError("reference SLM command produced no trap intensity")
         relative_depth = np.clip(np.asarray(intensities) / scale, 0.0, None)
         survival = np.asarray(
             [
@@ -890,21 +744,12 @@ class SimulationWorld:
             self._occupancy[occupied] &= (
                 self._atom_rng.random(len(occupied)) < survival[occupied]
             )
-            extra_survival = self._survival_probabilities(
-                self._extra_site_trap_intensities, off_time
-            )
-            extra_occupied = np.flatnonzero(self._extra_occupancy)
-            self._extra_occupancy[extra_occupied] &= (
-                self._atom_rng.random(len(extra_occupied))
-                < extra_survival[extra_occupied]
-            )
 
     def safe(self) -> None:
         """Return the simulated apparatus to the board target's safe outputs."""
 
         with self._lock:
             self._occupancy[:] = False
-            self._extra_occupancy[:] = False
             self._mot_population = 0.0
             self._dac_values.update(da_bias_x=0, da_bias_y=0, da_bias_z=0)
 
@@ -932,54 +777,25 @@ class SimulationWorld:
                 shot_occupancy = np.array(self._occupancy, copy=True)
             else:
                 shot_occupancy = np.asarray(occupancy, dtype=bool).reshape(-1)
-                if shot_occupancy.size != len(self.geometry.site_centers_xy):
-                    raise ValueError("occupancy size differs from simulation site map")
-            base_area = self.atom_sigma_px**2
+                if shot_occupancy.size != len(self._trap_intensities):
+                    raise ValueError("occupancy size differs from current trap roster")
             fluorescence_lifetime = float(self.fluorescence_lifetime_seconds)
             fluorescence_seconds = -fluorescence_lifetime * math.expm1(
                 -probe / fluorescence_lifetime
             )
             fluorescence_scales = self._fluorescence_scales(
-                self._site_trap_intensities
+                self._trap_intensities
             )
-            for occupied, brightness, gain, sigma_xy, spot in zip(
+            for occupied, brightness, spot in zip(
                 shot_occupancy,
                 fluorescence_scales,
-                self._detector_efficiency,
-                self._site_psf_sigma_xy,
-                self._site_psf_spots,
+                self._trap_psf_spots,
                 strict=True,
             ):
                 if occupied:
-                    sigma_x, sigma_y = (float(value) for value in sigma_xy)
                     expected_electrons += (
                         self.atom_rate
                         * fluorescence_seconds
-                        * float(gain)
-                        * base_area
-                        / (sigma_x * sigma_y)
-                        * float(brightness)
-                        * spot
-                    )
-            extra_fluorescence_scales = self._fluorescence_scales(
-                self._extra_site_trap_intensities
-            )
-            for occupied, brightness, gain, sigma_xy, spot in zip(
-                self._extra_occupancy,
-                extra_fluorescence_scales,
-                self._extra_detector_efficiency,
-                self._extra_site_psf_sigma_xy,
-                self._extra_site_psf_spots,
-                strict=True,
-            ):
-                if occupied:
-                    sigma_x, sigma_y = (float(value) for value in sigma_xy)
-                    expected_electrons += (
-                        self.atom_rate
-                        * fluorescence_seconds
-                        * float(gain)
-                        * base_area
-                        / (sigma_x * sigma_y)
                         * float(brightness)
                         * spot
                     )

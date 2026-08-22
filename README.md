@@ -20,12 +20,16 @@ demand from their loaded device cards and do not create a second session or IPC
 service. SLM feedback consumes every finite readout shot from the canonical
 Camera Measurement dataset and subtracts the calibrated per-site dark mean.
 That all-shot fluorescence includes loading probability and occupied brightness;
-it is not trap depth. The controller shrinks uncertain log residuals, clips
-steps, rolls back non-improving candidates, and retains a confidence-ranked
-best. Coarse measurements use 100 shots by default; one held-out validation
-then grows in 100-shot batches up to its authored maximum or 60-second budget.
+it is not trap depth. Each valid candidate directly updates the current Target
+from that candidate's dark-subtracted BOX averages with a fixed geometric
+exponent; measurement uncertainty does not erase the command and one noisy
+max/min does not roll the loop back. Coarse measurements use 500 shots by default,
+retain the latest valid controller state, and target a measured site ratio of
+1.10; one held-out validation then grows in 100-shot batches up to its authored
+3000-shot maximum or 300-second budget. Its terminal estimate is republished into
+the visible uniformity curve.
 It returns an estimate and simultaneous confidence interval as `accepted` or
-`inconclusive`, never promotes a noisy point estimate into a 1% claim, and does
+`inconclusive`, never promotes a noisy point estimate into a confidence claim, and does
 not infer unmeasured dense-target pixels or a hidden wavefront.
 
 The real SLM device type is `slm.hamamatsu_x15213`. Like the real Pulse

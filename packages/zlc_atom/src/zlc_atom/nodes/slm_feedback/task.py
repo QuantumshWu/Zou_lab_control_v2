@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import time
 from typing import Mapping
@@ -59,16 +58,13 @@ CANDIDATE_PHASE_OUTPUT = DatasetOutputDeclaration(
 UNIFORMITY_HISTORY_OUTPUT = DatasetOutputDeclaration(
     "uniformity_history", "slm-feedback.uniformity-history.v1"
 )
-_TARGET_RATIO = 1.01
+_TARGET_RATIO = 1.10
 _FEEDBACK_EXPONENT = 0.25
-_MAX_LOG_STEP = 0.2
-_MIN_FEEDBACK_GAIN = 0.03
-_MAX_FEEDBACK_GAIN = 0.35
-_NO_IMPROVEMENT_PATIENCE = 3
+_CENSORED_BOOST_LOG_STEP = float(np.log(2.0))
 _COARSE_MAX_BATCHES = 3
 _MAX_BOOTSTRAP_UPDATES = 3
 _VALIDATION_BATCH_SHOTS = 100
-_VALIDATION_MAX_SECONDS = 60.0
+_VALIDATION_MAX_SECONDS = 300.0
 READOUT_FRAME_COORDINATE = 1
 
 
@@ -176,7 +172,9 @@ def _boost_target(
 ) -> np.ndarray:
     updated = np.array(target, dtype=np.float32, copy=True)
     indices = np.asarray(censored_sites, dtype=int)
-    updated[rows[indices], columns[indices]] *= np.float32(np.exp(_MAX_LOG_STEP))
+    updated[rows[indices], columns[indices]] *= np.float32(
+        np.exp(_CENSORED_BOOST_LOG_STEP)
+    )
     updated *= float(np.sum(target)) / float(np.sum(updated))
     return validate_target(updated)
 
@@ -304,34 +302,21 @@ def _support(
 def _updated_target(
     target: np.ndarray,
     fluorescence: np.ndarray,
-    standard_error: np.ndarray,
     rows: np.ndarray,
     columns: np.ndarray,
-    *,
-    gain: float,
 ) -> np.ndarray:
     values = np.asarray(fluorescence, dtype=float)
-    error = np.asarray(standard_error, dtype=float)
     if (
         values.shape != (len(rows),)
-        or error.shape != values.shape
         or not np.all(np.isfinite(values))
-        or not np.all(np.isfinite(error))
         or np.any(values <= 0.0)
-        or np.any(error < 0.0)
-        or not np.isfinite(gain)
-        or gain <= 0.0
     ):
         raise ValueError("feedback fluorescence must be finite and positive at every site")
-    logarithm = np.log(values)
-    residual = logarithm - float(np.mean(logarithm))
-    z = float(special.ndtri(1.0 - 0.05 / (2.0 * len(values))))
-    resolved = np.sign(residual) * np.maximum(
-        np.abs(residual) - z * error / values, 0.0
-    )
-    step = np.clip(-float(gain) * resolved, -_MAX_LOG_STEP, _MAX_LOG_STEP)
+    geometric_mean = float(np.exp(np.mean(np.log(values))))
     updated = np.array(target, dtype=np.float32, copy=True)
-    updated[rows, columns] *= np.asarray(np.exp(step), dtype=np.float32)
+    updated[rows, columns] *= np.asarray(
+        (geometric_mean / values) ** _FEEDBACK_EXPONENT, dtype=np.float32
+    )
     updated *= float(np.sum(target)) / float(np.sum(updated))
     return validate_target(updated)
 
@@ -406,11 +391,8 @@ class SlmFeedbackTask:
         ):
             raise ValueError("Science Context has invalid pupil arrays")
         receipt = science_context.get("command_receipt")
-        if not isinstance(receipt, Mapping) or receipt.get("outcome") not in {
-            "known-old",
-            "known-new",
-        }:
-            raise ValueError("SLM feedback requires a known incoming command receipt")
+        if not isinstance(receipt, Mapping):
+            raise TypeError("Science Context command receipt must be a mapping")
         model = calibration.select_model(ReadoutModelKind.BOX)
         context_path = Path(science_context_path).expanduser().resolve()
         (
@@ -445,13 +427,14 @@ class SlmFeedbackTask:
         self._pupil_support.setflags(write=False)
         self._pupil = dict(science_context.get("pupil", {}))
         self._system_correction = science_context.get("system_correction")
-        self._incoming_receipt = dict(receipt)
         self._pattern_metadata = dict(science_context.get("pattern_metadata", {}))
         self._operator_metadata = dict(science_context.get("operator_metadata", {}))
-        self._mapping_revision = int(receipt["mapping_revision"])
+        self._mapping_revision = int(slm.mapping_revision)
         self.shots = int(shots_per_candidate)
         self.validation_shots = int(validation_shots)
         self.max_updates = int(max_updates)
+        self._candidate_capacity = self.max_updates + 1
+        self._publication_revision = 0
         if self.shots < 10 or self.validation_shots < 10 or self.max_updates < 1:
             raise ValueError("feedback needs at least 10 coarse/validation shots and one update")
         contract = calibration.frame_contract
@@ -490,6 +473,7 @@ class SlmFeedbackTask:
                 "slm": self.slm_key,
             },
             "max_updates": self.max_updates,
+            "target_uniformity_ratio": _TARGET_RATIO,
         }
 
     def _candidate_metadata(
@@ -511,10 +495,14 @@ class SlmFeedbackTask:
             },
             "candidate": int(candidate),
             "status": str(status),
-            "measurement": (
-                history[-1]
-                if history and history[-1]["iteration"] == candidate
-                else None
+            "target_uniformity_ratio": _TARGET_RATIO,
+            "measurement": next(
+                (
+                    item
+                    for item in reversed(history)
+                    if item["iteration"] == candidate
+                ),
+                None,
             ),
             "updates": len(history),
             "solver": None if solver is None else dict(solver),
@@ -563,8 +551,10 @@ class SlmFeedbackTask:
         history: list[dict[str, object]],
     ) -> None:
         candidate = int(candidate)
-        if not 1 <= candidate <= self.max_updates:
+        if not 1 <= candidate <= self._candidate_capacity:
             raise ValueError("feedback candidate lies outside its authored history")
+        self._publication_revision += 1
+        publication_revision = self._publication_revision
         generation = str(getattr(context.generation, "value", context.generation))
         record = self._run_record()
         canonical = canonical_phase(phase, self.slm.shape_yx)
@@ -575,12 +565,17 @@ class SlmFeedbackTask:
             roles=(SPATIAL_Y, SPATIAL_X),
             value_unit="rad",
             generation=generation,
-            revision=candidate,
+            revision=publication_revision,
         )
         coordinate_id = AxisId("slm_feedback.candidate")
-        curve = np.full(self.max_updates, np.nan, dtype="<f8")
+        curve = np.full(self._candidate_capacity, np.nan, dtype="<f8")
         for item in history:
-            ratio = item.get("uniformity_ratio")
+            validation = item.get("validation")
+            ratio = (
+                validation.get("uniformity_ratio")
+                if isinstance(validation, Mapping)
+                else item.get("uniformity_ratio")
+            )
             if ratio is not None:
                 curve[int(item["iteration"]) - 1] = float(ratio)
         history_event = snapshot_from_array(
@@ -596,12 +591,12 @@ class SlmFeedbackTask:
                     PointColumn.NUMERIC,
                     tuple(
                         float(index)
-                        for index in range(1, self.max_updates + 1)
+                        for index in range(1, self._candidate_capacity + 1)
                     ),
                 )
             },
             generation=generation,
-            revision=candidate,
+            revision=publication_revision,
             validity=np.isfinite(curve)[None],
         )
         context.commit_live(
@@ -616,8 +611,8 @@ class SlmFeedbackTask:
                     UNIFORMITY_HISTORY_OUTPUT,
                     history_event,
                     MonitorCoverage(
-                        self.max_updates,
-                        self.max_updates,
+                        self._candidate_capacity,
+                        self._candidate_capacity,
                         retain_at_terminal=True,
                     ),
                     record,
@@ -836,48 +831,36 @@ class SlmFeedbackTask:
 
         frames = _readout_frames(result.snapshot, shots=requested)
 
-        mean = np.zeros(self._site_count, dtype=float)
-        sum_squared_deviations = np.zeros_like(mean)
-        sample_counts = np.zeros(self._site_count, dtype=np.int64)
         saturated_sites: set[int] = set()
         for image in frames:
             saturated_sites.update(
                 self._saturated_sites(image, saturation_value)
             )
-            counts = extract_box_signals(
-                image,
-                self._site_centers_xy,
-                radius=self.model.integration_half_width,
-                reducer=self.model.reducer,  # type: ignore[arg-type]
-            )
-            sample = (
-                np.asarray(counts, dtype=float)
-                - self._dark_mean
-            )
-            usable = np.isfinite(sample)
-            if np.any(usable):
-                next_counts = sample_counts[usable] + 1
-                delta = sample[usable] - mean[usable]
-                mean[usable] += delta / next_counts
-                sum_squared_deviations[usable] += delta * (
-                    sample[usable] - mean[usable]
+        box_samples = np.asarray(
+            [
+                extract_box_signals(
+                    image,
+                    self._site_centers_xy,
+                    radius=self.model.integration_half_width,
+                    reducer=self.model.reducer,  # type: ignore[arg-type]
                 )
-                sample_counts[usable] = next_counts
-        complete = sample_counts == requested
-        missing_sites = set(int(index) for index in np.flatnonzero(~complete))
-        variance = np.full_like(mean, np.nan)
-        variance[complete] = (
-            sum_squared_deviations[complete] / (sample_counts[complete] - 1)
+                for image in frames
+            ],
+            dtype=float,
         )
+        complete = np.all(np.isfinite(box_samples), axis=0)
+        missing_sites = set(int(index) for index in np.flatnonzero(~complete))
+        mean = np.full(self._site_count, np.nan, dtype=float)
+        mean[complete] = (
+            np.mean(box_samples[:, complete], axis=0) - self._dark_mean[complete]
+        )
+        variance = np.full(self._site_count, np.nan, dtype=float)
+        variance[complete] = np.var(box_samples[:, complete], axis=0, ddof=1)
         standard_error = np.full_like(mean, np.nan)
         standard_error[complete] = np.sqrt(
-            variance[complete] / sample_counts[complete]
+            variance[complete] / requested
             + self._dark_sem_squared[complete]
         )
-        if missing_sites:
-            missing = np.fromiter(missing_sites, dtype=int)
-            mean[missing] = np.nan
-            standard_error[missing] = np.nan
         return (
             mean,
             standard_error,
@@ -1015,7 +998,7 @@ class SlmFeedbackTask:
             history=history,
             solver=candidate.get("solver"),
         )
-        metadata["best"] = candidate.get("history")
+        metadata["retained"] = candidate.get("history")
         metadata["history"] = history
         self._save_candidate(
             artifact_path,
@@ -1024,12 +1007,12 @@ class SlmFeedbackTask:
             candidate["target"],
             metadata,
         )
-        best = candidate.get("validation_score")
-        if best is None and isinstance(candidate.get("history"), Mapping):
-            best = candidate["history"].get("uniformity_ratio")
+        terminal_uniformity = candidate.get("validation_score")
+        if terminal_uniformity is None and isinstance(candidate.get("history"), Mapping):
+            terminal_uniformity = candidate["history"].get("uniformity_ratio")
         return {
             "artifact_path": artifact_path,
-            "best_uniformity": best,
+            "terminal_uniformity": terminal_uniformity,
             "validation_status": candidate.get("validation_status"),
             "validation_confidence_lower": candidate.get(
                 "validation_confidence_lower"
@@ -1041,39 +1024,22 @@ class SlmFeedbackTask:
                 "validation_max_relative_standard_error"
             ),
             "updates": len(history),
+            "target_uniformity_ratio": _TARGET_RATIO,
         }
 
     def execute(self, context: object) -> dict[str, object]:
-        observed_incoming = self.slm.last_commanded_phase
-        observed_receipt = dict(self.slm.last_command_receipt)
-        if (
-            observed_incoming is None
-            or not np.array_equal(observed_incoming, self._incoming_phase)
-            or json.dumps(
-                observed_receipt,
-                allow_nan=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            != json.dumps(
-                self._incoming_receipt,
-                allow_nan=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            or self.slm.command_revision
-            != self._incoming_receipt.get("command_revision")
-            or self.slm.mapping_revision != self._mapping_revision
-        ):
-            raise RuntimeError(
-                "SLM command no longer matches the frozen incoming Science Context"
-            )
         incoming = self._incoming_phase
         incoming_pattern = self._pattern_phase
         history: list[dict[str, object]] = []
-        best_valid: dict[str, object] | None = None
+        retained_valid: dict[str, object] | None = None
         best_observed: dict[str, object] | None = None
         try:
+            _check_cancelled(context)
+            # Science Context is the requested starting CONTENT, not proof of
+            # what a previous process happens to have commanded. This Task owns
+            # the SLM now, so establish and confirm that starting state itself.
+            self._mapping_revision = int(self.slm.mapping_revision)
+            incoming = self._apply_exact(incoming)
             exposure = self.calibration.frame_contract.exposure_seconds
             if exposure is None:
                 raise ValueError("calibration does not record its readout exposure")
@@ -1088,22 +1054,17 @@ class SlmFeedbackTask:
             _check_cancelled(context)
             current_target = self.target
             spot_optimizer_state: dict[str, object] = {}
-            current_pattern, solver_metadata = solve_phase(
-                current_target,
-                pupil_amplitude=self._pupil_amplitude,
-                initial_phase=incoming_pattern,
-                objective_kind="spots",
-                iterations=None,
-                stop_requested=context.cancel_requested,
-                spot_optimizer_state=spot_optimizer_state,
-            )
-            current_phase = self._science_phase(current_pattern)
-            gain = _FEEDBACK_EXPONENT
-            no_improvement = 0
+            current_pattern = incoming_pattern
+            current_phase = incoming
+            solver_metadata: Mapping[str, object] | None = None
             bootstrap_updates = 0
-            for iteration in range(self.max_updates):
+            for iteration in range(self._candidate_capacity):
                 _check_cancelled(context)
-                applied = self._apply_exact(current_phase)
+                applied = (
+                    current_phase
+                    if iteration == 0
+                    else self._apply_exact(current_phase)
+                )
                 candidate_number = iteration + 1
                 applied_metadata = self._candidate_metadata(
                     candidate=candidate_number,
@@ -1138,6 +1099,12 @@ class SlmFeedbackTask:
                 saturated = bool(saturated_sites)
                 missing = bool(missing_sites)
                 valid = bool(not saturated and not missing and not censored_sites)
+                observed_score = (
+                    float(np.max(fluorescence) / np.min(fluorescence))
+                    if np.all(np.isfinite(fluorescence))
+                    and np.all(fluorescence > 0.0)
+                    else float("nan")
+                )
                 if valid:
                     score, confidence_lower, confidence_upper, relative_sem = (
                         _ratio_interval(
@@ -1177,7 +1144,9 @@ class SlmFeedbackTask:
                     "valid": valid,
                     "saturated": saturated,
                     "saturated_sites": list(saturated_sites),
-                    "uniformity_ratio": None if not valid else score,
+                    "uniformity_ratio": (
+                        None if not np.isfinite(observed_score) else observed_score
+                    ),
                     "uniformity_confidence_lower": (
                         None if not valid else confidence_lower
                     ),
@@ -1187,7 +1156,7 @@ class SlmFeedbackTask:
                     "maximum_relative_standard_error": (
                         None if not valid else relative_sem
                     ),
-                    "controller_gain": gain,
+                    "feedback_exponent": _FEEDBACK_EXPONENT,
                     "bootstrap_updates": bootstrap_updates,
                     "fluorescence": _json_floats(fluorescence),
                     "standard_error": _json_floats(error),
@@ -1222,7 +1191,7 @@ class SlmFeedbackTask:
                     "target": np.array(current_target, copy=True),
                     "solver": solver_metadata,
                     "history": history[-1],
-                    "score": confidence_upper,
+                    "score": observed_score,
                     "fluorescence": np.array(fluorescence, copy=True),
                     "standard_error": np.array(error, copy=True),
                 }
@@ -1239,16 +1208,15 @@ class SlmFeedbackTask:
                 ):
                     best_observed = completed
                 if not valid:
-                    if best_valid is not None:
+                    if retained_valid is not None:
                         history[-1]["rollback_to_candidate"] = int(
-                            best_valid["candidate"]
+                            retained_valid["candidate"]
                         )
-                        gain = max(_MIN_FEEDBACK_GAIN, gain * 0.5)
-                        self._apply_exact(best_valid["phase"])
+                        self._apply_exact(retained_valid["phase"])
                         context.report_progress(
                             f"Candidate {candidate_number} was censored at "
                             f"{len(censored_sites)} site(s); retaining candidate "
-                            f"{best_valid['candidate']}"
+                            f"{retained_valid['candidate']}"
                         )
                         break
                     context.report_progress(
@@ -1257,7 +1225,7 @@ class SlmFeedbackTask:
                         "applying one bounded bootstrap step"
                     )
                     if (
-                        candidate_number == self.max_updates
+                        candidate_number == self._candidate_capacity
                         or bootstrap_updates >= _MAX_BOOTSTRAP_UPDATES
                     ):
                         break
@@ -1279,52 +1247,33 @@ class SlmFeedbackTask:
                     )
                     current_phase = self._science_phase(current_pattern)
                     continue
-                improved = (
-                    best_valid is None
-                    or confidence_upper < float(best_valid["score"])
-                )
-                if improved:
-                    had_best = best_valid is not None
-                    best_valid = completed
-                    no_improvement = 0
-                    if had_best:
-                        gain = min(_MAX_FEEDBACK_GAIN, gain * 1.1)
-                else:
-                    no_improvement += 1
-                    gain = max(_MIN_FEEDBACK_GAIN, gain * 0.5)
-                    history[-1]["rollback_to_candidate"] = int(
-                        best_valid["candidate"]
-                    )
-                    self._apply_exact(best_valid["phase"])
+                retained_valid = completed
                 context.report_progress(
                     f"qCMOS fluorescence ratio {score:.5f}; "
-                    f"simultaneous 95% upper {confidence_upper:.5f}; "
-                    f"gain {gain:.3f}"
+                    f"simultaneous 95% upper {confidence_upper:.5f}"
                 )
-                if score <= _TARGET_RATIO or no_improvement >= _NO_IMPROVEMENT_PATIENCE:
+                if score <= _TARGET_RATIO:
                     break
-                if candidate_number == self.max_updates:
+                if candidate_number == self._candidate_capacity:
                     break
                 if valid:
                     current_target = _updated_target(
-                        best_valid["target"],
-                        best_valid["fluorescence"],
-                        best_valid["standard_error"],
+                        current_target,
+                        fluorescence,
                         self._rows,
                         self._columns,
-                        gain=gain,
                     )
                     current_pattern, solver_metadata = solve_phase(
                         current_target,
                         pupil_amplitude=self._pupil_amplitude,
-                        initial_phase=best_valid["pattern_phase"],
+                        initial_phase=current_pattern,
                         objective_kind="spots",
                         iterations=None,
                         stop_requested=context.cancel_requested,
                         spot_optimizer_state=spot_optimizer_state,
                     )
                     current_phase = self._science_phase(current_pattern)
-            if best_valid is None:
+            if retained_valid is None:
                 if best_observed is None:
                     raise RuntimeError("qCMOS feedback produced no observable candidate")
                 best_observed["history"]["validation"] = {
@@ -1374,7 +1323,7 @@ class SlmFeedbackTask:
                     republish=False,
                 )
             _check_cancelled(context)
-            self._apply_exact(best_valid["phase"])
+            self._apply_exact(retained_valid["phase"])
             validation_mean = np.zeros(self._site_count, dtype=float)
             validation_m2 = np.zeros_like(validation_mean)
             validation_count = 0
@@ -1408,7 +1357,7 @@ class SlmFeedbackTask:
                 ) = self._measure(
                     pulse,
                     context,
-                    int(best_valid["candidate"]) - 1,
+                    int(retained_valid["candidate"]) - 1,
                     shots=batch_shots,
                 )
                 batch_valid = bool(
@@ -1482,11 +1431,13 @@ class SlmFeedbackTask:
                         validation_reason = "simultaneous confidence bound passed"
                         break
                     if validation_lower > _TARGET_RATIO:
-                        validation_reason = "simultaneous confidence bound excludes 1.01"
+                        validation_reason = (
+                            "simultaneous confidence bound excludes 1.10"
+                        )
                         break
             if time.monotonic() >= deadline and validation_status != "accepted":
                 validation_reason = "validation time budget reached"
-            best_valid["history"]["validation"] = {
+            retained_valid["history"]["validation"] = {
                 "status": validation_status,
                 "reason": validation_reason,
                 "shots": validation_count,
@@ -1516,8 +1467,8 @@ class SlmFeedbackTask:
                 "censored_sites": list(validation_censored),
             }
             accepted = {
-                **best_valid,
-                "history": best_valid["history"],
+                **retained_valid,
+                "history": retained_valid["history"],
                 "validation_status": validation_status,
                 "validation_score": (
                     None
@@ -1542,13 +1493,13 @@ class SlmFeedbackTask:
                 accepted,
                 history,
                 status=validation_status,
-                republish=False,
+                republish=True,
             )
         except BaseException as error:
             if context.cancel_requested():
                 try:
                     context.seal_terminal(accept_stop=True)
-                    retained = best_valid
+                    retained = retained_valid
                     if retained is None:
                         retained = self._incoming_candidate(
                             stem="slm_feedback_stopped",

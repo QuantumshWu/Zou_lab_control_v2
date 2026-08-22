@@ -108,8 +108,8 @@ SLM Feedback必须复用canonical Camera Measurement `repeat=N`及其同一Runti
 - real command state支持known/unknown，未send/read不能虚构zero；
 - correction mutation取得同一DeviceUse claim，并冻结进command receipt；
 - 当前Feedback优化all-shot fluorescence，不称trap depth；
-- 100 shots为coarse，controller使用最佳可实现的uncertainty/trust/rollback算法；
-- Stop表示接受并apply本run最好phase、写正式artifact；用户可主动load旧phase；异常失败只在incoming known时恢复；
+- 500 shots默认作为coarse；controller直接用当前candidate的dark-subtracted BOX average和固定`0.25`几何指数更新当前Target，uncertainty只进入最终validation；
+- Task自行apply Context起始phase；normal terminal与Stop接受并apply最后一个valid controller state、写正式artifact，不按noisy max/min回选旧phase；异常失败恢复Context起始phase；
 - Feedback只更新Pattern/base并compose明确Science Context；
 - Target、pupil、operator wavefront、vendor correction、device mapping各有唯一owner。
 
@@ -127,6 +127,7 @@ SLM Feedback必须复用canonical Camera Measurement `repeat=N`及其同一Runti
 - 允许不改变外部行为的依赖解耦、明确corruption修复和内存优化；
 - Scan正常完成/Stop/失败默认restore pre-run device values；
 - SimulationWorld保持一个类和一个state owner，不拆层；
+- 当前propagated dominant peaks是唯一trap roster；共同trap-forming aberration决定peak位置/强度，共同imaging aberration只产生一个shared非对称PSF；禁止nominal/extra双状态和逐site随机gain/shape；
 - 参数在init前通过单一API/immutable config确定；
 - 可用workspace-local simulation JSON人工编辑/只读显示，Device Manager Init不运行时改写；
 - tests用config override，不改public mutable world attributes；hidden truth不泄漏给production算法。
@@ -321,13 +322,13 @@ Solver/Feedback：
 - initial/hot inner solve走到canonical numerical gate，不为省几十毫秒增加physical candidate；
 - current Feedback observable明确all-shot fluorescence；
 - 复用Camera Measurement统一projection；
-- estimator使用uncertainty，controller有step clip/trust/rollback/invalid stop；
-- 100 shots coarse；final validation根据实测variance自适应并有最大时间/shots，输出estimate+uncertainty/inconclusive；
-- Stop选择confidence-best、apply并写正式artifact；异常failure按known incoming恢复；
+- Calibration只提供Target site对应的BOX几何和dark baseline；controller直接使用本轮Camera Measurement `xx-shot` readout average的dark-subtracted BOX值，以固定几何指数更新当前Target，不用bright-dark response归一化，也不用uncertainty clip或noisy单轮rollback；
+- 默认500-shot coarse、8 updates，实测ratio目标为`<=1.10`；final validation默认最多3000 shots/300秒，根据实测variance输出estimate+uncertainty/inconclusive并写回terminal curve；
+- Task取得SLM后自己apply Context起始phase；normal terminal与Stop保留最后一个valid controller state，异常failure恢复该Context起始phase；
 - sparse-only contract明确；
 - dense Gaussian/Flat Top先修signal/noise region、FOM、initial phase和early stop，再profile CPU；不引GPU。
 
-SimulationWorld保持单类owner；只收口immutable init config/local profile和test diagnostics，不拆physics state层。
+SimulationWorld保持单类owner和唯一dynamic trap roster；不拆physics state层。
 
 不得运行真SLM；输出DVI/USB实验机验收runbook：display geometry/SDK、profile来源、correction、orientation、gray evidence、optical settle、system correction。
 

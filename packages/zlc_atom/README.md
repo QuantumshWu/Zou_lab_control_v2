@@ -22,6 +22,15 @@ grid. The installation grammar is strict: files with the former camera-owned
 world fields are refused with the required root migration instead of silently
 creating a second owner.
 
+The virtual SLM has one physical trap roster: the dominant local peaks of the
+currently commanded phase after one shared pupil illumination and one shared
+low-order wavefront aberration are propagated through the FFT. Those peaks own
+trap position, depth and occupancy and all use the same Fourier-to-camera affine;
+there is no nominal/extra split. Trap depth changes loading and the shared probe's
+AC-Stark detuning before fluorescence is rendered. Fluorescence imaging translates
+one shared, non-symmetric aberrated PSF to every physical peak; it has no per-site
+random gain, ellipse, angle or skew.
+
 Both `slm.virtual` and `slm.hamamatsu_x15213` open the concrete SLM Editor
 lazily from the loaded device card. The Editor has one continuous non-negative
 target and solves only its latest edit into a Pattern/base phase in the
@@ -233,9 +242,10 @@ strict Science Context v2. Calibration has no SLM or Science Context input.
 Feedback registers the Context's frozen spots Target to the measured camera
 sites at its own composition boundary; the full roster, including predicted
 zero-capture sites, is then the stable site index.
-At execution start the current SLM phase, complete command receipt
-and mapping revision must still exactly equal the frozen incoming Context or
-the Task fails before changing hardware. Every coarse or validation measurement
+After acquiring the SLM, Feedback itself applies and confirms the frozen Context
+phase before measuring its baseline; the operator does not have to pre-Send or
+re-save that Context, and its command receipt remains provenance rather than a
+pre-existing device-state requirement. Every coarse or validation measurement
 is a canonical Camera Measurement generation under the stable companion
 producer `<task>/camera`: it commits all `repeat=N` three-frame cycles, seals
 them, selects readout-event `frame=1`, and uses every shot in the repeat
@@ -243,7 +253,7 @@ statistics. The displayed preview applies that same selection and repeat mean.
 The estimator integrates raw BOX samples. Observed sites subtract their
 persisted Calibration dark mean; a predicted zero-capture site uses the nearest
 measured dark baseline with an added conservative spatial systematic variance.
-it neither thresholds through Occupancy nor divides by Calibration bright mean.
+It neither thresholds through Occupancy nor divides by Calibration bright mean.
 Its total SEM combines shot SEM with dark calibration uncertainty exactly once, so
 loading and occupied-atom brightness remain part of the measured all-shot
 fluorescence observable. Every measurement must replay Calibration's effective
@@ -255,15 +265,19 @@ converted floating-point dtype.
 Each candidate may accumulate at most three coarse batches. A site whose
 simultaneous lower fluorescence bound still crosses zero is censored, not
 fabricated as a valid value. Before any valid candidate exists, at most three
-bootstrap updates raise only censored target sites by a clipped log step of
-`0.2` while renormalizing total target power; after a valid best exists, a
-censored candidate rolls back to it. The controller otherwise updates only the
-frozen Context's Pattern using uncertainty, clipped steps, trust and rollback;
-it performs no Zernike, modal, hidden-aberration or continuous-wavefront fit.
-If the run ends or is stopped without a valid result, incoming candidate 0 is
-saved with no invented measurement. With a valid best, Stop accepts and
-reapplies it; a Stop already requested before the initial solve makes zero
-solver calls. A genuine failure restores the known incoming command. Each
+bootstrap updates double only censored target sites while renormalizing total
+target power; after a valid state exists, a censored candidate returns to that
+latest valid state.
+Every other valid candidate directly updates the current Target from its own
+dark-subtracted `xx-shot` BOX averages using a fixed `0.25` geometric exponent.
+Uncertainty is recorded and used by final validation, but it does not zero a
+real update, change the exponent, or roll back one noisy max/min. The controller
+performs no Zernike, modal, hidden-aberration or continuous-wavefront fit.
+If the run ends or is stopped without a valid result, Context-start candidate 0 is
+saved with no invented measurement. With a valid state, normal terminal and Stop
+accept and reapply the latest valid controller state rather than the noisiest
+max/min winner; a Stop already requested before the initial solve makes zero
+solver calls. A genuine failure restores the Context starting phase. Each
 candidate Context freezes its actual evolving Target and can be selected
 directly for the next run because neither descriptor asks for a Target file.
 
@@ -272,15 +286,25 @@ while Feedback runs, but their final values remain published after terminal.
 Starting the next run keeps the previous Monitor surfaces visible until the
 replacement generation has rendered its first values.
 
-The held-out validation applies its 95% family correction across both sites and
+The coarse loop defaults to 500 shots, a fixed `0.25` update exponent and at
+most eight updates; it targets a measured maximum/minimum site ratio of `1.10`.
+The held-out validation defaults to at most 3000 shots/300 seconds and applies
+its 95% family correction across both sites and
 the maximum number of looks. It uses bounded batches without dropping a tail
 (for example, 101 shots become 99 + 2), and remains bounded by the authored
-shot limit and 60 seconds. The terminal Science Context reports `accepted` or
-`inconclusive` with the measured estimate and simultaneous interval. In the
-persistent virtual weak-site vertical, Calibration observed 34 of 35 sites;
-three censored candidates led to a valid fourth candidate, after which honest
-validation was inconclusive and retained that valid best. This is software/
-virtual evidence, not hardware or optical acceptance.
+shot limit and time budget. Its point estimate replaces the final coarse point
+in the retained `uniformity_history`. The terminal Science Context reports
+`accepted` or `inconclusive` with the measured estimate and simultaneous interval.
+
+The default stochastic-loading vertical built from an arbitrary spacing-15
+Science Context and a fresh 35-site Calibration measured coarse ratios
+`1.683, 1.330, 1.235, 1.308, 1.208, 1.332, 1.196, 1.317, 1.288`; independent
+1000-shot validation measured `1.241`. The simulator-only hidden oracle confirms
+that the same phase changed expected BOX ratio `1.445→1.123`, trap-depth ratio
+`1.166→1.074`, and mean expected fluorescence by `+1.6%`. A separate missing-site
+vertical observed 34/35 sites and recovered its measured ratio to `1.088`, with
+80-shot validation `1.096 [1.066,1.126]`. These are software/virtual evidence,
+not hardware or optical acceptance.
 
 The supported product path discovers seven logic descriptors: `calibration`,
 `camera_measurement`, `occupancy`, `seamless_scan`, `slm_feedback`,

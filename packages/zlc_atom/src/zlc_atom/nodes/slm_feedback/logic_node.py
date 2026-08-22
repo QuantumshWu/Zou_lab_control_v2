@@ -53,16 +53,16 @@ SLM_FEEDBACK_SCHEMA = AuthoringSchema(
             "pulse_template", "resource", "Imaging pulse", "imaging_template.json", required=True
         ),
         AuthoringField(
-            "shots_per_candidate", "int", "qCMOS shots per candidate", 100, minimum=10
+            "shots_per_candidate", "int", "qCMOS shots per candidate", 500, minimum=10
         ),
         AuthoringField(
             "validation_shots",
             "int",
             "Maximum independent validation shots",
-            1000,
+            3000,
             minimum=10,
         ),
-        AuthoringField("max_updates", "int", "Maximum feedback updates", 120, minimum=1),
+        AuthoringField("max_updates", "int", "Maximum feedback updates", 8, minimum=1),
     )
 )
 
