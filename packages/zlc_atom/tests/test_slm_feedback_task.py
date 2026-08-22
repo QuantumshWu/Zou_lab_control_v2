@@ -18,7 +18,6 @@ from zlc_atom.devices.slm import canonical_phase
 from zlc_atom.devices.slm.solver import load_science_context, preset_grid, solve_phase
 from zlc_atom.install import create_installation
 from zlc_atom.nodes import discover_logic_nodes
-from zlc_atom.nodes._framework.descriptor import ResolvedArtifact
 from zlc_atom.nodes.calibration import (
     FrameContract,
     ReadoutModel,
@@ -30,8 +29,10 @@ from zlc_atom.nodes.calibration.pulse import resolve_pulse
 from zlc_atom.nodes.slm_feedback import task as feedback_module
 from zlc_atom.nodes.slm_feedback.task import (
     SlmFeedbackTask,
+    _control_weights,
     _fit_contrasts,
     _ratio_interval,
+    _single_population_observables,
     _updated_target,
 )
 from zlc_atom.nodes.calibration.calibration import (
@@ -294,7 +295,8 @@ def _fitted_result(
     contrast: object,
     *,
     valid: object | None = None,
-    uncertain: object | None = None,
+    single_population: object | None = None,
+    invalid: object | None = None,
     standard_error: object = 0.0,
 ) -> dict[str, np.ndarray]:
     values = np.asarray(contrast, dtype=float).reshape(-1)
@@ -304,23 +306,36 @@ def _fitted_result(
         if valid is None
         else np.asarray(valid, dtype=bool).reshape(sites)
     )
-    fit_uncertain = (
-        np.zeros(sites, dtype=bool)
-        if uncertain is None
-        else np.asarray(uncertain, dtype=bool).reshape(sites)
+    fit_single = (
+        ~fit_valid
+        if single_population is None
+        else np.asarray(single_population, dtype=bool).reshape(sites)
     )
+    fit_invalid = (
+        np.zeros(sites, dtype=bool)
+        if invalid is None
+        else np.asarray(invalid, dtype=bool).reshape(sites)
+    )
+    fit_valid &= ~fit_invalid
+    fit_single &= ~fit_invalid
     error = np.broadcast_to(np.asarray(standard_error, dtype=float), (sites,)).copy()
     return {
         "contrast": values,
         "standard_error": error,
         "dark_mean": np.full(sites, 10.0),
+        "dark_sigma": np.full(sites, 1.0),
+        "dark_standard_error": np.full(sites, 0.1),
         "bright_mean": 10.0 + values,
+        "bright_sigma": np.full(sites, 1.0),
         "bright_fraction": np.full(sites, 0.5),
+        "threshold": 10.0 + 0.5 * values,
         "fidelity": np.full(sites, 0.999),
         "bic_gain": np.full(sites, 100.0),
+        "single_mean": np.full(sites, 10.0),
+        "single_sigma": np.full(sites, 0.1),
         "valid": fit_valid,
-        "uncertain": fit_uncertain,
-        "censored": ~(fit_valid | fit_uncertain),
+        "single_population": fit_single,
+        "invalid": fit_invalid,
     }
 
 
@@ -381,7 +396,6 @@ def _task(
     target: np.ndarray | None = None,
     calibration: TrapCalibration | None = None,
     shots: int = 10,
-    validation_shots: int = 20,
     updates: int = 3,
     science_context: dict[str, object] | None = None,
 ) -> SlmFeedbackTask:
@@ -410,7 +424,9 @@ def _task(
         feedback_mode="qcmos_bright_dark",
         exposure_seconds=0.020,
         shots_per_candidate=shots,
-        validation_shots=validation_shots,
+        single_gaussian_boost=0.03,
+        feedback_gain=0.25,
+        maximum_weight_change=0.5,
         max_updates=updates,
         artifact_directory=tmp_path,
     )
@@ -422,8 +438,10 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
     defaults = {
         field.name: field.default for field in descriptor.authoring_schema.fields
     }
-    assert defaults["shots_per_candidate"] == 500
-    assert defaults["validation_shots"] == 3000
+    assert defaults["shots_per_candidate"] == 100
+    assert defaults["single_gaussian_boost"] == pytest.approx(0.03)
+    assert defaults["feedback_gain"] == pytest.approx(0.25)
+    assert defaults["maximum_weight_change"] == pytest.approx(0.5)
     assert defaults["max_updates"] == 12
     assert defaults["feedback_mode"] == "qcmos_bright_dark"
     assert defaults["exposure_seconds"] == pytest.approx(0.1)
@@ -461,6 +479,10 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
     assert tuple((item.name, item.contract_id) for item in descriptor.outputs) == (
         ("candidate_phase", "slm-feedback.candidate-phase.v1"),
         ("uniformity_history", "slm-feedback.uniformity-history.v1"),
+        (
+            "observable_uniformity_history",
+            "slm-feedback.observable-uniformity-history.v1",
+        ),
     )
     assert tuple(
         (item.output.name, item.plot_kind, item.producer)
@@ -468,7 +490,7 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
     ) == (
         ("frames", "image", "camera"),
         ("candidate_phase", "image", ""),
-        ("uniformity_history", "curve", ""),
+        ("observable_uniformity_history", "curve", ""),
     )
     camera_preview = descriptor.node_previews[0]
     assert camera_preview.semantic == {
@@ -498,13 +520,15 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
         columns,
         previous_weights=np.full(35, np.nan),
         previous_contrast=np.full(35, np.nan),
-        bootstrap_counts=np.zeros(35, dtype=int),
+        feedback_gain=0.25,
+        single_gaussian_boost=0.03,
+        maximum_weight_change=0.5,
+        minimum_control_weight=np.full(35, np.nan),
     )
     assert updated[rows[0], columns[0]] < updated[rows[-1], columns[-1]]
     assert correction[0] < 0.0 < correction[-1]
     assert np.all(np.isnan(slope))
     assert set(decision) == {"feedback_assumed_slope"}
-    np.testing.assert_allclose(np.sum(updated), np.sum(target), rtol=1e-6)
     multipliers = updated[rows, columns] / target[rows, columns]
     assert float(np.max(multipliers) / np.min(multipliers)) <= np.exp(0.4)
     standard_error = 0.02 * contrast
@@ -514,12 +538,6 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
     assert lower <= estimate <= upper
     assert estimate == pytest.approx(1.4 / 0.6)
     assert max_relative_sem == pytest.approx(0.02)
-    _estimate3, lower3, upper3, _relative3 = _ratio_interval(
-        contrast, standard_error, looks=3
-    )
-    assert lower3 < lower and upper3 > upper
-
-
 def test_single_frame_mixture_and_site_history_control_weak_or_disappearing_sites() -> None:
     rng = np.random.default_rng(17)
     occupied = rng.random(500) < 0.45
@@ -535,47 +553,99 @@ def test_single_frame_mixture_and_site_history_control_weak_or_disappearing_site
     )
     fitted = _fit_contrasts(samples)
     assert fitted["valid"].tolist() == [True, False]
-    assert fitted["censored"].tolist() == [False, True]
+    assert fitted["single_population"].tolist() == [False, True]
+    assert fitted["invalid"].tolist() == [False, False]
     assert fitted["contrast"][0] == pytest.approx(22.0, rel=0.04)
+
+    single_fit = _fitted_result(
+        np.full(3, np.nan),
+        valid=np.zeros(3, dtype=bool),
+        single_population=np.ones(3, dtype=bool),
+    )
+    single_fit["single_mean"] = np.asarray((10.0, 32.0, 10.25))
+    single_fit["single_sigma"] = np.full(3, 0.2)
+    recovered, _error, dark_only, bright_only = (
+        _single_population_observables(
+            single_fit,
+            shots=100,
+            previous_dark_mean=np.asarray((np.nan, 10.0, 10.0)),
+            previous_dark_standard_error=np.asarray((np.nan, 0.1, 0.1)),
+        )
+    )
+    assert dark_only.tolist() == [True, False, True]
+    assert bright_only.tolist() == [False, True, False]
+    assert recovered[1] == pytest.approx(22.0)
 
     target = _grid_target((17, 23))
     rows, columns = np.nonzero(target)
     contrast = np.ones(35)
     error = np.zeros(35)
     valid = np.ones(35, dtype=bool)
-    censored = np.zeros(35, dtype=bool)
-    valid[17], censored[17], contrast[17] = False, True, np.nan
+    dark_only = np.zeros(35, dtype=bool)
+    valid[17], dark_only[17], contrast[17] = False, True, np.nan
     boosted, _correction, _slope, decision = _updated_target(
         target,
         contrast,
         error,
         valid,
-        censored,
+        dark_only,
         rows,
         columns,
         previous_weights=np.full(35, np.nan),
         previous_contrast=np.full(35, np.nan),
-        bootstrap_counts=np.zeros(35, dtype=int),
+        feedback_gain=0.25,
+        single_gaussian_boost=0.03,
+        maximum_weight_change=0.5,
+        minimum_control_weight=np.full(35, np.nan),
     )
-    assert decision[17] == "bootstrap_shallow"
+    assert decision[17] == "boost_dark_single_gaussian"
     assert boosted[rows[17], columns[17]] > boosted[rows[0], columns[0]]
+    before_share = target[rows[17], columns[17]] / np.sum(target[rows, columns])
+    after_share = boosted[rows[17], columns[17]] / np.sum(
+        boosted[rows, columns]
+    )
+    assert after_share / before_share == pytest.approx(1.03)
 
     previous_weights = np.ones(35)
     previous_contrast = np.ones(35)
-    rolled_back, _correction, _slope, decision = _updated_target(
-        boosted,
+    below_edge = np.array(target, copy=True)
+    below_edge[rows[17], columns[17]] = 0.7
+    recovered, _correction, _slope, decision = _updated_target(
+        below_edge,
         contrast,
         error,
         valid,
-        censored,
+        dark_only,
         rows,
         columns,
         previous_weights=previous_weights,
         previous_contrast=previous_contrast,
-        bootstrap_counts=np.zeros(35, dtype=int),
+        feedback_gain=0.25,
+        single_gaussian_boost=0.03,
+        maximum_weight_change=0.5,
+        minimum_control_weight=np.full(35, np.nan),
     )
-    assert decision[17] == "rollback_after_disappearance"
-    assert rolled_back[rows[17], columns[17]] < boosted[rows[17], columns[17]]
+    assert decision[17] == "boost_dark_single_gaussian"
+    assert recovered[rows[17], columns[17]] == pytest.approx(0.7 * 1.03)
+
+    floor = np.full(35, np.nan)
+    floor[17] = 1.0
+    floored, *_details = _updated_target(
+        below_edge,
+        contrast,
+        error,
+        valid,
+        dark_only,
+        rows,
+        columns,
+        previous_weights=previous_weights,
+        previous_contrast=previous_contrast,
+        feedback_gain=0.25,
+        single_gaussian_boost=0.03,
+        maximum_weight_change=0.5,
+        minimum_control_weight=floor,
+    )
+    assert _control_weights(floored[rows, columns])[17] >= 1.0 - 1e-12
 
 def test_feedback_applies_science_context_then_measures_before_solving_update(
     tmp_path: Path, monkeypatch
@@ -619,7 +689,10 @@ def test_feedback_applies_science_context_then_measures_before_solving_update(
         *np.nonzero(frozen_target),
         previous_weights=np.full(35, np.nan),
         previous_contrast=np.full(35, np.nan),
-        bootstrap_counts=np.zeros(35, dtype=int),
+        feedback_gain=0.25,
+        single_gaussian_boost=0.03,
+        maximum_weight_change=0.5,
+        minimum_control_weight=np.full(35, np.nan),
     )
 
     def solve(target, **kwargs):
@@ -641,17 +714,17 @@ def test_feedback_applies_science_context_then_measures_before_solving_update(
         "resolve_pulse",
         lambda *args, **kwargs: SimpleNamespace(program=object()),
     )
-    coarse = iter((_fitted_result(first_contrast), _fitted_result(np.ones(35))))
+    fits = iter((_fitted_result(first_contrast), _fitted_result(np.ones(35))))
     monkeypatch.setattr(
-        SlmFeedbackTask,
-        "_coarse_measure",
-        lambda self, pulse, context, iteration: (next(coarse), (), (), 1, self.shots),
+        feedback_module,
+        "_fit_contrasts",
+        lambda samples, **_kwargs: next(fits),
     )
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration, *, shots=None: (
-            _mixture_samples(np.ones(35), int(shots)),
+        lambda self, pulse, context, iteration: (
+            np.zeros((self.shots, 35)),
             (),
             (),
         ),
@@ -706,6 +779,9 @@ def test_feedback_applies_science_context_then_measures_before_solving_update(
         np.testing.assert_array_equal(slm.last_commanded_phase, expected)
         assert artifact["pattern_metadata"]["solver"]["iterations_run"] == 19
         assert artifact["pattern_metadata"]["feedback_mode"] == "qcmos_bright_dark"
+        assert artifact["pattern_metadata"]["single_gaussian_boost"] == pytest.approx(0.03)
+        assert artifact["pattern_metadata"]["feedback_gain"] == pytest.approx(0.25)
+        assert artifact["pattern_metadata"]["maximum_weight_change"] == pytest.approx(0.5)
         assert artifact["pattern_metadata"]["exposure_seconds"] == pytest.approx(0.020)
         assert artifact["command_receipt"]["outcome"] == "known-new"
         np.testing.assert_array_equal(slm.commands[command_count], incoming)
@@ -737,7 +813,7 @@ def test_arbitrary_sparse_geometry_matches_calibration_sites_before_updating_tar
     calibration_order = np.asarray([3, 0, 5, 1, 4, 2])
     calibration = _calibration_at(nominal_centers[calibration_order])
     target_contrast = np.asarray([0.7, 1.4, 0.9, 1.2, 0.8, 1.1])
-    coarse = iter(
+    fits = iter(
         (_fitted_result(target_contrast), _fitted_result(np.ones(len(rows))))
     )
     solved_targets: list[np.ndarray] = []
@@ -753,15 +829,15 @@ def test_arbitrary_sparse_geometry_matches_calibration_sites_before_updating_tar
     )
     monkeypatch.setattr(feedback_module, "solve_phase", solve)
     monkeypatch.setattr(
-        SlmFeedbackTask,
-        "_coarse_measure",
-        lambda self, pulse, context, iteration: (next(coarse), (), (), 1, self.shots),
+        feedback_module,
+        "_fit_contrasts",
+        lambda samples, **_kwargs: next(fits),
     )
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration, *, shots=None: (
-            _mixture_samples(np.ones(len(rows)), int(shots)),
+        lambda self, pulse, context, iteration: (
+            np.zeros((self.shots, len(rows))),
             (),
             (),
         ),
@@ -789,7 +865,10 @@ def test_arbitrary_sparse_geometry_matches_calibration_sites_before_updating_tar
             columns,
             previous_weights=np.full(len(rows), np.nan),
             previous_contrast=np.full(len(rows), np.nan),
-            bootstrap_counts=np.zeros(len(rows), dtype=int),
+            feedback_gain=0.25,
+            single_gaussian_boost=0.03,
+            maximum_weight_change=0.5,
+            minimum_control_weight=np.full(len(rows), np.nan),
         )
         np.testing.assert_allclose(solved_targets[0], expected)
         candidates = {
@@ -827,30 +906,25 @@ def test_uniformity_history_is_one_latest_curve_paired_with_candidate_phase(
         "resolve_pulse",
         lambda *args, **kwargs: SimpleNamespace(program=object()),
     )
+    phases = iter((0.25, 0.5))
     monkeypatch.setattr(
         feedback_module,
         "solve_phase",
         lambda *args, **kwargs: (
-            np.full(slm.shape_yx, 0.5, dtype=np.float32),
+            np.full(slm.shape_yx, next(phases), dtype=np.float32),
             {"method": "test"},
         ),
     )
     monkeypatch.setattr(
-        SlmFeedbackTask,
-        "_coarse_measure",
-        lambda self, pulse, run_context, iteration: (
-            _fitted_result(next(contrasts)),
-            (),
-            (),
-            1,
-            self.shots,
-        ),
+        feedback_module,
+        "_fit_contrasts",
+        lambda samples, **_kwargs: _fitted_result(next(contrasts)),
     )
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, run_context, iteration, *, shots=None: (
-            _mixture_samples(np.ones(35), int(shots)),
+        lambda self, pulse, run_context, iteration: (
+            np.zeros((self.shots, 35)),
             (),
             (),
         ),
@@ -866,11 +940,15 @@ def test_uniformity_history_is_one_latest_curve_paired_with_candidate_phase(
     )
     try:
         result = task.execute(context)
-        assert result["validation_status"] in {"accepted", "inconclusive"}
+        assert result["feedback_status"] == "accepted"
         output = context.commits[-1]["uniformity_history"]
         np.testing.assert_allclose(output.snapshot.block.values[0, :2, 0], (4.0, 2.0))
         assert output.snapshot.block.values[0, 2, 0] <= 1.10
-        assert len(context.commits) == 4
+        assert len(context.commits) == 7
+        assert not np.any(
+            context.commits[0]["uniformity_history"]
+            .snapshot.expanded_validity()
+        )
         assert (
             context.commits[0]["uniformity_history"].snapshot.block.schema
             is context.commits[1]["uniformity_history"].snapshot.block.schema
@@ -878,6 +956,7 @@ def test_uniformity_history_is_one_latest_curve_paired_with_candidate_phase(
         assert set(context.commits[-1]) == {
             "candidate_phase",
             "uniformity_history",
+            "observable_uniformity_history",
         }
         column = output.snapshot.block.schema.point_table.columns[0]
         assert column.name == "candidate"
@@ -1145,9 +1224,7 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
             return current_dataset(*args, **kwargs)
 
         monkeypatch.setattr(plane, "current_dataset", one_result_lookup)
-        samples, saturated, missing = task._measure(
-            pulse, _Context(), 0, shots=10
-        )
+        samples, saturated, missing = task._measure(pulse, _Context(), 0)
         assert lookup_count == 1
         monkeypatch.setattr(plane, "current_dataset", current_dataset)
         np.testing.assert_allclose(samples, np.broadcast_to(fluorescence, (10, 35)))
@@ -1204,8 +1281,9 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
             return values
 
         monkeypatch.setattr(feedback_module, "extract_box_signals", partial_signals)
+        slm.apply_phase(np.full(slm.shape_yx, 0.25, dtype=np.float32))
         partial_samples, _saturated, partial_missing = task._measure(
-            pulse, _Context(), 0, shots=10
+            pulse, _Context(), 1
         )
         assert partial_missing == (0,)
         assert np.all(np.isfinite(partial_samples[:2, 0]))
@@ -1297,9 +1375,7 @@ def test_electron_measurement_uses_current_conversion_and_saturation(
             calibration=calibration(),
         )
         try:
-            _samples, saturated, missing = task._measure(
-                pulse, _Context(), 0, shots=10
-            )
+            _samples, saturated, missing = task._measure(pulse, _Context(), 0)
             assert saturated == (17,) and not missing
             assert task._effective_photoelectrons is effective_photoelectrons
         finally:
@@ -1311,7 +1387,7 @@ def test_electron_measurement_uses_current_conversion_and_saturation(
     run(recorded_offset, 0.6, True)
 
 
-def test_censored_site_uses_bounded_batches_and_bootstrap_boost(
+def test_single_gaussian_site_updates_after_one_batch_and_next_capture_has_new_phase(
     tmp_path: Path, monkeypatch
 ) -> None:
     target = _asymmetric_target()
@@ -1321,13 +1397,14 @@ def test_censored_site_uses_bounded_batches_and_bootstrap_boost(
         target,
         missing=17,
     )
-    requested: list[int] = []
-    measurement_number = 0
+    measured_phases: list[np.ndarray] = []
     solved_targets: list[np.ndarray] = []
 
     def solve(candidate, **_kwargs):
         solved_targets.append(np.array(candidate, copy=True))
-        return np.full(candidate.shape, 0.1 * len(solved_targets), np.float32), {}
+        return np.full(
+            candidate.shape, 0.1 * (len(solved_targets) + 1), np.float32
+        ), {}
 
     monkeypatch.setattr(feedback_module, "solve_phase", solve)
     monkeypatch.setattr(
@@ -1336,16 +1413,31 @@ def test_censored_site_uses_bounded_batches_and_bootstrap_boost(
         lambda *args, **kwargs: SimpleNamespace(program=object()),
     )
 
-    def measure(self, pulse, context, iteration, *, shots=None):
-        nonlocal measurement_number
-        measurement_number += 1
-        requested.append(self.shots if shots is None else int(shots))
-        samples = _mixture_samples(np.ones(35), requested[-1])
-        if measurement_number <= 3:
-            samples[:, 17] = 10.0 + 0.1 * np.sin(np.arange(requested[-1]))
-        return samples, (), ()
+    valid = np.ones(35, dtype=bool)
+    valid[17] = False
+    single = np.zeros(35, dtype=bool)
+    single[17] = True
+    fits = iter(
+        (
+            _fitted_result(
+                np.where(valid, 1.0, np.nan),
+                valid=valid,
+                single_population=single,
+            ),
+            _fitted_result(np.ones(35)),
+        )
+    )
+
+    def measure(self, pulse, context, iteration):
+        measured_phases.append(np.array(self.slm.last_commanded_phase, copy=True))
+        return np.zeros((self.shots, 35)), (), ()
 
     monkeypatch.setattr(SlmFeedbackTask, "_measure", measure)
+    monkeypatch.setattr(
+        feedback_module,
+        "_fit_contrasts",
+        lambda samples, **_kwargs: next(fits),
+    )
     plane = SignalDataPlane()
     task = _task(
         tmp_path,
@@ -1359,111 +1451,92 @@ def test_censored_site_uses_bounded_batches_and_bootstrap_boost(
     )
     try:
         result = task.execute(_Context())
-        assert result["validation_status"] == "accepted"
-        assert requested == [10, 10, 10, 10, 20]
+        assert result["feedback_status"] == "accepted"
+        assert len(measured_phases) == 2
+        assert not np.array_equal(measured_phases[0], measured_phases[1])
         rows, columns = np.nonzero(target > 0.0)
         assert solved_targets[0][rows[17], columns[17]] > solved_targets[0][
             rows[0], columns[0]
         ]
-        assert np.sum(solved_targets[0]) == pytest.approx(np.sum(target))
         support_values = solved_targets[0][rows, columns]
         assert float(
             np.max(support_values) / np.min(support_values)
-        ) == pytest.approx(1.4, rel=0.01)
+        ) == pytest.approx(1.03, rel=0.01)
         candidate_context = load_science_context(result["artifact_path"])
         metadata = candidate_context["pattern_metadata"]
-        assert metadata["history"][0]["censored_sites"] == [17]
-        assert metadata["history"][0]["shots"] == 30
-        assert metadata["history"][0]["decision"][17] == "bootstrap_shallow"
-        descriptor = {item.api_name: item for item in discover_logic_nodes()}[
-            "slm_feedback"
-        ]
-        reused = descriptor.instantiate(
-            slm=slm,
-            slm_key="slm",
-            camera=object(),
-            camera_key="qcmos",
-            sequencer=SimpleNamespace(describe=lambda: object()),
-            sequencer_key="sequencer",
-            signal_plane=plane,
-            calibration=ResolvedArtifact(
-                tmp_path / "calibration.json",
-                "calibration.readout.v1",
-                calibration,
-            ),
-            science_context=ResolvedArtifact(
-                Path(result["artifact_path"]),
-                "zlc.slm.science-context.v2",
-                candidate_context,
-            ),
-            pulse_resource=IMAGING_PULSE_RESOURCE,
-            artifact_directory=tmp_path,
-            feedback_mode="qcmos_bright_dark",
-            pulse_template="selected_feedback_pulse.json",
-            exposure_seconds=0.02,
-            shots_per_candidate=10,
-            validation_shots=20,
-            max_updates=1,
-        )
-        np.testing.assert_array_equal(reused.target, candidate_context["target_intensity"])
-        resumed = reused.execute(_Context())
-        resumed_metadata = load_science_context(resumed["artifact_path"])[
-            "pattern_metadata"
-        ]
-        resumed_first = resumed_metadata["history"][0]
-        assert all(value is not None for value in resumed_first["previous_valid_weight"])
-        assert all(
-            value is not None
-            for value in resumed_first["previous_valid_bright_minus_dark"]
-        )
-        assert resumed_first["bootstrap_count"][17] == 1
+        first = metadata["history"][0]
+        assert first["single_gaussian_sites"] == [17]
+        assert first["shots"] == 10
+        assert first["decision"][17] == "boost_dark_single_gaussian"
+        assert first["next_phase_changed"] is True
     finally:
         plane.close()
 
 
-def test_coarse_measure_accumulates_raw_shots_before_refitting(
+def test_unchanged_solved_phase_stops_without_a_second_shot_batch(
     tmp_path: Path, monkeypatch
 ) -> None:
-    slm = _Slm((17, 23))
-    target = _grid_target(slm.shape_yx)
+    target = _asymmetric_target()
+    slm = _Slm(target.shape)
     plane = SignalDataPlane()
+    monkeypatch.setattr(
+        feedback_module,
+        "resolve_pulse",
+        lambda *args, **kwargs: SimpleNamespace(program=object()),
+    )
+    monkeypatch.setattr(
+        feedback_module,
+        "solve_phase",
+        lambda candidate, **kwargs: (
+            np.array(slm.last_commanded_phase, copy=True),
+            {},
+        ),
+    )
+    valid = np.ones(35, dtype=bool)
+    valid[17] = False
+    single = np.zeros(35, dtype=bool)
+    single[17] = True
+    monkeypatch.setattr(
+        feedback_module,
+        "_fit_contrasts",
+        lambda samples, **_kwargs: _fitted_result(
+            np.where(valid, 1.0, np.nan),
+            valid=valid,
+            single_population=single,
+        ),
+    )
+    calls = 0
+
+    def measure(self, pulse, context, iteration):
+        nonlocal calls
+        calls += 1
+        return np.zeros((self.shots, 35)), (), ()
+
+    monkeypatch.setattr(SlmFeedbackTask, "_measure", measure)
     task = _task(
         tmp_path,
         slm=slm,
         camera=object(),
-        sequencer=object(),
+        sequencer=SimpleNamespace(describe=lambda: object()),
         plane=plane,
         target=target,
-        calibration=_calibration(),
+        calibration=_calibration_with_unresolved_site(target, missing=17),
     )
-    calls = 0
-
-    def measure(pulse, context, iteration, *, shots=None):
-        nonlocal calls
-        calls += 1
-        samples = _mixture_samples(np.ones(35), int(shots or task.shots))
-        if calls < 3:
-            samples[:, 17] = 10.0 + 0.1 * np.sin(np.arange(len(samples)))
-        return samples, (), ()
-
-    monkeypatch.setattr(task, "_measure", measure)
     try:
-        fitted, _saturated, _missing, _attempts, shots = task._coarse_measure(
-            object(), _Context(), 0
-        )
-        assert calls == 3 and shots == 30
-        assert bool(np.all(fitted["valid"]))
+        result = task.execute(_Context())
+        assert calls == 1
+        assert result["feedback_status"] == "inconclusive"
+        _phase, metadata = _load_candidate(result["artifact_path"])
+        assert "no different SLM phase" in metadata["retained"]["outcome"]["reason"]
     finally:
         plane.close()
 
 
-@pytest.mark.parametrize("stop_after_first", (False, True))
-def test_persistently_censored_bootstrap_preserves_incoming(
-    tmp_path: Path, monkeypatch, stop_after_first: bool
+def test_persistently_dark_site_updates_every_phase_and_retains_latest_candidate(
+    tmp_path: Path, monkeypatch
 ) -> None:
     target = _asymmetric_target()
     slm = _Slm(target.shape)
-    incoming = np.array(slm.last_commanded_phase, copy=True)
     calibration = _calibration_with_unresolved_site(
         target,
         missing=17,
@@ -1474,27 +1547,35 @@ def test_persistently_censored_bootstrap_preserves_incoming(
         lambda *args, **kwargs: SimpleNamespace(program=object()),
     )
     context = _Context()
-    solve_calls = 0
+    solved_targets: list[np.ndarray] = []
 
     def solve(candidate, **_kwargs):
-        nonlocal solve_calls
-        solve_calls += 1
-        if stop_after_first and solve_calls == 1:
-            context.cancelled = True
-        return np.full(candidate.shape, 0.25, np.float32), {}
+        solved_targets.append(np.array(candidate, copy=True))
+        return np.full(
+            candidate.shape, 0.1 * (len(solved_targets) + 1), np.float32
+        ), {}
 
     monkeypatch.setattr(feedback_module, "solve_phase", solve)
-    calls = 0
+    measured_phases: list[np.ndarray] = []
+    valid = np.ones(35, dtype=bool)
+    valid[17] = False
+    single = np.zeros(35, dtype=bool)
+    single[17] = True
+    monkeypatch.setattr(
+        feedback_module,
+        "_fit_contrasts",
+        lambda samples, **_kwargs: _fitted_result(
+            np.where(valid, 1.0, np.nan),
+            valid=valid,
+            single_population=single,
+        ),
+    )
 
-    def censored(self, pulse, context, iteration, *, shots=None):
-        nonlocal calls
-        calls += 1
-        count = self.shots if shots is None else int(shots)
-        samples = _mixture_samples(np.ones(35), count)
-        samples[:, 17] = 10.0 + 0.1 * np.sin(np.arange(count))
-        return samples, (), ()
+    def measure(self, pulse, run_context, iteration):
+        measured_phases.append(np.array(self.slm.last_commanded_phase, copy=True))
+        return np.zeros((self.shots, 35)), (), ()
 
-    monkeypatch.setattr(SlmFeedbackTask, "_measure", censored)
+    monkeypatch.setattr(SlmFeedbackTask, "_measure", measure)
     plane = SignalDataPlane()
     task = _task(
         tmp_path,
@@ -1504,27 +1585,26 @@ def test_persistently_censored_bootstrap_preserves_incoming(
         plane=plane,
         target=target,
         calibration=calibration,
-        updates=10,
+        updates=4,
     )
     try:
         result = task.execute(context)
         artifact = load_science_context(result["artifact_path"])
-        np.testing.assert_array_equal(artifact["phase"], incoming)
-        np.testing.assert_array_equal(slm.last_commanded_phase, incoming)
         metadata = artifact["pattern_metadata"]
-        assert metadata["candidate"] == 0
-        assert metadata["measurement"] is None
-        if stop_after_first:
-            assert result["validation_status"] is None
-            assert metadata["status"] == "stopped"
-            assert calls == 3
-        else:
-            assert result["validation_status"] == "inconclusive"
-            assert calls == 12
-            assert metadata["retained"]["validation"]["reason"] == (
-                "censored sites remained after bounded bootstrap"
-            )
-            assert metadata["history"][-1]["bootstrap_count"][17] == 3
+        assert result["feedback_status"] == "inconclusive"
+        assert len(measured_phases) == 5
+        assert all(
+            not np.array_equal(left, right)
+            for left, right in zip(measured_phases, measured_phases[1:])
+        )
+        assert metadata["candidate"] == 5
+        np.testing.assert_array_equal(artifact["phase"], measured_phases[-1])
+        np.testing.assert_array_equal(slm.last_commanded_phase, measured_phases[-1])
+        rows, columns = np.nonzero(target > 0.0)
+        assert artifact["target_intensity"][rows[17], columns[17]] == pytest.approx(
+            target[rows[17], columns[17]] * 1.03**4,
+            rel=1e-5,
+        )
     finally:
         plane.close()
 
@@ -1586,8 +1666,10 @@ def test_virtual_feedback_drives_bright_dark_ratio_below_1p10_from_missing_site(
             pulse_path=IMAGING_PULSE_RESOURCE.path,
             feedback_mode="qcmos_bright_dark",
             exposure_seconds=0.020,
-            shots_per_candidate=80,
-            validation_shots=100,
+            shots_per_candidate=100,
+            single_gaussian_boost=0.03,
+            feedback_gain=0.25,
+            maximum_weight_change=0.5,
             max_updates=12,
             artifact_directory=tmp_path,
         )
@@ -1595,30 +1677,37 @@ def test_virtual_feedback_drives_bright_dark_ratio_below_1p10_from_missing_site(
         saved, metadata = _load_candidate(result["artifact_path"])
         np.testing.assert_array_equal(slm.last_commanded_phase, saved)
         assert not np.array_equal(saved, pattern)
-        assert result["validation_status"] in {"accepted", "inconclusive"}
-        assert metadata["status"] == result["validation_status"]
+        assert result["feedback_status"] in {"accepted", "inconclusive"}
+        assert metadata["status"] == result["feedback_status"]
         history = metadata["history"]
         assert 5 <= len(history) <= 13  # baseline plus at most twelve updates
         ratios = np.asarray(
             [item["uniformity_ratio"] for item in history], dtype=float
         )
         finite = ratios[np.isfinite(ratios)]
-        assert len(finite) >= 2
-        assert finite[-1] < finite[0]
-        assert float(np.min(finite)) <= 1.10
-        assert metadata["measurement"]["valid"]
-        assert metadata["retained"]["validation"]["uniformity_ratio"] <= 1.10
-        if result["validation_status"] == "inconclusive":
-            assert metadata["retained"]["validation"][
-                "uniformity_confidence_upper"
-            ] > 1.10
+        progress = np.asarray(
+            [item["observable_uniformity_ratio"] for item in history],
+            dtype=float,
+        )
+        assert max(item["observable_sites"] for item in history) >= 34
+        assert float(progress[-1]) < float(progress[0])
+        if len(finite):
+            assert metadata["measurement"]["valid"]
+            assert metadata["retained"]["uniformity_ratio"] == pytest.approx(
+                float(np.min(finite))
+            )
+        else:
+            assert result["feedback_status"] == "inconclusive"
+            assert result["terminal_uniformity"] is None
+        if result["feedback_status"] == "accepted":
+            assert metadata["retained"]["uniformity_ratio"] <= 1.10
         assert not camera.capture_state()
-        censored_messages = [
+        incomplete_messages = [
             args[0]
             for args, _kwargs in context.progress
             if args and "site fits valid" in str(args[0])
         ]
-        assert censored_messages
+        assert incomplete_messages
         artifacts = tuple(tmp_path.glob("slm_feedback_candidate_*.npz"))
         assert len(artifacts) == len(history)
         assert { _load_candidate(path)[1]["status"] for path in artifacts } <= {
@@ -1631,7 +1720,7 @@ def test_virtual_feedback_drives_bright_dark_ratio_below_1p10_from_missing_site(
         calibration_installation.close()
 
 
-def test_success_reapplies_and_saves_the_independently_validated_best(
+def test_success_saves_converged_candidate_without_extra_shots(
     tmp_path: Path, monkeypatch
 ) -> None:
     slm = _Slm((17, 23))
@@ -1642,7 +1731,7 @@ def test_success_reapplies_and_saves_the_independently_validated_best(
             np.full(slm.shape_yx, 0.75, dtype=np.float32),
         ]
     )
-    coarse_values = iter(
+    fit_results = iter(
         [
             np.linspace(0.8, 1.2, 35),
             np.linspace(0.9, 1.1, 35),
@@ -1663,23 +1752,16 @@ def test_success_reapplies_and_saves_the_independently_validated_best(
     )
     requested_shots: list[int] = []
     monkeypatch.setattr(
-        SlmFeedbackTask,
-        "_coarse_measure",
-        lambda self, pulse, context, iteration: (
-            requested_shots.append(self.shots),
-            _fitted_result(next(coarse_values)),
-            (),
-            (),
-            1,
-            self.shots,
-        )[1:],
+        feedback_module,
+        "_fit_contrasts",
+        lambda samples, **_kwargs: _fitted_result(next(fit_results)),
     )
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration, *, shots=None: (
-            requested_shots.append(int(shots)),
-            _mixture_samples(np.ones(35), int(shots)),
+        lambda self, pulse, context, iteration: (
+            requested_shots.append(self.shots),
+            np.zeros((self.shots, 35)),
             (),
             (),
         )[1:],
@@ -1697,8 +1779,8 @@ def test_success_reapplies_and_saves_the_independently_validated_best(
         saved, metadata = _load_candidate(result["artifact_path"])
         np.testing.assert_array_equal(saved, slm.last_commanded_phase)
         np.testing.assert_array_equal(saved, np.full(slm.shape_yx, 0.75, np.float32))
-        assert metadata["retained"]["validation"]["uniformity_ratio"] <= 1.10
-        assert requested_shots == [10, 10, 10, 20]
+        assert metadata["retained"]["uniformity_ratio"] <= 1.10
+        assert requested_shots == [10, 10, 10]
         assert resolved_api_values == [{}]
         assert result["updates"] == 3
         assert np.array_equal(slm.commands[-1], saved)
@@ -1718,7 +1800,7 @@ def test_valid_site_history_changes_the_next_target_correction(
     )
     phase_results = iter(phases)
     first_contrast = np.concatenate(([2.0], np.ones(34)))
-    coarse_values = iter(
+    fit_results = iter(
         (
             _fitted_result(first_contrast),
             _fitted_result(np.concatenate(([1.8], np.ones(34)))),
@@ -1738,17 +1820,17 @@ def test_valid_site_history_changes_the_next_target_correction(
         return next(phase_results), {"method": "test"}
 
     monkeypatch.setattr(feedback_module, "solve_phase", solve)
-    def coarse_result(self, pulse, context, iteration):
-        requested_shots.append(self.shots)
-        return next(coarse_values), (), (), 1, self.shots
-
-    monkeypatch.setattr(SlmFeedbackTask, "_coarse_measure", coarse_result)
+    monkeypatch.setattr(
+        feedback_module,
+        "_fit_contrasts",
+        lambda samples, **_kwargs: next(fit_results),
+    )
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration, *, shots=None: (
-            requested_shots.append(int(shots)),
-            _mixture_samples(np.ones(35), int(shots)),
+        lambda self, pulse, context, iteration: (
+            requested_shots.append(self.shots),
+            np.zeros((self.shots, 35)),
             (),
             (),
         )[1:],
@@ -1766,9 +1848,9 @@ def test_valid_site_history_changes_the_next_target_correction(
         result = task.execute(_Context())
         saved, metadata = _load_candidate(result["artifact_path"])
         np.testing.assert_array_equal(saved, phases[2])
-        assert requested_shots == [10, 10, 10, 10, 20]
+        assert requested_shots == [10, 10, 10, 10]
         assert all(
-            item["feedback_exponent"] == pytest.approx(0.25)
+            item["feedback_gain"] == pytest.approx(0.25)
             for item in metadata["history"]
         )
         base = _grid_target(slm.shape_yx)
@@ -1783,7 +1865,10 @@ def test_valid_site_history_changes_the_next_target_correction(
             columns,
             previous_weights=np.full(35, np.nan),
             previous_contrast=np.full(35, np.nan),
-            bootstrap_counts=np.zeros(35, dtype=int),
+            feedback_gain=0.25,
+            single_gaussian_boost=0.03,
+            maximum_weight_change=0.5,
+            minimum_control_weight=np.full(35, np.nan),
         )
         second_target, *_details = _updated_target(
             first_target,
@@ -1795,7 +1880,10 @@ def test_valid_site_history_changes_the_next_target_correction(
             columns,
             previous_weights=base[rows, columns],
             previous_contrast=first_contrast,
-            bootstrap_counts=np.zeros(35, dtype=int),
+            feedback_gain=0.25,
+            single_gaussian_boost=0.03,
+            maximum_weight_change=0.5,
+            minimum_control_weight=np.full(35, np.nan),
         )
         np.testing.assert_allclose(solved_targets[0], first_target)
         np.testing.assert_allclose(solved_targets[1], second_target)
@@ -1804,164 +1892,6 @@ def test_valid_site_history_changes_the_next_target_correction(
         np.testing.assert_array_equal(slm.commands[1], phases[0])
         np.testing.assert_array_equal(slm.commands[2], phases[1])
         np.testing.assert_array_equal(slm.commands[3], phases[2])
-    finally:
-        plane.close()
-
-
-@pytest.mark.parametrize(
-    ("validation_shots", "expected_shots"),
-    ((20, [10, 20]), (101, [10, 99, 2])),
-)
-def test_validation_refuses_a_point_estimate_with_wide_qcmos_uncertainty(
-    tmp_path: Path,
-    monkeypatch,
-    validation_shots: int,
-    expected_shots: list[int],
-) -> None:
-    slm = _Slm((17, 23), incoming=0.125)
-    incoming = np.array(slm.last_commanded_phase, copy=True)
-    plane = SignalDataPlane()
-    monkeypatch.setattr(
-        feedback_module,
-        "resolve_pulse",
-        lambda *args, **kwargs: SimpleNamespace(program=object()),
-    )
-    monkeypatch.setattr(
-        feedback_module,
-        "solve_phase",
-        lambda *args, **kwargs: (
-            np.full(slm.shape_yx, 0.5, dtype=np.float32),
-            {"method": "test"},
-        ),
-    )
-    requested: list[int] = []
-
-    monkeypatch.setattr(
-        SlmFeedbackTask,
-        "_coarse_measure",
-        lambda self, pulse, context, iteration: (
-            requested.append(self.shots),
-            _fitted_result(np.ones(35)),
-            (),
-            (),
-            1,
-            self.shots,
-        )[1:],
-    )
-
-    def measure(self, pulse, context, iteration, *, shots=None):
-        requested.append(int(shots))
-        return _mixture_samples(
-            np.ones(35), int(shots), noise_scale=0.30
-        ), (), ()
-
-    monkeypatch.setattr(SlmFeedbackTask, "_measure", measure)
-    monkeypatch.setattr(
-        feedback_module,
-        "_fit_contrasts",
-        lambda samples, *, looks=1: _fitted_result(
-            np.ones(35), standard_error=0.02
-        ),
-    )
-    task = _task(
-        tmp_path,
-        slm=slm,
-        camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object()),
-        plane=plane,
-        target=_grid_target(slm.shape_yx),
-        updates=1,
-        validation_shots=validation_shots,
-    )
-    try:
-        result = task.execute(_Context())
-        assert result["validation_status"] == "inconclusive"
-        assert result["terminal_uniformity"] == pytest.approx(1.0)
-        assert result["validation_confidence_upper"] > 1.10
-        artifacts = tuple(tmp_path.glob("slm_feedback_candidate_*.npz"))
-        assert len(artifacts) == 1
-        saved, metadata = _load_candidate(artifacts[0])
-        np.testing.assert_array_equal(saved, slm.last_commanded_phase)
-        assert metadata["status"] == "inconclusive"
-        assert metadata["retained"]["validation"]["reason"] == (
-            "maximum validation shots reached"
-        )
-        assert requested == expected_shots
-    finally:
-        plane.close()
-
-
-def test_validation_adapts_in_independent_batches_until_confidence_resolves(
-    tmp_path: Path, monkeypatch
-) -> None:
-    slm = _Slm((17, 23))
-    plane = SignalDataPlane()
-    requested: list[int] = []
-    monkeypatch.setattr(
-        feedback_module,
-        "resolve_pulse",
-        lambda *args, **kwargs: SimpleNamespace(program=object()),
-    )
-    solve_calls = 0
-
-    def solve(*args, **kwargs):
-        nonlocal solve_calls
-        solve_calls += 1
-        return np.full(slm.shape_yx, 0.5, dtype=np.float32), {"method": "test"}
-
-    monkeypatch.setattr(feedback_module, "solve_phase", solve)
-
-    monkeypatch.setattr(
-        SlmFeedbackTask,
-        "_coarse_measure",
-        lambda self, pulse, context, iteration: (
-            requested.append(self.shots),
-            _fitted_result(np.ones(35)),
-            (),
-            (),
-            1,
-            self.shots,
-        )[1:],
-    )
-    validation_batch = 0
-
-    def measure(self, pulse, context, iteration, *, shots=None):
-        nonlocal validation_batch
-        validation_batch += 1
-        requested.append(int(shots))
-        return _mixture_samples(np.ones(35), int(shots)), (), ()
-
-    monkeypatch.setattr(SlmFeedbackTask, "_measure", measure)
-    fit_call = 0
-
-    def validation_fit(samples, *, looks=1):
-        nonlocal fit_call
-        fit_call += 1
-        error = 0.02 if fit_call == 1 else 0.002
-        return _fitted_result(np.ones(35), standard_error=error)
-
-    monkeypatch.setattr(feedback_module, "_fit_contrasts", validation_fit)
-    task = _task(
-        tmp_path,
-        slm=slm,
-        camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object()),
-        plane=plane,
-        target=_grid_target(slm.shape_yx),
-        updates=1,
-        validation_shots=300,
-    )
-    try:
-        result = task.execute(_Context())
-        assert result["validation_status"] == "accepted"
-        assert requested == [10, 100, 100]
-        _saved, metadata = _load_candidate(result["artifact_path"])
-        validation = metadata["retained"]["validation"]
-        assert validation["shots"] == 200
-        assert validation["maximum_shots"] == 300
-        assert validation["maximum_looks"] == 3
-        assert validation["confidence_family_alpha"] == 0.05
-        assert validation["uniformity_confidence_upper"] <= 1.10
     finally:
         plane.close()
 
@@ -2023,139 +1953,6 @@ def test_stop_during_failed_first_candidate_save_restores_incoming(
         plane.close()
 
 
-def test_stop_at_terminal_gate_accepts_latest_valid_and_retains_final_previews(
-    tmp_path: Path, monkeypatch
-) -> None:
-    slm = _Slm((17, 23), incoming=0.125)
-    best = np.full(slm.shape_yx, 0.5, dtype=np.float32)
-    plane = SignalDataPlane()
-    wake = Event()
-    validation_entered = Event()
-    release_validation = Event()
-    stopped_save_entered = Event()
-    release_stopped_save = Event()
-    monkeypatch.setattr(
-        feedback_module,
-        "resolve_pulse",
-        lambda *args, **kwargs: SimpleNamespace(program=object()),
-    )
-    monkeypatch.setattr(
-        feedback_module,
-        "solve_phase",
-        lambda *args, **kwargs: (
-            best,
-            {"method": "test"},
-        ),
-    )
-    calls = 0
-    coarse_values = iter(
-        (
-            _fitted_result(np.concatenate(([2.0], np.ones(34)))),
-            _fitted_result(np.ones(35)),
-        )
-    )
-
-    def coarse(self, pulse, run_context, iteration):
-        nonlocal calls
-        calls += 1
-        return next(coarse_values), (), (), 1, self.shots
-
-    monkeypatch.setattr(SlmFeedbackTask, "_coarse_measure", coarse)
-
-    def measure(self, pulse, run_context, iteration, *, shots=None):
-        nonlocal calls
-        calls += 1
-        validation_entered.set()
-        assert release_validation.wait(2.0)
-        return _mixture_samples(
-            np.full(35, 1.005), int(shots)
-        ), (), ()
-
-    monkeypatch.setattr(SlmFeedbackTask, "_measure", measure)
-    task = _task(
-        tmp_path,
-        slm=slm,
-        camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object()),
-        plane=plane,
-        target=_grid_target(slm.shape_yx),
-        updates=2,
-    )
-    save = feedback_module.save_science_context
-
-    def blocking_stopped_save(path, phase, **kwargs):
-        if kwargs["pattern_metadata"]["status"] == "stopped":
-            stopped_save_entered.set()
-            assert release_stopped_save.wait(2.0)
-        return save(path, phase, **kwargs)
-
-    monkeypatch.setattr(
-        feedback_module, "save_science_context", blocking_stopped_save
-    )
-    host = _task_host(task, plane, wake)
-    try:
-        host.start()
-        assert validation_entered.wait(2.0)
-        # Stop wins immediately before the final apply/save commit, after
-        # validation has produced a passing result.  That measured candidate
-        # is committed to both retained previews before Task terminal, and
-        # remains there as well as on the device and in the durable artifact.
-        host.cancel("before terminal commit")
-        release_validation.set()
-        assert stopped_save_entered.wait(2.0)
-        phase_publication = plane.latest_publication(
-            host.signal_key("candidate_phase")
-        )
-        curve_publication = plane.latest_publication(
-            host.signal_key("uniformity_history")
-        )
-        assert phase_publication is not None and curve_publication is not None
-        phase_value = phase_publication.value(host.signal_key("candidate_phase"))
-        curve_value = curve_publication.value(host.signal_key("uniformity_history"))
-        np.testing.assert_array_equal(phase_value.snapshot.block.values[0, 0], best)
-        assert curve_value.snapshot.block.values[0, 0, 0] == pytest.approx(2.0)
-        assert curve_value.snapshot.block.values[0, 1, 0] <= 1.10
-        assert np.isnan(curve_value.snapshot.block.values[0, 2, 0])
-        assert phase_value.run_record == curve_value.run_record
-        release_stopped_save.set()
-        observation = _wait_host(host, wake)
-        assert observation.phase == "done"
-        assert host.final_result_resolved
-        assert calls == 3
-        np.testing.assert_array_equal(slm.last_commanded_phase, best)
-        artifacts = tuple(tmp_path.glob("slm_feedback_candidate_*.npz"))
-        assert len(artifacts) == 2
-        result = host.final_result
-        saved, metadata = _load_candidate(result["artifact_path"])
-        np.testing.assert_array_equal(saved, best)
-        assert metadata["candidate"] == 2
-        # Feedback previews are latest-value monitors while running, but their
-        # final phase and convergence curve remain visible after terminal.
-        retained_phase = plane.latest_publication(
-            host.signal_key("candidate_phase")
-        )
-        retained_curve = plane.latest_publication(
-            host.signal_key("uniformity_history")
-        )
-        assert retained_phase is not None and retained_curve is not None
-        np.testing.assert_array_equal(
-            retained_phase.value(host.signal_key("candidate_phase")).snapshot.block.values[0, 0],
-            best,
-        )
-        retained_values = retained_curve.value(
-            host.signal_key("uniformity_history")
-        ).snapshot.block.values[0, :2, 0]
-        assert retained_values[0] == pytest.approx(2.0)
-        assert retained_values[1] <= 1.10
-    finally:
-        release_validation.set()
-        release_stopped_save.set()
-        if not host.terminal:
-            _wait_host(host, wake)
-        host.shutdown()
-        plane.close()
-
-
 def test_stop_after_terminal_commit_keeps_host_success_and_artifact(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -2175,22 +1972,22 @@ def test_stop_after_terminal_commit_keeps_host_success_and_artifact(
         "solve_phase",
         lambda *args, **kwargs: (best, {"method": "test"}),
     )
-    coarse_values = iter(
+    fit_results = iter(
         (
             _fitted_result(np.concatenate(([2.0], np.ones(34)))),
             _fitted_result(np.ones(35)),
         )
     )
     monkeypatch.setattr(
-        SlmFeedbackTask,
-        "_coarse_measure",
-        lambda self, pulse, context, iteration: (next(coarse_values), (), (), 1, self.shots),
+        feedback_module,
+        "_fit_contrasts",
+        lambda samples, **_kwargs: next(fit_results),
     )
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration, *, shots=None: (
-            _mixture_samples(np.ones(35), int(shots)),
+        lambda self, pulse, context, iteration: (
+            np.zeros((self.shots, 35)),
             (),
             (),
         ),
@@ -2234,87 +2031,8 @@ def test_stop_after_terminal_commit_keeps_host_success_and_artifact(
         plane.close()
 
 
-def test_stop_accepted_then_apply_failure_is_failed_and_restores_incoming(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    slm = _Slm((17, 23), incoming=0.125)
-    incoming = np.array(slm.last_commanded_phase, copy=True)
-    best = np.full(slm.shape_yx, 0.5, dtype=np.float32)
-    plane = SignalDataPlane()
-    wake = Event()
-    validation_entered = Event()
-    release_validation = Event()
-    monkeypatch.setattr(
-        feedback_module,
-        "resolve_pulse",
-        lambda *args, **kwargs: SimpleNamespace(program=object()),
-    )
-    monkeypatch.setattr(
-        feedback_module,
-        "solve_phase",
-        lambda *args, **kwargs: (best, {"method": "test"}),
-    )
-
-    coarse_values = iter(
-        (
-            _fitted_result(np.concatenate(([2.0], np.ones(34)))),
-            _fitted_result(np.ones(35)),
-        )
-    )
-    monkeypatch.setattr(
-        SlmFeedbackTask,
-        "_coarse_measure",
-        lambda self, pulse, context, iteration: (next(coarse_values), (), (), 1, self.shots),
-    )
-
-    def measure(self, pulse, context, iteration, *, shots=None):
-        validation_entered.set()
-        assert release_validation.wait(2.0)
-        return _mixture_samples(np.ones(35), int(shots)), (), ()
-
-    monkeypatch.setattr(SlmFeedbackTask, "_measure", measure)
-    task = _task(
-        tmp_path,
-        slm=slm,
-        camera=object(),
-        sequencer=SimpleNamespace(describe=lambda: object()),
-        plane=plane,
-        target=_grid_target(slm.shape_yx),
-        updates=2,
-    )
-    apply = task._apply_exact
-    calls = 0
-
-    def fail_stop_apply(phase):
-        nonlocal calls
-        calls += 1
-        if calls == 4:
-            raise OSError("accepted Stop apply failed")
-        return apply(phase)
-
-    monkeypatch.setattr(task, "_apply_exact", fail_stop_apply)
-    host = _task_host(task, plane, wake)
-    try:
-        host.start()
-        assert validation_entered.wait(2.0)
-        host.cancel("accept best then fail apply")
-        release_validation.set()
-        observation = _wait_host(host, wake)
-        assert observation.phase == "failed"
-        assert observation.error == "OSError: accepted Stop apply failed"
-        np.testing.assert_array_equal(slm.last_commanded_phase, incoming)
-    finally:
-        release_validation.set()
-        if not host.terminal:
-            _wait_host(host, wake)
-        host.shutdown()
-        plane.close()
-
-
-@pytest.mark.parametrize("terminal_operation", ("apply", "save"))
-def test_terminal_apply_or_save_failure_restores_incoming_and_fails_host(
-    tmp_path: Path, monkeypatch, terminal_operation: str
+def test_terminal_save_failure_restores_incoming_and_fails_host(
+    tmp_path: Path, monkeypatch
 ) -> None:
     slm = _Slm((17, 23), incoming=0.125)
     incoming = np.array(slm.last_commanded_phase, copy=True)
@@ -2331,22 +2049,22 @@ def test_terminal_apply_or_save_failure_restores_incoming_and_fails_host(
         "solve_phase",
         lambda *args, **kwargs: (best, {"method": "test"}),
     )
-    coarse_values = iter(
+    fit_results = iter(
         (
             _fitted_result(np.concatenate(([2.0], np.ones(34)))),
             _fitted_result(np.ones(35)),
         )
     )
     monkeypatch.setattr(
-        SlmFeedbackTask,
-        "_coarse_measure",
-        lambda self, pulse, context, iteration: (next(coarse_values), (), (), 1, self.shots),
+        feedback_module,
+        "_fit_contrasts",
+        lambda samples, **_kwargs: next(fit_results),
     )
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration, *, shots=None: (
-            _mixture_samples(np.ones(35), int(shots)),
+        lambda self, pulse, context, iteration: (
+            np.zeros((self.shots, 35)),
             (),
             (),
         ),
@@ -2360,35 +2078,22 @@ def test_terminal_apply_or_save_failure_restores_incoming_and_fails_host(
         target=_grid_target(slm.shape_yx),
         updates=2,
     )
-    if terminal_operation == "apply":
-        original_apply = task._apply_exact
-        apply_calls = 0
+    original_save = feedback_module.save_science_context
 
-        def fail_terminal_apply(phase):
-            nonlocal apply_calls
-            apply_calls += 1
-            if apply_calls == 3:
-                raise OSError("terminal apply failed")
-            return original_apply(phase)
+    def fail_terminal_save(path, phase, **kwargs):
+        if kwargs["pattern_metadata"]["status"] == "accepted":
+            raise OSError("terminal save failed")
+        return original_save(path, phase, **kwargs)
 
-        monkeypatch.setattr(task, "_apply_exact", fail_terminal_apply)
-    else:
-        original_save = feedback_module.save_science_context
-
-        def fail_terminal_save(path, phase, **kwargs):
-            if kwargs["pattern_metadata"]["status"] == "accepted":
-                raise OSError("terminal save failed")
-            return original_save(path, phase, **kwargs)
-
-        monkeypatch.setattr(
-            feedback_module, "save_science_context", fail_terminal_save
-        )
+    monkeypatch.setattr(
+        feedback_module, "save_science_context", fail_terminal_save
+    )
     host = _task_host(task, plane, wake)
     try:
         host.start()
         observation = _wait_host(host, wake)
         assert observation.phase == "failed"
-        assert observation.error == f"OSError: terminal {terminal_operation} failed"
+        assert observation.error == "OSError: terminal save failed"
         assert not host.final_result_resolved
         np.testing.assert_array_equal(slm.last_commanded_phase, incoming)
         artifacts = tuple(tmp_path.glob("slm_feedback_candidate_*.npz"))
@@ -2406,35 +2111,29 @@ def test_terminal_apply_or_save_failure_restores_incoming_and_fails_host(
         plane.close()
 
 
-def test_persistent_missing_retries_same_candidate_once_then_stops_invalid(
+def test_invalid_site_holds_weight_and_never_retries_the_same_phase(
     tmp_path: Path, monkeypatch
 ) -> None:
     slm = _Slm((17, 23), incoming=0.125)
     incoming = np.array(slm.last_commanded_phase, copy=True)
     plane = SignalDataPlane()
-    phase = np.full(slm.shape_yx, 0.25, dtype=np.float32)
     first = _mixture_samples(np.ones(35), 10)
     first[:, 4] = np.nan
-    batches = iter(
-        (
-            (first, (), (4,)),
-            (first, (), (4,)),
-        )
-    )
     monkeypatch.setattr(
         feedback_module,
         "resolve_pulse",
         lambda *args, **kwargs: SimpleNamespace(program=object()),
     )
-    monkeypatch.setattr(
-        feedback_module,
-        "solve_phase",
-        lambda *args, **kwargs: (phase, {"method": "test"}),
-    )
+    measured_phases: list[np.ndarray] = []
+
+    def measure(self, pulse, context, iteration):
+        measured_phases.append(np.array(self.slm.last_commanded_phase, copy=True))
+        return first, (), (4,)
+
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration, *, shots=None: next(batches),
+        measure,
     )
     task = _task(
         tmp_path,
@@ -2446,17 +2145,26 @@ def test_persistent_missing_retries_same_candidate_once_then_stops_invalid(
         updates=2,
     )
     try:
-        with pytest.raises(RuntimeError, match="invalid after two measurements"):
-            task.execute(_Context())
-        np.testing.assert_array_equal(slm.last_commanded_phase, incoming)
+        result = task.execute(_Context())
+        assert result["feedback_status"] == "inconclusive"
+        assert measured_phases
+        assert all(
+            not np.array_equal(left, right)
+            for left, right in zip(measured_phases, measured_phases[1:])
+        )
         artifacts = tuple(tmp_path.glob("slm_feedback_candidate_*.npz"))
-        assert len(artifacts) == 1
-        saved, metadata = _load_candidate(artifacts[0])
-        assert metadata["measurement"]["attempts"] == 2
-        assert metadata["measurement"]["bright_minus_dark"][4] is None
-        assert metadata["measurement"]["contrast_standard_error"][4] is None
-        assert "history" not in metadata
-        np.testing.assert_array_equal(saved, incoming)
+        assert len(artifacts) == len(measured_phases)
+        _saved, metadata = _load_candidate(result["artifact_path"])
+        assert all(item["invalid_sites"] == [4] for item in metadata["history"])
+        assert all(
+            item["decision"][4] == "hold_invalid"
+            for item in metadata["history"]
+        )
+        assert all(
+            item["requested_log_correction"][4] == 0.0
+            for item in metadata["history"]
+        )
+        assert all(item["target_weight"][4] == 1.0 for item in metadata["history"])
     finally:
         plane.close()
 
@@ -2481,7 +2189,7 @@ def test_stop_before_first_candidate_accepts_incoming_as_formal_artifact(
 
     monkeypatch.setattr(feedback_module, "solve_phase", solve)
 
-    def cancelled(self, pulse, context, iteration, *, shots=None):
+    def cancelled(self, pulse, context, iteration):
         raise RuntimeError("SLM feedback was cancelled")
 
     monkeypatch.setattr(SlmFeedbackTask, "_measure", cancelled)
@@ -2507,7 +2215,7 @@ def test_stop_before_first_candidate_accepts_incoming_as_formal_artifact(
         history = context.commits[0]["uniformity_history"]
         np.testing.assert_array_equal(phase.snapshot.block.values[0, 0], incoming)
         assert not np.any(history.snapshot.expanded_validity())
-        assert np.array_equal(slm.commands[-1], incoming)
+        assert not slm.commands
         assert tuple(tmp_path.glob("slm_feedback*.npz")) == (
             Path(result["artifact_path"]),
         )

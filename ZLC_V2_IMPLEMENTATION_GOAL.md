@@ -108,7 +108,7 @@ SLM Feedback必须复用canonical Camera Measurement `repeat=N`及其同一Runti
 - real command state支持known/unknown，未send/read不能虚构zero；
 - correction mutation取得同一DeviceUse claim，并冻结进command receipt；
 - 当前Feedback mode为single-frame qCMOS `bright_mean-dark_mean`；loading fraction与occupied brightness由本run双高斯分开，不把all-shot mean冒充metric；
-- Calibration只供site BOX geometry；Pulse与camera exposure由operator分别显式设置。默认500-shot coarse、12 updates；controller使用per-site weight/contrast/fit历史、固定`0.25`基准增益、有限bootstrap/rollback/hold策略更新当前Target；
+- Calibration只供site BOX geometry；Pulse、camera exposure、shots、single-Gaussian boost、feedback gain与普通单步上限由operator显式设置。默认100 shots、12 updates；controller直接更新归一化Target share，保证dark-only绝对增权、invalid保持、loaded相对配平，并维护per-site loading floor；
 - Task自行apply Context起始phase；normal terminal与Stop接受并apply最后一个valid controller state、写正式artifact，不按noisy max/min回选旧phase；异常失败恢复Context起始phase；
 - Feedback只更新Pattern/base并compose明确Science Context；
 - Target、pupil、operator wavefront、vendor correction、device mapping各有唯一owner。
@@ -322,8 +322,8 @@ Solver/Feedback：
 - initial/hot inner solve走到canonical numerical gate，不为省几十毫秒增加physical candidate；
 - current Feedback mode明确为single-frame qCMOS shot distribution的`bright-dark`，loading probability只是mixture fraction；
 - 复用Camera Measurement统一projection，每cycle一张frame；Pulse与camera exposure分别由operator显式设置且不做二者科学兼容性判断；
-- Calibration只提供Target site对应的BOX geometry；controller用本轮双高斯contrast以及跨轮per-site weight/contrast/fit历史决定update、hold、有限bootstrap或disappearance rollback，不读取Calibration dark/threshold/exposure/working point；
-- 默认500-shot coarse、12 updates，全部site有效时contrast ratio目标为`<=1.10`；final validation默认最多3000 shots/300秒，重新拟合独立shots并输出estimate+uncertainty/inconclusive并写回terminal curve；
+- Calibration只提供Target site对应的BOX geometry；controller用本轮单/双高斯结果及跨轮per-site normalized share/contrast/loading bracket更新，不读取Calibration dark/threshold/exposure/working point；
+- 默认100 shots、12 updates；每candidate只采一批且下一批前必须apply不同phase，全部site有效时contrast ratio目标为`<=1.10`。真实all-site curve与显式observable-site progress curve分离，无独立validation采集；
 - Task取得SLM后自己apply Context起始phase；normal terminal与Stop保留最后一个valid controller state，异常failure恢复该Context起始phase；
 - sparse-only contract明确；
 - dense Gaussian/Flat Top先修signal/noise region、FOM、initial phase和early stop，再profile CPU；不引GPU。

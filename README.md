@@ -23,16 +23,16 @@ geometry; the selected Pulse and camera exposure are explicit operator inputs.
 For every candidate, each site's BOX values across shots are fitted as dark and
 bright Gaussian populations, and `bright - dark` is the feedback observable;
 the mixture fraction is loading probability, not the optimization metric.
-Per-site Target weight, contrast, fit quality and response history determine
-whether to update, hold, bootstrap a never-bright shallow site, or undo a weight
-increase after a previously visible bright peak disappears. Coarse measurements
-use 500 shots and at most 12 updates by default and target a measured contrast
-ratio of 1.10; an independent validation then grows in 100-shot batches up to
-3000 shots or 300 seconds. Its terminal estimate is republished into the visible
-uniformity curve.
-It returns an estimate and simultaneous confidence interval as `accepted` or
-`inconclusive`, never promotes a noisy point estimate into a confidence claim, and does
-not infer unmeasured dense-target pixels or a hidden wavefront.
+Per-site normalized Target share, contrast and loading history drive one
+single-batch control step. A dark-only single Gaussian receives the operator's
+authored absolute share increase; loaded sites divide the remaining power by
+their authored feedback gain, and learned dark/loaded brackets prevent later
+normalization from pushing a site below its loading floor. Each candidate uses
+exactly the authored shots once (100 by default), then must solve and apply a
+different phase before another acquisition. The all-site bright-dark ratio
+targets 1.10; a separately named observable-site progress curve remains live
+while some sites have not loaded. There is no automatic retry or independent
+validation acquisition.
 
 The real SLM device type is `slm.hamamatsu_x15213`. Like the real Pulse
 sequencer, its apparatus parameters are the server host and port; the process

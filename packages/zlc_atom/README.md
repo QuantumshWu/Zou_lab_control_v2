@@ -245,11 +245,12 @@ zero-capture sites, is then the stable site index.
 After acquiring the SLM, Feedback itself applies and confirms the frozen Context
 phase before measuring its baseline; the operator does not have to pre-Send or
 re-save that Context, and its command receipt remains provenance rather than a
-pre-existing device-state requirement. Every coarse or validation measurement
-is a canonical Camera Measurement generation under the stable companion
+pre-existing device-state requirement. Every candidate owns exactly one
+canonical Camera Measurement generation under the stable companion
 producer `<task>/camera`: current mode `qcmos_bright_dark` requires exactly one
 camera frame per cycle, commits all `repeat=N` cycles, seals them, and uses the
-same single-frame Dataset for preview and estimation. The Pulse resource is an
+same single-frame Dataset for preview and estimation. It never retries or adds
+a second batch at an unchanged phase. The Pulse resource is an
 explicit operator selection; camera exposure is a separate visible/editable
 field with a `0.1 s` default. Feedback neither derives one from the other nor
 reuses Calibration exposure.
@@ -260,54 +261,47 @@ exposure, photoelectron choice or camera working-point authority. For each
 candidate, Feedback integrates every site's BOX on every shot and fits the two
 Gaussian populations of empty (`dark`) and loaded (`bright`) shots. The metric
 is `bright_mean - dark_mean`; loading probability is reported as the mixture
-fraction but is not multiplied into that metric. A fit is usable only when the
-two-component model wins its BIC check, has populated/separated peaks, and its
-simultaneous contrast error excludes zero.
+fraction but is not multiplied into that metric. Penalized likelihood selects
+the single- or double-Gaussian result; every finite selected fit is valid, and
+only a numerical/non-finite fit failure holds that site.
 
-The controller records every site's actual Target weight, contrast, error,
-fit quality, action and local log-response slope. A high contrast means the
-trap is shallow at the experiment's red-detuned probe point, so its Target
-weight increases; a low contrast makes it decrease. A trustworthy historical
-`d log(contrast) / d log(weight)` is used when available, otherwise the base
-gain is `0.25`, with a 1.5x per-site step cap and total Target power preserved.
-An uncertain two-peak fit holds that site. A never-valid single peak receives
-at most three 1.4x shallow-trap bootstrap steps. If a previously valid bright
-peak disappears after its weight increased, that site returns toward its last
-valid weight; other unidentifiable cases hold. Comparable history survives in
-the Candidate Context, but changing mode, Pulse or exposure resets it.
+The controller records every site's normalized Target intensity share,
+contrast, fit choice, action and local log-response slope. A high contrast
+means the trap is shallow at the experiment's red-detuned probe point, so its
+share increases; a low contrast makes it decrease. Three authored parameters
+own the update: `single_gaussian_boost`, `feedback_gain`, and
+`maximum_weight_change`. Dark-only sites receive the exact feasible normalized
+share increase; invalid sites keep their share; loaded sites divide only the
+remaining power by their relative corrections. Historical dark/loaded bounds
+form a per-site loading floor which later normalization may not cross.
+Comparable history survives only when mode, Pulse, exposure and all three
+controller parameters match.
 
-If the run ends or is stopped without a valid result, Context-start candidate 0 is
-saved with no invented measurement. With a valid state, normal terminal and Stop
-accept and reapply the latest valid controller state rather than the noisiest
-max/min winner; a Stop already requested before the initial solve makes zero
-solver calls. A genuine failure restores the Context starting phase. Each
-candidate Context freezes its actual evolving Target and can be selected
-directly for the next run because neither descriptor asks for a Target file.
+Normal terminal and Stop retain the best fully measured candidate (or the most
+observable measured candidate when no all-site ratio exists); an applied but
+unmeasured phase is never promoted. A Stop already requested before the initial
+solve makes zero solver calls. A genuine failure restores the Context starting
+phase. Each Candidate Context freezes its actual evolving Target and can be
+selected directly for the next run.
 
-`candidate_phase` and `uniformity_history` update as latest-value monitors
-while Feedback runs, but their final values remain published after terminal.
+`candidate_phase` publishes immediately after the SLM confirms each phase and
+before that candidate's shots begin. `uniformity_history` contains only true
+all-site ratios; `observable_uniformity_history` is the explicitly named
+partial progress curve while sites are still dark. Their final values remain
+published after terminal.
 Starting the next run keeps the previous Monitor surfaces visible until the
 replacement generation has rendered its first values.
 
-The coarse loop defaults to 500 shots and at most 12 updates; it targets a
-maximum/minimum bright-dark site ratio of `1.10` with every site valid.
-The held-out validation defaults to at most 3000 shots/300 seconds and applies
-its 95% family correction across both sites and
-the maximum number of looks. It uses bounded batches without dropping a tail
-(for example, 101 shots become 99 + 2), and remains bounded by the authored
-shot limit and time budget. Its point estimate replaces the final coarse point
-in the retained `uniformity_history`. The terminal Science Context reports
-`accepted` or `inconclusive` with the measured estimate and simultaneous interval.
+The loop defaults to 100 shots and at most 12 updates. A candidate is accepted
+when all sites have a finite selected fit and that one authored batch measures
+a maximum/minimum bright-dark ratio at or below `1.10`. The simultaneous
+interval is recorded as uncertainty but never triggers an extra acquisition.
 
-The product-default virtual missing-site vertical starts from a Calibration
-that observed only 34/35 sites. Two bounded bootstrap rounds preceded valid
-coarse bright-dark ratios `2.092, 1.971, 1.687, 1.474, 1.331, 1.243, 1.169,
-1.128, 1.090`; site 17's actual Target weight moved `0.100→0.140→0.195→…→0.768`.
-Independent validation accepted after 2000 of the allowed 3000 shots: estimate
-`1.09126`, simultaneous 95% interval `[1.08293, 1.09989]`, in 84.0 seconds.
-The 35-site/500-shot double-Gaussian+BIC estimator itself measured about
-0.714 seconds median per candidate; acquisition remains the dominant time.
-This is software/virtual evidence, not hardware or optical acceptance.
+With `calibration-5.json` (23 detected sites) registered to
+`science-context_5x7.npz` (35 Target sites), the exact virtual 100-shot chain
+reached observable counts `23→26→29→32→32→33→35` and accepted candidate 7 at
+an all-site ratio of `1.098487`. Every candidate used one 100-shot batch and a
+distinct phase. This is software/virtual evidence, not hardware acceptance.
 
 The supported product path discovers seven logic descriptors: `calibration`,
 `camera_measurement`, `occupancy`, `seamless_scan`, `slm_feedback`,

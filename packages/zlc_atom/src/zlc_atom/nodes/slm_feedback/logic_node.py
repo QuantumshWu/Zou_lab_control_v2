@@ -25,6 +25,7 @@ from zlc_atom.nodes.camera_measurement.measurement import CAMERA_FRAMES_OUTPUT
 
 from .task import (
     CANDIDATE_PHASE_OUTPUT,
+    OBSERVABLE_UNIFORMITY_HISTORY_OUTPUT,
     SLM_PHASE_ARTIFACT_CONTRACT,
     SlmFeedbackTask,
     UNIFORMITY_HISTORY_OUTPUT,
@@ -71,14 +72,28 @@ SLM_FEEDBACK_SCHEMA = AuthoringSchema(
             minimum=1e-9,
         ),
         AuthoringField(
-            "shots_per_candidate", "int", "qCMOS shots per candidate", 500, minimum=10
+            "shots_per_candidate", "int", "qCMOS shots per candidate", 100, minimum=10
         ),
         AuthoringField(
-            "validation_shots",
-            "int",
-            "Maximum independent validation shots",
-            3000,
-            minimum=10,
+            "single_gaussian_boost",
+            "float",
+            "Single-Gaussian weight increase",
+            0.03,
+            minimum=0.0,
+        ),
+        AuthoringField(
+            "feedback_gain",
+            "float",
+            "Bright-dark feedback gain",
+            0.25,
+            minimum=0.0,
+        ),
+        AuthoringField(
+            "maximum_weight_change",
+            "float",
+            "Maximum ordinary weight change",
+            0.5,
+            minimum=0.0,
         ),
         AuthoringField("max_updates", "int", "Maximum feedback updates", 12, minimum=1),
     )
@@ -128,7 +143,9 @@ def _build(
         feedback_mode=str(authored["feedback_mode"]),
         exposure_seconds=float(authored["exposure_seconds"]),
         shots_per_candidate=int(authored["shots_per_candidate"]),
-        validation_shots=int(authored["validation_shots"]),
+        single_gaussian_boost=float(authored["single_gaussian_boost"]),
+        feedback_gain=float(authored["feedback_gain"]),
+        maximum_weight_change=float(authored["maximum_weight_change"]),
         max_updates=int(authored["max_updates"]),
         artifact_directory=artifact_directory,
     )
@@ -152,6 +169,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     outputs=(
         CANDIDATE_PHASE_OUTPUT,
         UNIFORMITY_HISTORY_OUTPUT,
+        OBSERVABLE_UNIFORMITY_HISTORY_OUTPUT,
     ),
     node_previews=(
         NodePreviewSpec(
@@ -164,7 +182,7 @@ LOGIC_NODE = LogicNodeDescriptor(
             producer="camera",
         ),
         NodePreviewSpec(CANDIDATE_PHASE_OUTPUT, "image"),
-        NodePreviewSpec(UNIFORMITY_HISTORY_OUTPUT, "curve"),
+        NodePreviewSpec(OBSERVABLE_UNIFORMITY_HISTORY_OUTPUT, "curve"),
     ),
     artifact_outputs=(
         ArtifactOutputSpec("artifact_path", SLM_PHASE_ARTIFACT_CONTRACT),

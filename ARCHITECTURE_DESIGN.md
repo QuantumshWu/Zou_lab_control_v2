@@ -218,11 +218,11 @@ Node new chunk
 - Feedback mode是leaf-owned显式字段；当前唯一mode为`qcmos_bright_dark`。Pulse由operator显式选择；camera exposure是独立、可见、可编辑的authored字段，默认`0.1 s`。Task不从Pulse或Calibration猜exposure，也不做Pulse/exposure科学“兼容性”判断。
 - 当前mode复用canonical Camera Measurement `repeat=N`，每cycle严格一张camera frame；preview与估计读取同一sealed Dataset，不另写camera average或三帧reference判据。
 - Calibration只提供Target→camera注册所需的site centers、BOX半宽/积分方式和frame坐标几何；Feedback不读取其dark/bright/threshold、exposure、photoelectron mode、camera identity或readout working-point provenance。实际camera requested/actual exposure、effective unit与conversion进入本run metadata；saturation只由本次actual raw integer maximum转换到本次effective unit判断。
-- 每个site使用本candidate全部shot的raw BOX值拟合双高斯；observable是`bright_mean-dark_mean`，loading probability只作为mixture fraction。BIC、峰分离与simultaneous mean error共同决定valid/uncertain/censored；不把单峰硬拆成有效bright response。
-- Controller保存并落盘每site的实际Target weight、bright-dark、误差、fit状态、动作与局部`d log C / d log weight`。有效site按实验已确认的单调方向更新：bright-dark偏大表示trap偏浅，因此增加Target；可信历史斜率优先，斜率不可辨识时使用固定`0.25`基准增益，单步最多1.5倍并保持总Target power。
-- 已有双峰但fit error过大的site本轮hold。此前从未有效的单峰site按浅阱先验最多三次、每次1.4倍bootstrap；曾经有效且在增加weight后bright峰消失的site回到其上一有效weight，其余不可辨识site hold。mode、Pulse或exposure变化时不复用旧响应历史。
-- 默认每candidate为500 shots、最多12次update；只有全部site valid时才以bright-dark ratio `<= 1.10`结束coarse。Normal terminal与Stop保留最后一个全site-valid controller state；无valid state保存Context-start candidate 0。Final validation默认最多3000 shots/300秒，对独立single-frame shots重新双高斯拟合，并按sites × maximum looks做simultaneous family correction，输出estimate、uncertainty或inconclusive。
-- Feedback取得SLM后自己apply并确认frozen Science Context phase，再测baseline、更新Target、solve并继续camera闭环；Context receipt是provenance，不要求operator事先Send/Save或保持某条旧command。无valid candidate的normal terminal或Stop以该Context起始phase的candidate 0落盘，measurement为None；有valid state时保留并apply最后一轮，异常failure恢复该Context起始phase。
+- 每个site使用本candidate唯一一批authored shots的raw BOX值选择单高斯或双高斯；能返回有限fit即为valid，只有数值失败才hold。双高斯observable为`bright_mean-dark_mean`；单高斯结合本批dark基线与per-site历史判为dark-only或bright-only。
+- Controller保存每site的归一化Target share、bright-dark、fit选择、动作、局部`d log C / d log share`及dark/loaded边界。dark-only按用户`single_gaussian_boost`保证绝对份额增加；loaded按用户`feedback_gain`只作相对配平并受`maximum_weight_change`限制；invalid保持实际份额。历史边界形成loading floor，归一化不得把site压到floor以下。
+- mode、Pulse、exposure或任一控制参数变化时不复用旧响应历史；用户要求的dark增幅若在固定总功率下不可行，静默缩到本轮最大可行值。
+- 默认每candidate为100 shots、最多12次update；每个phase严格一批shots，下一批前必须确认不同phase。全部site valid且bright-dark ratio `<= 1.10`即accepted；normal terminal与Stop保留最佳已测candidate。置信区间只作为同批数据的不确定度记录，不触发retry或独立validation采集。
+- Feedback取得SLM后自己apply并确认frozen Science Context phase，并在shot前发布该phase；Context receipt是provenance，不要求operator事先Send/Save。normal terminal与Stop只从完整测量过的candidate中保留最佳/最可观测状态，异常failure恢复Context起始phase。
 - Sparse-only contract明确；dense Gaussian/Flat Top先修算法定义和early stop，再profile CPU，不引GPU。
 
 ## 9. Calibration、Scan与Simulation
