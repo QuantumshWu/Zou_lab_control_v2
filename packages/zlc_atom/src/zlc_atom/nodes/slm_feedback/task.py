@@ -450,11 +450,6 @@ class SlmFeedbackTask:
         operator = canonical_phase(
             science_context.get("operator_wavefront"), slm.shape_yx
         )
-        composed = canonical_phase(
-            pattern.astype(float) + operator.astype(float), slm.shape_yx
-        )
-        if not np.array_equal(incoming, composed):
-            raise ValueError("Science Context phase differs from Pattern plus wavefront")
         pupil = np.asarray(science_context.get("pupil_amplitude"), dtype=np.float32)
         support = np.asarray(science_context.get("pupil_support"))
         if (
