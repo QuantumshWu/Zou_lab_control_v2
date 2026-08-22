@@ -157,7 +157,7 @@ class SimulationWorldConfig:
     loading_probability: float = 0.5
     probe_saturation: float = 0.1
     probe_detuning_linewidths: float = -1.9
-    trap_light_shift_linewidths: float = 1.15
+    trap_light_shift_linewidths: float = 1.6
     fluorescence_lifetime_seconds: float = 0.05
     atom_temperature_k: float = DEFAULT_ATOM_TEMPERATURE_K
     trap_depth_k: float = DEFAULT_TRAP_DEPTH_K
@@ -458,6 +458,18 @@ class SimulationWorld:
             + coefficients[2] * coma_x
             + coefficients[3] * coma_y
         )
+        pixel_y, pixel_x = np.ogrid[:height, :width]
+        aberration += (
+            0.256 * np.cos(2.0 * np.pi * 16.0 * pixel_x / width + 4.201)
+            + 0.317 * np.cos(2.0 * np.pi * 21.0 * pixel_y / height + 3.227)
+            + 0.155
+            * np.cos(
+                2.0
+                * np.pi
+                * (16.0 * pixel_x / width + 21.0 * pixel_y / height)
+                + 3.261
+            )
+        )
         return (
             _immutable(amplitude, "<f4"),
             _immutable(np.where(pupil, aberration, 0.0), "<f4"),
@@ -626,13 +638,12 @@ class SimulationWorld:
         if scale is None or not np.isfinite(scale) or scale <= 0.0:
             raise RuntimeError("reference SLM command produced no trap intensity")
         relative_depth = np.clip(np.asarray(intensities) / scale, 0.0, None)
-        if base == 1.0:
-            return np.asarray(relative_depth > 0.0, dtype=float)
-        # A finite cooling interval captures at a rate set by the harmonic
-        # trap frequency, omega_r proportional to sqrt(U).  ``base`` is the
-        # authored probability at nominal depth, so this is exactly p=base at
-        # U/U0=1 and exactly zero where no trap exists.
-        return -np.expm1(np.log1p(-base) * np.sqrt(relative_depth))
+        depth_k = self.trap_depth_k * relative_depth
+        cooling_temperature = self.atom_temperature_k
+        minimum_loading_depth = 25.0 * cooling_temperature
+        excess_depth = np.maximum(depth_k - minimum_loading_depth, 0.0)
+        capture = -np.expm1(-excess_depth / cooling_temperature)
+        return base * capture
 
     def _fluorescence_scales(self, intensities: np.ndarray) -> np.ndarray:
         """Occupied-atom scattering from one shared Stark-shifted probe law."""

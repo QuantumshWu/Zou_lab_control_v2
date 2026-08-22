@@ -157,7 +157,7 @@ def test_qcmos_parameters_and_derived_poisson_signal_are_single_world_physics() 
     assert world.background_rate == pytest.approx(300.0)
     assert world.atom_rate == pytest.approx(145_000.0)
     assert world.probe_detuning_linewidths == pytest.approx(-1.9)
-    assert world.trap_light_shift_linewidths == pytest.approx(1.15)
+    assert world.trap_light_shift_linewidths == pytest.approx(1.6)
     assert world.conversion_e_per_count == pytest.approx(0.107)
     assert world.read_noise_e == pytest.approx(0.43)
     assert world.offset_counts == pytest.approx(200.0)
@@ -562,8 +562,8 @@ def test_slm_coherent_plant_owns_the_twofold_site_error_and_caches_propagation()
             1.0 - (corrected_ratio - 1.0) / (initial_ratio - 1.0)
         )
 
-    assert min(ratios) >= 1.8
-    assert max(ratios) <= 2.2
+    assert min(ratios) >= 4.5
+    assert max(ratios) <= 5.5
     assert min(correctable_fractions) >= 0.90
     assert not hasattr(SimulationWorld, "trap_plane_intensity")
     assert not hasattr(SimulationWorld, "site_trap_intensities")

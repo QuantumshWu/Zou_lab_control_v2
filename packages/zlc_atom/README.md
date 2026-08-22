@@ -321,13 +321,11 @@ opening automatically.
 Virtual and physical cameras differ only below the adapter boundary.
 
 In the shared virtual world, every cooling rising edge while `trap` is high is
-a fresh shot: each currently active trap receives an independent draw at the
-same authored base loading probability, while an inactive/missing trap has
-probability zero.
-Local coherent trap depth does not exponentially or otherwise raise loading;
-it affects occupied-atom qCMOS brightness and release survival. Changing the
-SLM topology therefore removes atoms from vanished traps, and restoring a trap
-does not resurrect its old atom without a later cooling load.
+a fresh shot. At the default 20 µK cooling temperature, traps below 500 µK do
+not load; above that threshold the probability rises exponentially over one
+cooling-temperature scale to the authored collisional-blockade ceiling.
+Changing the SLM topology therefore removes atoms from vanished traps, and
+restoring a trap does not resurrect its old atom without a later cooling load.
 
 ## Executable integration path
 
