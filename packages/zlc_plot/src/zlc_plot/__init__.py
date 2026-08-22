@@ -94,8 +94,6 @@ _EXPORTS = {
 }
 
 
-__version__ = "1.1.0"
-
 def __getattr__(name: str) -> object:
     """Resolve one facade name, importing only what that name lives in.
 
@@ -179,7 +177,6 @@ __all__ = [
     "normalize_classifier_threshold_targets",
     "Unit",
     "UnitRegistry",
-    "__version__",
     "curve",
     "describe_semantics",
     "ensure_qt5_application",

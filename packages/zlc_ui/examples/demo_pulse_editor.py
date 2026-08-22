@@ -8,20 +8,13 @@ from __future__ import annotations
 
 import argparse
 import os
-from pathlib import Path
-import sys
 
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-
-from PyQt5 import QtCore, QtWidgets  # noqa: E402
+from PyQt5 import QtCore, QtWidgets
 
 # Everything an outside host may use, from the top-level facade and nowhere
 # else.  This demo is the tutorial for that surface, so it is written under the
 # same rule the surface enforces: no submodule reaches, no widget classes.
-from zlc_ui import (  # noqa: E402
+from zlc_ui import (
     ConnectionChoiceVM,
     ConnectionVM,
     DelayRowVM,
@@ -191,8 +184,8 @@ class _FakeHost:
 
 def populate(editor) -> None:
     editor.set_title("PulseGUI - pulse_20260801_080148 (new)*")
-    # Match the v1 offline acceptance state: the editor is dirty, but no
-    # device is running, so the header status remains neutral grey.
+    # The fake editor is dirty, but no device is running, so the header status
+    # remains neutral grey.
     editor.set_status_color("idle")
     editor.set_summary("5/22 ports visible | 2 periods | step 20 ns | 2e+03 ns | 1 pulses | repeat | scan 2 slots × 16 pts")
 

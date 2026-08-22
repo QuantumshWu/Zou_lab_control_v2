@@ -1,7 +1,5 @@
 """Stable role-axis contracts for named multidimensional data."""
 
-__version__ = "0.1.0"
-
 from .axis import (
     COMPONENT,
     PRIMARY_INDEX,
@@ -129,7 +127,6 @@ __all__ = [
     "ValidityMode",
     "ValueSchema",
     "NPZFormatError",
-    "__version__",
     "compact_dataset_validity",
     "expand_dataset_validity",
     "expand_snapshot_validity",

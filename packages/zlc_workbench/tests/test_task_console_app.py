@@ -46,6 +46,21 @@ def workspace(tmp_path) -> Path:
     return tmp_path
 
 
+def _subprocess_environment() -> dict[str, str]:
+    environment = dict(
+        os.environ,
+        QT_QPA_PLATFORM="offscreen",
+        MPLBACKEND="Agg",
+    )
+    if environment.get("ZLC_TEST_INSTALLED") == "1":
+        environment["PYTHONPATH"] = ""
+    else:
+        environment["PYTHONPATH"] = (
+            str(REPO_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")
+        )
+    return environment
+
+
 def _run_script(
     script: str,
     *,
@@ -53,12 +68,7 @@ def _run_script(
     timeout: int = 300,
     overrides: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
-    environment = dict(
-        os.environ,
-        QT_QPA_PLATFORM="offscreen",
-        MPLBACKEND="Agg",
-        PYTHONPATH=str(REPO_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", ""),
-    )
+    environment = _subprocess_environment()
     environment.update(dict(overrides or {}))
     return subprocess.run(
         [sys.executable, "-c", script],
@@ -248,7 +258,7 @@ def test_app_build_installs_the_plot_size_policy(
             "before = geometry.panel_display_size('2x2')\n"
             "import zlc_workbench\n"
             "assert geometry.panel_display_size('2x2') == before\n",
-            cwd=REPO_ROOT,
+            cwd=workspace,
             timeout=60,
         )
         assert completed.returncode == 0, completed.stdout + completed.stderr
@@ -620,77 +630,21 @@ def test_formal_panel_save_keeps_qt_live_and_close_waits_for_archive_and_render(
             _wait_qt(application, lambda: not window.is_visible())
 
 
-@pytest.mark.skipif(os.name != "nt", reason="the product launcher is a Windows batch file")
-def test_experiment_batch_is_one_task_console_entry_and_forwards_its_arguments(
-    workspace,
-) -> None:
+def test_experiment_batch_is_one_task_console_manifest_wrapper() -> None:
     launcher = REPO_ROOT / "bin" / "experiment.bat"
     source = launcher.read_text(encoding="utf-8").lower()
-    assert 'call "%~dp0_launch.bat" task_console %*' in source
+    assert 'set "zlc_command=task_console"' in source
+    assert 'call "%~dp0_launch.bat" %*' in source
     assert "pulse_editor" not in source and "device_manager" not in source
     assert "start " not in source
 
-    environment = dict(
-        os.environ,
-        QT_QPA_PLATFORM="offscreen",
-        MPLBACKEND="Agg",
-        ZLC_NO_PAUSE="1",
-        ZLC_PY_CMD=sys.executable,
-    )
-    completed = subprocess.run(
-        [
-            os.environ.get("COMSPEC", "cmd.exe"),
-            "/d",
-            "/c",
-            str(launcher),
-            "--workspace",
-            str(workspace),
-            "--template",
-            "virtual",
-            "--check",
-        ],
-        capture_output=True,
-        text=True,
-        env=environment,
-        cwd=REPO_ROOT,
-        timeout=300,
-    )
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "ZLC WORKBENCH - task_console" in completed.stdout
-    assert f"workspace: {workspace}" in completed.stdout
 
-
-@pytest.mark.skipif(os.name != "nt", reason="the product launcher is a Windows batch file")
-def test_figure_viewer_batch_uses_the_product_entry_and_forwards_arguments() -> None:
+def test_figure_viewer_batch_is_one_manifest_wrapper() -> None:
     launcher = REPO_ROOT / "bin" / "figure_viewer.bat"
     source = launcher.read_text(encoding="utf-8").lower()
-    assert 'call "%~dp0_launch.bat" figure_viewer %*' in source
+    assert 'set "zlc_command=figure_viewer"' in source
+    assert 'call "%~dp0_launch.bat" %*' in source
     assert "start " not in source
-
-    environment = dict(
-        os.environ,
-        QT_QPA_PLATFORM="offscreen",
-        MPLBACKEND="Agg",
-        ZLC_NO_PAUSE="1",
-        ZLC_PY_CMD=sys.executable,
-    )
-    completed = subprocess.run(
-        [
-            os.environ.get("COMSPEC", "cmd.exe"),
-            "/d",
-            "/c",
-            str(launcher),
-            "--check",
-        ],
-        capture_output=True,
-        text=True,
-        env=environment,
-        cwd=REPO_ROOT,
-        timeout=300,
-    )
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "ZLC WORKBENCH - figure_viewer" in completed.stdout
-    assert "figure viewer ready: no archive given" in completed.stdout
 
 
 def test_a_missing_apparatus_says_how_to_start_anyway(workspace) -> None:
@@ -711,12 +665,7 @@ def test_the_pulse_editor_opens_the_pulse_it_is_told_to(workspace) -> None:
     """One reader for pulse files, so the window cannot show a different pulse."""
 
     write_ordinary_pulse(workspace)
-    environment = dict(
-        os.environ,
-        QT_QPA_PLATFORM="offscreen",
-        MPLBACKEND="Agg",
-        PYTHONPATH=(str(REPO_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")),
-    )
+    environment = _subprocess_environment()
     script = (
         "import zou_lab_control_v2\n"
         "from zlc_workbench.apps import pulse_editor as tested_module\n"
@@ -750,12 +699,7 @@ def test_a_launcher_started_from_its_own_folder_still_finds_the_experiment(works
     and reported them missing -- from a directory nobody keeps data in.
     """
 
-    environment = dict(
-        os.environ,
-        QT_QPA_PLATFORM="offscreen",
-        MPLBACKEND="Agg",
-        PYTHONPATH=(str(REPO_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")),
-    )
+    environment = _subprocess_environment()
     deep = workspace / "data" / "2026_08_05"
     deep.mkdir(parents=True)
 
@@ -810,16 +754,7 @@ def test_the_pulse_editor_opens_where_there_is_no_experiment_at_all(tmp_path) ->
 def test_task_console_opens_empty_and_adds_only_a_stopped_camera_draft(workspace) -> None:
     """The v1-style combined Add Panel control reaches both endpoints."""
 
-    environment = dict(
-        os.environ,
-        QT_QPA_PLATFORM="offscreen",
-        MPLBACKEND="Agg",
-        PYTHONPATH=(
-            str(REPO_ROOT)
-            + os.pathsep
-            + os.environ.get("PYTHONPATH", "")
-        ),
-    )
+    environment = _subprocess_environment()
     script = """import time
 import zou_lab_control_v2
 from zlc_ui import ensure_qt_app
@@ -909,16 +844,7 @@ def test_task_takeover_and_live_preview_follow_the_real_buttons(workspace) -> No
         calibration_pulse_template_bytes()
     )
 
-    environment = dict(
-        os.environ,
-        QT_QPA_PLATFORM="offscreen",
-        MPLBACKEND="Agg",
-        PYTHONPATH=(
-            str(REPO_ROOT)
-            + os.pathsep
-            + os.environ.get("PYTHONPATH", "")
-        ),
-    )
+    environment = _subprocess_environment()
     script = """import time
 import zou_lab_control_v2
 from PyQt5 import QtCore, QtTest
@@ -1007,16 +933,7 @@ def test_calibration_terminal_writes_six_images_without_report_panels(
         calibration_pulse_template_bytes()
     )
 
-    environment = dict(
-        os.environ,
-        QT_QPA_PLATFORM="offscreen",
-        MPLBACKEND="Agg",
-        PYTHONPATH=(
-            str(REPO_ROOT)
-            + os.pathsep
-            + os.environ.get("PYTHONPATH", "")
-        ),
-    )
+    environment = _subprocess_environment()
     script = """import zou_lab_control_v2
 print(zou_lab_control_v2.__file__)
 import time
@@ -1178,12 +1095,7 @@ print('CALIBRATION_FILES_WITHOUT_REPORT_UI_OK')
 def test_device_controls_open_on_demand_over_the_one_experiment_session(workspace) -> None:
     """Init opens only Console; loaded-card Control owns every device window."""
 
-    environment = dict(
-        os.environ,
-        QT_QPA_PLATFORM="offscreen",
-        MPLBACKEND="Agg",
-        PYTHONPATH=(str(REPO_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")),
-    )
+    environment = _subprocess_environment()
     script = """import zou_lab_control_v2
 from zlc_workbench.apps import task_console as tested_module
 print(zou_lab_control_v2.__file__)

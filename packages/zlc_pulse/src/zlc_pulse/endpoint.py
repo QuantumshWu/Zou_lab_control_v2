@@ -6,16 +6,10 @@ The number itself was said five times in four packages -- the server default,
 the client default, the CLI default, a widget's placeholder and an apparatus
 form default -- so changing the port meant finding them all.
 
-And the module that runs the server is not the place to keep it.  Putting it
-there meant the package had to import the server to publish the constant, so
-``python -m zlc_pulse.remote`` loaded that module twice: once as a side effect
-of importing the package, once as __main__.  Python says exactly that, on the
-server launcher, every time it starts:
-
-    RuntimeWarning: 'zlc_pulse.remote' found in sys.modules after import of
-    package 'zlc_pulse', but prior to execution of 'zlc_pulse.remote'
-
-A constant should not oblige anyone to load a socket server to read it.
+The server implementation is not the place to keep shared connection defaults:
+importing the package merely to read a port must not load the socket server.
+The product manifest imports that server only when ``zlc pulse_server`` is
+selected.
 """
 
 from __future__ import annotations

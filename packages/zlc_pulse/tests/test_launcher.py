@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import subprocess
-import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -11,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # board, which is why this layer is what checks it.
 LAUNCHER = ROOT.parents[1] / "bin" / "run_server.bat"
 BUILD_LAUNCHER = ROOT.parents[1] / "bin" / "build_and_program.bat"
+ESTIMATE_LAUNCHER = ROOT.parents[1] / "bin" / "estimate_resources.bat"
 FPGA_SOURCES = ROOT / "fpga" / "pulse_streamer"
 
 
@@ -32,7 +32,9 @@ def _run_batch(*args: str, cwd: Path, python_path: Path) -> subprocess.Completed
     )
     for name in ("ZLC_PY_CMD", "ZLC_PY_PATH"):
         env.pop(name, None)
-    arguments = " ".join(f'"{arg}"' if " " in arg else arg for arg in args)
+    arguments = " ".join(
+        f'"{arg}"' if not arg or " " in arg else arg for arg in args
+    )
     command = f'cmd.exe /d /s /c ""{LAUNCHER}" {arguments}"'
     return subprocess.run(
         command,
@@ -58,25 +60,53 @@ def test_real_batch_wrapper_forwards_exact_modes_without_inner_argument(tmp_path
         assert "FAKE_ARGS=" in result.stdout
         assert "--inner" not in result.stdout
     no_args = _run_batch(cwd=ROOT, python_path=fake)
-    assert "Server listen bind: 127.0.0.1:18861" in no_args.stdout
-    assert "remote_server address: 127.0.0.1:18861" in no_args.stdout
+    assert "-m zou_lab_control_v2 pulse_server" in no_args.stdout
+    assert "--host \"127.0.0.1\" --port \"18861\"" in no_args.stdout
     jtag = _run_batch("--backend", "jtag-axi", cwd=ROOT, python_path=fake)
     assert "--backend jtag-axi" in jtag.stdout
     uart = _run_batch("--backend", "uart", "--uart-port", "COM7", cwd=ROOT, python_path=fake)
     assert "--backend uart --uart-port COM7" in uart.stdout
 
-
-def test_batch_check_config_uses_repo_imports_from_shadow_cwd(tmp_path) -> None:
-    shadow = tmp_path / "shadow"
-    (shadow / "zlc_pulse").mkdir(parents=True)
-    (shadow / "zlc_pulse" / "__init__.py").write_text(
-        "raise AssertionError('shadow zlc_pulse was imported')\n", encoding="utf-8"
+    exact = _run_batch(
+        "value with space", "", "bang!value", "μ-value",
+        cwd=ROOT, python_path=fake,
     )
-    result = _run_batch("--check-config", cwd=shadow, python_path=Path(sys.executable))
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "config=" in result.stdout
-    assert str((ROOT / "fpga" / "board_config" / "streamer_config.json").resolve()) in result.stdout
-    assert "shadow zlc_pulse was imported" not in result.stdout + result.stderr
+    assert '"value with space" "" bang!value μ-value' in exact.stdout
+
+    estimate_environment = dict(
+        os.environ,
+        ZLC_FPGA_PYTHON=str(fake),
+        ZLC_NO_PAUSE="1",
+        PYTHONPATH="",
+    )
+    estimate = subprocess.run(
+        ["cmd.exe", "/d", "/c", str(ESTIMATE_LAUNCHER)],
+        cwd=ROOT,
+        env=estimate_environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert estimate.returncode == 0, estimate.stdout + estimate.stderr
+    assert "configured part HAS enough resources" in estimate.stdout
+    assert "!ZLC_STATUS!" not in estimate.stdout
+
+    failing = tmp_path / "failing-python.bat"
+    failing.write_text(
+        "@echo off\nif \"%~1\"==\"-c\" exit /b 0\nexit /b 7\n",
+        encoding="utf-8",
+    )
+    estimate_environment["ZLC_FPGA_PYTHON"] = str(failing)
+    failed = subprocess.run(
+        ["cmd.exe", "/d", "/c", str(ESTIMATE_LAUNCHER)],
+        cwd=ROOT,
+        env=estimate_environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert failed.returncode == 7
+    assert "failed with code 7" in failed.stdout
 
 
 def test_create_project_deletes_only_its_marked_child_and_requires_geometry() -> None:

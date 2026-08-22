@@ -1598,7 +1598,3 @@ __all__ = [
     "resolve_backend",
     "serve",
 ]
-
-
-if __name__ == "__main__":
-    raise SystemExit(_main())

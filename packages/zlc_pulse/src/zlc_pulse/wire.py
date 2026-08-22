@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from importlib.metadata import PackageNotFoundError, distribution
 from numbers import Integral
 import os
 import struct
@@ -31,6 +32,28 @@ LAYOUT_STRUCT_VERSION = 3   # v3: word 63 is a geometry fingerprint (was static 
 
 # Only host-side validation caps are excluded; all other geometry fields are hashed.
 _FINGERPRINT_HOST_ONLY = frozenset({"ttl_delay_max_ticks"})
+_FPGA_SHARE = ("share", "zou-lab-control", "fpga")
+
+
+def _fpga_asset_path(*parts: str) -> Path:
+    """Locate one tracked FPGA asset in source or the installed product."""
+
+    source = Path(__file__).resolve().parents[2] / "fpga" / Path(*parts)
+    if source.exists():
+        return source
+    try:
+        product = distribution("zou-lab-control")
+    except PackageNotFoundError:
+        return source
+    suffix = _FPGA_SHARE + tuple(parts)
+    matches = tuple(
+        item
+        for item in (product.files or ())
+        if tuple(item.parts[-len(suffix):]) == suffix
+    )
+    if len(matches) > 1:
+        raise RuntimeError(f"installed product contains duplicate FPGA asset {'/'.join(parts)}")
+    return Path(product.locate_file(matches[0])).resolve() if matches else source
 
 def build_fingerprint(params: "StreamerParams") -> int:
     """32-bit host<->bitstream compatibility fingerprint exposed on CTRL word 63.
@@ -86,8 +109,11 @@ CTRL_WORDS = 64
 def _shipped_config_params() -> dict:
     """Read shipped geometry once so bare ``StreamerParams()`` follows the config."""
     try:
-        raw = json.loads((Path(__file__).resolve().parents[2] / "fpga" / "board_config"
-                          / "streamer_config.json").read_text(encoding="utf-8"))
+        raw = json.loads(
+            _fpga_asset_path("board_config", "streamer_config.json").read_text(
+                encoding="utf-8"
+            )
+        )
         params = raw.get("params") if isinstance(raw, dict) else None
         return params if isinstance(params, dict) else {}
     except (OSError, ValueError):
@@ -930,13 +956,12 @@ def _config_search_paths() -> list[Path]:
     if env and env.strip():
         paths.append(Path(env))
     paths.append(Path.cwd() / rel)
-    # The in-repository deployment manifest is the canonical fallback.
-    paths.append(Path(__file__).resolve().parents[2] / "fpga" / "board_config" / DEFAULT_CONFIG_FILENAME)
+    paths.append(_fpga_asset_path("board_config", DEFAULT_CONFIG_FILENAME))
     return paths
 
 def _default_config_path() -> Path:
-    """The canonical package-local config path, used for messages and round-trips."""
-    return Path(__file__).resolve().parents[2] / "fpga" / "board_config" / DEFAULT_CONFIG_FILENAME
+    """The canonical source-tree or installed-product configuration path."""
+    return _fpga_asset_path("board_config", DEFAULT_CONFIG_FILENAME)
 
 DEFAULT_CONFIG_PATH = _default_config_path()
 
@@ -1165,7 +1190,7 @@ def emit_geometry_vh(params: "StreamerParams") -> str:
     lines = [
         "// ==========================================================================",
         "// zlc_geometry.vh -- AUTO-GENERATED from fpga/board_config/streamer_config.json by",
-        "//   python -m zlc_pulse.fpga --emit-geometry-vh <path>",
+        "//   zlc fpga --emit-geometry-vh <path>",
         "// DO NOT EDIT.  Every RTL geometry parameter (+ the LAYOUT_FINGERPRINT the host connect-",
         "// check verifies) defaults to a macro here, so editing the config + rebuilding propagates",
         "// to the bitstream and testbenches with no hand-carried literal.  Regenerated from the",
@@ -1210,7 +1235,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(
-        prog="python -m zlc_pulse.wire",
+        prog="zlc fpga",
         description="Estimate whether the configured FPGA part has enough resources for the "
                     "configured pulse-streamer geometry (reads fpga/board_config/streamer_config.json).",
     )
@@ -1249,9 +1274,6 @@ def _main(argv: Sequence[str] | None = None) -> int:
                   "report": report, "ok": all(a["ok"] for a in report.values())}
     print(format_capacity_report(result))
     return 0 if result["ok"] else 1
-
-if __name__ == "__main__":
-    raise SystemExit(_main())
 
 def pack_scan_rows(rows, geom: StreamerParams, bank: int, chunk: int, cycles: int = 1) -> dict[int, int]:
     """Pack one bank-sized chunk of slot rows into a resident scan bank.

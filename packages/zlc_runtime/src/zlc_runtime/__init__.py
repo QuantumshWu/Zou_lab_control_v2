@@ -1,7 +1,5 @@
 """Runtime primitives used by the ZLC product."""
 
-__version__ = "0.1.0"
-
 from .dataset import DatasetCoverage, MonitorCoverage
 from .dataset_output import (
     DatasetOutputDeclaration,
@@ -46,7 +44,6 @@ __all__ = (
     "SignalDescription",
     "NodeHost",
     "SelectionBridge",
-    "__version__",
     "SelectionChange",
     "SelectionRange",
     "SelectionState",

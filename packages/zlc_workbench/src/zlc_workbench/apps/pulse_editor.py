@@ -1,8 +1,8 @@
 """Open the pulse editor.
 
-    python -m zlc_workbench.apps.pulse_editor
-    python -m zlc_workbench.apps.pulse_editor --pulse untitled
-    python -m zlc_workbench.apps.pulse_editor --connect remote:127.0.0.1:18861
+    zlc pulse_editor
+    zlc pulse_editor --pulse untitled
+    zlc pulse_editor --connect remote:127.0.0.1:18861
 
 The window opens whether or not there is a pulse to show; with none it says how
 to get one.  Product pulses are ``zlc.pulse.v1`` JSON documents in an
@@ -472,7 +472,3 @@ def main(argv: list[str] | None = None) -> int:
     )
     del window
     return int(application.exec_())
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

@@ -8,7 +8,7 @@ from .calibration import TrapCalibration
 
 
 CALIBRATION_ARTIFACT_CODEC = ArtifactCodec(
-    "calibration.readout.v1",
+    TrapCalibration.CONTRACT_ID,
     "Calibration artifacts (*.json)",
     (".json",),
     TrapCalibration.load,

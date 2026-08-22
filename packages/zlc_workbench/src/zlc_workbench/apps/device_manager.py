@@ -1,6 +1,6 @@
 """Edit this bench's apparatus.
 
-    python -m zlc_workbench.apps.device_manager --workspace D:/experiment
+    zlc device_manager --workspace D:/experiment
 
 Which devices exist and how each is set up is the one thing a session cannot
 start without, and it was the one thing with no window.  This writes
@@ -186,7 +186,3 @@ def main(argv: list[str] | None = None) -> int:
 
     create_window(workspace=arguments.workspace)
     return int(application.exec_())
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

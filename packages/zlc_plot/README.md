@@ -1,10 +1,8 @@
 # zlc-plot
 
-`zlc-plot` 提供 Zou Lab Control 的 Matplotlib 可视化接口。安装单元只发行
-`zlc_plot`；顶层 `zlc_data` 名称保留给角色轴数据仓 `zlc-data`，本仓不会再安装
-同名顶层包。
-
-科学数据对象由独立的角色轴 `zlc-data` 包提供；`zlc_plot` 不再捆绑第二份数据模型。
+`zlc_plot` 是单一 Zou Lab Control distribution 内的可视化层，不是独立 wheel。
+科学数据对象由同一产品中的 `zlc_data` 角色轴层提供；两者保持依赖边界，但只安装
+一个 `zou-lab-control` 产品。
 `zlc_plot` 本身提供 plot specification、Matplotlib renderer、selector、fit、
 固定尺寸、static/live session，以及 Notebook canvas / PyQt5 QImage adapter。
 
@@ -16,56 +14,16 @@ mapping 等扩展接口分别位于 `zlc_plot.fit`、`zlc_plot.parameters`、
 
 ## 安装
 
-Headless 与静态绘图：
+从产品根目录按唯一constraints安装；Notebook能力使用同一distribution的extra：
 
 ```bash
-python -m pip install -e .
+python -m pip install -c constraints.txt -e ".[notebook]"
 ```
 
-Notebook 交互：
-
-```bash
-python -m pip install -e ".[notebook]"
-```
-
-从仓库根目录启动 JupyterLab，示例 Notebook 会优先加载当前 `src`：
-
-```bash
-cd zlc_plot
-python -m jupyter lab
-```
-
-PyQt5 嵌入：
-
-```bash
-python -m pip install -e ".[qt]"
-```
-
-全部可选运行依赖：
-
-```bash
-python -m pip install -e ".[all]"
-```
-
-本仓库钉住 Matplotlib 3.10.8；修改依赖或 Notebook 前端代码后，必须在当前
-Jupyter kernel 所用的解释器中重新执行 editable 安装并重启 kernel/Lab view，避免
-旧的 widget registry 或旧的 Python 模块留在进程里：
-
-```bash
-python -m pip install --upgrade --force-reinstall -e ".[notebook]"
-```
-
-Notebook 和 Qt 依赖均惰性加载。普通 `import zlc_plot` 不依赖 Jupyter 或 Qt；Qt adapter 只支持 PyQt5。
-
-本仓可以与角色轴数据包同时安装：
-
-```bash
-python -m pip install -e ../zlc_data
-python -m pip install -e .
-```
-
-此时 `import zlc_data` 和 `import zlc_plot` 使用不同命名空间；旧契约若仅用于当前
-绘图层直接接收 `zlc_data.OwnedSnapshot`。
+正式教程只有 `packages/zlc_workbench/notebooks/usage.ipynb`；release gate把tracked
+document读入内存，并从checkout外的临时工作目录用fresh kernel执行。执行后的内存
+document会被丢弃，不写回source。Notebook依赖惰性加载；普通`import zlc_plot`不会
+加载Jupyter，Qt adapter只支持产品钉住的PyQt5。
 
 ## 创建数据与静态图
 
@@ -108,7 +66,7 @@ session.save("curve.png")
 
 ## Notebook 交互
 
-Notebook 使用 `zlc_plot.raster.RasterFront` 与一个标准 `anywidget` DOM canvas，不生成额外的按钮、下拉框或参数面板。安装 `zlc-plot[notebook]` 后，导入并构造 `zlc_plot.notebook.NotebookView` 时会自动加载这个 adapter，不需要运行 `%matplotlib widget` 或任何 IPython Matplotlib magic：
+Notebook 使用 `zlc_plot.raster.RasterFront` 与一个标准 `anywidget` DOM canvas，不生成额外的按钮、下拉框或参数面板。安装 `zou-lab-control[notebook]` 后，导入并构造 `zlc_plot.notebook.NotebookView` 时会自动加载这个 adapter，不需要运行 `%matplotlib widget` 或任何 IPython Matplotlib magic：
 
 ```python
 from zlc_plot import SelectorKind, show
@@ -146,9 +104,9 @@ Rolling 的静态快照也保留 R 轴的逐 shot 历史种子，因此 static �
 projection 语义；Runtime以严格递增revision提交新快照。Notebook拖拽候选由
 kernel烘焙进单一raster front。
 
-唯一的可执行教程 [`notebooks/usage.ipynb`](notebooks/usage.ipynb)
-包含六种plot kind、交互selector、fit、单位/limits/labels热更新、Image point
-overlay、保存和直接revision更新。
+唯一可执行产品教程是`packages/zlc_workbench/notebooks/usage.ipynb`；它把真实
+virtual Camera Measurement publication交给普通Image `NotebookView`并完整关闭owner。
+其余plot kind和交互contract由本层API文档及自动测试覆盖，不再维护第二本教程。
 
 ## 快速显示参数更新
 

@@ -892,11 +892,14 @@ def test_remote_packet_grammar_rejects_partial_duplicate_and_nonfinite_input(
 def test_slm_server_launcher_uses_the_product_entry() -> None:
     root = Path(__file__).resolve().parents[3]
     launcher = (root / "bin" / "slm_server.bat").read_text(encoding="utf-8")
-    assert 'call "%~dp0_launch.bat" slm_server %*' in launcher
+    assert 'set "ZLC_COMMAND=slm_server"' in launcher
+    assert 'call "%~dp0_launch.bat" %*' in launcher
 
-    from zou_lab_control_v2.__main__ import TOOLS
+    from zou_lab_control_v2 import entry_specs
 
-    assert TOOLS["slm_server"] == "zlc_atom.devices.slm.device_types"
+    assert entry_specs("zou_lab_control.commands")["slm_server"] == (
+        "zlc_atom.devices.slm.device_types:main"
+    )
 
 
 def test_slm_server_prints_copyable_same_machine_and_lan_device_addresses(

@@ -1,5 +1,5 @@
 @echo off
-setlocal EnableExtensions EnableDelayedExpansion
+setlocal EnableExtensions DisableDelayedExpansion
 
 rem ============================================================================
 rem  Double-click this file to check whether the FPGA part configured in
@@ -9,45 +9,34 @@ rem  the part, edge count, delay depth, etc., then re-run this.  The window stay
 rem  open with the report.
 rem ============================================================================
 
-if /I not "%~1"=="--inner" (
-  call "%~f0" --inner %*
-  set "ZLC_STATUS=!ERRORLEVEL!"
-  echo.
-  if "!ZLC_STATUS!"=="0" (
-    echo ZLC resource estimate: the configured part HAS enough resources.
-  ) else if "!ZLC_STATUS!"=="1" (
-    echo ZLC resource estimate: INSUFFICIENT -- see the OVER BUDGET lines above.
-  ) else (
-    echo ZLC resource estimate failed with code !ZLC_STATUS! -- read the messages above.
-  )
-  echo You can close this window, or press any key to exit.
-  if "%ZLC_NO_PAUSE%"=="" pause
-  exit /b !ZLC_STATUS!
+if /I "%~1"=="--inner" goto zlc_inner
+call "%~f0" --inner %*
+set "ZLC_STATUS=%ERRORLEVEL%"
+echo.
+if "%ZLC_STATUS%"=="0" (
+  echo ZLC resource estimate: the configured part HAS enough resources.
+) else if "%ZLC_STATUS%"=="1" (
+  echo ZLC resource estimate: INSUFFICIENT -- see the OVER BUDGET lines above.
+) else (
+  echo ZLC resource estimate failed with code %ZLC_STATUS% -- read the messages above.
 )
+echo You can close this window, or press any key to exit.
+if "%ZLC_NO_PAUSE%"=="" pause
+exit /b %ZLC_STATUS%
+
+:zlc_inner
 shift /1
 
-rem Clicked from bin\, run against zlc_pulse: the layer that owns the board
-rem geometry this estimates against.
-set "REPO_ROOT=%~dp0..\packages\zlc_pulse\"
 for %%I in ("%~dp0..") do set "ZLC_HOME=%%~fI"
-if "%REPO_ROOT:~-1%"=="\" set "REPO_ROOT=%REPO_ROOT:~0,-1%"
+set "FPGA_DIR=%ZLC_HOME%\packages\zlc_pulse\fpga"
 
-call "%REPO_ROOT%\fpga\_resolve_tools.bat" python "%REPO_ROOT%"
+call "%FPGA_DIR%\_resolve_tools.bat" python "%ZLC_HOME%"
 if errorlevel 1 exit /b 2
 
-pushd "%REPO_ROOT%"
-rem THIS checkout, through its one entry.  "%CD%" was packages\zlc_pulse,
-rem which does not contain the package -- the source is under src/ -- so
-rem "python -m zou_lab_control_v2 fpga" only worked where the standalone repositories
-rem happen to be pip-installed, and it ran THEIR code, not this tree's.  On a
-rem machine that only has this clone it was ModuleNotFoundError, thrown away
-rem by >nul 2>nul and reported as "failed to derive FPGA geometry".
-set "PYTHONPATH=%ZLC_HOME%;%PYTHONPATH%"
-if "%ZLC_PS_CONFIG%"=="" if exist "%CD%\fpga\board_config\streamer_config.json" set "ZLC_PS_CONFIG=%CD%\fpga\board_config\streamer_config.json"
+if "%ZLC_PS_CONFIG%"=="" set "ZLC_PS_CONFIG=%FPGA_DIR%\board_config\streamer_config.json"
 
 echo Reading config: %ZLC_PS_CONFIG%
 echo.
 %ZLC_PY_CMD% -m zou_lab_control_v2 fpga --config "%ZLC_PS_CONFIG%"
 set "ZLC_RC=%ERRORLEVEL%"
-popd
 exit /b %ZLC_RC%

@@ -13,7 +13,10 @@ REPO_ROOT = ROOT.parents[1]
 
 def _run_qt(code: str) -> None:
     environment = dict(os.environ)
-    environment["PYTHONPATH"] = os.pathsep.join((str(REPO_ROOT), str(SRC)))
+    environment["PYTHONPATH"] = (
+        "" if environment.get("ZLC_TEST_INSTALLED") == "1"
+        else os.pathsep.join((str(REPO_ROOT), str(SRC)))
+    )
     environment["QT_QPA_PLATFORM"] = "offscreen"
     completed = subprocess.run(
         [sys.executable, "-c", code],
@@ -357,6 +360,11 @@ assert not any(
     widget.isVisible() and isinstance(widget, FluentPopup)
     for widget in app.topLevelWidgets()
 )
+popup.close()
+console.deleteLater()
+owner.deleteLater()
+QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+app.processEvents()
 """
     )
 

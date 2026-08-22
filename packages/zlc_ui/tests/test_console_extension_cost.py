@@ -4,6 +4,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
 
 
 def test_synthetic_card_extension_enters_the_console_card_surface() -> None:
@@ -20,6 +21,9 @@ def test_synthetic_card_extension_enters_the_console_card_surface() -> None:
 
 def test_demo_console_once_echoes_a_view_signal() -> None:
     environment = dict(__import__("os").environ)
+    environment["PYTHONPATH"] = (
+        "" if environment.get("ZLC_TEST_INSTALLED") == "1" else str(SRC)
+    )
     environment["QT_QPA_PLATFORM"] = "offscreen"
     completed = __import__("subprocess").run(
         [__import__("sys").executable, "examples/demo_console.py", "--once"],

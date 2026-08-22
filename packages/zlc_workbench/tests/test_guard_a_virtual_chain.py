@@ -203,15 +203,20 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         assert set(
             json.loads(first_calibration.artifact_path.read_text(encoding="utf-8"))
         ) == {
+            "format",
+            "version",
             "site_map",
             "models",
             "default_model_kind",
             "frame_contract",
             "report",
         }
-        assert first_calibration.calibration.n_sites == len(
-            installation.world.geometry.site_centers_xy
+        all_sites = len(installation.world.geometry.site_centers_xy)
+        observable_sites = int(
+            np.count_nonzero(installation.world._site_loading_probabilities() > 0.0)
         )
+        assert first_calibration.calibration.n_sites == observable_sites
+        assert all_sites - observable_sites >= int(np.ceil(0.10 * all_sites))
         assert tuple(
             (output.name, output.contract_id)
             for output in calibration_descriptor.outputs

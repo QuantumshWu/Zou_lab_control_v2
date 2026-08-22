@@ -1,6 +1,6 @@
 // ==========================================================================
 // zlc_geometry.vh -- AUTO-GENERATED from fpga/board_config/streamer_config.json by
-//   python -m zlc_pulse.fpga --emit-geometry-vh <path>
+//   zlc fpga --emit-geometry-vh <path>
 // DO NOT EDIT.  Every RTL geometry parameter (+ the LAYOUT_FINGERPRINT the host connect-
 // check verifies) defaults to a macro here, so editing the config + rebuilding propagates
 // to the bitstream and testbenches with no hand-carried literal.  Regenerated from the

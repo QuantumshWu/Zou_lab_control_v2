@@ -455,15 +455,21 @@ def test_repeat_role_has_exactly_one_structural_owner():
 
 
 def test_import_is_headless_and_does_not_pull_legacy_domain():
+    import tempfile
+    import zou_lab_control_v2
+    import zlc_data
+
     repo_root = Path(__file__).resolve().parents[3]
     environment = dict(os.environ)
-    python_paths = [
-        str(repo_root),
-        str(repo_root / "packages" / "zlc_data" / "src"),
-    ]
-    if inherited := environment.get("PYTHONPATH"):
-        python_paths.append(inherited)
-    environment["PYTHONPATH"] = os.pathsep.join(python_paths)
+    if environment.get("ZLC_TEST_INSTALLED") == "1":
+        environment["PYTHONPATH"] = ""
+    else:
+        environment["PYTHONPATH"] = os.pathsep.join(
+            (
+                str(repo_root),
+                str(repo_root / "packages" / "zlc_data" / "src"),
+            )
+        )
     code = """
 from pathlib import Path
 import sys
@@ -471,22 +477,28 @@ import sys
 import zou_lab_control_v2
 import zlc_data
 
-repo_root = Path(sys.argv[1]).resolve()
 root_file = Path(zou_lab_control_v2.__file__).resolve()
 data_file = Path(zlc_data.__file__).resolve()
 print("root", root_file)
 print("zlc_data", data_file)
-assert root_file == repo_root / "zou_lab_control_v2" / "__init__.py"
-assert data_file == repo_root / "packages" / "zlc_data" / "src" / "zlc_data" / "__init__.py"
+assert root_file == Path(sys.argv[1]).resolve()
+assert data_file == Path(sys.argv[2]).resolve()
 for forbidden in ('matplotlib', 'PyQt5', 'Zou_lab_control'):
     assert forbidden not in sys.modules, (forbidden, sorted(sys.modules))
 """
-    subprocess.run(
-        [sys.executable, "-c", code, str(repo_root)],
-        check=True,
-        cwd=repo_root,
-        env=environment,
-    )
+    with tempfile.TemporaryDirectory() as folder:
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                code,
+                str(Path(zou_lab_control_v2.__file__).resolve()),
+                str(Path(zlc_data.__file__).resolve()),
+            ],
+            check=True,
+            cwd=folder,
+            env=environment,
+        )
 
 
 def test_a_schema_is_not_named_until_someone_asks() -> None:

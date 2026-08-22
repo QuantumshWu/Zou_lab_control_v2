@@ -1309,7 +1309,3 @@ __all__ = [
     "X15213_SERVER_SCHEMA",
     "X15213Adapter",
 ]
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

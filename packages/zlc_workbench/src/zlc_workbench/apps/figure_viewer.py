@@ -1,6 +1,6 @@
 """Open a saved figure.
 
-    python -m zlc_workbench.apps.figure_viewer --path D:/experiment/data/2026_08_05/run.npz
+    zlc figure_viewer --path D:/experiment/data/2026_08_05/run.npz
 
 The archive is the whole input.  This window needs no session, no devices and
 no apparatus file: a figure saved on the bench opens on a laptop months later,
@@ -148,7 +148,3 @@ def main(argv: list[str] | None = None) -> int:
     window = create_window(path=arguments.path)
     del window
     return int(application.exec_())
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

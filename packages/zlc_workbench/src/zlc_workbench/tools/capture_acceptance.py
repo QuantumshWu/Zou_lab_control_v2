@@ -1,8 +1,9 @@
 """Capture one workbench window for visual acceptance, on a real screen.
 
-    python -c "import zou_lab_control_v2; from zlc_workbench.tools.capture_acceptance import main; raise SystemExit(main())" --view console --template virtual
-    python -c "import zou_lab_control_v2; from zlc_workbench.tools.capture_acceptance import main; raise SystemExit(main())" --view pulse --pulse imaging_template.json
-    python -c "import zou_lab_control_v2; from zlc_workbench.tools.capture_acceptance import main; raise SystemExit(main())" --view figure --path run.npz
+    zlc capture --view console --template virtual
+    zlc capture --view pulse --pulse imaging_template.json
+    zlc capture --view figure --path run.npz
+    zlc capture --view device --workspace D:/experiment
 
 This is an adapter, not a capture implementation.  zlc_ui owns the only one:
 ``zlc_ui.acceptance.capture_window`` opens the same ``create_window`` entry a
@@ -42,6 +43,13 @@ def _opener(arguments: argparse.Namespace, ratio: float):
             connect=arguments.connect,
             window_ratio=ratio,
         )
+    if arguments.view == "device":
+        from ..apps.device_manager import create_window
+
+        return lambda: create_window(
+            workspace=arguments.workspace,
+            window_ratio=ratio,
+        )
     from ..apps.figure_viewer import create_window
 
     return lambda: create_window(path=arguments.path, window_ratio=ratio)
@@ -51,7 +59,9 @@ def main(argv: list[str] | None = None) -> int:
     from zlc_ui import WINDOW_SCREEN_FRACTION, capture_window
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--view", choices=("console", "pulse", "figure"), required=True)
+    parser.add_argument(
+        "--view", choices=("console", "pulse", "figure", "device"), required=True
+    )
     parser.add_argument("--workspace", type=Path, default=None)
     parser.add_argument("--template", default=None)
     parser.add_argument("--pulse", default=None)
@@ -70,6 +80,15 @@ def main(argv: list[str] | None = None) -> int:
         desktop_output=arguments.screen_output,
     )
     values = report.as_dict()
+    from importlib.metadata import version
+    import zou_lab_control_v2
+    import zlc_ui
+    import zlc_workbench
+
+    print(f"product_version={version('zou-lab-control')}")
+    print(f"product_bootstrap={Path(zou_lab_control_v2.__file__).resolve()}")
+    print(f"ui_layer={Path(zlc_ui.__file__).resolve()}")
+    print(f"workbench_layer={Path(zlc_workbench.__file__).resolve()}")
     for key in (
         "platform",
         "screen_logical",
@@ -83,7 +102,3 @@ def main(argv: list[str] | None = None) -> int:
     ):
         print(f"{key}={values[key]}")
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

@@ -1,6 +1,6 @@
 """Start the task console.
 
-    python -m zlc_workbench.apps.task_console --workspace D:/experiment
+    zlc task_console --workspace D:/experiment
 
 This is the composition root at its most literal: it builds the session, the
 views, the presenter and the display beat, connects them, and gets out of the
@@ -836,7 +836,3 @@ def main(argv: list[str] | None = None) -> int:
         return int(application.exec_())
     finally:
         flow.close()
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

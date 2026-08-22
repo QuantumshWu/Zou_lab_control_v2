@@ -7,6 +7,7 @@ land. Arrays stay NPZ members; explanatory metadata is one strict JSON tree.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 import json
 import math
 from typing import Any, BinaryIO
@@ -28,8 +29,18 @@ __all__ = [
 
 FIGURE_SCHEMA = "zlc.figure"
 _FIGURE_VERSION = 2
+_LEGACY_FIGURE_SCHEMA = "zlc.figure/v1"
 _INFO_KEY = "info"
 _ROOT_KEYS = {"schema", "version", "name", "members", "sections"}
+_LEGACY_ROOT_KEYS = {"schema", "name", "sections"}
+_LEGACY_AXIS_KEYS = {
+    "schema", "axis_id", "name", "role", "size", "coordinates", "unit",
+    "coordinate_frame", "index_origin",
+}
+_LEGACY_POINT_COLUMN_KEYS = {
+    "schema", "coordinate_id", "name", "role", "value_kind", "values",
+    "unit", "coordinate_frame",
+}
 
 
 def _jsonable(value: Any, path: str = "metadata") -> Any:
@@ -180,7 +191,7 @@ def _exact_keys(mapping: Mapping[str, Any], expected: set[str], path: str) -> No
         )
 
 
-def _decode_info(array: np.ndarray) -> dict[str, Any]:
+def _parse_info(array: np.ndarray) -> dict[str, Any]:
     if array.shape != () or array.dtype.kind != "U":
         raise ValueError("figure info must be one scalar Unicode JSON document")
     try:
@@ -194,6 +205,10 @@ def _decode_info(array: np.ndarray) -> dict[str, Any]:
         raise ValueError(f"invalid figure metadata JSON: {exc}") from exc
     if not isinstance(info, dict):
         raise ValueError("figure metadata root must be an object")
+    return info
+
+
+def _validate_current_info(info: dict[str, Any]) -> dict[str, Any]:
     _exact_keys(info, _ROOT_KEYS, "figure metadata")
     if (
         info["schema"] != FIGURE_SCHEMA
@@ -248,6 +263,66 @@ def _decode_info(array: np.ndarray) -> dict[str, Any]:
     return info
 
 
+def _migrate_legacy_dataset_tree(value: Any) -> Any:
+    if isinstance(value, dict):
+        result = {
+            key: _migrate_legacy_dataset_tree(item)
+            for key, item in value.items()
+        }
+        schema = result.get("schema")
+        keys = set(result)
+        if schema == "zlc_data.AxisSpec" and keys == _LEGACY_AXIS_KEYS:
+            result["coordinate_labels"] = None
+        elif schema == "zlc_data.PointColumn" and keys == _LEGACY_POINT_COLUMN_KEYS:
+            result["coordinate_labels"] = None
+        return result
+    if isinstance(value, list):
+        return [_migrate_legacy_dataset_tree(item) for item in value]
+    return value
+
+
+def _legacy_envelope(info: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    _exact_keys(info, _LEGACY_ROOT_KEYS, "legacy figure metadata")
+    if info["schema"] != _LEGACY_FIGURE_SCHEMA:
+        raise ValueError(f"unsupported figure format {info['schema']!r}")
+    name = info["name"]
+    sections = info["sections"]
+    if not isinstance(name, str) or not name or name.strip() != name:
+        raise ValueError("figure metadata name must be non-empty text")
+    if not isinstance(sections, dict):
+        raise ValueError("figure metadata sections must be an object")
+    return name, sections
+
+
+def _migrate_legacy_info(
+    name: str,
+    sections: dict[str, Any],
+    arrays: Mapping[str, np.ndarray],
+) -> dict[str, Any]:
+    migrated_sections = deepcopy(sections)
+    datasets = migrated_sections.get("dataset")
+    if datasets is not None:
+        if not isinstance(datasets, dict):
+            raise ValueError("figure dataset section must be an object")
+        migrated_sections["dataset"] = _migrate_legacy_dataset_tree(datasets)
+    try:
+        members = {
+            key: _member_descriptor(array)
+            for key, array in sorted(arrays.items())
+        }
+    except TypeError as exc:
+        raise ValueError(f"legacy {exc}") from exc
+    if not members:
+        raise ValueError("figure metadata members must be a non-empty object")
+    return {
+        "schema": FIGURE_SCHEMA,
+        "version": _FIGURE_VERSION,
+        "name": name,
+        "members": members,
+        "sections": migrated_sections,
+    }
+
+
 def _validate_datasets(
     info: Mapping[str, Any], arrays: Mapping[str, np.ndarray]
 ) -> None:
@@ -288,18 +363,31 @@ def read_archive(path: object) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
             raise ValueError(f"figure contains duplicate NPZ members {duplicates!r}")
         if _INFO_KEY not in names:
             raise ValueError(f"figure carries no {_INFO_KEY} document")
-        info = _decode_info(np.asarray(archive[_INFO_KEY]))
-        expected = {_INFO_KEY, *info["members"]}
-        actual = set(names)
-        if actual != expected:
-            raise ValueError(
-                "figure NPZ members mismatch; "
-                f"missing={sorted(expected - actual)}, "
-                f"extra={sorted(actual - expected)}"
+        raw_info = _parse_info(np.asarray(archive[_INFO_KEY]))
+        legacy = raw_info.get("schema") == _LEGACY_FIGURE_SCHEMA
+        if legacy:
+            legacy_name, legacy_sections = _legacy_envelope(raw_info)
+            member_names = tuple(name for name in names if name != _INFO_KEY)
+        else:
+            info = _validate_current_info(raw_info)
+            expected = {_INFO_KEY, *info["members"]}
+            actual = set(names)
+            if actual != expected:
+                raise ValueError(
+                    "figure NPZ members mismatch; "
+                    f"missing={sorted(expected - actual)}, "
+                    f"extra={sorted(actual - expected)}"
+                )
+            member_names = tuple(info["members"])
+        arrays: dict[str, np.ndarray] = {
+            name: np.asarray(archive[name]) for name in member_names
+        }
+        if legacy:
+            info = _validate_current_info(
+                _migrate_legacy_info(legacy_name, legacy_sections, arrays)
             )
-        arrays: dict[str, np.ndarray] = {}
         for name, descriptor in info["members"].items():
-            array = np.asarray(archive[name])
+            array = arrays[name]
             expected_shape = tuple(descriptor["shape"])
             if array.shape != expected_shape:
                 raise ValueError(
@@ -311,7 +399,6 @@ def read_archive(path: object) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
                     f"figure member {name!r} dtype {array.dtype.str!r} "
                     f"does not match metadata {descriptor['dtype']!r}"
                 )
-            arrays[name] = array
         _validate_datasets(info, arrays)
     return info, arrays
 

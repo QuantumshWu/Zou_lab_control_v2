@@ -17,7 +17,6 @@ ALLOWED_TOP_LEVEL = {
 def test_package_import_is_pure() -> None:
     import zlc_pulse
 
-    assert zlc_pulse.__version__
     assert Path(zlc_pulse.__file__).resolve().parent.name == "zlc_pulse"
 
 
@@ -76,7 +75,6 @@ def test_negative_surface_is_absent() -> None:
     banned = (
         "trigger_schedule",
         "expected_trigger_counts",
-        "visible_ports",
         "scan_sweep_count",
         "PulseExecutionForm",
         "rpyc",

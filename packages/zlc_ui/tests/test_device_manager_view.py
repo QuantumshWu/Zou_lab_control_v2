@@ -13,10 +13,13 @@ REPO = ROOT.parents[1]
 
 def _run_qt(code: str) -> None:
     environment = dict(os.environ)
-    environment["PYTHONPATH"] = os.pathsep.join(
-        value
-        for value in (str(REPO), str(SRC), environment.get("PYTHONPATH", ""))
-        if value
+    environment["PYTHONPATH"] = (
+        "" if environment.get("ZLC_TEST_INSTALLED") == "1"
+        else os.pathsep.join(
+            value
+            for value in (str(REPO), str(SRC), environment.get("PYTHONPATH", ""))
+            if value
+        )
     )
     environment["QT_QPA_PLATFORM"] = "offscreen"
     completed = subprocess.run(

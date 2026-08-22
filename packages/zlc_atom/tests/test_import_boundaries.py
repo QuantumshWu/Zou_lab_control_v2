@@ -71,7 +71,9 @@ def test_foundation_stays_headless_while_concrete_plugins_may_own_views() -> Non
     assert (Path("nodes/calibration/task.py"), "zlc_plot") in plugin_view_imports
 
 
-def test_calibration_does_not_depend_on_the_workbench_composition_root() -> None:
+def test_calibration_does_not_depend_on_the_workbench_composition_root(
+    tmp_path: Path,
+) -> None:
     imports = tuple(
         (path.relative_to(SRC), imported)
         for path in _python_files("nodes/calibration")
@@ -97,7 +99,7 @@ assert "zlc_workbench" not in sys.modules
 '''
     completed = subprocess.run(
         [sys.executable, "-c", script],
-        cwd=ROOT.parents[1],
+        cwd=tmp_path,
         check=False,
         capture_output=True,
         text=True,

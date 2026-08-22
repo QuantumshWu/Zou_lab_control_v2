@@ -1,8 +1,9 @@
 # FPGA Submodule
 
-`fpga/` is the standalone hardware side of the ZLC pulse-streamer path. It can
-be copied to the Vivado computer with the Python package and run without an
-experiment configuration.
+`fpga/` is the hardware subtree shipped inside the single ZLC product. The
+wheel carries the same RTL/XDC/Tcl tree under its installation-owned share
+directory; recovery builds still run from this source tree on the Vivado
+computer and require no experiment configuration.
 
 The root `ARCHITECTURE_DESIGN.md` is the authority. This page contains the
 operating and hardware-acceptance boundary; no deleted package-local design

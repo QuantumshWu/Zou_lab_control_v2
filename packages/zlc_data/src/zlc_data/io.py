@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any, BinaryIO
 import json
 import os
@@ -199,10 +198,20 @@ def snapshot_from_manifest(
 
 
 def save_npz(
-    path: str | os.PathLike[str] | BinaryIO,
+    stream: BinaryIO,
     snapshot: OwnedSnapshot,
 ) -> None:
-    """Save one owned snapshot without pickle or plotting/device state."""
+    """Encode one owned snapshot to caller-owned writable binary IO.
+
+    This function owns the dataset format, not filesystem publication.  A
+    caller saving to a path must give this stream to its durable write owner.
+    """
+
+    if not callable(getattr(stream, "write", None)):
+        raise TypeError(
+            "save_npz requires writable binary IO; path publication belongs "
+            "to the durable storage owner"
+        )
 
     arrays: dict[str, np.ndarray] = {}
     manifest = snapshot_manifest(snapshot, arrays)
@@ -217,12 +226,7 @@ def save_npz(
     except (TypeError, ValueError) as exc:
         raise NPZFormatError(f"metadata is not serializable: {exc}") from exc
     arrays[_MANIFEST] = np.asarray(encoded)
-    if hasattr(path, "write"):
-        np.savez_compressed(path, **arrays)
-        return
-    destination = Path(path)
-    with destination.open("wb") as stream:
-        np.savez_compressed(stream, **arrays)
+    np.savez_compressed(stream, **arrays)
 
 
 def _validity_from_manifest(

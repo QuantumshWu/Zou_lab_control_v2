@@ -14,9 +14,8 @@ from __future__ import annotations
 
 from pathlib import Path as _Path
 
-__version__ = "0.1.0"
 _PACKAGE_DIR = _Path(__file__).resolve().parent
 if _PACKAGE_DIR.name != "zlc_workbench" or __package__ != "zlc_workbench":
     raise ImportError(f"unexpected zlc_workbench installation path: {_PACKAGE_DIR}")
 
-__all__ = ["__version__"]
+__all__: list[str] = []

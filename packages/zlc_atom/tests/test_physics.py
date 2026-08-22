@@ -72,12 +72,16 @@ def test_trap_calibration_single_dispatch_supports_box(tmp_path: Path) -> None:
     target = calibration.save(tmp_path / "calibration.json")
     payload = json.loads(target.read_text(encoding="utf-8"))
     assert set(payload) == {
+        "format",
+        "version",
         "site_map",
         "models",
         "default_model_kind",
         "frame_contract",
         "report",
     }
+    assert payload["format"] == TrapCalibration.FORMAT
+    assert payload["version"] == TrapCalibration.VERSION
     loaded = TrapCalibration.load(target)
     assert loaded.frame_contract.binning_yx == (2, 2)
     assert loaded.select_model().threshold_method == "empirical"
@@ -88,6 +92,8 @@ def test_trap_calibration_single_dispatch_supports_box(tmp_path: Path) -> None:
     np.testing.assert_allclose(loaded.signals(image), [5.0])
 
     legacy_payload = calibration.to_dict()
+    legacy_payload.pop("format")
+    legacy_payload.pop("version")
     legacy_payload["models"][0].pop("dark_statistics")
     legacy = TrapCalibration.from_dict(legacy_payload).select_model()
     np.testing.assert_array_equal(legacy.dark_sample_count, [0])
@@ -101,6 +107,57 @@ def test_trap_calibration_single_dispatch_supports_box(tmp_path: Path) -> None:
     overflow_payload["models"][0]["dark_statistics"]["sample_count"] = [2**63]
     with pytest.raises(ValueError, match="invalid counts"):
         TrapCalibration.from_dict(overflow_payload)
+
+    for field, value in (("format", "other"), ("version", 99)):
+        malformed = calibration.to_dict()
+        malformed[field] = value
+        with pytest.raises(ValueError, match="unsupported Calibration format"):
+            TrapCalibration.from_dict(malformed)
+
+
+def test_unversioned_calibration_generations_migrate_without_inventing_statistics() -> None:
+    calibration = _calibration()
+    image = np.arange(9, dtype=float).reshape(3, 3) + 1.0
+
+    multi = calibration.to_dict()
+    multi.pop("format")
+    multi.pop("version")
+    for model in multi["models"]:
+        model.pop("dark_mean")
+        model.pop("bright_mean")
+        model.pop("dark_statistics")
+    migrated_multi = TrapCalibration.from_dict(multi)
+    model = migrated_multi.select_model()
+    np.testing.assert_allclose(model.thresholds, [5.0])
+    np.testing.assert_array_equal(model.usable_sites, [True])
+    assert np.isnan(model.dark_mean[0]) and np.isnan(model.bright_mean[0])
+    np.testing.assert_array_equal(model.dark_sample_count, [0])
+    assert np.isnan(model.dark_sample_variance[0])
+    np.testing.assert_array_equal(
+        migrated_multi.detect(image).occupied,
+        calibration.detect(image).occupied,
+    )
+
+    singular_model = calibration.to_dict()["models"][0]
+    singular_model.pop("kind")
+    singular_model.pop("dark_mean")
+    singular_model.pop("bright_mean")
+    singular_model.pop("dark_statistics")
+    singular_model["integration"]["method"] = "box"
+    singular_model["integration"]["background"] = "none"
+    singular_model["integration"]["padding"] = 3
+    singular = {
+        "site_map": calibration.site_map.to_dict(),
+        "readout_model": singular_model,
+        "frame_contract": calibration.frame_contract.to_dict(),
+        "report": {},
+    }
+    migrated_singular = TrapCalibration.from_dict(singular)
+    assert migrated_singular.default_model_kind is ReadoutModelKind.BOX
+    np.testing.assert_array_equal(
+        migrated_singular.detect(image).occupied,
+        calibration.detect(image).occupied,
+    )
 
 
 def test_calibration_document_is_actual_json_data_not_python_container_aliases() -> None:
@@ -233,6 +290,14 @@ def test_usable_readout_requires_a_finite_positive_response() -> None:
     )
     assert model.to_dict()["dark_mean"] == [None]
     assert model.to_dict()["bright_mean"] == [None]
+
+    legacy_unknown = ReadoutModel(
+        ("site_0000",), [5.0], [np.nan], [np.nan], [True], [1.0]
+    )
+    assert legacy_unknown.to_dict()["dark_statistics"] == {
+        "sample_count": [0],
+        "sample_variance": [None],
+    }
 
 
 def test_psf_dispatch_is_explicit_and_not_a_name_substring() -> None:

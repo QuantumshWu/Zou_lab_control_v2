@@ -13,7 +13,7 @@ from scipy.optimize import linear_sum_assignment
 import json
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Callable
+from typing import Any, Callable, ClassVar
 
 import numpy as np
 
@@ -687,16 +687,26 @@ class ReadoutModel:
                 raise ValueError("dark sample variance must match its effective count")
         with np.errstate(invalid="ignore", over="ignore"):
             response = bright_mean - dark_mean
+        legacy_unknown = (
+            np.isnan(dark_mean)
+            & np.isnan(bright_mean)
+            & (dark_count == 0)
+            & np.isnan(dark_variance)
+        )
+        finite_response = (
+            np.isfinite(dark_mean)
+            & np.isfinite(bright_mean)
+            & np.isfinite(response)
+            & (response > 0.0)
+        )
         if np.any(
             usable
-            & (
-                ~np.isfinite(dark_mean)
-                | ~np.isfinite(bright_mean)
-                | ~np.isfinite(response)
-                | (response <= 0.0)
-            )
+            & ~(finite_response | legacy_unknown)
         ):
-            raise ValueError("usable sites require finite bright_mean > dark_mean")
+            raise ValueError(
+                "usable sites require finite bright_mean > dark_mean or exact "
+                "legacy unknown statistics"
+            )
         if not isinstance(self.kind, ReadoutModelKind):
             raise TypeError("kind must be ReadoutModelKind")
         half_width = int(self.integration_half_width)
@@ -845,6 +855,10 @@ class ReadoutModel:
 @dataclass(frozen=True)
 class TrapCalibration:
     """One SiteMap and the aligned readout models trained from one capture."""
+
+    FORMAT: ClassVar[str] = "zlc.calibration.readout"
+    VERSION: ClassVar[int] = 1
+    CONTRACT_ID: ClassVar[str] = "calibration.readout.v1"
 
     site_map: SiteMap
     models: tuple[ReadoutModel, ...]
@@ -1024,6 +1038,8 @@ class TrapCalibration:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "format": self.FORMAT,
+            "version": self.VERSION,
             "site_map": self.site_map.to_dict(),
             "models": [model.to_dict() for model in self.models],
             "default_model_kind": self.default_model_kind.value,
@@ -1033,37 +1049,131 @@ class TrapCalibration:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "TrapCalibration":
-        values = _exact_fields(
-            payload,
-            "TrapCalibration",
-            frozenset(
-                {
-                    "site_map",
-                    "models",
-                    "default_model_kind",
-                    "frame_contract",
-                    "report",
-                }
-            ),
+        formal_fields = frozenset(
+            {
+                "format", "version", "site_map", "models",
+                "default_model_kind", "frame_contract", "report",
+            }
         )
+        multi_fields = formal_fields - {"format", "version"}
+        singular_fields = frozenset(
+            {"site_map", "readout_model", "frame_contract", "report"}
+        )
+        keys = set(payload) if type(payload) is dict else set()
+        formal = keys == formal_fields
+        singular = keys == singular_fields
+        if formal:
+            values = dict(_exact_fields(payload, "TrapCalibration", formal_fields))
+            version = values["version"]
+            if (
+                values["format"] != cls.FORMAT
+                or isinstance(version, bool)
+                or not isinstance(version, int)
+                or version != cls.VERSION
+            ):
+                raise ValueError(
+                    f"unsupported Calibration format {values['format']!r} "
+                    f"version {version!r}"
+                )
+        elif keys == multi_fields:
+            values = dict(_exact_fields(payload, "TrapCalibration", multi_fields))
+        elif singular:
+            legacy = _exact_fields(payload, "TrapCalibration", singular_fields)
+            raw_model = dict(
+                _exact_fields(
+                    legacy["readout_model"],
+                    "legacy ReadoutModel",
+                    frozenset(
+                        {
+                            "site_ids", "thresholds", "usable_sites", "quality",
+                            "threshold_method", "integration",
+                        }
+                    ),
+                )
+            )
+            integration = dict(
+                _exact_fields(
+                    raw_model["integration"],
+                    "legacy ReadoutModel.integration",
+                    frozenset(
+                        {
+                            "method", "half_width", "reducer", "psf_weights",
+                            "psf_boxes", "background", "padding",
+                        }
+                    ),
+                )
+            )
+            kind = ReadoutModelKind(integration.pop("method"))
+            if kind is ReadoutModelKind.BOX:
+                integration["background"] = None
+                integration["padding"] = None
+            site_ids = raw_model["site_ids"]
+            if type(site_ids) is not list:
+                raise TypeError("legacy ReadoutModel site_ids must be an array")
+            count = len(site_ids)
+            raw_model.update(
+                kind=kind.value,
+                dark_mean=[None] * count,
+                bright_mean=[None] * count,
+                dark_statistics={
+                    "sample_count": [0] * count,
+                    "sample_variance": [None] * count,
+                },
+                integration=integration,
+            )
+            values = {
+                "site_map": legacy["site_map"],
+                "models": [raw_model],
+                "default_model_kind": kind.value,
+                "frame_contract": legacy["frame_contract"],
+                "report": legacy["report"],
+            }
+        else:
+            _exact_fields(payload, "TrapCalibration", formal_fields)
+            raise AssertionError("unreachable Calibration grammar")
+
         models = values["models"]
         if type(models) is not list:
             raise TypeError("models must be an array")
+        legacy_model_fields = frozenset(
+            {
+                "kind", "site_ids", "thresholds", "dark_mean", "bright_mean",
+                "usable_sites", "quality", "threshold_method", "integration",
+            }
+        )
+        missing_response_fields = legacy_model_fields - {"dark_mean", "bright_mean"}
+        normalized_models: list[dict[str, Any]] = []
+        for model in models:
+            if type(model) is not dict:
+                raise TypeError("ReadoutModel must be an object")
+            normalized = dict(model)
+            model_keys = set(normalized)
+            if model_keys == missing_response_fields:
+                site_ids = normalized["site_ids"]
+                if type(site_ids) is not list:
+                    raise TypeError("ReadoutModel site_ids must be an array")
+                normalized["dark_mean"] = [None] * len(site_ids)
+                normalized["bright_mean"] = [None] * len(site_ids)
+                model_keys = set(normalized)
+            if model_keys == legacy_model_fields:
+                count = len(normalized["site_ids"])
+                normalized["dark_statistics"] = {
+                    "sample_count": [0] * count,
+                    "sample_variance": [None] * count,
+                }
+            normalized_models.append(normalized)
         report = values["report"]
         if type(report) is not dict:
             raise TypeError("report must be an object")
         result = cls(
             SiteMap.from_dict(values["site_map"]),
-            tuple(ReadoutModel.from_dict(model) for model in models),
+            tuple(ReadoutModel.from_dict(model) for model in normalized_models),
             ReadoutModelKind(values["default_model_kind"]),
             FrameContract.from_dict(values["frame_contract"]),
             report,
         )
-        canonical = result.to_dict()
-        for index, model in enumerate(models):
-            if type(model) is dict and "dark_statistics" not in model:
-                canonical["models"][index].pop("dark_statistics")
-        _require_canonical(canonical, dict(values), "TrapCalibration")
+        if formal:
+            _require_canonical(result.to_dict(), dict(values), "TrapCalibration")
         return result
 
     def save(self, path: str | Path) -> Path:

@@ -1,7 +1,7 @@
 """Interactive gallery for the domain-independent zlc_ui controls.
 
 The gallery deliberately uses only fake strings, numbers, and graph records.
-It can be run from a clean checkout without installing a v1 domain package.
+It consumes the installed `zlc_ui` layer and needs no domain or device package.
 """
 
 from __future__ import annotations
@@ -9,15 +9,9 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
-import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 from PyQt5 import QtCore, QtGui, QtWidgets  # noqa: E402
 
@@ -421,7 +415,10 @@ class _GalleryBody(QtWidgets.QWidget):
         return card
 
     def _build_gui_examples_section(self) -> QWidget:
-        from examples.demo_console import populate as populate_console_demo
+        if __package__:
+            from .demo_console import populate as populate_console_demo
+        else:
+            from demo_console import populate as populate_console_demo
 
         def build_console_demo():
             # A complete GUI is a window behind a handle now; the gallery is
@@ -437,7 +434,10 @@ class _GalleryBody(QtWidgets.QWidget):
             # exercised by the standalone demo and would have two owners here.
             populate_console_demo(handle, wire_intents=False)
             return view
-        from examples.demo_device_manager import populate as populate_device_demo
+        if __package__:
+            from .demo_device_manager import populate as populate_device_demo
+        else:
+            from demo_device_manager import populate as populate_device_demo
 
         def build_device_demo():
             # A complete GUI is a window behind a handle now; the gallery is
@@ -449,7 +449,10 @@ class _GalleryBody(QtWidgets.QWidget):
             view._gallery_handle = handle
             populate_device_demo(handle)
             return view
-        from examples.demo_figure_viewer import populate as populate_figure_demo
+        if __package__:
+            from .demo_figure_viewer import populate as populate_figure_demo
+        else:
+            from demo_figure_viewer import populate as populate_figure_demo
 
         def build_figure_demo():
             # A complete GUI is a window behind a handle now; the gallery is
@@ -461,7 +464,10 @@ class _GalleryBody(QtWidgets.QWidget):
             view._gallery_handle = handle
             populate_figure_demo(handle)
             return view
-        from examples.demo_pulse_editor import populate as populate_pulse_demo
+        if __package__:
+            from .demo_pulse_editor import populate as populate_pulse_demo
+        else:
+            from demo_pulse_editor import populate as populate_pulse_demo
 
         def build_pulse_demo():
             # A complete GUI is a WINDOW now, reached through one handle, so
@@ -574,6 +580,11 @@ def main(argv: list[str] | None = None) -> int:
     platform = app.platformName().strip().lower()
     if args.once or os.environ.get("ZLC_UI_GALLERY_ONESHOT") == "1" or platform == "offscreen":
         app.processEvents()
+        window.close()
+        window.deleteLater()
+        app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+        app.processEvents()
+        app.quit()
         return 0
     return int(app.exec_())
 

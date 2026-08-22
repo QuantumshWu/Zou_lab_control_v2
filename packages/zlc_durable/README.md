@@ -31,7 +31,6 @@ The top-level facade contains only these names:
 | `day_folder` | create or open one calendar-day folder beneath an existing save root |
 | `unique_path` | atomically publish a complete file at the first free numbered name, or exclusively create a uniquely named run directory |
 | `DirectoryDurabilityError` | report that a directory entry could not be made crash-durable |
-| `__version__` | identify the installed package version |
 
 ## Where things live
 

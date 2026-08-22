@@ -72,11 +72,14 @@ transaction. `PulseTimelineData` remains an immutable presentation payload;
 
 ## Persistence and application ownership
 
-Scientific NPZ persistence belongs to `zlc_data`:
+`zlc_data` owns scientific NPZ encoding and decoding; `zlc_durable` owns
+atomic path publication:
 
 ```python
 from zlc_data import load_npz, save_npz
-save_npz("run.npz", snapshot)
+from zlc_durable import atomic_write_file
+
+atomic_write_file("run.npz", lambda stream: save_npz(stream, snapshot))
 restored = load_npz("run.npz")
 ```
 

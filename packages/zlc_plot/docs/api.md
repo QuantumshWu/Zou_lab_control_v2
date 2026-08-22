@@ -1,7 +1,7 @@
 # API guide
 
-当前文档中的 `(R, P, *data_dim)` 数据对象来自独立的角色轴 `zlc-data` 仓。
-`zlc_plot` 只消费 `zlc_data.OwnedSnapshot`，不捆绑第二份数据模型。常用类型和构造器由稳定的顶层 `zlc_plot` facade 公开。模型注册、参数 schema、
+当前文档中的`(R, P, *data_dim)`数据对象来自同一产品的角色轴`zlc_data`层。
+`zlc_plot`只消费`zlc_data.OwnedSnapshot`，不建立第二份数据模型。常用类型和构造器由稳定的顶层`zlc_plot` facade公开。模型注册、参数 schema、
 底层 raster mapping 等扩展接口分别由 `zlc_plot.fit`、`zlc_plot.parameters`、
 `zlc_plot.raster`、`zlc_plot.ui` 和 `zlc_plot.layout` 公开，不重复平铺到顶层。
 
@@ -601,16 +601,11 @@ data/fit pair。Plot层不再提供第二个live controller或channel。
 Install the optional stack:
 
 ```bash
-pip install -e ".[notebook]"
+python -m pip install -c constraints.txt -e ".[notebook]"
 ```
 
-示例 Notebook 应从仓库根目录启动 JupyterLab；它会优先把当前仓库的
-`src` 放入 `sys.path`，避免误加载旧的已安装版本：
-
-```bash
-cd zlc_plot
-python -m jupyter lab
-```
+唯一产品教程是`packages/zlc_workbench/notebooks/usage.ipynb`；release gate从
+checkout外的fresh kernel执行它，不修改`sys.path`。
 
 ```python
 from zlc_plot import show
@@ -674,9 +669,7 @@ package import depend on Jupyter.
 
 ## PyQt5
 
-```bash
-pip install -e ".[qt]"
-```
+PyQt5是根产品的固定runtime依赖，不存在单独的Plot Qt extra。
 
 ```python
 from zlc_plot import (
@@ -767,12 +760,14 @@ remains the separate high-resolution rerendering route.
 
 ## Persistence boundary
 
-Dataset NPZ belongs to `zlc_data`:
+`zlc_data` owns Dataset NPZ encoding and decoding. Atomic path publication
+belongs to `zlc_durable`:
 
 ```python
 from zlc_data import load_npz, save_npz
+from zlc_durable import atomic_write_file
 
-save_npz("run.npz", snapshot)
+atomic_write_file("run.npz", lambda stream: save_npz(stream, snapshot))
 restored_snapshot = load_npz("run.npz")
 ```
 
@@ -810,7 +805,7 @@ backend code.
 | Pulse preview | `PulseTimelineData`, `PulseTimelinePlot`, interaction gate, fixed size and save APIs | Pulse document/compiler semantics, visible-row policy and conversion into immutable timeline records |
 | Edit-tab snapshot | `widget.presented_front` for exact pixels, or a new host over a frozen snapshot/spec for independent interaction and fit | Which source revision and authored settings the Edit tab freezes; archive identity |
 | Selector and Fit outputs | selector geometry/data methods, `SelectionEvent`, compatible `fit_models()`, `FitResult` and `FitEvent` | Wiring a result into another logic node, naming routes and deciding what is persisted |
-| Data/project/device persistence | no plot API; `zlc_data.save_npz/load_npz` persists scientific snapshots | Project files, device calls, Logic routes, causal IDs, paths and atomic archive publication |
+| Data/project/device persistence | no plot API; `zlc_data.save_npz/load_npz` encodes and decodes scientific snapshots | Project files, device calls, Logic routes, causal IDs, paths and atomic publication through `zlc_durable` |
 
 Coordinate/status maps use the ordinary Image boundary: the application performs
 its exact same-shot image/occupancy join, then supplies one

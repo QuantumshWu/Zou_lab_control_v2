@@ -228,7 +228,7 @@ def _load_qt5_modules() -> _QtModules:
     except (ImportError, ModuleNotFoundError) as error:
         raise BackendUnavailableError(
             "Qt5PlotWidget requires PyQt5; "
-            "install them with `pip install zlc-plot[qt]`."
+            "install the root `zou-lab-control` product."
         ) from error
     _configure_qt5_high_dpi(qt_core, qt_widgets)
     _QT_MODULES = _QtModules(qt_core, qt_gui, qt_widgets)

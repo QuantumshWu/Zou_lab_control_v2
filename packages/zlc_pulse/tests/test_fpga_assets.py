@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 import subprocess
@@ -80,9 +81,23 @@ def test_deployed_geometry_header_matches_wire_projection() -> None:
 
 def test_geometry_header_regenerates_through_the_documented_package_command(tmp_path: Path) -> None:
     output = tmp_path / "zlc_geometry.vh"
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = (
+        ""
+        if environment.get("ZLC_TEST_INSTALLED") == "1"
+        else os.pathsep.join((str(ROOT.parents[1]), str(ROOT / "src")))
+    )
     result = subprocess.run(
-        [sys.executable, "-m", "zlc_pulse.fpga", "--emit-geometry-vh", str(output)],
-        cwd=ROOT,
+        [
+            sys.executable,
+            "-m",
+            "zou_lab_control_v2",
+            "fpga",
+            "--emit-geometry-vh",
+            str(output),
+        ],
+        cwd=tmp_path,
+        env=environment,
         capture_output=True,
         text=True,
         check=False,
@@ -90,7 +105,7 @@ def test_geometry_header_regenerates_through_the_documented_package_command(tmp_
     assert result.returncode == 0, result.stderr
     header = output.read_text(encoding="utf-8")
     _assert_geometry_header_matches(header)
-    assert "python -m zlc_pulse.fpga --emit-geometry-vh" in header
+    assert "zlc fpga --emit-geometry-vh" in header
 
 
 def test_geometry_guard_rejects_macro_and_fingerprint_mutations() -> None:
@@ -108,11 +123,11 @@ def test_geometry_guard_rejects_macro_and_fingerprint_mutations() -> None:
             _assert_geometry_header_matches(mutated)
 
 
-def test_deployed_config_is_the_default_geometry_source(monkeypatch) -> None:
+def test_deployed_config_is_the_default_geometry_source(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv("ZLC_PS_CONFIG", raising=False)
-    monkeypatch.chdir(ROOT)
-    expected = (ROOT / "fpga/board_config/streamer_config.json").resolve()
-    assert DEFAULT_CONFIG_PATH.resolve() == expected
+    monkeypatch.chdir(tmp_path)
+    expected = DEFAULT_CONFIG_PATH.resolve()
+    assert expected.is_file()
     loaded = load_streamer_config()
     assert loaded["source"].resolve() == expected
     assert loaded["params"] == default_params()
@@ -230,9 +245,7 @@ def test_fpga_launchers_use_the_package_wire_cli() -> None:
     estimate = (launchers / "estimate_resources.bat").read_text(encoding="utf-8")
     assert "fpga.pulse_streamer.host" not in build
     assert "fpga.pulse_streamer.host" not in estimate
-    # Through the one entry, not at the layer.  "python -m zlc_pulse.fpga" with
-    # this layer's folder on PYTHONPATH does not find the package at all -- the
-    # source is under src/ -- so it ran only where a standalone repository was
-    # pip-installed, and then it derived the board geometry from that tree.
+    # Both hardware wrappers use the installed product manifest command; no
+    # launcher imports a layer module or mutates PYTHONPATH.
     assert "zou_lab_control_v2 fpga" in build
     assert "zou_lab_control_v2 fpga" in estimate

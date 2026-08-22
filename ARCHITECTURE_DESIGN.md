@@ -1,18 +1,17 @@
 # Zou Lab Control v2 — Approved Target Architecture
 
-状态：`TARGET / NOT YET IMPLEMENTED`，除非`IMPLEMENTATION_PLAN.md`的当前Checkpoint明确标为完成。
+状态：`FINAL SOFTWARE PRODUCT / IMPLEMENTED`。Real-screen、camera、SLM、optical与FPGA board acceptance仍是明确的实验机runbook，不由software evidence代替。
 
-本文只定义用户批准的产品不变量，不保存历史commit、旧测试数字或阶段日志。当前实现状态、验证证据和下一步只看`IMPLEMENTATION_PLAN.md`。完整实施范围与阶段顺序见根目录`ZLC_V2_IMPLEMENTATION_GOAL.md`。
+本文只定义最终产品不变量，不保存历史commit、旧测试数字或阶段日志。当前验证证据和未执行的实验机验收只看`IMPLEMENTATION_PLAN.md`。
 
 ## 1. Authority与原则
 
 实施authority顺序：
 
 1. 用户最新明确指令；
-2. `ZLC_V2_IMPLEMENTATION_GOAL.md`；
-3. 本文目标不变量；
-4. `IMPLEMENTATION_PLAN.md`当前Checkpoint；
-5. 当前代码与实验事实。
+2. 本文产品不变量；
+3. `IMPLEMENTATION_PLAN.md`当前Checkpoint；
+4. 当前代码与实验事实。
 
 Package README、旧GOAL、survey、acceptance、历史contract和旧tests不是目标规格；它们在Milestone 1中删除或按当前产品重写。
 
@@ -58,6 +57,8 @@ Package README、旧GOAL、survey、acceptance、历史contract和旧tests不是
 - Writer写入前规划全部member namespace并拒绝碰撞。
 - Reader在解释内容前严格验证format/version、required members、shape、duplicates和non-finite metadata。
 - 未知metadata类型拒绝，不自动字符串化。
+- 当前writer只写Figure v2；reader只迁移精确`zlc.figure/v1`根和其缺失的Dataset label字段，member dtype/shape从实际NPY推导，其它legacy/unknown格式仍拒绝。
+- Dataset/Figure encoder只写caller-owned binary IO；路径原子发布唯一属于`zlc_durable`。
 
 ### 3.3 Durable paths
 
@@ -150,6 +151,10 @@ Node new chunk
 - `zlc_ui`不拥有domain parser、device state或plot lifecycle。
 - Qt slot不得执行blocking I/O、device tune或`Future.result()`。
 - Window只有在owned command、worker、executor和claim安全退出后才能消失。
+- Device Manager的`instance_id`是稳定device identity，operator-facing role只是metadata；改role不得把同一硬件变成remove/add。Loaded card的Control与Close都只提交intent，不能由View直接关device。
+- Active apparatus变更走同一个`ExperimentSession`内的差量reconcile：相同key/type/canonical parameters的leaf、SignalPlane、TaskConsole与Panel继续复用；新增只build新增leaf，remove/change/Close只处理受影响leaf、world-bound closure及factory dependants。只有完全相同的draft/live集合才把主按钮解释为Shutdown。
+- Reconcile前以device-key maintenance barrier阻止新Logic/command，停止并等待受影响Logic lease，关闭对应Control；已有不可取消command时loud拒绝。partial close/factory cleanup失败后，所有仍open的leaf必须继续由Session或recovery owner强持有，effective live config与TaskConsole device projection同步后才允许下一次操作。
+- Device operation或projection-refresh pending期间Control、Close、TaskConsole X和root close不得越过owner状态；失败保持window/session可达并提供只刷新projection的retry，不重复hardware work。
 - Pulse Stop UI立即进入Stopping；Stop/SAFE高优先级并可取消普通wait/transport，hardware ack后台完成。
 - Timeout显示真实错误但不冻结UI；未确认前不能显示Safe。
 - Form reconcile必须按当前schema重建dependency graph。
@@ -167,6 +172,8 @@ Node new chunk
 
 - Same-shot保证采用continuous best-effort，不新增hardware marker或逐cycle arm/fire。
 - Camera Measurement只按自己的authored frames-per-cycle/repeat采集并核实际返回cardinality；Camera adapter不解析Pulse window数量，也不以exposure审查Pulse cadence。Adapter的source ordinal只编号实际采到的frames，必须从本次arm的0连续递增。
+- qCMOS的ROI、exposure、trigger/readout各由adapter的单一working-point owner管理；未变化字段不得在每次Start整套重写。Measurement冻结设置操作返回的authoritative readback，不再为同一capture额外读取完整property surface；相同exposure/ROI的restart因此不支付冗余sensor reconfiguration。
+- Camera auto Panel从canonical publication/preview signal建立；signal尚未publish时显示等待状态，但不得用重复device配置、额外generation或固定5秒轮询作为Panel接线条件。
 - Temperature保留约20ms authored exposure；Pulse timing与camera exposure是各自owner的独立输入。
 - Virtual sequencer按compiled wall cadence逐cycle并支持Stop；每个到达virtual camera的frame event都被采集，不根据Pulse时间或camera exposure私自skip、制造ordinal gap。
 
@@ -231,6 +238,7 @@ Node new chunk
 - 允许不改变外部行为的dependency解耦、明确corruption修复和内存优化。
 - Calibration只产生与SLM无关的camera/readout artifact，UI和Task都不接受Science Context。SLM Feedback在同时拿到Calibration与Context后做Target X/Y→camera X/Y直接正向注册，并为未观测site生成predicted BOX；不枚举翻转、旋转或轴交换。
 - BOX model仍为Calibration/Occupancy持久化自己的readout事实；Feedback只取BOX geometry。未观测Target site由注册产生predicted BOX，并与实测site一起接受本次run的双高斯估计，不伪造Calibration dark/bright样本。
+- Calibration writer固定`format="zlc.calibration.readout", version=1`；reader只迁移两套精确unversioned root。不可恢复的dark/bright统计保持NaN/count0/varianceNaN，阈值分类可继续但Feedback必须loud拒绝。
 - Scan正常完成、Stop或失败都默认restore pre-run device values。
 - SimulationWorld保持一个类和一个state owner，不拆层。
 - SimulationWorld的物理site只有当前SLM phase经共同pupil illumination、共同low-order wavefront aberration和FFT得到的dominant local peaks这一份动态roster；trap位置、强度、occupancy与Camera位置不得再拆成nominal/extra双状态。所有peaks经过同一个Fourier→camera affine；fluorescence imaging使用一个由共同imaging pupil/aberration生成的shared非对称PSF，不存在逐site随机gain/ellipse/angle/skew。Probe为红失谐，正的trap light-shift参数只把detuning进一步推红，因此occupied bright-dark随trap depth单调下降；loading probability随depth上升。Camera shot真实混合dark/bright population，Feedback不得读取hidden depth/occupancy truth。
@@ -241,8 +249,9 @@ Node new chunk
 
 ## 10. Deployment、Evidence与Docs
 
-- 一个可安装ZLC distribution，内部八层不独立发wheel。
-- 一份product manifest、一份dependency lock、一组正式entrypoints。
+- 一个可安装`zou-lab-control` distribution，内部八层不独立发wheel或版本。
+- 根`pyproject.toml`是唯一product manifest，`constraints.txt`是唯一resolved dependency surface，`zlc`是唯一console entry并从manifest加载commands/layers/evidence。
+- Wheel必须包含bootstrap、八层、Calibration/Scan templates、SLM profile、Plot font及完整有效FPGA RTL/XDC/Tcl assets；installed environment check按distribution RECORD验证归属。
 - 正式evidence lanes：software、gui_offscreen、virtual_vertical、notebook_offline、real_screen和hardware runbooks。
 - Mock/virtual/offscreen证据不得冒充真hardware/optical acceptance。
 - Root Architecture只保存目标不变量；Implementation Plan只保存当前Checkpoint、milestone状态和最新证据。
@@ -250,4 +259,4 @@ Node new chunk
 
 ## 11. 当前实现状态
 
-本文描述批准目标，不代表当前HEAD已实现。准确状态、已完成commit、测试和下一步见`IMPLEMENTATION_PLAN.md`的持久Checkpoint。
+上述software product不变量已实现；精确wheel、fresh-install、lane与全树结果见`IMPLEMENTATION_PLAN.md`。任何未执行的real-screen/hardware/optical步骤必须继续标为`UNEXECUTED`。

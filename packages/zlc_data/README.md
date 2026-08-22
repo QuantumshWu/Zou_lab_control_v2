@@ -17,4 +17,14 @@ second authority.
 `zlc_data.figure_archive.write_figure_archive(stream, ...)` is the sole Figure
 format encoder. It validates the complete member namespace and metadata before
 streaming NPZ content to caller-owned binary IO; durable path publication
-belongs to the composition layer.
+belongs to `zlc_durable`.
+
+The reader also migrates the exact historical `zlc.figure/v1` envelope into
+the current v2 representation. It derives member dtype/shape from the NPY
+members and supplies only the two formerly absent Dataset label fields; unknown
+legacy fields and every other schema/version remain errors.
+
+Likewise, `save_npz(stream, snapshot)` only encodes a Dataset to caller-owned
+writable binary IO. A path consumer publishes it with
+`zlc_durable.atomic_write_file(path, lambda stream: save_npz(stream, snapshot))`;
+the codec never opens or truncates a destination path itself.

@@ -64,6 +64,53 @@ def test_saved_panel_state_keeps_every_public_facet_cell_kind(cell_kind) -> None
     assert restored == state
 
 
+def test_figure_v1_panel_state_migrates_through_the_single_decoder() -> None:
+    restored = PanelState.from_document(
+        {
+            "signal": "@logic/camera_measurement/frame_0",
+            "title": "Distribution",
+            "kind": "histogram",
+            "cell_kind": "",
+            "size": "1x2",
+            "interval_ms": 400,
+            "semantic": {},
+            "display": {"log_y": True},
+            "fit": {"model": "bimodal_gaussian"},
+            "site_overlay": "off",
+        }
+    )
+
+    assert restored.signal == "@logic/camera_measurement/frame_0"
+    assert restored.display == {"log_y": True}
+    assert restored.fit == {"model": "bimodal_gaussian"}
+    assert restored.overlay_signal == ""
+    assert restored.published_outputs == {}
+    assert restored.selector == {}
+    assert restored.classifier_thresholds == ()
+    assert restored.focused_cell is None
+
+    intermediate = PanelState.from_document(
+        {
+            "signal": "frame", "title": "Frame", "kind": "image",
+            "cell_kind": "", "size": "1x2", "interval_ms": 100,
+            "semantic": {}, "display": {}, "fit": {"model": None},
+            "overlay_signal": "",
+        }
+    )
+    assert intermediate.overlay_signal == ""
+    assert intermediate.fit == {"model": None}
+
+    with pytest.raises(ValueError, match="legacy panel site_overlay"):
+        PanelState.from_document(
+            {
+                "signal": "signal", "title": "bad", "kind": "image",
+                "cell_kind": "", "size": "2x2", "interval_ms": 400,
+                "semantic": {}, "display": {}, "fit": {},
+                "site_overlay": "maybe",
+            }
+        )
+
+
 class _Signal:
     def __init__(self) -> None:
         self._listeners: list = []
@@ -140,7 +187,9 @@ def _wait_until(predicate, *, timeout: float = 10.0) -> None:
 
 def _presenter(view, *, make_host, edit_figure=None) -> FigureViewerPresenter:
     from zlc_workbench.board import attach_qt_worker
+    from zlc_ui.qt import ensure_qt_app
 
+    ensure_qt_app(["test-figure-viewer"])
     run_off_thread, close_worker = attach_qt_worker("test-figure-viewer")
     return FigureViewerPresenter(
         view,
@@ -155,7 +204,9 @@ def _presenter(view, *, make_host, edit_figure=None) -> FigureViewerPresenter:
 def _built_presenter(view) -> FigureViewerPresenter:
     from zlc_workbench.apps.figure_viewer import build
     from zlc_workbench.board import attach_qt_worker
+    from zlc_ui.qt import ensure_qt_app
 
+    ensure_qt_app(["test-built-figure-viewer"])
     run_off_thread, close_worker = attach_qt_worker("test-built-figure-viewer")
     return build(
         view,
@@ -315,7 +366,7 @@ def test_opening_shows_the_figure_and_its_record(presenter, saved) -> None:
     presenter.view.path_committed.emit(str(path))
     _wait_until(lambda: not presenter._busy)
 
-    assert presenter.description is not None
+    assert presenter.description is not None, presenter.view.status
     assert presenter.view.title == "run"
     assert presenter.view.path == str(path), "the File field cannot stay empty"
     assert dict(presenter.view.tabs)["Measurement"]

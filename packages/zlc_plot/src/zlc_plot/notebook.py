@@ -130,7 +130,7 @@ def _widget_class() -> type[Any]:
         from traitlets import Bytes
     except (ImportError, ModuleNotFoundError) as error:
         raise BackendUnavailableError(
-            "NotebookView requires anywidget; install zlc-plot[notebook]."
+            "NotebookView requires anywidget; install zou-lab-control[notebook]."
         ) from error
 
     class RasterWidget(anywidget.AnyWidget):

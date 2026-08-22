@@ -18,7 +18,7 @@ from zlc_data.figure_archive import (
     read_dataset,
     write_figure_archive,
 )
-from zlc_data.io import NPZFormatError, load_npz, save_npz
+from zlc_data.io import NPZFormatError, load_npz, save_npz, snapshot_manifest
 from zlc_data.schema import (
     DatasetSchema,
     GridTopology,
@@ -65,10 +65,25 @@ def _archive_members(path: Path) -> dict[str, np.ndarray]:
         return {name: np.asarray(archive[name]) for name in archive.files}
 
 
+def _write_npz(path: Path, snapshot: OwnedSnapshot) -> None:
+    with path.open("wb") as stream:
+        save_npz(stream, snapshot)
+
+
+def test_npz_writer_requires_caller_owned_binary_io(tmp_path: Path):
+    path = tmp_path / "snapshot.npz"
+    path.write_bytes(b"previous complete file")
+
+    with pytest.raises(TypeError, match="writable binary IO"):
+        save_npz(path, _snapshot())  # type: ignore[arg-type]
+
+    assert path.read_bytes() == b"previous complete file"
+
+
 def test_npz_round_trip_preserves_owned_snapshot_and_masks(tmp_path: Path):
     source = _snapshot(CellValidity(np.array([[True, False], [False, True]])))
     path = tmp_path / "snapshot.npz"
-    save_npz(path, source)
+    _write_npz(path, source)
 
     restored = load_npz(path)
     assert restored.ref == source.ref
@@ -115,7 +130,7 @@ def test_npz_round_trip_preserves_canonical_coordinates_and_display_labels(
     )
     path = tmp_path / "coordinate-labels.npz"
 
-    save_npz(path, source)
+    _write_npz(path, source)
     restored = load_npz(path)
 
     assert restored.block.schema.repeat_axis.coordinates == ("shot_dark", "shot_bright")
@@ -156,7 +171,7 @@ def test_npz_round_trip_preserves_dataset_component_masks(tmp_path: Path):
     )
     source = OwnedSnapshot(block.ref(StreamGenerationId("component-generation")), block)
     path = tmp_path / "component.npz"
-    save_npz(path, source)
+    _write_npz(path, source)
 
     restored = load_npz(path)
     np.testing.assert_array_equal(restored.block.validity.mask, validity.mask)
@@ -191,7 +206,7 @@ def test_npz_round_trip_preserves_topology_dimensions_without_point_columns(
     )
     path = tmp_path / "topology-only.npz"
 
-    save_npz(path, source)
+    _write_npz(path, source)
     restored = load_npz(path)
 
     assert restored.block.schema == schema
@@ -212,7 +227,7 @@ def test_npz_missing_value_member_is_rejected(tmp_path: Path):
     source = _snapshot()
     original = tmp_path / "original.npz"
     malformed = tmp_path / "missing-values.npz"
-    save_npz(original, source)
+    _write_npz(original, source)
     arrays = _archive_members(original)
     arrays.pop("values")
     np.savez_compressed(malformed, **arrays)
@@ -233,7 +248,7 @@ def test_npz_extra_member_is_rejected(tmp_path: Path):
     source = _snapshot()
     original = tmp_path / "original.npz"
     malformed = tmp_path / "extra-member.npz"
-    save_npz(original, source)
+    _write_npz(original, source)
     arrays = _archive_members(original)
     arrays["unexpected"] = np.asarray(3)
     np.savez_compressed(malformed, **arrays)
@@ -245,7 +260,7 @@ def test_npz_missing_cell_validity_member_is_rejected(tmp_path: Path):
     source = _snapshot(CellValidity(np.ones((2, 2), dtype=bool)))
     original = tmp_path / "original.npz"
     malformed = tmp_path / "missing-validity.npz"
-    save_npz(original, source)
+    _write_npz(original, source)
     arrays = _archive_members(original)
     arrays.pop("validity")
     np.savez_compressed(malformed, **arrays)
@@ -261,7 +276,7 @@ def test_npz_rejects_manifest_format_and_version_changes(
 ):
     original = tmp_path / "original.npz"
     malformed = tmp_path / f"bad-{field}.npz"
-    save_npz(original, _snapshot())
+    _write_npz(original, _snapshot())
     arrays = _archive_members(original)
     manifest = json.loads(str(arrays["manifest"].item()))
     manifest[field] = value
@@ -277,7 +292,7 @@ def test_npz_rejects_manifest_format_and_version_changes(
 def test_npz_rejects_duplicate_manifest_json_keys(tmp_path: Path):
     original = tmp_path / "original.npz"
     malformed = tmp_path / "duplicate-key.npz"
-    save_npz(original, _snapshot())
+    _write_npz(original, _snapshot())
     arrays = _archive_members(original)
     manifest_text = str(arrays["manifest"].item())
     duplicate = manifest_text.replace('"version":1', '"version":1,"version":1', 1)
@@ -292,7 +307,7 @@ def test_npz_rejects_duplicate_manifest_json_keys(tmp_path: Path):
 def test_npz_rejects_unknown_validity_kind(tmp_path: Path):
     original = tmp_path / "original.npz"
     malformed = tmp_path / "bad-validity-kind.npz"
-    save_npz(original, _snapshot())
+    _write_npz(original, _snapshot())
     arrays = _archive_members(original)
     manifest = json.loads(str(arrays["manifest"].item()))
     manifest["validity"] = {"kind": "not-a-validity"}
@@ -339,6 +354,93 @@ def test_figure_archive_round_trip_validates_version_members_and_dataset_shape()
     assert set(info["members"]) == {"data", "data.validity", "trace"}
     assert set(arrays) == {"data", "data.validity", "trace"}
     assert read_dataset(info, arrays, "data").exactly_equals(snapshot)
+
+
+def test_figure_v1_migrates_only_exact_legacy_dataset_fields():
+    repeat = AxisSpec(AxisId("legacy.repeat"), "repeat", REPEAT, 2, (0, 1))
+    sites = PointColumn(
+        AxisId("legacy.site"), "site", SITE, PointColumn.TEXT, ("a", "b")
+    )
+    schema = DatasetSchema(
+        repeat,
+        PointTable(2, (sites,)),
+        None,
+        ValueSchema.scalar(np.dtype("<f4")),
+    )
+    block = DataBlock(
+        BlockId("legacy-block"),
+        DatasetRevision(2),
+        np.arange(4, dtype="<f4").reshape(schema.physical_shape),
+        VALID,
+        schema,
+    )
+    source = OwnedSnapshot(block.ref(StreamGenerationId("legacy-generation")), block)
+    stored: dict[str, np.ndarray] = {}
+    manifest = snapshot_manifest(source, stored, values_key="data")
+    manifest["ref"].pop("schema_fingerprint")
+
+    def without_labels(value):
+        if isinstance(value, dict):
+            result = {key: without_labels(item) for key, item in value.items()}
+            if result.get("schema") in ("zlc_data.AxisSpec", "zlc_data.PointColumn"):
+                result.pop("coordinate_labels")
+            return result
+        if isinstance(value, list):
+            return [without_labels(item) for item in value]
+        return value
+
+    legacy_info = {
+        "schema": "zlc.figure/v1",
+        "name": "legacy figure",
+        "sections": {"dataset": {"data": without_labels(manifest)}},
+    }
+    stream = BytesIO()
+    np.savez_compressed(
+        stream,
+        info=np.asarray(json.dumps(legacy_info, separators=(",", ":"))),
+        **stored,
+    )
+    stream.seek(0)
+
+    info, arrays = read_archive(stream)
+
+    assert info["schema"] == FIGURE_SCHEMA
+    assert info["version"] == 2
+    assert info["members"] == {
+        "data": {"dtype": "<f4", "shape": list(source.block.values.shape)}
+    }
+    assert read_dataset(info, arrays, "data").exactly_equals(source)
+
+    empty_member = BytesIO()
+    np.savez_compressed(
+        empty_member,
+        info=np.asarray(json.dumps(legacy_info)),
+        **{"": np.zeros(1, dtype="|i1")},
+    )
+    empty_member.seek(0)
+    with pytest.raises(ValueError, match="member names must be non-empty"):
+        read_archive(empty_member)
+
+    legacy_info["unexpected"] = True
+    malformed = BytesIO()
+    np.savez_compressed(
+        malformed,
+        info=np.asarray(json.dumps(legacy_info)),
+        **stored,
+    )
+    malformed.seek(0)
+    with pytest.raises(ValueError, match="legacy figure metadata keys mismatch"):
+        read_archive(malformed)
+
+    object_member = BytesIO()
+    np.savez_compressed(
+        object_member,
+        info=np.asarray(json.dumps(legacy_info)),
+        data=np.asarray([object()], dtype=object),
+    )
+    object_member.seek(0)
+    with pytest.raises(ValueError, match="legacy figure metadata keys mismatch"):
+        read_archive(object_member)
 
 
 def test_figure_writer_preplans_snapshot_member_namespace():

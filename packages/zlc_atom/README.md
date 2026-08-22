@@ -190,8 +190,9 @@ The runtime has one direction of responsibility:
 | Task | pulse resolution, sequencer load/fire, repeated capture, progress/current preview, calibration, JSON artifact, and its six report-image saves | reusable readout mathematics or renderer internals |
 | Processor | consume a frames signal plus calibration and publish counts, occupied validity, and the exact frame judged with lineage | excitation or camera control |
 
-For a manually controlled experiment, the notebook calls `resolve_pulse`,
-`sequencer.load`, and `sequencer.fire` around a pure camera measurement. For
+For a manually controlled experiment, the product notebook calls
+`ExperimentSession.load_pulse` and `ExperimentSession.fire` around a pure
+camera measurement; those methods own compile/load and sequencer execution. For
 an automated experiment, `CalibrationTask.run()` owns that whole sequence and
 returns a saved calibration artifact. Calibration discovers its site count and
 centers from acquired images and accepts no Target, Science Context, authored
@@ -207,8 +208,12 @@ and no calibration object/report blob is put on the signal plane. Each
 classifier grid binds every finite threshold to the canonical
 `calibration.site` coordinate that measured it rather than to the current facet
 index. The BOX readout model also persists its dark sample count and sample
-variance; legacy `n=0`/`NaN` artifacts remain readable but cannot authorize
-registered Feedback.
+variance. New files have the exact root
+`format="zlc.calibration.readout", version=1`. The two known unversioned
+generations (singular `readout_model` and plural `models`) migrate in this same
+owner; unavailable response statistics remain explicit `NaN`, count `0`, and
+variance `NaN`. Their thresholds remain usable for ordinary classification,
+but those unknown statistics cannot authorize registered Feedback.
 
 Camera Measurement and camera-backed Calibration request photoelectrons by
 default. A camera with a complete configured offset/scale publishes converted
@@ -325,20 +330,20 @@ restoring a trap does not resurrect its old atom without a later cooling load.
 
 ## Executable integration path
 
-Run from the monorepo after importing the root bootstrap before any `zlc_*`
-package, so the checkout under test cannot be confused with an older editable
-installation:
+Install the one root distribution, then run the package suites or formal
+evidence lanes. Import provenance must point either to that installed wheel or
+to the explicitly selected source-test mode:
 
 ```powershell
-python -c "import zou_lab_control_v2; import zlc_atom; print(zlc_atom.__file__)"
-pytest -q
+zlc check
+zlc evidence virtual_vertical --repo C:\path\to\Zou_lab_control_v2
 ```
 
 The formal virtual guard uses the real `zlc_runtime.SignalDataPlane`, catalog,
 descriptor and `NodeHost` paths. Exact processors replay and then follow each
 committed event chunk; latest display processors explicitly coalesce. A
 processor started on a sealed generation consumes its canonical
-`current_dataset()` once. `zlc_pulse` remains a separate protocol package, and
+`current_dataset()` once. `zlc_pulse` remains a separate protocol layer, and
 the virtual sequencer has no alternate analysis path or `if virtual` branch.
 
 ## Current package boundary

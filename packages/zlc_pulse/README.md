@@ -56,12 +56,11 @@ If no enumerated UART matches, `auto` falls back to JTAG-to-AXI.
 alternatives. An explicitly requested UART failure is an error and never
 silently falls back.
 
-For an offline walk-through, run the cells before the real-hardware section in
-[`notebooks/usage.ipynb`](notebooks/usage.ipynb). They load the explicit board
-manifest, validate its XDC/RTL projections, model a sequence, compile it, and
-show the local transport choices without opening hardware. Every notebook
-example that uses `cycles=None` encloses the run in `try/finally` and reaches
-SAFE before closing.
+The one product notebook uses only the virtual sequencer and contains no
+hardware section. Pulse model, transport and FPGA acceptance details live in
+this README and `fpga/README.md`; continuous `cycles=None` hardware use remains
+an explicit operator workflow whose runbook requires `try/finally`, verified
+SAFE, and close.
 
 This repository tracks the RTL, board description, Vivado Tcl, and simulations
 under `packages\zlc_pulse\fpga\`. `bin\build_and_program.bat` is the explicit

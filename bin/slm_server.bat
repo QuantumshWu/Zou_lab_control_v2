@@ -1,7 +1,8 @@
 @echo off
-rem Start the sole SLM output owner. Default transport is the proven DVI
-rem display path; pass --transport usb only when the vendor SDK is installed.
-rem A local client uses 127.0.0.1; another
-rem control computer uses this machine's LAN address.  Device browsing and
-rem target editing stay client-local; only phase commands cross this boundary.
-call "%~dp0_launch.bat" slm_server %*
+rem Start the sole installed SLM output owner. The proven DVI transport stays
+rem the default; --transport usb opts into vendor-DLL discovery explicitly.
+rem The Python owner prints the local and LAN host/port values clients enter.
+setlocal EnableExtensions DisableDelayedExpansion
+set "ZLC_COMMAND=slm_server"
+call "%~dp0_launch.bat" %*
+exit /b %ERRORLEVEL%

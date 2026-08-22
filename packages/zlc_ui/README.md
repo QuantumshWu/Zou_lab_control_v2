@@ -1,8 +1,8 @@
 # zlc_ui
 
-`zlc_ui` owns the reusable, domain-independent Qt view layer. It is usable
-without any laboratory, plotting, data, or storage package installed. Its only
-non-standard UI dependency beyond PyQt5 is the reference
+`zlc_ui` owns the reusable, domain-independent Qt view layer. It imports no
+laboratory, plotting, data, or storage layer even though all eight layers ship
+in one distribution. Its only non-standard UI dependency beyond PyQt5 is the reference
 `PyQt5-Frameless-Window` shell used by the Fluent layer.
 
 ## Ownership boundary
@@ -57,8 +57,7 @@ guard accepts the close.
 
 ```powershell
 $env:QT_QPA_PLATFORM = "offscreen"
-python -c "import zou_lab_control_v2; import zlc_ui; print(zlc_ui.__file__)"
-pytest -q
+zlc evidence gui_offscreen --repo C:\path\to\Zou_lab_control_v2
 ```
 
 The stable reusable facade is intentionally small:
@@ -71,7 +70,6 @@ from zlc_ui import (
     FormRuntimeContext,
     FormSpec,
     ensure_qt_app,
-    __version__,
 )
 ```
 
@@ -88,30 +86,22 @@ the interactive scrollable gallery.  Gallery is organized as `1. 基础组件`
 (TaskConsole, PulseEditor, FigureViewer, and DeviceManager).  Scan slot/API
 slot states are visible in the composite section and in PulseEditor itself.
 
-For a human-readable walkthrough, install Jupyter in the notebook environment
-and open [`notebooks/usage.ipynb`](notebooks/usage.ipynb).  It has independent
-human-runnable cells for Gallery, TaskConsole, PulseEditor, FigureViewer, and
-DeviceManager; it then demonstrates how an external presenter supplies plain
-tuples and FormSpec values to `TaskConsoleView` and `DeviceManagerView`,
-connects outgoing signals, replaces host-owned QWidget surfaces, and closes the
-Qt windows.  In a Notebook use the non-blocking `create_window()` flow shown in
-[`notebooks/usage.ipynb`](notebooks/usage.ipynb); it calls `ensure_qt_app()`
-before any view is constructed and lets IPython install the Qt event-loop hook.
-Do not run `%gui qt` before that entry point, and do not call `app.exec_()` from
-a cell.
+For an offline walkthrough, use the one product tutorial at
+`packages/zlc_workbench/notebooks/usage.ipynb`; it uses virtual devices and the
+normal NotebookView, not fake UI windows. Human GUI inspection stays in the
+separate real-screen lane below.
 
 For a size-faithful desktop capture, run these commands without
 `QT_QPA_PLATFORM=offscreen`:
 
 ```powershell
-python examples/capture_acceptance.py --view console
-python examples/capture_acceptance.py --view figure
-python examples/capture_acceptance.py --view pulse
-python examples/capture_acceptance.py --view device
-python examples/capture_acceptance.py --view gallery
+zlc capture --view console --template virtual
+zlc capture --view figure --path D:\data\run.npz
+zlc capture --view pulse --pulse imaging_template.json
+zlc capture --view device --workspace D:\experiment
 ```
 
-The script is an adapter around the reusable `zlc_ui.acceptance.capture_window`
+The Workbench command is an adapter around the reusable `zlc_ui.acceptance.capture_window`
 API.  That API calls `ensure_qt_app()` before the same public `create_window()`
 entry a human uses, verifies the exact shared `WINDOW_SCREEN_FRACTION` size,
 and writes both a physical-DPR window crop and a desktop-relative proportion

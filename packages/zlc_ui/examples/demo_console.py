@@ -3,16 +3,9 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import os
-import sys
 
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-
-from PyQt5 import QtCore, QtWidgets  # noqa: E402
+from PyQt5 import QtCore, QtWidgets
 
 if __package__:
     from .synthetic_card import SyntheticCardView  # noqa: E402

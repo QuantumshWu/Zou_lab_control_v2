@@ -1,32 +1,84 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools==81.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "zou-lab-control"
 version = "2.0.0"
 description = "Neutral-atom experiment control: one distribution, eight layers"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    # The union of what the eight layers need.  Pinned where a layer pinned it:
-    # a plot that renders differently between two machines is not a record.
     "matplotlib==3.10.8",
-    "numpy",
-    "Pillow",
-    "PyQt5",
-    "PyQt5-Frameless-Window",
-    "pyserial>=3.5",
-    "scipy",
+    "numpy==2.4.2",
+    "Pillow==12.1.1",
+    "PyQt5==5.15.11",
+    "PyQt5-Frameless-Window==0.8.0",
+    "pyserial==3.5",
+    "scipy==1.17.1",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "jupyter"]
+test = [
+    "psutil==7.2.2",
+    "pytest==9.0.3",
+]
+notebook = [
+    "anywidget==0.11.0",
+    "ipykernel==7.2.0",
+    "ipython==9.10.0",
+    "ipywidgets==8.1.8",
+    "jupyterlab==4.6.2",
+    "nbclient==0.10.4",
+    "nbformat==5.10.4",
+]
+dev = [
+    "anywidget==0.11.0",
+    "ipykernel==7.2.0",
+    "ipython==9.10.0",
+    "ipywidgets==8.1.8",
+    "jupyterlab==4.6.2",
+    "nbclient==0.10.4",
+    "nbformat==5.10.4",
+    "psutil==7.2.2",
+    "pytest==9.0.3",
+]
 
 [project.scripts]
-zlc-pulse-editor = "zlc_workbench.apps.pulse_editor:main"
-zlc-task-console = "zlc_workbench.apps.task_console:main"
-zlc-figure-viewer = "zlc_workbench.apps.figure_viewer:main"
-zlc-device-manager = "zlc_workbench.apps.device_manager:main"
+zlc = "zou_lab_control_v2.__main__:main"
+
+# These two groups are the installed projection of this single manifest.
+# The root dispatcher and environment check read the generated entry-point
+# metadata; they do not keep another handwritten package/command table.
+[project.entry-points."zou_lab_control.layers"]
+zlc_data = "zlc_data"
+zlc_durable = "zlc_durable"
+zlc_runtime = "zlc_runtime"
+zlc_plot = "zlc_plot"
+zlc_ui = "zlc_ui"
+zlc_pulse = "zlc_pulse"
+zlc_atom = "zlc_atom"
+zlc_workbench = "zlc_workbench"
+
+[project.entry-points."zou_lab_control.commands"]
+capture = "zlc_workbench.tools.capture_acceptance:main"
+check = "zlc_workbench.tools.check_environment:main"
+device_manager = "zlc_workbench.apps.device_manager:main"
+evidence = "zou_lab_control_v2.__main__:evidence"
+figure_viewer = "zlc_workbench.apps.figure_viewer:main"
+fpga = "zlc_pulse.fpga:_main"
+pulse_editor = "zlc_workbench.apps.pulse_editor:main"
+pulse_server = "zlc_pulse.remote:_main"
+slm_server = "zlc_atom.devices.slm.device_types:main"
+task_console = "zlc_workbench.apps.task_console:main"
+
+[project.entry-points."zou_lab_control.evidence"]
+software = "zou_lab_control_v2.__main__:evidence"
+gui_offscreen = "zou_lab_control_v2.__main__:evidence"
+virtual_vertical = "zou_lab_control_v2.__main__:evidence"
+notebook_offline = "zou_lab_control_v2.__main__:evidence"
+real_screen = "zou_lab_control_v2.__main__:evidence"
+hardware = "zou_lab_control_v2.__main__:evidence"
 
 [tool.setuptools]
 # Every layer lives under packages/ and keeps its own root -- src/, tests/,
@@ -41,9 +93,11 @@ zlc-device-manager = "zlc_workbench.apps.device_manager:main"
 # gain nothing: what makes this ONE thing is the git repo and the distribution,
 # not the shape of the folders inside it.
 package-dir = {"" = "."}
+include-package-data = false
 
 [tool.setuptools.packages.find]
 where = [
+    ".",
     "packages/zlc_data/src",
     "packages/zlc_durable/src",
     "packages/zlc_runtime/src",
@@ -53,6 +107,45 @@ where = [
     "packages/zlc_atom/src",
     "packages/zlc_workbench/src",
 ]
+include = ["zou_lab_control_v2", "zlc_*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+"zlc_atom.nodes.calibration" = ["imaging_template.json"]
+"zlc_atom.nodes.scan" = ["mot_field_template.json", "temperature_template.json"]
+"zlc_atom.devices.slm" = ["profiles/*.json"]
+zlc_plot = ["assets/*.ttf", "py.typed"]
+zlc_pulse = ["py.typed"]
+
+# RTL/XDC/Tcl are product data, not Python modules.  data-files keeps their
+# source-tree hierarchy under one installation-owned share directory; the
+# single locator in zlc_pulse.wire resolves this RECORD projection.
+[tool.setuptools.data-files]
+"share/zou-lab-control/fpga" = [
+    "packages/zlc_pulse/fpga/__init__.py",
+    "packages/zlc_pulse/fpga/_resolve_tools.bat",
+    "packages/zlc_pulse/fpga/README.md",
+]
+"share/zou-lab-control/fpga/board_config" = [
+    "packages/zlc_pulse/fpga/board_config/*.json",
+    "packages/zlc_pulse/fpga/board_config/*.md",
+    "packages/zlc_pulse/fpga/board_config/*.xdc",
+]
+"share/zou-lab-control/fpga/build" = [
+    "packages/zlc_pulse/fpga/build/geom.tcl",
+]
+"share/zou-lab-control/fpga/pulse_streamer" = [
+    "packages/zlc_pulse/fpga/pulse_streamer/*.md",
+    "packages/zlc_pulse/fpga/pulse_streamer/*.py",
+    "packages/zlc_pulse/fpga/pulse_streamer/*.tcl",
+    "packages/zlc_pulse/fpga/pulse_streamer/*.v",
+    "packages/zlc_pulse/fpga/pulse_streamer/*.vh",
+]
+"share/zou-lab-control/fpga/pulse_streamer/sim" = [
+    "packages/zlc_pulse/fpga/pulse_streamer/sim/*.md",
+    "packages/zlc_pulse/fpga/pulse_streamer/sim/*.v",
+    "packages/zlc_pulse/fpga/pulse_streamer/sim/*.vh",
+]
 
 [tool.pytest.ini_options]
 # importlib, because six test filenames repeat across the layers and the
@@ -61,13 +154,4 @@ where = [
 addopts = "--import-mode=importlib"
 # Every layer's suite, from the top.  A change that crosses two layers is
 # checked by both in one run, which is the whole point of merging them.
-testpaths = [
-    "packages/zlc_data/tests",
-    "packages/zlc_durable/tests",
-    "packages/zlc_runtime/tests",
-    "packages/zlc_plot/tests",
-    "packages/zlc_ui/tests",
-    "packages/zlc_pulse/tests",
-    "packages/zlc_atom/tests",
-    "packages/zlc_workbench/tests",
-]
+testpaths = ["packages"]

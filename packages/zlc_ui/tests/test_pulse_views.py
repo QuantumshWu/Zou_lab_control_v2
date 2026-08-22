@@ -11,7 +11,7 @@ SRC = ROOT / "src"
 
 def _run_qt(code: str) -> None:
     environment = dict(os.environ)
-    environment["PYTHONPATH"] = str(SRC)
+    environment["PYTHONPATH"] = "" if environment.get("ZLC_TEST_INSTALLED") == "1" else str(SRC)
     environment["QT_QPA_PLATFORM"] = "offscreen"
     # Fixed for the child, not inherited: a matplotlib backend chosen by
     # whatever imported it in the parent is how this harness produced access
@@ -335,7 +335,7 @@ def test_linked_panes_show_one_bar_only_while_some_pane_overflows() -> None:
 
     _run_qt(
         """
-from PyQt5 import QtWidgets
+from PyQt5 import QtCore, QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.fluent import FluentScrollArea, LinkedScrollPanes
 app = ensure_qt_app(["linked-panes"])
@@ -576,7 +576,7 @@ def test_the_repeat_posts_are_built_to_frame_the_cards_they_span() -> None:
     _run_qt(
         """
 from dataclasses import replace
-from PyQt5 import QtWidgets
+from PyQt5 import QtCore, QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.pulse import PulseScheduleView, RepeatBracket
 from zlc_ui.pulse._layout import panel_top_height
@@ -622,5 +622,11 @@ view.feedback_requested.connect(feedback.append)
 view.bracket_button.click()
 assert requested == [("p1", "p1", one.default_repeat_count)]
 assert feedback == []
+for widget in (view, start, end):
+    widget.close()
+    widget.deleteLater()
+app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+app.processEvents()
+app.quit()
 '''
     )

@@ -1,4 +1,6 @@
 @echo off
-rem The experiment entry: Device Manager Init opens TaskConsole; each loaded
-rem device card opens its on-demand Control in the same ExperimentSession.
-call "%~dp0_launch.bat" task_console %*
+rem Device Manager Init opens the Task Console in one ExperimentSession.
+setlocal DisableDelayedExpansion
+set "ZLC_COMMAND=task_console"
+call "%~dp0_launch.bat" %*
+exit /b %ERRORLEVEL%

@@ -25,7 +25,7 @@ from zlc_workbench.device_use import (
 from zlc_workbench.session import ExperimentSession, Workspace
 
 
-def test_slm_control_factory_is_plugin_owned_and_lazy() -> None:
+def test_slm_control_factory_is_plugin_owned_and_lazy(tmp_path: Path) -> None:
     script = r"""
 import zou_lab_control_v2
 import sys
@@ -49,7 +49,7 @@ assert "zlc_workbench" not in sys.modules
 """
     completed = subprocess.run(
         [sys.executable, "-c", script],
-        cwd=Path(__file__).resolve().parents[3],
+        cwd=tmp_path,
         capture_output=True,
         text=True,
     )

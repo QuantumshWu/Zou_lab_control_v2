@@ -104,7 +104,7 @@ def test_importing_package_does_not_create_qapplication() -> None:
         "assert QApplication.instance() is None"
     )
     environment = dict(__import__("os").environ)
-    environment["PYTHONPATH"] = str(SRC)
+    environment["PYTHONPATH"] = "" if environment.get("ZLC_TEST_INSTALLED") == "1" else str(SRC)
     environment["QT_QPA_PLATFORM"] = "offscreen"
     completed = subprocess.run(
         [sys.executable, "-c", code],
@@ -130,7 +130,7 @@ assert app.font().family() == 'Segoe UI'
 assert app.font().pointSize() == fluent_font_size()
 """
     environment = dict(__import__("os").environ)
-    environment["PYTHONPATH"] = str(SRC)
+    environment["PYTHONPATH"] = "" if environment.get("ZLC_TEST_INSTALLED") == "1" else str(SRC)
     environment["QT_QPA_PLATFORM"] = "offscreen"
     completed = subprocess.run(
         [sys.executable, "-c", code],
@@ -157,7 +157,7 @@ else:
 assert QtWidgets.QApplication.instance() is raw_app
 """
     environment = dict(__import__("os").environ)
-    environment["PYTHONPATH"] = str(SRC)
+    environment["PYTHONPATH"] = "" if environment.get("ZLC_TEST_INSTALLED") == "1" else str(SRC)
     environment["QT_QPA_PLATFORM"] = "offscreen"
     completed = subprocess.run(
         [sys.executable, "-c", code],
@@ -185,7 +185,7 @@ assert window.width() > body.sizeHint().width()
 window.close()
 """
     environment = dict(__import__("os").environ)
-    environment["PYTHONPATH"] = str(SRC)
+    environment["PYTHONPATH"] = "" if environment.get("ZLC_TEST_INSTALLED") == "1" else str(SRC)
     environment["QT_QPA_PLATFORM"] = "offscreen"
     completed = subprocess.run(
         [sys.executable, "-c", code],
@@ -218,7 +218,7 @@ else:
     raise AssertionError('offscreen capture was accepted as UI acceptance evidence')
 """
     environment = dict(__import__("os").environ)
-    environment["PYTHONPATH"] = str(SRC)
+    environment["PYTHONPATH"] = "" if environment.get("ZLC_TEST_INSTALLED") == "1" else str(SRC)
     environment["QT_QPA_PLATFORM"] = "offscreen"
     completed = subprocess.run(
         [sys.executable, "-c", code],
@@ -251,7 +251,7 @@ assert window.loaded.geometry().top() >= window.titleBar.geometry().bottom() + 1
 )
 """
     environment = dict(__import__("os").environ)
-    environment["PYTHONPATH"] = str(SRC)
+    environment["PYTHONPATH"] = "" if environment.get("ZLC_TEST_INSTALLED") == "1" else str(SRC)
     environment["QT_QPA_PLATFORM"] = "offscreen"
     completed = subprocess.run(
         [sys.executable, "-c", code],

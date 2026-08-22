@@ -125,7 +125,10 @@ path where relevant, without embedding the JSON or adding fingerprint/hash.
 
 Figure Viewer reads and fully prepares a candidate off the Qt owner, atomically
 mounts only a successful candidate, and keeps the previous accepted figure on
-failure. Its resize/save/host retirement are likewise asynchronous. TaskConsole
+failure. Historical v1 panel state is decoded by the same `PanelState` owner;
+all recoverable display/fit choices survive, while the old anonymous
+`site_overlay=centers` wish becomes no overlay because it never recorded a signal
+identity. Its resize/save/host retirement are likewise asynchronous. TaskConsole
 keeps its lifecycle beat running while nodes, projections, plot hosts or Panel
 Save retire; the window stays visible until every owner is actually stopped.
 Session/device shutdown runs on the one flow-owned serial device worker used by
@@ -137,16 +140,9 @@ closed.
 ## Check the environment first
 
 ```bash
-python -m zou_lab_control_v2 check
+zlc check
 ```
 
-That root-bootstrap entry prints every resolved production module path before
-reporting success, so the check cannot silently measure an installed sibling
-copy.
-
-Run it from anywhere except the workspace root. Three separate incidents in this
-project came from an import that succeeded while the wrong code ran — a monolith
-installed under the same names, an uninstalled package resolving to an empty
-namespace because the current directory happened to sit beside it, an editable
-install pointing at a deleted copy. None of them raised. This asserts that every
-package resolves to the repo that owns it, and that the retired names are gone.
+The command reads the installed manifest projection, prints all eight module
+origins, verifies that each file belongs to `zou-lab-control`, and rejects the
+retired monolith names. It is independent of the working directory.

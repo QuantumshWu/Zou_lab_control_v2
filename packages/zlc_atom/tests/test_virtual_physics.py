@@ -500,7 +500,10 @@ def test_slm_coherent_plant_owns_the_twofold_site_error_and_caches_propagation()
         initial_loading = world._site_loading_probabilities()
         order = np.argsort(sites)
         assert np.all(np.diff(initial_loading[order]) >= 0.0)
-        assert float(np.max(initial_loading) / np.min(initial_loading)) > 1.2
+        assert np.count_nonzero(initial_loading == 0.0) >= int(
+            np.ceil(0.10 * len(initial_loading))
+        )
+        assert float(np.max(initial_loading)) > 0.0
         initial_fluorescence = world._fluorescence_scales(sites)
         assert np.all(np.diff(initial_fluorescence[order]) <= 0.0)
         initial_depth_interval = np.linspace(np.min(sites), np.max(sites), 128)
@@ -545,12 +548,8 @@ def test_slm_coherent_plant_owns_the_twofold_site_error_and_caches_propagation()
         corrected_loading_ratio = float(
             np.max(corrected_loading) / np.min(corrected_loading)
         )
-        initial_loading_ratio = float(
-            np.max(initial_loading) / np.min(initial_loading)
-        )
-        assert corrected_loading_ratio - 1.0 < 0.10 * (
-            initial_loading_ratio - 1.0
-        )
+        assert float(np.min(corrected_loading)) > 0.0
+        assert corrected_loading_ratio == pytest.approx(1.0)
         np.testing.assert_array_equal(
             world._fluorescence_scales(fixed_probe_depths),
             fixed_probe_response,
@@ -741,7 +740,7 @@ def test_a_removed_trap_cannot_resurrect_its_atom(monkeypatch) -> None:
         target[tuple(nominal_sites[kept].T)] = 1.0
         sparse_phase, _metadata = solve_phase(target, seed=0)
 
-        _fire_world(world, _world_pulse(cooling=True, trap=True))
+        world._occupancy[:] = True
         assert np.all(world._occupancy)
 
         snapshots: list[np.ndarray] = []
@@ -848,7 +847,9 @@ def test_occupied_qcmos_box_brightness_tracks_physical_trap_depth() -> None:
     assert float(np.max(box_means) / np.min(box_means)) > 1.5
 
 
-def test_add_remove_and_move_change_the_next_triggered_qcmos_frame() -> None:
+def test_add_remove_and_move_change_the_next_triggered_qcmos_frame(
+    monkeypatch,
+) -> None:
     """Each public phase command must change the next physical atom image."""
 
     installation = create_installation(
@@ -860,6 +861,12 @@ def test_add_remove_and_move_change_the_next_triggered_qcmos_frame() -> None:
     sequencer = installation.device("sequencer")
     slm = installation.device("slm")
     try:
+        def load_every_present_trap() -> np.ndarray:
+            world._ensure_slm_propagation()
+            world._occupancy = np.ones(len(world._trap_intensities), dtype=bool)
+            return np.array(world._occupancy, copy=True)
+
+        monkeypatch.setattr(world, "_load_shot", load_every_present_trap)
         base_target = np.array(preset_grid(slm.shape_yx, (5, 7)), copy=True)
         nominal_indices = np.argwhere(base_target > 0.0)
         old_index = nominal_indices[len(nominal_indices) // 2]
@@ -1206,7 +1213,7 @@ def test_virtual_trap_off_time_removes_loaded_atoms() -> None:
     _fire_world(world, _world_pulse(trap=True))
     assert not np.any(world._occupancy), "a pulse without cooling cannot load atoms"
     _fire_world(world, _world_pulse(cooling=True, trap=True))
-    assert np.all(world._occupancy)
+    assert np.any(world._occupancy)
     _fire_world(world, _world_pulse(duration=1.0))
     assert not np.any(world._occupancy)
 
@@ -1517,18 +1524,19 @@ def test_public_repeat_reduction_conflates_loading_and_bright_dark_contrast() ->
         slm = installation.device("slm")
         repeats = 50
         loading = world._site_loading_probabilities()
-        expected_site_signal = loading * world._fluorescence_scales(
-            world._trap_intensities
-        )
+        fluorescence = world._fluorescence_scales(world._trap_intensities)
+        expected_site_signal = loading * fluorescence
         order = np.argsort(world._trap_intensities)
         assert np.all(np.diff(loading[order]) >= 0.0)
-        assert float(np.max(loading) / np.min(loading)) > 1.2
-        np.testing.assert_allclose(
+        assert np.count_nonzero(loading == 0.0) >= int(
+            np.ceil(0.10 * len(loading))
+        )
+        nominal_loading = float(
             world._loading_probabilities(
                 np.asarray([world._loading_intensity_scale])
-            ),
-            [world.loading_probability],
+            )[0]
         )
+        assert 0.0 < nominal_loading < world.loading_probability
         depth_ratio = float(
             np.max(world._trap_intensities)
             / np.min(world._trap_intensities)
@@ -1580,9 +1588,14 @@ def test_public_repeat_reduction_conflates_loading_and_bright_dark_contrast() ->
             np.max(site_boxes) / np.min(site_boxes)
         )
         assert float(
-            np.corrcoef(expected_site_signal, world._trap_intensities)[0, 1]
+            np.corrcoef(fluorescence, world._trap_intensities)[0, 1]
         ) < -0.99
-        assert float(np.max(expected_site_signal) / np.min(expected_site_signal)) > 1.2
+        assert float(
+            np.corrcoef(expected_site_signal, world._trap_intensities)[0, 1]
+        ) > 0.50
+        assert np.count_nonzero(expected_site_signal == 0.0) >= int(
+            np.ceil(0.10 * len(expected_site_signal))
+        )
         assert observed_raw_count_ratio > 1.3
 
         # The acceptance oracle may remove the planted coherent screen, but it

@@ -1,36 +1,58 @@
-"""One test run over eight layers, without renaming anybody's files.
-
-Two things had to be true at once.  Six test filenames repeat across layers --
-``test_public_surface.py`` exists in three of them, because each layer guards
-its own surface and that is the right name for it -- and pytest's default
-import mode derives a module name from the basename, so the second one to be
-collected is refused as a mismatch.  Meanwhile a handful of suites import a
-SIBLING test module by bare name (``import test_console_presenter``) to reuse
-its doubles, which only works while that directory is on ``sys.path``.
-
-So: importlib import mode, which names a module from its whole path and stops
-the collision; and this file, which brings in the one entry -- importing
-``zou_lab_control_v2`` is what puts THIS checkout's layers on the path -- and
-then adds the ``tests`` directories the sibling imports need.  Every
-bare-imported name is unique across the tree: checked, not assumed.
-
-The path list lives in that package and not here, because a second copy of
-"where the layers are" is a second answer waiting to disagree.
-"""
+"""Run the same tests against source paths or one fresh installed product."""
 
 from __future__ import annotations
 
-import sys
+import os
 from pathlib import Path
+import sys
+import tomllib
 
 
-ROOT = Path(__file__).resolve().parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+REPO_ROOT = Path(__file__).resolve().parent
+INSTALLED = os.environ.get("ZLC_TEST_INSTALLED") == "1"
 
-import zou_lab_control_v2  # noqa: E402  -- the import IS the path setup
+if INSTALLED:
+    # Pytest loads this file from the checkout, but product imports must come
+    # only from the fresh environment's site-packages.
+    for item in tuple(sys.path):
+        try:
+            if Path(item or ".").resolve() == REPO_ROOT:
+                sys.path.remove(item)
+        except OSError:
+            continue
+else:
+    sys.path.insert(0, str(REPO_ROOT))
 
-for _layer in zou_lab_control_v2.LAYERS:
-    _tests = zou_lab_control_v2.ROOT / "packages" / _layer / "tests"
-    if _tests.is_dir() and str(_tests) not in sys.path:
-        sys.path.insert(0, str(_tests))
+# Deliberately the first product import in the verification process.
+import zou_lab_control_v2  # noqa: E402
+
+if INSTALLED and REPO_ROOT in Path(zou_lab_control_v2.__file__).resolve().parents:
+    raise RuntimeError("installed evidence imported zou_lab_control_v2 from the checkout")
+if INSTALLED:
+    # Windows spawn must be able to unpickle pytest's importlib-mode module
+    # name (packages.<layer>.tests...). Append, never prepend: site-packages
+    # remains the product authority and the checkout is visible only as a test
+    # module namespace.
+    sys.path.append(str(REPO_ROOT))
+
+manifest = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+source_roots = tuple(
+    (REPO_ROOT / item).resolve()
+    for item in manifest["tool"]["setuptools"]["packages"]["find"]["where"]
+    if item != "."
+)
+if INSTALLED:
+    os.environ["PYTHONPATH"] = ""
+else:
+    os.environ["PYTHONPATH"] = os.pathsep.join(
+        (str(REPO_ROOT), *(str(source) for source in source_roots))
+    )
+    for source in reversed(source_roots):
+        sys.path.insert(0, str(source))
+
+# A few suites intentionally share test doubles by bare module name.  Their
+# test directories are not product code and are safe in both modes.
+for source in source_roots:
+    tests = source.parent / "tests"
+    if tests.is_dir():
+        sys.path.insert(0, str(tests))

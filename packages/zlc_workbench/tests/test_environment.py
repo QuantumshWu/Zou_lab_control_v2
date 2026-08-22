@@ -1,25 +1,13 @@
-"""Every package name must resolve to the repo that owns it.
-
-Three separate incidents in this project came from an import that succeeded
-while the wrong code ran: a pre-split monolith installed under the same
-top-level names, a package that was never installed resolving to an empty
-namespace because the working directory sat beside it, and an editable install
-pointing at a copy that had been deleted.  None of them raised; all of them
-wasted a day.
-
-This runs as an ordinary test so the condition is checked continuously, not
-only when someone remembers to run the tool.
-"""
+"""Every layer and command belongs to the one installed product manifest."""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
-import subprocess
-import sys
-import tempfile
+from types import SimpleNamespace
 
 from zlc_workbench.tools.check_environment import OWNED, RETIRED, check
+from zou_lab_control_v2 import entry_specs
 
 
 def test_every_package_resolves_to_its_own_repo_and_no_retired_name_survives() -> None:
@@ -27,45 +15,69 @@ def test_every_package_resolves_to_its_own_repo_and_no_retired_name_survives() -
     assert problems == [], "\n".join(problems)
 
 
-def test_the_check_covers_every_package_in_the_workspace() -> None:
-    """A guard that scans nothing passes for the wrong reason."""
-
-    assert len(OWNED) >= 8
-    assert "zlc_workbench" in OWNED
+def test_product_manifest_owns_all_commands_and_layers() -> None:
+    assert set(entry_specs("zou_lab_control.layers")) == set(OWNED) == {
+        "zlc_data", "zlc_durable", "zlc_runtime", "zlc_plot", "zlc_ui",
+        "zlc_pulse", "zlc_atom", "zlc_workbench",
+    }
     assert set(RETIRED) == {"zlc_storage", "zlc_frontend", "zlc_neutral_atom"}
+    assert set(entry_specs("zou_lab_control.commands")) == {
+        "capture", "check", "device_manager", "evidence", "figure_viewer", "fpga",
+        "pulse_editor", "pulse_server", "slm_server", "task_console",
+    }
+    assert set(entry_specs("zou_lab_control.evidence")) == {
+        "software", "gui_offscreen", "virtual_vertical", "notebook_offline",
+        "real_screen", "hardware",
+    }
+    from importlib import import_module
+
+    for spec in entry_specs("zou_lab_control.commands").values():
+        module_name, attribute = spec.split(":", 1)
+        assert callable(getattr(import_module(module_name), attribute))
 
 
-def test_the_tool_is_runnable_from_outside_the_workspace() -> None:
-    """The namespace-package trap only shows up from another directory.
+def test_manual_evidence_never_prepares_an_automated_lane(monkeypatch, capsys) -> None:
+    from zou_lab_control_v2.__main__ import evidence
 
-    Running it from the workspace root would let a directory that merely sits
-    beside an uninstalled package stand in for a real install -- which is
-    exactly how zlc_ui appeared to be installed when it was not.
-    """
+    monkeypatch.setenv("QT_QPA_PLATFORM", "windows")
+    monkeypatch.setenv("MPLBACKEND", "QtAgg")
+    for lane in ("real_screen", "hardware"):
+        assert evidence([lane]) == 2
+    assert os.environ["QT_QPA_PLATFORM"] == "windows"
+    assert os.environ["MPLBACKEND"] == "QtAgg"
+    assert capsys.readouterr().out.count("NOT EXECUTED") == 2
 
-    with tempfile.TemporaryDirectory() as elsewhere:
-        root = Path(__file__).resolve().parents[3]
-        environment = dict(
-            os.environ,
-            PYTHONPATH=(
-                str(root)
-                + os.pathsep
-                + os.environ.get("PYTHONPATH", "")
-            ),
-        )
-        script = (
-            "import zou_lab_control_v2\n"
-            "from zlc_workbench.tools import check_environment as tested_module\n"
-            "print(tested_module.__file__)\n"
-            "from zou_lab_control_v2 import __main__ as product_entry\n"
-            "raise SystemExit(product_entry.main(['check']))\n"
-        )
-        completed = subprocess.run(
-            [sys.executable, "-c", script],
-            cwd=elsewhere,
-            capture_output=True,
-            text=True,
-            env=environment,
-        )
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "resolve to their own repo" in completed.stdout
+
+def test_automated_evidence_forces_installed_offscreen_environment(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from zou_lab_control_v2 import __main__ as product_entry
+    from zlc_workbench.tools import check_environment
+
+    repo = tmp_path / "source"
+    repo.mkdir()
+    (repo / "pyproject.toml").write_text("[project]\nname='evidence-source'\n")
+    owned = Path(product_entry.__file__).resolve()
+    monkeypatch.setattr(
+        product_entry,
+        "distribution",
+        lambda _name: SimpleNamespace(
+            files=(owned,),
+            locate_file=lambda item: item,
+        ),
+    )
+    monkeypatch.setattr(check_environment, "check", lambda: [])
+    monkeypatch.setattr(product_entry, "_pytest_process", lambda _names, _paths: 0)
+    monkeypatch.setenv("QT_QPA_PLATFORM", "windows")
+    monkeypatch.setenv("MPLBACKEND", "QtAgg")
+    monkeypatch.setenv("ZLC_TEST_INSTALLED", "0")
+    monkeypatch.setenv("PYTHONPATH", "source-test-path")
+
+    assert product_entry.evidence(
+        ["virtual_vertical", "--repo", str(repo)]
+    ) == 0
+    assert os.environ["ZLC_TEST_INSTALLED"] == "1"
+    assert os.environ["PYTHONPATH"] == ""
+    assert os.environ["QT_QPA_PLATFORM"] == "offscreen"
+    assert os.environ["MPLBACKEND"] == "Agg"

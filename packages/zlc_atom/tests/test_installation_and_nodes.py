@@ -64,7 +64,7 @@ def test_device_discovery_is_the_leaf_manifest() -> None:
     assert not any(item.type_id.startswith(("rf", "mot", "temperature")) for item in descriptors)
 
 
-def test_sequencer_control_is_plugin_owned_and_lazily_discovered() -> None:
+def test_sequencer_control_is_plugin_owned_and_lazily_discovered(tmp_path: Path) -> None:
     script = r"""
 import zou_lab_control_v2
 import sys
@@ -105,7 +105,7 @@ assert calls == [{
 """
     completed = subprocess.run(
         [sys.executable, "-c", script],
-        cwd=Path(__file__).resolve().parents[3],
+        cwd=tmp_path,
         check=False,
         capture_output=True,
         text=True,
@@ -358,6 +358,8 @@ def test_virtual_installation_runs_measurement_occupancy_and_same_shot_front(
         assert result.artifact_path != second.artifact_path
         artifact = json.loads(result.artifact_path.read_text(encoding="utf-8"))
         assert set(artifact) == {
+            "format",
+            "version",
             "site_map",
             "models",
             "default_model_kind",
@@ -375,9 +377,12 @@ def test_virtual_installation_runs_measurement_occupancy_and_same_shot_front(
             == {"site_n_test", "site_n_train_dark", "site_n_train_bright"}
             for model_report in artifact["report"]["models"].values()
         )
-        assert result.calibration.n_sites == len(
-            installation.world.geometry.site_centers_xy
+        all_sites = len(installation.world.geometry.site_centers_xy)
+        observable_sites = int(
+            np.count_nonzero(installation.world._site_loading_probabilities() > 0.0)
         )
+        assert result.calibration.n_sites == observable_sites
+        assert all_sites - observable_sites >= int(np.ceil(0.10 * all_sites))
         assert result.calibration.frame_contract.image_shape == (96, 128)
         assert result.calibration.frame_contract.sensor_shape == (96, 128)
         assert result.calibration.frame_contract.roi_xywh == (0, 0, 128, 96)
@@ -398,7 +403,11 @@ def test_virtual_installation_runs_measurement_occupancy_and_same_shot_front(
         occupancy = occupancy_node.process(
             camera_cycle_snapshot([(record,) for record in result.capture.short]),
         )
-        assert occupancy.counts.shape == (30, 1, 35)
+        assert occupancy.counts.shape == (
+            30,
+            1,
+            result.calibration.n_sites,
+        )
         np.testing.assert_array_equal(occupancy.artifacts["counts"].block.values, occupancy.counts)
         assert len(result.capture.frames) == 90
         assert sum(len(group) for group in result.capture.reference) == 60
@@ -427,7 +436,8 @@ def test_virtual_installation_auto_calibration_path_matches_usage_notebook(
         occupancy = OccupancyProcessor(result.calibration).process(
             frames,
         )
-        assert occupancy.counts.shape == (30, 1, 35)
+        expected_shape = (30, 1, result.calibration.n_sites)
+        assert occupancy.counts.shape == expected_shape
         counts_artifact = occupancy.artifacts["counts"]
         assert isinstance(counts_artifact, OwnedSnapshot)
         assert counts_artifact.block.schema.repeat_axis.role is REPEAT
@@ -444,12 +454,14 @@ def test_virtual_installation_auto_calibration_path_matches_usage_notebook(
         # shared between publications that describe the same thing.
         assert site_axis == result.calibration.site_map.site_axis
         assert site_axis.role is SITE
-        assert site_axis.coordinates == tuple(range(1, 36))
+        assert site_axis.coordinates == tuple(
+            range(1, result.calibration.n_sites + 1)
+        )
         assert site_axis.coordinate_labels is None
         assert tuple(site_axis.coordinates) == tuple(
             range(1, len(result.calibration.site_map.site_ids) + 1)
         )
-        assert counts_artifact.block.values.shape == (30, 1, 35)
+        assert counts_artifact.block.values.shape == expected_shape
     finally:
         plane.close()
         installation.close()

@@ -21,8 +21,13 @@ PLOT_TESTS = REPO_ROOT / "packages" / "zlc_plot" / "tests"
 
 def _run_qt(code: str) -> None:
     environment = dict(os.environ)
-    environment["PYTHONPATH"] = os.pathsep.join(
-        (str(REPO_ROOT), str(SRC), str(PLOT_TESTS))
+    environment["PYTHONPATH"] = (
+        str(PLOT_TESTS) if environment.get("ZLC_TEST_INSTALLED") == "1"
+        else os.pathsep.join(
+            value
+            for value in (environment.get("PYTHONPATH", ""), str(PLOT_TESTS))
+            if value
+        )
     )
     environment["QT_QPA_PLATFORM"] = "offscreen"
     environment.setdefault("MPLBACKEND", "Agg")

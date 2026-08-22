@@ -1,185 +1,200 @@
-# Zou lab control
+# Zou Lab Control
 
-Neutral-atom experiment control: one repository, one distribution, eight layers.
+Neutral-atom experiment control shipped as one Python distribution with eight
+internal dependency layers.
 
-The current product path uses the same descriptor/catalog/NodeHost/TaskConsole
-route for virtual and physical adapters:
+## Install one product
+
+The root `pyproject.toml` is the only distribution manifest and
+`constraints.txt` is the only dependency constraint surface. The eight
+`packages/zlc_*/src` trees are internal layers, not standalone wheels.
+
+```powershell
+python -m pip install -c constraints.txt -e ".[notebook]"
+zlc check
+```
+
+On Windows, `bin\install_requirements.bat` performs the constrained root install
+and provenance check. A release wheel uses the same constraint surface:
+
+```powershell
+python -m pip install -c constraints.txt "zou_lab_control-2.0.0-py3-none-any.whl[dev]"
+zlc check
+```
+
+The wheel contains the product bootstrap, all eight layers, Calibration/Scan
+templates, the SLM profile, Plot font, and tracked FPGA RTL/XDC/Tcl assets.
+
+## Product commands and launchers
+
+The installed command is manifest-driven:
 
 ```text
-Calibration Task -> one result -> calibration JSON + six report images
-Camera Measurement -> frames signal
-Occupancy Processor(frames + calibration path) -> occupancy data
-SLM Editor Pattern -> base phase + optional Zernike -> science phase -> explicit Send
-SLM Feedback(calibration + Science Context + pulse + exposure) -> single-frame qCMOS bright-dark -> completed/stalled Science Context
-Image/other Plot Panel -> Panel Edit Save Fig
+zlc task_console      experiment Device Manager -> Task Console flow
+zlc device_manager    Device Manager
+zlc pulse_editor      Pulse Editor
+zlc figure_viewer     saved Figure archive viewer
+zlc pulse_server      separated FPGA-machine owner
+zlc slm_server        separated DVI-default / explicit-USB SLM owner
+zlc fpga              FPGA geometry/resource tool
+zlc check             installed-product provenance check
+zlc evidence          formal evidence lanes
 ```
 
-TaskConsole and every device Control share the same `Experiment` session,
-named devices, virtual world, and sequencer; Pulse and SLM Editors open on
-demand from their loaded device cards and do not create a second session or IPC
-service. SLM feedback consumes every finite single-frame shot from the canonical
-Camera Measurement dataset. Calibration supplies only registered site BOX
-geometry; the selected Pulse and camera exposure are explicit operator inputs.
-For every candidate, each site's BOX values across shots are fitted as dark and
-bright Gaussian populations, and `bright - dark` is the feedback observable;
-the mixture fraction is loading probability, not the optimization metric.
-Per-site normalized Target share, contrast and loading history drive one
-single-batch control step. A dark-only single Gaussian receives the operator's
-authored absolute share increase; loaded sites divide the remaining power by
-their authored feedback gain, and learned dark/loaded brackets prevent later
-normalization from pushing a site below its loading floor. Each candidate uses
-exactly the authored shots once (100 by default), then must solve and apply a
-different phase before another acquisition. The Task normally completes every
-authored update and then retains the best measured candidate; it has no
-built-in uniformity magic number. A separately named observable-site progress
-curve remains live while some sites have not loaded. There is no automatic
-retry or independent validation acquisition.
+The Windows files in `bin\` are thin shortcuts. They resolve Python, select one
+manifest command, and forward the original argument vector once; they do not
+modify `PYTHONPATH` or rebuild arguments.
 
-The real SLM device type is `slm.hamamatsu_x15213`. Like the real Pulse
-sequencer, its apparatus parameters are the server host and port; the process
-started by `bin/slm_server.bat` is the sole SLM output owner. It defaults to the
-previously working exact-raster DVI presenter and uses the vendor DLL only when
-the server is explicitly started with `--transport usb`. A newly connected
-real adapter reports its command state as unknown; only an acknowledged DVI
-presentation (or USB write/readback) and authored optical-settle wait establish
-known command truth. The Editor
-has only **Pattern** and **Wavefront** pages. Pattern keeps the independent
-target and pre-correction science-phase plots at the established
-`2x2 = 490 x 357` logical size; a shared **Size** selector also controls the
-independent Wavefront preview, and scrollable canvases keep larger presets from
-overlapping or being clipped. A strict Target stores intensity plus objective;
-a strict Science Context stores Pattern, numeric pupil, operator wavefront,
-typed system-correction reference and command receipt. Loading or saving either
-artifact does not write the SLM; only **Send to SLM** establishes a known command.
-
-The vendor correction BMP stays on the SLM-server computer and is selected by
-the server configuration; it is composed by the adapter only on the next
-explicit Send. Each correction mutation advances the device mapping revision; a command
-receipt freezes the transport identity, profile, wavelength, orientation, correction
-and mapping revision used by that command. The serial profile records the model,
-head serial, phase-curve wavelength and source, and settle source. The current
-LSH0804382 curve and settle provenance are explicitly unverified, so the
-experiment-machine SDK-header, calibration, orientation, readback and optical
-settle runbook remains required before hardware acceptance. A correction map
-labelled for another wavelength is rejected rather than passed through an
-unverified two-dimensional unwrap.
-
-Virtual loading follows the same shot logic the experiment expects: every
-cooling rise while the trap output is high independently redraws each active
-trap at one base loading probability. Coherent local depth controls active
-topology, occupied qCMOS brightness and release survival, but never
-exponentially boosts loading; a removed trap loses its atom and cannot
-resurrect it merely by reappearing.
-Calibration publishes only its current capture preview while
-running; after the loop it computes one result, writes its JSON, and passes that
-same result to `zlc_plot` for six PNG report images. Workbench does not display
-or re-analyse the report. Camera Measurement owns per-run exposure/ROI and uses
-`Repeat = 0` for infinite acquisition.
-
-The three TaskConsole save actions are intentionally separate: header **Save
-Layout** writes stopped pipeline/layout wiring without data, header **Save
-Screenshot** writes one ordinary image of the GUI, and Panel Edit **Save Fig**
-writes only that panel's displayed frozen image/data plus its run-time call-chain
-metadata and actual device snapshots.
-
-```
-bin\install_requirements.bat   once per machine: numpy, matplotlib, PyQt5, ...
-bin\experiment.bat             Device Manager Init -> TaskConsole; device Control windows on demand
-bin\pulse_editor.bat           the pulse window on its own
-bin\figure_viewer.bat          open a saved figure archive; no experiment session needed
-bin\update.bat                 git pull, re-check dependencies, prove it still imports
-bin\run_server.bat             the pulse server, on the machine wired to the board
-bin\build_and_program.bat      build if needed, then program the volatile FPGA; explicit build-only/flash modes
-bin\estimate_resources.bat     what the current board geometry costs on the part
+```text
+bin\experiment.bat             Device Manager Init -> Task Console
+bin\pulse_editor.bat           Pulse Editor
+bin\figure_viewer.bat          Figure Viewer
+bin\run_server.bat             pulse server only; never builds/programs FPGA
+bin\slm_server.bat             sole SLM server owner; DVI default
+bin\estimate_resources.bat     installed geometry/resource estimate
+bin\build_and_program.bat      build if needed, then program volatile FPGA;
+                               build-only/flash remain explicit modes
 ```
 
-Everything a human clicks is in `bin\`, the three FPGA scripts included. They
-operate on `packages\zlc_pulse\fpga`, where the RTL, the board config and the
-build tree live: being clickable and being owned are different questions, and
-only the first one is about where a file sits.
+Run experiment windows from the folder owning `pulses\`, `data\`, and
+`apparatus.json`, or pass `--workspace`. Set `ZLC_PY_CMD` only when the intended
+Python is outside normal discovery.
 
-Run them from your experiment folder — the one holding `pulses\`, `data\` and
-`apparatus.json`. They are deliberately not passed a workspace: a
-double-clicked launcher starts in `bin\`, which is nobody's experiment.
+## One runtime path
 
-They find Python themselves, and print which one they found: PATH first,
-then conda's base and the usual Anaconda / Miniconda / python.org install
-folders. Anaconda in particular recommends staying off PATH, and a machine
-equipped that way is still a machine with Python on it. If yours lives
-somewhere else, say so once and every launcher obeys:
+Virtual and physical devices use the same descriptor/catalog/NodeHost/session
+path:
 
-```
-setx ZLC_PY_CMD "C:\Users\you\anaconda3\python.exe"
-```
-
-## Nothing is installed, and that is deliberate
-
-This checkout is not `pip install`ed.  The code is reached by PATH: every
-launcher puts this folder on `PYTHONPATH` and runs
-`python -m zou_lab_control_v2 <window>`, and importing that package is what
-puts all eight layers ahead of anything else.  A notebook does the same with
-one line:
-
-```python
-import zou_lab_control_v2   # first, before any zlc_* import
-import zlc_workbench
+```text
+Calibration Task -> calibration JSON + report images
+Camera Measurement -> canonical frames Dataset
+Occupancy Processor(frames + Calibration) -> counts/occupied/judged frame
+SLM Editor -> strict Target/Science Context -> explicit Send
+SLM Feedback(Calibration + Science Context + pulse + exposure) -> completed/stalled Context
+Panel -> matching data/fit/overlay -> archive-first Save Fig
 ```
 
-The reason is a failure this project has already paid for.  Install the same
-names twice -- once from here, once from somewhere else -- and `import
-zlc_data` answers with whichever pip wired up, so a change made here appears
-to do nothing, repeatedly, with nothing on screen to say why.  So
-`zou_lab_control_v2` refuses out loud if a `zlc_*` module was imported before
-it: arriving second is exactly the case that used to pass silently.
+Task Console, Device Control, Pulse Editor and SLM Editor share one
+`ExperimentSession`, named devices, signal plane and sequencer. Loaded-device
+cards expose Control and Close. Adding, removing, renaming or reconfiguring a
+device does not recreate the whole session: unchanged canonical device leaves,
+Task Console and Panels are retained, while a key-scoped maintenance barrier
+stops only conflicting Logic/commands. A role rename preserves stable
+`instance_id`; partial close/build failures keep every still-open leaf reachable,
+project the effective live config, and remain retryable.
 
-On the experiment machine the update is therefore just a pull.
-`bin\update.bat` does it, re-checks the dependency list, and proves the code
-still imports -- before you find out during a run.
+Runtime owns complete live/final Dataset truth. Plot surfaces keep one
+active+latest solve and atomically show matching data/fit revisions. The three
+save actions stay separate: Save Layout writes stopped wiring, Save Screenshot
+writes a GUI image, and Panel Save Fig writes only that panel's frozen data/image
+plus actual run/device provenance.
 
-## The eight layers, and what each is allowed to know
+### Camera and qCMOS
 
-Each lives under `packages/` with its own `src/`, `tests/`, `docs/` and
-`notebooks/`. The order is the dependency order — a layer may know the ones
-above it and must not know the ones below.
+Camera Measurement owns its exposure, ROI, frames-per-cycle and repeat; Pulse
+timing does not infer or validate camera exposure. Real and virtual adapters
+publish only frames actually acquired, with source ordinals contiguous from zero
+for each arm.
 
-| layer | owns | may not |
+qCMOS applies only changed ROI/exposure settings. An unchanged Start does not
+rewrite the complete sensor working point, and Camera Measurement freezes the
+authoritative readback returned by configuration instead of issuing another full
+property query. Auto Panels connect to the canonical publication/preview signal;
+they must not wait for a redundant reconfiguration or a fixed five-second poll.
+Photoelectron output is used only when the device provides complete conversion;
+otherwise the effective run falls back to native counts while the authored draft
+remains visible.
+
+### SLM and fluorescence feedback
+
+The real device type is `slm.hamamatsu_x15213`; apparatus parameters are server
+host and port. The server is the sole DVI/USB output owner. DVI exact-raster is
+the default and does not load the vendor DLL; USB is selected explicitly. The
+trusted-lab-LAN proxy has no TLS/authentication and must not be exposed publicly.
+
+Target v2 stores intensity/objective. Science Context v2 stores the frozen
+Target, numeric pupil, Pattern/base phase, operator wavefront, correction
+reference and command receipt. Loading/saving artifacts never writes hardware;
+only explicit Send or the Feedback task's own confirmed apply establishes a
+known command.
+
+Calibration remains an SLM-independent camera/readout artifact and supplies only
+registered site BOX geometry to Feedback. Feedback uses one canonical single-
+frame Camera Measurement batch per candidate (100 authored shots by default).
+Finite single/double Gaussian fits are valid; dark-only sites receive the
+authored absolute boost, loaded sites change relatively under feedback gain and
+maximum-step bounds, invalid sites hold, and history protects the learned loading
+floor. Every next acquisition requires a confirmed different phase. The task
+runs all authored updates (12 by default), then keeps the best measured
+candidate; it has no built-in uniformity magic-number stop and no hidden retry or
+validation batch.
+
+The virtual plant uses one commanded-phase Fourier trap roster, one shared
+non-symmetric imaging PSF and a fixed apparatus aberration independent of Target
+or grid. With 20 µK cooling, traps below 500 µK do not load; the 520 µK nominal
+depth deliberately places ordinary optical nonuniformity near that edge.
+
+### Pulse and FPGA
+
+Pulse cycle count, Camera frames-per-cycle and Dataset repeat are independent.
+The Pulse server alone owns UART/JTAG hardware; normal disconnect drives SAFE,
+UART auto-selection requires the word-63 fingerprint, and explicit UART failure
+does not silently choose another port.
+
+The FPGA host validates part/device identity, target ABI, clock, geometry,
+counts and delay-FIFO capacity before Load. SAFE independently gates TTL/DAC;
+DONE waits through final FIFO/latch completion. Vivado scratch stays under the
+FPGA build root. `run_server` never programs hardware; the default
+`build_and_program` path builds/reuses a valid project and then programs volatile
+FPGA state, while flash is always explicit. Timing/build evidence and the
+remaining board acceptance boundary are recorded in `IMPLEMENTATION_PLAN.md`
+and `packages/zlc_pulse/fpga/README.md`.
+
+## Persistence and notebook
+
+Figure writer emits v2; its one reader migrates the exact supported v1 grammar
+and rejects unknown formats. Calibration writer emits
+`zlc.calibration.readout/v1`; its owner migrates only the two known unversioned
+roots without inventing missing statistics.
+
+The only supported tutorial is
+`packages/zlc_workbench/notebooks/usage.ipynb`. It uses the installed product, a
+temporary workspace, virtual devices, canonical Camera Measurement publication
+and `NotebookView`; it contains no hardware cell, source-path bootstrap, saved
+output or execution count.
+
+## Evidence lanes
+
+Automated release lanes run from a fresh wheel outside the checkout:
+
+```powershell
+zlc evidence software --repo C:\path\to\Zou_lab_control_v2
+zlc evidence gui_offscreen --repo C:\path\to\Zou_lab_control_v2
+zlc evidence virtual_vertical --repo C:\path\to\Zou_lab_control_v2
+zlc evidence notebook_offline --repo C:\path\to\Zou_lab_control_v2
+```
+
+`real_screen` and `hardware` are manual-only; the CLI reports them as
+`NOT EXECUTED` and never touches a device. Software/virtual evidence must not be
+presented as real monitor, camera, optical SLM/Feedback, FPGA program/flash or
+external DAC/TTL acceptance. The authoritative manual runbooks are the package
+READMEs; receipts record product/module paths, device identities, requested and
+actual working points, raw evidence, timestamp, operator observations and
+pass/fail.
+
+## Layer boundaries
+
+| Layer | Owns | Must not own |
 |---|---|---|
-| `zlc_data` | what a dataset IS: axes, validity, snapshots, manifests | everything else |
-| `zlc_durable` | writing a file so a crash cannot half-write it | domain, plots, Qt |
-| `zlc_runtime` | generations, publication, board-coherent ticks | what any signal MEANS |
-| `zlc_plot` | drawing, fitting, panel layout | scheduling, devices |
-| `zlc_ui` | windows and controls | data, plots, domain — **and no Qt escapes it** |
-| `zlc_pulse` | the sequence model, the compiler, the wire | anything above |
-| `zlc_atom` | physics: headless foundation plus concrete node/device plugins and their own report or control surface | Qt/plot dependencies in foundation/common/install/framework; Workbench-owned plugin science |
-| `zlc_workbench` | composition and wiring, and nothing else | inventing domain or UI |
+| `zlc_data` | immutable scientific schema, validity, selection and codecs | Runtime, Qt, devices, paths |
+| `zlc_durable` | atomic publication and workspace paths | scientific meaning |
+| `zlc_runtime` | lifecycle, canonical accumulation, fronts and scheduling | plugin physics, plotting, Qt |
+| `zlc_plot` | projection, rendering, fit, overlay and selector | Task/device ownership |
+| `zlc_ui` | Qt views and plain view models | Runtime/Plot/device/domain truth |
+| `zlc_pulse` | pulse model, compiler, wire and transport | measurement policy |
+| `zlc_atom` | device plugins and atom-science nodes | Workbench composition |
+| `zlc_workbench` | session/composition/device claims/layout | plugin science or second pipelines |
 
-Two rules are mechanically enforced rather than remembered, because both were
-broken before they were checked:
-
-* **Every window is one call and one handle.** `zlc_ui` hands out
-  `open_pulse_editor()`, `open_task_console()`, `open_figure_viewer()`,
-  `open_device_manager()`; each answers with a handle carrying signals and
-  `set_*` methods. Nothing outside `zlc_ui` holds a QWidget, and
-  `packages/zlc_workbench/tests/test_gui_seam.py` fails if anything tries.
-  Whatever the outside can hold, the outside will assemble — and then what is
-  on screen has two owners.
-* **Every package is reached through its front door.** No layer imports
-  another's submodule; if a name is needed, it goes on that layer's facade with
-  its contract and its tutorial updated. The count went 45 → 0.
-
-## Running the tests
-
-```
-python -m pytest
-```
-
-All eight suites, from the top: a change that crosses two layers is checked by
-both in one run, which is the point of merging them.
-
-## Where the code lives
-
-This tree is the product. The eight standalone repositories beside it
-(`Github/zlc_data`, `Github/zlc_ui`, …) are where it was built and are kept for
-their history; they are not a second place to edit. If `import zlc_data`
-resolves to one of them, this checkout is not the one running — which
-`python -m zou_lab_control_v2 check` reports explicitly.
+`ARCHITECTURE_DESIGN.md` records final invariants. `IMPLEMENTATION_PLAN.md`
+records the current M7 checkpoint, evidence already obtained, pending final
+lanes, and explicit experiment-machine acceptance boundary.

@@ -523,7 +523,11 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         occupancy_result = occupancy_node.process(
             camera_cycle_snapshot([(record,) for record in task_result.capture.short]),
         )
-        assert occupancy_result.counts.shape == (30, 1, 35)
+        assert occupancy_result.counts.shape == (
+            30,
+            1,
+            task_result.calibration.n_sites,
+        )
         assert (
             occupancy_result.artifacts["occupied"].expanded_validity().shape
             == occupancy_result.counts.shape

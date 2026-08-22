@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-__version__ = "0.1.0"
 _PACKAGE_DIR = Path(__file__).resolve().parent
 if _PACKAGE_DIR.name != "zlc_pulse" or __package__ != "zlc_pulse":
     raise ImportError(f"unexpected zlc_pulse installation path: {_PACKAGE_DIR}")
@@ -103,7 +102,6 @@ __all__ = [
     "scan_rows_to_wire",
     "scan_rows_from_wire",
     "RemoteError",
-    "__version__",
 ]
 
 

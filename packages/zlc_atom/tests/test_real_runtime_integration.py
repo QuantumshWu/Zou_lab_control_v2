@@ -125,7 +125,11 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
                 [(record,) for record in task_result.capture.short]
             ),
         )
-        assert occupancy.counts.shape == (30, 1, 35)
+        assert occupancy.counts.shape == (
+            30,
+            1,
+            task_result.calibration.n_sites,
+        )
 
         oracle = _oracle()
         result = calibrate(

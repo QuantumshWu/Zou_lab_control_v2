@@ -1,7 +1,7 @@
 # Architecture
 
-`zlc-plot` 是一个安装单元，依赖独立的角色轴 `zlc-data`。本仓只发行
-`zlc_plot`；科学数据对象始终来自 `zlc_data`，绘图仓不再捆绑第二份数据模型。
+`zlc_plot`是单一`zou-lab-control` distribution内的绘图层；科学数据对象始终
+来自同一产品的`zlc_data`角色轴层。两层保持依赖边界，但不再各自发行wheel。
 
 `zlc_plot`：view specification、Matplotlib renderer、selector、fit、固定 surface
 和 Notebook/PyQt5 adapter。

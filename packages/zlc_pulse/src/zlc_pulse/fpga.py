@@ -62,10 +62,6 @@ __all__ = [
 
 
 def _main(argv: Sequence[str] | None = None) -> int:
-    """Run the capacity/geometry CLI from its build-specific module."""
+    """Run the manifest-selected FPGA capacity/geometry command."""
 
     return _wire._main(argv)
-
-
-if __name__ == "__main__":
-    raise SystemExit(_main())

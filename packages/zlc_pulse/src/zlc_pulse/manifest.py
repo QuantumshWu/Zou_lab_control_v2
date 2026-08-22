@@ -7,12 +7,11 @@ from pathlib import Path
 import re
 
 from .model import PORT_CLOCK, PORT_DAC, PulsePortSpec, PulseTarget
-from .wire import StreamerParams, load_streamer_config
+from .wire import StreamerParams, _fpga_asset_path, load_streamer_config
 
 
-_FPGA = Path(__file__).resolve().parents[2] / "fpga"
-DEFAULT_XDC_PATH = _FPGA / "board_config" / "board.xdc"
-DEFAULT_TOP_PATH = _FPGA / "pulse_streamer" / "zlc_pulse_streamer_top.v"
+DEFAULT_XDC_PATH = _fpga_asset_path("board_config", "board.xdc")
+DEFAULT_TOP_PATH = _fpga_asset_path("pulse_streamer", "zlc_pulse_streamer_top.v")
 _PIN = re.compile(
     r"\bPACKAGE_PIN\s+(?P<pin>[^\s}\]]+).*?\[\s*get_ports\s+"
     r"(?:\{\s*(?P<braced>[^{}]+?)\s*\}|(?P<plain>[A-Za-z_][A-Za-z0-9_]*(?:\[\d+\])?))\s*\]",

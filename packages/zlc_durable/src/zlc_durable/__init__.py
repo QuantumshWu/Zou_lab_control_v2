@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from pathlib import Path as _Path
 
-__version__ = "0.1.0"
 _PACKAGE_DIR = _Path(__file__).resolve().parent
 if _PACKAGE_DIR.name != "zlc_durable" or __package__ != "zlc_durable":
     raise ImportError(f"unexpected zlc_durable installation path: {_PACKAGE_DIR}")
@@ -38,5 +37,4 @@ __all__ = [
     "day_folder",
     "durable_makedirs",
     "unique_path",
-    "__version__",
 ]

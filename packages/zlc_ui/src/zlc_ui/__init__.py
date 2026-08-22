@@ -49,8 +49,7 @@ _EXPORTS = {
     "VALIDATOR_INT": ("zlc_ui.pulse.models", "VALIDATOR_INT"),
 }
 
-__all__: tuple[str, ...] = ("__version__", *tuple(sorted(_EXPORTS)))
-__version__ = "0.1.0"
+__all__: tuple[str, ...] = tuple(sorted(_EXPORTS))
 
 
 def __getattr__(name: str):

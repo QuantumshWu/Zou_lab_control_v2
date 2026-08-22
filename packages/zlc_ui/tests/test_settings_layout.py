@@ -26,7 +26,10 @@ SRC = ROOT / "src"
 
 def _run_qt(code: str) -> None:
     environment = dict(os.environ)
-    environment["PYTHONPATH"] = os.pathsep.join((str(REPO_ROOT), str(SRC)))
+    environment["PYTHONPATH"] = (
+        "" if environment.get("ZLC_TEST_INSTALLED") == "1"
+        else os.pathsep.join((str(REPO_ROOT), str(SRC)))
+    )
     environment["QT_QPA_PLATFORM"] = "offscreen"
     completed = subprocess.run(
         [sys.executable, "-c", code],

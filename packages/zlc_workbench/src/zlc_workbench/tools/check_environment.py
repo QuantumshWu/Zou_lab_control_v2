@@ -1,37 +1,16 @@
-"""Assert that every package name resolves to the repo that owns it.
-
-This project has been bitten repeatedly by shadow imports: an old monolith
-installed under the same top-level names, a package that was never installed
-resolving to an empty namespace package because the current directory happened
-to sit beside it, and an editable install pointing at a copy that had been
-deleted.  In every case ``import`` succeeded and the wrong code ran.
-
-Run this before anything else, from a directory that is NOT the workspace root,
-so a namespace package cannot mask a missing install.
-"""
+"""Verify that every layer comes from this one source or installed product."""
 
 from __future__ import annotations
 
 import importlib.util
-import sys
+from importlib.metadata import PackageNotFoundError, distribution, packages_distributions
 from pathlib import Path
 
+from zou_lab_control_v2 import DISTRIBUTION_NAME, ROOT, entry_specs
 
-WORKSPACE = Path(__file__).resolve().parents[4]
 
-OWNED = {
-    "zlc_data": "zlc_data",
-    "zlc_runtime": "zlc_runtime",
-    "zlc_plot": "zlc_plot",
-    "zlc_pulse": "zlc_pulse",
-    "zlc_ui": "zlc_ui",
-    "zlc_atom": "zlc_atom",
-    "zlc_workbench": "zlc_workbench",
-    "zlc_durable": "zlc_durable",
-}
-
-# Names the pre-split monolith used.  Nothing may resolve them: the reference
-# tree is a read-only source to migrate FROM, never an importable dependency.
+_LAYER_GROUP = "zou_lab_control.layers"
+OWNED = {name: name for name in entry_specs(_LAYER_GROUP)}
 RETIRED = ("zlc_storage", "zlc_frontend", "zlc_neutral_atom")
 
 
@@ -44,42 +23,55 @@ def _origin(name: str) -> tuple[str, Path | None]:
         return "missing", None
     if spec.origin in (None, "namespace"):
         locations = list(spec.submodule_search_locations or ())
-        return "namespace", Path(locations[0]) if locations else None
-    return "module", Path(spec.origin)
+        return "namespace", Path(locations[0]).resolve() if locations else None
+    return "module", Path(spec.origin).resolve()
+
+
+def _normalized(name: str) -> str:
+    return name.lower().replace("_", "-")
 
 
 def check() -> list[str]:
     problems: list[str] = []
+    source_manifest = ROOT / "pyproject.toml"
+    installed_files: set[Path] = set()
+    if not source_manifest.is_file():
+        try:
+            product = distribution(DISTRIBUTION_NAME)
+        except PackageNotFoundError:
+            return [f"{DISTRIBUTION_NAME}: product distribution is not installed"]
+        installed_files = {
+            Path(product.locate_file(item)).resolve()
+            for item in (product.files or ())
+        }
+    ownership = packages_distributions()
 
-    for name, repo in OWNED.items():
+    for name in OWNED:
         kind, where = _origin(name)
-        expected = WORKSPACE / repo / "src" / name
-        if kind == "missing":
-            problems.append(f"{name}: not installed (pip install -e {WORKSPACE / repo})")
-        elif kind == "namespace":
-            problems.append(
-                f"{name}: resolves to an EMPTY namespace package at {where} — it is not "
-                f"installed, and only the current directory made the import appear to work"
-            )
-        elif expected not in where.parents and where.parent != expected:
-            problems.append(f"{name}: resolves to {where}, expected under {expected}")
+        if kind != "module" or where is None:
+            problems.append(f"{name}: expected an installed module, got {kind} at {where}")
+            continue
+        if source_manifest.is_file():
+            expected = (ROOT / "packages" / name / "src" / name).resolve()
+            if where.parent != expected:
+                problems.append(f"{name}: resolves to {where}, expected under {expected}")
+        else:
+            owners = {_normalized(item) for item in ownership.get(name, ())}
+            expected_owners = {_normalized(DISTRIBUTION_NAME)}
+            if owners != expected_owners or where not in installed_files:
+                problems.append(
+                    f"{name}: {where} owners={sorted(owners)}; expected only "
+                    f"{DISTRIBUTION_NAME}"
+                )
 
     for name in RETIRED:
         kind, where = _origin(name)
         if kind != "missing":
-            problems.append(
-                f"{name}: still importable from {where} — the pre-split monolith is a "
-                f"read-only reference, not an installed package (pip uninstall zou-lab-control)"
-            )
-
+            problems.append(f"{name}: retired package is still importable from {where}")
     return problems
 
 
 def main() -> int:
-    if Path.cwd() == WORKSPACE:
-        print(f"run this from outside {WORKSPACE}, or a namespace package can mask a missing install")
-        return 2
-
     problems = check()
     for name in OWNED:
         kind, where = _origin(name)
@@ -90,9 +82,6 @@ def main() -> int:
         for problem in problems:
             print(f"FAIL  {problem}")
         return 1
-    print(f"all {len(OWNED)} packages resolve to their own repo; {len(RETIRED)} retired names are gone")
+    mode = "source manifest" if (ROOT / "pyproject.toml").is_file() else DISTRIBUTION_NAME
+    print(f"all {len(OWNED)} layers belong to one {mode}; {len(RETIRED)} retired names are gone")
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

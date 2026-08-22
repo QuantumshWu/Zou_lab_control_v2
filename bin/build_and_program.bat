@@ -33,9 +33,9 @@ rem config, its build.  The path is derived from the repository root rather
 rem than from %~dp0, so moving the launcher does not move the board.
 set "FPGA_DIR=%~dp0..\packages\zlc_pulse\fpga\"
 for %%I in ("%~dp0..") do set "ZLC_HOME=%%~fI"
-for %%I in ("%FPGA_DIR%..") do set "REPO_ROOT=%%~fI"
+for %%I in ("%FPGA_DIR%..") do set "PULSE_ROOT=%%~fI"
 set "STREAMER_DIR=%FPGA_DIR%pulse_streamer"
-set "ZLC_REPO_ROOT=%REPO_ROOT%"
+set "ZLC_REPO_ROOT=%ZLC_HOME%"
 set "ZLC_CREATE_TCL=create_project.tcl"
 set "ZLC_PROGRAM_TCL=program_fpga.tcl"
 set "ZLC_PROJ_SUB=ps"
@@ -67,10 +67,11 @@ call :zlc_default_paths
 call :zlc_verify_sources
 if errorlevel 1 exit /b 1
 
-call "%FPGA_DIR%_resolve_tools.bat" python "%REPO_ROOT%"
+call "%FPGA_DIR%_resolve_tools.bat" python "%ZLC_HOME%"
 if errorlevel 1 exit /b 1
-set "PYTHONPATH=%ZLC_HOME%;%PYTHONPATH%"
-set "ZLC_CFG_JSON=%REPO_ROOT%\fpga\board_config\streamer_config.json"
+call :zlc_require_product
+if errorlevel 1 exit /b 1
+set "ZLC_CFG_JSON=%PULSE_ROOT%\fpga\board_config\streamer_config.json"
 call :zlc_require_config
 if errorlevel 1 exit /b 1
 call :zlc_resolve_part
@@ -165,7 +166,7 @@ echo   set ZLC_PS_PROJECT_DIR=%%CD%%\fpga\build\ps
 exit /b 0
 
 :zlc_verify_sources
-set "ZLC_DEFAULT_XDC=%REPO_ROOT%\fpga\board_config\board.xdc"
+set "ZLC_DEFAULT_XDC=%PULSE_ROOT%\fpga\board_config\board.xdc"
 if not defined ZLC_PS_XDC set "ZLC_PS_XDC=%ZLC_DEFAULT_XDC%"
 set "ZLC_SELECTED_XDC=%ZLC_PS_XDC%"
 if not exist "%STREAMER_DIR%\zlc_edge_streamer.v" (
@@ -229,12 +230,28 @@ echo ZLC FINAL source contract: channels=62 num_slots=4 control=JTAG-to-AXI (jta
 echo ZLC FINAL XDC: !ZLC_SELECTED_XDC!
 exit /b 0
 
+:zlc_require_product
+rem Hardware projection must come from the one installed distribution. Running
+rem from a neutral directory prevents this checkout's bootstrap or a neighboring
+rem standalone layer from masking a missing or stale product install.
+pushd "%TEMP%"
+%ZLC_PY_CMD% -m zou_lab_control_v2 check
+set "ZLC_PRODUCT_STATUS=!ERRORLEVEL!"
+popd
+if not "!ZLC_PRODUCT_STATUS!"=="0" (
+  echo ERROR: the selected Python does not own one valid zou-lab-control product.
+  echo        Run bin\install_requirements.bat, or set ZLC_PY_CMD to the
+  echo        interpreter where the root product is installed.
+  exit /b !ZLC_PRODUCT_STATUS!
+)
+exit /b 0
+
 :zlc_require_config
 if not exist "%ZLC_CFG_JSON%" (
   echo ERROR: canonical FPGA config is missing: %ZLC_CFG_JSON%
   exit /b 1
 )
-pushd "%ZLC_HOME%"
+pushd "%TEMP%"
 %ZLC_PY_CMD% -c "import dataclasses,json,pathlib,sys;import zou_lab_control_v2;from zlc_pulse.fpga import load_streamer_config;from zlc_pulse.wire import StreamerParams;p=pathlib.Path(sys.argv[1]).resolve();pairs=lambda x:dict(x) if len(x)==len(dict(x)) else (_ for _ in ()).throw(ValueError('duplicate key in streamer_config.json'));raw=json.loads(p.read_text(encoding='utf-8'),object_pairs_hook=pairs,parse_constant=lambda x:(_ for _ in ()).throw(ValueError('non-finite JSON constant '+x)));top={'_README','_field_docs','fpga_part','clock_hz','target_pct','params','board'};expected={f.name for f in dataclasses.fields(StreamerParams)}|{'slot_mul_width'};assert isinstance(raw,dict) and set(raw)==top,'streamer_config.json fields are not exact';assert isinstance(raw['params'],dict) and set(raw['params'])==expected,'streamer_config.json params fields are not exact';assert isinstance(raw['board'],dict),'streamer_config.json board must be an object';assert isinstance(raw['fpga_part'],str) and raw['fpga_part'].strip(),'fpga_part must be non-empty text';cfg=load_streamer_config(p);assert cfg['source'] is not None and pathlib.Path(cfg['source']).resolve()==p,'build config fell back from the requested file';assert not cfg['warnings'],'; '.join(cfg['warnings']);print(cfg['fpga_part'])" "%ZLC_CFG_JSON%"
 set "ZLC_CONFIG_STATUS=%ERRORLEVEL%"
 popd
@@ -279,14 +296,7 @@ rem parameter defaults + LAYOUT_FINGERPRINT the .v `include) IN PLACE, so editin
 rem the SYNTHESIZED bitstream (IP depths + every RTL geometry param + the connect fingerprint) with
 rem no hand edits.  This routine is called only for a real build/check and fails closed: synthesis
 rem must never proceed with a stale header or a partially generated geometry file.
-pushd "%REPO_ROOT%"
-rem THIS checkout, through its one entry.  "%CD%" was packages\zlc_pulse,
-rem which does not contain the package -- the source is under src/ -- so
-rem "python -m zou_lab_control_v2 fpga" only worked where the standalone repositories
-rem happen to be pip-installed, and it ran THEIR code, not this tree's.  On a
-rem machine that only has this clone it was ModuleNotFoundError, thrown away
-rem by >nul 2>nul and reported as "failed to derive FPGA geometry".
-set "PYTHONPATH=%ZLC_HOME%;%PYTHONPATH%"
+pushd "%TEMP%"
 rem NOT >nul 2>nul.  The generic "failed to derive FPGA geometry" below is
 rem worth nothing on its own -- the reason is whatever Python printed, and
 rem throwing it away is the same mistake that hid "python is not recognized"
@@ -347,7 +357,7 @@ if not "!ZLC_VIVADO_VERSION_STATUS!"=="0" (
   del "%ZLC_VIVADO_ID_TMP%" >nul 2>nul
   exit /b 1
 )
-%ZLC_PY_CMD% -c "import hashlib,os,sys;r,part,top,tool=sys.argv[1:5];paths=sys.argv[5:];missing=[p for p in paths if not p or not os.path.isfile(p)];assert not missing,'missing bitstream input(s): '+repr(missing);h=hashlib.sha256();h.update(b'tool\0');h.update(open(tool,'rb').read());h.update(b'part\0'+part.encode());h.update(b'top\0'+top.encode());[(h.update(os.path.relpath(p,r).replace(chr(92),chr(47)).encode()),h.update(b'\0'),h.update(open(p,'rb').read())) for p in paths];print(h.hexdigest())" "%REPO_ROOT%" "%ZLC_PS_FPGA_PART%" "%ZLC_TOP%" "%ZLC_VIVADO_ID_TMP%" "%STREAMER_DIR%\zlc_edge_streamer.v" "%STREAMER_DIR%\zlc_uart_bridge.v" "%STREAMER_DIR%\zlc_pulse_streamer_top.v" "%STREAMER_DIR%\zlc_geometry.vh" "%STREAMER_DIR%\!ZLC_CREATE_TCL!" "!ZLC_SELECTED_XDC!" "%REPO_ROOT%\fpga\board_config\streamer_config.json" "!ZLC_HASH_GEOM!" > "%ZLC_HASH_TMP%"
+%ZLC_PY_CMD% -c "import hashlib,os,sys;r,part,top,tool=sys.argv[1:5];paths=sys.argv[5:];missing=[p for p in paths if not p or not os.path.isfile(p)];assert not missing,'missing bitstream input(s): '+repr(missing);h=hashlib.sha256();h.update(b'tool\0');h.update(open(tool,'rb').read());h.update(b'part\0'+part.encode());h.update(b'top\0'+top.encode());[(h.update(os.path.relpath(p,r).replace(chr(92),chr(47)).encode()),h.update(b'\0'),h.update(open(p,'rb').read())) for p in paths];print(h.hexdigest())" "%ZLC_HOME%" "%ZLC_PS_FPGA_PART%" "%ZLC_TOP%" "%ZLC_VIVADO_ID_TMP%" "%STREAMER_DIR%\zlc_edge_streamer.v" "%STREAMER_DIR%\zlc_uart_bridge.v" "%STREAMER_DIR%\zlc_pulse_streamer_top.v" "%STREAMER_DIR%\zlc_geometry.vh" "%STREAMER_DIR%\!ZLC_CREATE_TCL!" "!ZLC_SELECTED_XDC!" "%PULSE_ROOT%\fpga\board_config\streamer_config.json" "!ZLC_HASH_GEOM!" > "%ZLC_HASH_TMP%"
 set "ZLC_HASH_STATUS=%ERRORLEVEL%"
 del "%ZLC_VIVADO_ID_TMP%" >nul 2>nul
 if not "%ZLC_HASH_STATUS%"=="0" (
@@ -410,14 +420,7 @@ exit /b 0
 :zlc_print_capacity_estimate
 set "ZLC_EST_PART=%ZLC_PS_FPGA_PART%"
 if "%ZLC_EST_PART%"=="" set "ZLC_EST_PART=xc7a35tfgg484-2"
-pushd "%REPO_ROOT%"
-rem THIS checkout, through its one entry.  "%CD%" was packages\zlc_pulse,
-rem which does not contain the package -- the source is under src/ -- so
-rem "python -m zou_lab_control_v2 fpga" only worked where the standalone repositories
-rem happen to be pip-installed, and it ran THEIR code, not this tree's.  On a
-rem machine that only has this clone it was ModuleNotFoundError, thrown away
-rem by >nul 2>nul and reported as "failed to derive FPGA geometry".
-set "PYTHONPATH=%ZLC_HOME%;%PYTHONPATH%"
+pushd "%TEMP%"
 %ZLC_PY_CMD% -m zou_lab_control_v2 fpga --part "%ZLC_EST_PART%"
 popd
 exit /b 0

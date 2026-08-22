@@ -4,17 +4,10 @@ from __future__ import annotations
 
 import argparse
 import os
-from pathlib import Path
-import sys
-
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
 
 # The facade and nothing else: this file is the tutorial for the surface an
 # outside host may use, so it is written under the rule that surface enforces.
-from zlc_ui import ensure_qt_app, open_figure_viewer  # noqa: E402
+from zlc_ui import ensure_qt_app, open_figure_viewer
 
 
 def populate(viewer) -> None:

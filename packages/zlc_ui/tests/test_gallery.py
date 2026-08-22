@@ -10,10 +10,16 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 
 
+def _environment() -> dict[str, str]:
+    environment = dict(os.environ, QT_QPA_PLATFORM="offscreen")
+    environment["PYTHONPATH"] = (
+        "" if environment.get("ZLC_TEST_INSTALLED") == "1" else str(SRC)
+    )
+    return environment
+
+
 def test_gallery_offscreen_smoke_only() -> None:
-    environment = dict(os.environ)
-    environment["QT_QPA_PLATFORM"] = "offscreen"
-    environment["PYTHONPATH"] = str(SRC)
+    environment = _environment()
     completed = subprocess.run(
         [sys.executable, "examples/gallery.py"],
         cwd=ROOT,
@@ -27,8 +33,7 @@ def test_gallery_offscreen_smoke_only() -> None:
 
 
 def test_console_demo_imports_as_a_package_and_has_mixed_two_row_cards() -> None:
-    environment = dict(os.environ)
-    environment["QT_QPA_PLATFORM"] = "offscreen"
+    environment = _environment()
     completed = subprocess.run(
         [
             sys.executable,
@@ -61,9 +66,7 @@ console.close()
 
 
 def test_gallery_has_named_layers_scan_api_and_all_complete_demo_tabs() -> None:
-    environment = dict(os.environ)
-    environment["QT_QPA_PLATFORM"] = "offscreen"
-    environment["PYTHONPATH"] = str(SRC)
+    environment = _environment()
     completed = subprocess.run(
         [
             sys.executable,
@@ -112,7 +115,10 @@ tab_sets = [
 ]
 assert {'TaskConsole', 'PulseEditor', 'FigureViewer', 'DeviceManager'} in tab_sets
 window.close()
+window.deleteLater()
+app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
 app.processEvents()
+app.quit()
 """,
         ],
         cwd=ROOT,
