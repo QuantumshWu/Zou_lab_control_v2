@@ -196,6 +196,7 @@ class ExperimentGuiFlow:
         self.console = None
         self.console_presenter = None
         self.device_controls: dict[str, object] = {}
+        self._device_control_devices: dict[str, object] = {}
         self.timer = None
         self._closing_console = False
         self._closing_all = False
@@ -235,6 +236,8 @@ class ExperimentGuiFlow:
                 initial_config=initial_config,
                 initialize_session=self._initialize_session,
                 on_initialized=self._open_work_windows,
+                prepare_reconcile=self._prepare_session_reconcile,
+                on_reconciled=self._session_reconciled,
                 prepare_shutdown=self._prepare_session_shutdown,
                 shutdown_session=self._shutdown_session,
                 on_shutdown=self._session_shutdown_complete,
@@ -300,6 +303,11 @@ class ExperimentGuiFlow:
         """Open or raise the one control window for a loaded named device."""
 
         key = str(instance_id)
+        if (
+            self.devices is not None
+            and self.devices.presenter.device_operation_active
+        ):
+            raise RuntimeError("a Device Manager operation is still running")
         existing = self.device_controls.get(key)
         if existing is not None:
             existing.restore()
@@ -322,10 +330,12 @@ class ExperimentGuiFlow:
         else:
             control = self._open_generic_control(key, leaf.device)
         self.device_controls[key] = control
+        self._device_control_devices[key] = leaf.device
 
         def released() -> None:
             if self.device_controls.get(key) is control:
                 self.device_controls.pop(key, None)
+                self._device_control_devices.pop(key, None)
 
         control.closed.connect(released)
         return control
@@ -469,13 +479,78 @@ class ExperimentGuiFlow:
         self._device_worker_close = None
         return True
 
-    def _retire_device_controls(self) -> None:
+    def _retire_device_controls(
+        self,
+        device_keys: frozenset[str] | None = None,
+    ) -> None:
         for key, control in tuple(self.device_controls.items()):
+            if device_keys is not None and key not in device_keys:
+                continue
             control.close()
             if self.device_controls.get(key) is control:
                 if control.is_visible():
                     raise RuntimeError(f"{key} control refused to close")
                 self.device_controls.pop(key, None)
+                self._device_control_devices.pop(key, None)
+
+    def _prepare_session_reconcile(
+        self,
+        session: object,
+        config: object,
+        close_keys: frozenset[str],
+    ):
+        """Stop only users of affected leaves, then return the worker half."""
+
+        if self.session is not session:
+            raise RuntimeError("DeviceManager tried to change another experiment session")
+        plan = session.plan_device_reconcile(
+            config,
+            close_keys=frozenset(close_keys),
+        )
+        affected = frozenset(plan.affected_keys)
+        barrier = None
+        if affected:
+            barrier = session.device_use.begin_maintenance(
+                self,
+                "Device Manager change",
+                tuple(sorted(affected)),
+            )
+            try:
+                self._retire_device_controls(affected)
+            except BaseException:
+                barrier.release()
+                raise
+
+        def work() -> object:
+            try:
+                if barrier is not None:
+                    # Logic stop callbacks run on the GUI owner turn above;
+                    # their leases release asynchronously at their normal
+                    # cleanup boundary.  Never close a device before that.
+                    barrier.wait(30.0)
+                session.reconcile_devices(plan)
+                return session
+            finally:
+                if barrier is not None:
+                    barrier.release()
+
+        return work
+
+    def _session_reconciled(self, session: object) -> None:
+        """Refresh device-dependent drafts without replacing TaskConsole."""
+
+        if self.session is not session:
+            raise RuntimeError("another experiment session replaced the changed one")
+        installed = session.installation.devices
+        stale_controls = frozenset(
+            key
+            for key, device in self._device_control_devices.items()
+            if key not in installed or installed[key].device is not device
+        )
+        if stale_controls:
+            self._retire_device_controls(stale_controls)
+        if self.console_presenter is not None:
+            self.console_presenter.installation_changed()
 
     def _console_owner_ready(self) -> None:
         if self._device_shutdown_pending and self.devices is not None:
@@ -524,10 +599,20 @@ class ExperimentGuiFlow:
         if self._closing_console:
             return False
         self._closing_console = True
-        self._closing_all = True
         try:
+            if (
+                self.devices is not None
+                and self.devices.presenter.device_operation_active
+            ):
+                if self.console_presenter is not None:
+                    self.console_presenter._report(
+                        "a Device Manager operation is still running",
+                        severity="warning",
+                    )
+                return False
             if not self._device_tune_idle():
                 return False
+            self._closing_all = True
             if self.console_presenter is not None and not self.console_presenter.close():
                 return False
             if self.devices is not None:
@@ -541,6 +626,7 @@ class ExperimentGuiFlow:
             self.console = None
             return True
         except BaseException:
+            self._closing_all = False
             return False
         finally:
             self._closing_console = False
@@ -548,14 +634,17 @@ class ExperimentGuiFlow:
     def _device_manager_close_guard(self) -> bool:
         """Retire the whole composition before its root window disappears."""
 
+        if self.devices is not None and self.devices.presenter.device_operation_active:
+            return False
+        if not self._device_tune_idle():
+            return False
         self._closing_all = True
         try:
-            if not self._device_tune_idle():
-                return False
             if self.devices is not None and not self.devices.presenter.close():
                 return False
             return self._close_device_worker()
         except BaseException:
+            self._closing_all = False
             return False
 
     def close(self) -> bool:

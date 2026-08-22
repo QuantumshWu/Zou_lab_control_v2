@@ -8,6 +8,7 @@ from typing import Any, Callable, Mapping
 from zlc_atom.authoring import AuthoringSchema
 from zlc_atom.execution.capabilities import CAPABILITY_TYPES
 from zlc_atom.execution.ports import BoundDevice
+from zlc_atom.execution.resources import PhysicalDeviceIdentity
 from zlc_atom.install.configuration import DeviceInstanceConfig
 
 
@@ -19,6 +20,17 @@ class InstalledLeaf:
     capabilities: Mapping[str, object]
     binding: BoundDevice | None = None
     closer: Callable[[], None] | None = None
+    #: The factory world this leaf's implementation closes over.  Assigned by
+    #: create_installation from descriptor.world_config, never by the family.
+    #: None means the leaf is independent physical infrastructure and may be
+    #: retained while a simulation world is replaced.
+    world_affinity: object | None = None
+
+    @property
+    def physical_identity(self) -> PhysicalDeviceIdentity | None:
+        """The verified real resource, or None for an unbound synthetic leaf."""
+
+        return None if self.binding is None else self.binding.physical_identity
 
     def close(self) -> None:
         if self.closer is not None:

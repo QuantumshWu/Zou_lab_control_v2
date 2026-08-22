@@ -83,6 +83,7 @@ class DeviceManagerHandle(QtCore.QObject):
     type_picked = QtCore.pyqtSignal(str, str)
     parameter_committed = QtCore.pyqtSignal(str, str)
     device_open_requested = QtCore.pyqtSignal(str)
+    device_close_requested = QtCore.pyqtSignal(str)
     template_selected = QtCore.pyqtSignal(str)
     discovery_requested = QtCore.pyqtSignal()
     discovered_add_requested = QtCore.pyqtSignal(str)
@@ -99,6 +100,7 @@ class DeviceManagerHandle(QtCore.QObject):
         "type_picked",
         "parameter_committed",
         "device_open_requested",
+        "device_close_requested",
         "template_selected",
         "discovery_requested",
         "discovered_add_requested",
@@ -223,12 +225,14 @@ class DeviceManagerHandle(QtCore.QObject):
         enabled: bool,
         active: bool,
         busy: bool = False,
+        changed: bool = False,
     ) -> None:
         self._view.set_lifecycle(
             text,
             enabled=enabled,
             active=active,
             busy=busy,
+            changed=changed,
         )
 
     def set_form_spec(

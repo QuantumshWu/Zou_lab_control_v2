@@ -56,6 +56,7 @@ class _ManagerView:
         self.type_picked = _Signal()
         self.parameter_committed = _Signal()
         self.device_open_requested = _Signal()
+        self.device_close_requested = _Signal()
         self.choices: tuple = ()
         self.devices: tuple = ()
         self.forms: dict = {}
@@ -90,8 +91,15 @@ class _ManagerView:
         enabled: bool,
         active: bool,
         busy: bool = False,
+        changed: bool = False,
     ) -> None:
-        self.lifecycle = (str(text), bool(enabled), bool(active), bool(busy))
+        self.lifecycle = (
+            str(text),
+            bool(enabled),
+            bool(active),
+            bool(busy),
+            bool(changed),
+        )
 
     def set_loaded_devices(self, devices) -> None:
         self.loaded_devices = tuple(devices)
@@ -184,10 +192,9 @@ def test_adding_a_device_sets_it_up_the_way_its_own_schema_says(manager) -> None
 
 
 def test_two_devices_cannot_share_one_name(manager) -> None:
-    """A role is how everything else reaches a device.
+    """Roles are unique operator-facing names.
 
-    The second would silently shadow the first for every consumer, which is a
-    bench that looks configured and is not.
+    Stable instance ids remain separate from these editable labels.
     """
 
     manager.view.device_add_requested.emit("camera.virtual")
@@ -198,6 +205,10 @@ def test_two_devices_cannot_share_one_name(manager) -> None:
 
     assert [item.role for item in manager.devices] == ["camera", "camera2"]
     assert "already called" in manager.view.status[-1][1]
+
+    manager.view.role_committed.emit("camera2", "qCMOS")
+    assert manager.devices[1].instance_id == "camera2"
+    assert manager.devices[1].role == "qCMOS"
 
 
 def test_changing_device_type_starts_from_that_types_own_defaults(manager) -> None:
@@ -489,7 +500,8 @@ def test_init_holds_the_exact_session_until_explicit_shutdown(tmp_path) -> None:
     assert view.lifecycle[:3] == ("Shutdown devices", True, True)
 
     manager.set_role("camera", "camera_edited")
-    assert view.lifecycle[:3] == ("Shutdown for restart", True, True)
+    assert view.lifecycle[:3] == ("Apply device changes", True, True)
+    assert view.lifecycle[4] is True
     manager.cancel()
     assert view.lifecycle[:3] == ("Shutdown devices", True, True)
 
@@ -501,6 +513,314 @@ def test_init_holds_the_exact_session_until_explicit_shutdown(tmp_path) -> None:
     manager.shutdown_active()
     manager.close()
     assert shut_down == [session], "shutdown and close are idempotent"
+
+
+def test_an_active_draft_change_reconciles_without_replacing_or_shutting_session(
+    tmp_path,
+) -> None:
+    from zlc_atom.install import discover_device_catalog
+
+    camera = next(
+        item
+        for item in discover_device_catalog().available
+        if item.type_id == "camera.virtual"
+    )
+    initial = InstallationConfig(
+        (
+            DeviceInstanceConfig(
+                instance_id="camera",
+                role="camera",
+                type_id=camera.type_id,
+                parameters=camera.authoring_schema.project_values({}),
+            ),
+        )
+    )
+    session = SimpleNamespace(
+        installation=SimpleNamespace(devices={"camera": object()}, failures={})
+    )
+    prepared: list[tuple[object, InstallationConfig, tuple[str, ...]]] = []
+    reconciled: list[object] = []
+    shut_down: list[object] = []
+
+    def prepare(active, candidate, close_keys):
+        prepared.append((active, candidate, close_keys))
+        return lambda: active
+
+    view = _ManagerView()
+    manager = DeviceManagerPresenter(
+        view,
+        tmp_path / "apparatus.json",
+        initial_config=initial,
+        initialize_session=lambda _candidate: session,
+        prepare_reconcile=prepare,
+        on_reconciled=reconciled.append,
+        shutdown_session=shut_down.append,
+    )
+    assert manager.toggle_lifecycle() is True
+
+    view.values["camera"]["exposure_seconds"] = 0.03
+    assert manager.commit_parameters("camera", "exposure_seconds") is True
+    assert view.lifecycle[:3] == ("Apply device changes", True, True)
+    assert manager.toggle_lifecycle() is True
+
+    assert len(prepared) == 1
+    active, candidate, close_keys = prepared[0]
+    assert active is session
+    assert candidate.devices[0].parameters["exposure_seconds"] == 0.03
+    assert close_keys == ()
+    assert manager.active_session is session
+    assert reconciled == [session]
+    assert shut_down == []
+    assert view.loaded_devices == (
+        ("camera", "camera", "camera.virtual"),
+    )
+    assert view.lifecycle[:3] == ("Shutdown devices", True, True)
+
+
+def test_loaded_close_targets_one_key_and_missing_device_remains_applyable(
+    tmp_path,
+) -> None:
+    from zlc_atom.install import discover_device_catalog
+
+    descriptors = {
+        item.type_id: item for item in discover_device_catalog().available
+    }
+    initial = InstallationConfig(
+        tuple(
+            DeviceInstanceConfig(
+                instance_id=key,
+                role=key,
+                type_id=type_id,
+                parameters=descriptors[type_id].authoring_schema.project_values({}),
+            )
+            for key, type_id in (
+                ("camera", "camera.virtual"),
+                ("sequencer", "sequencer.virtual"),
+            )
+        )
+    )
+    installed = {"camera": object(), "sequencer": object()}
+    session = SimpleNamespace(
+        installation=SimpleNamespace(devices=installed, failures={})
+    )
+    prepared: list[tuple[InstallationConfig, tuple[str, ...]]] = []
+    shut_down: list[object] = []
+
+    def prepare(active, candidate, close_keys):
+        assert active is session
+        prepared.append((candidate, close_keys))
+
+        def work():
+            if close_keys:
+                for key in close_keys:
+                    installed.pop(key)
+            else:
+                for item in candidate.devices:
+                    installed.setdefault(item.instance_id, object())
+            return active
+
+        return work
+
+    view = _ManagerView()
+    manager = DeviceManagerPresenter(
+        view,
+        tmp_path / "apparatus.json",
+        initial_config=initial,
+        initialize_session=lambda _candidate: session,
+        prepare_reconcile=prepare,
+        shutdown_session=shut_down.append,
+    )
+    assert manager.toggle_lifecycle() is True
+
+    view.device_close_requested.emit("camera")
+
+    assert prepared == [(initial, ("camera",))]
+    assert set(installed) == {"sequencer"}
+    assert view.loaded_devices == (
+        ("sequencer", "sequencer", "sequencer.virtual"),
+    )
+    assert view.lifecycle[:3] == ("Apply device changes", True, True)
+    assert manager.active_session is session
+    assert shut_down == []
+
+    assert manager.toggle_lifecycle() is True
+    assert prepared[-1] == (initial, ())
+    assert set(installed) == {"camera", "sequencer"}
+    assert view.lifecycle[:3] == ("Shutdown devices", True, True)
+    assert manager.active_session is session
+    assert shut_down == []
+
+
+def test_reconcile_failure_keeps_the_active_session_and_apply_state(tmp_path) -> None:
+    from zlc_atom.install import discover_device_catalog
+
+    camera = next(
+        item
+        for item in discover_device_catalog().available
+        if item.type_id == "camera.virtual"
+    )
+    initial = InstallationConfig(
+        (
+            DeviceInstanceConfig(
+                instance_id="camera",
+                role="camera",
+                type_id=camera.type_id,
+                parameters=camera.authoring_schema.project_values({}),
+            ),
+        )
+    )
+    session = SimpleNamespace(
+        installation=SimpleNamespace(devices={"camera": object()}, failures={})
+    )
+    reconciled: list[object] = []
+    shut_down: list[object] = []
+
+    def prepare(_active, _candidate, _close_keys):
+        def fail():
+            raise RuntimeError("camera refused reconfigure")
+
+        return fail
+
+    view = _ManagerView()
+    manager = DeviceManagerPresenter(
+        view,
+        tmp_path / "apparatus.json",
+        initial_config=initial,
+        initialize_session=lambda _candidate: session,
+        prepare_reconcile=prepare,
+        on_reconciled=reconciled.append,
+        shutdown_session=shut_down.append,
+    )
+    assert manager.toggle_lifecycle() is True
+    assert manager.set_role("camera", "edited") is True
+
+    assert manager.toggle_lifecycle() is True
+
+    assert manager.active_session is session
+    assert manager.busy is False
+    assert reconciled == []
+    assert shut_down == []
+    assert view.lifecycle[:3] == ("Apply device changes", True, True)
+    assert view.status[-1] == (
+        "error",
+        "device changes did not apply: camera refused reconfigure",
+    )
+
+
+def test_partial_failure_adopts_effective_config_and_refreshes_views(tmp_path) -> None:
+    from zlc_atom.install import discover_device_catalog
+
+    descriptors = {
+        item.type_id: item for item in discover_device_catalog().available
+    }
+    initial = InstallationConfig(
+        tuple(
+            DeviceInstanceConfig(
+                key,
+                key,
+                type_id,
+                descriptors[type_id].authoring_schema.project_values({}),
+            )
+            for key, type_id in (
+                ("camera", "camera.virtual"),
+                ("sequencer", "sequencer.virtual"),
+            )
+        )
+    )
+    effective = InstallationConfig((initial.devices[1],), simulation=initial.simulation)
+    installed = {"camera": object(), "sequencer": object()}
+    session = SimpleNamespace(
+        installation=SimpleNamespace(devices=installed, failures={}),
+        installation_config=initial,
+    )
+    refreshed: list[object] = []
+
+    def prepare(active, _candidate, _close_keys):
+        def work():
+            installed.pop("camera")
+            active.installation_config = effective
+            raise RuntimeError("camera close failed after another leaf closed")
+
+        return work
+
+    view = _ManagerView()
+    manager = DeviceManagerPresenter(
+        view,
+        tmp_path / "apparatus.json",
+        initial_config=initial,
+        initialize_session=lambda _candidate: session,
+        prepare_reconcile=prepare,
+        on_reconciled=refreshed.append,
+    )
+    assert manager.toggle_lifecycle() is True
+    assert manager.close_device("camera") is True
+
+    assert refreshed == [session]
+    assert manager._active_config == effective
+    assert view.loaded_devices == (("sequencer", "sequencer", "sequencer.virtual"),)
+    assert view.lifecycle[0] == "Apply device changes"
+    assert "camera close failed" in view.status[-1][1]
+
+
+def test_projection_refresh_failure_retries_without_running_hardware_again(tmp_path) -> None:
+    from zlc_atom.install import discover_device_catalog
+
+    camera = next(
+        item
+        for item in discover_device_catalog().available
+        if item.type_id == "camera.virtual"
+    )
+    initial = InstallationConfig(
+        (
+            DeviceInstanceConfig(
+                "camera",
+                "camera",
+                camera.type_id,
+                camera.authoring_schema.project_values({}),
+            ),
+        )
+    )
+    session = SimpleNamespace(
+        installation=SimpleNamespace(devices={"camera": object()}, failures={}),
+        installation_config=initial,
+    )
+    hardware_calls: list[bool] = []
+    refresh_calls: list[bool] = []
+
+    def prepare(active, candidate, _close_keys):
+        def work():
+            hardware_calls.append(True)
+            active.installation_config = candidate
+            return active
+
+        return work
+
+    def refresh(_active):
+        refresh_calls.append(True)
+        if len(refresh_calls) == 1:
+            raise RuntimeError("projection failed")
+
+    view = _ManagerView()
+    manager = DeviceManagerPresenter(
+        view,
+        tmp_path / "apparatus.json",
+        initial_config=initial,
+        initialize_session=lambda _candidate: session,
+        prepare_reconcile=prepare,
+        on_reconciled=refresh,
+    )
+    assert manager.toggle_lifecycle() is True
+    assert manager.set_role("camera", "qCMOS") is True
+    assert manager.toggle_lifecycle() is True
+    assert hardware_calls == [True]
+    assert view.lifecycle[0] == "Refresh device views"
+    assert manager.close_device("camera") is False
+    assert hardware_calls == [True]
+
+    assert manager.toggle_lifecycle() is True
+    assert hardware_calls == [True]
+    assert refresh_calls == [True, True]
+    assert view.lifecycle[0] == "Shutdown devices"
 
 
 def test_a_loaded_card_forwards_control_to_the_session_window_owner(tmp_path) -> None:

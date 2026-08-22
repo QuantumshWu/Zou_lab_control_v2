@@ -74,6 +74,10 @@ class DeviceManagerPresenter:
         initial_config: InstallationConfig | None = None,
         initialize_session: Callable[[InstallationConfig], object] | None = None,
         on_initialized: Callable[[object], None] | None = None,
+        prepare_reconcile: Callable[
+            [object, InstallationConfig, tuple[str, ...]], Callable[[], object]
+        ] | None = None,
+        on_reconciled: Callable[[object], None] | None = None,
         prepare_shutdown: Callable[[object], bool] | None = None,
         shutdown_session: Callable[[object], None] | None = None,
         on_shutdown: Callable[[object], None] | None = None,
@@ -86,6 +90,8 @@ class DeviceManagerPresenter:
         for value, name in (
             (initialize_session, "initialize_session"),
             (on_initialized, "on_initialized"),
+            (prepare_reconcile, "prepare_reconcile"),
+            (on_reconciled, "on_reconciled"),
             (prepare_shutdown, "prepare_shutdown"),
             (shutdown_session, "shutdown_session"),
             (on_shutdown, "on_shutdown"),
@@ -133,12 +139,15 @@ class DeviceManagerPresenter:
         self._initial_config = initial_config
         self._initialize_session = initialize_session
         self._on_initialized = on_initialized
+        self._prepare_reconcile = prepare_reconcile
+        self._on_reconciled = on_reconciled
         self._prepare_shutdown = prepare_shutdown
         self._shutdown_session = shutdown_session
         self._on_shutdown = on_shutdown
         self._on_device_open = on_device_open
         self._active_session: object | None = None
         self._active_config: InstallationConfig | None = None
+        self._refresh_pending = False
         self._confirm_overwrite = confirm_overwrite
         self._connect()
         self.load(_use_initial=True)
@@ -160,6 +169,7 @@ class DeviceManagerPresenter:
         self.view.cancel_requested.connect(self.cancel)
         self.view.lifecycle_requested.connect(self.toggle_lifecycle)
         self.view.device_open_requested.connect(self.open_device)
+        self.view.device_close_requested.connect(self.close_device)
         # What this machine cannot offer is named too, with the reason: a
         # family that will not import used to be simply absent, which reads
         # exactly like a family that does not exist.
@@ -244,6 +254,12 @@ class DeviceManagerPresenter:
         """The exact session produced by Init, or ``None`` before/after it."""
 
         return self._active_session
+
+    @property
+    def device_operation_active(self) -> bool:
+        """Whether controls must stay closed during change or refresh."""
+
+        return bool(self.busy or self._refresh_pending)
 
     def new_from_template(self, name: str) -> bool:
         """Replace the local draft from a domain-owned installation template."""
@@ -436,10 +452,11 @@ class DeviceManagerPresenter:
         return True
 
     def set_role(self, instance_id: str, role: str) -> bool:
-        """Rename a device.  The role IS its name, so both move together.
+        """Change the operator-facing role without changing device identity.
 
-        A role is how everything else reaches it, so two devices cannot share
-        one -- the second would silently shadow the first for every consumer.
+        ``instance_id`` is the stable key used by Logic drafts, live leases and
+        differential installation.  A display rename must not turn an
+        unchanged physical device into remove-old/add-new.
         """
 
         role = str(role).strip()
@@ -455,7 +472,7 @@ class DeviceManagerPresenter:
             self._show()
             return False
         return self._replace(
-            instance_id, lambda item: replace(item, instance_id=role, role=role)
+            instance_id, lambda item: replace(item, role=role)
         )
 
     def set_type(self, instance_id: str, type_id: str) -> bool:
@@ -511,6 +528,12 @@ class DeviceManagerPresenter:
         """Forward one loaded-card Control intent to the experiment owner."""
 
         key = str(instance_id)
+        if self.busy or self._refresh_pending:
+            self._report(
+                "finish the current device change before opening a control",
+                severity="warning",
+            )
+            return False
         session = self._active_session
         if session is None:
             self._report("initialize devices before opening a control", severity="warning")
@@ -528,14 +551,181 @@ class DeviceManagerPresenter:
             return False
         return True
 
+    def close_device(self, instance_id: str) -> bool:
+        """Request retirement of exactly one currently loaded device."""
+
+        key = str(instance_id)
+        if self.device_operation_active:
+            self._report(
+                "finish the current device change before closing another device",
+                severity="warning",
+            )
+            return False
+        session = self._active_session
+        if session is None:
+            self._report("initialize devices before closing one", severity="warning")
+            return False
+        if key not in session.installation.devices:
+            self._report(f"no loaded device {key!r}", severity="warning")
+            return False
+        candidate = self._active_config
+        if candidate is None:
+            self._report("active session has no installation config", severity="error")
+            return False
+        return self._reconcile_active(candidate, close_keys=(key,))
+
     # ------------------------------------------------------------ session life
 
     def toggle_lifecycle(self) -> bool:
-        """Init the shared session, or shut down the exact active session."""
+        """Init, apply a changed draft, or shut down an unchanged session."""
 
         if self._active_session is None:
             return self._initialize_active()
+        if self._refresh_pending:
+            return self._retry_reconcile_refresh()
+        try:
+            candidate = InstallationConfig(
+                tuple(self.devices), simulation=self.simulation
+            )
+        except Exception as error:
+            self._report(f"this apparatus cannot be applied: {error}", severity="error")
+            return False
+        if self._active_differs(candidate):
+            return self._reconcile_active(candidate)
         return self.shutdown_active()
+
+    def _reconcile_active(
+        self,
+        candidate: InstallationConfig,
+        *,
+        close_keys: tuple[str, ...] = (),
+    ) -> bool:
+        """Prepare on the owner, reconcile off-thread, then project atomically."""
+
+        if self._closed:
+            self._report("device manager is closed", severity="error")
+            return False
+        if self.device_operation_active or self._scan_active():
+            return False
+        session = self._active_session
+        if session is None:
+            return False
+        if self._prepare_reconcile is None:
+            self._report(
+                "this Device Manager has no session reconciler",
+                severity="warning",
+            )
+            return False
+        keys = tuple(dict.fromkeys(str(key) for key in close_keys))
+        if any(not key for key in keys):
+            self._report("device close key must be non-empty", severity="error")
+            return False
+        effective_before = getattr(session, "installation_config", None)
+
+        self.busy = True
+        self._show()
+        self._report(
+            f"closing {', '.join(keys)}" if keys else "applying device changes"
+        )
+
+        def failed(error: BaseException) -> None:
+            refresh_error = None
+            effective = getattr(session, "installation_config", None)
+            if (
+                isinstance(effective, InstallationConfig)
+                and effective is not effective_before
+            ):
+                self._active_config = effective
+                try:
+                    if self._on_reconciled is not None:
+                        self._on_reconciled(session)
+                except Exception as projection_error:
+                    self._refresh_pending = True
+                    refresh_error = projection_error
+                else:
+                    self._refresh_pending = False
+            self.busy = False
+            self._show()
+            self._report(
+                f"device changes did not apply: {error}"
+                + (
+                    f"; device views did not refresh: {refresh_error}"
+                    if refresh_error is not None
+                    else ""
+                ),
+                severity="error",
+            )
+
+        try:
+            work = self._prepare_reconcile(session, candidate, keys)
+            if not callable(work):
+                raise TypeError("session reconciler preparation must return callable work")
+        except BaseException as error:
+            failed(error)
+            return False
+
+        def reconcile() -> object:
+            reconciled = work()
+            if reconciled is not session:
+                raise RuntimeError("device reconcile replaced the active session")
+            return reconciled
+
+        def finished(reconciled: object) -> None:
+            if self._active_session is not reconciled:
+                failed(RuntimeError("device reconcile completed for another session"))
+                return
+            effective = getattr(reconciled, "installation_config", None)
+            if not isinstance(effective, InstallationConfig):
+                effective = candidate
+            try:
+                if self._on_reconciled is not None:
+                    self._on_reconciled(reconciled)
+            except Exception as error:
+                self._active_config = effective
+                self._refresh_pending = True
+                self.busy = False
+                self._show()
+                self._report(
+                    f"devices changed but windows did not refresh: {error}",
+                    severity="error",
+                )
+                return
+            self._active_config = effective
+            self._refresh_pending = False
+            self.busy = False
+            self._show()
+            loaded = len(reconciled.installation.devices)
+            self._report(
+                (
+                    f"{', '.join(keys)} closed · {loaded} device(s) loaded"
+                    if keys
+                    else f"device changes applied · {loaded} device(s) loaded"
+                )
+            )
+
+        try:
+            self._run_off_thread(reconcile, finished, failed)
+        except BaseException as error:
+            failed(error)
+            return False
+        return True
+
+    def _retry_reconcile_refresh(self) -> bool:
+        """Retry only presentation after devices already changed successfully."""
+
+        session = self._active_session
+        if session is None or self.busy or not self._refresh_pending:
+            return False
+        try:
+            if self._on_reconciled is not None:
+                self._on_reconciled(session)
+        except Exception as error:
+            self._report(f"device views did not refresh: {error}", severity="error")
+            return False
+        self._refresh_pending = False
+        self._show()
+        self._report("device views refreshed")
+        return True
 
     def _initialize_active(self) -> bool:
         if self._closed:
@@ -588,6 +778,7 @@ class DeviceManagerPresenter:
 
         self._active_session = session
         self._active_config = candidate
+        self._refresh_pending = False
         try:
             if self._on_initialized is not None:
                 self._on_initialized(session)
@@ -605,6 +796,7 @@ class DeviceManagerPresenter:
                 return False
             self._active_session = None
             self._active_config = None
+            self._refresh_pending = False
             self.busy = False
             self._show()
             self._report(f"window startup failed: {error}", severity="error")
@@ -661,6 +853,7 @@ class DeviceManagerPresenter:
                 raise RuntimeError("another session replaced the one being shut down")
             self._active_session = None
             self._active_config = None
+            self._refresh_pending = False
             self.busy = False
             if self._on_shutdown is not None:
                 self._on_shutdown(retired)
@@ -877,11 +1070,13 @@ class DeviceManagerPresenter:
             )
         )
         active = self._active_session is not None
-        restart = active and self._active_differs()
+        reconcile = active and self._active_differs()
         self.view.set_lifecycle(
             (
-                "Shutdown for restart"
-                if restart
+                "Refresh device views"
+                if self._refresh_pending
+                else "Apply device changes"
+                if reconcile
                 else "Shutdown devices"
                 if active
                 else "Init devices"
@@ -889,6 +1084,7 @@ class DeviceManagerPresenter:
             enabled=active or (self._initialize_session is not None and bool(self.devices)),
             active=active,
             busy=self.busy,
+            changed=bool(reconcile),
         )
 
     def _template_name(
@@ -905,16 +1101,29 @@ class DeviceManagerPresenter:
                 return name
         return None
 
-    def _active_differs(self) -> bool:
+    def _active_differs(
+        self,
+        candidate: InstallationConfig | None = None,
+    ) -> bool:
         if self._active_config is None:
             return False
-        try:
-            candidate = InstallationConfig(
-                tuple(self.devices), simulation=self.simulation
-            )
-        except Exception:
+        if self._refresh_pending:
             return True
-        return candidate != self._active_config
+        if candidate is None:
+            try:
+                candidate = InstallationConfig(
+                    tuple(self.devices), simulation=self.simulation
+                )
+            except Exception:
+                return True
+        if candidate != self._active_config:
+            return True
+        session = self._active_session
+        if session is None:
+            return False
+        loaded = frozenset(session.installation.devices)
+        configured = frozenset(item.instance_id for item in candidate.devices)
+        return loaded != configured
 
     def _report(self, text: str, *, severity: str = "task") -> None:
         """One line of what just happened.

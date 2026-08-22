@@ -116,6 +116,7 @@ class _LiveDeviceCard(FluentFrame):
     """Identity and entry point for one device in the loaded session."""
 
     device_open_requested = QtCore.pyqtSignal(str)
+    device_close_requested = QtCore.pyqtSignal(str)
 
     def __init__(self, instance_id: str, parent=None) -> None:
         super().__init__(parent, bordered=True)
@@ -128,11 +129,16 @@ class _LiveDeviceCard(FluentFrame):
         self.role_label = ElidedLabel("")
         self.detail_label = muted_note_label("")
         self.control_button = FluentButton("Control", color=ACCENT)
+        self.close_button = FluentButton("Close", color=ORANGE)
         outer.addWidget(self.role_label)
         outer.addWidget(self.detail_label, 1)
         outer.addWidget(self.control_button)
+        outer.addWidget(self.close_button)
         self.control_button.clicked.connect(
             lambda: self.device_open_requested.emit(self.instance_id)
+        )
+        self.close_button.clicked.connect(
+            lambda: self.device_close_requested.emit(self.instance_id)
         )
 
     def set_record(self, role: str, type_id: str) -> None:
@@ -197,6 +203,9 @@ class DeviceManagerView(QtWidgets.QWidget):
     #: Open the independent control surface for a loaded device.  This view
     #: neither constructs that surface nor touches the device.
     device_open_requested = QtCore.pyqtSignal(str)
+    #: Request retirement of exactly one loaded device.  Session ownership,
+    #: claims and the actual close remain outside this view.
+    device_close_requested = QtCore.pyqtSignal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -456,6 +465,7 @@ class DeviceManagerView(QtWidgets.QWidget):
             if card is None:
                 card = _LiveDeviceCard(instance_id, self.loaded_group)
                 card.device_open_requested.connect(self.device_open_requested)
+                card.device_close_requested.connect(self.device_close_requested)
                 self._loaded_cards[instance_id] = card
                 self.loaded_layout.insertWidget(index, card)
             card.set_record(str(role), str(type_id))
@@ -522,15 +532,16 @@ class DeviceManagerView(QtWidgets.QWidget):
         enabled: bool,
         active: bool,
         busy: bool = False,
+        changed: bool = False,
     ) -> None:
         self._busy = bool(busy)
         self._lifecycle_enabled = bool(enabled)
         self.lifecycle_button.setText(str(text))
-        restart = active and "restart" in str(text).lower()
-        self.status_dot.set_color(ORANGE if restart else GREEN if active else GREY)
+        pending = bool(active and changed)
+        self.status_dot.set_color(ORANGE if pending else GREEN if active else GREY)
         self.status_dot.setToolTip(
             "Configuration differs from the active installation"
-            if restart
+            if pending
             else "Active installation"
             if active
             else "No active installation"
@@ -624,6 +635,8 @@ class DeviceManagerView(QtWidgets.QWidget):
         for domain, button in self.domain_add_buttons.items():
             button.setEnabled(enabled and bool(self._choices_by_domain.get(domain)))
         for card in self._cards.values():
+            card.setEnabled(enabled)
+        for card in self._loaded_cards.values():
             card.setEnabled(enabled)
         for instance_id, (_frame, _title, _detail, button) in self._discovered_widgets.items():
             button.setEnabled(enabled and instance_id not in self._configured_discoveries)

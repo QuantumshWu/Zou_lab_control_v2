@@ -1361,6 +1361,76 @@ print('SHARED_EXPERIMENT_FLOW')
     assert "SHARED_EXPERIMENT_FLOW" in completed.stdout
 
 
+def test_live_device_close_and_reopen_preserve_session_and_unchanged_devices(
+    workspace,
+) -> None:
+    script = r"""import zou_lab_control_v2
+from PyQt5 import QtCore, QtTest
+from zlc_ui import ensure_qt_app
+from zlc_workbench.apps import task_console as tested_module
+
+application = ensure_qt_app([])
+flow = tested_module.create_experiment_flow(workspace=r'%s', template='virtual')
+
+def settle(predicate, message):
+    deadline = QtCore.QDeadlineTimer(10000)
+    while not predicate() and not deadline.hasExpired():
+        application.processEvents()
+        QtTest.QTest.qWait(10)
+    assert predicate(), message
+
+try:
+    assert flow.devices.presenter.toggle_lifecycle() is True
+    settle(lambda: flow.session is not None and not flow.devices.presenter.busy,
+           'initial session did not open')
+    session = flow.session
+    sequencer = session.installation.device('sequencer')
+    camera = session.installation.device('camera')
+    slm = session.installation.device('slm')
+    flow.devices.presenter.busy = True
+    assert flow._console_close_guard() is False
+    assert flow.console.is_visible()
+    assert not flow.console_presenter._closing
+    assert not flow._closing_all
+    assert flow.devices.presenter.open_device('camera') is False
+    assert 'camera' not in flow.device_controls
+    flow.devices.presenter.busy = False
+    card = flow.devices._view._loaded_cards['camera']
+    QtTest.QTest.mouseClick(card.close_button, QtCore.Qt.LeftButton)
+    settle(lambda: not flow.devices.presenter.busy and
+           'camera' not in session.installation.devices,
+           'camera did not close')
+    assert flow.session is session
+    assert flow.console.is_visible()
+    assert session.installation.device('sequencer') is sequencer
+    assert flow.devices.presenter._active_differs()
+
+    sequencer_card = flow.devices._view._loaded_cards['sequencer']
+    QtTest.QTest.mouseClick(sequencer_card.close_button, QtCore.Qt.LeftButton)
+    settle(lambda: not flow.devices.presenter.busy and
+           'camera' not in session.installation.devices and
+           'sequencer' not in session.installation.devices,
+           'second close reopened the first device')
+    assert session.installation.device('slm') is slm
+
+    assert flow.devices.presenter.toggle_lifecycle() is True
+    settle(lambda: not flow.devices.presenter.busy and
+           {'camera', 'sequencer'} <= set(session.installation.devices),
+           'closed devices did not reopen')
+    assert flow.session is session
+    assert session.installation.device('slm') is slm
+    assert session.installation.device('sequencer') is not sequencer
+    assert session.installation.device('camera') is not camera
+finally:
+    flow.close()
+    application.processEvents()
+print('LIVE_DEVICE_RECONCILE_OK')
+""" % workspace
+    completed = _run_script(script, timeout=60)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "LIVE_DEVICE_RECONCILE_OK" in completed.stdout
+
+
 def test_generic_device_tune_keeps_qt_live_and_refuses_false_close(workspace) -> None:
     script = """import time, threading
 from types import SimpleNamespace

@@ -20,6 +20,7 @@ import json
 from numbers import Integral
 import os
 from pathlib import Path
+import threading
 from typing import TYPE_CHECKING, Any
 
 from zlc_durable import atomic_write_bytes, day_folder, readable_json_bytes
@@ -33,7 +34,27 @@ if TYPE_CHECKING:
     from zlc_atom.install.configuration import InstallationConfig
 
 
-__all__ = ["ExperimentSession", "PulseEditorState", "Workspace", "read_pulse"]
+__all__ = [
+    "DeviceReconcilePlan",
+    "ExperimentSession",
+    "PulseEditorState",
+    "Workspace",
+    "read_pulse",
+]
+
+
+@dataclass(frozen=True)
+class DeviceReconcilePlan:
+    """One immutable, generation-checked change to a live installation."""
+
+    source_installation: object = field(compare=False, repr=False)
+    source_revision: int
+    session_revision: int
+    target_config: object
+    retained_keys: tuple[str, ...]
+    affected_keys: tuple[str, ...]
+    build_keys: tuple[str, ...]
+    world_changed: bool
 
 
 def _connect_pulse(host: str, port: int, **kwargs: Any) -> object:
@@ -58,6 +79,30 @@ def _same_json_value(left: object, right: object) -> bool:
             _same_json_value(a, b) for a, b in zip(left, right, strict=True)
         )
     return left == right
+
+
+def _same_device_setup(left: object, right: object) -> bool:
+    """Compare the factory inputs for two named-device declarations."""
+
+    return (
+        left.type_id == right.type_id
+        and _same_json_value(
+            left.to_dict()["parameters"],
+            right.to_dict()["parameters"],
+        )
+    )
+
+
+def _resolved_simulation(space: "Workspace", config: object) -> dict[str, object]:
+    """Resolve the one path-valued simulation field exactly as initial open does."""
+
+    simulation = dict(config.simulation)
+    profile = simulation.get("world_profile", "")
+    if isinstance(profile, str) and profile.strip():
+        simulation["world_profile"] = str(
+            resolve_under(space.root, profile.strip())
+        )
+    return simulation
 
 
 def _seed_default_pulse(template: Path, packaged: bytes) -> None:
@@ -300,22 +345,17 @@ class ExperimentSession:
         if not isinstance(config, InstallationConfig):
             raise TypeError("config must be InstallationConfig")
 
-        simulation = dict(config.simulation)
-        profile = simulation.get("world_profile", "")
-        if isinstance(profile, str) and profile.strip():
-            simulation["world_profile"] = str(
-                resolve_under(space.root, profile.strip())
-            )
-
         return cls(
             installation=create_installation(
                 config.specs(),
-                simulation=simulation,
+                simulation=_resolved_simulation(space, config),
                 catalog=catalog,
                 connect_pulse=_connect_pulse,
             ),
             signal_plane=SignalDataPlane(),
             workspace=space,
+            installation_config=config,
+            device_catalog=catalog,
         )
 
     def __init__(
@@ -324,11 +364,18 @@ class ExperimentSession:
         installation: object,
         signal_plane: object,
         workspace: Workspace,
+        installation_config: object | None = None,
+        device_catalog: object | None = None,
     ) -> None:
         self.installation = installation
         self.signal_plane = signal_plane
         self.workspace = workspace.prepare()
         self.device_use = DeviceUseCoordinator()
+        self._installation_config = installation_config
+        self._device_catalog = device_catalog
+        self._installation_revision = 0
+        self._reconcile_lock = threading.RLock()
+        self._recovery_installations: list[object] = []
 
     # ---------------------------------------------------------------- devices
 
@@ -345,6 +392,316 @@ class ExperimentSession:
         """Devices that did not open, by key.  An empty mapping means all did."""
 
         return self.installation.failures
+
+    @property
+    def installation_config(self) -> object | None:
+        """The effective live declaration, including operational Close changes."""
+
+        with self._reconcile_lock:
+            return self._installation_config
+
+    def _project_effective_installation_config(self) -> None:
+        """Make the authored live baseline match the leaves still reachable."""
+
+        from zlc_atom.install.configuration import InstallationConfig
+
+        current = self._installation_config
+        if not isinstance(current, InstallationConfig):
+            return
+        live = frozenset(self.installation.devices)
+        self._installation_config = InstallationConfig(
+            tuple(item for item in current.devices if item.instance_id in live),
+            simulation=current.simulation,
+        )
+        self._installation_revision += 1
+
+    def _close_recovery_installations(self) -> None:
+        """Retry unusable successor leaves before another device transition."""
+
+        for recovery in tuple(reversed(self._recovery_installations)):
+            recovery.close()
+            self._recovery_installations.remove(recovery)
+
+    def plan_device_reconcile(
+        self,
+        config: object,
+        *,
+        close_keys: tuple[str, ...] | frozenset[str] = (),
+    ) -> DeviceReconcilePlan:
+        """Classify a live apparatus edit without touching a device.
+
+        Identity is the authored ``instance_id``.  A role-only edit is metadata;
+        a type/parameter edit replaces that leaf.  Dependants are rebuilt when
+        the type they were constructed from changes.  A simulation-world edit
+        rebuilds world-bound leaves and their dependants while independent
+        physical leaves retain identity.
+        """
+
+        from zlc_atom.install import preflight_installation
+        from zlc_atom.install.configuration import InstallationConfig
+
+        if not isinstance(config, InstallationConfig):
+            raise TypeError("config must be InstallationConfig")
+        if not isinstance(close_keys, (tuple, frozenset)):
+            raise TypeError("close_keys must be a tuple or frozenset")
+        closed = frozenset(str(key) for key in close_keys)
+        if any(not key for key in closed):
+            raise ValueError("close_keys must contain non-empty device keys")
+        with self._reconcile_lock:
+            current = self._installation_config
+            catalog = self._device_catalog
+            source = self.installation
+            session_revision = self._installation_revision
+        if not isinstance(current, InstallationConfig) or catalog is None:
+            raise RuntimeError(
+                "this session was not opened from an installation configuration"
+            )
+        loaded_keys = frozenset(source.devices)
+        unknown_close = closed - loaded_keys
+        if unknown_close:
+            raise KeyError(f"no loaded devices {sorted(unknown_close)}")
+        target_blueprint = preflight_installation(
+            config.specs(),
+            **(
+                {"world": source.world}
+                if closed
+                else {"simulation": _resolved_simulation(self.workspace, config)}
+            ),
+            catalog=catalog,
+        )
+        descriptors = {item.type_id: item for item in catalog.available}
+
+        current_by_key = {item.instance_id: item for item in current.devices}
+        wanted_by_key = {item.instance_id: item for item in config.devices}
+        source_world = source.world
+        target_world = target_blueprint.world
+        if source_world is None or target_world is None:
+            world_changed = source_world is not target_world
+        else:
+            before = getattr(source_world, "config", None)
+            after = getattr(target_world, "config", None)
+            world_changed = (
+                source_world is not target_world
+                and (before is None or after is None or before != after)
+            )
+
+        affected: set[str] = set(closed)
+        affected_types: set[str] = set()
+        all_keys = set(current_by_key) | set(wanted_by_key)
+        if world_changed:
+            # Only factories owned by the simulation world, then their normal
+            # dependency closure below, must be rebuilt.  Independent physical
+            # devices retain their exact object across a virtual-world edit.
+            for key, item in {**current_by_key, **wanted_by_key}.items():
+                descriptor = descriptors[item.type_id]
+                if descriptor.world_config is not None:
+                    affected.add(key)
+                    affected_types.add(item.type_id)
+        for key in all_keys:
+            before = current_by_key.get(key)
+            after = wanted_by_key.get(key)
+            if before is None:
+                continue
+            if after is None or not _same_device_setup(before, after):
+                affected.add(key)
+                affected_types.add(before.type_id)
+                if after is not None:
+                    affected_types.add(after.type_id)
+        for key in closed:
+            affected_types.add(current_by_key[key].type_id)
+
+        # Factories receive dependency leaves at construction time.  Reusing a
+        # dependant after replacing its dependency would preserve a stale
+        # object reference even when the logical keys look unchanged.
+        affected.update(target_blueprint.dependent_keys(affected_types))
+
+        # Close is an operational request, not an edit to apparatus.json.  Its
+        # dependency closure is omitted from the live target; the untouched
+        # draft remains available for an explicit Apply that opens it again.
+        omitted = affected if closed else set()
+        target = InstallationConfig(
+            tuple(item for item in config.devices if item.instance_id not in omitted),
+            simulation=config.simulation,
+        )
+        target_by_key = {item.instance_id: item for item in target.devices}
+        retained = tuple(
+            key
+            for key in source.devices
+            if key in target_by_key
+            and key not in affected
+            and key in current_by_key
+            and _same_device_setup(current_by_key[key], target_by_key[key])
+        )
+        build = tuple(
+            item.instance_id
+            for item in target.devices
+            if item.instance_id not in retained
+        )
+        affected_keys = tuple(
+            dict.fromkeys(
+                (*tuple(key for key in source.devices if key not in retained), *build)
+            )
+        )
+        return DeviceReconcilePlan(
+            source_installation=source,
+            source_revision=int(source.revision),
+            session_revision=session_revision,
+            target_config=target,
+            retained_keys=retained,
+            affected_keys=affected_keys,
+            build_keys=build,
+            world_changed=world_changed,
+        )
+
+    def reconcile_devices(self, plan: DeviceReconcilePlan) -> None:
+        """Apply one admitted plan while preserving every unchanged leaf."""
+
+        from zlc_atom.install import (
+            Installation,
+            InstallationCompositionError,
+            create_installation,
+            preflight_installation,
+        )
+        from zlc_atom.install.configuration import InstallationConfig
+
+        if not isinstance(plan, DeviceReconcilePlan):
+            raise TypeError("plan must be DeviceReconcilePlan")
+        target_config = plan.target_config
+        if not isinstance(target_config, InstallationConfig):
+            raise TypeError("plan target_config must be InstallationConfig")
+        with self._reconcile_lock:
+            if self.installation is not plan.source_installation:
+                raise RuntimeError("live installation changed after reconcile planning")
+            if self._installation_revision != plan.session_revision:
+                raise RuntimeError("session installation revision changed")
+            source = self.installation
+            if int(source.revision) != plan.source_revision:
+                raise RuntimeError("installation ownership revision changed")
+            self._close_recovery_installations()
+
+            # Metadata-only edits need no ownership transition at all.
+            if not plan.affected_keys and not plan.build_keys:
+                self._installation_config = target_config
+                self._installation_revision += 1
+                return
+
+            holding = Installation(
+                {},
+                world=source.world,
+                broker=source.broker,
+            )
+            if plan.retained_keys:
+                source.transfer_leaves_to(
+                    holding,
+                    list(plan.retained_keys),
+                    source_revision=plan.source_revision,
+                    target_revision=holding.revision,
+                )
+            build_by_key = {
+                item.instance_id: item
+                for item in target_config.devices
+                if item.instance_id in plan.build_keys
+            }
+            successor_blueprint = None
+            if build_by_key or plan.world_changed:
+                build_specs = tuple(
+                    {
+                        "key": item.instance_id,
+                        "type_id": item.type_id,
+                        "config": item.to_dict()["parameters"],
+                    }
+                    for item in target_config.devices
+                    if item.instance_id in build_by_key
+                )
+                catalog = self._device_catalog
+                assert catalog is not None
+                preflight_kwargs = {
+                    "catalog": catalog,
+                    "borrowed_from": holding,
+                    "borrowed_revision": holding.revision,
+                }
+                if plan.world_changed:
+                    preflight_kwargs["simulation"] = _resolved_simulation(
+                        self.workspace, target_config
+                    )
+                else:
+                    preflight_kwargs["world"] = holding.world
+                try:
+                    successor_blueprint = preflight_installation(
+                        build_specs,
+                        **preflight_kwargs,
+                    )
+                except BaseException:
+                    # No closer has run yet.  Restore the one ownership root so
+                    # a failed internal successor preflight changes no live
+                    # session reachability.
+                    if plan.retained_keys:
+                        holding.transfer_leaves_to(
+                            source,
+                            list(plan.retained_keys),
+                            source_revision=holding.revision,
+                            target_revision=source.revision,
+                        )
+                    raise
+            # Make every retained leaf continuously reachable while affected
+            # devices close and replacements start on the worker thread.
+            self.installation = holding
+            try:
+                source.close()
+            except BaseException as close_error:
+                # A failed closer remains owned and bound by source.  Move it
+                # back beside the retained leaves before reporting failure so
+                # the live session never loses a device that is still open.
+                remaining = tuple(source.devices)
+                if remaining:
+                    source.transfer_leaves_to(
+                        holding,
+                        list(remaining),
+                        source_revision=source.revision,
+                        target_revision=holding.revision,
+                    )
+                self._project_effective_installation_config()
+                raise close_error
+
+            if successor_blueprint is None:
+                self._installation_config = target_config
+                self._installation_revision += 1
+                return
+            try:
+                successor = create_installation(
+                    successor_blueprint,
+                    broker=holding.broker,
+                    connect_pulse=_connect_pulse,
+                )
+            except BaseException as create_error:
+                if isinstance(create_error, InstallationCompositionError):
+                    self._recovery_installations.append(create_error.recovery)
+                self._project_effective_installation_config()
+                raise
+            try:
+                retained_now = tuple(holding.devices)
+                if retained_now:
+                    holding.transfer_leaves_to(
+                        successor,
+                        list(retained_now),
+                        source_revision=holding.revision,
+                        target_revision=successor.revision,
+                    )
+            except BaseException as transfer_error:
+                try:
+                    successor.close()
+                except BaseException as close_error:
+                    self._recovery_installations.append(successor)
+                    self._project_effective_installation_config()
+                    raise BaseExceptionGroup(
+                        "device reconcile transfer and cleanup failed",
+                        [transfer_error, close_error],
+                    ) from None
+                self._project_effective_installation_config()
+                raise
+            self.installation = successor
+            self._installation_config = target_config
+            self._installation_revision += 1
 
     def acquire_device_command(
         self, owner: object, label: str, key: str, device: object,
@@ -447,18 +804,24 @@ class ExperimentSession:
     # ----------------------------------------------------------------- closing
 
     def close(self) -> None:
-        self.device_use.assert_idle()
-        failures: list[BaseException] = []
-        try:
-            self.installation.close()
-        except BaseException as error:
-            failures.append(error)
-        close = getattr(self.signal_plane, "close", None)
-        if callable(close):
+        with self._reconcile_lock:
+            self.device_use.assert_idle()
+            failures: list[BaseException] = []
             try:
-                close()
+                self._close_recovery_installations()
             except BaseException as error:
                 failures.append(error)
+            if not self._recovery_installations:
+                try:
+                    self.installation.close()
+                except BaseException as error:
+                    failures.append(error)
+            close = getattr(self.signal_plane, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except BaseException as error:
+                    failures.append(error)
         if len(failures) == 1:
             raise failures[0]
         if failures:

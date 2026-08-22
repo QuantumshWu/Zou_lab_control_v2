@@ -202,6 +202,8 @@ view.new_combo.activated[int].emit(1)
 view.set_lifecycle('Init devices', enabled=True, active=False)
 view.lifecycle_button.click()
 assert events == ['load', 'save-as', 'discover', ('template', 'virtual'), 'lifecycle']
+view.set_lifecycle('Apply device changes', enabled=True, active=True, changed=True)
+assert view.status_dot.toolTip() == 'Configuration differs from the active installation'
 """
     )
 
@@ -214,7 +216,7 @@ import zlc_ui.device_manager.view as tested_module
 print(tested_module.__file__)
 from PyQt5 import QtCore, QtTest, QtWidgets
 from zlc_ui import open_device_control
-from zlc_ui.device_manager import DeviceManagerView
+from zlc_ui.device_manager import DeviceManagerHandle, DeviceManagerView
 from zlc_ui.device_manager.handle import DeviceControlHandle
 from zlc_ui.fluent import WINDOW_SCREEN_FRACTION, screen_fit_window_size
 from zlc_ui.form import FormFieldProps, FormSpec
@@ -223,16 +225,26 @@ from zlc_ui.qt import ensure_qt_app
 app = ensure_qt_app(['device-control'])
 
 manager = DeviceManagerView()
+manager_handle = DeviceManagerHandle(None, manager)
 opened = []
-manager.device_open_requested.connect(opened.append)
+closed_devices = []
+manager_handle.device_open_requested.connect(opened.append)
+manager_handle.device_close_requested.connect(closed_devices.append)
 manager.set_loaded_devices((('camera', 'qCMOS', 'camera.dcam'),))
 manager.resize(900, 600); manager.show(); app.processEvents()
 card = manager._loaded_cards['camera']
 assert card.role_label.text() == 'qCMOS'
 assert card.control_button.text() == 'Control'
+assert card.close_button.text() == 'Close'
 assert card.findChildren(FluentParameterForm) == []
+manager.set_lifecycle('Applying device changes', enabled=True, active=True, busy=True)
+assert not card.isEnabled()
+manager.set_lifecycle('Shutdown devices', enabled=True, active=True, busy=False)
+assert card.isEnabled()
 QtTest.QTest.mouseClick(card.control_button, QtCore.Qt.LeftButton)
 assert opened == ['camera']
+QtTest.QTest.mouseClick(card.close_button, QtCore.Qt.LeftButton)
+assert closed_devices == ['camera']
 
 spec = FormSpec((
     FormFieldProps('gain', 'int', 'Gain', default=2, minimum=0, maximum=20),

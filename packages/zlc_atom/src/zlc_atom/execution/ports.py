@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import threading
 import uuid
+import weakref
 from typing import Callable, Mapping
 
 from .capabilities import CAPABILITY_TYPES
@@ -54,6 +55,22 @@ class BoundDevice:
     stamp: DeviceBindingStamp
     capabilities: Mapping[str, object]
     _broker_token: object
+    _broker_ref: weakref.ReferenceType["DeviceBroker"]
+
+    @property
+    def physical_identity(self) -> PhysicalDeviceIdentity:
+        """The real resource this logical binding owns."""
+
+        return self.stamp.physical_identity
+
+    @property
+    def broker(self) -> "DeviceBroker":
+        """The identity owner required to retire this exact binding."""
+
+        owner = self._broker_ref()
+        if owner is None:
+            raise RuntimeError("device binding broker no longer exists")
+        return owner
 
 
 CapabilityProbe = Callable[[], Mapping[str, object]]
@@ -68,8 +85,17 @@ class DeviceBroker:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._verified_identities: dict[object, IdentityProof] = {}
-        self._binding_tokens: set[object] = set()
-        self._physical_ids: set[str] = set()
+        # Keep the exact minted object, not only its opaque token.  Otherwise a
+        # caller that copied a token into another BoundDevice could release the
+        # real binding while presenting different identity evidence.
+        self._active_bindings: dict[object, BoundDevice] = {}
+        # A legitimate second unbind is an idempotent close retry.  Remember
+        # bindings minted here so that retry can return False while a binding
+        # from another broker (or a forged one) is still rejected.
+        # Weak after unbind: remembering that a retry is legitimate must not
+        # retain the closed adapter through BoundDevice.capabilities forever.
+        self._known_bindings: dict[object, weakref.ReferenceType[BoundDevice]] = {}
+        self._physical_ids: dict[str, object] = {}
 
     def verify_identity(self, probe: IdentityProbe) -> IdentityProof:
         identity = probe()
@@ -104,7 +130,7 @@ class DeviceBroker:
         snapshot = dict(capability_probe())
         token = object()
         stamp = DeviceBindingStamp(identity.identity, uuid.uuid4().hex)
-        binding = BoundDevice(key, stamp, snapshot, token)
+        binding = BoundDevice(key, stamp, snapshot, token, weakref.ref(self))
         with self._lock:
             if self._verified_identities.get(identity._nonce) is not identity:
                 raise RuntimeError(
@@ -115,9 +141,57 @@ class DeviceBroker:
             if stable_id in self._physical_ids:
                 raise RuntimeError(f"physical device {stable_id!r} is already bound")
             self._verified_identities.pop(identity._nonce)
-            self._physical_ids.add(stable_id)
-            self._binding_tokens.add(token)
+            self._physical_ids[stable_id] = token
+            self._active_bindings[token] = binding
+
+            broker_ref = weakref.ref(self)
+
+            def forget(
+                reference: weakref.ReferenceType[BoundDevice],
+                *,
+                binding_token: object = token,
+                owner_ref: weakref.ReferenceType[DeviceBroker] = broker_ref,
+            ) -> None:
+                # The weakref owns this callback, so capturing ``self`` here
+                # would create broker -> weakref -> callback -> broker and turn
+                # the tombstone cleanup into the leak it is meant to prevent.
+                owner = owner_ref()
+                if owner is None:
+                    return
+                with owner._lock:
+                    if (
+                        binding_token not in owner._active_bindings
+                        and owner._known_bindings.get(binding_token) is reference
+                    ):
+                        owner._known_bindings.pop(binding_token, None)
+
+            self._known_bindings[token] = weakref.ref(binding, forget)
         return binding
+
+    def unbind(self, binding: BoundDevice) -> bool:
+        """Release one exact physical binding after its device has closed.
+
+        Returns ``True`` for the transition and ``False`` for an idempotent
+        retry.  Unknown, copied, or foreign bindings are never treated as an
+        already-completed close: accepting one would let it release somebody
+        else's physical device identity.
+        """
+
+        if not isinstance(binding, BoundDevice):
+            raise TypeError("binding must be BoundDevice")
+        token = binding._broker_token
+        with self._lock:
+            known = self._known_bindings.get(token)
+            if known is None or known() is not binding:
+                raise RuntimeError("device binding is unknown")
+            if self._active_bindings.get(token) is not binding:
+                return False
+            stable_id = binding.physical_identity.stable_device_identity
+            if self._physical_ids.get(stable_id) is not token:
+                raise RuntimeError("device binding physical identity is inconsistent")
+            self._active_bindings.pop(token)
+            self._physical_ids.pop(stable_id)
+            return True
 
     def verify_capability(self, binding: BoundDevice) -> CapabilityProof:
         self._require_binding(binding)
@@ -132,8 +206,9 @@ class DeviceBroker:
     def _require_binding(self, binding: BoundDevice) -> None:
         if not isinstance(binding, BoundDevice):
             raise TypeError("binding must be BoundDevice")
-        if binding._broker_token not in self._binding_tokens:
-            raise RuntimeError("device binding is unknown")
+        with self._lock:
+            if self._active_bindings.get(binding._broker_token) is not binding:
+                raise RuntimeError("device binding is unknown")
 
 
 def bind_verified_device(

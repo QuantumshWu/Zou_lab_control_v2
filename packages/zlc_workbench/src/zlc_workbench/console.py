@@ -3942,6 +3942,15 @@ class ConsolePresenter:
             for api_name, kind, publishes in self.catalog.rows()
         )
 
+    def installation_changed(self) -> None:
+        """Re-project stopped drafts against the current live device set."""
+
+        for binding in self.logic.values():
+            binding.finalization_key = ()
+            binding.finalization = None
+            self.refresh_logic_editor(binding.node_id)
+        self._refresh_console_projection()
+
     def add_logic(
         self,
         api_name: str,
@@ -4035,6 +4044,7 @@ class ConsolePresenter:
         return (
             binding.draft_revision,
             id(self.session.installation),
+            int(getattr(self.session.installation, "revision", 0)),
             source_options,
             publication is not None,
         )
