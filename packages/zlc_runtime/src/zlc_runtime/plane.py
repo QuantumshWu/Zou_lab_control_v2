@@ -1678,6 +1678,7 @@ class SignalDataPlane:
         producer = None
         state = None
         sequence = 0
+        retain_latest_monitor = False
         materialized: dict[str, tuple[int, OwnedSnapshot]] = {}
         pending: dict[
             str,
@@ -1723,9 +1724,19 @@ class SignalDataPlane:
                         )
             else:
                 producer = state.publication_stream
+                retain_latest_monitor = bool(state.publication.signals) and all(
+                    isinstance(value.coverage, MonitorCoverage)
+                    and value.coverage.retain_at_terminal
+                    for value in state.publication.signals.values()
+                )
+                if retain_latest_monitor:
+                    state.terminal = True
+                    self._membership_changed = True
         if not exact_outputs:
             if producer is not None:
                 producer.finish()
+            if retain_latest_monitor:
+                return True
             self._withdraw_owner(owner_id)
             return False
         try:

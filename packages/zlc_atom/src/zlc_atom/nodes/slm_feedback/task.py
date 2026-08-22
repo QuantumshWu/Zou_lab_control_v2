@@ -609,13 +609,17 @@ class SlmFeedbackTask:
                 CANDIDATE_PHASE_OUTPUT.name: LiveDatasetOutput(
                     CANDIDATE_PHASE_OUTPUT,
                     phase_event,
-                    MonitorCoverage(1, 1),
+                    MonitorCoverage(1, 1, retain_at_terminal=True),
                     record,
                 ),
                 UNIFORMITY_HISTORY_OUTPUT.name: LiveDatasetOutput(
                     UNIFORMITY_HISTORY_OUTPUT,
                     history_event,
-                    MonitorCoverage(self.max_updates, self.max_updates),
+                    MonitorCoverage(
+                        self.max_updates,
+                        self.max_updates,
+                        retain_at_terminal=True,
+                    ),
                     record,
                 ),
             }

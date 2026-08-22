@@ -1816,7 +1816,7 @@ def test_stop_during_failed_first_candidate_save_restores_incoming(
         plane.close()
 
 
-def test_stop_at_terminal_gate_accepts_best_before_transient_previews_retire(
+def test_stop_at_terminal_gate_accepts_best_and_retains_final_previews(
     tmp_path: Path, monkeypatch
 ) -> None:
     slm = _Slm((17, 23), incoming=0.125)
@@ -1879,8 +1879,8 @@ def test_stop_at_terminal_gate_accepts_best_before_transient_previews_retire(
         assert validation_entered.wait(2.0)
         # Stop wins immediately before the final apply/save commit, after
         # validation has produced a passing result.  That measured candidate
-        # is committed to both transient previews before Task terminal retires
-        # them, and remains on the device and in the durable artifact.
+        # is committed to both retained previews before Task terminal, and
+        # remains there as well as on the device and in the durable artifact.
         host.cancel("before terminal commit")
         release_validation.set()
         assert stopped_save_entered.wait(2.0)
@@ -1909,10 +1909,23 @@ def test_stop_at_terminal_gate_accepts_best_before_transient_previews_retire(
         saved, metadata = _load_candidate(artifacts[0])
         np.testing.assert_array_equal(saved, best)
         assert metadata["candidate"] == 1
-        # Task previews are Monitor projections and retire at terminal; the
-        # durable artifact and commanded SLM remain the accepted truth.
-        assert plane.latest_publication(host.signal_key("candidate_phase")) is None
-        assert plane.latest_publication(host.signal_key("uniformity_history")) is None
+        # Feedback previews are latest-value monitors while running, but their
+        # final phase and convergence curve remain visible after terminal.
+        retained_phase = plane.latest_publication(
+            host.signal_key("candidate_phase")
+        )
+        retained_curve = plane.latest_publication(
+            host.signal_key("uniformity_history")
+        )
+        assert retained_phase is not None and retained_curve is not None
+        np.testing.assert_array_equal(
+            retained_phase.value(host.signal_key("candidate_phase")).snapshot.block.values[0, 0],
+            best,
+        )
+        np.testing.assert_array_equal(
+            retained_curve.value(host.signal_key("uniformity_history")).snapshot.block.values[0, :, 0],
+            np.asarray([1.0]),
+        )
     finally:
         release_validation.set()
         release_stopped_save.set()

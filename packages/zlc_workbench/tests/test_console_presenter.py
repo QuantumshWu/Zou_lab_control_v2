@@ -3053,6 +3053,11 @@ def test_task_preview_retirement_uses_runtime_signal_existence(
         signal="@logic/task/retired-preview",
     )
     assert missing is not None
+    manual = presenter.add_blank_panel(
+        "image",
+        signal="@logic/task/manual-panel",
+    )
+    assert manual is not None
     task_id = presenter.add_logic("calibration", open_editor=False)
     task = presenter.logic[task_id]
     presenter._auto_task_previews[task_id] = {
@@ -3063,6 +3068,7 @@ def test_task_preview_retirement_uses_runtime_signal_existence(
     presenter._reconcile_task_previews(task)
     assert retained.panel_id in presenter.panels
     assert missing.panel_id not in presenter.panels
+    assert manual.panel_id in presenter.panels
 
 
 def test_a_facet_grid_panel_of_frames_carries_the_occupancy_overlay(

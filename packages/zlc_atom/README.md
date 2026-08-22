@@ -267,6 +267,11 @@ solver calls. A genuine failure restores the known incoming command. Each
 candidate Context freezes its actual evolving Target and can be selected
 directly for the next run because neither descriptor asks for a Target file.
 
+`candidate_phase` and `uniformity_history` update as latest-value monitors
+while Feedback runs, but their final values remain published after terminal.
+Starting the next run keeps the previous Monitor surfaces visible until the
+replacement generation has rendered its first values.
+
 The held-out validation applies its 95% family correction across both sites and
 the maximum number of looks. It uses bounded batches without dropping a tail
 (for example, 101 shots become 99 + 2), and remains bounded by the authored

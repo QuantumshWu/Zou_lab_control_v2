@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 
 from zlc_data import AxisSpec, DatasetSchema
-from zlc_runtime.dataset import DatasetCoverage
+from zlc_runtime.dataset import DatasetCoverage, MonitorCoverage
 from zlc_runtime.dataset_output import (
     DatasetOutputDeclaration,
     LiveDatasetOutput,
@@ -87,6 +87,65 @@ def _latest_value(plane: SignalDataPlane, node: _Producer) -> float:
     assert value is not None
     values = value.snapshot.block.values
     return float(np.asarray(values).reshape(-1)[0])
+
+
+def test_retained_monitor_keeps_its_last_value_until_the_next_run() -> None:
+    plane = SignalDataPlane()
+    node = _Producer()
+    signal = node.signal_key("frames")
+    try:
+        first = plane.begin_generation(node)
+        plane.commit_live(
+            node,
+            {
+                "frames": LiveDatasetOutput(
+                    node.declaration,
+                    snapshot("probe", 1),
+                    MonitorCoverage(1, 1, retain_at_terminal=True),
+                )
+            },
+        )
+        assert plane.seal_committed(node)
+        assert _latest_value(plane, node) == 1.0
+        assert not plane.is_generation_live(signal)
+
+        second = plane.begin_generation(node)
+        assert second != first
+        plane.commit_live(
+            node,
+            {
+                "frames": LiveDatasetOutput(
+                    node.declaration,
+                    snapshot("probe", 2),
+                    MonitorCoverage(1, 1, retain_at_terminal=True),
+                )
+            },
+        )
+        assert plane.seal_committed(node)
+        assert _latest_value(plane, node) == 2.0
+    finally:
+        plane.close()
+
+
+def test_transient_monitor_still_retires_at_terminal() -> None:
+    plane = SignalDataPlane()
+    node = _Producer()
+    try:
+        plane.begin_generation(node)
+        plane.commit_live(
+            node,
+            {
+                "frames": LiveDatasetOutput(
+                    node.declaration,
+                    snapshot("probe", 1),
+                    MonitorCoverage(1, 1),
+                )
+            },
+        )
+        assert not plane.seal_committed(node)
+        assert plane.latest_publication(node.signal_key("frames")) is None
+    finally:
+        plane.close()
 
 
 def test_reserve_alone_can_never_run_the_same_node_twice() -> None:
