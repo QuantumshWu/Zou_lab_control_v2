@@ -25,7 +25,6 @@ from zlc_atom.nodes.camera_measurement.measurement import CAMERA_FRAMES_OUTPUT
 
 from .task import (
     CANDIDATE_PHASE_OUTPUT,
-    READOUT_FRAME_COORDINATE,
     SLM_PHASE_ARTIFACT_CONTRACT,
     SlmFeedbackTask,
     UNIFORMITY_HISTORY_OUTPUT,
@@ -159,7 +158,6 @@ LOGIC_NODE = LogicNodeDescriptor(
             CAMERA_FRAMES_OUTPUT,
             "image",
             semantic={
-                "fate:frame": READOUT_FRAME_COORDINATE,
                 "fate:repeat": "reduce",
                 "reduction": Reduction.MEAN,
             },

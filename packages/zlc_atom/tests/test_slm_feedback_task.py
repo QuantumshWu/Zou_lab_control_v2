@@ -471,9 +471,7 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
         ("uniformity_history", "curve", ""),
     )
     camera_preview = descriptor.node_previews[0]
-    assert camera_preview.semantic["fate:frame"] == feedback_module.READOUT_FRAME_COORDINATE
     assert camera_preview.semantic == {
-        "fate:frame": 0,
         "fate:repeat": "reduce",
         "reduction": Reduction.MEAN,
     }
