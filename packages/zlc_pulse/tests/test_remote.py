@@ -5,6 +5,7 @@ from dataclasses import replace
 import socket
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -493,11 +494,43 @@ def test_only_the_configured_uart_is_probed(monkeypatch) -> None:
     assert calls == [("COM9", 0.5)]
 
 
+def test_auto_enumerates_usb_first_then_chooses_the_word63_match(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def probe(port, _timeout, **_kwargs):
+        calls.append(port)
+        if port == "COM7":
+            raise TimeoutError("not the pulse board")
+
+    monkeypatch.setattr(remote_module, "_probe_uart_port", probe)
+    descriptors = (
+        SimpleNamespace(device="COM3", vid=None, pid=None),
+        SimpleNamespace(device="COM7", vid=0x1234, pid=0x5678),
+        SimpleNamespace(device="COM8", vid=None, pid=None),
+    )
+
+    result = resolve_backend(
+        "auto",
+        target=_BOARD_TARGET,
+        params=StreamerParams(),
+        clock_hz=50e6,
+        port_provider=lambda: descriptors,
+    )
+
+    assert result.backend == "uart"
+    assert result.uart_port == "COM3"
+    assert calls == ["COM7", "COM3"]
+    assert result.attempts == (
+        "COM7: timeout",
+        "COM3: word63 fingerprint matched",
+    )
+
+
 @pytest.mark.parametrize(
     "requested, expected",
     (("auto", "jtag-axi"), ("uart", "error"), ("jtag-axi", "jtag-axi")),
 )
-def test_backend_without_a_configured_uart_never_touches_serial(
+def test_backend_without_any_serial_port_falls_back_or_fails_loudly(
     monkeypatch, requested: str, expected: str
 ) -> None:
     monkeypatch.setattr(
@@ -508,12 +541,13 @@ def test_backend_without_a_configured_uart_never_touches_serial(
         ),
     )
     if expected == "error":
-        with pytest.raises(BackendResolutionError, match="requires --uart-port"):
+        with pytest.raises(BackendResolutionError, match="no UART ports detected"):
             resolve_backend(
                 requested,
                 target=_BOARD_TARGET,
                 params=StreamerParams(),
                 clock_hz=50e6,
+                port_provider=lambda: (),
             )
         return
     result = resolve_backend(
@@ -521,8 +555,46 @@ def test_backend_without_a_configured_uart_never_touches_serial(
         target=_BOARD_TARGET,
         params=StreamerParams(),
         clock_hz=50e6,
+        port_provider=lambda: (),
     )
     assert result.backend == expected
+
+
+def test_server_releases_a_fixed_port_for_the_next_run() -> None:
+    port = 0
+    for _ in range(2):
+        transport = MemoryRegisterTransport(geom=StreamerParams())
+        streamer = PulseStreamer(transport, StreamerParams(), 50e6, target=_BOARD_TARGET)
+        server = PulseRemoteServer(("127.0.0.1", port), streamer)
+        port = int(server.server_address[1])
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        client = _client(server)
+        try:
+            client.describe()
+        finally:
+            client.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2.0)
+            streamer.close()
+        assert not thread.is_alive()
+
+
+def test_startup_failure_prints_the_real_error(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        remote_module,
+        "serve",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError(10048, "address already in use")
+        ),
+    )
+
+    assert remote_module._main(["--backend", "memory", "--port", "0"]) == 3
+    error = capsys.readouterr().err
+    assert "OSError" in error
+    assert "address already in use" in error
+    assert "did not enter LISTENING" in error
 
 
 def test_backend_failure_categories_use_real_transport_exceptions() -> None:

@@ -67,12 +67,13 @@ There is no idle timeout for a healthy client. The first valid RPC owns the
 board; a newer valid client takes over only after verified physical SAFE. A
 real disconnect or server shutdown also drives SAFE.
 
-The `auto` backend considers UART only when the one intended port is supplied;
-it never enumerates or probes unrelated serial devices. For example, use
-`.\bin\run_server.bat --backend uart --uart-port COM6`. Without `--uart-port`,
-`auto` skips UART and uses JTAG-to-AXI. An explicit UART failure is loud and
-does not fall back. `--backend jtag-axi` and offline `--backend memory` are
-explicit alternatives. There is no `ZLC_PS_SERVER_BACKEND` environment switch.
+The `auto` backend enumerates COM ports, tries USB VID/PID descriptors first,
+and accepts one only after the word-63 fingerprint matches. Failed probes are
+closed before continuing; if none match, it falls back to JTAG-to-AXI. Use
+`.\bin\run_server.bat --backend uart --uart-port COM6` to restrict probing to
+one port. An explicit UART failure is loud and does not fall back.
+`--backend jtag-axi` and offline `--backend memory` are explicit alternatives.
+There is no `ZLC_PS_SERVER_BACKEND` environment switch.
 
 `bin\build_and_program.bat` is not a normal-use command. It is retained only for a
 separately approved, evidence-driven recovery after an actual RTL/deployment

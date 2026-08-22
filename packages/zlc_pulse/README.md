@@ -42,17 +42,19 @@ host. `RemotePulseStreamer` mirrors the local device surface and adds only its
 TCP connection lifecycle. `wait_done()` uses short client-side polls, so SAFE
 can interrupt `fire(cycles=None)` over the same connection.
 
-UART is never discovered by opening arbitrary serial ports. It is considered
-only when the one intended port is supplied, for example:
+The default `auto` policy enumerates COM ports, tries USB VID/PID descriptors
+first, and accepts a UART only after the deployed word-63 geometry fingerprint
+matches. Every failed probe is closed before the next port. To restrict the
+probe to one known port, use:
 
 ```powershell
 .\bin\run_server.bat --backend uart --uart-port COM6
 ```
 
-Without `--uart-port`, the `auto` policy skips UART and uses the configured
-JTAG-to-AXI path. `--backend jtag-axi` and the offline `--backend memory` mode
-are explicit alternatives. An explicitly requested UART failure is an error
-and never silently falls back.
+If no enumerated UART matches, `auto` falls back to JTAG-to-AXI.
+`--backend jtag-axi` and the offline `--backend memory` mode are explicit
+alternatives. An explicitly requested UART failure is an error and never
+silently falls back.
 
 For an offline walk-through, run the cells before the real-hardware section in
 [`notebooks/usage.ipynb`](notebooks/usage.ipynb). They load the explicit board

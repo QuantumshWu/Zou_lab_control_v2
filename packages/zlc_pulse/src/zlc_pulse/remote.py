@@ -21,7 +21,7 @@ import struct
 import sys
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 from .compile import CompiledProgram, TargetBusDelay as _TargetBusDelay, TargetBusSegment as _TargetBusSegment
 from .device import (
@@ -343,6 +343,51 @@ class BackendResolutionError(RuntimeError):
         self.attempts = tuple(attempts)
 
 
+def _list_uart_ports() -> tuple[object, ...]:
+    """Enumerate serial descriptors lazily so importing zlc_pulse stays optional."""
+
+    from serial.tools import list_ports
+
+    return tuple(list_ports.comports())
+
+
+def _uart_candidates(
+    uart_port: str | None,
+    port_provider: Callable[[], Iterable[object]] | None,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return explicit port or every enumerated COM, with USB descriptors first."""
+
+    selected = str(uart_port).strip() if uart_port is not None else ""
+    if selected:
+        return (selected,), ()
+    provider = port_provider or _list_uart_ports
+    try:
+        raw_ports = provider()
+    except ModuleNotFoundError as exc:
+        name = str(getattr(exc, "name", "") or "")
+        if name.startswith("serial") or "serial" in str(exc).lower():
+            return (), (f'pyserial missing; install with: "{sys.executable}" -m pip install pyserial',)
+        return (), (f"port enumeration failed: {type(exc).__name__}",)
+    except Exception as exc:
+        return (), (f"port enumeration failed: {type(exc).__name__}: {exc}",)
+
+    if isinstance(raw_ports, str):
+        raw_ports = (raw_ports,)
+    raw_ports = sorted(
+        raw_ports,
+        key=lambda item: (
+            getattr(item, "vid", None) is None
+            or getattr(item, "pid", None) is None
+        ),
+    )
+    ports: list[str] = []
+    for descriptor in raw_ports:
+        port = str(getattr(descriptor, "device", descriptor)).strip()
+        if port and port not in ports:
+            ports.append(port)
+    return tuple(ports), (() if ports else ("no UART ports detected",))
+
+
 def _probe_uart_port(
     port: str,
     timeout: float,
@@ -398,8 +443,9 @@ def resolve_backend(
     target: PulseTarget,
     params: StreamerParams,
     clock_hz: float,
+    port_provider: Callable[[], Iterable[object]] | None = None,
 ) -> BackendResolution:
-    """Resolve one backend without ever probing an undeclared serial port."""
+    """Probe enumerated UARTs by word 63, then fall back to JTAG."""
 
     choice = str(requested).strip().lower()
     if choice not in BACKEND_CHOICES:
@@ -411,42 +457,32 @@ def resolve_backend(
 
     if uart_port is not None and not isinstance(uart_port, str):
         raise TypeError("uart_port must be text or None")
-    port = "" if uart_port is None else uart_port.strip()
-    if not port:
-        if choice == "uart":
-            raise BackendResolutionError(
-                "explicit UART backend requires --uart-port; no COM ports are scanned"
+    ports, setup_attempts = _uart_candidates(uart_port, port_provider)
+    attempts = list(setup_attempts)
+    for port in ports:
+        try:
+            _probe_uart_port(
+                port,
+                UART_PROBE_TIMEOUT,
+                target=target,
+                params=params,
+                clock_hz=clock_hz,
+                baud=int(uart_baud),
             )
-        return BackendResolution(
-            choice,
-            "jtag-axi",
-            None,
-            "auto selected jtag-axi because no explicit UART port was configured",
-        )
-
-    try:
-        _probe_uart_port(
-            port,
-            UART_PROBE_TIMEOUT,
-            target=target,
-            params=params,
-            clock_hz=clock_hz,
-            baud=int(uart_baud),
-        )
-    except Exception as exc:
-        attempts = (f"{port}: {_probe_failure_reason(exc)}",)
-    else:
-        attempts = (f"{port}: word63 fingerprint matched",)
+        except Exception as exc:
+            attempts.append(f"{port}: {_probe_failure_reason(exc)}")
+            continue
+        attempts.append(f"{port}: word63 fingerprint matched")
         mode = "explicit uart" if choice == "uart" else "auto"
         return BackendResolution(
             choice,
             "uart",
             port,
             f"{mode} selected UART {port}@{int(uart_baud) / 1_000_000:g}M after word63 fingerprint match",
-            attempts,
+            tuple(attempts),
         )
 
-    failure = "; ".join(attempts)
+    failure = "; ".join(attempts) if attempts else "no board UART detected"
     if choice == "uart":
         raise BackendResolutionError(
             f"explicit UART backend failed; no matching device: {failure}",
@@ -457,7 +493,7 @@ def resolve_backend(
         "jtag-axi",
         None,
         f"auto fallback to jtag-axi after UART probe: {failure}",
-        attempts,
+        tuple(attempts),
     )
 
 
@@ -1370,7 +1406,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--backend",
         choices=BACKEND_CHOICES,
         default="auto",
-        help="transport policy; UART is considered only with --uart-port",
+        help="transport policy; auto probes UART word 63, then falls back to JTAG",
     )
     parser.add_argument("--state-dir", default="fpga/build/state")
     parser.add_argument("--uart-port", default=None, help="the one configured Pulse UART port")
@@ -1398,7 +1434,7 @@ def _main(argv: list[str] | None = None) -> int:
     if args.check_config:
         print(f"python={sys.executable}")
         print(f"backend={args.backend}")
-        print(f"uart_port={args.uart_port or 'not-configured'}")
+        print(f"uart_port={args.uart_port or 'auto-discover'}")
         print(f"listen_bind={args.host}:{args.port}")
         normalized_host = str(args.host).strip().lower()
         same_host = (
@@ -1530,6 +1566,11 @@ def _main(argv: list[str] | None = None) -> int:
         _server_log(
             "SERVER FAILED",
             detail=_log_fields(error=f"{type(exc).__name__}: {str(exc).replace(chr(10), ' ')}"),
+        )
+        print(
+            f"ERROR before LISTENING: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+            flush=True,
         )
         print("ZLC server did not enter LISTENING state; no client can connect.", file=sys.stderr, flush=True)
         return 3

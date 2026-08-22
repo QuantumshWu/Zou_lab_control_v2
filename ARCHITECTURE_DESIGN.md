@@ -175,7 +175,8 @@ Node new chunk
 - 无密码、认证、TLS或权限UI。
 - Second client默认last-client-wins；旧handler立即失效，takeover前旧active command必须成功Stop/SAFE。
 - 正常连接无idle timeout；控制进程/socket/连接真正断开时自动SAFE。
-- UART port显式配置，不扫描所有COM。
+- UART auto枚举COM、优先USB VID/PID，并只在word-63 fingerprint匹配后选用；
+  显式port把探测限制为该端口。auto探测失败才回退JTAG，显式UART失败则报错。
 - 只有server process持hardware transport；不保留假的进程内Interprocess lease。
 
 ### 7.4 Host/RTL/build invariants
