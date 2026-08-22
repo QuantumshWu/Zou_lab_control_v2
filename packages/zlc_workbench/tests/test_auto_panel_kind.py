@@ -142,6 +142,14 @@ def test_a_grid_of_judged_frames_draws_one_cell_per_frame() -> None:
     assert isinstance(asked_for_histogram, FacetGridPlot)
     assert isinstance(asked_for_histogram.cell, HistogramPlot)
 
+    # A one-frame Camera preview keeps the authored frame identity.  Shot
+    # count must not silently turn repeat into the panel's facet axis.
+    one_frame = task_console_fitting_spec(
+        _camera_frames(cycles=30, frames=1), "facet_grid", ""
+    )
+    assert isinstance(one_frame, FacetGridPlot)
+    assert one_frame.facet.axis_id == "cam.frames.frame"
+
 
 def test_the_automatic_kind_is_the_flat_kind_the_data_proves() -> None:
     """One rule, and a grid is not part of it: a grid is asked for.

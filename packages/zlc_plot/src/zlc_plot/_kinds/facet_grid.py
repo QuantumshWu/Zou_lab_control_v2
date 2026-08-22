@@ -75,7 +75,7 @@ def _data_axes_cell(schema: DatasetSchema) -> ImagePlot | None:
     )
 
 
-def _facet_axis(schema: Any, cell: Any) -> AxisRef:
+def _facet_axis(schema: Any, cell: Any) -> AxisRef | None:
     """What varies from cell to cell: the thing one plot would have to pool.
 
     One rule, and it depends on what the CELL already consumes, because a
@@ -85,29 +85,21 @@ def _facet_axis(schema: Any, cell: Any) -> AxisRef:
     every scan point free to have its own cell.
 
     Frames of a cycle and points of a scan are different measurements and
-    get a cell each; repeats are the same measurement again, and pooling
-    them is the reduction the operator declared, so they face a grid only
-    when nothing else varies.
-
-    Nothing varying is not a refusal.  Inference never asks this question --
-    FACET_GRID is deliberately absent from the inference order, so the only
-    callers are an operator picking the kind and a node declaring it for its
-    own preview.  Both have already decided they want a grid, and the honest
-    answer for a one-frame cycle is the grid they asked for with one cell in
-    it: the repeat axis, which every dataset has and which is one value wide
-    exactly when nothing else varies.  Refusing here is what made a camera
-    panel silently open as a plain image whenever the cycle held one frame.
+    get a cell each.  Repeats are the same measurement again, so the default
+    reduction keeps pooling them; only an explicitly authored specification
+    may make repeat a facet.  ``None`` means the cell already consumes every
+    non-repeat axis and there is no honest automatic FacetGrid layout.
     """
 
     live = live_grid_dimensions(schema)
     dense = tuple(axis for axis in schema.cell_schema.data_axes if axis.size > 1)
-    # No scan topology and several point rows: the point axis IS the thing
-    # measured several times -- the frames of a camera cycle, the frames
-    # occupancy judged.
-    points_vary = schema.grid_topology is None and schema.point_table.row_count > 1
+    # Without scan topology the point coordinate IS the authored cell identity
+    # -- the frames of a camera cycle, including a one-frame cycle.  Its size
+    # does not change that identity; using repeat instead made panel meaning
+    # depend on the number of shots.
     point_axis = (
         AxisRef.point(str(schema.point_table.columns[0].coordinate_id))
-        if points_vary
+        if schema.grid_topology is None and schema.point_table.columns
         else None
     )
     if isinstance(cell, CurvePlot):
@@ -121,7 +113,7 @@ def _facet_axis(schema: Any, cell: Any) -> AxisRef:
             # The curve walks the innermost dimension; the grid takes the
             # outermost.
             return AxisRef.point_dimension(live[0])
-        return AxisRef.repeat()
+        return None
     if point_axis is not None:
         return point_axis
     if len(live) == 1:
@@ -131,7 +123,7 @@ def _facet_axis(schema: Any, cell: Any) -> AxisRef:
         # measured gets its cell rather than one dimension being folded
         # into the other.
         return AxisRef.point_rows()
-    return AxisRef.repeat()
+    return None
 
 
 def cell_within_one_cell(schema: Any, facet: Any, cell: Any) -> Any | None:
@@ -193,9 +185,10 @@ def default_spec(schema: Any) -> FacetGridPlot | None:
     thirty-five points, instead of a panel that refuses to draw at all.
 
     Degenerate axes (one value) are real provenance but not structure, so
-    they never decide what a cell holds.  They can still BE the facet: this
-    kind is only ever asked for, so a dataset with nothing varying gets the
-    grid of one cell it was asked for rather than a refusal.
+    they never decide what a cell holds.  A no-topology point coordinate may
+    still identify a single authored frame.  Repeat is never selected here:
+    an operator may author it explicitly, but acquisition history is reduced
+    by default.
     """
 
     if not isinstance(schema, DatasetSchema):
@@ -218,11 +211,13 @@ def default_spec(schema: Any) -> FacetGridPlot | None:
             )
             if len(live) >= 3:
                 return FacetGridPlot(AxisRef.point_dimension(live[0]), heatmap)
-            return FacetGridPlot(AxisRef.repeat(), heatmap)
+            return None
         cell = curve_default_spec(schema)
     if cell is None:
         return None
     facet = _facet_axis(schema, cell)
+    if facet is None:
+        return None
     cell = cell_within_one_cell(schema, facet, cell)
     return None if cell is None else FacetGridPlot(facet, cell)
 

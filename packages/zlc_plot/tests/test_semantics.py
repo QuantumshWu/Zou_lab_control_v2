@@ -106,11 +106,18 @@ def test_semantic_choices_are_labeled_once_and_kind_domain_is_registry_filtered(
         assert all(isinstance(label, str) and label for label in labels)
         assert all("AxisRef(" not in label for label in labels)
     expected = tuple(
-        handler.kind for handler in HANDLERS if handler.admits(snapshot.block.schema)
+        handler.kind
+        for handler in HANDLERS
+        if handler.admits(snapshot.block.schema)
+        and (
+            handler.kind is PlotKind.CURVE
+            or handler.default_spec(snapshot.block.schema) is not None
+        )
     )
     kind_field = description.field("kind")
-    # Every offered kind is usable; here every admitted kind also has a
-    # default, so the offered domain equals the admitted set.
+    # Admission means an authored spec is valid; a kind switch additionally
+    # needs an unambiguous default.  FacetGrid therefore stays out when the
+    # only unused axis is repeat.
     assert kind_field.choice_values == expected
     # Every axis row offers the fate an unassigned axis already has, so
     # "none of the above" is a fate rather than a null.

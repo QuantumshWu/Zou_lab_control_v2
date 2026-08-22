@@ -68,11 +68,10 @@ def test_offscreen_semantic_combos_use_unique_labeled_choices() -> None:
 def test_offscreen_semantic_kind_combo_offers_only_usable_kinds() -> None:
     """The kind combo lists exactly the kinds that can be switched to.
 
-    An editor never shows an option that cannot be used.  A grid always can
-    be: asked for on a dataset where nothing varies, it is the grid with one
-    cell in it, so it is offered and selectable on both of these datasets.
-    An image cannot be drawn from a scalar point table with no second
-    dimension, and that is the kind the combo must leave out.
+    An editor never shows an option that cannot be used.  A scalar series has
+    no non-repeat facet axis left, so FacetGrid is not offered merely because
+    repeats exist.  An image likewise cannot be drawn from a scalar point
+    table with no second dimension.
     """
 
     try:
@@ -85,9 +84,7 @@ def test_offscreen_semantic_kind_combo_offers_only_usable_kinds() -> None:
     try:
         panel = Qt5ParameterPanel(session.describe_display())
         editor = panel.semantic_editor("kind")
-        index = editor.findData(FacetGridPlot.kind)
-        assert index >= 0
-        assert editor.model().item(index).isEnabled()
+        assert editor.findData(FacetGridPlot.kind) < 0
     finally:
         if panel is not None:
             panel.deleteLater()
@@ -105,9 +102,7 @@ def test_offscreen_semantic_kind_combo_offers_only_usable_kinds() -> None:
     try:
         panel = Qt5ParameterPanel(session.describe_display())
         editor = panel.semantic_editor("kind")
-        index = editor.findData(FacetGridPlot.kind)
-        assert index >= 0
-        assert editor.model().item(index).isEnabled()
+        assert editor.findData(FacetGridPlot.kind) < 0
         assert editor.findData(ImagePlot.kind) < 0
     finally:
         if panel is not None:

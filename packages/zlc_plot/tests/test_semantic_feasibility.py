@@ -18,6 +18,7 @@ from zlc_plot import (
     CurvePlot,
     FacetGridPlot,
     PlotSession,
+    describe_semantics,
     updated_spec,
 )
 from zlc_plot._kinds import default_spec
@@ -342,7 +343,10 @@ def test_updated_spec_is_the_single_composition_authority() -> None:
     assert cell_edit.cell.x == AxisRef.point("row")
     assert cell_edit.facet == facet.facet
 
-    facet_edit = updated_spec(schema, facet, "facet", AxisRef.repeat())
+    description = describe_semantics(schema, facet)
+    repeat_fate = dict(description.fate_rows)[AxisRef.repeat()]
+    assert "facet" in description.field(repeat_fate).choice_values
+    facet_edit = updated_spec(schema, facet, repeat_fate, "facet")
     assert facet_edit.facet == AxisRef.repeat()
     assert facet_edit.cell == facet.cell
 

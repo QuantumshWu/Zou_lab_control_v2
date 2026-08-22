@@ -150,26 +150,15 @@ def test_default_specs_put_the_innermost_scan_loop_on_x() -> None:
     assert dense_image.x == AxisRef.data("column")
     assert dense_image.y == AxisRef.data("row")
 
-    # FacetGrid on a scalar two-dimension scan: the scan grid itself is the
-    # cell (the heatmap the scan was measured for) and, with no outer
-    # dimension left, the non-trivial repeat axis is the one lawful facet.
+    # FacetGrid on a scalar two-dimension scan has no automatic facet left:
+    # the heatmap consumes both scan dimensions, while repeat is acquisition
+    # history and may become a facet only through an explicit operator edit.
     inferred_facet = facet.default_spec(topology_schema)
-    assert inferred_facet.facet == AxisRef.repeat()
-    assert isinstance(inferred_facet.cell, ImagePlot)
-    assert inferred_facet.cell.x == AxisRef.point_dimension("y")
-    assert inferred_facet.cell.y == AxisRef.point_dimension("x")
+    assert inferred_facet is None
 
 
-def test_a_scalar_two_dimension_scan_without_repeats_defaults_to_one_cell() -> None:
-    """The scan grid IS the cell, and the grid that holds it has one cell.
-
-    FACET_GRID is absent from the inference order, so this default is only
-    ever reached because someone ASKED for a grid -- an operator picking the
-    kind, or a node declaring it for its own preview.  The honest answer to
-    "show me this as a grid" when nothing varies is the grid with one cell in
-    it, over the degenerate repeat axis; refusing is how an asked-for grid
-    silently became a different kind.
-    """
+def test_repeat_is_not_an_automatic_facet_but_remains_explicitly_valid() -> None:
+    """A default never guesses repeat; an authored repeat facet still works."""
 
     points = PointTable.from_columns(
         {
@@ -194,13 +183,17 @@ def test_a_scalar_two_dimension_scan_without_repeats_defaults_to_one_cell() -> N
     image = next(h for h in HANDLERS if h.kind is PlotKind.IMAGE)
     curve = next(h for h in HANDLERS if h.kind is PlotKind.CURVE)
     assert facet.admits(schema)
-    grid = facet.default_spec(schema)
-    assert grid.facet == AxisRef.repeat()
+    assert facet.default_spec(schema) is None
     heatmap = image.default_spec(schema)
     assert heatmap.x == AxisRef.point_dimension("y")
     assert heatmap.y == AxisRef.point_dimension("x")
-    # The one cell shows exactly the picture the image kind would have drawn.
-    assert grid.cell == heatmap
+    explicit = FacetGridPlot(AxisRef.repeat(), heatmap)
+    from zlc_plot.data_view import DataView
+    from data_factory import DatasetSnapshot
+
+    DataView(
+        DatasetSnapshot(schema, np.zeros(schema.shape, dtype=np.float64), revision=0)
+    ).validate_facet(explicit)
 
     # A flat point table with a single repeat has nothing to face either: the
     # curve IS the picture, and the grid asked for holds it in one cell.
@@ -210,9 +203,11 @@ def test_a_scalar_two_dimension_scan_without_repeats_defaults_to_one_cell() -> N
         generation="facet-default-flat",
     )
     assert facet.admits(flat)
-    flat_grid = facet.default_spec(flat)
-    assert flat_grid.facet == AxisRef.repeat()
-    assert flat_grid.cell == curve.default_spec(flat)
+    assert facet.default_spec(flat) is None
+    explicit_flat = FacetGridPlot(AxisRef.repeat(), curve.default_spec(flat))
+    DataView(
+        DatasetSnapshot(flat, np.zeros(flat.shape, dtype=np.float64), revision=0)
+    ).validate_facet(explicit_flat)
 
 
 def test_a_default_spec_names_axes_the_data_view_can_actually_resolve() -> None:

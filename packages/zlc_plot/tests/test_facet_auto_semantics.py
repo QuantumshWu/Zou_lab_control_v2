@@ -2,8 +2,8 @@
 
 The rules under test ARE the product decision: the cell shows the densest
 structure the data offers (frame > scan heatmap > curve), degenerate axes
-are invisible to inference, and the facet axis follows the cell -- repeats
-for frames, outer dimensions for heatmaps.
+are invisible to inference, and the facet axis follows the cell.  Repeat is
+measurement history, so only an explicitly authored grid may facet it.
 """
 
 from __future__ import annotations
@@ -71,34 +71,20 @@ def test_a_scalar_multi_dimension_scan_cells_its_two_innermost_dims() -> None:
     assert cell.reduction is Reduction.MEAN
 
 
-def test_a_scalar_two_dimension_scan_with_repeats_facets_them() -> None:
-    """No outer dimension left: repeats are the only lawful facet."""
+def test_a_two_dimension_heatmap_does_not_automatically_facet_repeat() -> None:
+    """The heatmap consumes both scan dimensions; repeat remains reduced.
 
-    spec = facet_default(_scan_schema({"a": 3, "b": 4}, repeats=5))
-    assert isinstance(spec, FacetGridPlot)
-    assert spec.facet == AxisRef.repeat()
-    assert isinstance(spec.cell, ImagePlot)
-    assert spec.cell.x == AxisRef.point_dimension("b")
-    assert spec.cell.y == AxisRef.point_dimension("a")
-
-
-def test_a_scalar_two_dimension_scan_without_repeats_is_one_cell() -> None:
-    """Nothing varying is not a refusal: a grid is only ever ASKED for.
-
-    The heatmap already IS the picture, so the grid holds exactly one cell --
-    the degenerate repeat axis.  Refusing instead is what silently replaced an
-    asked-for grid with another kind.
+    Having many repeats must not turn acquisition history into a layout axis.
+    With no non-repeat dimension left there is no automatic FacetGrid spec.
     """
 
-    schema = _scan_schema({"a": 3, "b": 4})
-    spec = facet_default(schema)
-    assert isinstance(spec, FacetGridPlot)
-    assert spec.facet == AxisRef.repeat()
-    assert isinstance(spec.cell, ImagePlot)
-    image = image_default(schema)
-    assert isinstance(image, ImagePlot)
-    assert image.x == AxisRef.point_dimension("b")
-    assert image.y == AxisRef.point_dimension("a")
+    for repeats in (1, 5):
+        schema = _scan_schema({"a": 3, "b": 4}, repeats=repeats)
+        assert facet_default(schema) is None
+        image = image_default(schema)
+        assert isinstance(image, ImagePlot)
+        assert image.x == AxisRef.point_dimension("b")
+        assert image.y == AxisRef.point_dimension("a")
 
 
 def test_repeats_reduce_into_the_heatmap_when_an_outer_dimension_exists() -> None:
@@ -111,16 +97,13 @@ def test_repeats_reduce_into_the_heatmap_when_an_outer_dimension_exists() -> Non
 
 
 def test_a_degenerate_data_axis_still_counts_as_a_scalar_point() -> None:
-    """survival_rate carries a one-pair axis; the heatmap must still win."""
+    """A degenerate cell axis does not justify faceting repeat."""
 
     pairs = (Axis.create("pair", size=1),)
     spec = facet_default(
         _scan_schema({"a": 3, "b": 4}, repeats=5, data_axes=pairs)
     )
-    assert isinstance(spec, FacetGridPlot)
-    assert spec.facet == AxisRef.repeat()
-    assert isinstance(spec.cell, ImagePlot)
-    assert spec.cell.x == AxisRef.point_dimension("b")
+    assert spec is None
 
 
 def test_frame_cells_facet_the_scan_and_leave_repeats_to_the_reduction() -> None:
@@ -161,13 +144,12 @@ def test_frame_cells_facet_the_scan_and_leave_repeats_to_the_reduction() -> None
     assert spec.facet == AxisRef.point_rows()
     assert isinstance(spec.cell, ImagePlot)
 
-    # With nothing else live, the repeats ARE the only structure there is.
+    # With nothing else live, repeat is still history rather than an automatic
+    # layout axis.
     frames_repeated_only = _scan_schema(
         {"a": 1}, repeats=4, data_axes=_frame_axes()
     )
-    spec = facet_default(frames_repeated_only)
-    assert isinstance(spec, FacetGridPlot)
-    assert spec.facet == AxisRef.repeat()
+    assert facet_default(frames_repeated_only) is None
 
 
 def test_a_camera_cycle_facets_its_frames_from_the_point_axis() -> None:
@@ -208,9 +190,7 @@ def test_a_camera_cycle_facets_its_frames_from_the_point_axis() -> None:
     )
     spec = facet_default(one_frame)
     assert isinstance(spec, FacetGridPlot)
-    assert spec.facet == AxisRef.repeat(), (
-        "a single-frame capture has only its repeats to show"
-    )
+    assert spec.facet == AxisRef.point("frame")
 
 
 def test_a_site_resolved_scan_keeps_the_grouped_curve_cell() -> None:

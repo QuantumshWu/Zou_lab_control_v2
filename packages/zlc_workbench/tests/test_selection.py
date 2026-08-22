@@ -647,8 +647,8 @@ def _wait_published(plane, name: str, timeout: float = 5.0):
 def test_a_box_on_a_focused_scan_heatmap_cell_publishes_the_focused_subgrid() -> None:
     """The headline chain: heatmap facet cell -> gesture -> derived signal.
 
-    The auto default for a repeated 2D scalar scan is a facet grid of
-    scan-heatmap image cells whose axes are grid-topology DIMENSIONS.  Every
+    This deliberately authored repeat facet contains scan-heatmap image cells
+    whose axes are grid-topology DIMENSIONS.  Every
     committed box on one used to die silently in the bridge with 'image area
     axes must be source data axes' -- nothing published, nothing said.  And
     the focused cell's identity used to be dropped, so the cut spanned every
@@ -656,13 +656,14 @@ def test_a_box_on_a_focused_scan_heatmap_cell_publishes_the_focused_subgrid() ->
     """
 
     plot = pytest.importorskip("zlc_plot")
-    from zlc_plot._kinds.facet_grid import default_spec as facet_default_spec
+    from zlc_plot._kinds.image import default_spec as image_default_spec
 
     snapshot = _heatmap_snapshot()
     schema = snapshot.block.schema
     values = snapshot.block.values
-    spec = facet_default_spec(schema)
-    assert spec is not None and isinstance(spec.cell, plot.ImagePlot), spec
+    cell = image_default_spec(schema)
+    assert isinstance(cell, plot.ImagePlot), cell
+    spec = plot.FacetGridPlot(plot.AxisRef.repeat(), cell)
 
     plane, source_node = _plane_for(
         snapshot, {"@logic/panel-1/roi_frame", "@logic/panel-1/roi_mean"}
