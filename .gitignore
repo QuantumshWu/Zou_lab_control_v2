@@ -4,6 +4,10 @@ __pycache__/
 .pytest_cache/
 .ipynb_checkpoints/
 .venv/
+/build/
+/zou_lab_control.egg-info/
+/.Xil/
+/tight_setup_hold_pin*
 
 # Vivado build output: regenerable, and large.  geom.tcl is the exception --
 # it is pinned by digest in packages/zlc_pulse/tests/test_fpga_assets.py, so it
