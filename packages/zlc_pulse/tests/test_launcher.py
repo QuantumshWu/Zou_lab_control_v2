@@ -107,9 +107,12 @@ def test_hardware_tcl_requires_exactly_one_matching_target_and_device() -> None:
         assert "lindex [get_hw_devices] 0" not in source, name
 
 
-def test_build_launcher_fails_closed_on_config_and_never_programs_by_default() -> None:
+def test_build_launcher_fails_closed_and_programs_by_default() -> None:
     source = BUILD_LAUNCHER.read_text(encoding="utf-8")
-    assert 'set "MODE=build"' in source
+    assert 'set "MODE=build_program"' in source
+    assert 'if /I "%MODE%"=="build_program" goto zlc_program' in source
+    assert 'if /I "%~1"=="--build-only" (set "MODE=build"' in source
+    assert 'if /I "%~1"=="--program-only" (set "MODE=program"' in source
     assert ":zlc_require_config" in source
     require_at = source.index("call :zlc_require_config")
     program_at = source.index(":zlc_program")

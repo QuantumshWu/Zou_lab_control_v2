@@ -2,7 +2,7 @@
 setlocal EnableExtensions EnableDelayedExpansion
 
 if /I not "%~1"=="--inner" (
-  set "ZLC_ACTION=build"
+  set "ZLC_ACTION=build + program"
   if /I "%~1"=="--check" set "ZLC_ACTION=synth check"
   if /I "%~1"=="--diagnose" set "ZLC_ACTION=hardware diagnose"
   if /I "%~1"=="--build-only" set "ZLC_ACTION=build"
@@ -41,7 +41,7 @@ set "ZLC_PROGRAM_TCL=program_fpga.tcl"
 set "ZLC_PROJ_SUB=ps"
 set "ZLC_TOP=zlc_pulse_streamer_top"
 
-set "MODE=build"
+set "MODE=build_program"
 set "ZLC_OPTION_OK="
 if "%~1"=="" set "ZLC_OPTION_OK=1"
 if "%~1"=="--help" goto zlc_help
@@ -101,13 +101,14 @@ if errorlevel 1 exit /b 1
 
 
 rem Skip the slow synth+implementation when a bitstream and its routed reports already match
-rem every recorded source/artifact input.  This applies only to the default build/check mode
-rem and only when --force-build / --rebuild was not given; it never starts programming.
+rem every recorded source/artifact input.  Default mode still PROGRAMS that qualified bit;
+rem --build-only / --check stop after proving it current.
 call :zlc_check_prebuilt
-if /I "%MODE%"=="build" if not defined ZLC_FORCE_BUILD if defined ZLC_PREBUILT (
+if not defined ZLC_FORCE_BUILD if defined ZLC_PREBUILT (
   echo ZLC bitstream is up to date ^(sources unchanged since last build^) -- skipping build.
   echo ZLC   bit: !ZLC_BIT!
   echo ZLC   ^(force a rebuild with: build_and_program.bat --force-build^)
+  if /I "%MODE%"=="build_program" goto zlc_program
   exit /b 0
 )
 
@@ -117,6 +118,7 @@ if errorlevel 1 exit /b 1
 call :zlc_save_src_hash
 if errorlevel 1 exit /b 1
 
+if /I "%MODE%"=="build_program" goto zlc_program
 if /I "%MODE%"=="build" exit /b 0
 if /I "%MODE%"=="check" exit /b 0
 
@@ -131,8 +133,8 @@ echo Control path: JTAG-to-AXI master -^> AXI BRAM controller -^> edge/scan BRAM
 echo Engine: 1-tick (20 ns) FIFO prefetch + streamed autonomous ping-pong scan.
 echo.
 echo Usage:
-echo   bin\build_and_program.bat              Build only (skips when sources are unchanged)
-echo   bin\build_and_program.bat --force-build Rebuild even if the sources are unchanged
+echo   bin\build_and_program.bat              Build if needed, then PROGRAM volatile FPGA
+echo   bin\build_and_program.bat --force-build Rebuild, then PROGRAM volatile FPGA
 echo   bin\build_and_program.bat --build-only Build only
 echo   bin\build_and_program.bat --program-only Program existing bitstream (VOLATILE: lost on power-off)
 echo   bin\build_and_program.bat --flash      Program the SPI flash so the program SURVIVES a power cycle
@@ -147,8 +149,9 @@ echo (run 'get_cfgmem_parts' in Vivado to list valid names).
 echo.
 echo The default mode SKIPS the (slow) synth+impl only when the Vivado build, target part,
 echo engine/top HDL, create tcl, board XDC, streamer_config and generated geometry all match,
-echo and the bitstream plus routed reports match their saved receipt. It never programs hardware. --force-build
-echo (or --rebuild) forces a rebuild.  The qualified build receipt is fpga\build\ps\.zlc_src_hash.
+echo and the bitstream plus routed reports match their saved receipt; it then PROGRAMS that bit.
+echo --force-build ^(or --rebuild^) forces a rebuild before programming.  The qualified build receipt
+echo is fpga\build\ps\.zlc_src_hash.
 echo.
 echo Real build XDC:
 echo   fpga\board_config\board.xdc
