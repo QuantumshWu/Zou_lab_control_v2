@@ -103,6 +103,9 @@ def test_hardware_tcl_requires_exactly_one_matching_target_and_device() -> None:
         assert "[llength $zlc_devices] != 1" in source, name
         assert "ZLC_PS_FPGA_PART" in source, name
         assert "get_property PART $device" in source, name
+        assert "get_parts -quiet $expected_part" in source, name
+        assert "get_property DEVICE $expected_parts" in source, name
+        assert "string equal -nocase $actual_part $expected_device" in source, name
         assert "lindex $zlc_targets 0" not in source, name
         assert "lindex [get_hw_devices] 0" not in source, name
 

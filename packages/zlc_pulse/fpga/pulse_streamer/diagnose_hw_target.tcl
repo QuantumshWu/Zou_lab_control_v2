@@ -6,6 +6,12 @@ proc env_or {name default} {
 set hw_server_url [env_or ZLC_PS_HW_SERVER_URL [env_or ZLC_HW_SERVER_URL ""]]
 set expected_part [env_or ZLC_PS_FPGA_PART ""]
 if {$expected_part eq ""} { error "ZLC_PS_FPGA_PART is required; validate streamer_config.json before hardware diagnosis" }
+set expected_parts [get_parts -quiet $expected_part]
+if {[llength $expected_parts] != 1} {
+    error "Vivado cannot resolve configured synthesis part '$expected_part'"
+}
+set expected_device [get_property DEVICE $expected_parts]
+if {$expected_device eq ""} { error "Configured part '$expected_part' has no DEVICE property" }
 
 if {[llength [info commands load_features]]} { catch {load_features labtools} }
 if {[llength [info commands open_hw_manager]]} {
@@ -51,8 +57,8 @@ if {[llength $zlc_devices] != 1} {
 }
 set device $zlc_devices
 set actual_part [get_property PART $device]
-if {$actual_part ne $expected_part} {
-    error "FPGA part mismatch: streamer_config.json requires '$expected_part', hardware reports '$actual_part'"
+if {![string equal -nocase $actual_part $expected_device]} {
+    error "FPGA device mismatch: streamer_config.json part '$expected_part' resolves to '$expected_device', hardware reports '$actual_part'"
 }
 set line "  NAME=[get_property NAME $device]"
 foreach prop {PART IDCODE PROGRAM.FILE PROBES.FILE} {

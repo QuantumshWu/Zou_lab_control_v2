@@ -26,6 +26,12 @@ set ltx_path [path_env_or ZLC_PS_VIVADO_LTX [path_env_or ZLC_PS_LTX $default_ltx
 set hw_server_url [raw_env_or ZLC_PS_HW_SERVER_URL [raw_env_or ZLC_HW_SERVER_URL ""]]
 set expected_part [raw_env_or ZLC_PS_FPGA_PART ""]
 if {$expected_part eq ""} { error "ZLC_PS_FPGA_PART is required; validate streamer_config.json before programming" }
+set expected_parts [get_parts -quiet $expected_part]
+if {[llength $expected_parts] != 1} {
+    error "Vivado cannot resolve configured synthesis part '$expected_part'"
+}
+set expected_device [get_property DEVICE $expected_parts]
+if {$expected_device eq ""} { error "Configured part '$expected_part' has no DEVICE property" }
 
 puts "ZLC program_fpga contract: CHANNEL_COUNT=62 NUM_SLOTS=4 control=JTAG-to-AXI (final BRAM tables + streaming)"
 puts "ZLC program_fpga project_dir: $project_dir"
@@ -73,8 +79,8 @@ if {[llength $zlc_devices] != 1} {
 }
 set device $zlc_devices
 set actual_part [get_property PART $device]
-if {$actual_part ne $expected_part} {
-    error "FPGA part mismatch: streamer_config.json requires '$expected_part', hardware reports '$actual_part'"
+if {![string equal -nocase $actual_part $expected_device]} {
+    error "FPGA device mismatch: streamer_config.json part '$expected_part' resolves to '$expected_device', hardware reports '$actual_part'"
 }
 
 set_property PROGRAM.FILE $bit_path $device
