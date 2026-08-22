@@ -384,10 +384,34 @@ opt_design
 place_design
 phys_opt_design
 route_design
+# At this utilization the default route can finish a few tens of picoseconds
+# short even after the RTL path is pipelined.  Post-route physical optimization
+# is designed for exactly that small residual.  Run it only when needed, then
+# preserve completed routes and repair only what the optimization changed.
+set zlc_postroute_path [get_timing_paths -quiet -delay_type max -max_paths 1 -nworst 1]
+if {[llength $zlc_postroute_path] > 0
+        && [get_property SLACK [lindex $zlc_postroute_path 0]] < 0.0} {
+    puts "ZLC post-route setup cleanup: phys_opt_design + preserved reroute"
+    phys_opt_design
+    route_design -preserve
+}
 set bit_path [file join $impl_dir ${top}.bit]
 set ltx_path [file join $impl_dir ${top}.ltx]
 report_utilization -file [file join $impl_dir ${top}_utilization_routed.rpt]
 report_timing_summary -file [file join $impl_dir ${top}_timing_summary_routed.rpt]
+set bus_skew_path [file join $impl_dir ${top}_bus_skew_routed.rpt]
+report_bus_skew -file $bus_skew_path
+set bus_skew_file [open $bus_skew_path r]
+set bus_skew_text [read $bus_skew_file]
+close $bus_skew_file
+if {[string first "Slack (VIOLATED)" $bus_skew_text] >= 0} {
+    error "bus-skew timing failed; see $bus_skew_path"
+}
+set bus_skew_met [regexp -all {Slack \(MET\)} $bus_skew_text]
+if {$bus_skew_met == 0} {
+    error "No constrained bus-skew path was found; refusing an unattested bitstream"
+}
+puts "ZLC bus-skew constraints met: $bus_skew_met"
 
 # Producing a .bit file is not sufficient qualification for a physical timing
 # source.  Reject setup or hold violations before a recovery image can exist.

@@ -1,19 +1,18 @@
 # ZLC FPGA Pulse Streamer
 
 Vivado Tcl and HDL sources for the neutral-atom runtime pulse streamer. The
-user-facing Windows entry points live one directory up (`fpga\build_and_program.bat`,
-`fpga\run_server.bat`).
+user-facing Windows entry points live at repository root in
+`bin\build_and_program.bat` and `bin\run_server.bat`.
 
-This is a short subsystem pointer.  Current frozen-bitstream bring-up policy is
-documented in `docs/REAL_HARDWARE_BRINGUP_zh.md`; architecture and capacity
-invariants live in `docs/SYSTEM_ARCHITECTURE_DESIGN_zh.md` and
-`docs/MAINTAINER_NOTES.md`.
+This is a short subsystem pointer. The root `ARCHITECTURE_DESIGN.md` and
+`IMPLEMENTATION_PLAN.md` are the active architecture and evidence authorities;
+hardware acceptance remains the runbook in `fpga\README.md`.
 
 ## Files
 
 - `zlc_edge_streamer.v`: the engine. A global edge table held in three parallel
   block RAMs (tick 32b / coeff 64b / mask 62b, forced `READ_LATENCY_B=2`), a
-  depth-`FIFO_DEPTH` (=`RD_LAT`+2=4) continuous edge prefetch that hides the BRAM
+  depth-`FIFO_DEPTH` (=`RD_LAT`+3=5) continuous edge prefetch that hides the BRAM
   latency so back-to-back 1-tick (20 ns) edges fire one per clock, a 2-bank
   continuous cyclic ping-pong scan window (`BANK_SIZE`=2048, 4096 bank-local
   resident slots at one time) for autonomous streamed scans, the affine effective-tick MAC + analog-bus
@@ -37,25 +36,26 @@ invariants live in `docs/SYSTEM_ARCHITECTURE_DESIGN_zh.md` and
   tree is deliberately absent so there is one Python owner for packing.
 - `sim/`: xsim (Vivado simulator) testbenches that run the REAL RTL --- and,
   where it matters, the real block-RAM IP netlists --- covering the prefetch
-  pipeline, seamless scan wrap, event-scheduler delays, ramp scans, DA clock
-  phase, and a full-chain first-frame regression (`tb_t_ff.v`).  See
+  pipeline, seamless scan wrap, event-scheduler delays, ramp scans, and a
+  full-chain first-frame regression (`tb_t_ff.v`).  See
   `sim/README.md` for how to run them.
 
 ## Contract Summary
 
 Target FPGA is the Artix-7 35T `xc7a35tfgg484-2`. The default board XDC is
 `fpga\board_config\board.xdc` (see `fpga/board_config/README.md`; override with
-`ZLC_PS_XDC` for the Vivado build; the parser derives the 62 output lanes and
-package pins from the XDC declaration order. The bitstream is fixed; every
+`ZLC_PS_XDC` for the Vivado build). Explicit `streamer_config.board.lanes`
+indices own lane identity; XDC and top-level ports are unordered validated
+projections. The bitstream is fixed; every
 `On Pulse` packs a fresh program image and uploads it over JTAG-to-AXI through
 `axi_bram_ctrl`, then drives the CTRL mailbox. One edge row means "at this
 absolute FPGA tick, set all outputs to this mask".
 
-JTAG-to-AXI is the current default transport.  The optional UART path is for a
+JTAG-to-AXI is the current default transport. The optional UART path is for a
 controlled repository host: its encoder splits every request to at most 256
-words.  The frozen UART RTL does not independently reject a malicious or
-otherwise invalid wire `COUNT > 256`, so it is not an untrusted transport and
-must not be described as one.
+words, and RTL rejects zero/oversize counts and address overflow before commit.
+It is still a trusted-laboratory transport rather than an authentication or
+authorization boundary.
 
 Scans use named slots: each edge row stores a base tick plus `NUM_SLOTS`
 fixed-point coefficients, and the FPGA computes
@@ -69,14 +69,25 @@ LUTRAM segment table (`bus_id, start_tick, stop_tick, start_value, stop_value,
 mode`, plus dual `value_select` for scanned endpoints) so a ramp costs one
 segment, not hundreds of TTL edge rows.
 
-Default profile (from `zlc_pulse.wire.StreamerParams` / `solve_capacity` on the 35T):
+The edge FIFO still supports adjacent 1-tick edges, and a finite one-shot may
+end after only 1 or 2 ticks.  The registered affine boundary cache is scheduled
+two clocks before a seam.  Therefore every outer cycle which has a successor
+needs at least 3 ticks after its final restart; a two-pass `RepeatRegion` needs
+its single boundary at or after absolute tick 3, and three or more passes need
+at least a 3-tick loop span.  The host validates only the rows that actually
+cross such a seam before FIRE/LOAD, rather than allowing a stale-cache cycle or
+misreporting the deterministic scheduling error as a scan-refill underflow.
+
+Frozen profile (from `zlc_pulse.wire.StreamerParams` and the deployed manifest's
+explicit 98% ceiling; the generic 90% solver correctly rejects this tight 35T):
 `CHANNEL_COUNT=62`, `NUM_SLOTS=4`, `MAX_EDGES=4096`, `BANK_SIZE=2048` (4096
 bank-local resident slots), `TICK_WIDTH=32`, `COEFF_WIDTH=16`, `COEFF_FRAC_BITS=8`,
-`RD_LAT=2`, `FIFO_DEPTH=4`, `EVT_FIFO_DEPTH=64`, `BUS_EVT_FIFO_DEPTH=64`,
+`RD_LAT=2`, `FIFO_DEPTH=5`, `EVT_FIFO_DEPTH=64`, `BUS_EVT_FIFO_DEPTH=64`,
 `CLOCK_HZ=50 MHz` (20 ns tick). Vivado `report_utilization` is the final
-resource authority; the conservative host-side estimate (`bin\estimate_resources.bat`)
-is RAMB36 78%, LUT ~97%, FF ~22%, DSP ~58% --- tight on LUTs but the real
-implementation closes (the estimate overcounts distributed RAM).
+resource authority; the routed 2026-08-21 calibration used by
+`bin\estimate_resources.bat` is block-RAM tiles 82%, LUT 96.51%, FF 33.78%, DSP 84.44%.
+This frozen 35T deployment is tight on LUTs; proposed geometry changes must be
+re-estimated and routed rather than inferred from the old 2026-06 profile.
 
 ## CTRL Register-File Mailbox
 
@@ -108,7 +119,7 @@ Lifecycle: `prepare` (SAFE, upload the static image and first two scan chunks,
 arm both banks, LOAD) / `fire` (FIRE) / `wait_done` (the sole observer polls and
 refills released banks) / `safe_state`.
 `STATUS_UNDERFLOW` is fatal evidence that seamless timing was not achieved; the
-run is rejected.  Current always-run Python tests compare a bounded set of
-prefetch, streamed-scan, stale-seed, TTL-delay, and DAC-delay cases against
-their reference models.  They do not replace the optional xsim or on-board
-qualification described below.
+run is rejected. Current Python tests compare bounded prefetch, streamed-scan,
+stale-seed, TTL-delay, and DAC-delay cases against reference models; when Vivado
+and generated IP are present, the same suite also runs the exact-marker xsim
+matrix. Neither software lane replaces the on-board acceptance in `fpga\README.md`.

@@ -39,6 +39,7 @@ set "ZLC_REPO_ROOT=%REPO_ROOT%"
 set "ZLC_CREATE_TCL=create_project.tcl"
 set "ZLC_PROGRAM_TCL=program_fpga.tcl"
 set "ZLC_PROJ_SUB=ps"
+set "ZLC_TOP=zlc_pulse_streamer_top"
 
 set "MODE=build"
 set "ZLC_OPTION_OK="
@@ -96,11 +97,12 @@ rem Diagnose/program/flash consume the already-built frozen artifact and must be
 call :zlc_emit_geom
 if errorlevel 1 exit /b 1
 call :zlc_print_capacity_estimate
+if errorlevel 1 exit /b 1
 
 
-rem Skip the (slow) synth+impl when a bitstream already exists and NONE of the sources that go
-rem into it changed since it was built -- just program the existing .bit.  Only in the default
-rem (build+program) mode, and only when --force-build / --rebuild was NOT given.
+rem Skip the slow synth+implementation when a bitstream and its routed reports already match
+rem every recorded source/artifact input.  This applies only to the default build/check mode
+rem and only when --force-build / --rebuild was not given; it never starts programming.
 call :zlc_check_prebuilt
 if /I "%MODE%"=="build" if not defined ZLC_FORCE_BUILD if defined ZLC_PREBUILT (
   echo ZLC bitstream is up to date ^(sources unchanged since last build^) -- skipping build.
@@ -113,6 +115,7 @@ echo ZLC FPGA pulse streamer: build FINAL bitstream (1-tick FIFO prefetch + auto
 call :zlc_run_tcl "!ZLC_CREATE_TCL!"
 if errorlevel 1 exit /b 1
 call :zlc_save_src_hash
+if errorlevel 1 exit /b 1
 
 if /I "%MODE%"=="build" exit /b 0
 if /I "%MODE%"=="check" exit /b 0
@@ -128,13 +131,13 @@ echo Control path: JTAG-to-AXI master -^> AXI BRAM controller -^> edge/scan BRAM
 echo Engine: 1-tick (20 ns) FIFO prefetch + streamed autonomous ping-pong scan.
 echo.
 echo Usage:
-echo   fpga\build_and_program.bat              Build only (skips when sources are unchanged)
-echo   fpga\build_and_program.bat --force-build Rebuild even if the sources are unchanged
-echo   fpga\build_and_program.bat --build-only Build only
-echo   fpga\build_and_program.bat --program-only Program existing bitstream (VOLATILE: lost on power-off)
-echo   fpga\build_and_program.bat --flash      Program the SPI flash so the program SURVIVES a power cycle
-echo   fpga\build_and_program.bat --check      Build only (alias of --build-only)
-echo   fpga\build_and_program.bat --diagnose   List Vivado hw targets/devices
+echo   bin\build_and_program.bat              Build only (skips when sources are unchanged)
+echo   bin\build_and_program.bat --force-build Rebuild even if the sources are unchanged
+echo   bin\build_and_program.bat --build-only Build only
+echo   bin\build_and_program.bat --program-only Program existing bitstream (VOLATILE: lost on power-off)
+echo   bin\build_and_program.bat --flash      Program the SPI flash so the program SURVIVES a power cycle
+echo   bin\build_and_program.bat --check      Build only (alias of --build-only)
+echo   bin\build_and_program.bat --diagnose   List Vivado hw targets/devices
 echo.
 echo --program-only loads the VOLATILE FPGA config (lost when the board powers off).  --flash writes
 echo the bitstream into the board's SPI configuration flash so the FPGA AUTO-BOOTS from it on every
@@ -142,10 +145,10 @@ echo power-up -- run it ONCE and the program persists across reboots (no rebuild
 echo board MODE jumper on SPI/QSPI boot; set ZLC_PS_CFGMEM_PART if your flash differs from the default
 echo (run 'get_cfgmem_parts' in Vivado to list valid names).
 echo.
-echo The default mode SKIPS the (slow) synth+impl when a bitstream already exists and none of
-echo the sources that go into it (engine/top HDL, create/program tcl, board XDC, streamer_config,
-echo geom tcl) changed since it was built. It never programs hardware. --force-build
-echo (or --rebuild) forces a rebuild.  The build-cache key is fpga\build\ps\.zlc_src_hash.
+echo The default mode SKIPS the (slow) synth+impl only when the Vivado build, target part,
+echo engine/top HDL, create tcl, board XDC, streamer_config and generated geometry all match,
+echo and the bitstream plus routed reports match their saved receipt. It never programs hardware. --force-build
+echo (or --rebuild) forces a rebuild.  The qualified build receipt is fpga\build\ps\.zlc_src_hash.
 echo.
 echo Real build XDC:
 echo   fpga\board_config\board.xdc
@@ -308,9 +311,10 @@ echo   The reason is printed above, from zlc_pulse.fpga.
 exit /b 1
 
 :zlc_compute_src_hash
-rem Hash the files that go into the bitstream (engine + top + build tcl + program tcl + XDC +
-rem board config + the generated geom tcl).  Failure leaves ZLC_SRC_HASH empty, so the
-rem skip is disabled (always rebuild), never a wrong skip.
+rem Hash every bit-relevant input plus the complete Vivado build identity and
+rem the resolved target part.  program_fpga.tcl is deliberately absent: it can
+rem load an existing bit but cannot change one.  Every listed input is required;
+rem a missing file disables reuse instead of being silently omitted.
 rem
 rem Each file is identified by its path RELATIVE to the repository root, so WHICH files went in is
 rem part of the hash without WHERE the checkout sits being part of it.  Absolute paths made the
@@ -329,40 +333,72 @@ rem recognized` -- on stderr, which the loop swallowed.  The hash was therefore 
 rem every run rebuilt from scratch and no build was ever recorded, silently, for as long as the
 rem interpreter path has been quoted.  A plain redirect parses the command line the normal way.
 set "ZLC_HASH_TMP=%ZLC_PS_BUILD_ROOT%\.zlc_src_hash.tmp"
-%ZLC_PY_CMD% -c "import hashlib,os,sys;r=sys.argv[1];h=hashlib.sha256();[(h.update(os.path.relpath(p,r).replace(chr(92),chr(47)).encode('utf-8')),h.update(open(p,'rb').read())) for p in sys.argv[2:] if p and os.path.exists(p)];print(h.hexdigest())" "%REPO_ROOT%" "%STREAMER_DIR%\zlc_edge_streamer.v" "%STREAMER_DIR%\zlc_uart_bridge.v" "%STREAMER_DIR%\zlc_pulse_streamer_top.v" "%STREAMER_DIR%\zlc_geometry.vh" "%STREAMER_DIR%\!ZLC_CREATE_TCL!" "%STREAMER_DIR%\!ZLC_PROGRAM_TCL!" "!ZLC_SELECTED_XDC!" "%REPO_ROOT%\fpga\board_config\streamer_config.json" "!ZLC_HASH_GEOM!" > "%ZLC_HASH_TMP%"
+set "ZLC_VIVADO_ID_TMP=%ZLC_PS_BUILD_ROOT%\.zlc_vivado_id.tmp"
+del "%ZLC_HASH_TMP%" "%ZLC_VIVADO_ID_TMP%" >nul 2>nul
+call "%ZLC_PS_VIVADO_BIN%" -version > "%ZLC_VIVADO_ID_TMP%" 2>&1
+if errorlevel 1 (
+  echo ERROR: could not read the selected Vivado build identity.
+  del "%ZLC_VIVADO_ID_TMP%" >nul 2>nul
+  exit /b 1
+)
+%ZLC_PY_CMD% -c "import hashlib,os,sys;r,part,top,tool=sys.argv[1:5];paths=sys.argv[5:];missing=[p for p in paths if not p or not os.path.isfile(p)];assert not missing,'missing bitstream input(s): '+repr(missing);h=hashlib.sha256();h.update(b'tool\0');h.update(open(tool,'rb').read());h.update(b'part\0'+part.encode());h.update(b'top\0'+top.encode());[(h.update(os.path.relpath(p,r).replace(chr(92),chr(47)).encode()),h.update(b'\0'),h.update(open(p,'rb').read())) for p in paths];print(h.hexdigest())" "%REPO_ROOT%" "%ZLC_PS_FPGA_PART%" "%ZLC_TOP%" "%ZLC_VIVADO_ID_TMP%" "%STREAMER_DIR%\zlc_edge_streamer.v" "%STREAMER_DIR%\zlc_uart_bridge.v" "%STREAMER_DIR%\zlc_pulse_streamer_top.v" "%STREAMER_DIR%\zlc_geometry.vh" "%STREAMER_DIR%\!ZLC_CREATE_TCL!" "!ZLC_SELECTED_XDC!" "%REPO_ROOT%\fpga\board_config\streamer_config.json" "!ZLC_HASH_GEOM!" > "%ZLC_HASH_TMP%"
+set "ZLC_HASH_STATUS=%ERRORLEVEL%"
+del "%ZLC_VIVADO_ID_TMP%" >nul 2>nul
+if not "%ZLC_HASH_STATUS%"=="0" (
+  del "%ZLC_HASH_TMP%" >nul 2>nul
+  exit /b 1
+)
 if exist "%ZLC_HASH_TMP%" set /p ZLC_SRC_HASH=<"%ZLC_HASH_TMP%"
 del "%ZLC_HASH_TMP%" >nul 2>nul
+if not defined ZLC_SRC_HASH exit /b 1
+exit /b 0
+
+:zlc_compute_artifact_hash
+rem Bind the skip decision to the qualified outputs, not merely to source age.
+rem Replacing a bit, deleting a report, or editing routed evidence invalidates
+rem the receipt and forces a fresh implementation.
+set "ZLC_ARTIFACT_HASH="
+set "ZLC_ARTIFACT_TMP=%ZLC_PS_BUILD_ROOT%\.zlc_artifact_hash.tmp"
+del "%ZLC_ARTIFACT_TMP%" >nul 2>nul
+%ZLC_PY_CMD% -c "import hashlib,os,sys;r=sys.argv[1];paths=sys.argv[2:];missing=[p for p in paths if not os.path.isfile(p)];assert not missing,'missing qualified artifact(s): '+repr(missing);h=hashlib.sha256();[(h.update(os.path.relpath(p,r).replace(chr(92),chr(47)).encode()),h.update(b'\0'),h.update(open(p,'rb').read())) for p in paths];print(h.hexdigest())" "%ZLC_PS_PROJECT_DIR%" "%ZLC_BIT%" "%ZLC_TIMING_RPT%" "%ZLC_BUS_SKEW_RPT%" "%ZLC_UTIL_RPT%" > "%ZLC_ARTIFACT_TMP%"
+if errorlevel 1 (
+  del "%ZLC_ARTIFACT_TMP%" >nul 2>nul
+  exit /b 1
+)
+if exist "%ZLC_ARTIFACT_TMP%" set /p ZLC_ARTIFACT_HASH=<"%ZLC_ARTIFACT_TMP%"
+del "%ZLC_ARTIFACT_TMP%" >nul 2>nul
+if not defined ZLC_ARTIFACT_HASH exit /b 1
 exit /b 0
 
 :zlc_check_prebuilt
 rem Set ZLC_PREBUILT=1 iff the bitstream exists AND the stored source hash matches the current
 rem sources (i.e. nothing that affects the .bit changed since it was built).
 set "ZLC_PREBUILT="
-set "ZLC_BIT=%ZLC_PS_PROJECT_DIR%\%ZLC_PROJ_SUB%.runs\impl_1\zlc_pulse_streamer_top.bit"
 set "ZLC_HASHFILE=%ZLC_PS_PROJECT_DIR%\.zlc_src_hash"
-if not exist "%ZLC_BIT%" exit /b 0
 if not exist "%ZLC_HASHFILE%" exit /b 0
 call :zlc_compute_src_hash
-if not defined ZLC_SRC_HASH exit /b 0
+if errorlevel 1 exit /b 0
+call :zlc_compute_artifact_hash
+if errorlevel 1 exit /b 0
 set "ZLC_STORED_HASH="
 set /p ZLC_STORED_HASH=<"%ZLC_HASHFILE%"
-if "%ZLC_STORED_HASH%"=="%ZLC_SRC_HASH%" set "ZLC_PREBUILT=1"
+if "%ZLC_STORED_HASH%"=="%ZLC_SRC_HASH%:%ZLC_ARTIFACT_HASH%" set "ZLC_PREBUILT=1"
 exit /b 0
 
 :zlc_save_src_hash
 rem Record the current source hash next to the freshly built bitstream so the next default-mode
 rem run can skip the build when nothing changed.
 call :zlc_compute_src_hash
-if not defined ZLC_SRC_HASH (
-  rem Silence here used to mean "the next run rebuilds from scratch", with nothing said about why.
-  echo WARNING: the sources could not be hashed, so this build cannot be recognised next time.
-  exit /b 0
+if errorlevel 1 (
+  echo ERROR: the bitstream inputs could not be hashed; refusing an unqualified build receipt.
+  exit /b 1
 )
-if not exist "%ZLC_PS_PROJECT_DIR%\" (
-  echo WARNING: no project dir at %ZLC_PS_PROJECT_DIR%, so there is nowhere to record the build.
-  exit /b 0
+call :zlc_compute_artifact_hash
+if errorlevel 1 (
+  echo ERROR: bitstream or routed reports are missing; refusing an incomplete build receipt.
+  exit /b 1
 )
-> "%ZLC_PS_PROJECT_DIR%\.zlc_src_hash" echo %ZLC_SRC_HASH%
+> "%ZLC_PS_PROJECT_DIR%\.zlc_src_hash" echo %ZLC_SRC_HASH%:%ZLC_ARTIFACT_HASH%
 exit /b 0
 
 :zlc_print_capacity_estimate
@@ -396,6 +432,11 @@ rem In-repo build (fpga\build\ps).  The SHORT subdir "ps" keeps Vivado's deep
 rem run/.Xil temp path under the Windows MAX_PATH limit without leaving fpga/.
 if not defined ZLC_PS_PROJECT_DIR set "ZLC_PS_PROJECT_DIR=%ZLC_PS_BUILD_ROOT%\!ZLC_PROJ_SUB!"
 if not defined ZLC_PS_LOG_DIR set "ZLC_PS_LOG_DIR=%ZLC_PS_BUILD_ROOT%\logs"
+set "ZLC_IMPL_DIR=!ZLC_PS_PROJECT_DIR!\!ZLC_PROJ_SUB!.runs\impl_1"
+set "ZLC_BIT=!ZLC_IMPL_DIR!\!ZLC_TOP!.bit"
+set "ZLC_TIMING_RPT=!ZLC_IMPL_DIR!\!ZLC_TOP!_timing_summary_routed.rpt"
+set "ZLC_BUS_SKEW_RPT=!ZLC_IMPL_DIR!\!ZLC_TOP!_bus_skew_routed.rpt"
+set "ZLC_UTIL_RPT=!ZLC_IMPL_DIR!\!ZLC_TOP!_utilization_routed.rpt"
 echo ZLC build root: %ZLC_PS_BUILD_ROOT%
 exit /b 0
 

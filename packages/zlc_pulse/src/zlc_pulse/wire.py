@@ -8,7 +8,7 @@ from numbers import Integral
 import os
 import struct
 import zlib
-from dataclasses import dataclass, fields as _dataclass_fields
+from dataclasses import dataclass, fields as _dataclass_fields, replace as _dataclass_replace
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -77,7 +77,7 @@ class CtrlWords:
     BANK_READY = 16       # host -> top: bit b = bank b is loaded/ready
     BANK0_CHUNK = 17      # host -> top: sweep-chunk index currently resident in bank 0
     BANK1_CHUNK = 18      # host -> top: sweep-chunk index currently resident in bank 1
-    REPEAT_FROM_LOOP_START = 19
+    RESERVED_19 = 19
     CLK_ENABLE = 20
     LAYOUT_ID = 63
 
@@ -299,6 +299,19 @@ def _is_pow2(v: int) -> bool:
 
 def check_rtl_assumptions(p: StreamerParams) -> None:
     """Reject geometries that would silently corrupt the shipped RTL contract."""
+    if p.num_slots > 4:
+        raise ValueError(
+            f"num_slots must be at most 4 for the shipped RTL (got {p.num_slots}); "
+            "zlc_effective_tick has four balanced affine lanes, so additional host "
+            "slots would be silently truncated."
+        )
+    if p.coeff_width > 18:
+        raise ValueError(
+            f"coeff_width must be at most 18 for the shipped RTL resource model "
+            f"(got {p.coeff_width}); one affine lane is calibrated as one "
+            "DSP48E1 25x18 multiplier, and wider coefficients need a different "
+            "multiplier and merge accounting model."
+        )
     if p.num_slots * p.coeff_width != 64:
         raise ValueError(
             f"num_slots*coeff_width must be 64 for the shipped RTL (got {p.num_slots}*{p.coeff_width}="
@@ -400,8 +413,6 @@ def scan_bank_words(rows, p: StreamerParams, chunk_index: int,
             words[row + j] = _checked_unsigned(val, p.tick_width, f"scan row {idx} slot {j}")
     return words
 
-HOST_REPEAT_FROM_INDEX = 0  # The frozen RTL supports this register; host CompiledProgram does not expose it.
-
 def pack_program(program, params: StreamerParams | None = None) -> dict[int, int]:
     """Pack a CompiledProgram into the FINAL AXI write image (sparse).
 
@@ -428,10 +439,9 @@ def pack_program(program, params: StreamerParams | None = None) -> dict[int, int
     w[CtrlWords.SCAN_COUNT] = 0
     w[CtrlWords.SCAN_ENABLE] = 0
     w[CtrlWords.REPEAT_FOREVER] = 0
-    # The frozen RTL supports an additive repeat register, but the host API exposes
-    # only the compiled loop bracket. Keep the hardware field at its named safe value.
+    # Word 19 is retained only to keep the deployed register layout stable.
     w[CtrlWords.LOOP_START] = int(program.loop_start_index)
-    w[CtrlWords.REPEAT_FROM_LOOP_START] = HOST_REPEAT_FROM_INDEX
+    w[CtrlWords.RESERVED_19] = 0
     loop_count = _checked_unsigned(program.loop_count, 32, "loop count")
     if loop_count < 1:
         raise ValueError("loop count must be at least one")
@@ -631,16 +641,16 @@ def unpack_program(words: Mapping[int, int], params: StreamerParams | None = Non
     for i in range((p.channel_count + 31) // 32):
         clk_enable |= (g(CtrlWords.CLK_ENABLE + i) & 0xFFFFFFFF) << (32 * i)
     clk_enable &= (1 << p.channel_count) - 1
+    if g(CtrlWords.RESERVED_19) != 0:
+        raise ValueError("reserved control word 19 must be zero")
     return {
         "ticks": ticks, "masks": masks, "tick_slot_coeffs": coeffs,
         "channel_delays": channel_delays,
         "clk_enable": clk_enable,
         "scan_points_resident": scan_points, "scan_count": n_points, "slot_count": slot_count,
         "repeat_forever": bool(g(CtrlWords.REPEAT_FOREVER) & 1),
-        # LOOP_START is the additive-delay steady-frame anchor when the flag is set,
-        # else the finite-bracket start.
-        "loop_start_index": 0 if (g(CtrlWords.REPEAT_FROM_LOOP_START) & 1) else g(CtrlWords.LOOP_START),
-        "repeat_from_index": g(CtrlWords.LOOP_START) if (g(CtrlWords.REPEAT_FROM_LOOP_START) & 1) else 0,
+        # LOOP_START belongs only to the finite RepeatRegion bracket.
+        "loop_start_index": g(CtrlWords.LOOP_START),
         "loop_count": g(CtrlWords.LOOP_COUNT),
         "loop_end_tick": g(CtrlWords.LOOP_END_TICK),
         "loop_end_slot_coeffs": _unpack_coeffs(_unfield([g(CtrlWords.LOOP_END_LO), g(CtrlWords.LOOP_END_HI)], p.coeff_bits), p),
@@ -665,6 +675,23 @@ FPGA_PARTS: dict[str, FpgaPartProfile] = {
     "xc7a100t": FpgaPartProfile("xc7a100t", 135, 63400, 126800, 240, 1188),
     "xc7a200t": FpgaPartProfile("xc7a200t", 365, 134600, 269200, 740, 2888),
 }
+
+# The ordinary capacity-planning target keeps ten percent headroom.  A frozen
+# deployment may explicitly choose a higher target only when its own manifest
+# records a routed report; the current 35T deployment does so at 98% because
+# its measured LUT use is 96.51%.  The generic solver must never silently turn
+# that deployment exception into its default.
+DEFAULT_TARGET_PCT = 90.0
+
+
+def _resource_target_pct(value: object) -> float:
+    if isinstance(value, bool):
+        raise TypeError("target_pct must be a numeric percentage")
+    pct = float(value)
+    if not math.isfinite(pct) or not 1.0 <= pct <= 100.0:
+        raise ValueError("target_pct must be finite and from 1 through 100")
+    return pct
+
 
 def part_profile(part) -> FpgaPartProfile:
     if isinstance(part, FpgaPartProfile):
@@ -696,9 +723,9 @@ def _edge_ramb(max_edges: int, p: StreamerParams) -> int:
 def _scan_ramb(bank_size: int, p: StreamerParams) -> int:
     return _ceil(p.slot_bits, 36) * _ceil(2 * bank_size, 1024)
 
-def estimate_resources(params: StreamerParams, *, part, target_pct: float = 90.0,
-                       slot_mul_width: int = 25, engine_logic_luts: int = 14639,
-                       engine_ff: int = 11502, engine_dsp: int | None = None) -> dict:
+def estimate_resources(params: StreamerParams, *, part, target_pct: float = DEFAULT_TARGET_PCT,
+                       slot_mul_width: int = 25, engine_logic_luts: int = 16989,
+                       engine_ff: int = 14053, engine_dsp: int | None = None) -> dict:
     """Resource usage of a CONCRETE ``StreamerParams`` vs a part, per axis.
 
     This is the single accounting model shared by :func:`solve_capacity` (which
@@ -707,20 +734,24 @@ def estimate_resources(params: StreamerParams, *, part, target_pct: float = 90.0
     ``{"ramb36"|"lut"|"ff"|"dsp": {"used","budget","total","pct","ok"}}``.
 
     LUT is CALIBRATED to a REAL Vivado 2019.1 SYNTH+PLACE+ROUTE of the current 35T build
-    (2026-06-29, zlc_pulse_streamer_top_utilization_routed.rpt): 18607 of 20800 slice LUTs
-    (89.5%, FITS) at evt_fifo_depth=128 / bus_evt_fifo_depth=64.  ``engine_logic_luts``
-    (=14639) is the fixed, non-depth-scaled remainder (logic LUTs + the LUTRAM the geometry
+    (2026-08-21, zlc_pulse_streamer_top_utilization_routed.rpt): 20075 of 20800 slice LUTs
+    (96.51%, FITS) at evt_fifo_depth=64 / bus_evt_fifo_depth=64.  ``engine_logic_luts``
+    (=16989) is the fixed, non-depth-scaled remainder (logic LUTs + the LUTRAM the geometry
     terms below do not capture) once the bus-segment LUTRAM and the two event-FIFO terms
     (ttl_sched + per-bus segment scheduler, which DO scale with evt_fifo_depth /
     bus_evt_fifo_depth) are
-    subtracted -- so the model reproduces the real 18607 at (128/64) and predicts other
-    depths honestly.  FF (real 11502), DSP (real 52, exact)
-    and RAMB36 (real 40) are calibrated to the same routed build; edge fields are parallel
+    subtracted -- so the model reproduces the real 20075 at (64/64) and predicts other
+    depths honestly.  FF (real 14053), DSP (real 76, exact)
+    and block RAM (40 RAMB36 + 2 RAMB18 = 41 tiles) are calibrated to the same routed build; edge fields are parallel
     BRAMs and the event FIFOs are distributed RAM (LUTs in SLICEM, no RAMB36)."""
+    check_rtl_assumptions(params)
     prof = part_profile(part)
-    pct = max(1.0, min(100.0, float(target_pct)))
+    pct = _resource_target_pct(target_pct)
+    # The routed top also consumes two fixed BRAM36-equivalent tiles outside the
+    # geometry memories (40 RAMB36 + two RAMB18 = 41 tiles for this profile).
+    # Report the conservative integer ceiling used by the capacity solver.
     ramb36_used = (_edge_ramb(params.max_edges, params) + _scan_ramb(params.bank_size, params)
-                   + _ceil(params.bus_rows * params.bus_words, 1024) + 1)
+                   + _ceil(params.bus_rows * params.bus_words, 1024) + 3)
     # per bus-segment row: start+stop tick (2*tick_width), start+stop tick coeffs
     # (2*coeff_bits), start+stop value (2*bus_width), mode (2), start+stop value_select
     # (2*bus_sel_width -- a ramp can scan both endpoints).
@@ -760,12 +791,22 @@ def estimate_resources(params: StreamerParams, *, part, target_pct: float = 90.0
         20 + _ceil(bus_evt_depth * bus_segment_bits, 64)
     )
     delay_lutram = ttl_sched_luts + bus_sched_luts
-    # DSP: engine affine-MAC call sites (2 evals/bus + 5 main) x num_slots products,
-    # each coeff(<=18b) x slot(slot_mul_width); slot operand <=25b fits ONE DSP48E1.
+    # DSP: 12 affine evaluators (2/bus + 4 main), each implemented as the four
+    # slot multipliers plus one balanced-tree merge DSP; and two exact reciprocal
+    # products in each of the live + delayed ramp players (4 DSPs per bus).
     if engine_dsp is None:
-        mac_instances = 2 * params.bus_count + 5
-        dsp_per_mult = 1 if slot_mul_width <= 25 else 2
-        engine_dsp = mac_instances * params.num_slots * dsp_per_mult
+        mac_instances = 2 * params.bus_count + 4
+        if isinstance(slot_mul_width, bool) or not isinstance(slot_mul_width, Integral):
+            raise TypeError("slot_mul_width must be an integer")
+        if slot_mul_width <= 0:
+            raise ValueError("slot_mul_width must be positive")
+        # One DSP48E1 covers one signed 25x18 product.  The shipped gate above
+        # keeps coeff_width inside that calibrated lane; this factor also keeps
+        # recovery estimates honest if the slot operand itself is widened.
+        dsp_per_mult = _ceil(slot_mul_width, 25) * _ceil(params.coeff_width, 18)
+        affine_dsp = mac_instances * (params.num_slots * dsp_per_mult + 1)
+        ramp_dsp = 4 * params.bus_count
+        engine_dsp = affine_dsp + ramp_dsp
 
     def res(used, total):
         b = int(total * pct / 100.0)
@@ -783,63 +824,90 @@ def solve_capacity(part, *, channel_count: int = 62, num_slots: int = 4, coeff_w
                    tick_width: int = 32, coeff_frac_bits: int = 8, bus_count: int = 4,
                    bus_width: int = 10, bus_seg_addr_width: int = 6, bus_sel_width: int = 3,
                    slot_mul_width: int = 25,
-                   target_pct: float = 90.0, bank_size: int = 2048,
+                   target_pct: float = DEFAULT_TARGET_PCT, bank_size: int = 2048,
                    max_edges_cap: int = 16384,
-                   engine_logic_luts: int = 14639, engine_ff: int = 11502, engine_dsp: int | None = None) -> SolvedCapacity:
-    """Maximise max_edges under <=target_pct of the part's RAMB36. Scan storage
+                   engine_logic_luts: int = 16989, engine_ff: int = 14053, engine_dsp: int | None = None) -> SolvedCapacity:
+    """Maximise max_edges while every resource stays within ``target_pct``.
+
+    Scan storage
     is the two-bank resident window, whose depth controls refill slack rather
 
     than total scan length; edge fields are parallel BRAMs (no width padding).
 
     LUT/FF/DSP/RAMB36 estimates are CALIBRATED to a real Vivado 2019.1 place+ROUTE of the
-    35T build (zlc_pulse_streamer_top, 2026-06-29 routed): 18607 slice LUTs (89%), 11502 FF
-    (28%), 52 DSP (58%), 40 RAMB36 (80%) at evt_fifo_depth=128 / bus_evt_fifo_depth=64.  The
-    LUT/FF defaults reproduce those at this geometry and scale the depth-driven LUTRAM terms,
-    so the contract test catches a regression that would push any axis past 90%."""
+    35T build (zlc_pulse_streamer_top, 2026-08-21 routed): 20075 slice LUTs (96.51%), 14053 FF
+    (33.78%), 76 DSP (84.44%), 40 RAMB36 + 2 RAMB18 (41 tiles) at evt_fifo_depth=64 /
+    bus_evt_fifo_depth=64.  The
+    LUT/FF defaults reproduce those at this geometry and scale the depth-driven LUTRAM terms.
+    The ordinary default is 90% planning headroom; the frozen 35T manifest explicitly uses
+    98% because this frozen, resource-tight deployment is separately routed.  Asking this solver for the 35T at 90% therefore
+    fails loudly instead of returning a capacity whose own report says it is over budget."""
     prof = part_profile(part)
-    pct = max(1.0, min(100.0, float(target_pct)))
-    budget = int(prof.ramb36 * pct / 100.0)
+    pct = _resource_target_pct(target_pct)
     base = StreamerParams(channel_count=channel_count, num_slots=num_slots, coeff_width=coeff_width,
                           tick_width=tick_width, coeff_frac_bits=coeff_frac_bits, max_edges=256,
                           bank_size=bank_size, bus_count=bus_count, bus_width=bus_width,
                           bus_seg_addr_width=bus_seg_addr_width, bus_sel_width=bus_sel_width)
-    # bus image is a small 32b BRAM (bus_rows*bus_words words); bus tables themselves
-    # live in engine LUTRAM (counted under distributed RAM / LUT, not RAMB36).  The OUTPUT delay
-    # delay scheduler uses per-TTL event FIFOs plus per-bus segment FIFOs (NO BRAM image --
-    # ram_style="distributed"), so it costs LUTs, not RAMB36.
-    bus_img_ram = _ceil(base.bus_rows * base.bus_words, 1024)
-    scan_ram = _scan_ramb(bank_size, base)
-    ctrl_ram = 1
-    fixed = scan_ram + bus_img_ram + ctrl_ram
-    # largest pow2 max_edges whose edge BRAM fits the remaining budget
-    max_edges = 256
+    estimate_kwargs = {
+        "part": prof,
+        "target_pct": pct,
+        "slot_mul_width": slot_mul_width,
+        "engine_logic_luts": engine_logic_luts,
+        "engine_ff": engine_ff,
+        "engine_dsp": engine_dsp,
+    }
+
+    # LUT/FF/DSP do not change with edge or scan BRAM depth in this calibrated
+    # model.  Reject an impossible planning target before searching RAM sizes;
+    # reducing max_edges cannot make the frozen 35T's 96.51% LUT use fit 90%.
+    minimum_report = estimate_resources(base, **estimate_kwargs)
+    fixed_over = tuple(
+        axis for axis in ("lut", "ff", "dsp") if not minimum_report[axis]["ok"]
+    )
+    if fixed_over:
+        detail = ", ".join(
+            f"{axis.upper()} {minimum_report[axis]['used']} > "
+            f"{minimum_report[axis]['budget']}"
+            for axis in fixed_over
+        )
+        raise ValueError(
+            f"{prof.name} cannot satisfy the {pct:g}% planning target: {detail}"
+        )
+
+    # Every candidate is admitted by the same concrete estimator used by the
+    # CLI.  There is no second fixed-RAM formula in the solver.
+    max_edges = None
     for cand in (16384, 8192, 4096, 2048, 1024, 512, 256):
         if cand > max_edges_cap:
             continue
-        if _edge_ramb(cand, base) + fixed <= budget:
+        candidate = _dataclass_replace(base, max_edges=cand)
+        if estimate_resources(candidate, **estimate_kwargs)["ramb36"]["ok"]:
             max_edges = cand
             break
+    if max_edges is None:
+        minimum = estimate_resources(base, **estimate_kwargs)["ramb36"]
+        raise ValueError(
+            f"{prof.name} cannot fit the minimum 256-edge, {bank_size}-point-bank "
+            f"geometry at {pct:g}% RAMB36 ({minimum['used']} > {minimum['budget']})"
+        )
+
     # Spend leftover RAMB36 on larger ping-pong banks for more refill slack.
-    chosen_bank = bank_size
-    for cand in (8192, 4096, 2048, 1024, bank_size):
+    params = None
+    report = None
+    for cand in sorted({8192, 4096, 2048, 1024, bank_size}, reverse=True):
         if cand < bank_size:
             continue
-        if _edge_ramb(max_edges, base) + _scan_ramb(cand, base) + bus_img_ram + ctrl_ram <= budget:
-            chosen_bank = cand
+        candidate = _dataclass_replace(base, max_edges=max_edges, bank_size=cand)
+        candidate_report = estimate_resources(candidate, **estimate_kwargs)
+        if candidate_report["ramb36"]["ok"]:
+            params = candidate
+            report = candidate_report
             break
-    bank_size = chosen_bank
-    params = StreamerParams(channel_count=channel_count, num_slots=num_slots, coeff_width=coeff_width,
-                            tick_width=tick_width, coeff_frac_bits=coeff_frac_bits, max_edges=max_edges,
-                            bank_size=bank_size, bus_count=bus_count, bus_width=bus_width,
-                            bus_seg_addr_width=bus_seg_addr_width, bus_sel_width=bus_sel_width)
-    # Single accounting model (shared with the config-check CLI).  The LITERAL delay line
-    # is distributed RAM (LUTs, no RAMB36); DSP is the engine affine-MAC sites.
-    report = estimate_resources(params, part=prof, target_pct=pct, slot_mul_width=slot_mul_width,
-                                engine_logic_luts=engine_logic_luts, engine_ff=engine_ff,
-                                engine_dsp=engine_dsp)
+    if params is None or report is None:  # bank_size itself was checked above
+        raise AssertionError("capacity search lost its admitted minimum bank")
     ramb36_used = report["ramb36"]["used"]
     return SolvedCapacity(part=prof.name, params=params, ramb36_used=ramb36_used,
-                          ramb36_budget=budget, resource_report=report)
+                          ramb36_budget=report["ramb36"]["budget"], resource_report=report)
 
 # --------------------------------------------------------------- config file
 # Single user-editable source of truth for the reconfigurable, compile-affecting
@@ -848,7 +916,6 @@ def solve_capacity(part, *, channel_count: int = 62, num_slots: int = 4, coeff_w
 # scattered DEFAULT_* literals.  See fpga/board_config/streamer_config.json.
 DEFAULT_CONFIG_FILENAME = "streamer_config.json"
 DEFAULT_FPGA_PART = "xc7a35tfgg484-2"
-DEFAULT_TARGET_PCT = 90.0
 FROZEN_CLOCK_HZ = 50_000_000.0
 FROZEN_SLOT_MUL_WIDTH = 25
 

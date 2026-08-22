@@ -26,8 +26,8 @@ module tb_da_ttl_align;
     tp[0]<=etick[edge_raddr%3]; tp[1]<=tp[0]; tp[2]<=tp[1];
     mp[0]<=emask[edge_raddr%3]; mp[1]<=mp[0]; mp[2]<=mp[1];
   end
-  wire [TW-1:0] edge_tick_rdata = tp[1];
-  wire [CH-1:0] edge_mask_rdata = mp[1];
+  wire [TW-1:0] edge_tick_rdata = tp[2];
+  wire [CH-1:0] edge_mask_rdata = mp[2];
 
   // ---- per-output delays: ch5 (TTL) and bus0 (DA) BOTH = DUT_D, everything else 0 ----
   reg [CH*TDW-1:0]   delay_ticks_w   = {CH*TDW{1'b0}};
@@ -46,7 +46,7 @@ module tb_da_ttl_align;
   zlc_edge_streamer #(.CHANNEL_COUNT(CH), .NUM_SLOTS(NS), .BUS_COUNT(BUSC), .BUS_WIDTH(BW)) dut (
     .clk(clk),.reset(reset),.start(start),.prog_count(13'd3),.repeat_forever(1'b1),
     .loop_start_addr({EAW{1'b0}}),.loop_end_tick(32'd300),.loop_end_coeffs({NS*CW{1'b0}}),
-    .loop_count(32'd1),.repeat_from_loop_start(1'b0),.scan_enable(1'b0),.scan_count(32'd0),
+    .loop_count(32'd1),.scan_enable(1'b0),.scan_count(32'd0),
     .edge_raddr(edge_raddr),.edge_tick_rdata(edge_tick_rdata),
     .edge_coeff_rdata({NS*CW{1'b0}}),.edge_mask_rdata(edge_mask_rdata),
     .scan_raddr(scan_raddr),.scan_rdata({NS*TW{1'b0}}),

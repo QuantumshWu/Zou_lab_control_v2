@@ -14,6 +14,7 @@ from zlc_pulse import (
     PulseSequence,
     PulseSlot,
     PulseTarget,
+    RepeatRegion,
     compile_sequence,
     pulse_target_from_xdc,
 )
@@ -32,6 +33,7 @@ from zlc_pulse.wire import (
     STATUS_LOADED,
     STATUS_RUNNING,
     build_fingerprint,
+    check_rtl_assumptions,
     pack_program,
     pack_scan_rows,
     region_bases,
@@ -45,7 +47,7 @@ _DIGITAL_PORT = next(port for port in _BOARD_TARGET.ports if port.kind == "digit
 _DAC_PORT = next(port for port in _BOARD_TARGET.ports if port.kind == "dac")
 
 
-def _sequence(*, slotted: bool = False) -> PulseSequence:
+def _sequence(*, slotted: bool = False, period_ns: int = 40) -> PulseSequence:
     target = _BOARD_TARGET
     high = [0] * len(target.raw_lanes)
     high[target.raw_lanes.index(_DIGITAL_PORT.lanes[0])] = 1
@@ -57,12 +59,12 @@ def _sequence(*, slotted: bool = False) -> PulseSequence:
         periods=(
             PulsePeriod(
                 "p0",
-                20,
+                period_ns,
                 "ns",
                 tuple(high),
                 (AnalogStep(_DAC_PORT.key, "edge", 0),),
             ),
-            PulsePeriod("p1", 20, "ns", low),
+            PulsePeriod("p1", period_ns, "ns", low),
         ),
         slots=slots,
     )
@@ -83,6 +85,17 @@ def test_default_geometry_is_pinned_to_deployed_word63() -> None:
     assert build_fingerprint(StreamerParams()) == 0x5AFC7CFB
 
 
+def test_host_rejects_affine_geometry_beyond_the_shipped_four_dsp_lanes() -> None:
+    with pytest.raises(ValueError, match="at most 4"):
+        check_rtl_assumptions(
+            replace(StreamerParams(), num_slots=8, coeff_width=8)
+        )
+    with pytest.raises(ValueError, match="at most 18"):
+        check_rtl_assumptions(
+            replace(StreamerParams(), num_slots=2, coeff_width=32)
+        )
+
+
 def test_pack_sparse_image_matches_frozen_byte_baseline() -> None:
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     program = compile_sequence(_sequence(), geom, 50e6)
@@ -94,8 +107,13 @@ def test_pack_sparse_image_matches_frozen_byte_baseline() -> None:
     assert words[CtrlWords.MAGIC] == IMAGE_MAGIC
     assert words[CtrlWords.PROG_COUNT] == 3
     assert words[CtrlWords.SCAN_COUNT] == 0
+    assert words[CtrlWords.RESERVED_19] == 0
+    invalid = dict(words)
+    invalid[CtrlWords.RESERVED_19] = 1
+    with pytest.raises(ValueError, match="reserved control word 19"):
+        unpack_program(invalid, geom)
     assert hashlib.sha256(payload).hexdigest() == (
-        "bb53b94628e7f9469ba0b4e1f43968e97fa72489b9f118dee38cf053e82ea0b5"
+        "be9f123b9d4aa3046f65bb0fc828966764f5725f763fe9822893ccecfd4dada2"
     )
 
 
@@ -147,6 +165,110 @@ def test_unslotted_program_uses_the_same_finite_cycle_entry() -> None:
     assert streamer.snapshot()["scan_count"] == 5
     assert transport.words[CtrlWords.SCAN_COUNT] == 5
     assert streamer.wait_done(1.0) is not None
+
+
+def test_short_timeline_is_valid_once_but_rejected_before_a_seam() -> None:
+    geom = replace(StreamerParams(), max_edges=8, bank_size=2)
+    short = _sequence(period_ns=20)
+    program = compile_sequence(short, geom, 50e6)
+    assert program.ticks == (0, 1, 2)
+
+    transport = MemoryRegisterTransport(geom=geom, auto_done=True)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
+    streamer.open()
+    streamer.load(program)
+    streamer.fire(cycles=1)
+    assert streamer.wait_done(1.0) is not None
+
+    before = list(transport.write_batches)
+    with pytest.raises(ValueError, match="at least 3 hardware ticks"):
+        streamer.fire(cycles=2)
+    with pytest.raises(ValueError, match="at least 3 hardware ticks"):
+        streamer.fire(cycles=None)
+    assert transport.write_batches == before
+
+    repeated = compile_sequence(
+        replace(short, repeat=RepeatRegion("p0", "p1", 2)),
+        geom,
+        50e6,
+    )
+    other_transport = MemoryRegisterTransport(geom=geom, auto_done=True)
+    other = PulseStreamer(other_transport, geom, 50e6, target=_BOARD_TARGET)
+    other.open()
+    with pytest.raises(ValueError, match="RepeatRegion boundary.*tick 3"):
+        other.load(repeated)
+    assert other_transport.write_batches == []
+
+    scanned = compile_sequence(_sequence(slotted=True, period_ns=20), geom, 50e6)
+    scan_transport = MemoryRegisterTransport(geom=geom, auto_done=True)
+    scan = PulseStreamer(scan_transport, geom, 50e6, target=_BOARD_TARGET)
+    scan.open()
+    # Point 0 spans 3 ticks and may hand off to a 2-tick final point.  That
+    # final point needs no boundary cache in a two-cycle finite run.
+    scan.load(scanned, rows=((2,), (1,)))
+    scan.fire(cycles=2)
+    assert scan.wait_done(1.0) is not None
+    before = list(scan_transport.write_batches)
+    with pytest.raises(ValueError, match="at least 3 hardware ticks"):
+        scan.fire(cycles=3)
+    assert scan_transport.write_batches == before
+
+    low = (0,) * len(_BOARD_TARGET.raw_lanes)
+    high = short.periods[0].states
+    late_short_loop = PulseSequence(
+        target=_BOARD_TARGET,
+        time_step_ns=20,
+        periods=(
+            PulsePeriod("pre", 200, "ns", low),
+            PulsePeriod("body0", 20, "ns", high),
+            PulsePeriod("body1", 20, "ns", low),
+        ),
+        repeat=RepeatRegion("body0", "body1", 2),
+    )
+    late_program = compile_sequence(late_short_loop, geom, 50e6)
+    late_transport = MemoryRegisterTransport(geom=geom, auto_done=True)
+    late = PulseStreamer(late_transport, geom, 50e6, target=_BOARD_TARGET)
+    late.open()
+    # The only inner rewind can prefetch at absolute tick 10, so one execution
+    # is valid even though the loop span is two ticks.  A second outer cycle is
+    # not: after the rewind only two ticks remain before the frame boundary.
+    late.load(late_program)
+    late.fire(cycles=1)
+    assert late.wait_done(1.0) is not None
+    before = list(late_transport.write_batches)
+    with pytest.raises(ValueError, match="after its final restart"):
+        late.fire(cycles=2)
+    assert late_transport.write_batches == before
+
+    too_many_short_loops = compile_sequence(
+        replace(late_short_loop, repeat=RepeatRegion("body0", "body1", 3)),
+        geom,
+        50e6,
+    )
+    rejected_transport = MemoryRegisterTransport(geom=geom, auto_done=True)
+    rejected = PulseStreamer(rejected_transport, geom, 50e6, target=_BOARD_TARGET)
+    rejected.open()
+    with pytest.raises(ValueError, match="RepeatRegion span.*3 hardware ticks"):
+        rejected.load(too_many_short_loops)
+    assert rejected_transport.write_batches == []
+
+    three_tick_loop = compile_sequence(
+        replace(
+            late_short_loop,
+            periods=(
+                late_short_loop.periods[0],
+                late_short_loop.periods[1],
+                replace(late_short_loop.periods[2], duration=40),
+            ),
+            repeat=RepeatRegion("body0", "body1", 3),
+        ),
+        geom,
+        50e6,
+    )
+    accepted_transport = MemoryRegisterTransport(geom=geom, auto_done=True)
+    accepted = PulseStreamer(accepted_transport, geom, 50e6, target=_BOARD_TARGET)
+    accepted.open()
+    accepted.load(three_tick_loop)
 
 
 def test_load_requires_one_complete_application_shape() -> None:

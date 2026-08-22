@@ -80,7 +80,7 @@ bin\pulse_editor.bat           the pulse window on its own
 bin\figure_viewer.bat          open a saved figure archive; no experiment session needed
 bin\update.bat                 git pull, re-check dependencies, prove it still imports
 bin\run_server.bat             the pulse server, on the machine wired to the board
-bin\build_and_program.bat      synthesise the bitstream and load it onto the FPGA
+bin\build_and_program.bat      build/check the bitstream; program/flash only when explicitly requested
 bin\estimate_resources.bat     what the current board geometry costs on the part
 ```
 

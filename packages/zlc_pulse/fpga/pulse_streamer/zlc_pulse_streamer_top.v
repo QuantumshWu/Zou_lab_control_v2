@@ -144,13 +144,12 @@ module zlc_pulse_streamer_top #(
     localparam integer C_BANK_READY = 16;   // host -> engine (bit b: bank b loaded)
     localparam integer C_BANK0_CHUNK = 17;  // host -> engine: sweep chunk resident in bank 0
     localparam integer C_BANK1_CHUNK = 18;  // host -> engine: sweep chunk resident in bank 1
-    localparam integer C_REPEAT_FROM_LOOP_START = 19;  // repeat_forever rewinds to LOOP_START
-                                                       // (additive-delay steady frame), not edge 0
+    localparam integer C_RESERVED_19 = 19;
     // --- per-channel CLK mask: bit b drives channel b's PIN from the FPGA clk
     // (== host.image.CtrlWords.CLK_ENABLE).  Sits right after the command words: there are NO
     // dense delay-tick CTRL words any more (TTL+DAC delays live in the R_DELAY region).
     localparam integer CLK_ENABLE_WORDS = (CHANNEL_COUNT + 31) / 32;            // 2
-    localparam integer C_CLK_ENABLE = C_REPEAT_FROM_LOOP_START + 1;             // 20: per-channel clk mask (2 words: 20..21)
+    localparam integer C_CLK_ENABLE = C_RESERVED_19 + 1;                        // 20: per-channel clk mask (2 words: 20..21)
 
     // engine outputs
     wire [CHANNEL_COUNT-1:0] out;
@@ -187,10 +186,10 @@ module zlc_pulse_streamer_top #(
     // captured half-old/half-new = a sporadic THIRD code (the "third DA value between two
     // edge periods" bug; a long HOLD gap only masked it by moving the DAC step off the
     // busy edge).  Driving the strobe as ~clk moves the DAC latch to the clk FALLING edge =
-    // the CENTRE of the data eye (~10 ns settled each side at 50 MHz) and the quiet half-
-    // cycle (nothing else switches there), so the DAC always captures the clean settled
-    // word.  Proven in sim/tb_da_clk_phase.v (engine step is glitch-free; coincident latch
-    // captures a third code for realistic skews, eye-centre latch never does).
+    // the intended centre of the 20 ns fabric data eye. `tb_da_ttl_align.v` proves
+    // the RTL launch/latch ordering; actual board-level setup/hold margin remains
+    // an instrumented hardware-acceptance item because the DAC I/O delays are not
+    // specified by this repository.
     wire [CLK_ENABLE_WORDS*32-1:0] clk_enable_pack;
     wire [CHANNEL_COUNT-1:0] clk_en;
     wire [CHANNEL_COUNT-1:0] out_final;
@@ -229,14 +228,14 @@ module zlc_pulse_streamer_top #(
     // so a priority mux (UART wins when u_active) is correct + free; a UART write is byte-for-byte a
     // JTAG write to the same word (only the operands are re-sourced, decode/timing unchanged).
     wire [29:0] u_word_addr; wire [31:0] u_wdata; wire u_we, u_active, u_protocol_error;
-    wire [5:0]  u_rd_word;   wire u_rd_req; reg [31:0] u_rd_data;
+    wire [5:0]  u_rd_word;   reg [31:0] u_rd_data;
     reg  [3:0]  uart_por = 4'h0;                            // power-on reset, independent of eng_reset
     always @(posedge clk) if (uart_por != 4'hF) uart_por <= uart_por + 1'b1;
     wire uart_rst = (uart_por != 4'hF);
     zlc_uart_bridge #(.CLK_HZ(50_000_000), .BAUD(3_000_000), .ADDRESS_WORDS(R_TOTAL_WORDS)) zlc_uart_i (
         .clk(clk), .rst(uart_rst), .uart_rx(uart_rx), .uart_tx(uart_tx),
         .u_word_addr(u_word_addr), .u_wdata(u_wdata), .u_we(u_we), .u_active(u_active), .u_error(u_protocol_error),
-        .u_rd_word(u_rd_word), .u_rd_req(u_rd_req), .u_rd_data(u_rd_data)
+        .u_rd_word(u_rd_word), .u_rd_data(u_rd_data)
     );
     wire        uart_sel  = u_active;
     wire [29:0] word_addr = uart_sel ? u_word_addr : bram_addra[31:2];
@@ -300,14 +299,12 @@ module zlc_pulse_streamer_top #(
     // loader/engine-driven write-backs (separate from AXI host writes)
     reg ldr_status_we;
     reg [31:0] ldr_status_val;
-    reg ldr_cmd_clear;          // loader acks a command by clearing C_COMMAND
 
     always @(posedge clk) begin
         if (ena_mux && wr && sel_ctrl) ctrl_reg[word_addr[5:0]] <= wdata_mux;
         if (ena_mux && wr && sel_delay && (delay_word_off < DELAY_REG_COUNT))
             delay_reg[delay_word_off[6:0]] <= wdata_mux;
         if (ldr_status_we) ctrl_reg[C_STATUS] <= ldr_status_val;
-        if (ldr_cmd_clear) ctrl_reg[C_COMMAND] <= 32'b0;
         ctrl_reg[C_CURSOR] <= zlc_cursor;        // engine cursor visible to host
     end
 
@@ -456,7 +453,6 @@ module zlc_pulse_streamer_top #(
 
     always @(posedge clk) begin
         ldr_status_we <= 1'b0;
-        ldr_cmd_clear <= 1'b0;
         eng_start <= 1'b0;
         if (u_protocol_error) protocol_error <= 1'b1;
         case (lstate)
@@ -593,10 +589,10 @@ module zlc_pulse_streamer_top #(
         // drift from image.num_delay_ch.  The host must never place a delay on channel >= DLY_NUM.
         .DELAY_COMPACT(1), .NUM_DELAY_CH(DLY_NUM), .DELAY_CH_IDX_W(DLY_IDXW),
         .DELAY_CH_MAP(DLY_MAP),
-        // RD_LAT = the forced edge-BRAM read latency.  FIFO_DEPTH = RD_LAT + 2: the prefetch
-        // pipeline is RD_LAT+1 deep (the registered edge_raddr adds a cycle before the BRAM),
-        // so sustaining 1-tick playback needs a resident head + (RD_LAT+1) in-flight slots.
-        .RD_LAT(2), .FIFO_DEPTH(4)
+        // RD_LAT = the configured edge-BRAM latency.  The registered address plus
+        // generated memory/core output stages make issue->data RD_LAT+2 cycles;
+        // FIFO_DEPTH=RD_LAT+3 owns the resident head and all tracked reads.
+        .RD_LAT(2), .FIFO_DEPTH(5)
     ) zlc_engine_i (
         .clk(axi_clk), .reset(eng_reset), .start(eng_start),
         .prog_count(ctrl_reg[C_PROG_COUNT][EDGE_ADDR_WIDTH:0]),
@@ -605,7 +601,6 @@ module zlc_pulse_streamer_top #(
         .loop_end_tick(ctrl_reg[C_LOOP_END_TICK][TICK_WIDTH-1:0]),
         .loop_end_coeffs({ctrl_reg[C_LOOP_END_HI][COEFF_BITS-33:0], ctrl_reg[C_LOOP_END_LO]}),
         .loop_count(ctrl_reg[C_LOOP_COUNT]),
-        .repeat_from_loop_start(ctrl_reg[C_REPEAT_FROM_LOOP_START][0]),
         .scan_enable(ctrl_reg[C_SCAN_ENABLE][0]),
         .scan_count(ctrl_reg[C_SCAN_COUNT][SCAN_COUNT_WIDTH-1:0]),
         .edge_raddr(edge_raddr),

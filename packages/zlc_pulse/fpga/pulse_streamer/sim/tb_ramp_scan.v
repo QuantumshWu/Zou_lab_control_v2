@@ -1,15 +1,19 @@
 `timescale 1ns/1ps
 // REAL-ENGINE proof of the edge+RAMP DAC scan: a ramp whose STOP endpoint reads scan
-// slot 0 at runtime (stop_value_select = 1).  Two scan points (codes 420 and 900, both
+// slot 0 at runtime (stop_value_select = 1).  Three scan points (codes 420, 900, 600;
+// the first two are the full staircase oracle and the third arrives from a late bank).
 // STEEP Bresenham: delta > span exercises the deferred divmod + multi-code stepping).
-// For every tick of both points the engine's bus_out must equal the integer staircase
+// Segment 1 starts at affine tick floor(slot0/256): point 0 starts at tick 1,
+// point 1 at tick 3.  This deliberately makes the first post-seam candidate
+// slot-dependent, so an NBA-old boundary cache fails immediately.  For every
+// tick of both points the engine's bus_out must equal the integer staircase
 //   v(t) = vstart + floor((t - t0) * delta / span)   (landing exactly on the code),
 // which is byte-identical to the Python model (_rtl_bus_held_value) and the preview.
 module tb_ramp_scan;
-  localparam integer CH=8, EAW=12, TW=32, NS=1, CW=16, BUSC=4, BW=10, TDW=32, SAW=12;
-  localparam integer T0=10, T1=40, TF=60;          // ramp window [10,40), frame 60 ticks
+  localparam integer CH=8, EAW=12, TW=32, NS=1, CW=16, BUSC=4, BW=10, TDW=32, SAW=2;
+  localparam integer T1=40, TF=60;                 // affine ramp start, fixed stop, 60-tick frame
   localparam [BW-1:0] VSTART=10'd320;
-  localparam [TW-1:0] P0VAL=32'd420, P1VAL=32'd900;
+  localparam [TW-1:0] P0VAL=32'd420, P1VAL=32'd900, P2VAL=32'd600;
 
   reg clk=0; always #10 clk=~clk;
   reg reset, start;
@@ -34,7 +38,10 @@ module tb_ramp_scan;
   wire [SAW-1:0] scan_raddr;
   always @(posedge clk) begin spipe[0]<=scanmem[scan_raddr[1:0]]; spipe[1]<=spipe[0]; spipe[2]<=spipe[1]; end
   wire [NS*TW-1:0] scan_rdata = spipe[1];
-  initial begin scanmem[0]=P0VAL; scanmem[1]=P1VAL; scanmem[2]=0; scanmem[3]=0; end
+  initial begin scanmem[0]=P0VAL; scanmem[1]=P1VAL; scanmem[2]=P2VAL; scanmem[3]=0; end
+
+  reg [1:0] bank_ready;
+  reg [31:0] bank_chunk0, bank_chunk1;
 
   reg [CH*TDW-1:0]   delay_ticks_w     = {CH*TDW{1'b0}};
   reg [BUSC*TDW-1:0] bus_delay_ticks_w = {BUSC*TDW{1'b0}};
@@ -45,23 +52,24 @@ module tb_ramp_scan;
   reg [BW-1:0]       bus_prog_start_value=0, bus_prog_stop_value=0;
   reg [1:0]          bus_prog_mode=2'd0;
   reg [2:0]          bus_prog_value_select=3'd0, bus_prog_stop_value_select=3'd0;
+  reg [NS*CW-1:0]    bus_prog_start_tick_coeffs={NS*CW{1'b0}};
   reg [BUSC*7-1:0]   bus_counts = {BUSC*7{1'b0}};
 
   wire [CH-1:0] out; wire [BUSC*BW-1:0] bus_out;
   wire running, done; wire [31:0] scan_cursor; wire underflow;
   zlc_edge_streamer #(.CHANNEL_COUNT(CH), .NUM_SLOTS(NS), .BUS_COUNT(BUSC), .BUS_WIDTH(BW),
-                      .SCAN_ADDR_WIDTH(SAW)) dut (
+                      .SCAN_ADDR_WIDTH(SAW), .BANK_SIZE(2)) dut (
     .clk(clk),.reset(reset),.start(start),.prog_count(13'd3),.repeat_forever(1'b0),
     .loop_start_addr({EAW{1'b0}}),.loop_end_tick(TF[TW-1:0]),.loop_end_coeffs({NS*CW{1'b0}}),
-    .loop_count(32'd1),.repeat_from_loop_start(1'b0),.scan_enable(1'b1),.scan_count(32'd2),
-    .edge_raddr(edge_raddr),.edge_tick_rdata(tp[1]),
-    .edge_coeff_rdata({NS*CW{1'b0}}),.edge_mask_rdata(mp[1]),
+    .loop_count(32'd1),.scan_enable(1'b1),.scan_count(32'd3),
+    .edge_raddr(edge_raddr),.edge_tick_rdata(tp[2]),
+    .edge_coeff_rdata({NS*CW{1'b0}}),.edge_mask_rdata(mp[2]),
     .scan_raddr(scan_raddr),.scan_rdata(scan_rdata),
-    .bank_ready(2'b11),.bank_chunk0(32'd0),.bank_chunk1(32'd0),
+    .bank_ready(bank_ready),.bank_chunk0(bank_chunk0),.bank_chunk1(bank_chunk1),
     .scan_cursor(scan_cursor),.underflow(underflow),
     .bus_prog_we(bus_prog_we),.bus_prog_bus(bus_prog_bus),.bus_prog_addr(bus_prog_addr),
     .bus_prog_start_tick(bus_prog_start_tick),.bus_prog_stop_tick(bus_prog_stop_tick),
-    .bus_prog_start_tick_coeffs({NS*CW{1'b0}}),.bus_prog_stop_tick_coeffs({NS*CW{1'b0}}),
+    .bus_prog_start_tick_coeffs(bus_prog_start_tick_coeffs),.bus_prog_stop_tick_coeffs({NS*CW{1'b0}}),
     .bus_prog_start_value(bus_prog_start_value),.bus_prog_stop_value(bus_prog_stop_value),
     .bus_prog_mode(bus_prog_mode),.bus_prog_value_select(bus_prog_value_select),
     .bus_prog_stop_value_select(bus_prog_stop_value_select),
@@ -71,13 +79,14 @@ module tb_ramp_scan;
 
   task prog_seg(input [5:0] a, input [TW-1:0] stk, input [TW-1:0] etk,
                 input [BW-1:0] v0, input [BW-1:0] v1, input [1:0] m,
-                input [2:0] s0, input [2:0] s1);
+                input [2:0] s0, input [2:0] s1, input [CW-1:0] start_coeff);
     begin
       @(posedge clk);
       bus_prog_bus=2'd0; bus_prog_addr=a;
       bus_prog_start_tick=stk; bus_prog_stop_tick=etk;
       bus_prog_start_value=v0; bus_prog_stop_value=v1; bus_prog_mode=m;
       bus_prog_value_select=s0; bus_prog_stop_value_select=s1;
+      bus_prog_start_tick_coeffs=start_coeff;
       bus_prog_we = ~bus_prog_we; @(posedge clk); @(posedge clk);
     end
   endtask
@@ -85,14 +94,15 @@ module tb_ramp_scan;
   // expected staircase for point value PV at frame tick t (matches the Python model)
   function [BW-1:0] expect_v;
     input integer t; input [TW-1:0] pv;
-    integer delta, k, moves;
+    integer delta, k, moves, t0;
     begin
-      if (t < T0) expect_v = VSTART;
+      t0 = pv >> 8;
+      if (t < t0) expect_v = VSTART;
       else if (t >= T1) expect_v = pv[BW-1:0];
       else begin
         delta = pv - VSTART;       // both points ramp upward here
-        k = t - T0;
-        moves = (k * delta) / (T1 - T0);
+        k = t - t0;
+        moves = (k * delta) / (T1 - t0);
         if (moves > delta) moves = delta;
         expect_v = VSTART + moves;
       end
@@ -102,10 +112,10 @@ module tb_ramp_scan;
   integer t, started, errs, p, ft;
   reg [BW-1:0] hist [0:2*60+10];
   initial begin
-    reset=1; start=0;
+    reset=1; start=0; bank_ready=2'b01; bank_chunk0=0; bank_chunk1=1;
     repeat (8) @(posedge clk);
-    prog_seg(6'd0, 32'd0, 32'd0, VSTART, VSTART, 2'd1, 3'd0, 3'd0);   // edge 320 @0
-    prog_seg(6'd1, T0[TW-1:0], T1[TW-1:0], VSTART, 10'd0, 2'd2, 3'd0, 3'd1); // RAMP stop<-s0
+    prog_seg(6'd0, 32'd0, 32'd0, VSTART, VSTART, 2'd1, 3'd0, 3'd0, 16'd0); // edge 320 @0
+    prog_seg(6'd1, 32'd0, T1[TW-1:0], VSTART, 10'd0, 2'd2, 3'd0, 3'd1, 16'd1); // start=floor(s0/256), stop<-s0
     bus_counts[0*7 +: 7] = 7'd2;
     repeat (140) @(posedge clk);                                       // arm with reset held
     reset=0; @(posedge clk); start=1; repeat(4) @(posedge clk); start=0;
@@ -131,7 +141,32 @@ module tb_ramp_scan;
           errs = errs + 1;
         end
     end
-    $display("mismatches=%0d  %s", errs, (errs==0) ? "RAMP-SCAN-OK" : "**RAMP-SCAN-BAD**");
+    if (errs != 0) $fatal(1, "RAMP-SCAN-BAD mismatches=%0d", errs);
+
+    // Point 2 lives in bank 1, deliberately not-ready through the physical
+    // seam.  When it becomes resident, the first clock registers a fill request,
+    // the second evaluates BOUNDARY0 truth, and only the third may advance.
+    // Consuming stale point-1 cache would advance early and fail this sequence.
+    if (dut.scan_point_index != 1) $fatal(1, "late-bank setup lost point 1");
+    repeat (2) @(posedge clk);
+    @(negedge clk);
+    bank_ready = 2'b11;
+    @(posedge clk); #1;
+    if (dut.scan_point_index != 1)
+      $fatal(1, "late bank advanced before its fill request was registered");
+    if (!dut.bus_prefetch_pending || dut.scan_boundary_ready)
+      $fatal(1, "late bank did not enter the registered fill stage");
+    @(posedge clk); #1;
+    if (dut.scan_point_index != 1)
+      $fatal(1, "late bank advanced during its boundary evaluation tick");
+    if (!dut.scan_boundary_ready)
+      $fatal(1, "late bank did not publish point-2 boundary truth");
+    @(posedge clk); #1;
+    if (dut.scan_point_index != 2)
+      $fatal(1, "late bank did not advance after its cache became valid");
+    if (bus_out[0*BW +: BW] != VSTART)
+      $fatal(1, "point-2 bus did not restart from segment 0");
+    $display("RAMP-SCAN-OK mismatches=0");
     $finish;
   end
 endmodule

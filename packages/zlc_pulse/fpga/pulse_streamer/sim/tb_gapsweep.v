@@ -22,7 +22,7 @@ module tb_gapsweep;
   zlc_edge_streamer #(.CHANNEL_COUNT(CH)) dut (
     .clk(clk),.reset(reset),.start(start),.prog_count(13'd10),.repeat_forever(1'b1),
     .loop_start_addr({EAW{1'b0}}),.loop_end_tick(LE),.loop_end_coeffs({NS*CW{1'b0}}),
-    .loop_count(32'd1),.repeat_from_loop_start(1'b0),.scan_enable(1'b0),.scan_count(32'd0),
+    .loop_count(32'd1),.scan_enable(1'b0),.scan_count(32'd0),
     .edge_raddr(edge_raddr),.edge_tick_rdata(edge_tick_rdata),
     .edge_coeff_rdata({NS*CW{1'b0}}),.edge_mask_rdata(edge_mask_rdata),
     .scan_raddr(scan_raddr),.scan_rdata({NS*TW{1'b0}}),.bank_ready(2'b11),
@@ -50,11 +50,21 @@ module tb_gapsweep;
     for (i=0;i<10;i=i+1) begin pa(1'b0, 2*i, masks[i]); pa(1'b0, 2*i+1, 32'd0); end
     repeat (200) @(posedge clk); reset=0; @(posedge clk); start=1; @(posedge clk); start=0;
   end
-  integer tcount=0; reg emp=0; integer lo=-1, nbad=0, np=0;
+  integer tcount=0; reg emp=0; integer lo=-1, nbad=0, np=0, nrise=0, nperiodbad=0;
+  integer previous_on[0:1];
+  initial begin previous_on[0]=-1; previous_on[1]=-1; end
   always @(posedge clk) begin
     if (running||done) tcount=tcount+1;
     if (running && out[11]!==emp) begin
-      if (out[11]) lo=tcount;
+      if (out[11]) begin
+        lo=tcount;
+        if (previous_on[nrise & 1] >= 0 && tcount-previous_on[nrise & 1] != LE) begin
+          nperiodbad=nperiodbad+1;
+          $display("[GAP=%0d] repeat onset delta=%0d expect=%0d **BAD**", GAP,
+                   tcount-previous_on[nrise & 1], LE);
+        end
+        previous_on[nrise & 1]=tcount; nrise=nrise+1;
+      end
       else begin np=np+1; if (tcount-lo != 2000) nbad=nbad+1;
         $display("[GAP=%0d] emCCD pulse#%0d on=%0d off=%0d width=%0d %s", GAP, np, lo, tcount, tcount-lo, (tcount-lo==2000)?"OK":"**BAD**"); end
       emp<=out[11];
@@ -63,7 +73,12 @@ module tb_gapsweep;
   initial begin
     wait(reset==1); wait(reset==0);
     repeat (40000) @(posedge clk);
-    $display("==== GAP=%0d : %0d pulses, %0d BAD ====", GAP, np, nbad);
+    $display("==== GAP=%0d : pulses=%0d width_errors=%0d ====", GAP, np, nbad);
+    if (np < 4 || nrise < 4) $fatal(1, "gap %0d did not cross a repeat seam: pulses=%0d rises=%0d", GAP, np, nrise);
+    if (nbad != 0) $fatal(1, "gap %0d had %0d bad pulse widths", GAP, nbad);
+    if (nperiodbad != 0) $fatal(1, "gap %0d had %0d bad repeat periods", GAP, nperiodbad);
+    if (underflow) $fatal(1, "gap %0d raised underflow", GAP);
+    $display("GAPSWEEP-OK GAP=%0d pulses=%0d", GAP, np);
     $finish;
   end
 endmodule

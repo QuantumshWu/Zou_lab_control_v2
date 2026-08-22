@@ -24,7 +24,7 @@ module tb_real_engine;
     .clk(clk),.reset(reset),.start(start),
     .prog_count(13'd10),.repeat_forever(1'b1),
     .loop_start_addr({EAW{1'b0}}),.loop_end_tick(32'd14101),.loop_end_coeffs({NS*CW{1'b0}}),
-    .loop_count(32'd1),.repeat_from_loop_start(1'b0),
+    .loop_count(32'd1),
     .scan_enable(1'b0),.scan_count(32'd0),
     .edge_raddr(edge_raddr),.edge_tick_rdata(edge_tick_rdata),
     .edge_coeff_rdata({NS*CW{1'b0}}),.edge_mask_rdata(edge_mask_rdata),
@@ -90,7 +90,7 @@ module tb_real_engine;
   initial begin
     wait (reset==1); wait (reset==0);
     repeat (52000) @(posedge clk);
-    $display("==== DONE (correct = every pulse pair 1000/2000 wide) ====");
+    $display("==== DONE (correct = seven emCCD pulses, every width 2000) ====");
     $finish;
   end
 endmodule

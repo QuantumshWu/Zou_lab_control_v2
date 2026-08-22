@@ -7,7 +7,14 @@ import sys
 
 import pytest
 
-from zlc_pulse.fpga import DEFAULT_CONFIG_PATH, emit_geometry_vh, load_streamer_config
+from zlc_pulse.fpga import (
+    DEFAULT_CONFIG_PATH,
+    FpgaPartProfile,
+    emit_geometry_vh,
+    estimate_resources,
+    load_streamer_config,
+    solve_capacity,
+)
 from zlc_pulse.wire import default_params
 
 
@@ -30,11 +37,9 @@ DEPLOYMENT_ASSETS = (
     "fpga/pulse_streamer/sim/replay_t_frame.vh",
     "fpga/pulse_streamer/sim/tb_1tick.v",
     "fpga/pulse_streamer/sim/tb_bus_delay.v",
-    "fpga/pulse_streamer/sim/tb_da_clk_phase.v",
     "fpga/pulse_streamer/sim/tb_da_ttl_align.v",
     "fpga/pulse_streamer/sim/tb_delay_compact.v",
     "fpga/pulse_streamer/sim/tb_delay_sched.v",
-    "fpga/pulse_streamer/sim/tb_edge_streamer.v",
     "fpga/pulse_streamer/sim/tb_evt_depth.v",
     "fpga/pulse_streamer/sim/tb_gapsweep.v",
     "fpga/pulse_streamer/sim/tb_loop.v",
@@ -113,6 +118,67 @@ def test_deployed_config_is_the_default_geometry_source(monkeypatch) -> None:
     assert loaded["params"] == default_params()
 
 
+def test_frozen_35t_uses_98_percent_without_weakening_the_90_percent_default() -> None:
+    config = load_streamer_config()
+    assert config["target_pct"] == 98.0
+
+    frozen = estimate_resources(
+        config["params"], part=config["fpga_part"], target_pct=config["target_pct"]
+    )
+    assert frozen["lut"] == {
+        "used": 20075,
+        "budget": 20384,
+        "total": 20800,
+        "pct": 96.5,
+        "ok": True,
+    }
+    at_default = estimate_resources(config["params"], part=config["fpga_part"])
+    assert at_default["lut"]["ok"] is False
+    assert at_default["lut"]["budget"] == 18720
+
+    with pytest.raises(ValueError, match=r"90% planning target: LUT 20075 > 18720"):
+        solve_capacity(config["fpga_part"])
+
+    planning = solve_capacity("xc7a50t")
+    assert planning.all_within_budget()
+    assert planning.resource_report["lut"]["budget"] == 29340
+
+    solved = solve_capacity(
+        config["fpga_part"], target_pct=config["target_pct"]
+    )
+    assert solved.all_within_budget()
+    assert solved.resource_report == estimate_resources(
+        solved.params, part=config["fpga_part"], target_pct=config["target_pct"]
+    )
+
+
+def test_capacity_search_uses_the_estimators_fixed_ramb36_cost() -> None:
+    # At 39 tiles the old solver's private +1 formula admitted 4096 edges,
+    # while the estimator's routed +3 accounting correctly reports 41.  One
+    # estimator authority must instead choose the next 2048-edge geometry.
+    part = FpgaPartProfile("boundary", 39, 100000, 100000, 1000, 100000)
+    solved = solve_capacity(
+        part,
+        target_pct=100,
+        max_edges_cap=4096,
+        engine_logic_luts=0,
+        engine_ff=0,
+        engine_dsp=0,
+    )
+    assert solved.params.max_edges == 2048
+    assert solved.ramb36_used == 31
+    assert solved.ramb36_budget == 39
+    assert solved.all_within_budget()
+    assert solved.resource_report == estimate_resources(
+        solved.params,
+        part=part,
+        target_pct=100,
+        engine_logic_luts=0,
+        engine_ff=0,
+        engine_dsp=0,
+    )
+
+
 def test_clock_and_safe_pin_boundary_are_explicit() -> None:
     xdc = (ROOT / "fpga/board_config/board.xdc").read_text(encoding="utf-8")
     top = (ROOT / "fpga/pulse_streamer/zlc_pulse_streamer_top.v").read_text(
@@ -135,7 +201,11 @@ def test_public_done_waits_for_the_physical_tail_and_errors_are_sticky() -> None
     assert "draining <= 1'b1" in engine
     assert "if (!delay_runtime_busy)" in engine
     assert "done <= 1'b1" in engine
-    assert "underflow <= 1'b0" not in engine[engine.index("else if (running)") :]
+    playback_start = engine.index(
+        "else if (running) begin", engine.index("start_event && !running")
+    )
+    playback_end = engine.index("else if (draining) begin", playback_start)
+    assert "underflow <= 1'b0" not in engine[playback_start:playback_end]
     assert "overflow <= 1'b1" in engine
     assert "(zlc_overflow || protocol_error) ? ST_ERROR" in top
     assert "bank_ready[0] && bank_chunk0 == 0" in engine

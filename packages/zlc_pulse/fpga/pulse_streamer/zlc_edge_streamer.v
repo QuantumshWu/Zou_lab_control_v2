@@ -12,7 +12,7 @@
 //     tables in LUTRAM (the bus/ramp engine reads them
 //     combinationally every tick, so they MUST stay async-read).
 //   * a depth-FIFO_DEPTH continuous PREFETCH of the next edges (one BRAM read per
-//     cycle, RD_LAT+1-cycle issue-to-data latency) + FIFO_DEPTH(=RD_LAT+2) edge SHADOWS
+//     cycle, RD_LAT+2-cycle issue-to-data latency) plus one tracked boundary read
 //     latched at arm time per boundary, so the four gapless reload sites
 //     (start / loop-rewind / scan-advance / repeat) reseed instantly and
 //     back-to-back **1-tick (20 ns) edges** play one per cycle.
@@ -22,14 +22,11 @@
 //     STALLS the engine and flags STATUS underflow rather than emitting a wrong
 //     point; the host never drives point timing.
 //
-// SEED INVARIANT: at every boundary, seed
-// FIFO_DEPTH resident shadows starting at the FIRST not-yet-output edge, and
-// issue NO read at the boundary (occupancy == #shadows <= depth).  The first
-// PREFETCHED edge is issued only when the head fires and frees a slot; with
-// FIFO_DEPTH = RD_LAT+2 that read lands and registers into arm exactly in time
-// for a 1-tick successor (the issue-to-data latency is RD_LAT+1 because
-// edge_raddr is itself a register -- see the PIPE note at the pend logic).
-// A shorter seed is one cycle short and drops edges.
+// SEED INVARIANT: at every boundary, seed the resident shadows starting at the
+// FIRST not-yet-output edge and issue+track the following row immediately.
+// Normal issue starts at the row after it.  FIFO_DEPTH=RD_LAT+3 owns the
+// resident head, every in-flight read, and the landing slot, so dense 1-tick
+// rows neither duplicate the boundary address nor overrun the FIFO.
 //
 // RD_LAT MUST equal the synthesised edge-BRAM read latency; the build tcl FORCES
 // the edge BRAMs to READ_LATENCY_B = 2 so RD_LAT=2 is deterministic.  BANK_SIZE
@@ -69,14 +66,10 @@ module zlc_edge_streamer #(
     // and after done -- uses THIS mid-scale code so an idle DAC outputs 0 V, not -FS.
     parameter integer BUS_SAFE_VALUE = (1 << (BUS_WIDTH - 1)),
     parameter integer RD_LAT = 2,               // edge-BRAM read latency (forced)
-    // The PREFETCH pipeline from `issue` to data-valid is RD_LAT + 1 (the extra cycle is
-    // the registered `edge_raddr`: an issued read only reaches the BRAM address port the
-    // NEXT cycle, then the BRAM adds RD_LAT).  For sustained 1-tick (20 ns) playback the
-    // FIFO must hold a resident head PLUS one in-flight read per pipeline stage, i.e.
-    // FIFO_DEPTH = (RD_LAT+1) + 1 = RD_LAT + 2.  (The earlier value RD_LAT+1 under-counted
-    // the edge_raddr stage: `landed` fired a cycle early, the append latched a stale bus
-    // word, and a streamed edge was dropped -- the emCCD "40 ms / e7 vanished" bug.)
-    parameter integer FIFO_DEPTH = RD_LAT + 2,
+    // The generated IP model exposes data RD_LAT+2 cycles after issue: registered
+    // edge_raddr plus the configured memory/core output stages.  One extra FIFO
+    // slot owns the head being fired while the pipeline remains full.
+    parameter integer FIFO_DEPTH = RD_LAT + 3,
     parameter integer ARM_SETTLE = 4,           // generous one-time arm read settle
     // ----- TTL EVENT-SCHEDULER delay geometry ------------------------------------------
     // TTL channel delays are NOT bounded by a fixed delay-line depth: each channel schedules its
@@ -117,11 +110,6 @@ module zlc_edge_streamer #(
     input  wire [TICK_WIDTH-1:0] loop_end_tick,
     input  wire [NUM_SLOTS*COEFF_WIDTH-1:0] loop_end_coeffs,
     input  wire [31:0] loop_count,
-    // When set, repeat_forever rewinds to loop_start_addr (the steady-state frame of an
-    // additive-delay program) instead of edge 0 -- so the real-startup preamble plays
-    // ONCE.  The host points loop_start_addr at the steady frame (loop_count is 1, so
-    // the finite-bracket rewind is unused and its shadows are reused for free).
-    input  wire repeat_from_loop_start,
     input  wire scan_enable,
     input  wire [SCAN_COUNT_WIDTH-1:0] scan_count,   // total N points
 
@@ -225,6 +213,8 @@ module zlc_edge_streamer #(
     reg [TICK_WIDTH-1:0] time_count = {TICK_WIDTH{1'b0}};
     reg [TICK_WIDTH-1:0] final_tick = {TICK_WIDTH{1'b0}};
     reg [TICK_WIDTH-1:0] loop_end_active = {TICK_WIDTH{1'b0}};
+    reg [TICK_WIDTH-1:0] final_prefetch_schedule_tick = {TICK_WIDTH{1'b0}};
+    reg [TICK_WIDTH-1:0] loop_prefetch_schedule_tick = {TICK_WIDTH{1'b0}};
     reg [EDGE_ADDR_WIDTH:0] edge_index = {(EDGE_ADDR_WIDTH+1){1'b0}};
     reg [EDGE_ADDR_WIDTH:0] active_count = {(EDGE_ADDR_WIDTH+1){1'b0}};
     reg repeat_forever_active = 1'b0;
@@ -242,8 +232,9 @@ module zlc_edge_streamer #(
     reg [31:0] loops_remaining = 32'd1;
 
     // shadows latched at arm time (BRAM pre-reads while reset is asserted)
-    // FIFO_DEPTH (= RD_LAT+2) resident shadows are seeded at every boundary, so we pre-read that
-    // many edges (e0..e4) and loop-start edges (ls0..ls4) -- one more than the old 4.
+    // FIFO_DEPTH (= RD_LAT+3) shadows are available at every boundary: four
+    // resident rows plus the tracked BRAM pre-read.  Arm therefore captures
+    // e0..e4 and loop-start rows ls0..ls4.
     reg [TICK_WIDTH-1:0]  sh_e0_t, sh_e1_t, sh_e2_t, sh_e3_t, sh_e4_t;
     reg [COEFF_BITS-1:0]  sh_e0_c, sh_e1_c, sh_e2_c, sh_e3_c, sh_e4_c;
     reg [CHANNEL_COUNT-1:0] sh_e0_m, sh_e1_m, sh_e2_m, sh_e3_m, sh_e4_m;
@@ -261,13 +252,11 @@ module zlc_edge_streamer #(
     reg [2:0] arm_nv;                         // valid arm entries (0..FIFO_DEPTH)
     reg [EDGE_ADDR_WIDTH:0] fetch_idx;        // next edge index to read
     // In-flight read markers, ONE BIT PER PIPELINE STAGE from `issue` to data-valid.  The
-    // true latency is RD_LAT+1, NOT RD_LAT: `edge_raddr` is a REGISTER (issue decides at
-    // cycle T, the address only reaches the BRAM at T+1), then the BRAM adds RD_LAT.  So a
-    // read issued at T lands (edge_*_rdata valid) at T+RD_LAT+1.  Tracking only RD_LAT made
+    // true latency is RD_LAT+2, NOT RD_LAT.  Tracking only RD_LAT made
     // `landed` fire ONE CYCLE EARLY, so when two reads landed back-to-back the append
     // latched the STALE (previous) bus word twice and silently dropped the next edge -- the
     // "second emCCD pulse is 40 ms / e7 vanished" hardware bug (reproduced in real-IP xsim).
-    localparam integer PIPE = RD_LAT + 1;     // issue -> data-valid latency (incl. edge_raddr reg)
+    localparam integer PIPE = RD_LAT + 2;     // issue -> data-valid latency measured with real IP model
     reg [PIPE-1:0] pend;                       // in-flight read markers (1 bit/pipeline-stage)
 
     // ----- bus runtime --------------------------------------------------------
@@ -276,8 +265,6 @@ module zlc_edge_streamer #(
     // pins sit at the SAFE mid-scale code (0 V) from the first clock -- not at code 0
     // (negative full scale) -- even before the host's first CMD_SAFE/reset.
     integer bus_pu;
-    initial for (bus_pu = 0; bus_pu < BUS_COUNT; bus_pu = bus_pu + 1)
-        bus_value_active[bus_pu] = BUS_SAFE_VALUE[BUS_WIDTH-1:0];
     reg [BUS_SEG_ADDR_WIDTH:0] bus_index_active [0:BUS_COUNT-1];
     reg [BUS_SEG_ADDR_WIDTH:0] bus_count_active [0:BUS_COUNT-1];
     reg bus_ramp_active [0:BUS_COUNT-1];
@@ -298,6 +285,55 @@ module zlc_edge_streamer #(
     reg bus_ramp_steep [0:BUS_COUNT-1];
     reg [TICK_WIDTH-1:0] bus_ramp_denom [0:BUS_COUNT-1];
     reg [TICK_WIDTH+BUS_WIDTH:0] bus_ramp_accum [0:BUS_COUNT-1];
+
+    // Affine segment times are resolved once when a segment becomes the next
+    // candidate, not recomputed through four DSPs on every physical tick.  The
+    // single cache feeds normal playback and can be prepared as BOUNDARY0 one
+    // tick before a seam.  `scan_boundary_ready` belongs only to the streaming
+    // scan handshake: a late bank clears it, then spends one held tick rebuilding
+    // segment 0 before scan advance.  Other gapless seams retain their direct,
+    // deterministic penultimate prefetch and add no parallel condition tree.
+    // A boundary evaluation also registers the next active segment request.
+    // The seam therefore consumes only registered slots/index; scan ownership
+    // never sits in front of the LUTRAM + DSP evaluator path.
+    reg [TICK_WIDTH-1:0] bus_next_start_tick [0:BUS_COUNT-1];
+    reg [TICK_WIDTH-1:0] bus_next_stop_tick [0:BUS_COUNT-1];
+    reg scan_boundary_ready;
+    reg scan_next_resident;
+    reg bus_prefetch_pending;
+    reg [SLOT_BITS-1:0] bus_prefetch_slots;
+    reg bus_prefetch_scan;
+    reg bus_refill_pending;
+    reg [SLOT_BITS-1:0] bus_refill_slots;
+    reg [BUS_SEG_ADDR_WIDTH:0] bus_refill_index [0:BUS_COUNT-1];
+    reg [TICK_WIDTH-1:0] bus_cached_final_tick;
+    reg [TICK_WIDTH-1:0] bus_cached_loop_end;
+    reg [BUS_SEG_ADDR_WIDTH:0] bus_eval_index [0:BUS_COUNT-1];
+    reg bus_eval_boundary;
+    reg bus_eval_scan_boundary;
+    reg bus_eval_use_refill;
+    reg [SLOT_BITS-1:0] bus_eval_slots;
+    reg [BUS_INDEX_WIDTH+BUS_SEG_ADDR_WIDTH-1:0] bus_eval_addr;
+    reg [TICK_WIDTH-1:0] bus_eval_start_resolved, bus_eval_stop_resolved;
+    integer bus_eval_i;
+
+    initial begin
+        for (bus_pu = 0; bus_pu < BUS_COUNT; bus_pu = bus_pu + 1) begin
+            bus_value_active[bus_pu] = BUS_SAFE_VALUE[BUS_WIDTH-1:0];
+            bus_next_start_tick[bus_pu] = {TICK_WIDTH{1'b0}};
+            bus_next_stop_tick[bus_pu] = {TICK_WIDTH{1'b0}};
+            bus_refill_index[bus_pu] = {(BUS_SEG_ADDR_WIDTH+1){1'b0}};
+        end
+        scan_boundary_ready = 1'b0;
+        scan_next_resident = 1'b0;
+        bus_prefetch_pending = 1'b0;
+        bus_prefetch_slots = {SLOT_BITS{1'b0}};
+        bus_prefetch_scan = 1'b0;
+        bus_refill_pending = 1'b0;
+        bus_refill_slots = {SLOT_BITS{1'b0}};
+        bus_cached_final_tick = {TICK_WIDTH{1'b0}};
+        bus_cached_loop_end = {TICK_WIDTH{1'b0}};
+    end
 
     // Exact reciprocal table for the only variable division in the real-time path.
     // A STEEP ramp has 0 < span < delta < 2^BUS_WIDTH.  For S=2^(2*BUS_WIDTH),
@@ -425,7 +461,7 @@ module zlc_edge_streamer #(
     reg start_meta = 1'b0, start_sync = 1'b0, start_prev = 1'b0;
     reg bus_prog_we_meta = 1'b0, bus_prog_we_sync = 1'b0, bus_prog_we_prev = 1'b0;
     integer bus_loop;
-    reg [BUS_INDEX_WIDTH+BUS_SEG_ADDR_WIDTH-1:0] bus_prog_flat_addr, bus_runtime_addr;
+    reg [BUS_INDEX_WIDTH+BUS_SEG_ADDR_WIDTH-1:0] bus_prog_flat_addr;
     reg [TICK_WIDTH+BUS_WIDTH:0] bus_accum_next;
     reg [BUS_WIDTH:0] bus_inc;        // this tick's ramp movement: step or step+1
     reg [BUS_WIDTH:0] bus_v_next;     // widened value+inc for target saturation
@@ -606,29 +642,39 @@ module zlc_edge_streamer #(
 
     function [TICK_WIDTH-1:0] zlc_effective_tick;
         input [TICK_WIDTH-1:0] base_tick;
-        input [COEFF_BITS-1:0] coeffs;
-        input [SLOT_BITS-1:0] slots;
-        integer slot_i;
+        // The deployed geometry has four affine lanes.  Narrower standalone
+        // benches zero-extend into these fixed inputs, preserving their single-
+        // slot semantics while exercising the production datapath.
+        input [4*COEFF_WIDTH-1:0] coeffs;
+        input [4*TICK_WIDTH-1:0] slots;
+        reg signed [SLOT_MUL_WIDTH+COEFF_WIDTH-1:0] p0, p1, p2, p3;
+        reg signed [SLOT_MUL_WIDTH+COEFF_WIDTH:0] sum01, sum23;
         reg signed [ACC_WIDTH-1:0] acc;
-        reg signed [COEFF_WIDTH-1:0] coeff_i;
-        reg signed [SLOT_MUL_WIDTH-1:0] slot_value_i;   // low 25b of the slot, signed
         reg signed [ACC_WIDTH-1:0] total;
         begin
-            acc = {ACC_WIDTH{1'b0}};
-            for (slot_i = 0; slot_i < NUM_SLOTS; slot_i = slot_i + 1) begin
-                coeff_i = coeffs[slot_i*COEFF_WIDTH +: COEFF_WIDTH];
-                // single-DSP 16x25 product (slot bounded to +/-2^24; see SLOT_MUL_WIDTH)
-                slot_value_i = slots[slot_i*TICK_WIDTH +: SLOT_MUL_WIDTH];
-                acc = acc + (coeff_i * slot_value_i);
-            end
+            // Two parallel pair MACs followed by one merge.  The old procedural
+            // accumulation forced all four DSP48s into one serial chain; this
+            // balanced tree uses one extra DSP but removes a full DSP level from
+            // every affine timing path.
+            p0 = $signed(coeffs[0*COEFF_WIDTH +: COEFF_WIDTH])
+                 * $signed(slots[0*TICK_WIDTH +: SLOT_MUL_WIDTH]);
+            p1 = $signed(coeffs[1*COEFF_WIDTH +: COEFF_WIDTH])
+                 * $signed(slots[1*TICK_WIDTH +: SLOT_MUL_WIDTH]);
+            p2 = $signed(coeffs[2*COEFF_WIDTH +: COEFF_WIDTH])
+                 * $signed(slots[2*TICK_WIDTH +: SLOT_MUL_WIDTH]);
+            p3 = $signed(coeffs[3*COEFF_WIDTH +: COEFF_WIDTH])
+                 * $signed(slots[3*TICK_WIDTH +: SLOT_MUL_WIDTH]);
+            sum01 = p0 + p1;
+            sum23 = p2 + p3;
+            acc = sum01 + sum23;
             total = $signed({1'b0, base_tick}) + (acc >>> COEFF_FRAC_BITS);
             zlc_effective_tick = total[TICK_WIDTH-1:0];
         end
     endfunction
 
-    function [2:0] clamp3;                     // min(FIFO_DEPTH, available)
+    function [2:0] clamp3;                     // resident seed count; one FIFO slot belongs to boundary pre-read
         input [EDGE_ADDR_WIDTH:0] avail;
-        begin clamp3 = (avail >= FIFO_DEPTH) ? FIFO_DEPTH[2:0] : avail[2:0]; end
+        begin clamp3 = (avail >= (FIFO_DEPTH-1)) ? (FIFO_DEPTH-1) : avail[2:0]; end
     endfunction
 
     function [BUS_SEG_ADDR_WIDTH:0] zlc_bus_count_at;
@@ -682,7 +728,6 @@ module zlc_edge_streamer #(
         ((scan_wrap_base_next ? bank_chunk1 : bank_chunk0) == {SCAN_COUNT_WIDTH{1'b0}});
     wire scan_point0_ready_at_start = !(scan_enable && scan_count != 0)
                                       || (bank_ready[0] && bank_chunk0 == 0);
-
     task zlc_bus_clear_runtime;
         integer i;
         begin
@@ -767,6 +812,7 @@ module zlc_edge_streamer #(
         input [SLOT_BITS-1:0] slot_vec;
         input [TICK_WIDTH-1:0] tkstart;
         input [TICK_WIDTH-1:0] tkstop;
+        input [TICK_WIDTH-1:0] frame_end_tick;
         reg [TICK_WIDTH-1:0] span;
         reg [BUS_SEL_WIDTH-1:0] start_sel, stop_sel;
         reg [BUS_WIDTH-1:0] vstart, vstop;
@@ -822,9 +868,8 @@ module zlc_edge_streamer #(
                     bus_seg_rstop[i]  <= g_time + {{(GTIME_WIDTH-TTL_DELAY_WIDTH){1'b0}}, dly_bus}
                                          + {{(GTIME_WIDTH-TICK_WIDTH){1'b0}}, span};
                     // FREEZE boundary = emit + ticks-left-in-frame = emit + (frame_len - segment start).
-                    // Use FRESHLY-RESOLVED, stale-free operands: zlc_effective_tick(...,slot_vec) is the
-                    // CURRENT frame length (not the register final_tick, which is NBA-recomputed at the
-                    // wrap and reads the PREVIOUS point's length -- wrong for a scanned DURATION), and
+                    // Use the seam cache's freshly resolved CURRENT frame length
+                    // (not final_tick, whose boundary NBA still contains the previous scan point), and
                     // tkstart is the segment's frame-local start (0 for the tick-0 pre-applied ramp, T for
                     // a mid-frame apply == time_count there).  The old (final_tick - time_count) BOTH read
                     // not-yet-committed registers at the reinit/wrap cycle where time_count==final_tick
@@ -833,7 +878,7 @@ module zlc_edge_streamer #(
                     bus_seg_fend[i]   <= repeat_forever_active
                         ? (g_time + {{(GTIME_WIDTH-TTL_DELAY_WIDTH){1'b0}}, dly_bus}
                            + {{(GTIME_WIDTH-TICK_WIDTH){1'b0}},
-                              (zlc_effective_tick(sh_final_t, sh_final_c, slot_vec) - tkstart)})
+                              (frame_end_tick - tkstart)})
                         : {GTIME_WIDTH{1'b1}};
                     bus_seg_vstart[i] <= vstart;   bus_seg_target[i] <= vstop;
                     bus_seg_denom[i]  <= span;      bus_seg_step[i]   <= {(BUS_WIDTH+1){1'b0}};
@@ -870,13 +915,15 @@ module zlc_edge_streamer #(
         integer i;
         reg [BUS_INDEX_WIDTH+BUS_SEG_ADDR_WIDTH-1:0] addr;
         reg [BUS_SEG_ADDR_WIDTH:0] idx, count;
-        reg [TICK_WIDTH-1:0] s_eff, e_eff;          // the ONLY bus affine evals: 2 per bus
+        reg [TICK_WIDTH-1:0] s_eff, e_eff;
+        reg [TICK_WIDTH-1:0] frame_end_resolved;
         begin
             for (i = 0; i < BUS_COUNT; i = i + 1) begin
                 idx  = reinit ? {(BUS_SEG_ADDR_WIDTH+1){1'b0}} : bus_index_active[i];
                 addr = (i * MAX_BUS_SEGMENTS) + idx[BUS_SEG_ADDR_WIDTH-1:0];
-                s_eff = zlc_effective_tick(bus_start_tick_mem[addr], bus_start_tick_coeff_mem[addr], slot_vec);
-                e_eff = zlc_effective_tick(bus_stop_tick_mem[addr],  bus_stop_tick_coeff_mem[addr],  slot_vec);
+                s_eff = bus_next_start_tick[i];
+                e_eff = bus_next_stop_tick[i];
+                frame_end_resolved = reinit ? bus_cached_final_tick : final_tick;
                 if (reinit) begin
                     count = zlc_bus_count_at(i);
                     bus_count_active[i] <= count; bus_index_active[i] <= {(BUS_SEG_ADDR_WIDTH+1){1'b0}};
@@ -890,7 +937,7 @@ module zlc_edge_streamer #(
                     bus_ramp_target[i] <= {BUS_WIDTH{1'b0}}; bus_ramp_step[i] <= {(BUS_WIDTH+1){1'b0}}; bus_ramp_rem[i] <= {(BUS_WIDTH+1){1'b0}}; bus_ramp_steep[i] <= 1'b0;
                     bus_ramp_denom[i] <= {TICK_WIDTH{1'b0}}; bus_ramp_accum[i] <= {(TICK_WIDTH+BUS_WIDTH+1){1'b0}};
                     if (count != 0 && s_eff == {TICK_WIDTH{1'b0}}) begin
-                        zlc_bus_apply_segment(i, addr, slot_vec, s_eff, e_eff);
+                        zlc_bus_apply_segment(i, addr, slot_vec, s_eff, e_eff, frame_end_resolved);
                         bus_index_active[i] <= {{BUS_SEG_ADDR_WIDTH{1'b0}}, 1'b1};
                     end
                 end else if (bus_ramp_active[i]) begin
@@ -898,11 +945,9 @@ module zlc_edge_streamer #(
                         bus_value_active[i] <= bus_ramp_target[i];
                         bus_ramp_active[i] <= 1'b0;
                         bus_ramp_accum[i] <= {(TICK_WIDTH+BUS_WIDTH+1){1'b0}};
-                        if (bus_index_active[i] < bus_count_active[i]) begin
-                            if (s_eff <= time_count) begin
-                                zlc_bus_apply_segment(i, addr, slot_vec, s_eff, e_eff);
-                                bus_index_active[i] <= bus_index_active[i] + 1'b1;
-                            end
+                        if (bus_eval_index[i] != bus_index_active[i]) begin
+                            zlc_bus_apply_segment(i, addr, slot_vec, s_eff, e_eff, frame_end_resolved);
+                            bus_index_active[i] <= bus_eval_index[i];
                         end
                     end else if (time_count > bus_ramp_start_tick[i] && bus_ramp_denom[i] != 0) begin
                         if (bus_ramp_steep[i]) begin
@@ -942,19 +987,18 @@ module zlc_edge_streamer #(
                             end
                         end
                     end
-                end else if (bus_index_active[i] < bus_count_active[i]) begin
-                    if (time_count >= s_eff) begin
-                        zlc_bus_apply_segment(i, addr, slot_vec, s_eff, e_eff);
-                        bus_index_active[i] <= bus_index_active[i] + 1'b1;
-                    end
+                end else if (bus_eval_index[i] != bus_index_active[i]) begin
+                    zlc_bus_apply_segment(i, addr, slot_vec, s_eff, e_eff, frame_end_resolved);
+                    bus_index_active[i] <= bus_eval_index[i];
                 end
             end
         end
     endtask
 
-    // ---- seed the prefetch from edge-0 shadows for slot vector sv (start/scan/repeat) ----
-    // Output edge0 directly iff eff(edge0)==0, then seed FIFO_DEPTH (= RD_LAT+2)
-    // resident shadows from the first not-yet-output edge.
+    // ---- seed the prefetch from edge 0 (start/scan/repeat) ----
+    // The host validates effective edge 0 == 0 for every slot row, so resolving
+    // it again in fabric would be a redundant fifth affine evaluator.  Output
+    // edge0 directly, then seed the resident shadows and boundary pre-read.
     // ``cnt`` is the program's edge count, passed in EXPLICITLY (not read from the
     // active_count REG).  At FIRE, active_count <= prog_count is a non-blocking write
     // that has NOT committed when this task runs the same cycle, so reading the reg
@@ -966,11 +1010,10 @@ module zlc_edge_streamer #(
     // The caller threads prog_count at FIRE and active_count at the (mid-run, already
     // committed) frame/scan boundaries.
     task seed_from_edge0;
-        input [SLOT_BITS-1:0] sv;
         input [EDGE_ADDR_WIDTH:0] cnt;
         begin
             pend <= {PIPE{1'b0}};
-            if (cnt != 0 && zlc_effective_tick(sh_e0_t, sh_e0_c, sv) == {TICK_WIDTH{1'b0}}) begin
+            if (cnt != 0) begin
                 state_mask <= sh_e0_m; time_count <= {{(TICK_WIDTH-1){1'b0}},1'b1};
                 edge_index <= {{EDGE_ADDR_WIDTH{1'b0}},1'b1};
                 arm_t[0]<=sh_e1_t; arm_c[0]<=sh_e1_c; arm_m[0]<=sh_e1_m;
@@ -978,7 +1021,13 @@ module zlc_edge_streamer #(
                 arm_t[2]<=sh_e3_t; arm_c[2]<=sh_e3_c; arm_m[2]<=sh_e3_m;
                 arm_t[3]<=sh_e4_t; arm_c[3]<=sh_e4_c; arm_m[3]<=sh_e4_m;
                 arm_nv <= clamp3(cnt - 1'b1);
-                fetch_idx <= {{(EDGE_ADDR_WIDTH-2){1'b0}},3'd5}; edge_raddr <= {{(EDGE_ADDR_WIDTH-2){1'b0}},3'd5};
+                if (cnt > 5) begin
+                    edge_raddr <= {{(EDGE_ADDR_WIDTH-2){1'b0}},3'd5};
+                    fetch_idx <= {{(EDGE_ADDR_WIDTH-2){1'b0}},3'd6};
+                    pend <= {{(PIPE-1){1'b0}},1'b1};
+                end else begin
+                    fetch_idx <= cnt;
+                end
             end else begin
                 state_mask <= {CHANNEL_COUNT{1'b0}}; time_count <= {TICK_WIDTH{1'b0}};
                 edge_index <= {(EDGE_ADDR_WIDTH+1){1'b0}};
@@ -987,7 +1036,13 @@ module zlc_edge_streamer #(
                 arm_t[2]<=sh_e2_t; arm_c[2]<=sh_e2_c; arm_m[2]<=sh_e2_m;
                 arm_t[3]<=sh_e3_t; arm_c[3]<=sh_e3_c; arm_m[3]<=sh_e3_m;
                 arm_nv <= clamp3(cnt);
-                fetch_idx <= {{(EDGE_ADDR_WIDTH-2){1'b0}},3'd4}; edge_raddr <= {{(EDGE_ADDR_WIDTH-2){1'b0}},3'd4};
+                if (cnt > 4) begin
+                    edge_raddr <= {{(EDGE_ADDR_WIDTH-2){1'b0}},3'd4};
+                    fetch_idx <= {{(EDGE_ADDR_WIDTH-2){1'b0}},3'd5};
+                    pend <= {{(PIPE-1){1'b0}},1'b1};
+                end else begin
+                    fetch_idx <= cnt;
+                end
             end
         end
     endtask
@@ -1023,7 +1078,6 @@ module zlc_edge_streamer #(
     // EVENT-SCHEDULER boundary work: keep g_time advancing so queued toggles / value-changes pop.
     // Set on EVERY physical tick once the engine has fired (running or draining), so the
     // schedulers delay the WHOLE output stream. No frame seam / skip counter is needed.
-    reg bnd_delay_advance;     // advance the event schedulers' free-running g_time this tick
     reg draining = 1'b0;       // logical program ended; physical delayed tail still owns pins
     reg [1:0] drain_settle = 2'd0; // covers one-tick TTL/DAC registers before DONE
     assign physical_active = running || draining;
@@ -1056,10 +1110,47 @@ module zlc_edge_streamer #(
         // boundary work-request defaults (consumed once, after the state chain)
         bnd_bus_tick = 1'b0; bnd_bus_reinit = 1'b0; bnd_seed = 1'b0;
         bnd_recompute_final = 1'b0; bnd_slots = slot_active; bnd_count = active_count;
-        bnd_delay_advance = 1'b0;
+        // Predict only the ordinary active-segment advance here.  This logic
+        // intentionally has no boundary/reinit input, so scan/frame ownership
+        // cannot become an affine-evaluator timing path.
+        for (bus_eval_i = 0; bus_eval_i < BUS_COUNT; bus_eval_i = bus_eval_i + 1) begin
+            bus_eval_index[bus_eval_i] = bus_index_active[bus_eval_i];
+            if (bus_ramp_active[bus_eval_i]) begin
+                if (time_count >= bus_ramp_stop_tick[bus_eval_i]
+                        && bus_index_active[bus_eval_i] < bus_count_active[bus_eval_i]
+                        && bus_next_start_tick[bus_eval_i] <= time_count)
+                    bus_eval_index[bus_eval_i] = bus_index_active[bus_eval_i] + 1'b1;
+            end else if (bus_index_active[bus_eval_i] < bus_count_active[bus_eval_i]
+                    && time_count >= bus_next_start_tick[bus_eval_i]) begin
+                bus_eval_index[bus_eval_i] = bus_index_active[bus_eval_i] + 1'b1;
+            end
+        end
+        bus_eval_boundary = bus_prefetch_pending;
+        bus_eval_scan_boundary = bus_prefetch_pending && bus_prefetch_scan;
+        bus_eval_use_refill = bus_refill_pending && (start_event || running)
+                              && !bus_prefetch_pending;
+        bus_eval_slots = bus_prefetch_pending ? bus_prefetch_slots
+                         : (bus_eval_use_refill ? bus_refill_slots : slot_active);
+        if (bus_eval_use_refill) begin
+            for (bus_eval_i = 0; bus_eval_i < BUS_COUNT; bus_eval_i = bus_eval_i + 1)
+                bus_eval_index[bus_eval_i] = bus_refill_index[bus_eval_i];
+        end
+
+        // The single affine evaluator bank is driven only by a registered
+        // boundary request.  Frame/scan/loop control computes that request one
+        // cycle earlier, so its wide counters never sit in front of the DSP path.
+        if (reset_sync) begin
+            bus_eval_boundary = 1'b1;
+            bus_eval_scan_boundary = 1'b0;
+            bus_eval_slots = scan_first_values;
+        end
 
         if (reset_sync) begin
             running <= 1'b0; done <= 1'b0; underflow <= 1'b0; overflow <= 1'b0; draining <= 1'b0; drain_settle <= 2'd0;
+            scan_boundary_ready <= 1'b0;
+            scan_next_resident <= 1'b0;
+            bus_prefetch_pending <= 1'b0;
+            bus_refill_pending <= 1'b0;
             state_mask <= {CHANNEL_COUNT{1'b0}};
             arm_nv <= 3'd0; pend <= {PIPE{1'b0}};
             zlc_bus_clear_runtime();
@@ -1107,6 +1198,8 @@ module zlc_edge_streamer #(
                 end
             end
         end else if (start_event && !running) begin
+            bus_prefetch_pending <= 1'b0;
+            bus_refill_pending <= 1'b0;
             running <= (prog_count != 0) && scan_point0_ready_at_start;
             done <= (prog_count == 0);
             underflow <= !scan_point0_ready_at_start;
@@ -1136,11 +1229,31 @@ module zlc_edge_streamer #(
                 bnd_bus_tick = 1'b1; bnd_bus_reinit = 1'b1; bnd_seed = 1'b1;
             end
         end else if (running) begin
-            landed = pend[PIPE-1];   // data valid PIPE (=RD_LAT+1) cycles after issue
+            scan_next_resident <= scan_point_resident(scan_point_index + 1'b1);
+            bus_prefetch_pending <= 1'b0;
+            bus_refill_pending <= 1'b0;
+            if (loop_count_active > 32'd1 && loops_remaining > 32'd1
+                    && time_count == loop_prefetch_schedule_tick) begin
+                bus_prefetch_pending <= 1'b1;
+                bus_prefetch_slots <= slot_active;
+                bus_prefetch_scan <= 1'b0;
+            end else if (time_count == final_prefetch_schedule_tick) begin
+                if (scan_enable_active && (scan_point_index + 1'b1) < active_scan_count) begin
+                    if (scan_next_resident) begin
+                        bus_prefetch_pending <= 1'b1;
+                        bus_prefetch_slots <= scan_rdata;
+                        bus_prefetch_scan <= 1'b1;
+                    end
+                end else if (repeat_forever_active) begin
+                    bus_prefetch_pending <= 1'b1;
+                    bus_prefetch_slots <= scan_first_values;
+                    bus_prefetch_scan <= scan_enable_active;
+                end
+            end
+            landed = pend[PIPE-1];   // data valid PIPE (=RD_LAT+2) cycles after issue
             // every RUNNING output tick advances the event schedulers' g_time; a toggle pushed at
             // t pops d ticks later, so the scheduled output IS the delayed output.  The event
             // schedulers need no frame seam / skip counter; they delay the whole stream uniformly.
-            bnd_delay_advance = 1'b1;
             if (loop_count_active>32'd1 && loops_remaining>32'd1 && time_count>=loop_end_active) begin
                 // loop rewind: output loop_start mask, seed arm from loop_start+1
                 state_mask <= sh_ls0_m; time_count <= zlc_effective_tick(sh_ls0_t,sh_ls0_c,slot_active)+1'b1;
@@ -1150,38 +1263,41 @@ module zlc_edge_streamer #(
                 arm_t[2]<=sh_ls3_t; arm_c[2]<=sh_ls3_c; arm_m[2]<=sh_ls3_m;
                 arm_t[3]<=sh_ls4_t; arm_c[3]<=sh_ls4_c; arm_m[3]<=sh_ls4_m;
                 arm_nv <= clamp3(active_count - ({1'b0,loop_start_addr}+1'b1));
-                fetch_idx <= {1'b0,loop_start_addr}+3'd5; edge_raddr <= loop_start_addr+3'd5;
-                pend <= {PIPE{1'b0}};
+                if (({1'b0,loop_start_addr}+3'd5) < active_count) begin
+                    edge_raddr <= loop_start_addr+3'd5;
+                    fetch_idx <= {1'b0,loop_start_addr}+3'd6;
+                    pend <= {{(PIPE-1){1'b0}},1'b1};
+                end else begin
+                    fetch_idx <= active_count;
+                    pend <= {PIPE{1'b0}};
+                end
                 bnd_bus_tick = 1'b1; bnd_bus_reinit = 1'b1; bnd_slots = slot_active;  // re(start) bus, keep slots
             end else if (time_count >= final_tick) begin
                 if (scan_enable_active && (scan_point_index+1'b1) < active_scan_count) begin
                     if (!scan_point_resident(scan_point_index+1'b1)) begin
                         underflow <= 1'b1;          // STALL: next chunk not (yet) resident
+                        scan_boundary_ready <= 1'b0;
+                    end else if (!scan_boundary_ready) begin
+                        // A bank may become resident after the early scheduling
+                        // opportunity.  Register a late fill request; the next
+                        // cycle evaluates it and the following cycle advances.
+                        underflow <= 1'b1;
+                        if (!bus_prefetch_pending) begin
+                            bus_prefetch_pending <= 1'b1;
+                            bus_prefetch_slots <= scan_rdata;
+                            bus_prefetch_scan <= 1'b1;
+                        end
                     end else begin
                         scan_point_index <= scan_point_index+1'b1;
                         scan_cursor <= scan_point_index+1'b1;
                         scan_raddr <= scan_addr_of(scan_point_index+2'd2);   // pre-read following point
                         slot_active <= scan_rdata;
                         loops_remaining <= loop_count_active;
+                        scan_boundary_ready <= 1'b0;
                         bnd_slots = scan_rdata; bnd_recompute_final = 1'b1;
                         bnd_bus_tick = 1'b1; bnd_bus_reinit = 1'b1; bnd_seed = 1'b1;
                     end
                 end else if (repeat_forever_active) begin
-                    if (repeat_from_loop_start && !scan_enable_active) begin
-                        // ADDITIVE-DELAY repeat: rewind to the STEADY frame (loop_start
-                        // shadows), NOT edge 0, so the real-startup preamble plays once.
-                        // Same gapless reseed as the finite-bracket rewind, but
-                        // loops_remaining is untouched (this repeat is infinite).
-                        state_mask <= sh_ls0_m; time_count <= zlc_effective_tick(sh_ls0_t,sh_ls0_c,slot_active)+1'b1;
-                        edge_index <= {1'b0,loop_start_addr}+1'b1;
-                        arm_t[0]<=sh_ls1_t; arm_c[0]<=sh_ls1_c; arm_m[0]<=sh_ls1_m;
-                        arm_t[1]<=sh_ls2_t; arm_c[1]<=sh_ls2_c; arm_m[1]<=sh_ls2_m;
-                        arm_t[2]<=sh_ls3_t; arm_c[2]<=sh_ls3_c; arm_m[2]<=sh_ls3_m;
-                        arm_t[3]<=sh_ls4_t; arm_c[3]<=sh_ls4_c; arm_m[3]<=sh_ls4_m;
-                        arm_nv <= clamp3(active_count - ({1'b0,loop_start_addr}+1'b1));
-                        fetch_idx <= {1'b0,loop_start_addr}+3'd5; edge_raddr <= loop_start_addr+3'd5;
-                        pend <= {PIPE{1'b0}};
-                        bnd_bus_tick = 1'b1; bnd_bus_reinit = 1'b1; bnd_slots = slot_active;
                     // CONTINUOUS CYCLIC PING-PONG re-sweep: the wrap is just another chunk
                     // boundary.  scan_bank_base toggles by (n_chunks & 1) so chunk 0 lands in the
                     // bank the host fed it ONE-AHEAD (bank scan_wrap_base_next, NOT necessarily
@@ -1189,15 +1305,24 @@ module zlc_edge_streamer #(
                     // in bank 0 (identical to before).  Proceed the instant point 0 is resident
                     // in that bank -- seamless; STALL (safe hold) only if the host is genuinely
                     // behind.  scan_cursor is published = N so a late host still gets the signal.
-                    end else if (scan_enable_active && !scan_point0_ready_next) begin
+                    if (scan_enable_active && !scan_point0_ready_next) begin
                         underflow <= 1'b1;
+                        scan_boundary_ready <= 1'b0;
                         scan_cursor <= active_scan_count;
+                    end else if (scan_enable_active && !scan_boundary_ready) begin
+                        underflow <= 1'b1;
+                        if (!bus_prefetch_pending) begin
+                            bus_prefetch_pending <= 1'b1;
+                            bus_prefetch_slots <= scan_first_values;
+                            bus_prefetch_scan <= 1'b1;
+                        end
                     end else begin
                         scan_bank_base <= scan_wrap_base_next;     // cyclic bank flip (0 if resident)
                         slot_active <= scan_first_values; scan_point_index <= {SCAN_COUNT_WIDTH{1'b0}}; scan_cursor <= {SCAN_COUNT_WIDTH{1'b0}};
                         // pre-read point 1 (chunk 0) from the NEW base's bank
                         scan_raddr <= {scan_wrap_base_next, {(SCAN_ADDR_WIDTH-2){1'b0}}, 1'b1};
                         loops_remaining <= loop_count_active;
+                        if (scan_enable_active) scan_boundary_ready <= 1'b0;
                         bnd_slots = scan_first_values; bnd_recompute_final = 1'b1;
                         bnd_bus_tick = 1'b1; bnd_bus_reinit = 1'b1; bnd_seed = 1'b1;
                     end
@@ -1237,8 +1362,8 @@ module zlc_edge_streamer #(
                 // Every read the pipeline OWNS (resident shadows + ALL in-flight reads that
                 // will still append) must have a landing slot: owned_next = nv_after_fire +
                 // popcount(pend) + issue <= FIFO_DEPTH.  popcount(pend) spans the full PIPE
-                // stages (the previous code summed only landed+pend[0], which silently
-                // assumed PIPE==2 and under-counted in-flight reads once PIPE grew to 3).
+                // stages (the previous code summed only landed+pend[0] and
+                // under-counted once the real-IP pipeline grew beyond two stages).
                 inflight = {3{1'b0}};
                 for (pk = 0; pk < PIPE; pk = pk + 1) inflight = inflight + {2'b0, pend[pk]};
                 issue = ((nv_after_fire + inflight) < FIFO_DEPTH[2:0])
@@ -1250,7 +1375,6 @@ module zlc_edge_streamer #(
             // Public DONE means physical completion: every delayed TTL toggle,
             // delayed DAC segment and one-tick register has reached its safe
             // value.  Until then the physical scheduler keeps advancing.
-            bnd_delay_advance = 1'b1;
             if (drain_settle != 0) begin
                 drain_settle <= drain_settle - 1'b1;
             end else if (!delay_runtime_busy) begin
@@ -1264,14 +1388,55 @@ module zlc_edge_streamer #(
         // vector as the old in-line calls -> behavior is byte-identical, but the
         // affine evaluators are no longer replicated at every boundary site.
         if (bnd_recompute_final) begin
-            final_tick <= zlc_effective_tick(sh_final_t, sh_final_c, bnd_slots);
-            loop_end_active <= zlc_effective_tick(loop_end_tick, loop_end_coeffs, bnd_slots);
+            final_tick <= bus_cached_final_tick;
+            loop_end_active <= bus_cached_loop_end;
+            final_prefetch_schedule_tick <= bus_cached_final_tick - 2'd2;
+            loop_prefetch_schedule_tick <= bus_cached_loop_end - 2'd2;
         end
-        if (bnd_bus_tick) zlc_bus_tick(bnd_bus_reinit, bnd_slots);
-        if (bnd_seed) seed_from_edge0(bnd_slots, bnd_count);
+        if (bnd_bus_tick) begin
+            zlc_bus_tick(bnd_bus_reinit, bnd_slots);
+        end
+        // Resolve one candidate segment per bus into the single cache.  A
+        // boundary request sets its ownership token; ordinary evaluation keeps
+        // refreshing the active candidate without a second data bank or CE mux.
+        if (reset_sync || running || start_event) begin
+            for (bus_eval_i = 0; bus_eval_i < BUS_COUNT; bus_eval_i = bus_eval_i + 1) begin
+                bus_eval_addr = (bus_eval_i * MAX_BUS_SEGMENTS)
+                                + (bus_eval_boundary
+                                   ? {BUS_SEG_ADDR_WIDTH{1'b0}}
+                                   : bus_eval_index[bus_eval_i][BUS_SEG_ADDR_WIDTH-1:0]);
+                bus_eval_start_resolved = zlc_effective_tick(
+                    bus_start_tick_mem[bus_eval_addr],
+                    bus_start_tick_coeff_mem[bus_eval_addr],
+                    bus_eval_slots
+                );
+                bus_eval_stop_resolved = zlc_effective_tick(
+                    bus_stop_tick_mem[bus_eval_addr],
+                    bus_stop_tick_coeff_mem[bus_eval_addr],
+                    bus_eval_slots
+                );
+                bus_next_start_tick[bus_eval_i] <= bus_eval_start_resolved;
+                bus_next_stop_tick[bus_eval_i] <= bus_eval_stop_resolved;
+                if (bus_eval_boundary) begin
+                    bus_refill_index[bus_eval_i] <=
+                        (zlc_bus_count_at(bus_eval_i) != 0
+                         && bus_eval_start_resolved == {TICK_WIDTH{1'b0}})
+                        ? {{BUS_SEG_ADDR_WIDTH{1'b0}}, 1'b1}
+                        : {(BUS_SEG_ADDR_WIDTH+1){1'b0}};
+                end
+            end
+        end
+        if (bus_eval_boundary) begin
+            if (bus_eval_scan_boundary) scan_boundary_ready <= 1'b1;
+            bus_cached_final_tick <= zlc_effective_tick(sh_final_t, sh_final_c, bus_eval_slots);
+            bus_cached_loop_end <= zlc_effective_tick(loop_end_tick, loop_end_coeffs, bus_eval_slots);
+            bus_refill_slots <= bus_eval_slots;
+            bus_refill_pending <= 1'b1;
+        end
+        if (bnd_seed) seed_from_edge0(bnd_count);
         if (!reset_sync && (|evt_fifo_overflow || |bus_delay_overflow)) overflow <= 1'b1;
-        // (The DAC delay is INSTRUCTION-LEVEL: zlc_bus_apply_segment captures each resolved segment
-        // and the g_busseg generate re-runs it d ticks later.  bnd_delay_advance is unused.)
+        // The DAC delay is instruction-level: zlc_bus_apply_segment captures each
+        // resolved segment and the g_busseg generate re-runs it d ticks later.
     end
 
     // ----- TTL EVENT SCHEDULER runtime -------------------------------------------------------

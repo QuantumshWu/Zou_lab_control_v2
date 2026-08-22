@@ -31,8 +31,8 @@ module tb_delay_compact;
     tp[0]<=etick[edge_raddr[2:0]]; tp[1]<=tp[0]; tp[2]<=tp[1];
     mp[0]<=emask[edge_raddr[2:0]]; mp[1]<=mp[0]; mp[2]<=mp[1];
   end
-  wire [TW-1:0] edge_tick_rdata = tp[1];
-  wire [CH-1:0] edge_mask_rdata = mp[1];
+  wire [TW-1:0] edge_tick_rdata = tp[2];
+  wire [CH-1:0] edge_mask_rdata = mp[2];
 
   // per-channel delays: only ch1=3, ch5=7, ch6=2 are nonzero (must match the map)
   localparam integer TDW = 32;
@@ -56,7 +56,7 @@ module tb_delay_compact;
   ) dut (
     .clk(clk),.reset(reset),.start(start),.prog_count(13'd8),.repeat_forever(1'b1),
     .loop_start_addr({EAW{1'b0}}),.loop_end_tick(32'd2400),.loop_end_coeffs({NS*CW{1'b0}}),
-    .loop_count(32'd1),.repeat_from_loop_start(1'b0),.scan_enable(1'b0),.scan_count(32'd0),
+    .loop_count(32'd1),.scan_enable(1'b0),.scan_count(32'd0),
     .edge_raddr(edge_raddr),.edge_tick_rdata(edge_tick_rdata),
     .edge_coeff_rdata({NS*CW{1'b0}}),.edge_mask_rdata(edge_mask_rdata),
     .scan_raddr(scan_raddr),.scan_rdata({NS*TW{1'b0}}),
@@ -72,7 +72,7 @@ module tb_delay_compact;
 
   initial begin
     reset=1; start=0;
-    repeat (50) @(posedge clk);
+    repeat (140) @(posedge clk);         // complete at least two 12-step ARM passes
     reset=0; @(posedge clk); start=1; @(posedge clk); start=0;
   end
 

@@ -10,7 +10,7 @@
 //
 // It presents the top a write interface (u_word_addr/u_wdata/u_we) that the top
 // MUXes against the axi_bram_ctrl bram_* side before the region decode, and a
-// CTRL-region read tap (u_rd_word/u_rd_req -> u_rd_data) for STATUS/CURSOR/
+// CTRL-region read tap (u_rd_word -> u_rd_data one clock later) for STATUS/CURSOR/
 // LAYOUT_ID.  Only TWO wire opcodes: WRITE (a run of words at a base word addr)
 // and READ (a run back).  COMMAND / scan-step / PING are COMPOSED by the host
 // from WRITE/READ, so this FSM stays small and image.py is the single source.
@@ -52,7 +52,6 @@ module zlc_uart_bridge #(
     output reg                        u_error,    // protocol fault pulse; top latches STATUS.ERROR
     // CTRL-region read tap (STATUS/CURSOR/LAYOUT_ID)
     output reg  [5:0]  u_rd_word,
-    output reg         u_rd_req,                  // 1-clk pulse; top returns u_rd_data next cycle
     input  wire [31:0] u_rd_data
 );
     localparam integer FW_AW = $clog2(FRAME_WORDS);
@@ -113,7 +112,8 @@ module zlc_uart_bridge #(
     // ---------------------------------------------------------------- decoder FSM
     localparam D_HUNT=4'd0, D_SYNC1=4'd1, D_OP=4'd2, D_SEQ=4'd3, D_ADDR=4'd4, D_CNT=4'd5,
                D_DATA=4'd6, D_CRC=4'd7, D_COMMIT=4'd8, D_READ=4'd9, D_RLAT=4'd10,
-               D_WEND=4'd11, D_BAD_SEQ=4'd12;
+               D_WEND=4'd11, D_BAD_SEQ=4'd12, D_CWAIT=4'd13;
+    localparam S_IDLE=2'd0, S_LOAD=2'd1, S_WAIT=2'd2;
     reg [3:0]  dst;
     reg [7:0]  f_op, f_seq;
     reg [31:0] f_addr, word_acc;
@@ -122,15 +122,30 @@ module zlc_uart_bridge #(
     reg [15:0] crc_run, crc_rx;
     reg [31:0] frame_idle;
     reg seq_valid;
-    (* ram_style="distributed" *) reg [31:0] wbuf [0:FRAME_WORDS-1];   // WRITE payload + READ reply staging
+    // One shared synchronous read port serves commit and reply serialization,
+    // which never overlap.  The UART byte cadence leaves many clocks between
+    // payload words, so a RAMB18 replaces the former 256x32 LUTRAM plus its
+    // wide asynchronous address mux without changing wire timing.
+    (* ram_style="block" *) reg [31:0] wbuf [0:FRAME_WORDS-1];
+    reg [FW_AW-1:0] commit_raddr, serializer_raddr;
+    reg [FW_AW-1:0] wbuf_waddr;
+    reg [31:0] wbuf_wdata;
+    reg wbuf_we;
+    reg [31:0] wbuf_rdata;
+    reg [1:0] sst;
+    wire [FW_AW-1:0] wbuf_raddr = (sst == S_IDLE) ? commit_raddr : serializer_raddr;
+    always @(posedge clk) begin
+        if (wbuf_we) wbuf[wbuf_waddr] <= wbuf_wdata;
+        wbuf_rdata <= wbuf[wbuf_raddr];
+    end
 
     // handshake to the reply serializer (single-writer here, single-reader there)
     reg        rpl_go; reg [7:0] rpl_seq, rpl_status; reg [15:0] rpl_count;
 
     always @(posedge clk) begin
-        if (rst) begin dst<=D_HUNT; u_we<=1'b0; u_active<=1'b0; u_error<=1'b0; u_rd_req<=1'b0; rpl_go<=1'b0; frame_idle<=32'd0; seq_valid<=1'b0; end
+        if (rst) begin dst<=D_HUNT; u_we<=1'b0; u_active<=1'b0; u_error<=1'b0; rpl_go<=1'b0; frame_idle<=32'd0; seq_valid<=1'b0; commit_raddr<={FW_AW{1'b0}}; wbuf_we<=1'b0; end
         else begin
-            u_we<=1'b0; u_error<=1'b0; u_rd_req<=1'b0; rpl_go<=1'b0;
+            u_we<=1'b0; u_error<=1'b0; rpl_go<=1'b0; wbuf_we<=1'b0;
             if (!u_active || rx_valid) frame_idle <= 32'd0;
             else frame_idle <= frame_idle + 1'b1;
             if (u_active && frame_idle >= FRAME_TIMEOUT_CYCLES-1) begin
@@ -181,29 +196,36 @@ module zlc_uart_bridge #(
                     D_DATA:  if (rx_valid) begin
                                  crc_run<=crc_byte(crc_run,rx_byte); word_acc<={rx_byte, word_acc[31:8]};
                                  if (byte_in_word==2'd3) begin
-                                     byte_in_word<=0; wbuf[w_idx[FW_AW-1:0]]<={rx_byte, word_acc[31:8]};
+                                     byte_in_word<=0; wbuf_we<=1'b1; wbuf_waddr<=w_idx[FW_AW-1:0];
+                                     wbuf_wdata<={rx_byte, word_acc[31:8]};
                                      if (w_idx==f_count-1) dst<=D_CRC; else w_idx<=w_idx+1'b1;
                                  end else byte_in_word<=byte_in_word+1'b1; end
                     D_CRC:   if (rx_valid) begin
                                  if (crc_bytes==2'd0) begin crc_rx[7:0]<=rx_byte; crc_bytes<=1; end
                                  else begin
                                      if ({rx_byte, crc_rx[7:0]}==crc_run) begin
-                                         if (f_op==OP_WRITE) begin w_idx<=0; dst<=D_COMMIT; end
+                                         if (f_op==OP_WRITE) begin w_idx<=0; commit_raddr<={FW_AW{1'b0}}; dst<=D_CWAIT; end
                                          else begin rd_i<=0; dst<=D_READ; end
                                      end else begin
                                          rpl_seq<=f_seq; rpl_status<=ST_CRC_FAIL; rpl_count<=16'd0; rpl_go<=1'b1;
                                          dst<=D_HUNT; u_active<=1'b0; u_error<=1'b1;
                                      end   // bad CRC -> commit nothing
                                  end end
+                    // Prime synchronous word 0 and point the RAM at word 1 so
+                    // every following COMMIT cycle sees the next payload word.
+                    D_CWAIT: begin commit_raddr<={{(FW_AW-1){1'b0}},1'b1}; dst<=D_COMMIT; end
                     // --- COMMIT: one u_we per buffered word (CRC already verified), then ACK ---
                     D_COMMIT: begin
                                  u_word_addr <= f_addr[ADDR_WORD_WIDTH-1:0] + w_idx;
-                                 u_wdata     <= wbuf[w_idx[FW_AW-1:0]];
+                                 u_wdata     <= wbuf_rdata;
                                  u_we        <= 1'b1;
                                  if (w_idx==f_count-1) begin
                                      rpl_seq<=f_seq; rpl_status<=ST_OK; rpl_count<=16'd0; rpl_go<=1'b1;   // ACK (count 0) -> host retries on timeout
                                      dst<=D_WEND;                                      // hold u_active 1 more cycle (see D_WEND)
-                                 end else w_idx<=w_idx+1'b1;
+                                 end else begin
+                                     w_idx<=w_idx+1'b1;
+                                     commit_raddr<=w_idx[FW_AW-1:0]+2'd2;
+                                 end
                               end
                     // The LAST word's u_we (asserted in D_COMMIT via non-blocking) actually drives the
                     // write THIS cycle -- so u_active MUST still be high now, or the top's uart_sel=u_active
@@ -211,9 +233,9 @@ module zlc_uart_bridge #(
                     // would lose its last word; a 1-word write loses everything).  Retire only after it lands.
                     D_WEND:  begin dst<=D_HUNT; u_active<=1'b0; end
                     // --- READ: request word rd_i, latch it next cycle into wbuf, then reply ---
-                    D_READ:  begin u_rd_word <= f_addr[5:0] + rd_i[5:0]; u_rd_req<=1'b1; dst<=D_RLAT; end
+                    D_READ:  begin u_rd_word <= f_addr[5:0] + rd_i[5:0]; dst<=D_RLAT; end
                     D_RLAT:  begin
-                                 wbuf[rd_i[FW_AW-1:0]] <= u_rd_data;    // 1-cycle read latency
+                                 wbuf_we<=1'b1; wbuf_waddr<=rd_i[FW_AW-1:0]; wbuf_wdata<=u_rd_data;
                                  if (rd_i==f_count-1) begin
                                      rpl_seq<=f_seq; rpl_status<=ST_OK; rpl_count<=f_count; rpl_go<=1'b1; dst<=D_HUNT; u_active<=1'b0;
                                  end else begin rd_i<=rd_i+1'b1; dst<=D_READ; end
@@ -227,8 +249,6 @@ module zlc_uart_bridge #(
     // ---------------------------------------------------------------- reply serializer (SINGLE driver of TX)
     // Emits SYNC0 SYNC1 RESP SEQ STATUS COUNT[2] PAYLOAD[4*COUNT] CRC16[2] one byte per idle TX window.
     // reply data words are in wbuf[0..rpl_count-1] (staged by D_RLAT).
-    localparam S_IDLE=2'd0, S_LOAD=2'd1, S_WAIT=2'd2;
-    reg [1:0]  sst;
     reg [15:0] t_i, t_total, t_pcut;      // t_pcut = flat index of the first CRC byte (7 + 4*count)
     reg [15:0] t_crc_run;                 // reply CRC accumulated as bytes are emitted (no runtime loop)
     reg [7:0]  hdr [0:6];
@@ -245,7 +265,7 @@ module zlc_uart_bridge #(
             // is self-determined to the 2-bit width of pj[1:0], so the <<3 truncates to 0 and every
             // payload byte would come out as byte 0 (0x5A4C4C02 -> 0x02020202 on the wire).  Concatenate
             // 3 zero bits instead ( == pj[1:0]*8, a proper 5-bit 0/8/16/24 offset).
-            cur_byte = wbuf[pj[FW_AW+1:2]][ {pj[1:0], 3'b000} +: 8 ];
+            cur_byte = wbuf_rdata[{pj[1:0], 3'b000} +: 8];
         end else cur_byte = (t_i == t_pcut) ? t_crc_run[7:0] : t_crc_run[15:8];
     end
 
@@ -254,7 +274,7 @@ module zlc_uart_bridge #(
     // `send` is still propagating and busy has not yet risen (which a bare ~busy check would misread
     // as "byte done").  `tx_send` is driven ONLY in this block (single driver).
     always @(posedge clk) begin
-        if (rst) begin sst<=S_IDLE; tx_send<=1'b0; end
+        if (rst) begin sst<=S_IDLE; tx_send<=1'b0; serializer_raddr<={FW_AW{1'b0}}; end
         else case (sst)
             S_IDLE: begin
                 tx_send<=1'b0;
@@ -264,7 +284,7 @@ module zlc_uart_bridge #(
                     t_pcut  <= 16'd7 + (rpl_count<<2);
                     t_total <= 16'd7 + (rpl_count<<2) + 16'd2;
                     t_crc_run <= 16'hFFFF;                    // seeded; folded per emitted byte in S_LOAD
-                    t_i<=0; sst<=S_LOAD;
+                    t_i<=0; serializer_raddr<={FW_AW{1'b0}}; sst<=S_LOAD;
                 end
             end
             S_LOAD: begin
@@ -273,6 +293,8 @@ module zlc_uart_bridge #(
                     tx_send<=1'b0;
                     if (t_i >= 16'd2 && t_i < t_pcut)         // fold RESP..last-payload into the reply CRC
                         t_crc_run <= crc_byte(t_crc_run, cur_byte);
+                    if (t_i >= 16'd7 && t_i < t_pcut && pj[1:0] == 2'd3)
+                        serializer_raddr <= pj[FW_AW+1:2] + 1'b1;
                     sst<=S_WAIT;
                 end else tx_send<=1'b1;                        // request; hold until accepted
             end

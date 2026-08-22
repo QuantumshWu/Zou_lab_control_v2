@@ -45,6 +45,7 @@ SAFE_RETRY_AFTER = 0.05
 STROBE_VERIFY_AFTER = 0.3
 SAFE_POLL_INTERVAL = 0.001
 MAXIMUM_CYCLE_COUNT = (1 << 32) - 1
+_MIN_SEAM_SPAN_TICKS = 3
 
 
 def _execution_cycles(value: int | None) -> int | None:
@@ -413,6 +414,29 @@ class PulseStreamer:
             self._stop.clear()
             assert self._program is not None
             self._validate_delay_capacity(self._program, self._scan_rows, cycles)
+            # The single registered affine cache is prepared two clocks before
+            # every frame seam.  A one-shot may be only one tick long, but every
+            # point which is followed by another point must reach that schedule
+            # tick after starting at tick 1.  Refuse an impossible seamless run
+            # before touching the mailbox instead of letting RTL underflow or
+            # consume the previous point's cache.
+            if cycles is None:
+                seam_rows = self._scan_rows
+            elif cycles > 1:
+                seam_count = cycles - 1
+                seam_rows = (
+                    self._scan_rows
+                    if seam_count >= len(self._scan_rows)
+                    else self._scan_rows[:seam_count]
+                )
+            else:
+                seam_rows = ()
+            for row in seam_rows:
+                self._validate_slot_row(
+                    self._program,
+                    row,
+                    require_outer_seam=True,
+                )
             self._cycles = cycles
             forever = cycles is None
             self._scan_count = len(self._scan_rows) if forever else cycles
@@ -656,7 +680,7 @@ class PulseStreamer:
         expected_geometry = build_fingerprint(self.geom)
         if program.geometry_fingerprint != expected_geometry:
             raise ValueError("compiled geometry does not match the connected sequencer")
-        for row in rows:
+        for row in rows or ((),):
             self._validate_slot_row(program, row)
         self._validate_delay_capacity(program, rows or ((),), 1)
 
@@ -664,6 +688,8 @@ class PulseStreamer:
         self,
         program: CompiledProgram,
         row: Sequence[int],
+        *,
+        require_outer_seam: bool = False,
     ) -> None:
         # A value the multiplier cannot hold is refused, not wrapped.  The host
         # and the board now agree about what a wrapped value plays, which means
@@ -699,6 +725,22 @@ class PulseStreamer:
         )
         if loop_end <= loop_start or loop_end > effective[-1]:
             raise ValueError("slot row makes compiled loop metadata invalid")
+        if program.loop_count == 2 and loop_end < _MIN_SEAM_SPAN_TICKS:
+            raise ValueError(
+                "inner RepeatRegion boundary must occur at or after "
+                f"hardware tick {_MIN_SEAM_SPAN_TICKS}"
+            )
+        if program.loop_count > 2 and loop_end - loop_start < _MIN_SEAM_SPAN_TICKS:
+            raise ValueError(
+                "inner RepeatRegion span must be at least "
+                f"{_MIN_SEAM_SPAN_TICKS} hardware ticks"
+            )
+        outer_origin = loop_start if program.loop_count > 1 else 0
+        if require_outer_seam and effective[-1] - outer_origin < _MIN_SEAM_SPAN_TICKS:
+            raise ValueError(
+                "each cycle before another cycle must leave at least "
+                f"{_MIN_SEAM_SPAN_TICKS} hardware ticks after its final restart"
+            )
 
     def _validate_delay_capacity(
         self,

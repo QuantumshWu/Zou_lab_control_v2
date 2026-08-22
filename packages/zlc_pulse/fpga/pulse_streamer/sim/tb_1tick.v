@@ -4,7 +4,7 @@
 // design's headline 1-tick capability AFTER the pend-depth fix.
 module tb_1tick;
   localparam integer CH=62, EAW=12, TW=32, NS=4, CW=16, DTW=32, BUSC=4, BW=10, NE=20;
-  reg clk=0, reset=0, start=0; always #10 clk=~clk;
+  reg clk=0, reset=0, start=0; reg [12:0] prog_count=NE; always #10 clk=~clk;
   reg [12:0] wa=0; reg [31:0] wd=0; reg [3:0] we=0; reg wt=0, wm=0;
   wire [EAW-1:0] edge_raddr; wire [TW-1:0] edge_tick_rdata; wire [63:0] mrd;
   wire [CH-1:0] edge_mask_rdata = mrd[CH-1:0];
@@ -16,9 +16,9 @@ module tb_1tick;
     .clkb(clk),.enb(1'b1),.web(4'b0),.addrb(edge_raddr),.dinb(32'b0),.doutb(mrd));
   reg [31:0] ticks[0:NE-1]; reg [31:0] masks[0:NE-1];
   zlc_edge_streamer #(.CHANNEL_COUNT(CH)) dut (
-    .clk(clk),.reset(reset),.start(start),.prog_count(NE[12:0]),.repeat_forever(1'b0),
+    .clk(clk),.reset(reset),.start(start),.prog_count(prog_count),.repeat_forever(1'b0),
     .loop_start_addr({EAW{1'b0}}),.loop_end_tick(32'd0),.loop_end_coeffs({NS*CW{1'b0}}),
-    .loop_count(32'd1),.repeat_from_loop_start(1'b0),.scan_enable(1'b0),.scan_count(32'd0),
+    .loop_count(32'd1),.scan_enable(1'b0),.scan_count(32'd0),
     .edge_raddr(edge_raddr),.edge_tick_rdata(edge_tick_rdata),
     .edge_coeff_rdata({NS*CW{1'b0}}),.edge_mask_rdata(edge_mask_rdata),
     .scan_raddr(scan_raddr),.scan_rdata({NS*TW{1'b0}}),.bank_ready(2'b11),
@@ -35,27 +35,61 @@ module tb_1tick;
     @(posedge clk); wt<=t; wm<=~t; we<=4'hF; wa<=a; wd<=d;
     @(posedge clk); @(posedge clk); wt<=0; wm<=0; we<=0; @(posedge clk); end
   endtask
+  task pe; input [12:0] a; input [31:0] t; input [31:0] m; begin
+    pa(1'b1, a, t); pa(1'b0, 2*a, m); pa(1'b0, 2*a+1'b1, 32'd0);
+  end endtask
+  task short_case; input [12:0] count; begin
+    reset=1; start=0; prog_count=count;
+    pe(0, 0, 32'h1); pe(1, 1, (count==2)?32'h0:32'h2);
+    if (count==3) pe(2, 2, 32'h0);
+    repeat (200) @(posedge clk);
+    @(negedge clk); reset=0; start=1;
+    // reset/start each cross the engine's two-flop synchronizer.
+    repeat (3) @(posedge clk); #1;
+    if (!running || out !== 62'h1) $fatal(1, "short frame edge0 mismatch: count=%0d out=%h", count, out);
+    @(negedge clk); start=0;
+    @(posedge clk); #1;
+    if (count==2) begin
+      if (out !== 62'h0) $fatal(1, "1-tick terminal mask mismatch: %h", out);
+    end else begin
+      if (out !== 62'h2) $fatal(1, "2-tick middle mask mismatch: %h", out);
+      @(posedge clk); #1;
+      if (out !== 62'h0) $fatal(1, "2-tick terminal mask mismatch: %h", out);
+    end
+    repeat (8) @(posedge clk); #1;
+    if (!done || running || underflow || out !== {CH{1'b0}})
+      $fatal(1, "short frame did not finish SAFE: count=%0d run=%b done=%b uf=%b out=%h",
+             count, running, done, underflow, out);
+    $display("SHORT-ONE-SHOT-OK ticks=%0d", count-1'b1);
+    @(negedge clk); reset=1;
+    repeat (4) @(posedge clk);
+  end endtask
+  reg dense_phase=0;
+  // Record the tick at which each dense-stress edge's mask appears.
+  integer tcount=0; reg [CH-1:0] op=62'hx; integer seen=0; integer bad=0; integer exp_t;
+  integer dbg=0;
   initial begin
+    short_case(13'd2);
+    short_case(13'd3);
     // e0..e9 at ticks 0..9 (1-tick back-to-back), then a gap, then e10..e19 at 100..109
     for (i=0;i<10;i=i+1)  begin ticks[i]=i;       masks[i]=(i[0])?62'h001:62'h002; end
     for (i=10;i<20;i=i+1) begin ticks[i]=90+i;    masks[i]=(i[0])?62'h001:62'h002; end
-    reset=1; start=0;
+    reset=1; start=0; prog_count=NE;
     for (i=0;i<NE;i=i+1) pa(1'b1, i, ticks[i]);
     for (i=0;i<NE;i=i+1) begin pa(1'b0, 2*i, masks[i]); pa(1'b0, 2*i+1, 32'd0); end
-    repeat (200) @(posedge clk); reset=0; @(posedge clk); start=1; @(posedge clk); start=0;
+    repeat (200) @(posedge clk);
+    tcount=0; seen=0; bad=0; dbg=0; op=62'hx; dense_phase=1;
+    @(negedge clk); reset=0; start=1; @(negedge clk); start=0;
   end
-  // record the tick at which each edge's mask appears; compare to expected (ticks[i]+1)
-  integer tcount=0; reg [CH-1:0] op=62'hx; integer seen=0; integer bad=0; integer exp_t;
-  integer dbg=0;
-  always @(posedge clk) if (running && dbg<16) begin
+  always @(posedge clk) if (dense_phase && running && dbg<16) begin
     $display("  T%0d tc=%0d nv=%0d a0t=%0d pend=%b land=%b fire=%b infl=%0d fi=%0d raddr=%0d trd=%0d",
       dbg, dut.time_count, dut.arm_nv, dut.arm_t[0], dut.pend, dut.landed, dut.do_fire,
       dut.inflight, dut.fetch_idx, dut.edge_raddr, dut.edge_tick_rdata);
     dbg=dbg+1;
   end
   always @(posedge clk) begin
-    if (running||done) tcount=tcount+1;
-    if ((running||done) && out!==op) begin
+    if (dense_phase && (running||done)) tcount=tcount+1;
+    if (dense_phase && (running||done) && out!==op) begin
       // each visible change = the next edge firing; expected fire tick = ticks[seen]+1
       exp_t = ticks[seen]+1;
       $display("  edge#%0d out=0x%h at t=%0d (expect %0d) %s", seen, out[7:0], tcount, exp_t, (tcount==exp_t)?"OK":"**LATE**");
@@ -64,9 +98,12 @@ module tb_1tick;
     end
   end
   initial begin
-    wait(reset==1); wait(reset==0);
+    wait(dense_phase==1); wait(reset==0);
     repeat (400) @(posedge clk);
     $display("==== 1-tick: %0d edges fired, %0d off-schedule ====", seen, bad);
+    if (seen != NE) $fatal(1, "1-tick bench fired %0d edges, expected %0d", seen, NE);
+    if (bad != 0) $fatal(1, "1-tick bench had %0d off-schedule edges", bad);
+    $display("ONE-TICK-OK");
     $finish;
   end
 endmodule

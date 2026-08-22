@@ -4,7 +4,6 @@ The RTL detects commands on a rising edge and never clears COMMAND itself:
 
     wire [3:0] cmd_now  = ctrl_reg[C_COMMAND][3:0];
     wire [3:0] cmd_edge = cmd_now & ~cmd_seen;          # top.v
-    reg ldr_cmd_clear;   # declared, defaulted to 0, never asserted anywhere
 
 So writing the same command code twice in a row produces no edge and the board
 silently ignores the second one -- while the host still starts its observer and
@@ -18,6 +17,7 @@ so they fail for exactly the reason the board would go quiet.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -119,6 +119,91 @@ def test_rtl_contracts_execute_with_nonzero_failure(
     assert marker in transcript, transcript
 
 
+def test_vivado_rtl_matrix_requires_each_numeric_oracle(tmp_path: Path) -> None:
+    """Run the maintained xsim matrix when Vivado and generated BRAM IP exist."""
+
+    suffix = ".bat" if os.name == "nt" else ""
+    configured = os.environ.get("ZLC_PS_VIVADO_BIN", "")
+    tool_dir = Path(configured).resolve().parent if configured else Path("C:/Xilinx/Vivado/2019.1/bin")
+    tools = {
+        name: Path(shutil.which(name) or tool_dir / f"{name}{suffix}")
+        for name in ("xvlog", "xelab", "xsim")
+    }
+    if any(not path.is_file() for path in tools.values()):
+        pytest.skip("Vivado xsim matrix not executed: xvlog/xelab/xsim are unavailable")
+
+    ip_root = RTL_DIR.parent / "build/ps/ps.srcs/sources_1/ip"
+    common = ip_root / "blk_mem_gen_edge_tick/simulation/blk_mem_gen_v8_4.v"
+    tick = ip_root / "blk_mem_gen_edge_tick/sim/blk_mem_gen_edge_tick.v"
+    mask = ip_root / "blk_mem_gen_edge_mask/sim/blk_mem_gen_edge_mask.v"
+    if any(not path.is_file() for path in (common, tick, mask)):
+        pytest.skip("Vivado xsim matrix not executed: generated edge-BRAM models are absent")
+
+    engine_markers = {
+        "tb_1tick": "ONE-TICK-OK",
+        "tb_bus_delay": "BUS-DELAY-OK",
+        "tb_da_ttl_align": "DA-TTL-ALIGN-OK",
+        "tb_delay_compact": "COMPACT-MAP-OK",
+        "tb_delay_sched": "DELAY-SCHED-PHYSICAL-DONE-OK",
+        "tb_evt_depth": "EVT-DEPTH-STICKY-OVERFLOW-OK",
+        "tb_gapsweep": "GAPSWEEP-OK",
+        "tb_loop": "LOOP-OK",
+        "tb_ramp_scan": "RAMP-SCAN-OK",
+        "tb_scan_wrap": "SEAMLESS-OK",
+    }
+    markers = {
+        **engine_markers,
+        "tb_uart_pipeline": "UART-PIPELINE-WATCHDOG-BOUNDS-OK",
+        "tb_uart_read_tap": "UART-READ-WRITE-LASTWORD-LAYOUT-OK",
+    }
+    compile_result = subprocess.run(
+        [
+            str(tools["xvlog"]),
+            str(RTL_DIR / "zlc_edge_streamer.v"),
+            str(common),
+            str(tick),
+            str(mask),
+            *[str(RTL_DIR / "sim" / f"{name}.v") for name in engine_markers],
+            str(RTL_DIR / "zlc_uart_bridge.v"),
+            str(RTL_DIR / "tb_uart_pipeline.v"),
+            str(RTL_DIR / "tb_uart_read_tap.v"),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    assert compile_result.returncode == 0, compile_result.stdout + compile_result.stderr
+
+    forbidden = re.compile(r"Fatal:|\*\*FAIL\*\*|\*\*BAD\*\*|\*\*LATE\*\*|RAMP-SCAN-BAD")
+    for top, marker in markers.items():
+        snapshot = f"zlc_{top}"
+        elaborate = subprocess.run(
+            [str(tools["xelab"]), f"work.{top}", "-s", snapshot],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+        assert elaborate.returncode == 0, elaborate.stdout + elaborate.stderr
+        simulate = subprocess.run(
+            [str(tools["xsim"]), snapshot, "-runall"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+        transcript = simulate.stdout + simulate.stderr
+        assert simulate.returncode == 0, transcript
+        assert marker in transcript and forbidden.search(transcript) is None, transcript
+        if top == "tb_1tick":
+            assert "SHORT-ONE-SHOT-OK ticks=1" in transcript
+            assert "SHORT-ONE-SHOT-OK ticks=2" in transcript
+
+
 def _dropped(writes: list[int]) -> list[int]:
     """Apply the RTL rule verbatim and return the commands the board ignores.
 
@@ -174,10 +259,7 @@ def test_rtl_still_detects_commands_on_a_rising_edge_and_never_self_clears() -> 
 
     source = RTL.read_text(encoding="utf-8", errors="replace")
     assert re.search(r"cmd_edge\s*=\s*cmd_now\s*&\s*~cmd_seen", source)
-    assignments = re.findall(r"ldr_cmd_clear\s*<=\s*1'b([01])", source)
-    assert assignments and set(assignments) == {"0"}, (
-        "the RTL now clears COMMAND itself; revisit the host strobe rule"
-    )
+    assert not re.search(r"ctrl_reg\[C_COMMAND\]\s*<=\s*32'b0", source)
 
 
 def test_every_fire_in_a_scan_loop_reaches_the_board() -> None:

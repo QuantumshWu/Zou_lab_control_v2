@@ -317,6 +317,16 @@ Performance commit：`Make derived history continuous and presentation capacity-
 
 Milestone 5 commit：`Close pulse, camera, remote, FPGA stop, timing, and ownership semantics`。下一步M6，不把SLM物理truth塞进Workbench或simulation旁路。
 
+### M5实验机timing回修（2026-08-21）
+
+- M5前`clk`没有`create_clock`，旧bitstream“build成功”不代表50 MHz timing通过；M5加入20 ns约束与负slack gate后暴露既有DAC ramp restoring divider。回修不撤约束：steep ramp改为全输入域精确的reciprocal-ROM+DSP divmod，522753组合法输入逐值等于整数商余数；四slot affine MAC改为balanced DSP tree。
+- Bus segment start/stop与frame/loop end在seam前由同一cache解析；完整boundary请求提前一拍寄存，`time_count/scan owner`不再直接穿过LUTRAM+DSP。晚到scan bank先注册请求、再填cache、最后推进，不消费旧slot；edge0由host逐row保证effective tick为0，删除重复的第五套affine evaluator。真实BRAM issue latency按4拍所有权闭合：boundary预读进入`pend`，FIFO为5，20条连续1-tick edge为`0 off-schedule`；旧behavioral bench同步到真实输出延迟，Vivado不接受的`fork/disable`结构已清理。
+- 最终Vivado 2019.1 build-only gate：fresh-project暴露旧LUT结果不可复现及`active_scan_count→affine evaluator`的29层旁路。UART 256×32 staging从LUTRAM根修为单写/同步读RAMB18；boundary evaluator完成时寄存下一active segment的slots/index，seam不再让scan owner穿过LUTRAM+DSP。正式route无需post-route补救即setup `+0.726 ns`、hold `+0.036 ns`。12条vendor bus-skew constraint全部MET，最差`+18.988 ns`；bitstream生成成功。Routed资源为20075/20800 LUT、14053/41600 FF、76/90 DSP、40 RAMB36+2 RAMB18；resource estimator按该报告校准，冻结deployment threshold保持98%，通用solver默认仍为90%。
+- 1/2-tick timeline只在真正跨seam时由connected `PulseStreamer`拒绝：单次terminal仍合法；finite只核前`cycles-1`个outgoing rows，forever核全部rows，内部RepeatRegion按一次rewind与多次rewind的实际lead分别验证。word19旧additive-repeat旁路删除为reserved zero。`tb_1tick`新增完整1/2-tick one-shot oracle，`tb_gapsweep`真正跨完整frame，`tb_loop`核非零loop-start的preamble/body/tail。
+- Vivado快速重建只复用7个OOC IP；完整tool build、part、source/XDC/geometry及effective `CONFIG.*`签名不一致即fresh project，reopen重新核四个BRAM latency。外层receipt同时绑定所有bit输入、bitstream及timing/bus-skew/utilization reports；缺失或被替换时不允许跳过。当前同contract构建命中FAST REBUILD且每次重跑top synth/place/route。
+- xsim证据：10个retained engine bench全部命中各自PASS marker并拒绝failure token；UART pipeline/watchdog/bounds与read/write/last-word/layout两组通过；真实edge BRAM `tb_real_engine`共7个pulse且宽度全为2000；full-top `tb_t_ff`两次连续FIRE、每次四帧均`T-FF-OK`；SAFE pin gate通过。Python `zlc_pulse`全包`138 passed, 4 skipped`，4个skip仅因本机无Icarus，以上Vivado xsim已独立覆盖RTL。默认构建receipt在1.865秒内验证source/artifact后跳过；全程未program/flash、未连接硬件。
+- Gate 17/18最终冻结：FPGA candidate为32 files `+1262/-701`（净+561）：Python production净+109、tests净+274、production RTL净+182、RTL benches净删186、build/config/launcher净+156、docs净+26。无新增production file/class/module，Python production只新增单owner `_resource_target_pct`，tests净增5个独立oracle，Tcl新增2个多consumer签名/latency proc；旧word19语义、4个dead RTL surface、2个obsolete bench、2个source-string whitebox test与单consumer Tcl helper均已删除或合并，UART oracles现严格核exact commit次数/顺序，active tree（排AUDIT历史报告）的指定旧符号和未跟踪生成残余为0。
+
 ## 11. Milestone 6完成证据
 
 - 正式X15213 transport只剩USB；DVI production/discovery/UI/tests/docs为0。真实adapter初始command为unknown；只有write、display slot、exact frame-memory readback和profile settle全部完成才是known-new。失败能区分known-old/unknown；command与mapping revision、profile/model/serial/wavelength/orientation/correction/settle和outcome进入immutable receipt。Strict profile记录phase-curve与settle provenance，同波长correction才接受。

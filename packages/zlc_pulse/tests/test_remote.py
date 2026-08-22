@@ -57,8 +57,8 @@ def _sequence(*, slotted: bool = False) -> PulseSequence:
         target=target,
         time_step_ns=20,
         periods=(
-            PulsePeriod("p0", 20, "ns", (1, 0, 0), (AnalogStep("dac", "edge", 0),)),
-            PulsePeriod("p1", 20, "ns", (0, 0, 0)),
+            PulsePeriod("p0", 40, "ns", (1, 0, 0), (AnalogStep("dac", "edge", 0),)),
+            PulsePeriod("p1", 40, "ns", (0, 0, 0)),
         ),
         slots=slots,
     )

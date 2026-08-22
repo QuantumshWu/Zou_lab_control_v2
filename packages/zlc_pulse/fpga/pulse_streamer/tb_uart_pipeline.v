@@ -11,7 +11,7 @@ module tb_uart_pipeline;
     reg clk = 1'b0; always #10 clk = ~clk;
     reg rst = 1'b1, uart_rx = 1'b1; wire uart_tx;
     wire [29:0] u_word_addr; wire [31:0] u_wdata; wire u_we, u_active, u_error;
-    wire [5:0] u_rd_word; wire u_rd_req; reg [31:0] u_rd_data; reg [31:0] ctrl_reg [0:63];
+    wire [5:0] u_rd_word; reg [31:0] u_rd_data; reg [31:0] ctrl_reg [0:63];
     integer commits = 0; integer error_pulses = 0;
 
     always @(posedge clk) begin
@@ -24,7 +24,7 @@ module tb_uart_pipeline;
                       .ADDRESS_WORDS(64), .FRAME_TIMEOUT_CYCLES(2000)) dut (
         .clk(clk), .rst(rst), .uart_rx(uart_rx), .uart_tx(uart_tx),
         .u_word_addr(u_word_addr), .u_wdata(u_wdata), .u_we(u_we), .u_active(u_active), .u_error(u_error),
-        .u_rd_word(u_rd_word), .u_rd_req(u_rd_req), .u_rd_data(u_rd_data));
+        .u_rd_word(u_rd_word), .u_rd_data(u_rd_data));
 
     task send_byte(input [7:0] b); integer i; begin
         uart_rx=1'b0; #(BITT);
@@ -67,11 +67,15 @@ module tb_uart_pipeline;
         for (k=0;k<64;k=k+1) send_byte(wr[k]);        // 4 WRITE frames BACK-TO-BACK, no ACK read between
         wait (nrx >= 36);                              // collect 4 ACKs (9 B each)
         for (k=0;k<4;k=k+1) begin
-            if (!(rb[k*9]==8'h5a && rb[k*9+1]==8'ha5 && rb[k*9+2]==8'h81 && rb[k*9+4]==8'h00)) begin
-                fails=fails+1; $display("TB: ACK %0d malformed/lost: %02x %02x %02x st=%02x", k, rb[k*9],rb[k*9+1],rb[k*9+2],rb[k*9+4]);
+            if (!(rb[k*9]==8'h5a && rb[k*9+1]==8'ha5 && rb[k*9+2]==8'h81 &&
+                  rb[k*9+3]==k+1 && rb[k*9+4]==8'h00)) begin
+                fails=fails+1; $display("TB: ACK %0d malformed/lost: %02x %02x %02x seq=%02x st=%02x", k, rb[k*9],rb[k*9+1],rb[k*9+2],rb[k*9+3],rb[k*9+4]);
             end
         end
         $display("TB: 4 back-to-back WRITE frames -> %0d/4 well-formed ACKs collected", 4-fails);
+        if (commits != 4) begin
+            fails=fails+1; $display("TB: 4 one-word WRITE frames produced %0d commits", commits);
+        end
 
         // READ back ONE AT A TIME (reads are synchronous, never pipelined: a 13-byte read reply is
         // LONGER than the 12-byte read request, so back-to-back reads CAN drop a reply -- unlike the

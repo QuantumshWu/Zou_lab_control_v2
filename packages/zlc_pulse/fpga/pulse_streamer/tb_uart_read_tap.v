@@ -19,13 +19,22 @@ module tb_uart_read_tap;
     reg  rst = 1'b1;
     reg  uart_rx = 1'b1;
     wire uart_tx;
-    wire [29:0] u_word_addr; wire [31:0] u_wdata; wire u_we, u_active;
-    wire [5:0]  u_rd_word;   wire u_rd_req;
+    wire [29:0] u_word_addr; wire [31:0] u_wdata; wire u_we, u_active, u_error;
+    wire [5:0]  u_rd_word;
     reg  [31:0] u_rd_data;
     reg  [31:0] ctrl_reg [0:63];
 
-    // top model: UART write into CTRL (uart_sel=u_active priority mux + registered ctrl write) ...
-    always @(posedge clk) if (u_active && u_we) ctrl_reg[u_word_addr[5:0]] <= u_wdata;
+    integer commits;
+    reg [5:0] commit_addr0, commit_addr1;
+    // Top model: UART write into CTRL (uart_sel=u_active priority mux + registered
+    // ctrl write).  The exact commit sequence is part of the wire contract: a
+    // duplicate write could retrigger a command even when final readback matches.
+    always @(posedge clk) if (u_active && u_we) begin
+        ctrl_reg[u_word_addr[5:0]] <= u_wdata;
+        if (commits == 0) commit_addr0 = u_word_addr[5:0];
+        if (commits == 1) commit_addr1 = u_word_addr[5:0];
+        commits = commits + 1;
+    end
     // ... and the CTRL read tap (word 63 -> hardwired LAYOUT id, else regfile).  MUST be combinational.
 `ifdef REGISTERED_BUG
     always @(posedge clk) u_rd_data <= (u_rd_word == 6'd63) ? LAYOUT : ctrl_reg[u_rd_word];
@@ -35,8 +44,8 @@ module tb_uart_read_tap;
 
     zlc_uart_bridge #(.CLK_HZ(50_000_000), .BAUD(3_000_000)) dut (
         .clk(clk), .rst(rst), .uart_rx(uart_rx), .uart_tx(uart_tx),
-        .u_word_addr(u_word_addr), .u_wdata(u_wdata), .u_we(u_we), .u_active(u_active),
-        .u_rd_word(u_rd_word), .u_rd_req(u_rd_req), .u_rd_data(u_rd_data)
+        .u_word_addr(u_word_addr), .u_wdata(u_wdata), .u_we(u_we), .u_active(u_active), .u_error(u_error),
+        .u_rd_word(u_rd_word), .u_rd_data(u_rd_data)
     );
 
 `ifdef DBG
@@ -104,7 +113,7 @@ module tb_uart_read_tap;
         fr1[0]=8'h5a;fr1[1]=8'ha5;fr1[2]=8'h02;fr1[3]=8'h04;fr1[4]=8'h29;fr1[5]=8'h00;fr1[6]=8'h00;fr1[7]=8'h00;fr1[8]=8'h01;fr1[9]=8'h00;fr1[10]=8'h85;fr1[11]=8'h31;
         frl[0]=8'h5a;frl[1]=8'ha5;frl[2]=8'h02;frl[3]=8'h01;frl[4]=8'h3f;frl[5]=8'h00;frl[6]=8'h00;frl[7]=8'h00;frl[8]=8'h01;frl[9]=8'h00;frl[10]=8'h47;frl[11]=8'hdf;
         for (k = 0; k < 64; k = k + 1) ctrl_reg[k] = 32'hDEAD0000 + k;   // init != written values
-        fails = 0;
+        fails = 0; commits = 0; commit_addr0 = 6'h3f; commit_addr1 = 6'h3f;
 
         #200 rst = 1'b0;
         #4000;
@@ -119,10 +128,14 @@ module tb_uart_read_tap;
         check_reply(9,  32'hAABBCCDD, "READ w40 (first)");
         check_reply(22, 32'h11223344, "READ w41 (LAST word -> the drop candidate)");
         check_reply(35, LAYOUT,       "READ w63 (LAYOUT_ID)");
+        if (commits != 2 || commit_addr0 !== 6'd40 || commit_addr1 !== 6'd41) begin
+            fails = fails + 1;
+            $display("TB: 2-word WRITE commit sequence was count=%0d addr0=%0d addr1=%0d", commits, commit_addr0, commit_addr1);
+        end
 
-        if (fails == 0) $display("TB RESULT: PASS -- write (incl. last word) + reads + LAYOUT all correct on the wire");
-        else            $display("TB RESULT: FAIL -- %0d check(s) failed (nrx=%0d)", fails, nrx);
+        if (fails != 0) $fatal(1, "UART read/write/last-word/layout had %0d error(s) (nrx=%0d)", fails, nrx);
+        $display("UART-READ-WRITE-LASTWORD-LAYOUT-OK");
         $finish;
     end
-    initial begin #600000 $display("TB RESULT: FAIL -- timeout"); $finish; end
+    initial begin #600000 $fatal(1, "UART read/write/last-word/layout timeout"); end
 endmodule

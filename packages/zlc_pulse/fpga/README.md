@@ -22,17 +22,17 @@ document is a second source of truth.
   Vivado's deep run/.Xil temp path under the Windows MAX_PATH limit while the
   build stays in-repo. The default server state dir is `fpga\build\state`.
 
-The root-level `pulse_gui.bat` is the direct frontend entry point. The
+The root `bin\pulse_editor.bat` is the direct frontend entry point. The
 sequencer-only `remote_pulse` installation and the complete `hardware`
 installation (remote FPGA + qCMOS DCAM + Pylon MOT camera) both use this same
 server contract; camera qualification remains on the client installation
-machine. The FPGA batch files stay here so hardware setup is separate from the
-GUI and camera SDKs.
+machine. Human launchers stay together in root `bin\`; the hardware sources and
+generated build tree remain owned here, separate from GUI and camera SDKs.
 
 ## Runtime Chain
 
 ```text
-Pulse GUI / Zou_lab_control.api
+Pulse Editor / Workbench
   -> RemotePulseStreamer.load(..., rows=...)/fire(cycles=...)/wait_done/applied
   -> zlc_pulse.remote on the FPGA computer (uart or injected axi backend)
   -> zlc_pulse.PulseStreamer
