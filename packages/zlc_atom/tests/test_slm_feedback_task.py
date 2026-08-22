@@ -1557,7 +1557,7 @@ def test_virtual_feedback_drives_bright_dark_ratio_below_1p10_from_missing_site(
         )
         calibration_result = calibration_node.run()
         calibration = TrapCalibration.load(calibration_result.artifact_path)
-        assert calibration.site_map.n_sites == 31
+        assert calibration.site_map.n_sites == 25
         assert calibration.site_map.topology is None
         box = calibration.select_model(ReadoutModelKind.BOX)
         assert box.integration_half_width == 1 and box.reducer == "mean"

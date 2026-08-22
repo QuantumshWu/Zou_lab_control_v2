@@ -42,7 +42,7 @@ BOLTZMANN_J_PER_K = 1.380649e-23
 #: apparatus -- a measurement asks the bench what happened, it does not tell
 #: the bench what the answer should be.
 DEFAULT_ATOM_TEMPERATURE_K = 2.0e-5
-DEFAULT_TRAP_DEPTH_K = 6.2e-4
+DEFAULT_TRAP_DEPTH_K = 5.2e-4
 DEFAULT_TRAP_WAIST_M = 1.0e-6
 _WORLD_PROFILE_FORMAT = "zlc.simulation.world_profile"
 _SIMULATION_FLOAT_FIELDS = (
