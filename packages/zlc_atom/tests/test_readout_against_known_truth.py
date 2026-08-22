@@ -27,6 +27,7 @@ from zlc_atom.nodes.calibration.calibration import (
     detect_sites,
     fit_bimodal,
 )
+from zlc_atom.nodes.slm_feedback.task import _support
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 RUN = FIXTURES / "main_readout_oracle.npz"
@@ -267,9 +268,10 @@ def test_target_registration_keeps_a_never_loaded_site_as_unresolved(
     target = np.zeros((20, 20), dtype=np.float32)
     for row, column in support_yx:
         target[row, column] = 1.0
-    provenance = {
-        "science_context_path": "contexts/nine.npz",
-        "command_receipt": {"identity": "slm", "mapping_revision": 7},
+    context_path = tmp_path / "contexts" / "nine.npz"
+    receipt = {
+        "identity": "slm",
+        "mapping_revision": 7,
     }
     result = calibrate(
         reference,
@@ -279,24 +281,19 @@ def test_target_registration_keeps_a_never_loaded_site_as_unresolved(
         psf_half_width=2,
         psf_padding=2,
         detection_spot_sigma=1.1,
-        target_intensity=target,
-        registration_provenance=provenance,
     )
 
-    saved = result.calibration.save(tmp_path / "registered-calibration.json")
+    saved = result.calibration.save(tmp_path / "generic-calibration.json")
     calibration = type(result.calibration).load(saved)
-    site_map = calibration.site_map
-    assert site_map.n_sites == 9
-    assert site_map.site_ids == tuple(f"site_{index:04d}" for index in range(9))
-    assert np.flatnonzero(~site_map.valid_sites).tolist() == [missing]
-    np.testing.assert_allclose(
-        site_map.centers_xy[missing], camera_centers[missing], atol=0.1
+    assert calibration.site_map.n_sites == 8
+    rows, columns, centers, dark_mean, dark_sem_squared = _support(
+        target,
+        calibration,
+        science_context_path=context_path,
+        command_receipt=receipt,
     )
-    assert site_map.topology["kind"] == "slm_target_registration"
-    assert site_map.topology["version"] == 1
-    assert site_map.topology["target_support_yx"][missing] == (10, 9)
-    assert site_map.topology["provenance"] == provenance
-    for model in calibration.models:
-        assert not model.usable_sites[missing]
-    box = calibration.select_model(ReadoutModelKind.BOX)
-    assert np.isfinite(box.dark_mean[missing])
+    assert len(rows) == len(columns) == len(centers) == 9
+    np.testing.assert_allclose(centers[missing], camera_centers[missing], atol=0.1)
+    assert np.isfinite(dark_mean[missing])
+    assert np.isfinite(dark_sem_squared[missing])
+    assert (rows[missing], columns[missing]) == (10, 9)

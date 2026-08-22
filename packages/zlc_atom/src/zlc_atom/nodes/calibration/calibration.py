@@ -2689,8 +2689,6 @@ def calibrate(
     detection_sigma: float = 6.0,
     train_fraction: float = 0.9,
     split_seed: int = 0,
-    target_intensity: object | None = None,
-    registration_provenance: Mapping[str, Any] | None = None,
 ) -> CalibrationResult:
     """Discover sites once and train all readout models from one capture."""
 
@@ -2729,23 +2727,6 @@ def calibrate(
         # cannot carry all of them is not a site THIS calibration can use.
         measurement_radius=measurement_radius,
     )
-    if (target_intensity is None) != (registration_provenance is None):
-        raise ValueError(
-            "target intensity and registration provenance must be supplied together"
-        )
-    if target_intensity is not None:
-        site_map = _register_target_sites(
-            site_map,
-            target_intensity,
-            registration_provenance,
-            frame_shape=references.shape[-2:],
-            measurement_radius=box_half_width,
-        )
-        if any(
-            not box_fits(tuple(center), measurement_radius, references.shape[-2:])
-            for center in site_map.centers_xy
-        ):
-            raise ValueError("a predicted Target readout window lies outside the frame")
     centers = site_map.centers_xy
 
     box_extractor: Callable[[np.ndarray], np.ndarray] = lambda frame: extract_box_signals(

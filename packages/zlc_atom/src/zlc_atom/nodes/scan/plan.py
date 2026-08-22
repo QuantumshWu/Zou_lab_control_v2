@@ -30,8 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from zlc_pulse import PulseSequence, api_parameter_columns_for, sequence_from_tree
-from zlc_pulse.codec import parse_pulse_tree_json
+from zlc_pulse import PulseSequence, api_parameter_columns_for
+from zlc_pulse.codec import parse_pulse_tree_json, sequence_from_document_tree
 
 from zlc_atom.nodes._framework.descriptor import (
     SelectionMapping,
@@ -262,7 +262,7 @@ def load_scan_template(path: str | Path) -> PulseSequence:
     """One workspace pulse file, admitted only if it offers something to scan."""
 
     source = Path(path).expanduser().resolve()
-    sequence = sequence_from_tree(
+    sequence = sequence_from_document_tree(
         parse_pulse_tree_json(source.read_text(encoding="utf-8"))
     )
     if not sequence.api_parameters:

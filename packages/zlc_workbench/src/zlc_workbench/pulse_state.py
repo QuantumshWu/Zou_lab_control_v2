@@ -17,7 +17,7 @@ from zlc_pulse import (
     sequence_to_tree,
     validate_scan_table,
 )
-from zlc_pulse.codec import parse_pulse_tree_json
+from zlc_pulse.codec import parse_pulse_tree_json, split_pulse_document_tree
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,49 +75,16 @@ class PulseEditorState:
             raise TypeError("scan_source_dirty must be a boolean")
 
 
-_EDITOR_FIELDS = (
-    "visible_ports",
-    "scan_source",
-    "scan_rows",
-    "scan_source_dirty",
-    "scan_repeats",
-)
-
-
 def state_from_tree(tree: Mapping[str, Any]) -> PulseEditorState:
     """Decode the pulse and its sole ``editor`` section as one candidate."""
 
-    sequence_tree = dict(tree)
-    raw = sequence_tree.pop("editor", {})
+    sequence_tree, raw = split_pulse_document_tree(tree)
     sequence = sequence_from_tree(sequence_tree)
-    if not isinstance(raw, Mapping):
-        raise TypeError("pulse editor state must be an object")
-    unknown = tuple(key for key in raw if key not in _EDITOR_FIELDS)
-    if unknown:
-        raise ValueError(f"unknown pulse editor field(s): {', '.join(map(str, unknown))}")
-
     visible = raw.get("visible_ports")
-    if visible is not None and (
-        isinstance(visible, (str, bytes)) or not isinstance(visible, Sequence)
-    ):
-        raise TypeError("editor.visible_ports must be null or a list")
-    if visible is not None and any(not isinstance(key, str) for key in visible):
-        raise TypeError("editor.visible_ports must contain strings")
     source = raw.get("scan_source", "")
-    if not isinstance(source, str):
-        raise TypeError("editor.scan_source must be a string")
     rows = raw.get("scan_rows", ())
-    if isinstance(rows, (str, bytes, Mapping)) or not isinstance(rows, Sequence):
-        raise TypeError("editor.scan_rows must be a table")
-    for row in rows:
-        if isinstance(row, (str, bytes, Mapping)) or not isinstance(row, Sequence):
-            raise TypeError("each editor.scan_rows row must be a list")
     dirty = raw.get("scan_source_dirty", False)
-    if not isinstance(dirty, bool):
-        raise TypeError("editor.scan_source_dirty must be a boolean")
     repeats = raw.get("scan_repeats", 0)
-    if isinstance(repeats, bool) or not isinstance(repeats, int):
-        raise TypeError("editor.scan_repeats must be an integer")
     candidate = PulseEditorState(
         sequence=sequence,
         visible_ports=None if visible is None else frozenset(visible),

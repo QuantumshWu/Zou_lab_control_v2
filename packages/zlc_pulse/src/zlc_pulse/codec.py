@@ -13,8 +13,9 @@ experiment keeps things, which is not this package.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import json
+from numbers import Real
 from typing import Any
 
 from .model import (
@@ -33,6 +34,13 @@ from .model import (
 
 #: What a reader checks before trusting the rest.
 PULSE_TREE_FORMAT = "zlc.pulse.v1"
+PULSE_EDITOR_FIELDS = (
+    "visible_ports",
+    "scan_source",
+    "scan_rows",
+    "scan_source_dirty",
+    "scan_repeats",
+)
 
 
 def parse_pulse_tree_json(text: str | bytes) -> Mapping[str, Any]:
@@ -62,6 +70,60 @@ def parse_pulse_tree_json(text: str | bytes) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise TypeError("pulse JSON must contain one object")
     return value
+
+
+def split_pulse_document_tree(
+    tree: Mapping[str, Any],
+) -> tuple[dict[str, Any], Mapping[str, Any]]:
+    """Split one product pulse document into its sequence and editor sections."""
+
+    if not isinstance(tree, Mapping):
+        raise TypeError("pulse document must be an object")
+    sequence_tree = dict(tree)
+    editor = sequence_tree.pop("editor", {})
+    if not isinstance(editor, Mapping):
+        raise TypeError("pulse editor state must be an object")
+    unknown = tuple(key for key in editor if key not in PULSE_EDITOR_FIELDS)
+    if unknown:
+        raise ValueError(
+            f"unknown pulse editor field(s): {', '.join(map(str, unknown))}"
+        )
+    visible = editor.get("visible_ports")
+    if visible is not None and (
+        isinstance(visible, (str, bytes))
+        or not isinstance(visible, Sequence)
+        or any(not isinstance(key, str) for key in visible)
+    ):
+        raise TypeError("editor.visible_ports must be null or a list of strings")
+    source = editor.get("scan_source", "")
+    if not isinstance(source, str):
+        raise TypeError("editor.scan_source must be a string")
+    rows = editor.get("scan_rows", ())
+    if isinstance(rows, (str, bytes, Mapping)) or not isinstance(rows, Sequence):
+        raise TypeError("editor.scan_rows must be a table")
+    for row in rows:
+        if (
+            isinstance(row, (str, bytes, Mapping))
+            or not isinstance(row, Sequence)
+            or any(isinstance(value, bool) or not isinstance(value, Real) for value in row)
+        ):
+            raise TypeError("each editor.scan_rows row must be a list of numbers")
+    dirty = editor.get("scan_source_dirty", False)
+    if not isinstance(dirty, bool):
+        raise TypeError("editor.scan_source_dirty must be a boolean")
+    repeats = editor.get("scan_repeats", 0)
+    if isinstance(repeats, bool) or not isinstance(repeats, int):
+        raise TypeError("editor.scan_repeats must be an integer")
+    if repeats < 0:
+        raise ValueError("editor.scan_repeats must be non-negative")
+    return sequence_tree, editor
+
+
+def sequence_from_document_tree(tree: Mapping[str, Any]) -> PulseSequence:
+    """Decode the sequence from a complete Pulse Editor or bare pulse document."""
+
+    sequence_tree, _editor = split_pulse_document_tree(tree)
+    return sequence_from_tree(sequence_tree)
 
 
 def _object(value: Any, expected: tuple[str, ...], name: str) -> Mapping[str, Any]:
@@ -367,7 +429,10 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
 
 __all__ = [
     "PULSE_TREE_FORMAT",
+    "PULSE_EDITOR_FIELDS",
     "parse_pulse_tree_json",
+    "sequence_from_document_tree",
     "sequence_from_tree",
     "sequence_to_tree",
+    "split_pulse_document_tree",
 ]

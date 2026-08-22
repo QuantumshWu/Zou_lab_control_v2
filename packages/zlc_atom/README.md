@@ -236,10 +236,11 @@ that same dataset and its validity into survival rate against trap-off time;
 there is no second rate history. It does not fit a temperature or lifetime and
 does not derive a 1/e crossing.
 
-The `slm_feedback` Task takes only a registered Calibration and one strict
-Science Context v2. That Context's frozen spots Target is the unique Target
-truth, and the Calibration must be registered to the same Context. The full
-roster, including predicted zero-capture sites, remains the stable site index.
+The `slm_feedback` Task takes one ordinary camera/readout Calibration and one
+strict Science Context v2. Calibration has no SLM or Science Context input.
+Feedback registers the Context's frozen spots Target to the measured camera
+sites at its own composition boundary; the full roster, including predicted
+zero-capture sites, is then the stable site index.
 At execution start the current SLM phase, complete command receipt
 and mapping revision must still exactly equal the frozen incoming Context or
 the Task fails before changing hardware. Every coarse or validation measurement
@@ -247,9 +248,11 @@ is a canonical Camera Measurement generation under the stable companion
 producer `<task>/camera`: it commits all `repeat=N` three-frame cycles, seals
 them, selects readout-event `frame=1`, and uses every shot in the repeat
 statistics. The displayed preview applies that same selection and repeat mean.
-The estimator integrates raw BOX samples and subtracts the persisted dark mean;
+The estimator integrates raw BOX samples. Observed sites subtract their
+persisted Calibration dark mean; a predicted zero-capture site uses the nearest
+measured dark baseline with an added conservative spatial systematic variance.
 it neither thresholds through Occupancy nor divides by Calibration bright mean.
-Its total SEM combines shot SEM with `dark sample variance / n` exactly once, so
+Its total SEM combines shot SEM with dark calibration uncertainty exactly once, so
 loading and occupied-atom brightness remain part of the measured all-shot
 fluorescence observable. Every measurement must replay Calibration's effective
 raw/photoelectron mode and exact raw dtype/count-unit provenance; electron mode

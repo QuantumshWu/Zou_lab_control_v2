@@ -207,7 +207,7 @@ Node new chunk
 ### 8.2 Context与artifacts
 
 - Target v2保存intensity和objective，只是Editor authoring import/export artifact，不是run consumer的第二Target truth。
-- Science Context v2保存run的唯一strict frozen Target、numeric pupil、Pattern/base、operator wavefront和system correction引用；Editor的v2 Load是一次atomic adopt。v1只允许显式migration为`target=None`的authoring input，Calibration registration与Feedback必须拒绝。Candidate Context保存实际evolving Target，可直接作为下一run的唯一Context input。
+- Science Context v2保存run的唯一strict frozen Target、numeric pupil、Pattern/base、operator wavefront和system correction引用；Editor的v2 Load是一次atomic adopt。v1只允许显式migration为`target=None`的authoring input，Feedback必须拒绝。Candidate Context保存实际evolving Target，可直接作为下一run的唯一Context input。
 - Command receipt保存USB/profile/wavelength/orientation/correction/outcome。
 - `SystemCorrectionArtifact`明确区分pupil phase map与target response map；不得把per-geometry site weights冒充通用wavefront correction。
 
@@ -228,8 +228,8 @@ Node new chunk
 
 - 不重设计Calibration对外流程、主要artifact、默认raw policy或三帧report。
 - 允许不改变外部行为的dependency解耦、明确corruption修复和内存优化。
-- Calibration可选消费single strict Science Context v2内的frozen Target，把未拍到的site也以predicted BOX保留在stable full roster中；不接受另一个Target artifact。同一SiteMap topology validator在创建和load时都重新核physics、rounded-window overlap/bounds与runner-up uniqueness。Registration信任apparatus的positive Target x/y → camera x/y、no reflection/shear/axis swap；未观测部分存在x/y/180°对称或其他同样可行的alternate mapping时必须loud要求asymmetric spatial fiducial。
-- Registered BOX model必须持久化dark sample count与sample variance；legacy `n=0/NaN`可被读取，但不得用于Feedback。Calibration capture不claim SLM，实验workflow必须保持所选Context command未变。
+- Calibration只产生与SLM无关的camera/readout artifact，UI和Task都不接受Science Context。SLM Feedback在同时拿到Calibration与Context后才做Target→camera注册，并为未观测site生成predicted BOX。Registration有alternate mapping时必须loud要求asymmetric spatial fiducial。
+- BOX model持久化可观测site的dark sample count与sample variance；Feedback对predicted site使用最近已测dark baseline并加入保守spatial systematic variance，不伪造该site在Calibration中被采集过。
 - Scan正常完成、Stop或失败都默认restore pre-run device values。
 - SimulationWorld保持一个类和一个state owner，不拆层。
 - Apparatus root `simulation`是image/grid geometry、seed与profile的唯一持久化owner；virtual qCMOS只声明camera事实并消费world image geometry，virtual MOT保持独立的camera geometry。旧的camera-owned world字段不保留双owner或静默migration，必须loud refusal并给出root grammar。

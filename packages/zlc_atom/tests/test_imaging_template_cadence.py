@@ -17,11 +17,13 @@ they find that out.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from zlc_pulse import TIME_UNIT_TO_NS
 
 from zlc_atom.nodes import calibration_pulse_template_bytes
+from zlc_atom.nodes.calibration.pulse import load_calibration_pulse_template
 
 
 def test_the_three_camera_windows_share_one_trigger_cadence() -> None:
@@ -55,3 +57,22 @@ def test_the_three_camera_windows_share_one_trigger_cadence() -> None:
     assert periods["gap_1"] == pytest.approx(
         periods["long_before"] + periods["gap_0"] - periods["short"]
     ), "gap_1 is DERIVED, not free: long + gap_0 - short"
+
+
+def test_calibration_accepts_the_complete_document_saved_by_the_pulse_editor(
+    tmp_path: Path,
+) -> None:
+    tree = json.loads(calibration_pulse_template_bytes().decode("utf-8"))
+    tree["editor"] = {
+        "visible_ports": None,
+        "scan_source": "",
+        "scan_rows": [],
+        "scan_source_dirty": False,
+        "scan_repeats": 0,
+    }
+    path = tmp_path / "imaging_template.json"
+    path.write_text(json.dumps(tree), encoding="utf-8")
+
+    sequence = load_calibration_pulse_template(path)
+
+    assert sequence.name == "imaging_template"

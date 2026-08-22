@@ -11,9 +11,8 @@ from zlc_pulse import (
     authored_api_values,
     compile_sequence,
     resolve_api_parameters,
-    sequence_from_tree,
 )
-from zlc_pulse.codec import parse_pulse_tree_json
+from zlc_pulse.codec import parse_pulse_tree_json, sequence_from_document_tree
 from zlc_pulse.device import BoardDescription
 
 
@@ -33,7 +32,7 @@ def load_calibration_pulse_template(path: str | Path) -> PulseSequence:
     source = Path(path).expanduser().resolve()
     if source.suffix.lower() != ".json" or not source.is_file():
         raise ValueError("calibration pulse template must be an existing JSON file")
-    sequence = sequence_from_tree(
+    sequence = sequence_from_document_tree(
         parse_pulse_tree_json(source.read_text(encoding="utf-8"))
     )
     _validate_calibration_sequence(sequence)

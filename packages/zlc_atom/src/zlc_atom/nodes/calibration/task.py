@@ -33,7 +33,6 @@ from zlc_atom.devices.camera.contract import (
     CameraWorkingPoint,
 )
 from zlc_atom.devices.camera.photoelectrons import PHOTOELECTRONS
-from zlc_atom.devices.slm.solver import validate_target
 from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementNode,
     CameraMeasurementRequest,
@@ -912,8 +911,6 @@ class CalibrationTask:
         pulse_path: str | Path,
         signal_plane: object,
         artifact_directory: str | Path,
-        science_context: Mapping[str, object] | None = None,
-        science_context_path: str | Path | None = None,
     ) -> None:
         if not isinstance(camera, CameraAdapter):
             raise TypeError("camera must implement CameraAdapter")
@@ -936,40 +933,6 @@ class CalibrationTask:
             raise TypeError("signal_plane must be supplied by the runtime owner")
         self.signal_plane = signal_plane
         self.artifact_directory = directory
-        registration_values = (science_context, science_context_path)
-        if all(value is None for value in registration_values):
-            self._registration_target = None
-            self._registration_provenance = None
-        else:
-            if any(value is None for value in registration_values):
-                raise ValueError(
-                    "Science Context value and path must be supplied together"
-                )
-            if not isinstance(science_context, Mapping):
-                raise TypeError("science_context must be a loaded mapping")
-            context_target = science_context.get("target_intensity")
-            if context_target is None:
-                raise ValueError(
-                    "Calibration registration requires a v2 Science Context Target"
-                )
-            frozen_target = validate_target(context_target)
-            if science_context.get("objective_kind") != "spots":
-                raise ValueError("Calibration Science Context must use spots")
-            receipt = science_context.get("command_receipt")
-            if not isinstance(receipt, Mapping) or receipt.get("outcome") not in {
-                "known-old",
-                "known-new",
-            }:
-                raise ValueError(
-                    "Calibration registration requires a known Science Context receipt"
-                )
-            self._registration_target = frozen_target
-            self._registration_provenance = {
-                "science_context_path": str(
-                    Path(science_context_path).expanduser().resolve()
-                ),
-                "command_receipt": dict(receipt),
-            }
         self._actual_working_point: CameraWorkingPoint | None = None
         self._result: CalibrationRunResult | None = None
 
@@ -1389,8 +1352,6 @@ class CalibrationTask:
             psf_padding=self.request.psf_padding,
             detection_spot_sigma=self.request.detection_spot_sigma,
             detection_sigma=self.request.detection_sigma,
-            target_intensity=self._registration_target,
-            registration_provenance=self._registration_provenance,
         )
 
     def _run(self, context: object | None) -> CalibrationRunResult:

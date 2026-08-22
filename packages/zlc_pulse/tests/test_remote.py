@@ -105,6 +105,19 @@ def test_canonical_and_pulse_json_boundaries_do_not_coerce_or_drop_input() -> No
     with pytest.raises(ValueError, match="non-finite JSON constant.*NaN"):
         pulse_codec.parse_pulse_tree_json('{"format":"zlc.pulse.v1","x":NaN}')
 
+    document = sequence_to_tree(_sequence())
+    document["editor"] = {
+        "visible_ports": None,
+        "scan_source": "",
+        "scan_rows": [],
+        "scan_source_dirty": False,
+        "scan_repeats": 0,
+    }
+    assert pulse_codec.sequence_from_document_tree(document) == _sequence()
+    document["editor"]["typo"] = True
+    with pytest.raises(ValueError, match="unknown pulse editor field.*typo"):
+        pulse_codec.sequence_from_document_tree(document)
+
     remote_tree = remote_module.encode_tree(_sequence())
     remote_tree["typo"] = 1
     with pytest.raises(ValueError, match="unknown PulseSequence remote field"):

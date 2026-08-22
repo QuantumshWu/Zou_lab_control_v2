@@ -268,37 +268,9 @@ def _load_candidate(path: str | Path) -> tuple[np.ndarray, dict[str, object]]:
     return context["phase"], context["pattern_metadata"]
 
 
-def _registered_calibration(
-    calibration: TrapCalibration,
-    target: np.ndarray,
-    *,
-    context_path: Path,
-    receipt: dict[str, object],
-) -> TrapCalibration:
-    site_map = _register_target_sites(
-        calibration.site_map,
-        target,
-        {
-            "science_context_path": str(context_path.resolve()),
-            "command_receipt": receipt,
-        },
-        frame_shape=calibration.frame_contract.image_shape,
-        measurement_radius=0,
-    )
-    return TrapCalibration(
-        site_map,
-        tuple(replace(model, site_ids=site_map.site_ids) for model in calibration.models),
-        calibration.default_model_kind,
-        calibration.frame_contract,
-        calibration.report,
-    )
-
-
 def _calibration_with_unresolved_site(
     target: np.ndarray,
     *,
-    receipt: dict[str, object],
-    context_path: Path,
     missing: int,
 ) -> TrapCalibration:
     rows, columns = np.nonzero(target > 0.0)
@@ -309,24 +281,15 @@ def _calibration_with_unresolved_site(
         np.ones(np.count_nonzero(keep), dtype=bool),
         np.ones(np.count_nonzero(keep)),
     )
-    site_map = _register_target_sites(
-        detected,
-        target,
-        {
-            "science_context_path": str(context_path.resolve()),
-            "command_receipt": receipt,
-        },
-        frame_shape=target.shape,
-        measurement_radius=0,
-    )
-    usable = np.array(site_map.valid_sites, copy=True)
+    site_map = detected
+    usable = np.ones(site_map.n_sites, dtype=bool)
     model = ReadoutModel(
         site_map.site_ids,
-        np.where(usable, 5.0, np.nan),
+        np.full(site_map.n_sites, 5.0),
         np.zeros(site_map.n_sites),
-        np.where(usable, 10.0, np.nan),
+        np.full(site_map.n_sites, 10.0),
         usable,
-        np.where(usable, 1.0, np.nan),
+        np.ones(site_map.n_sites),
         dark_sample_count=np.full(site_map.n_sites, 100),
         dark_sample_variance=np.zeros(site_map.n_sites),
         kind=ReadoutModelKind.BOX,
@@ -354,7 +317,6 @@ def _task(
     validation_shots: int = 20,
     updates: int = 3,
     science_context: dict[str, object] | None = None,
-    registered_calibration: bool = True,
 ) -> SlmFeedbackTask:
     if science_context is None:
         if target is None:
@@ -362,21 +324,8 @@ def _task(
         frozen_context = _science_context(slm, target=target)
     else:
         frozen_context = science_context
-    context_target = frozen_context.get("target_intensity")
-    frozen_target = (
-        None
-        if context_target is None
-        else np.asarray(context_target, dtype=np.float32)
-    )
     selected_calibration = _calibration() if calibration is None else calibration
     context_path = tmp_path / "science_context.npz"
-    if registered_calibration and frozen_target is not None:
-        selected_calibration = _registered_calibration(
-            selected_calibration,
-            frozen_target,
-            context_path=context_path,
-            receipt=dict(frozen_context["command_receipt"]),
-        )
     return SlmFeedbackTask(
         camera=camera,
         camera_key="qcmos",
@@ -402,8 +351,7 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
     descriptors = {item.api_name: item for item in discover_logic_nodes()}
     descriptor = descriptors["slm_feedback"]
     calibration_inputs = descriptors["calibration"].input_specs
-    assert tuple(item.name for item in calibration_inputs) == ("science_context_path",)
-    assert all(not item.required for item in calibration_inputs)
+    assert calibration_inputs == ()
     assert tuple(item.name for item in descriptor.input_specs) == (
         "calibration_path",
         "science_context_path",
@@ -536,7 +484,6 @@ def test_feedback_freezes_science_context_and_solves_only_pattern_to_gate(
         *,
         selected_context=science_context,
         selected_calibration=None,
-        register=True,
     ):
         return _task(
             tmp_path,
@@ -546,7 +493,6 @@ def test_feedback_freezes_science_context_and_solves_only_pattern_to_gate(
             plane=plane,
             calibration=selected_calibration,
             science_context=selected_context,
-            registered_calibration=register,
         )
 
     unknown = {
@@ -562,85 +508,21 @@ def test_feedback_freezes_science_context_and_solves_only_pattern_to_gate(
         build(
             selected_context={**science_context, "target_intensity": None}
         )
-    with pytest.raises(ValueError, match="registered Target topology"):
-        build(register=False)
-    registered = _registered_calibration(
-        _calibration(),
-        frozen_target,
-        context_path=tmp_path / "original-context.npz",
-        receipt=dict(science_context["command_receipt"]),
-    )
-    build(selected_calibration=registered, register=False)
+    generic = _calibration()
+    build(selected_calibration=generic)
     legacy_dark = replace(
-        registered,
+        generic,
         models=tuple(
             replace(
                 model,
                 dark_sample_count=None,
                 dark_sample_variance=None,
             )
-            for model in registered.models
+            for model in generic.models
         ),
     )
-    with pytest.raises(ValueError, match="dark mean, sample count"):
-        build(selected_calibration=legacy_dark, register=False)
-    corrupt_topology = dict(registered.site_map.topology)
-    corrupt_affine = np.asarray(
-        corrupt_topology["affine_target_xy_to_image_xy"], dtype=float
-    )
-    corrupt_affine[2, 0] += 100.0
-    corrupt_topology["affine_target_xy_to_image_xy"] = corrupt_affine.tolist()
-    support_yx = np.asarray(corrupt_topology["target_support_yx"])
-    corrupt_centers = np.column_stack(
-        (support_yx[:, 1], support_yx[:, 0], np.ones(len(support_yx)))
-    ) @ corrupt_affine
-    outside_registration = replace(
-        registered,
-        site_map=replace(
-            registered.site_map,
-            centers_xy=corrupt_centers,
-            topology=corrupt_topology,
-        ),
-    )
-    with pytest.raises(ValueError, match="outside"):
-        build(selected_calibration=outside_registration, register=False)
-    overlap_topology = dict(registered.site_map.topology)
-    overlap_affine = np.asarray(
-        overlap_topology["affine_target_xy_to_image_xy"], dtype=float
-    )
-    overlap_affine[2] += 1.0
-    overlap_topology["affine_target_xy_to_image_xy"] = overlap_affine.tolist()
-    overlap_centers = np.column_stack(
-        (support_yx[:, 1], support_yx[:, 0], np.ones(len(support_yx)))
-    ) @ overlap_affine
-    overlap_registration = replace(
-        registered,
-        site_map=replace(
-            registered.site_map,
-            centers_xy=overlap_centers,
-            topology=overlap_topology,
-        ),
-        models=tuple(
-            replace(model, integration_half_width=1)
-            for model in registered.models
-        ),
-        frame_contract=replace(registered.frame_contract, image_shape=(7, 9)),
-    )
-    with pytest.raises(ValueError, match="overlap"):
-        build(selected_calibration=overlap_registration, register=False)
-    mismatched_receipt = {
-        **science_context,
-        "command_receipt": {
-            **science_context["command_receipt"],
-            "correction_path": "different_mapping.bmp",
-        },
-    }
-    with pytest.raises(ValueError, match="registration differs"):
-        build(
-            selected_calibration=registered,
-            selected_context=mismatched_receipt,
-            register=False,
-        )
+    with pytest.raises(ValueError, match="calibrated BOX site"):
+        build(selected_calibration=legacy_dark)
     task = build()
     try:
         result = task.execute(_Context())
@@ -1379,8 +1261,6 @@ def test_censored_site_uses_bounded_batches_and_bootstrap_boost(
     context_mapping = _science_context(slm, target=target)
     calibration = _calibration_with_unresolved_site(
         target,
-        receipt=slm.last_command_receipt,
-        context_path=tmp_path / "science_context.npz",
         missing=17,
     )
     requested: list[int] = []
@@ -1421,7 +1301,6 @@ def test_censored_site_uses_bounded_batches_and_bootstrap_boost(
         plane=plane,
         calibration=calibration,
         science_context=context_mapping,
-        registered_calibration=False,
         updates=2,
     )
     try:
@@ -1520,8 +1399,6 @@ def test_persistently_censored_bootstrap_preserves_incoming(
     incoming = np.array(slm.last_commanded_phase, copy=True)
     calibration = _calibration_with_unresolved_site(
         target,
-        receipt=slm.last_command_receipt,
-        context_path=tmp_path / "science_context.npz",
         missing=17,
     )
     monkeypatch.setattr(
@@ -1562,7 +1439,6 @@ def test_persistently_censored_bootstrap_preserves_incoming(
         plane=plane,
         target=target,
         calibration=calibration,
-        registered_calibration=False,
         updates=10,
     )
     try:
@@ -1615,11 +1491,6 @@ def test_virtual_feedback_runs_repeated_real_qcmos_candidates_and_restores(
             camera_key="camera",
             sequencer=sequencer,
             sequencer_key="sequencer",
-            science_context=ResolvedArtifact(
-                tmp_path / "science_context.npz",
-                "zlc.slm.science-context.v2",
-                _science_context(slm, target=target),
-            ),
             signal_plane=plane,
             pulse_resource=IMAGING_PULSE_RESOURCE,
             artifact_directory=tmp_path,
@@ -1627,11 +1498,11 @@ def test_virtual_feedback_runs_repeated_real_qcmos_candidates_and_restores(
         )
         calibration_result = calibration_node.run()
         calibration = TrapCalibration.load(calibration_result.artifact_path)
-        unresolved = np.flatnonzero(~calibration.site_map.valid_sites)
-        np.testing.assert_array_equal(unresolved, [17])
+        assert calibration.site_map.n_sites == 34
+        assert calibration.site_map.topology is None
         box = calibration.select_model(ReadoutModelKind.BOX)
-        assert box.dark_sample_count[17] >= 2
-        assert np.isfinite(box.dark_sample_variance[17])
+        assert np.all(box.dark_sample_count >= 2)
+        assert np.all(np.isfinite(box.dark_sample_variance))
         context = _Context()
         task = SlmFeedbackTask(
             camera=camera,

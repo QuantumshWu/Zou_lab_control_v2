@@ -35,10 +35,12 @@ from zlc_atom.devices.slm.solver import (
 )
 from zlc_atom.nodes.calibration import (
     ReadoutModelKind,
+    SiteMap,
     TrapCalibration,
     extract_box_signals,
 )
 from zlc_atom.nodes.calibration.calibration import (
+    _register_target_sites,
     reads_photoelectrons,
     validate_target_registration,
 )
@@ -68,11 +70,6 @@ _MAX_BOOTSTRAP_UPDATES = 3
 _VALIDATION_BATCH_SHOTS = 100
 _VALIDATION_MAX_SECONDS = 60.0
 READOUT_FRAME_COORDINATE = 1
-_MAPPING_RECEIPT_FIELDS = (
-    "transport", "identity", "profile", "model", "serial", "wavelength_nm",
-    "flip_x", "flip_y", "correction_path", "correction_enabled",
-    "mapping_revision", "settle_seconds", "settle_source", "phase_curve_source",
-)
 
 
 def _check_cancelled(context: object) -> None:
@@ -194,49 +191,114 @@ def _support(
     target: np.ndarray,
     calibration: TrapCalibration,
     *,
+    science_context_path: str | Path,
     command_receipt: Mapping[str, object],
-) -> tuple[np.ndarray, np.ndarray]:
-    """Consume the registered Target roster in its stable calibration order."""
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
+    """Register a generic camera calibration to this Feedback Target."""
 
     model = calibration.select_model(ReadoutModelKind.BOX)
+    dark_mean = np.asarray(model.dark_mean, dtype=float)
+    dark_count = np.asarray(model.dark_sample_count)
+    dark_variance = np.asarray(model.dark_sample_variance, dtype=float)
+    usable = (
+        np.asarray(calibration.site_map.valid_sites, dtype=bool)
+        & np.isfinite(dark_mean)
+        & (dark_count >= 2)
+        & np.isfinite(dark_variance)
+        & (dark_variance >= 0.0)
+    )
+    if not np.any(usable):
+        raise ValueError(
+            "SLM Feedback requires at least one calibrated BOX site with dark statistics"
+        )
+    source_indices = np.flatnonzero(usable)
+    source_map = SiteMap(
+        tuple(calibration.site_map.site_ids[index] for index in source_indices),
+        np.asarray(calibration.site_map.centers_xy)[source_indices],
+        np.ones(len(source_indices), dtype=bool),
+        np.asarray(calibration.site_map.quality)[source_indices],
+        calibration.site_map.coordinate_frame,
+        {},
+    )
+    registered = _register_target_sites(
+        source_map,
+        target,
+        {
+            "science_context_path": str(
+                Path(science_context_path).expanduser().resolve()
+            ),
+            "command_receipt": dict(command_receipt),
+        },
+        frame_shape=calibration.frame_contract.image_shape,
+        measurement_radius=model.integration_half_width,
+    )
     support, provenance = validate_target_registration(
-        calibration.site_map,
+        registered,
         frame_shape=calibration.frame_contract.image_shape,
         box_half_width=model.integration_half_width,
     )
     rows, columns = support.T
     if not np.array_equal(support, np.column_stack(np.nonzero(target > 0.0))):
-        raise ValueError("Calibration registered support differs from Science Context")
-    registered_receipt = provenance["command_receipt"]
-    registered_mapping = {
-        key: registered_receipt[key]
-        for key in _MAPPING_RECEIPT_FIELDS
-        if isinstance(registered_receipt, Mapping) and key in registered_receipt
-    }
-    current_mapping = {
-        key: command_receipt[key]
-        for key in _MAPPING_RECEIPT_FIELDS
-        if key in command_receipt
-    }
-    if (
-        not isinstance(registered_receipt, Mapping)
-        or json.dumps(
-            registered_mapping,
-            allow_nan=False,
-            sort_keys=True,
-            separators=(",", ":"),
+        raise ValueError("registered Calibration support differs from Science Context")
+    if provenance["command_receipt"] != dict(command_receipt):
+        raise RuntimeError("Feedback registration lost its Science Context receipt")
+
+    observed = np.asarray(registered.topology["observed_sites"], dtype=bool)
+    centers = np.asarray(registered.centers_xy, dtype=float)
+    roster_dark = np.full(len(centers), np.nan, dtype=float)
+    roster_sem_squared = np.full(len(centers), np.nan, dtype=float)
+    used_sources: set[int] = set()
+    for roster_index in np.flatnonzero(observed):
+        distance = np.linalg.norm(
+            np.asarray(source_map.centers_xy, dtype=float) - centers[roster_index],
+            axis=1,
         )
-        != json.dumps(
-            current_mapping,
-            allow_nan=False,
-            sort_keys=True,
-            separators=(",", ":"),
+        local_index = int(np.argmin(distance))
+        if distance[local_index] > 1e-9 or local_index in used_sources:
+            raise RuntimeError("Feedback registration lost a measured Calibration site")
+        used_sources.add(local_index)
+        source_index = int(source_indices[local_index])
+        roster_dark[roster_index] = dark_mean[source_index]
+        roster_sem_squared[roster_index] = (
+            dark_variance[source_index] / dark_count[source_index]
         )
+
+    missing = np.flatnonzero(~observed)
+    if len(missing):
+        observed_indices = np.flatnonzero(observed)
+        observed_dark = roster_dark[observed_indices]
+        spatial_scale = 1.4826 * float(
+            np.median(np.abs(observed_dark - np.median(observed_dark)))
+        )
+        systematic_variance = max(
+            spatial_scale * spatial_scale,
+            float(np.max(roster_sem_squared[observed_indices])),
+        )
+        for roster_index in missing:
+            nearest = int(
+                observed_indices[
+                    np.argmin(
+                        np.linalg.norm(
+                            centers[observed_indices] - centers[roster_index], axis=1
+                        )
+                    )
+                ]
+            )
+            roster_dark[roster_index] = roster_dark[nearest]
+            roster_sem_squared[roster_index] = (
+                roster_sem_squared[nearest] + systematic_variance
+            )
+    if not np.all(np.isfinite(roster_dark)) or not np.all(
+        np.isfinite(roster_sem_squared)
     ):
-        raise ValueError(
-            "Calibration registration differs from the selected Target or Context"
-        )
-    return rows, columns
+        raise RuntimeError("Feedback registration produced invalid dark statistics")
+    return rows, columns, centers, roster_dark, roster_sem_squared
 
 
 def _updated_target(
@@ -350,34 +412,30 @@ class SlmFeedbackTask:
         }:
             raise ValueError("SLM feedback requires a known incoming command receipt")
         model = calibration.select_model(ReadoutModelKind.BOX)
-        dark_count = np.asarray(model.dark_sample_count)
-        dark_variance = np.asarray(model.dark_sample_variance)
-        if (
-            not np.all(np.isfinite(model.dark_mean))
-            or np.any(dark_count < 2)
-            or not np.all(np.isfinite(dark_variance))
-            or np.any(dark_variance < 0.0)
-        ):
-            raise ValueError(
-                "registered Feedback requires finite BOX dark mean, sample "
-                "count, and sample variance at every site"
-            )
-        self._dark_sem_squared = np.asarray(
-            dark_variance / dark_count, dtype=float
-        )
-        self._dark_sem_squared.setflags(write=False)
-        self._rows, self._columns = _support(
+        context_path = Path(science_context_path).expanduser().resolve()
+        (
+            self._rows,
+            self._columns,
+            self._site_centers_xy,
+            self._dark_mean,
+            self._dark_sem_squared,
+        ) = _support(
             frozen_target,
             calibration,
+            science_context_path=context_path,
             command_receipt=receipt,
         )
+        self._site_count = len(self._rows)
+        self._site_centers_xy.setflags(write=False)
+        self._dark_mean.setflags(write=False)
+        self._dark_sem_squared.setflags(write=False)
         self.camera, self.sequencer, self.slm = camera, sequencer, slm
         self.camera_key, self.sequencer_key, self.slm_key = camera_key, sequencer_key, slm_key
         self.signal_plane, self.calibration, self.model = signal_plane, calibration, model
         self.target, self.sequence = frozen_target, pulse_sequence
         self.calibration_path = Path(calibration_path).expanduser().resolve()
         self.pulse_path = Path(pulse_path).expanduser().resolve()
-        self.science_context_path = Path(science_context_path).expanduser().resolve()
+        self.science_context_path = context_path
         self._incoming_phase = incoming
         self._pattern_phase = pattern
         self._operator_wavefront = operator
@@ -405,9 +463,7 @@ class SlmFeedbackTask:
         site_mask = np.zeros((height, width), dtype=bool)
         windows: list[tuple[slice, slice]] = []
         radius = int(model.integration_half_width)
-        for center_x, center_y in np.asarray(
-            calibration.site_map.centers_xy, dtype=float
-        ):
+        for center_x, center_y in self._site_centers_xy:
             x, y = int(round(float(center_x))), int(round(float(center_y)))
             y0, y1 = max(0, y - radius), min(height, y + radius + 1)
             x0, x1 = max(0, x - radius), min(width, x + radius + 1)
@@ -776,9 +832,9 @@ class SlmFeedbackTask:
 
         frames = _readout_frames(result.snapshot, shots=requested)
 
-        mean = np.zeros(self.calibration.n_sites, dtype=float)
+        mean = np.zeros(self._site_count, dtype=float)
         sum_squared_deviations = np.zeros_like(mean)
-        sample_counts = np.zeros(self.calibration.n_sites, dtype=np.int64)
+        sample_counts = np.zeros(self._site_count, dtype=np.int64)
         saturated_sites: set[int] = set()
         for image in frames:
             saturated_sites.update(
@@ -786,13 +842,13 @@ class SlmFeedbackTask:
             )
             counts = extract_box_signals(
                 image,
-                self.calibration.site_map.centers_xy,
+                self._site_centers_xy,
                 radius=self.model.integration_half_width,
                 reducer=self.model.reducer,  # type: ignore[arg-type]
             )
             sample = (
                 np.asarray(counts, dtype=float)
-                - np.asarray(self.model.dark_mean, dtype=float)
+                - self._dark_mean
             )
             usable = np.isfinite(sample)
             if np.any(usable):
@@ -840,13 +896,13 @@ class SlmFeedbackTask:
         int,
     ]:
         for attempt in range(2):
-            mean = np.zeros(self.calibration.n_sites, dtype=float)
+            mean = np.zeros(self._site_count, dtype=float)
             m2 = np.zeros_like(mean)
             error = np.full_like(mean, np.nan)
             count = 0
             saturated: tuple[int, ...] = ()
             missing: tuple[int, ...] = ()
-            censored = tuple(range(self.calibration.n_sites))
+            censored = tuple(range(self._site_count))
             for batch in range(_COARSE_MAX_BATCHES):
                 batch_mean, batch_error, saturated, missing = self._measure(
                     pulse,
@@ -1088,7 +1144,7 @@ class SlmFeedbackTask:
                     )
                 else:
                     score = confidence_lower = confidence_upper = relative_sem = float("inf")
-                visibility = self.calibration.n_sites - len(censored_sites)
+                visibility = self._site_count - len(censored_sites)
                 visibility_margin = (
                     None
                     if saturated or missing
@@ -1101,7 +1157,7 @@ class SlmFeedbackTask:
                                     - 0.05
                                     / (
                                         2.0
-                                        * self.calibration.n_sites
+                                        * self._site_count
                                         * _COARSE_MAX_BATCHES
                                     )
                                 )
@@ -1315,13 +1371,13 @@ class SlmFeedbackTask:
                 )
             _check_cancelled(context)
             self._apply_exact(best_valid["phase"])
-            validation_mean = np.zeros(self.calibration.n_sites, dtype=float)
+            validation_mean = np.zeros(self._site_count, dtype=float)
             validation_m2 = np.zeros_like(validation_mean)
             validation_count = 0
             validation_error = np.full_like(validation_mean, np.nan)
             validation_estimate = validation_lower = validation_upper = float("inf")
             validation_relative_sem = float("inf")
-            validation_censored = tuple(range(self.calibration.n_sites))
+            validation_censored = tuple(range(self._site_count))
             validation_status = "inconclusive"
             validation_reason = "maximum validation shots reached"
             validation_started = time.monotonic()
