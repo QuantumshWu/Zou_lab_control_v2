@@ -80,6 +80,10 @@ class FigureViewerView(QtWidgets.QWidget):
         # that TaskConsole packages the whole board.
         self._dataset_bar = QtWidgets.QWidget(holder)
         self._dataset_bar.setStyleSheet("background: transparent;")
+        self._dataset_bar.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Fixed,
+        )
         bar_layout = QtWidgets.QHBoxLayout(self._dataset_bar)
         bar_layout.setContentsMargins(0, 0, 0, 0)
         bar_layout.setSpacing(window_pad(0.5))
@@ -114,7 +118,11 @@ class FigureViewerView(QtWidgets.QWidget):
         self.figure_card.set_live(False)
         self.figure_card.signal_picked.connect(self.dataset_picked)
         self.figure_card.hide()
-        self._surface_layout.addWidget(self.figure_card, 1)
+        self._surface_layout.addWidget(
+            self.figure_card,
+            0,
+            QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft,
+        )
         root.addWidget(holder, 1)
 
     def set_info(self, tabs: tuple[tuple[str, tuple[tuple[str, object], ...]], ...]) -> None:
@@ -182,6 +190,9 @@ class FigureViewerView(QtWidgets.QWidget):
 
     def set_figure_size(self, size: str) -> None:
         self.figure_card.set_panel_size(str(size))
+
+    def set_figure_title(self, title: str) -> None:
+        self.figure_card.set_title(str(title))
 
     def set_figure_surface(self, widget: QtWidgets.QWidget | None) -> None:
         if widget is not None and not isinstance(widget, QtWidgets.QWidget):

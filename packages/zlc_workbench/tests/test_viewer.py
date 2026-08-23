@@ -98,6 +98,7 @@ class _ViewerView:
         self.surface = None
         self.title = ""
         self.size = ""
+        self.figure_title = ""
         self.path = ""
         self.status: list[tuple[str, bool]] = []
         self.panel_sizes: tuple[str, ...] = ()
@@ -114,6 +115,9 @@ class _ViewerView:
 
     def set_figure_size(self, size: str) -> None:
         self.size = str(size)
+
+    def set_figure_title(self, title: str) -> None:
+        self.figure_title = str(title)
 
     def run_host_dialog(self, opener, host, *, title: str):
         return opener(host, None, title=title)

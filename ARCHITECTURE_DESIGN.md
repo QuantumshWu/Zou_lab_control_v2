@@ -177,6 +177,7 @@ Node new chunk
 - Timeout显示真实错误但不冻结UI；未确认前不能显示Safe。
 - Form reconcile必须按当前schema重建dependency graph。
 - PanelState decoder只接受当前完整grammar；owner wake和产品Figure save各只有一个实现。
+- FigureViewer与TaskConsole必须复用同一个`PanelCardView` frame owner、panel preset尺寸、title band、Setting按钮和body padding；Viewer只以saved/immutable状态隐藏无意义的remove动作。Viewer右栏的global action bar固定自身高度，Panel在其下方top-align，不能把剩余窗口高度塞进action bar或让同一2x2 card漂到中部；card title读取当前archive dataset的operator label。
 
 ## 7. Pulse、Camera、Remote与FPGA
 

@@ -112,6 +112,9 @@ class FigureViewerHandle(QtCore.QObject):
     def set_figure_size(self, size: str) -> None:
         self._view.set_figure_size(size)
 
+    def set_figure_title(self, title: str) -> None:
+        self._view.set_figure_title(title)
+
     def show_figure(self, host: Any | None) -> None:
         """Draw what this host is holding, or clear the page when None.
 

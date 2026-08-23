@@ -106,6 +106,7 @@
 - 后续adaptive gain/formal-update accounting与Curve hover/lock切分运行6个直接聚焦用例，结果`6 passed`；未重新运行100-shot验收。
 - 固定nearest清理运行standalone/facet artist、Workbench parameter surface及Fluent Setting/Edit四个聚焦用例，结果`4 passed`。
 - Device Control当前回归：Workbench完整`425 passed`；Runtime完整加Figure grammar `112 passed`；adapter/camera/scan受影响组`53 passed`；Device Control Qt、风险revision、refresh close guard、in-flight latest-only和demo直接证据均通过。Atom完整回归同时暴露并修复Temperature sibling event record、Feedback输出声明和三条terminal/Stop残余；100-shot virtual Feedback仍为既有`34/35`上限，未用放宽断言冒充通过。
+- FigureViewer/TaskConsole Panel parity已用同一current 2x2 Curve在两个真实窗口经Windows capture逐轮对照：两者card均为612×494逻辑像素、同一约50px title band与同一body frame；Viewer的dataset action bar改为固定高度，card从中部漂移改为紧随bar top-align，title从占位`figure`改为archive dataset label。zlc_ui完整回归`86 passed`，Viewer/Panel/Workbench contract聚焦`62 passed`。
 - 第一次installed software尝试曾在重负载下出现一次本地SLM测试TCP connect timeout；
   同一wheel的精确case随后连续5/5通过，第二次完整installed software lane通过，因此没有
   用该不可复现事件改动产品remote timeout或server逻辑。

@@ -406,6 +406,9 @@ class FigureViewerPresenter:
         description: ArchiveDescription,
     ) -> None:
         name, recipe, _viewport, host = candidate
+        self.view.set_figure_title(
+            dict(description.datasets).get(str(name), str(name) or "figure")
+        )
         self.view.show_figure(host)
         if recipe is not None:
             self.view.set_figure_size(str(recipe["size"]))
@@ -423,6 +426,11 @@ class FigureViewerPresenter:
             self.view.show_figure(previous)
             description = self.description
             if description is not None:
+                self.view.set_figure_title(
+                    dict(description.datasets).get(
+                        self.dataset, self.dataset or "figure"
+                    )
+                )
                 self.view.set_title(
                     description.name
                     or ("" if self.path is None else self.path.stem)

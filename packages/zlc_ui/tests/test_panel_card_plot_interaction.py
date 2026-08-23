@@ -376,7 +376,7 @@ assert card.minimumSizeHint().width() <= reserved.width()
 close_x = card.close_button.mapTo(band, QtCore.QPoint()).x()
 settings_x = card.settings_button.mapTo(band, QtCore.QPoint()).x()
 right_pad = band.width() - (close_x + card.close_button.width())
-top_pad = card.settings_button.y()
+top_pad = card.settings_button.mapTo(band, QtCore.QPoint()).y()
 assert right_pad == tested_module.CARD_TITLE_PAD, (right_pad, top_pad)
 assert abs((band.height() - card.settings_button.height()) // 2 - top_pad) <= 1
 assert card.settings_button.width() < tested_module.scaled_px(74, minimum=64)

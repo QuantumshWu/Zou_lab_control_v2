@@ -30,10 +30,21 @@ from zlc_ui.qt import ensure_qt_app
 app = ensure_qt_app(["figure-test"])
 view = FigureViewerView(); view.set_info((("Summary", (("Name", "fake"),)), ("Flow", ())))
 assert view.info_pane.path_edit._filter == "Saved figure archives (*.npz)"
+view.figure_card.set_size_choices(('2x2',), '2x2')
+view.set_datasets((('data', 'Camera frame'),), 'data')
 first = QtWidgets.QLabel("first"); second = QtWidgets.QLabel("second")
 view.set_figure_surface(first); view.set_figure_surface(first); view.set_figure_surface(second)
 assert view._figure_surface is second and first.parentWidget() is None
-view.show(); app.processEvents()
+view.resize(1200, 700); view.show(); app.processEvents()
+assert view._dataset_bar.height() == view._dataset_bar.sizeHint().height()
+expected_card_top = (
+    view._dataset_bar.geometry().bottom()
+    + 1
+    + view._surface_layout.spacing()
+)
+assert view.figure_card.geometry().top() == expected_card_top, (
+    view.figure_card.geometry(), view._dataset_bar.geometry(),
+)
 
 # Showing which file is open must not re-ask for it to be opened.
 committed = []; view.path_committed.connect(committed.append)
@@ -42,6 +53,8 @@ assert view.info_pane.path_edit.text() == "D:/data/2026_08_05/run.npz"
 assert committed == []
 
 handle = FigureViewerHandle(None, view)
+handle.set_figure_title('Camera frame')
+assert view.figure_card._base_title == 'Camera frame'
 tree = (("fit @3", (("roi @2", (("camera @1", ()),)),)),)
 handle.set_lineage_tree(tree)
 assert view._lineage_tree == tree

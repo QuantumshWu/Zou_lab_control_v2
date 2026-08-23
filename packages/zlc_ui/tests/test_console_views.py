@@ -155,7 +155,7 @@ print(zou_lab_control.__file__)
 from zlc_ui.console import panel_card_view as tested_module
 print(tested_module.__file__)
 from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
-from zlc_ui.fluent import FluentPopup
+from zlc_ui.fluent import GREY, RED, FluentPopup
 from zlc_ui.qt import ensure_qt_app
 PanelCardView = tested_module.PanelCardView
 app = ensure_qt_app(['test'])
@@ -180,10 +180,10 @@ card.state_changed.connect(lambda patch: events.append(('state', patch)))
 # second click inside the platform double-click interval removes the panel.
 QtTest.QTest.mouseClick(card.close_button, QtCore.Qt.LeftButton)
 assert events == []
-assert RED in card.close_button.styleSheet()
+assert RED.lower() in card.close_button.styleSheet().lower()
 QtTest.QTest.mouseClick(card.close_button, QtCore.Qt.LeftButton)
 assert events == [('remove',)]
-assert GREY in card.close_button.styleSheet()
+assert GREY.lower() in card.close_button.styleSheet().lower()
 # Edit and the explicit text Remove remain available in Setting as well.
 top_levels = {widget for widget in app.topLevelWidgets() if widget.isVisible()}
 shown_top_levels = []
