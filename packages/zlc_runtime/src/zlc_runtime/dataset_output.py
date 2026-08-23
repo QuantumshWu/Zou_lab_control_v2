@@ -76,6 +76,7 @@ class LiveDatasetOutput:
     run_record: Mapping[str, object] | None = None
     canonical_schema: DatasetSchema | None = None
     cell_origin: tuple[int, int] | None = None
+    event_record: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.declaration, DatasetOutputDeclaration):
@@ -86,6 +87,10 @@ class LiveDatasetOutput:
             raise TypeError("coverage must be DatasetCoverage or MonitorCoverage")
         if self.run_record is not None and not isinstance(self.run_record, Mapping):
             raise TypeError("run_record must be a mapping or None")
+        if self.event_record is not None and not isinstance(
+            self.event_record, Mapping
+        ):
+            raise TypeError("event_record must be a mapping or None")
         if (self.canonical_schema is None) != (self.cell_origin is None):
             raise ValueError(
                 "canonical_schema and cell_origin must be supplied together"

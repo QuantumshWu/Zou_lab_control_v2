@@ -52,18 +52,46 @@ def populate(view) -> None:
         if existing is not None:
             existing.restore()
             return
+        count = 4 if instance_id == "sensor-1" else 2
+        fields = {
+            "count": {
+                "current": count,
+                "desired": count,
+                "editable": True,
+                "live_apply": False,
+                "live_enabled": True,
+                "apply_enabled": False,
+                "status": "Ready",
+                "severity": "ready",
+                "reason": "",
+            },
+            "enabled": {
+                "current": True,
+                "desired": True,
+                "editable": True,
+                "live_apply": False,
+                "live_enabled": True,
+                "apply_enabled": False,
+                "status": "Ready",
+                "severity": "ready",
+                "reason": "",
+            },
+        }
         control = open_device_control(
             title=f"{instance_id} control",
             spec=spec,
-            values=(
-                ("count", 4 if instance_id == "sensor-1" else 2),
-                ("enabled", True),
-            ),
+            projection={
+                "owners": (),
+                "reason": "Offline fake device",
+                "risk_enabled": False,
+                "risk_accepted": False,
+                "fields": fields,
+            },
         )
         controls[instance_id] = control
-        control.field_committed.connect(
-            lambda key, name=instance_id, handle=control: print(
-                f"device_control_committed{(name, key, handle.read_values())!r}",
+        control.field_apply_requested.connect(
+            lambda key, value, name=instance_id: print(
+                f"device_control_apply_requested{(name, key, value)!r}",
                 flush=True,
             )
         )

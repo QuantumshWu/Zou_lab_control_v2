@@ -195,7 +195,11 @@ class SeamlessScanMeasurement:
                     companions = on_point(value, row=row_index, visit=visit) or {}
                     front.update(
                         {
-                            name: replace(output, run_record=run_record)
+                            name: replace(
+                                output,
+                                run_record=run_record,
+                                event_record=value.event_record,
+                            )
                             for name, output in companions.items()
                         }
                     )

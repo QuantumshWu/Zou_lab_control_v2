@@ -7,10 +7,11 @@ from dataclasses import dataclass
 import threading
 import time
 from typing import Callable
+from uuid import uuid4
 
 import numpy as np
 
-from zlc_atom.authoring import AuthoringField
+from zlc_atom.authoring import AuthoringField, TunableField
 from zlc_atom.devices.camera.contract import (
     CameraCaptureTerminalRecord,
     CameraFrameRecord,
@@ -68,11 +69,22 @@ class VirtualCamera:
         self._frame_source = frame_source
         self._free_running = bool(free_running)
         self._condition = threading.Condition()
+        self._device_session_id = uuid4().hex
+        self._settings_epoch = 0
         self._sensor_shape_yx = shape
         self._exposure_seconds = float(self.config.exposure_seconds)
         self._roi_xywh = (0, 0, shape[1], shape[0])
         self._queue: deque[CameraFrameRecord] = deque()
-        self._trigger_queue: deque[tuple[int, np.ndarray | None]] = deque()
+        self._trigger_queue: deque[
+            tuple[
+                int,
+                np.ndarray | None,
+                float,
+                tuple[int, int, int, int],
+                str,
+                int,
+            ]
+        ] = deque()
         self._armed = False
         self._accepting = False
         self._expected_frames: int | None = None
@@ -136,7 +148,9 @@ class VirtualCamera:
         with self._condition:
             if self._armed:
                 raise RuntimeError("virtual camera settings cannot change while armed")
-            self._exposure_seconds = exposure
+            if self._exposure_seconds != exposure:
+                self._exposure_seconds = exposure
+                self._settings_epoch += 1
         return self.working_point()
 
     def set_roi(
@@ -170,7 +184,7 @@ class VirtualCamera:
             self._roi_xywh = roi
         return self.working_point()
 
-    def tunable_fields(self) -> tuple[AuthoringField, ...]:
+    def tunable_fields(self) -> tuple[TunableField, ...]:
         """The runtime knobs this camera volunteers to a scan (duck-typed).
 
         Both bounds are declared because a scan plan must be refusable
@@ -178,23 +192,38 @@ class VirtualCamera:
         so tuning works while armed -- which is exactly when a scan needs it.
         """
 
+        with self._condition:
+            current = float(self._exposure_seconds)
         return (
-            AuthoringField(
-                "exposure_seconds",
-                "float",
-                "Exposure (s)",
-                # The LIVE exposure, not the one written down: this camera is
-                # tuned by a scan and by the bench window, and a field that
-                # answers with the authored value reports a setting the camera
-                # stopped using at the first move.
-                float(self._exposure_seconds),
-                minimum=1e-6,
-                maximum=10.0,
+            TunableField(
+                metadata=AuthoringField(
+                    "exposure_seconds",
+                    "float",
+                    "Exposure (s)",
+                    float(self.config.exposure_seconds),
+                    minimum=1e-6,
+                    maximum=10.0,
+                ),
+                current=current,
+                live_write=True,
+                dependency_group=("exposure_seconds",),
             ),
         )
 
-    def tune(self, name: str, value: float) -> None:
-        (field,) = self.tunable_fields()
+    def tunable_values(self) -> dict[str, float]:
+        with self._condition:
+            return {"exposure_seconds": float(self._exposure_seconds)}
+
+    def settings_provenance(self) -> dict[str, object]:
+        with self._condition:
+            return {
+                "device_session_id": self._device_session_id,
+                "settings_epoch": self._settings_epoch,
+            }
+
+    def tune(self, name: str, value: float) -> float:
+        (tunable,) = self.tunable_fields()
+        field = tunable.metadata
         if str(name) != field.name:
             raise ValueError(
                 f"virtual camera has no tunable field {name!r}; "
@@ -206,8 +235,11 @@ class VirtualCamera:
                 f"exposure_seconds must lie in [{field.minimum:g}, {field.maximum:g}]"
             )
         with self._condition:
-            self._exposure_seconds = exposure
-            self._condition.notify_all()
+            if exposure != self._exposure_seconds:
+                self._exposure_seconds = exposure
+                self._settings_epoch += 1
+                self._condition.notify_all()
+            return float(self._exposure_seconds)
 
     def arm(
         self,
@@ -281,14 +313,21 @@ class VirtualCamera:
                     if self._free_running:
                         if not self._accepting or stop.is_set():
                             break
-                        self._condition.wait(timeout=self._exposure_seconds)
+                        exposure = self._exposure_seconds
+                        roi = self._roi_xywh
+                        settings_session_id = self._device_session_id
+                        settings_epoch = self._settings_epoch
+                        deadline = time.monotonic() + exposure
+                        while self._accepting and not stop.is_set():
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                break
+                            self._condition.wait(timeout=remaining)
                         if not self._accepting or stop.is_set():
                             break
                         ordinal = self._next_ordinal
                         self._next_ordinal += 1
                         provided = None
-                        exposure = self._exposure_seconds
-                        roi = self._roi_xywh
                     else:
                         while (
                             not self._trigger_queue
@@ -297,9 +336,14 @@ class VirtualCamera:
                         ):
                             self._condition.wait()
                         if self._trigger_queue:
-                            ordinal, provided = self._trigger_queue.popleft()
-                            exposure = self._exposure_seconds
-                            roi = self._roi_xywh
+                            (
+                                ordinal,
+                                provided,
+                                exposure,
+                                roi,
+                                settings_session_id,
+                                settings_epoch,
+                            ) = self._trigger_queue.popleft()
                         elif not self._accepting or stop.is_set():
                             break
                         else:
@@ -350,6 +394,8 @@ class VirtualCamera:
                         None,
                         None,
                         time.time_ns(),
+                        settings_session_id=settings_session_id,
+                        settings_epochs=(settings_epoch,),
                     )
                     while len(self._queue) >= self._buffer_frame_count:
                         self._queue.popleft()
@@ -391,7 +437,14 @@ class VirtualCamera:
                 ordinal = self._next_ordinal
                 self._next_ordinal += 1
                 self._trigger_queue.append(
-                    (ordinal, None if frame is None else np.asarray(frame))
+                    (
+                        ordinal,
+                        None if frame is None else np.asarray(frame),
+                        self._exposure_seconds,
+                        self._roi_xywh,
+                        self._device_session_id,
+                        self._settings_epoch,
+                    )
                 )
                 self._triggered_count += 1
                 if (

@@ -21,6 +21,7 @@ from numbers import Integral
 import os
 from pathlib import Path
 import threading
+import time
 from typing import TYPE_CHECKING, Any
 
 from zlc_durable import atomic_write_bytes, day_folder, readable_json_bytes
@@ -376,6 +377,9 @@ class ExperimentSession:
         self._installation_revision = 0
         self._reconcile_lock = threading.RLock()
         self._recovery_installations: list[object] = []
+        self._device_setting_records: dict[
+            tuple[str, int], dict[str, object]
+        ] = {}
 
     # ---------------------------------------------------------------- devices
 
@@ -399,6 +403,117 @@ class ExperimentSession:
 
         with self._reconcile_lock:
             return self._installation_config
+
+    def record_device_tune(
+        self,
+        *,
+        device_key: str,
+        field: str,
+        requested: object,
+        previous_effective: object,
+        new_effective: object,
+        verified: bool,
+        before_provenance: Mapping[str, object],
+        after_provenance: Mapping[str, object],
+        previous_values: Mapping[str, object],
+        current_values: Mapping[str, object],
+        active_logic_owners: tuple[str, ...],
+    ) -> dict[str, object] | None:
+        """Record one worker-verified active-Logic delta without device I/O."""
+
+        before_session = str(
+            before_provenance.get("device_session_id", "")
+        ).strip()
+        after_session = str(
+            after_provenance.get("device_session_id", "")
+        ).strip()
+        before_epoch = before_provenance.get("settings_epoch")
+        after_epoch = after_provenance.get("settings_epoch")
+        if (
+            not before_session
+            or before_session != after_session
+            or type(before_epoch) is not int
+            or type(after_epoch) is not int
+            or before_epoch < 0
+            or after_epoch < before_epoch
+        ):
+            raise ValueError("device tune provenance is invalid")
+        owners = tuple(str(value) for value in active_logic_owners)
+        if not owners:
+            return None
+        timestamp = {
+            "device_key": str(device_key),
+            "monotonic_seconds": time.monotonic(),
+            "wall_time_seconds": time.time(),
+            "active_logic_owners": list(owners),
+        }
+        before_record = {
+            **timestamp,
+            "device_session_id": before_session,
+            "settings_epoch": before_epoch,
+            "current": {
+                str(name): value for name, value in previous_values.items()
+            },
+            "actor": "before_device_control_risk_override",
+        }
+        record = {
+            **timestamp,
+            "device_session_id": after_session,
+            "settings_epoch": after_epoch,
+            "current": {
+                str(name): value for name, value in current_values.items()
+            },
+            "field": str(field),
+            "requested": requested,
+            "previous_effective": previous_effective,
+            "new_effective": new_effective,
+            "verified": bool(verified),
+            "actor": "device_control_risk_override",
+        }
+        if previous_effective != new_effective:
+            with self._reconcile_lock:
+                self._device_setting_records.setdefault(
+                    (before_session, before_epoch), before_record
+                )
+                self._device_setting_records[(after_session, after_epoch)] = record
+        return record
+
+    def resolve_device_setting_records(
+        self, event_records: tuple[Mapping[str, object], ...]
+    ) -> list[dict[str, object]]:
+        """Expand only epochs named by an artifact's captured event lineage."""
+
+        referenced: dict[str, list[tuple[int, int]]] = {}
+        for event in event_records:
+            devices = event.get("device_settings", {})
+            if not isinstance(devices, Mapping):
+                continue
+            for raw in devices.values():
+                if not isinstance(raw, Mapping):
+                    continue
+                session_id = str(raw.get("device_session_id", "")).strip()
+                ranges = raw.get("epoch_ranges", ())
+                if not session_id or not isinstance(ranges, (tuple, list)):
+                    continue
+                for bounds in ranges:
+                    try:
+                        start, stop = tuple(int(value) for value in bounds)
+                    except (TypeError, ValueError):
+                        continue
+                    if start < 0 or stop < start:
+                        continue
+                    referenced.setdefault(session_id, []).append((start, stop))
+        with self._reconcile_lock:
+            return [
+                dict(record)
+                for (session_id, epoch), record in sorted(
+                    self._device_setting_records.items()
+                )
+                if any(
+                    start <= epoch <= stop
+                    for start, stop in referenced.get(session_id, ())
+                )
+            ]
 
     def _project_effective_installation_config(self) -> None:
         """Make the authored live baseline match the leaves still reachable."""

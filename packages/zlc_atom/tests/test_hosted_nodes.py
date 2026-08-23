@@ -554,6 +554,7 @@ def test_repeat_100_builds_only_one_cycle_per_camera_commit() -> None:
         actual_working_point=None,
         frame_value_unit=None,
         run_record={},
+        _camera_event_record=lambda _cycle, *, accumulate: {},
     )
     payload = 0
     for index in range(100):

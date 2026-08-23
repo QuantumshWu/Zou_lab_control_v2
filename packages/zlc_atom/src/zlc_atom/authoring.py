@@ -77,6 +77,37 @@ class AuthoringField:
 
 
 @dataclass(frozen=True)
+class TunableField:
+    """One runtime setting: stable form metadata beside current device truth."""
+
+    metadata: AuthoringField
+    current: Any
+    live_write: bool
+    dependency_group: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.metadata, AuthoringField):
+            raise TypeError("tunable metadata must be an AuthoringField")
+        if type(self.live_write) is not bool:
+            raise TypeError("tunable live_write must be bool")
+        group = tuple(str(name).strip() for name in self.dependency_group)
+        if (
+            not group
+            or any(not name for name in group)
+            or len(set(group)) != len(group)
+            or self.metadata.name not in group
+        ):
+            raise ValueError(
+                "tunable dependency_group must uniquely include its own field"
+            )
+        current = AuthoringSchema((self.metadata,)).project_values(
+            {self.metadata.name: self.current}
+        )[self.metadata.name]
+        object.__setattr__(self, "current", current)
+        object.__setattr__(self, "dependency_group", group)
+
+
+@dataclass(frozen=True)
 class AuthoringSchema:
     fields: tuple[AuthoringField, ...] = ()
     validator: Callable[[Mapping[str, Any]], None] | None = None
@@ -210,4 +241,4 @@ def _project_integer(value: object, *, label: str) -> int:
     raise TypeError(f"{label} must be an integer or decimal integer text")
 
 
-__all__ = ["AuthoringChoice", "AuthoringField", "AuthoringSchema"]
+__all__ = ["AuthoringChoice", "AuthoringField", "AuthoringSchema", "TunableField"]

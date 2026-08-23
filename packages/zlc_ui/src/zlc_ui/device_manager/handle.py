@@ -21,14 +21,25 @@ from .view import DeviceControlView, DeviceManagerView
 class DeviceControlHandle(QtCore.QObject):
     """The outside surface of one independent generic device window."""
 
-    field_committed = QtCore.pyqtSignal(str)
+    refresh_requested = QtCore.pyqtSignal()
+    risk_toggled = QtCore.pyqtSignal(bool)
+    field_desired_changed = QtCore.pyqtSignal(str, object)
+    field_live_apply_toggled = QtCore.pyqtSignal(str, bool)
+    field_apply_requested = QtCore.pyqtSignal(str, object)
     closed = QtCore.pyqtSignal()
 
     def __init__(self, window: Any, view: DeviceControlView) -> None:
         super().__init__()
         self._window = window
         self._view = view
-        view.field_committed.connect(self.field_committed)
+        for name in (
+            "refresh_requested",
+            "risk_toggled",
+            "field_desired_changed",
+            "field_live_apply_toggled",
+            "field_apply_requested",
+        ):
+            getattr(view, name).connect(getattr(self, name))
         if window is not None and hasattr(window, "closed"):
             window.closed.connect(self.closed)
 
@@ -55,15 +66,8 @@ class DeviceControlHandle(QtCore.QObject):
         target = self._window if self._window is not None else self._view
         return bool(target.isVisible())
 
-    def set_form(
-        self,
-        spec: object,
-        values: tuple[tuple[str, object], ...],
-    ) -> None:
-        self._view.set_form(spec, values)
-
-    def read_values(self) -> tuple[tuple[str, object], ...]:
-        return self._view.read_values()
+    def set_projection(self, spec: object, projection: object) -> None:
+        self._view.set_projection(spec, projection)
 
     def show_status(self, text: str, severity: str) -> None:
         self._view.show_status(text, severity)

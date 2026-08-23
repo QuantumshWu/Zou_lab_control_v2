@@ -22,9 +22,37 @@ class DeviceClaim:
     argument_name: str
     device_key: str
     device: object = field(compare=False)
+    protected_fields: tuple[str, ...] = ()
+    exclusive: bool = True
+
+    def __post_init__(self) -> None:
+        argument = str(self.argument_name).strip()
+        key = str(self.device_key).strip()
+        protected = tuple(str(value).strip() for value in self.protected_fields)
+        if not argument or not key:
+            raise ValueError("device claim requires argument and installed key")
+        if any(not value for value in protected):
+            raise ValueError("protected device fields must be non-empty text")
+        if len(set(protected)) != len(protected):
+            raise ValueError("protected device fields must be unique")
+        if type(self.exclusive) is not bool:
+            raise TypeError("device claim exclusive must be bool")
+        object.__setattr__(self, "argument_name", argument)
+        object.__setattr__(self, "device_key", key)
+        object.__setattr__(self, "protected_fields", protected)
 
 
 def _conflict(left: Sequence[DeviceClaim], right: Sequence[DeviceClaim]) -> bool:
+    return any(
+        first.exclusive
+        and second.exclusive
+        and (first.device is second.device or first.device_key == second.device_key)
+        for first in left
+        for second in right
+    )
+
+
+def _same_device(left: Sequence[DeviceClaim], right: Sequence[DeviceClaim]) -> bool:
     return any(
         first.device is second.device or first.device_key == second.device_key
         for first in left
@@ -133,6 +161,76 @@ class DeviceUseCoordinator:
         self._leases: dict[object, DeviceLease] = {}
         self._reservations: dict[object, LogicReservation] = {}
         self._maintenance: dict[object, DeviceMaintenance] = {}
+        self._device_owner_revisions: dict[str, int] = {}
+
+    def logic_owners(self, device_key: str) -> tuple[str, ...]:
+        key = str(device_key).strip()
+        if not key:
+            raise ValueError("logic owners require a device key")
+        with self._lock:
+            return tuple(
+                lease.label
+                for lease in self._leases.values()
+                if lease.kind == "logic"
+                and any(claim.device_key == key for claim in lease.claims)
+            )
+
+    def field_policy(
+        self,
+        device_key: str,
+        field_names: Sequence[str],
+        *,
+        dependency_groups: Sequence[Sequence[str]] = (),
+    ) -> tuple[int, tuple[str, ...], dict[str, tuple[str, ...]]]:
+        """Project active Logic blockers without changing exclusive admission."""
+
+        key = str(device_key).strip()
+        fields = tuple(str(value).strip() for value in field_names)
+        if not key or any(not value for value in fields):
+            raise ValueError("field policy requires a device key and field names")
+        if len(set(fields)) != len(fields):
+            raise ValueError("field policy field names must be unique")
+        neighbors: dict[str, set[str]] = {}
+        for raw_group in dependency_groups:
+            group = tuple(str(value).strip() for value in raw_group)
+            if any(not value for value in group):
+                raise ValueError("device field dependency names must be non-empty")
+            members = set(group)
+            for name in members:
+                neighbors.setdefault(name, set()).update(members - {name})
+
+        def closure(name: str) -> set[str]:
+            reached = {name}
+            pending = [name]
+            while pending:
+                current = pending.pop()
+                for dependency in neighbors.get(current, ()):
+                    if dependency not in reached:
+                        reached.add(dependency)
+                        pending.append(dependency)
+            return reached
+
+        with self._lock:
+            blockers: dict[str, list[str]] = {name: [] for name in fields}
+            requested = set(fields)
+            owners: list[str] = []
+            for lease in self._leases.values():
+                if lease.kind != "logic":
+                    continue
+                for claim in lease.claims:
+                    if claim.device_key != key:
+                        continue
+                    if lease.label not in owners:
+                        owners.append(lease.label)
+                    for protected in claim.protected_fields:
+                        for name in closure(protected) & requested:
+                            if lease.label not in blockers[name]:
+                                blockers[name].append(lease.label)
+            return (
+                self._device_owner_revisions.get(key, 0),
+                tuple(owners),
+                {name: tuple(labels) for name, labels in blockers.items()},
+            )
 
     def _maintenance_blockers(
         self, claims: Sequence[DeviceClaim]
@@ -160,16 +258,21 @@ class DeviceUseCoordinator:
             maintenance = self._maintenance_blockers(frozen)
             if maintenance:
                 raise DeviceUseBusy(maintenance)
-            active_blockers = tuple(
+            active_logic = tuple(
                 lease
                 for lease in self._leases.values()
-                if lease.owner is owner or _conflict(frozen, lease.claims)
+                if lease.kind == "logic"
+                and (lease.owner is owner or _conflict(frozen, lease.claims))
             )
             command_blockers = tuple(
-                lease for lease in active_blockers if lease.kind != "logic"
+                lease
+                for lease in self._leases.values()
+                if lease.kind != "logic"
+                and (lease.owner is owner or _same_device(frozen, lease.claims))
             )
             if command_blockers:
                 raise DeviceUseBusy(tuple(lease.label for lease in command_blockers))
+            active_blockers = active_logic
 
             replaced = tuple(
                 reservation
@@ -216,15 +319,73 @@ class DeviceUseCoordinator:
             blockers = self._maintenance_blockers(frozen) + tuple(
                 lease.label
                 for lease in self._leases.values()
-                if _conflict(frozen, lease.claims)
+                if _same_device(frozen, lease.claims)
             ) + tuple(
                 reservation.label
                 for reservation in self._reservations.values()
-                if _conflict(frozen, reservation.claims)
+                if _same_device(frozen, reservation.claims)
             )
             if blockers:
                 raise DeviceUseBusy(blockers)
             lease = DeviceLease(self, owner, label, "command", frozen, None)
+            self._leases[owner] = lease
+            return lease
+
+    def acquire_field_command(
+        self,
+        owner: object,
+        label: str,
+        claim: DeviceClaim,
+        *,
+        dependency_groups: Sequence[Sequence[str]] = (),
+        expected_owner_revision: int,
+        allow_while_logic: bool,
+    ) -> DeviceLease:
+        """Acquire one unclaimed field while an unrelated Logic may stay active."""
+
+        if not isinstance(claim, DeviceClaim) or len(claim.protected_fields) != 1:
+            raise TypeError("field command requires one DeviceClaim protected field")
+        if type(expected_owner_revision) is not int or expected_owner_revision < 0:
+            raise TypeError("expected owner revision must be a non-negative integer")
+        if type(allow_while_logic) is not bool:
+            raise TypeError("allow_while_logic must be bool")
+        field = claim.protected_fields[0]
+        with self._lock:
+            if owner in self._leases:
+                raise DeviceUseBusy((self._leases[owner].label,))
+            maintenance = self._maintenance_blockers((claim,))
+            if maintenance:
+                raise DeviceUseBusy(maintenance)
+            revision, owners, policy = self.field_policy(
+                claim.device_key,
+                (field,),
+                dependency_groups=dependency_groups,
+            )
+            if revision != expected_owner_revision:
+                raise DeviceUseBusy(("device owners changed; review access again",))
+            if policy[field]:
+                raise DeviceUseBusy(policy[field])
+            if owners and not allow_while_logic:
+                raise DeviceUseBusy(owners)
+            blockers = tuple(
+                lease.label
+                for lease in self._leases.values()
+                if lease.kind != "logic" and _conflict((claim,), lease.claims)
+            ) + tuple(
+                reservation.label
+                for reservation in self._reservations.values()
+                if _same_device((claim,), reservation.claims)
+            )
+            if blockers:
+                raise DeviceUseBusy(blockers)
+            lease = DeviceLease(
+                self,
+                owner,
+                label,
+                "field_command",
+                (claim,),
+                None,
+            )
             self._leases[owner] = lease
             return lease
 
@@ -249,7 +410,11 @@ class DeviceUseCoordinator:
                 lease.label
                 for lease in self._leases.values()
                 if lease.owner is reservation.owner
-                or _conflict(reservation.claims, lease.claims)
+                or (
+                    _conflict(reservation.claims, lease.claims)
+                    if lease.kind == "logic"
+                    else _same_device(reservation.claims, lease.claims)
+                )
             )
             if blockers:
                 raise DeviceUseBusy(blockers)
@@ -264,6 +429,10 @@ class DeviceUseCoordinator:
                 reservation.stop,
             )
             self._leases[reservation.owner] = lease
+            for key in _claims_keys(lease.claims):
+                self._device_owner_revisions[key] = (
+                    self._device_owner_revisions.get(key, 0) + 1
+                )
             return lease
 
     def _abort(self, reservation: LogicReservation) -> bool:
@@ -279,6 +448,11 @@ class DeviceUseCoordinator:
             if self._leases.get(lease.owner) is not lease:
                 return False
             self._leases.pop(lease.owner)
+            if lease.kind == "logic":
+                for key in _claims_keys(lease.claims):
+                    self._device_owner_revisions[key] = (
+                        self._device_owner_revisions.get(key, 0) + 1
+                    )
             self._condition.notify_all()
             return True
 

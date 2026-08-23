@@ -203,6 +203,11 @@ class ExperimentGuiFlow:
         self._device_worker_run = None
         self._device_worker_close = None
         self._device_tune_active: str | None = None
+        self._device_tune_pending: dict[tuple[str, str], object] = {}
+        self._device_control_models: dict[str, dict[str, object]] = {}
+        self._device_control_risk: dict[str, tuple[str, int] | None] = {}
+        self._device_refresh_active: set[str] = set()
+        self._device_refresh_pending: set[str] = set()
         self._device_shutdown_pending = False
 
     def open(self) -> "ExperimentGuiFlow":
@@ -273,7 +278,7 @@ class ExperimentGuiFlow:
                 request_close=self._console_owner_ready,
             )
             timer = attach_qt(
-                presenter.beat,
+                self._beat,
                 interval_ms=_beat_interval_ms(presenter),
             )
             console.presenter = presenter
@@ -298,6 +303,12 @@ class ExperimentGuiFlow:
         # way to reach a camera's gain without shutting the experiment down.
         # TaskConsole comes up in front; device controls remain on demand.
         self.devices.send_behind()
+
+    def _beat(self) -> None:
+        presenter = self.console_presenter
+        if presenter is not None:
+            presenter.beat()
+        self._refresh_device_control_policies()
 
     def open_device_control(self, instance_id: str) -> object:
         """Open or raise the one control window for a loaded named device."""
@@ -336,6 +347,13 @@ class ExperimentGuiFlow:
             if self.device_controls.get(key) is control:
                 self.device_controls.pop(key, None)
                 self._device_control_devices.pop(key, None)
+                self._device_control_models.pop(key, None)
+                self._device_control_risk.pop(key, None)
+                self._device_refresh_active.discard(key)
+                self._device_refresh_pending.discard(key)
+                for pending in tuple(self._device_tune_pending):
+                    if pending[0] == key:
+                        self._device_tune_pending.pop(pending, None)
 
         control.closed.connect(released)
         return control
@@ -344,125 +362,521 @@ class ExperimentGuiFlow:
         from zlc_atom.authoring import AuthoringSchema
         from zlc_ui import open_device_control
 
-        from ..authoring_form import display_value, project_schema
-        from ..device_use import DeviceClaim, DeviceUseBusy
+        from ..authoring_form import project_schema
 
         session = self.session
         if session is None:
             raise RuntimeError("initialize devices before opening a control")
-        declare = getattr(device, "tunable_fields", None)
-        tune = getattr(device, "tune", None)
-        fields = tuple(declare()) if callable(declare) and callable(tune) else ()
+        empty_spec = project_schema(AuthoringSchema(()))
         control = open_device_control(
             title=f"{key} control",
-            spec=project_schema(AuthoringSchema(fields)),
-            values=tuple(
-                (field.name, display_value(field.default)) for field in fields
-            ),
+            spec=empty_spec,
+            projection={
+                "owners": (),
+                "reason": "Reading device settings",
+                "risk_enabled": False,
+                "risk_accepted": False,
+                "fields": {},
+            },
         )
-
-        def refresh(
-            current: tuple[object, ...],
-            message: str = "",
-            severity: str = "idle",
-        ) -> None:
-            nonlocal fields
-            fields = tuple(current)
-            control.set_form(
-                project_schema(AuthoringSchema(fields)),
-                tuple(
-                    (field.name, display_value(field.default)) for field in fields
-                ),
+        self._device_control_models[key] = {
+            "device": device,
+            "control": control,
+            "spec": empty_spec,
+            "tunables": (),
+            "current": {},
+            "desired": {},
+            "live": {},
+            "status": {},
+            "device_session_id": "",
+        }
+        self._device_control_risk[key] = None
+        control.refresh_requested.connect(
+            lambda selected=key: self._request_device_control_refresh(selected)
+        )
+        control.risk_toggled.connect(
+            lambda accepted, selected=key: self._set_device_control_risk(
+                selected, accepted
             )
-            control.show_status(
-                message or ("ready" if current else "No runtime controls"),
-                severity,
+        )
+        control.field_desired_changed.connect(
+            lambda field, value, selected=key: self._set_device_control_desired(
+                selected, field, value
             )
-
-        def commit(field_name: str) -> None:
-            active = self._device_tune_active
-            if active is not None:
-                control.show_status(
-                    f"{active} tune is still running; this edit was not queued",
-                    "warning",
-                )
-                return
-            try:
-                wanted = dict(control.read_values())
-                lease = session.device_use.acquire_command(
-                    control,
-                    f"{key} control",
-                    (DeviceClaim(key, key, device),),
-                )
-            except DeviceUseBusy as error:
-                try:
-                    refresh(fields, str(error), "warning")
-                except Exception as refresh_error:
-                    control.show_status(str(refresh_error), "error")
-                return
-            except Exception as error:
-                control.show_status(str(error), "error")
-                return
-            run = self._device_worker_run
-            if run is None:
-                lease.release()
-                control.show_status("device tune worker is closed", "error")
-                return
-            name = str(field_name)
-            try:
-                value = wanted[name]
-            except KeyError:
-                lease.release()
-                control.show_status(f"unknown runtime field {name!r}", "error")
-                return
-            self._device_tune_active = key
-            control.show_status(f"applying {name}", "task")
-
-            def work() -> tuple[object, ...]:
-                tune(name, value)
-                return tuple(declare())
-
-            def finish(current: tuple[object, ...] | None, error: BaseException | None) -> None:
-                try:
-                    lease.release()
-                finally:
-                    self._device_tune_active = None
-                try:
-                    refresh(
-                        fields if current is None else current,
-                        str(error) if error is not None else f"{name} applied",
-                        "error" if error is not None else "task",
-                    )
-                except Exception as refresh_error:
-                    control.show_status(str(refresh_error), "error")
-
-            try:
-                run(
-                    work,
-                    lambda current: finish(tuple(current), None),
-                    lambda error: finish(None, error),
-                )
-            except BaseException as error:
-                finish(None, error)
-
-        control.field_committed.connect(commit)
-        control.show_status("ready" if fields else "No runtime controls", "idle")
+        )
+        control.field_live_apply_toggled.connect(
+            lambda field, enabled, selected=key: self._set_device_control_live(
+                selected, field, enabled
+            )
+        )
+        control.field_apply_requested.connect(
+            lambda field, value, selected=key: self._queue_device_tune(
+                selected, field, value
+            )
+        )
+        self._request_device_control_refresh(key)
         control.set_close_guard(
             lambda: self._generic_control_close_guard(key, control)
         )
         return control
 
+    def _request_device_control_refresh(self, key: str) -> None:
+        from zlc_atom.authoring import AuthoringSchema, TunableField
+        from ..authoring_form import project_schema
+
+        key = str(key)
+        model = self._device_control_models.get(key)
+        run = self._device_worker_run
+        if model is None or run is None:
+            return
+        if key in self._device_refresh_active:
+            self._device_refresh_pending.add(key)
+            return
+        self._device_refresh_active.add(key)
+        device = model["device"]
+        control = model["control"]
+        control.show_status("refreshing device settings", "task")
+
+        def work() -> tuple[tuple[object, ...], dict[str, object], dict[str, object]]:
+            declare = getattr(device, "tunable_fields", None)
+            if not callable(declare):
+                return (), {}, {}
+            fields = tuple(declare())
+            if any(not isinstance(field, TunableField) for field in fields):
+                raise TypeError("device tunable_fields must contain TunableField values")
+            tune = getattr(device, "tune", None)
+            provenance_reader = getattr(device, "settings_provenance", None)
+            if fields and (not callable(tune) or not callable(provenance_reader)):
+                raise TypeError(
+                    "a tunable device must provide tune and settings_provenance"
+                )
+            current = {
+                field.metadata.name: field.current for field in fields
+            }
+            provenance = {} if not fields else dict(provenance_reader())
+            names = tuple(field.metadata.name for field in fields)
+            if set(current) != set(names):
+                raise ValueError("tunable current values differ from field metadata")
+            session_id = str(provenance.get("device_session_id", "")).strip()
+            epoch = provenance.get("settings_epoch")
+            if fields and (
+                not session_id or type(epoch) is not int or epoch < 0
+            ):
+                raise ValueError("device settings provenance is invalid")
+            return fields, current, provenance
+
+        def settled() -> None:
+            self._device_refresh_active.discard(key)
+            if key in self._device_refresh_pending:
+                self._device_refresh_pending.discard(key)
+                if key in self._device_control_models:
+                    self._request_device_control_refresh(key)
+
+        def finish(result: object) -> None:
+            current_model = self._device_control_models.get(key)
+            if current_model is not model or self.device_controls.get(str(key)) is not control:
+                settled()
+                return
+            try:
+                fields, current, provenance = result
+                names = tuple(field.metadata.name for field in fields)
+                session_id = (
+                    "" if not fields else str(provenance["device_session_id"])
+                )
+                epoch = 0 if not fields else int(provenance["settings_epoch"])
+                previous_session = str(model.get("device_session_id", ""))
+                model["tunables"] = fields
+                model["current"] = current
+                model["spec"] = project_schema(
+                    AuthoringSchema(tuple(field.metadata for field in fields))
+                )
+                if previous_session != session_id:
+                    model["desired"] = dict(current)
+                    model["live"] = {name: False for name in names}
+                    self._device_control_risk[key] = None
+                else:
+                    desired = dict(model.get("desired", {}))
+                    model["desired"] = {
+                        name: desired.get(name, current[name]) for name in names
+                    }
+                    live = dict(model.get("live", {}))
+                    model["live"] = {
+                        name: bool(live.get(name, False)) for name in names
+                    }
+                model["device_session_id"] = session_id
+                model["settings_epoch"] = epoch
+                model["status"] = {}
+                self._project_device_control(key)
+                control.show_status(
+                    "ready" if fields else "No runtime controls", "idle"
+                )
+            except BaseException as error:
+                control.show_status(str(error), "error")
+            finally:
+                settled()
+
+        def failed(error: BaseException) -> None:
+            if self._device_control_models.get(key) is model:
+                control.show_status(str(error), "error")
+            settled()
+
+        try:
+            run(work, finish, failed)
+        except BaseException as error:
+            failed(error)
+
+    def _device_control_projection(self, key: str) -> dict[str, object]:
+        model = self._device_control_models[str(key)]
+        session = self.session
+        if session is None:
+            raise RuntimeError("device session is closed")
+        tunables = tuple(model.get("tunables", ()))
+        names = tuple(field.metadata.name for field in tunables)
+        groups = tuple(field.dependency_group for field in tunables)
+        revision, owners, blockers = session.device_use.field_policy(
+            key, names, dependency_groups=groups
+        )
+        session_id = str(model.get("device_session_id", ""))
+        accepted = self._device_control_risk.get(key) == (session_id, revision)
+        if not owners or not accepted:
+            if not owners:
+                self._device_control_risk[key] = None
+            accepted = False
+        risk_possible = bool(owners) and any(
+            not blockers[field.metadata.name] and field.live_write
+            for field in tunables
+        )
+        if accepted and not risk_possible:
+            self._device_control_risk[key] = None
+            accepted = False
+        current = dict(model.get("current", {}))
+        desired = dict(model.get("desired", {}))
+        live_values = dict(model.get("live", {}))
+        statuses = dict(model.get("status", {}))
+        active = str(self._device_tune_active or "")
+        fields: dict[str, object] = {}
+        for tunable in tunables:
+            name = tunable.metadata.name
+            protected = tuple(blockers[name])
+            if protected:
+                editable = False
+                reason = "Protected by " + ", ".join(protected)
+            elif owners and not tunable.live_write:
+                editable = False
+                reason = "Stop the active Logic; this field is not live-writable"
+            elif owners and not accepted:
+                editable = False
+                reason = "Accept risk to edit this unclaimed live-safe field"
+            else:
+                editable = True
+                reason = ""
+            applying = active == f"{key}:{name}"
+            queued = (key, name) in self._device_tune_pending
+            status, severity = statuses.get(
+                name,
+                (
+                    ("Applying; latest queued", "task") if applying and queued else
+                    ("Applying", "task") if applying else
+                    ("Queued latest", "task") if queued else
+                    ("Protected", "warning") if not editable else
+                    ("Ready", "ready")
+                ),
+            )
+            fields[name] = {
+                "current": current.get(name),
+                "desired": desired.get(name, current.get(name)),
+                "editable": editable,
+                "live_apply": bool(live_values.get(name, False)),
+                "live_enabled": editable and tunable.live_write,
+                "apply_enabled": (
+                    editable
+                    and not applying
+                    and desired.get(name, current.get(name)) != current.get(name)
+                ),
+                "status": status,
+                "severity": severity,
+                "reason": reason,
+            }
+        return {
+            "owners": owners,
+            "reason": (
+                "No active Logic uses this device"
+                if not owners else
+                "Risk acceptance applies only to unclaimed live-safe fields"
+            ),
+            "risk_enabled": risk_possible,
+            "risk_accepted": accepted,
+            "fields": fields,
+            "owner_revision": revision,
+        }
+
+    def _project_device_control(self, key: str) -> None:
+        model = self._device_control_models.get(str(key))
+        if model is None:
+            return
+        model["control"].set_projection(
+            model["spec"], self._device_control_projection(str(key))
+        )
+
+    def _refresh_device_control_policies(self) -> None:
+        for key in tuple(self._device_control_models):
+            projection = self._device_control_projection(key)
+            for pending in tuple(self._device_tune_pending):
+                if pending[0] != key:
+                    continue
+                field = projection["fields"].get(pending[1])
+                if not isinstance(field, dict) or not field.get("editable"):
+                    self._device_tune_pending.pop(pending, None)
+                    self._device_control_models[key]["status"] = {
+                        pending[1]: ("Cancelled because field ownership changed", "warning")
+                    }
+            self._project_device_control(key)
+
+    def _set_device_control_risk(self, key: str, accepted: bool) -> None:
+        model = self._device_control_models.get(str(key))
+        session = self.session
+        if model is None or session is None:
+            return
+        if accepted:
+            projection = self._device_control_projection(str(key))
+            self._device_control_risk[str(key)] = (
+                str(model.get("device_session_id", "")),
+                int(projection["owner_revision"]),
+            )
+        else:
+            self._device_control_risk[str(key)] = None
+        self._project_device_control(str(key))
+
+    def _set_device_control_desired(
+        self, key: str, field: str, value: object
+    ) -> None:
+        model = self._device_control_models.get(str(key))
+        if model is None or str(field) not in dict(model.get("current", {})):
+            return
+        desired = dict(model.get("desired", {}))
+        desired[str(field)] = value
+        model["desired"] = desired
+        self._project_device_control(str(key))
+
+    def _set_device_control_live(
+        self, key: str, field: str, enabled: bool
+    ) -> None:
+        model = self._device_control_models.get(str(key))
+        if model is None:
+            return
+        live = dict(model.get("live", {}))
+        live[str(field)] = bool(enabled)
+        model["live"] = live
+
+    def _queue_device_tune(self, key: str, field: str, requested: object) -> None:
+        key, field = str(key), str(field)
+        model = self._device_control_models.get(key)
+        if model is None:
+            return
+        projection = self._device_control_projection(key)
+        selected = projection["fields"].get(field)
+        if not isinstance(selected, dict) or not selected.get("editable"):
+            model["status"] = {field: (str(selected.get("reason", "Field is locked")) if isinstance(selected, dict) else "Unknown field", "warning")}
+            self._project_device_control(key)
+            return
+        if self._device_tune_active is not None:
+            self._device_tune_pending[(key, field)] = requested
+            model["desired"][field] = requested
+            model["control"].show_status(
+                f"queued latest {field}", "task"
+            )
+            self._project_device_control(key)
+            return
+        self._start_device_tune(key, field, requested)
+
+    def _start_device_tune(self, key: str, field: str, requested: object) -> None:
+        from zlc_atom.authoring import AuthoringSchema, TunableField
+        from ..authoring_form import project_schema
+        from ..device_use import DeviceClaim
+
+        model = self._device_control_models[key]
+        session = self.session
+        run = self._device_worker_run
+        if session is None or run is None:
+            model["control"].show_status("device tune worker is closed", "error")
+            return
+        tunables = {item.metadata.name: item for item in model["tunables"]}
+        try:
+            tunable = tunables[field]
+            projection = self._device_control_projection(key)
+            selected = projection["fields"].get(field)
+            if not isinstance(selected, dict) or not selected.get("editable"):
+                reason = (
+                    selected.get("reason", "Field is locked")
+                    if isinstance(selected, dict)
+                    else "Unknown field"
+                )
+                raise RuntimeError(str(reason))
+            owners = tuple(projection["owners"])
+            lease = session.device_use.acquire_field_command(
+                model["control"],
+                f"{key} control {field}",
+                DeviceClaim(key, key, model["device"], (field,)),
+                dependency_groups=tuple(
+                    item.dependency_group for item in tunables.values()
+                ),
+                expected_owner_revision=int(projection["owner_revision"]),
+                allow_while_logic=bool(owners and tunable.live_write),
+            )
+        except Exception as error:
+            model["status"] = {field: (str(error), "warning")}
+            model["control"].show_status(str(error), "warning")
+            self._project_device_control(key)
+            return
+        self._device_tune_active = f"{key}:{field}"
+        model["status"] = {field: ("Applying", "task")}
+        model["control"].show_status(f"applying {field}", "task")
+        self._project_device_control(key)
+        device = model["device"]
+        with_logic = bool(owners)
+
+        def work() -> dict[str, object]:
+            declared_before = tuple(device.tunable_fields())
+            if any(not isinstance(item, TunableField) for item in declared_before):
+                raise TypeError("device tunable_fields must contain TunableField values")
+            current_tunable = {
+                item.metadata.name: item for item in declared_before
+            }.get(field)
+            if current_tunable is None:
+                raise ValueError(f"device no longer declares field {field!r}")
+            if with_logic and not current_tunable.live_write:
+                raise RuntimeError(
+                    "field stopped being live-writable while Logic owns the device"
+                )
+            before = {
+                item.metadata.name: item.current for item in declared_before
+            }
+            before_provenance = dict(device.settings_provenance())
+            effective = device.tune(field, requested)
+            declared_after = tuple(device.tunable_fields())
+            if any(not isinstance(item, TunableField) for item in declared_after):
+                raise TypeError("device tunable_fields must contain TunableField values")
+            after = {
+                item.metadata.name: item.current for item in declared_after
+            }
+            after_provenance = dict(device.settings_provenance())
+            if after.get(field) != effective:
+                raise RuntimeError("device tune return differs from authoritative readback")
+            before_session = str(
+                before_provenance.get("device_session_id", "")
+            ).strip()
+            after_session = str(
+                after_provenance.get("device_session_id", "")
+            ).strip()
+            before_epoch = before_provenance.get("settings_epoch")
+            after_epoch = after_provenance.get("settings_epoch")
+            if (
+                not before_session
+                or before_session != after_session
+                or type(before_epoch) is not int
+                or type(after_epoch) is not int
+                or before_epoch < 0
+            ):
+                raise RuntimeError("device settings provenance changed identity")
+            expected_epoch = before_epoch + int(before[field] != effective)
+            if after_epoch != expected_epoch:
+                raise RuntimeError(
+                    "device settings epoch does not match the effective change"
+                )
+            return {
+                "previous": before[field],
+                "before": before,
+                "effective": effective,
+                "current": after,
+                "tunables": declared_after,
+                "before_provenance": before_provenance,
+                "provenance": after_provenance,
+            }
+
+        def finish(result: dict[str, object] | None, error: BaseException | None) -> None:
+            finish_error = error
+            try:
+                if result is not None:
+                    session.record_device_tune(
+                        device_key=key,
+                        field=field,
+                        requested=requested,
+                        previous_effective=result["previous"],
+                        new_effective=result["effective"],
+                        verified=True,
+                        before_provenance=result["before_provenance"],
+                        after_provenance=result["provenance"],
+                        previous_values=result["before"],
+                        current_values=result["current"],
+                        active_logic_owners=owners,
+                    )
+            except BaseException as provenance_error:
+                finish_error = provenance_error
+            finally:
+                lease.release()
+                self._device_tune_active = None
+            if result is None or finish_error is not None:
+                model["status"] = {field: (str(finish_error), "error")}
+                model["control"].show_status(str(finish_error), "error")
+            else:
+                model["current"] = dict(result["current"])
+                model["tunables"] = tuple(result["tunables"])
+                model["spec"] = project_schema(
+                    AuthoringSchema(
+                        tuple(item.metadata for item in model["tunables"])
+                    )
+                )
+                if (key, field) not in self._device_tune_pending:
+                    model["desired"][field] = result["effective"]
+                model["device_session_id"] = str(
+                    result["provenance"]["device_session_id"]
+                )
+                model["settings_epoch"] = int(
+                    result["provenance"]["settings_epoch"]
+                )
+                model["status"] = {field: ("Applied", "ready")}
+                model["control"].show_status(f"applied {field}", "idle")
+            self._project_device_control(key)
+            self._drain_device_tune_pending()
+
+        try:
+            run(
+                work,
+                lambda result: finish(dict(result), None),
+                lambda error: finish(None, error),
+            )
+        except BaseException as error:
+            finish(None, error)
+
+    def _drain_device_tune_pending(self) -> None:
+        if self._device_tune_active is not None or not self._device_tune_pending:
+            return
+        (key, field), requested = next(iter(self._device_tune_pending.items()))
+        self._device_tune_pending.pop((key, field), None)
+        if key in self._device_control_models:
+            self._queue_device_tune(key, field, requested)
+
     def _generic_control_close_guard(self, key: str, control: object) -> bool:
-        if self._device_tune_active != str(key):
+        if str(key) in self._device_refresh_active:
+            control.show_status("device refresh is still running", "warning")
+            return False
+        active = str(self._device_tune_active or "")
+        if not active.startswith(f"{str(key)}:"):
             return True
         control.show_status("device tune is still running", "warning")
         return False
 
     def _device_tune_idle(self) -> bool:
+        if self._device_refresh_active:
+            key = next(iter(self._device_refresh_active))
+            control = self.device_controls.get(key)
+            if control is not None:
+                control.show_status("device refresh is still running", "warning")
+            return False
         active = self._device_tune_active
         if active is None:
             return True
-        control = self.device_controls.get(active)
+        control = self.device_controls.get(str(active).partition(":")[0])
         if control is not None:
             control.show_status("device tune is still running", "warning")
         return False
@@ -492,6 +906,13 @@ class ExperimentGuiFlow:
                     raise RuntimeError(f"{key} control refused to close")
                 self.device_controls.pop(key, None)
                 self._device_control_devices.pop(key, None)
+                self._device_control_models.pop(key, None)
+                self._device_control_risk.pop(key, None)
+                self._device_refresh_active.discard(key)
+                self._device_refresh_pending.discard(key)
+                for pending in tuple(self._device_tune_pending):
+                    if pending[0] == key:
+                        self._device_tune_pending.pop(pending, None)
 
     def _prepare_session_reconcile(
         self,

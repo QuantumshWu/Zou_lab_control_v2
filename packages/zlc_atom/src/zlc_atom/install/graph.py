@@ -282,9 +282,10 @@ class Installation:
 def tunable_devices(installation: Installation) -> dict[str, object]:
     """Every installed device that volunteers scan-tunable fields, by key.
 
-    A device volunteers by exposing ``tunable_fields()`` -- authoring fields
-    whose bounds are BOTH declared, because an unbounded knob is not
-    scannable -- and ``tune(name, value)`` to move one of them at runtime.
+    A device volunteers by exposing ``tunable_fields()`` -- ``TunableField``
+    values which keep stable form metadata separate from current device truth
+    -- and ``tune(name, value)`` to move one at runtime and return its effective
+    value.
     Duck-typed like the optional ``close``: a device without runtime knobs
     simply does not appear, which is an honest absence rather than a stub.
     """

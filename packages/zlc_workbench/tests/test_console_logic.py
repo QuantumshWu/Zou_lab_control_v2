@@ -447,7 +447,11 @@ def test_named_device_options_and_build_resolution_use_compatible_instances() ->
         )
 
 
-def _claim_descriptor(api_name: str, *capabilities: str):
+def _claim_descriptor(
+    api_name: str,
+    *capabilities: str,
+    protected_fields: tuple[str, ...] = (),
+):
     from zlc_atom.authoring import AuthoringSchema
     from zlc_atom.nodes import (
         DeviceRequirement,
@@ -473,11 +477,106 @@ def _claim_descriptor(api_name: str, *capabilities: str):
         NodeKind.MEASUREMENT,
         AuthoringSchema(),
         device_requirements=tuple(
-            DeviceRequirement(token, f"device_{index}")
+            DeviceRequirement(
+                token,
+                f"device_{index}",
+                protected_fields if index == 0 else (),
+            )
             for index, token in enumerate(requested)
         ),
         build=build,
     )
+
+
+def test_logic_claim_carries_descriptor_protected_fields(presenter) -> None:
+    descriptor = _claim_descriptor(
+        "protected",
+        protected_fields=("exposure_seconds", "roi_x"),
+    )
+    presenter.catalog = LogicCatalog((descriptor,))
+    node_id = presenter.add_logic("protected")
+
+    assert presenter.start_logic(node_id) is True
+    revision, owners, policy = presenter.session.device_use.field_policy(
+        "camera",
+        ("exposure_seconds", "gain_db", "roi_width"),
+        dependency_groups=(("roi_x", "roi_width"),),
+    )
+    assert revision > 0
+    assert owners == (node_id,)
+    assert policy == {
+        "exposure_seconds": (node_id,),
+        "gain_db": (),
+        "roi_width": (node_id,),
+    }
+
+
+def test_device_setting_history_records_only_worker_verified_active_changes(
+    session,
+) -> None:
+    from zlc_workbench.device_use import DeviceClaim
+
+    device = session.installation.device("camera")
+    lease = session.device_use.prepare_logic(
+        object(),
+        "camera measurement",
+        (DeviceClaim("camera", "camera", device, ("exposure_seconds",)),),
+        stop=lambda _reason: None,
+        superseded=lambda: None,
+    ).commit()
+    session.record_device_tune(
+        device_key="camera",
+        field="gain_db",
+        requested=8.0,
+        previous_effective=6.0,
+        new_effective=8.0,
+        verified=True,
+        before_provenance={
+            "device_session_id": "camera-session",
+            "settings_epoch": 0,
+        },
+        after_provenance={
+            "device_session_id": "camera-session",
+            "settings_epoch": 1,
+        },
+        previous_values={"gain_db": 6.0},
+        current_values={"gain_db": 8.0},
+        active_logic_owners=("camera measurement",),
+    )
+    event = {
+        "device_settings": {
+            "camera": {
+                "device_session_id": "camera-session",
+                "epoch_ranges": [[0, 1]],
+                "mixed": True,
+            }
+        }
+    }
+    records = session.resolve_device_setting_records((event,))
+    assert [record["settings_epoch"] for record in records] == [0, 1]
+    assert records[1]["requested"] == 8.0
+
+    lease.release()
+    assert session.record_device_tune(
+        device_key="camera",
+        field="gain_db",
+        requested=10.0,
+        previous_effective=8.0,
+        new_effective=10.0,
+        verified=True,
+        before_provenance={
+            "device_session_id": "camera-session",
+            "settings_epoch": 1,
+        },
+        after_provenance={
+            "device_session_id": "camera-session",
+            "settings_epoch": 2,
+        },
+        previous_values={"gain_db": 8.0},
+        current_values={"gain_db": 10.0},
+        active_logic_owners=(),
+    ) is None
+    assert session.resolve_device_setting_records((event,)) == records
 
 
 def test_same_device_claims_queue_and_stop_the_old_row(presenter) -> None:

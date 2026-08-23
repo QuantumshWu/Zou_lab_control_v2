@@ -97,6 +97,55 @@ def test_virtual_measurement_configuration_returns_actual_crop_and_is_idle_only(
     camera.finish_record_capture()
 
 
+def test_virtual_camera_tunable_reports_current_effective_value_and_epoch() -> None:
+    exposures: list[float] = []
+    camera = VirtualCamera(
+        VirtualCameraConfig(frame_shape_yx=(4, 5), exposure_seconds=0.02),
+        frame_source=lambda _ordinal, exposure: (
+            exposures.append(exposure) or np.zeros((4, 5), dtype=np.uint16)
+        ),
+    )
+    (tunable,) = camera.tunable_fields()
+    assert tunable.metadata.name == "exposure_seconds"
+    assert tunable.metadata.default == pytest.approx(0.02)
+    assert tunable.current == pytest.approx(0.02)
+    assert tunable.live_write is True
+    assert tunable.dependency_group == ("exposure_seconds",)
+    initial = camera.settings_provenance()
+    assert initial["settings_epoch"] == 0
+
+    assert camera.tune("exposure_seconds", 0.03) == pytest.approx(0.03)
+    assert camera.tunable_values()["exposure_seconds"] == pytest.approx(0.03)
+    assert camera.settings_provenance()["settings_epoch"] == 1
+    assert camera.tune("exposure_seconds", 0.03) == pytest.approx(0.03)
+    assert camera.settings_provenance()["settings_epoch"] == 1
+
+    camera.arm(1, source_group_sizes=(1,), buffer_frame_count=1, timeout=1.0)
+    assert camera.tune("exposure_seconds", 0.04) == pytest.approx(0.04)
+    camera.trigger()
+    (record,) = camera.read_frame_records(1, timeout=1.0, exact=True)
+    camera.finish_record_capture()
+    assert exposures == [pytest.approx(0.04)]
+    assert record.settings_session_id == initial["device_session_id"]
+    assert record.settings_epochs == (2,)
+    assert camera.settings_provenance() == {
+        "device_session_id": initial["device_session_id"],
+        "settings_epoch": 2,
+    }
+    with pytest.raises(ValueError, match="must lie in"):
+        camera.tune("exposure_seconds", 11.0)
+    assert camera.settings_provenance()["settings_epoch"] == 2
+
+    other = VirtualCamera(
+        VirtualCameraConfig(frame_shape_yx=(4, 5)),
+        frame_source=lambda _ordinal, _exposure: np.zeros((4, 5), dtype=np.uint16),
+    )
+    assert (
+        other.settings_provenance()["device_session_id"]
+        != initial["device_session_id"]
+    )
+
+
 def test_an_external_gate_shortens_the_light_not_the_integration() -> None:
     """What a pulse window gates is the PROBE, not the sensor.
 

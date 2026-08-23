@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
@@ -9,6 +11,7 @@ from zlc_ui.fluent import (
     GREEN,
     GREY,
     ORANGE,
+    RED,
     ElidedLabel,
     FluentButton,
     FluentComboBox,
@@ -18,8 +21,10 @@ from zlc_ui.fluent import (
     FluentScrollArea,
     FluentSectionLabel,
     FluentStatusDot,
+    FluentSwitch,
     FluentTabWidget,
     muted_note_label,
+    signals_blocked,
     window_pad,
 )
 from zlc_ui.form.form import FormSpec
@@ -148,37 +153,201 @@ class _LiveDeviceCard(FluentFrame):
 
 
 class DeviceControlView(QtWidgets.QWidget):
-    """One generic device form; hardware ownership stays outside the view."""
+    """Projection-only control surface for one loaded device."""
 
-    field_committed = QtCore.pyqtSignal(str)
+    refresh_requested = QtCore.pyqtSignal()
+    risk_toggled = QtCore.pyqtSignal(bool)
+    field_desired_changed = QtCore.pyqtSignal(str, object)
+    field_live_apply_toggled = QtCore.pyqtSignal(str, bool)
+    field_apply_requested = QtCore.pyqtSignal(str, object)
 
     def __init__(
         self,
         spec: FormSpec,
-        values: tuple[tuple[str, object], ...] = (),
+        projection: Mapping[str, object],
         parent=None,
     ) -> None:
         super().__init__(parent)
+        self._field_rows: dict[str, tuple[ElidedLabel, FluentSwitch, FluentButton, FluentStatusDot, ElidedLabel]] = {}
+        self._field_states: dict[str, Mapping[str, object]] = {}
+        self._live_timers: dict[str, QtCore.QTimer] = {}
         outer = QtWidgets.QVBoxLayout(self)
         pad = window_pad()
         outer.setContentsMargins(pad, pad, pad, pad)
         outer.setSpacing(window_pad(0.5))
-        self.form = FluentParameterForm(spec, dict(values), parent=self)
-        self.form.changed.connect(self.field_committed)
+
+        header = FluentFrame(self, bordered=True)
+        header_layout = QtWidgets.QHBoxLayout(header)
+        header_layout.setContentsMargins(pad, pad, pad, pad)
+        owner_stack = QtWidgets.QVBoxLayout()
+        self.owner_label = FluentSectionLabel("Owner: none")
+        self.reason_label = muted_note_label("No control policy projection")
+        self.reason_label.setWordWrap(True)
+        owner_stack.addWidget(self.owner_label)
+        owner_stack.addWidget(self.reason_label)
+        header_layout.addLayout(owner_stack, 1)
+        self.refresh_button = FluentButton("Refresh", color=ACCENT)
+        self.risk_switch = FluentSwitch("Accept risk")
+        header_layout.addWidget(self.refresh_button)
+        header_layout.addWidget(self.risk_switch)
+        outer.addWidget(header)
+
+        self.columns = QtWidgets.QWidget(self)
+        columns = QtWidgets.QHBoxLayout(self.columns)
+        columns.setContentsMargins(0, 0, 0, 0)
+        columns.setSpacing(window_pad(0.35))
+        self.field_heading = muted_note_label("Field")
+        self.current_heading = muted_note_label("Current")
+        self.desired_heading = muted_note_label("Desired")
+        self.live_heading = muted_note_label("Live apply")
+        self.apply_heading = muted_note_label("Apply")
+        self.status_heading = muted_note_label("Status")
+        self.current_heading.setFixedWidth(window_pad(8.0))
+        self.live_heading.setFixedWidth(window_pad(5.5))
+        self.apply_heading.setFixedWidth(window_pad(5.5))
+        columns.addWidget(self.field_heading)
+        columns.addWidget(self.current_heading)
+        columns.addWidget(self.desired_heading, 1)
+        columns.addWidget(self.live_heading)
+        columns.addWidget(self.apply_heading)
+        columns.addWidget(self.status_heading, 1)
+        outer.addWidget(self.columns)
+
+        fields = projection.get("fields", {})
+        desired = {key: fields[key]["desired"] for key in spec.keys}
+        self.form = FluentParameterForm(spec, desired, parent=self)
+        self.form.changed.connect(self._desired_changed)
         outer.addWidget(self.form)
         outer.addStretch(1)
         self.status_strip = StatusStrip(self)
         outer.addWidget(self.status_strip)
+        self.refresh_button.clicked.connect(self.refresh_requested.emit)
+        self.risk_switch.toggled.connect(self.risk_toggled.emit)
+        self.set_projection(spec, projection)
 
-    def set_form(
-        self,
-        spec: FormSpec,
-        values: tuple[tuple[str, object], ...],
-    ) -> None:
-        self.form.reconcile(spec, dict(values))
+    def _retire_field_row(self, key: str) -> None:
+        timer = self._live_timers.pop(str(key), None)
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+        widgets = self._field_rows.pop(str(key), None)
+        if widgets is None:
+            return
+        current, live, apply, _dot, status = widgets
+        for widget in (current, live, apply, status.parentWidget()):
+            widget.hide()
+            widget.deleteLater()
 
-    def read_values(self) -> tuple[tuple[str, object], ...]:
-        return tuple(self.form.read_all().items())
+    def _sync_rows(self) -> None:
+        for key, widgets in tuple(self._field_rows.items()):
+            current = widgets[0]
+            if key not in self.form._rows or current.parentWidget() is not self.form._rows[key]:
+                self._retire_field_row(key)
+        for field in self.form.spec.fields:
+            key = field.key
+            if key in self._field_rows:
+                continue
+            row = self.form._rows[key]
+            editor = self.form.widget_for(key)
+            layout = row.layout()
+            while layout.count():
+                layout.takeAt(0)
+            current = ElidedLabel("—", row)
+            current.setFixedWidth(self.current_heading.width())
+            live = FluentSwitch("", row)
+            apply = FluentButton("Apply", color=ACCENT)
+            dot = FluentStatusDot(size=12)
+            status = ElidedLabel("", row)
+            status_host = QtWidgets.QWidget(row)
+            status_layout = QtWidgets.QHBoxLayout(status_host)
+            status_layout.setContentsMargins(0, 0, 0, 0)
+            status_layout.setSpacing(window_pad(0.2))
+            status_layout.addWidget(dot)
+            status_layout.addWidget(status, 1)
+            layout.addWidget(row._label)
+            layout.addWidget(current)
+            layout.addWidget(editor, 1)
+            layout.addWidget(live)
+            layout.addWidget(apply)
+            layout.addWidget(status_host, 1)
+            timer = QtCore.QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(75)
+            timer.timeout.connect(lambda value=key: self._emit_apply(value))
+            live.toggled.connect(
+                lambda checked, value=key: self._live_toggled(value, checked)
+            )
+            apply.clicked.connect(lambda _checked=False, value=key: self._emit_apply(value))
+            self._field_rows[key] = current, live, apply, dot, status
+            self._live_timers[key] = timer
+        first = next(iter(self.form._rows.values()), None)
+        self.field_heading.setFixedWidth(0 if first is None else first._label.width())
+
+    def set_projection(self, spec: FormSpec, projection: Mapping[str, object]) -> None:
+        fields = projection.get("fields", {})
+        self._field_states = dict(fields)
+        desired = {key: fields[key]["desired"] for key in spec.keys}
+        self.form.reconcile(spec, desired)
+        self._sync_rows()
+        owners = tuple(str(value) for value in projection.get("owners", ()))
+        self.owner_label.setText(f"Owner: {', '.join(owners) if owners else 'none'}")
+        self.reason_label.setText(str(projection.get("reason", "")))
+        with signals_blocked(self.risk_switch):
+            self.risk_switch.setChecked(bool(projection.get("risk_accepted", False)))
+        self.risk_switch.setEnabled(bool(projection.get("risk_enabled", False)))
+        colours = {
+            "info": GREY, "idle": GREY, "ready": GREEN,
+            "task": ORANGE, "warning": ORANGE, "error": RED,
+        }
+        for key in spec.keys:
+            field = fields[key]
+            current, live, apply, dot, status = self._field_rows[key]
+            shown = field.get("current")
+            current.setText("—" if shown is None else str(shown))
+            editor = self.form.widget_for(key)
+            self._set_editable(key, bool(field.get("editable", False)))
+            with signals_blocked(live):
+                live.setChecked(bool(field.get("live_apply", False)))
+            live.setEnabled(bool(field.get("live_enabled", False)))
+            apply.setEnabled(bool(field.get("apply_enabled", False)))
+            if not bool(field.get("editable", False)) or not live.isChecked():
+                self._live_timers[key].stop()
+            status.setText(str(field.get("status", "")))
+            dot.set_color(colours.get(str(field.get("severity", "info")), GREY))
+            reason = str(field.get("reason", ""))
+            for widget in (editor, live, apply, status):
+                widget.setToolTip(reason)
+
+    def _desired_changed(self, key: str) -> None:
+        try:
+            value = self.form.read_value(key)
+        except (TypeError, ValueError):
+            return
+        for name, state in self._field_states.items():
+            self._set_editable(name, bool(state.get("editable", False)))
+        self.field_desired_changed.emit(str(key), value)
+        live = self._field_rows.get(str(key), (None, None))[1]
+        if live is not None and live.isChecked() and live.isEnabled():
+            self._live_timers[str(key)].start()
+
+    def _set_editable(self, key: str, enabled: bool) -> None:
+        self.form.widget_for(str(key)).setEnabled(bool(enabled))
+        automatic = self.form._auto_switches.get(str(key))
+        if automatic is not None:
+            automatic.setEnabled(bool(enabled))
+
+    def _live_toggled(self, key: str, checked: bool) -> None:
+        if not checked:
+            self._live_timers[str(key)].stop()
+        self.field_live_apply_toggled.emit(str(key), bool(checked))
+
+    def _emit_apply(self, key: str) -> None:
+        try:
+            value = self.form.read_value(str(key))
+        except (TypeError, ValueError) as error:
+            self.show_status(str(error), "error")
+            return
+        self.field_apply_requested.emit(str(key), value)
 
     def show_status(self, text: str, severity: str) -> None:
         self.status_strip.show_status(str(text), str(severity))

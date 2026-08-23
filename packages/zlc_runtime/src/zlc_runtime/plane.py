@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import math
 import threading
 from types import MappingProxyType
@@ -166,6 +166,7 @@ class SignalValue:
     canonical_schema: DatasetSchema | None = None
     cell_origin: tuple[int, int] | None = None
     primary_index: int | None = None
+    event_record: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         name = canonical_text(self.name, "signal name")
@@ -189,6 +190,8 @@ class SignalValue:
             object.__setattr__(self, "cell_origin", origin)
         if not isinstance(self.run_record, Mapping):
             raise TypeError("signal value run_record must be a mapping")
+        if not isinstance(self.event_record, Mapping):
+            raise TypeError("signal value event_record must be a mapping")
         primary_index = self.primary_index
         if primary_index is not None and (
             type(primary_index) is not int or primary_index < 0
@@ -196,6 +199,9 @@ class SignalValue:
             raise TypeError("signal primary_index must be a non-negative integer or None")
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "run_record", _freeze_run_record(self.run_record))
+        object.__setattr__(
+            self, "event_record", _freeze_run_record(self.event_record)
+        )
 
     # The block is the value; these read off it rather than copying, so two
     # consumers describing "the same signal" cannot describe different data.
@@ -342,6 +348,7 @@ class SignalPublication:
     _issuer: object = field(repr=False, compare=False)
     direct_parent_refs: tuple[EventRef, ...] = ()
     run_record: Mapping[str, object] = field(default_factory=dict)
+    event_record: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.event_ref, EventRef):
@@ -363,7 +370,10 @@ class SignalPublication:
             raise ValueError("signal publication parent refs must be unique")
         if not isinstance(self.run_record, Mapping):
             raise TypeError("signal publication run_record must be a mapping")
+        if not isinstance(self.event_record, Mapping):
+            raise TypeError("signal publication event_record must be a mapping")
         run_record = _freeze_run_record(self.run_record)
+        event_record = _freeze_run_record(self.event_record)
         if any(
             not _run_records_equal(value.run_record, run_record)
             for value in signals.values()
@@ -371,9 +381,17 @@ class SignalPublication:
             raise ValueError(
                 "signal publication run_record differs from its sibling values"
             )
+        if any(
+            not _run_records_equal(value.event_record, event_record)
+            for value in signals.values()
+        ):
+            raise ValueError(
+                "signal publication event_record differs from its sibling values"
+            )
         object.__setattr__(self, "signals", MappingProxyType(signals))
         object.__setattr__(self, "direct_parent_refs", parents)
         object.__setattr__(self, "run_record", run_record)
+        object.__setattr__(self, "event_record", event_record)
 
     def value(self, name: str) -> SignalValue | None:
         return self.signals.get(str(name))
@@ -482,6 +500,86 @@ def _shared_run_record(
         if not _run_records_equal(record, shared):
             raise ValueError("sibling outputs must share one run_record")
     return {} if shared is None else shared
+
+
+def _shared_event_record(
+    outputs: Mapping[str, LiveDatasetOutput | SignalValue],
+) -> Mapping[str, object]:
+    """Copy the small event-varying record shared by one sibling bundle."""
+
+    shared: Mapping[str, object] | None = None
+    for output in outputs.values():
+        record = {} if output.event_record is None else output.event_record
+        if shared is None:
+            shared = record
+            continue
+        if not _run_records_equal(record, shared):
+            raise ValueError("sibling outputs must share one event_record")
+    return {} if shared is None else shared
+
+
+def _merge_event_records(
+    records: Iterable[Mapping[str, object]],
+) -> Mapping[str, object]:
+    """Union compact device epoch ranges used by one materialized value."""
+
+    merged: dict[str, object] = {}
+    devices: dict[str, dict[str, object]] = {}
+    for record in records:
+        if not isinstance(record, Mapping):
+            raise TypeError("event record must be a mapping")
+        for key, value in record.items():
+            if key == "device_settings":
+                if not isinstance(value, Mapping):
+                    raise TypeError("device_settings event record must be a mapping")
+                for device_key, raw in value.items():
+                    if not isinstance(raw, Mapping):
+                        raise TypeError("device settings reference must be a mapping")
+                    session_id = str(raw.get("device_session_id", "")).strip()
+                    ranges = raw.get("epoch_ranges", ())
+                    if not session_id or not isinstance(ranges, (tuple, list)):
+                        raise ValueError("device settings reference is invalid")
+                    target = devices.setdefault(
+                        str(device_key),
+                        {"device_session_id": session_id, "epoch_ranges": []},
+                    )
+                    if target["device_session_id"] != session_id:
+                        raise RuntimeError(
+                            "device session changed inside one materialized value"
+                        )
+                    target["epoch_ranges"].extend(ranges)
+                continue
+            previous_key = str(key)
+            if previous_key in merged and not _run_records_equal(
+                merged[previous_key], value
+            ):
+                raise ValueError(f"event record field {key!r} cannot be merged")
+            merged[previous_key] = value
+    if devices:
+        compact: dict[str, object] = {}
+        for device_key, raw in devices.items():
+            ordered: list[tuple[int, int]] = []
+            for bounds in raw["epoch_ranges"]:
+                try:
+                    start, stop = tuple(int(value) for value in bounds)
+                except (TypeError, ValueError) as error:
+                    raise ValueError("device epoch range is invalid") from error
+                if start < 0 or stop < start:
+                    raise ValueError("device epoch range is invalid")
+                ordered.append((start, stop))
+            ranges: list[list[int]] = []
+            for start, stop in sorted(ordered):
+                if ranges and start <= ranges[-1][1] + 1:
+                    ranges[-1][1] = max(ranges[-1][1], stop)
+                else:
+                    ranges.append([start, stop])
+            compact[device_key] = {
+                "device_session_id": raw["device_session_id"],
+                "epoch_ranges": ranges,
+                "mixed": len(ranges) > 1 or bool(ranges and ranges[0][0] != ranges[0][1]),
+            }
+        merged["device_settings"] = compact
+    return merged
 
 
 def _require_signal_producer(node: object) -> SignalProducer:
@@ -670,7 +768,7 @@ class _GenerationState:
     indexed_events: dict[str, deque[int]] = field(default_factory=dict)
     indexed_event_values: dict[
         str,
-        dict[int, tuple[int, OwnedSnapshot]],
+        dict[int, tuple[int, OwnedSnapshot, Mapping[str, object]]],
     ] = field(default_factory=dict)
     indexed_first_indices: dict[str, int] = field(default_factory=dict)
     indexed_capacities: dict[str, int] = field(default_factory=dict)
@@ -1141,7 +1239,7 @@ class SignalDataPlane:
                     "indexed Processor source primary index moved backwards"
                 )
             indices.append(primary_index)
-        event_values[primary_index] = (sequence, event)
+        event_values[primary_index] = (sequence, event, value.event_record)
         first_index = state.indexed_first_indices.get(
             signal_name,
             primary_index,
@@ -1498,6 +1596,7 @@ class SignalDataPlane:
                         output.run_record,
                         schema,
                         (0, 0),
+                        output.event_record,
                     )
         return self._commit_outputs(
             node,
@@ -1575,6 +1674,7 @@ class SignalDataPlane:
             ):
                 raise ValueError("live extent kinds changed inside one generation")
             run_record = _freeze_run_record(_shared_run_record(outputs))
+            event_record = _freeze_run_record(_shared_event_record(outputs))
             if (
                 state.committed_run_record is not None
                 and not _run_records_equal(state.committed_run_record, run_record)
@@ -1715,7 +1815,30 @@ class SignalDataPlane:
                     canonical_schema=output.canonical_schema,
                     cell_origin=output.cell_origin,
                     primary_index=primary_index,
+                    event_record=event_record,
                 )
+
+            materialized_event_records: list[Mapping[str, object]] = [event_record]
+            if exact_qualified and state.publication is not None:
+                materialized_event_records.append(state.publication.event_record)
+            for qualified, (_schema, _event, first_index, capacity) in (
+                indexed_updates.items()
+            ):
+                start = max(first_index, primary_index - capacity + 1)
+                held = state.indexed_event_values.get(qualified, {})
+                materialized_event_records.extend(
+                    value[2]
+                    for index, value in held.items()
+                    if start <= index <= primary_index and value[0] <= sequence
+                )
+            materialized_event_record = _freeze_run_record(
+                _merge_event_records(materialized_event_records)
+            )
+            if not _run_records_equal(materialized_event_record, event_record):
+                values = {
+                    name: replace(value, event_record=materialized_event_record)
+                    for name, value in values.items()
+                }
 
             parents = () if source_publication is None else (source_publication,)
             publication = self._publish_locked(
@@ -1749,10 +1872,10 @@ class SignalDataPlane:
                 indices = state.indexed_events.setdefault(qualified, deque())
                 event_values = state.indexed_event_values.setdefault(qualified, {})
                 if indices and indices[-1] == primary_index:
-                    event_values[primary_index] = (sequence, event)
+                    event_values[primary_index] = (sequence, event, event_record)
                 else:
                     indices.append(primary_index)
-                    event_values[primary_index] = (sequence, event)
+                    event_values[primary_index] = (sequence, event, event_record)
                 start = max(first_index, primary_index - capacity + 1)
                 while indices and indices[0] < start:
                     event_values.pop(indices.popleft(), None)
@@ -2153,6 +2276,7 @@ class SignalDataPlane:
                                 parent.event_ref for parent in parents
                             ),
                             run_record=value.run_record,
+                            event_record=value.event_record,
                         )
                         self._publication_parents[publication] = parents
                     retained.append((sequence, publication))
@@ -2488,6 +2612,7 @@ class SignalDataPlane:
             self._publication_issuer,
             direct_parent_refs=tuple(parent.event_ref for parent in slim_parents),
             run_record=publication.run_record,
+            event_record=publication.event_record,
         )
         memo[publication] = slim
         self._publication_parents[slim] = slim_parents
@@ -2596,6 +2721,7 @@ class SignalDataPlane:
             }
         )
         run_record = _shared_run_record(frozen)
+        event_record = _shared_event_record(frozen)
         self._validate_generation_values_locked(
             state,
             frozen,
@@ -2611,6 +2737,7 @@ class SignalDataPlane:
             _issuer=self._publication_issuer,
             direct_parent_refs=tuple(parent.event_ref for parent in parents),
             run_record=run_record,
+            event_record=event_record,
         )
         self._publication_parents[publication] = parents
         state.next_sequence += 1

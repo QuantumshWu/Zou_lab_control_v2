@@ -104,6 +104,8 @@ class CameraFrameRecord:
     timestamp_microseconds: int | None = None
     host_received_at_ns: int = 0
     driver_buffer_index: int | None = None
+    settings_session_id: str | None = None
+    settings_epochs: tuple[int, ...] = ()
     __hash__ = None
 
     def __post_init__(self) -> None:
@@ -121,6 +123,22 @@ class CameraFrameRecord:
             raise ValueError("timestamp_microseconds must be less than 1_000_000")
         if (self.timestamp_seconds is None) != (self.timestamp_microseconds is None):
             raise ValueError("timestamp seconds and microseconds must appear together")
+        session_id = (
+            None
+            if self.settings_session_id is None
+            else str(self.settings_session_id).strip()
+        )
+        epochs = tuple(int(value) for value in self.settings_epochs)
+        if (session_id is None) != (not epochs):
+            raise ValueError(
+                "camera frame settings need both a device session and epochs"
+            )
+        if session_id == "" or any(value < 0 for value in epochs):
+            raise ValueError("camera frame settings provenance is invalid")
+        if len(set(epochs)) != len(epochs):
+            raise ValueError("camera frame settings epochs must be unique")
+        object.__setattr__(self, "settings_session_id", session_id)
+        object.__setattr__(self, "settings_epochs", epochs)
         host = int(self.host_received_at_ns or time.time_ns())
         if host <= 0:
             raise ValueError("host_received_at_ns must be positive")

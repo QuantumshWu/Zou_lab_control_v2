@@ -301,6 +301,7 @@ class ScanDatasetWriter:
             self._run_record,
             self._schema,
             (visit * repeats, row * points),
+            value.event_record,
         )
 
     def _allocate(self, value: SignalValue) -> None:

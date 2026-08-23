@@ -69,6 +69,7 @@ def _finite(
     origin: int,
     written: int,
     run_record: dict[str, object] | None = None,
+    event_record: dict[str, object] | None = None,
 ) -> LiveDatasetOutput:
     event = _event(declaration.name, value)
     schema = event.block.schema
@@ -91,6 +92,7 @@ def _finite(
         run_record,
         canonical,
         (origin, 0),
+        event_record,
     )
 
 
@@ -551,6 +553,63 @@ def test_commit_mints_runtime_identity_and_freezes_run_record() -> None:
         assert value.snapshot.ref.revision.value == 1
         assert value.snapshot.ref.block_id == BlockId("camera/frame.event")
         assert plane.seal_committed(node)
+    finally:
+        plane.close()
+
+
+def test_finite_prefix_merges_event_epochs_without_changing_run_identity() -> None:
+    declaration = DatasetOutputDeclaration("frame", "test.frame")
+    node = _node("epoch-camera", declaration)
+    plane = SignalDataPlane()
+
+    def event(epoch: int) -> dict[str, object]:
+        return {
+            "device_settings": {
+                "camera": {
+                    "device_session_id": "camera-session",
+                    "epoch_ranges": [[epoch, epoch]],
+                    "mixed": False,
+                }
+            }
+        }
+
+    try:
+        plane.reserve(node)
+        first = plane.commit_live(
+            node,
+            {
+                "frame": _finite(
+                    declaration,
+                    value=1.0,
+                    total=2,
+                    origin=0,
+                    written=1,
+                    run_record={"run": "same"},
+                    event_record=event(0),
+                )
+            },
+        )["epoch-camera/frame"]
+        second = plane.commit_live(
+            node,
+            {
+                "frame": _finite(
+                    declaration,
+                    value=2.0,
+                    total=2,
+                    origin=1,
+                    written=2,
+                    run_record={"run": "same"},
+                    event_record=event(2),
+                )
+            },
+        )["epoch-camera/frame"]
+        assert first.event_record["device_settings"]["camera"][
+            "epoch_ranges"
+        ] == ((0, 0),)
+        camera = second.event_record["device_settings"]["camera"]
+        assert camera["epoch_ranges"] == ((0, 0), (2, 2))
+        assert camera["mixed"] is True
+        assert first.run_record == second.run_record == {"run": "same"}
     finally:
         plane.close()
 

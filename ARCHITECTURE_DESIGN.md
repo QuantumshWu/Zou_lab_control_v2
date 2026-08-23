@@ -169,6 +169,10 @@ Node new chunk
 - Active apparatus变更走同一个`ExperimentSession`内的差量reconcile：相同key/type/canonical parameters的leaf、SignalPlane、TaskConsole与Panel继续复用；新增只build新增leaf，remove/change/Close只处理受影响leaf、world-bound closure及factory dependants。只有完全相同的draft/live集合才把主按钮解释为Shutdown。
 - Reconcile前以device-key maintenance barrier阻止新Logic/command，停止并等待受影响Logic lease，关闭对应Control；已有不可取消command时loud拒绝。partial close/factory cleanup失败后，所有仍open的leaf必须继续由Session或recovery owner强持有，effective live config与TaskConsole device projection同步后才允许下一次操作。
 - Device operation或projection-refresh pending期间Control、Close、TaskConsole X和root close不得越过owner状态；失败保持window/session可达并提供只刷新projection的retry，不重复hardware work。
+- Device Control只显示adapter声明的`TunableField`：稳定表单metadata、authoritative current、当前是否live-write及dependency group。每行统一为Current、Desired、Live apply、Apply和Status；打开/显式Refresh及成功Apply后的readback只走session-owned串行device worker，Qt不碰SDK，也不做周期hardware polling。
+- Logic在实际Start lease中声明protected fields；运行时才选出的device scan ports以nonexclusive resolved field claim加入同一lease。Device Manager按所有active claim与dependency closure锁字段，不按camera type或字段名特判；无owner时正常写，有owner时只有未claim且adapter确认live-safe的字段可在operator接受风险后写。
+- 风险接受只绑定当前`device_session_id + device-specific owner revision`。owner或session变化立即失效；字段命令在DeviceUse同一原子锁内再次核revision/claim，active field command阻止新Logic Start。in-flight live edits只保留每字段最新值，owner变化后尚未执行的write取消。
+- `device_session_id/settings_epoch`只在成功且effective值实际改变时推进；requested/effective/readback与active owners只在Logic运行期间的真实override中记录。Camera frame在adapter接受/复制边界冻结epoch，不能在publication时读取“当前epoch”倒填旧frame；无法证明边界的Pylon首批readback保守标为old/new mixed。Publication只带压缩epoch ranges，Figure只展开lineage实际引用的记录；idle调整不进入历史。
 - Pulse Stop UI立即进入Stopping；Stop/SAFE高优先级并可取消普通wait/transport，hardware ack后台完成。
 - Timeout显示真实错误但不冻结UI；未确认前不能显示Safe。
 - Form reconcile必须按当前schema重建dependency graph。
@@ -188,6 +192,7 @@ Node new chunk
 - Camera Measurement只按自己的authored frames-per-cycle/repeat采集并核实际返回cardinality；Camera adapter不解析Pulse window数量，也不以exposure审查Pulse cadence。Adapter的source ordinal只编号实际采到的frames，必须从本次arm的0连续递增。
 - qCMOS的ROI、exposure、trigger/readout各由adapter的单一working-point owner管理；未变化字段不得在每次Start整套重写。Measurement冻结设置操作返回的authoritative readback，不再为同一capture额外读取完整property surface；相同exposure/ROI的restart因此不支付冗余sensor reconfiguration。
 - Camera auto Panel从canonical publication/preview signal建立；signal尚未publish时显示等待状态，但不得用重复device配置、额外generation或固定5秒轮询作为Panel接线条件。
+- Camera settings provenance属于frame event而不是generation identity：`run_record`在一代内保持不变，frame冻结的小型`event_record`可变化；finite/scan前缀与有界indexed history按实际保留chunks合并epoch ranges，monitor只携带当前event。
 - Temperature保留约20ms authored exposure；Pulse timing与camera exposure是各自owner的独立输入。
 - Virtual sequencer按compiled wall cadence逐cycle并支持Stop；每个到达virtual camera的frame event都被采集，不根据Pulse时间或camera exposure私自skip、制造ordinal gap。
 

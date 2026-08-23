@@ -224,6 +224,7 @@ def _finite_cycle_output(
         node.run_record,
         canonical,
         (index, 0),
+        event_record=node._camera_event_record(cycle, accumulate=True),
     )
 
 
@@ -246,6 +247,7 @@ def _monitor_cycle_output(
         event,
         MonitorCoverage(frames, frames),
         node.run_record,
+        event_record=node._camera_event_record(cycle, accumulate=False),
     )
 
 
@@ -461,6 +463,9 @@ class CameraCycleSource:
             ),
             MonitorCoverage(written_cells=len(records), total_cells=len(records)),
             run_record=self.camera_node.run_record,
+            event_record=self.camera_node._camera_event_record(
+                records, accumulate=True
+            ),
         )
 
     def close(self) -> CameraCaptureTerminalRecord | None:
@@ -785,6 +790,8 @@ class CameraMeasurementNode:
         self._request = request
         self._actual_working_point: CameraWorkingPoint | None = None
         self._run_record: dict[str, object] | None = None
+        self._settings_session_id: str | None = None
+        self._settings_epochs: set[int] = set()
         if signal_plane is None:
             raise TypeError("signal_plane must be supplied by the runtime owner")
         self.signal_plane = signal_plane
@@ -969,6 +976,58 @@ class CameraMeasurementNode:
             },
         }
         self._run_record = record
+        self._settings_session_id = None
+        self._settings_epochs = set()
+
+    def _camera_event_record(
+        self,
+        records: Sequence[CameraFrameRecord],
+        *,
+        accumulate: bool,
+    ) -> dict[str, object]:
+        """Merge settings frozen on the actual frames, never current state."""
+
+        frames = tuple(records)
+        references = tuple(
+            (record.settings_session_id, record.settings_epochs)
+            for record in frames
+            if record.settings_session_id is not None
+        )
+        if not references:
+            return {}
+        if len(references) != len(frames):
+            raise RuntimeError("one camera cycle mixed settings-aware and unaware frames")
+        session_ids = {str(session_id) for session_id, _epochs in references}
+        if len(session_ids) != 1:
+            raise RuntimeError("camera device session changed inside one cycle")
+        session_id = next(iter(session_ids))
+        if self._settings_session_id not in (None, session_id):
+            raise RuntimeError("camera device session changed during one acquisition")
+        observed = {
+            epoch
+            for _session_id, epochs in references
+            for epoch in epochs
+        }
+        if accumulate:
+            self._settings_session_id = session_id
+            self._settings_epochs.update(observed)
+            selected = self._settings_epochs
+        else:
+            selected = observed
+        ordered = sorted(selected)
+        ranges: list[list[int]] = []
+        for epoch in ordered:
+            if ranges and epoch == ranges[-1][1] + 1:
+                ranges[-1][1] = epoch
+            else:
+                ranges.append([epoch, epoch])
+        return {"device_settings": {
+            "camera": {
+                "device_session_id": session_id,
+                "epoch_ranges": ranges,
+                "mixed": len(ordered) > 1,
+            }
+        }}
 
     @property
     def run_record(self) -> dict[str, object]:

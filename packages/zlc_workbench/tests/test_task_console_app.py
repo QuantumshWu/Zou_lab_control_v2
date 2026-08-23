@@ -1166,15 +1166,22 @@ try:
     QtTest.QTest.mouseClick(camera_card.control_button, QtCore.Qt.LeftButton)
     application.processEvents()
     camera_control = flow.device_controls['camera']
+    deadline = QtCore.QDeadlineTimer(2000)
+    while ('exposure_seconds' not in camera_control._view.form.keys or
+           'camera' in flow._device_refresh_active) and not deadline.hasExpired():
+        application.processEvents(); QtTest.QTest.qWait(5)
     exposure = camera_control._view.form.widget_for('exposure_seconds')
-    exposure.setValue(0.05); application.processEvents()
+    exposure.setValue(0.05)
+    camera_control._view._field_rows['exposure_seconds'][2].click()
+    application.processEvents()
+    camera = flow.session.installation.device('camera')
     deadline = QtCore.QDeadlineTimer(5000)
-    while flow._device_tune_active is not None and not deadline.hasExpired():
+    while (camera.tunable_fields()[0].current != 0.05 or
+           flow._device_tune_active is not None) and not deadline.hasExpired():
         application.processEvents(); QtTest.QTest.qWait(10)
     assert flow._device_tune_active is None
-    camera = flow.session.installation.device('camera')
     (field,) = camera.tunable_fields()
-    assert field.default == 0.05
+    assert field.current == 0.05
     flow.session.device_use.assert_idle()
 
     blocker_owner = object()
@@ -1185,9 +1192,11 @@ try:
     )
     try:
         exposure = camera_control._view.form.widget_for('exposure_seconds')
-        exposure.setValue(0.06); application.processEvents()
+        exposure.setValue(0.06)
+        camera_control._view._field_rows['exposure_seconds'][2].click()
+        application.processEvents()
         (field,) = camera.tunable_fields()
-        assert field.default == 0.05, 'Control must not bypass the session claim'
+        assert field.current == 0.05, 'Control must not bypass the session claim'
         assert camera_control._view.status_strip.current_severity == 'warning'
         assert 'camera task' in camera_control._view.status_strip.text()
     finally:
@@ -1199,7 +1208,7 @@ try:
     while 'camera' in flow.device_controls and not deadline.hasExpired():
         application.processEvents(); QtTest.QTest.qWait(10)
     assert 'camera' not in flow.device_controls
-    assert camera.tunable_fields()[0].default == 0.05, 'GUI close must not close the device'
+    assert camera.tunable_fields()[0].current == 0.05, 'GUI close must not close the device'
     first_session = flow.session
     slm = flow.session.installation.device('slm')
     slm_phase = slm.last_commanded_phase.copy()
@@ -1351,7 +1360,7 @@ from zlc_workbench.apps import task_console as tested_module
 print(zou_lab_control.__file__)
 print(tested_module.__file__)
 from PyQt5 import QtCore, QtTest
-from zlc_atom.authoring import AuthoringField
+from zlc_atom.authoring import AuthoringField, TunableField
 from zlc_ui import ensure_qt_app
 application = ensure_qt_app([])
 flow = tested_module.create_experiment_flow(
@@ -1386,12 +1395,18 @@ try:
     QtTest.QTest.mouseClick(camera_card.control_button, QtCore.Qt.LeftButton)
     application.processEvents()
     control = flow.device_controls['camera']
+    deadline = QtCore.QDeadlineTimer(2000)
+    while ('exposure_seconds' not in control._view.form.keys or
+           'camera' in flow._device_refresh_active) and not deadline.hasExpired():
+        application.processEvents(); QtTest.QTest.qWait(5)
+    assert 'exposure_seconds' in control._view.form.keys
     threading.Timer(0.4, release.set).start()
 
     exposure = control._view.form.widget_for('exposure_seconds')
     before_turns = len(heartbeat)
     started_at = time.monotonic()
     exposure.setValue(0.05)
+    control._view._field_rows['exposure_seconds'][2].click()
     returned_in = time.monotonic() - started_at
     assert returned_in < 0.1, returned_in
     deadline = QtCore.QDeadlineTimer(1000)
@@ -1411,10 +1426,16 @@ try:
     application.processEvents()
     assert stop_turn == [True], 'Stop intent could not take a Qt owner turn'
 
+    QtTest.QTest.mouseClick(
+        control._view._field_rows['exposure_seconds'][1],
+        QtCore.Qt.LeftButton,
+    )
     exposure.setValue(0.06)
-    application.processEvents()
-    assert len(calls) == 1, 'busy commit queued a second vendor tune'
-    assert control._view.status_strip.current_severity == 'warning'
+    exposure.setValue(0.07)
+    QtTest.QTest.qWait(110); application.processEvents()
+    assert len(calls) == 1, 'latest-only write bypassed the active vendor call'
+    assert flow._device_tune_pending == {('camera', 'exposure_seconds'): 0.07}
+    assert control._view.status_strip.current_severity == 'task'
     control.close(); application.processEvents()
     assert control.is_visible(), 'hung tune control claimed it had closed'
     flow.devices.close(); application.processEvents()
@@ -1422,24 +1443,82 @@ try:
     assert flow.session is not None
 
     deadline = QtCore.QDeadlineTimer(3000)
-    while flow._device_tune_active is not None and not deadline.hasExpired():
+    while (flow._device_tune_active is not None or
+           flow._device_tune_pending) and not deadline.hasExpired():
         application.processEvents(); QtTest.QTest.qWait(5)
     assert flow._device_tune_active is None
+    assert not flow._device_tune_pending
     assert calls[0][3].startswith('zlc-devices'), calls
-    assert camera.tunable_fields()[0].default == 0.05
+    assert [call[1] for call in calls] == [0.05, 0.07]
+    assert camera.tunable_fields()[0].current == 0.07
     control.close(); application.processEvents()
     assert not control.is_visible()
 
+    refresh_started = threading.Event()
+    refresh_release = threading.Event()
+    def slow_fields():
+        refresh_started.set()
+        refresh_release.wait(2.0)
+        return (TunableField(
+            AuthoringField('level', 'float', 'Level', 1.0),
+            1.0, True, ('level',),
+        ),)
+    slow = SimpleNamespace(
+        tunable_fields=slow_fields,
+        tunable_values=lambda: {'level': 1.0},
+        settings_provenance=lambda: {
+            'device_session_id': 'slow-session', 'settings_epoch': 0,
+        },
+        tune=lambda _name, value: value,
+    )
+    slow_control = flow._open_generic_control('slow', slow)
+    flow.device_controls['slow'] = slow_control
+    deadline = QtCore.QDeadlineTimer(1000)
+    while not refresh_started.is_set() and not deadline.hasExpired():
+        application.processEvents(); QtTest.QTest.qWait(5)
+    assert refresh_started.is_set()
+    slow_control.close(); application.processEvents()
+    assert slow_control.is_visible(), 'control closed over an active refresh'
+    refresh_release.set()
+    deadline = QtCore.QDeadlineTimer(1000)
+    while 'slow' in flow._device_refresh_active and not deadline.hasExpired():
+        application.processEvents(); QtTest.QTest.qWait(5)
+    slow_control.close(); application.processEvents()
+    assert not slow_control.is_visible()
+
     typed_seen = []
+    typed_state = {'enabled': False, 'epoch': 0}
     def typed_fields():
-        return (AuthoringField('enabled', 'bool', 'Enabled', False),)
+        return (TunableField(
+            AuthoringField('enabled', 'bool', 'Enabled', False),
+            typed_state['enabled'], True, ('enabled',),
+        ),)
+    def typed_values():
+        return {'enabled': typed_state['enabled']}
+    def typed_provenance():
+        return {'device_session_id': 'typed-session',
+                'settings_epoch': typed_state['epoch']}
     def typed_tune(name, value):
         typed_seen.append((name, value, type(value)))
-    typed = SimpleNamespace(tunable_fields=typed_fields, tune=typed_tune)
+        if typed_state[name] != value:
+            typed_state[name] = value
+            typed_state['epoch'] += 1
+        return typed_state[name]
+    typed = SimpleNamespace(
+        tunable_fields=typed_fields,
+        tunable_values=typed_values,
+        settings_provenance=typed_provenance,
+        tune=typed_tune,
+    )
     typed_control = flow._open_generic_control('typed', typed)
     flow.device_controls['typed'] = typed_control
+    deadline = QtCore.QDeadlineTimer(1000)
+    while ('enabled' not in typed_control._view.form.keys or
+           'typed' in flow._device_refresh_active) and not deadline.hasExpired():
+        application.processEvents(); QtTest.QTest.qWait(5)
     switch = typed_control._view.form.widget_for('enabled')
     switch.setChecked(True)
+    typed_control._view._field_rows['enabled'][2].click()
     deadline = QtCore.QDeadlineTimer(1000)
     while not typed_seen and not deadline.hasExpired():
         application.processEvents(); QtTest.QTest.qWait(5)
@@ -1457,4 +1536,87 @@ print('GENERIC_TUNE_OWNER_OK')
     completed = _run_script(script, timeout=60)
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "GENERIC_TUNE_OWNER_OK" in completed.stdout
+
+
+def test_device_control_risk_unlock_is_field_scoped_and_owner_scoped(
+    workspace,
+) -> None:
+    from types import SimpleNamespace
+
+    from zlc_atom.authoring import AuthoringField, TunableField
+    from zlc_workbench.apps.task_console import ExperimentGuiFlow
+    from zlc_workbench.device_use import DeviceClaim, DeviceUseCoordinator
+
+    coordinator = DeviceUseCoordinator()
+    device = object()
+    lease = coordinator.prepare_logic(
+        object(),
+        "camera measurement",
+        (
+            DeviceClaim(
+                "camera",
+                "camera",
+                device,
+                ("exposure_seconds",),
+            ),
+        ),
+        stop=lambda _reason: None,
+        superseded=lambda: None,
+    ).commit()
+    flow = ExperimentGuiFlow(workspace=workspace)
+    flow.session = SimpleNamespace(device_use=coordinator)
+    flow._device_control_models["camera"] = {
+        "device_session_id": "camera-session",
+        "tunables": (
+            TunableField(
+                AuthoringField(
+                    "exposure_seconds", "float", "Exposure", 0.1
+                ),
+                0.1,
+                True,
+                ("exposure_seconds",),
+            ),
+            TunableField(
+                AuthoringField("gain_db", "float", "Gain", 6.0),
+                6.0,
+                True,
+                ("gain_db",),
+            ),
+        ),
+        "current": {"exposure_seconds": 0.1, "gain_db": 6.0},
+        "desired": {"exposure_seconds": 0.1, "gain_db": 6.0},
+        "live": {},
+        "status": {},
+    }
+
+    locked = flow._device_control_projection("camera")
+    assert locked["fields"]["exposure_seconds"]["editable"] is False
+    assert locked["fields"]["gain_db"]["editable"] is False
+    flow._device_control_risk["camera"] = (
+        "camera-session",
+        locked["owner_revision"],
+    )
+    accepted = flow._device_control_projection("camera")
+    assert accepted["fields"]["exposure_seconds"]["editable"] is False
+    assert accepted["fields"]["gain_db"]["editable"] is True
+
+    lease.release()
+    replacement = coordinator.prepare_logic(
+        object(),
+        "replacement camera measurement",
+        (
+            DeviceClaim(
+                "camera",
+                "camera",
+                device,
+                ("exposure_seconds",),
+            ),
+        ),
+        stop=lambda _reason: None,
+        superseded=lambda: None,
+    ).commit()
+    changed = flow._device_control_projection("camera")
+    assert changed["risk_accepted"] is False
+    assert changed["fields"]["gain_db"]["editable"] is False
+    replacement.release()
 

@@ -29,6 +29,7 @@ are different apparatus, and only the operator knows which one is wired up.
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Mapping, Sequence
 
@@ -48,6 +49,7 @@ from zlc_atom.nodes.scan import (
     check_cancelled,
     wait_for_board,
 )
+from zlc_atom.nodes._framework.descriptor import ResolvedDeviceClaim
 
 
 #: What gates one publication: the fired cycle, or the source's own clock.
@@ -102,6 +104,24 @@ class SteppedScanMeasurement:
     @property
     def dataset_output_declarations(self):
         return (SCAN_OUTPUT,)
+
+    def resolved_device_claims(self) -> tuple[ResolvedDeviceClaim, ...]:
+        """Fields selected by this plan, resolved before its host can start."""
+
+        selected: dict[str, list[str]] = {}
+        for port in self.ports:
+            if not port.port.startswith(DEVICE_PARAM_FAMILY):
+                continue
+            key, separator, field = port.port[
+                len(DEVICE_PARAM_FAMILY):
+            ].partition(":")
+            if not separator or key not in self._tunables:
+                raise RuntimeError("bound device scan port lost its installed device")
+            selected.setdefault(key, []).append(field)
+        return tuple(
+            ResolvedDeviceClaim(key, self._tunables[key], tuple(fields))
+            for key, fields in selected.items()
+        )
 
     def _split_row(
         self, row: Sequence[float]
@@ -210,7 +230,22 @@ class SteppedScanMeasurement:
         self.sequencer.safe()
         time.sleep(self.settle_seconds)
         for device, field, value in device_moves:
-            device.tune(field, value)
+            effective = device.tune(field, value)
+            if isinstance(effective, bool):
+                raise TypeError("device tune must return its effective numeric value")
+            try:
+                actual = float(effective)
+            except (TypeError, ValueError) as error:
+                raise TypeError(
+                    "device tune must return its effective numeric value"
+                ) from error
+            if not math.isfinite(actual):
+                raise ValueError("device tune returned a non-finite effective value")
+            if actual != value:
+                raise RuntimeError(
+                    f"device field {field!r} applied {actual!r}, not the scan "
+                    f"coordinate {value!r}"
+                )
         resolved = resolve_api_parameters(
             self.sequence, self._api_values(pulse_values)
         )

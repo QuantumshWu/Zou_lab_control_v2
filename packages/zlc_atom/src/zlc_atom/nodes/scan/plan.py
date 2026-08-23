@@ -33,6 +33,7 @@ import numpy as np
 from zlc_pulse import PulseSequence, api_parameter_columns_for
 from zlc_pulse.codec import parse_pulse_tree_json, sequence_from_document_tree
 
+from zlc_atom.authoring import TunableField
 from zlc_atom.nodes._framework.descriptor import (
     SelectionMapping,
     WorkspaceResourceSpec,
@@ -128,11 +129,12 @@ def scan_ports_for(sequence: PulseSequence) -> tuple[ScanPort, ...]:
 def scan_ports_for_devices(tunables: Mapping | None) -> tuple[ScanPort, ...]:
     """Every port the bench's tunable devices offer, from their own words.
 
-    A device volunteers through ``tunable_fields()``; only fields with BOTH
-    bounds declared become ports, because a plan must be refusable against a
-    finite range before anything touches hardware.  Authoring fields carry
-    no unit vocabulary, so the port's unit is empty and its label names the
-    device and the knob.
+    A device volunteers through ``tunable_fields()``.  A scan exposes only a
+    bounded, live-writable field whose dependency group is that field alone:
+    this executor advances one scalar port at a time and cannot pretend a
+    coupled hardware transaction is atomic.  Metadata carries no unit
+    vocabulary, so the port's unit is empty and its label names the device
+    and the knob.
     """
 
     ports: list[ScanPort] = []
@@ -141,8 +143,13 @@ def scan_ports_for_devices(tunables: Mapping | None) -> tuple[ScanPort, ...]:
         fields = getattr(device, "tunable_fields", None)
         if not callable(fields):
             continue
-        for field in fields():
+        for tunable in fields():
+            if not isinstance(tunable, TunableField):
+                raise TypeError("device tunable_fields must contain TunableField values")
+            field = tunable.metadata
             if field.minimum is None or field.maximum is None:
+                continue
+            if not tunable.live_write or tunable.dependency_group != (field.name,):
                 continue
             port = f"{DEVICE_PARAM_FAMILY}{key}:{field.name}"
             ports.append(

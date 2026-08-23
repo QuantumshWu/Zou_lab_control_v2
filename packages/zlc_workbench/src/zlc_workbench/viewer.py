@@ -85,7 +85,7 @@ def describe_archive(
         tabs=(
             ("Plot", _plot_rows(arrays, recipes)),
             ("Measurement", _lineage_rows(sections["lineage"])),
-            ("Device", ()),
+            ("Device", _device_rows(sections["lineage"])),
             ("Flow", ()),
             ("Raw", _flatten(sections)),
         ),
@@ -110,9 +110,17 @@ def _plot_rows(
 
 
 def _lineage_nodes(value: object) -> tuple[str | None, dict[str, Mapping[str, Any]]]:
-    if not isinstance(value, Mapping) or set(value) != {"root", "nodes"}:
-        raise ValueError("figure lineage must contain root and nodes")
+    if not isinstance(value, Mapping) or set(value) != {
+        "root", "nodes", "device_settings"
+    }:
+        raise ValueError(
+            "figure lineage must contain root, nodes, and device_settings"
+        )
     root, raw_nodes = value["root"], value["nodes"]
+    if not isinstance(value["device_settings"], list) or not all(
+        isinstance(item, Mapping) for item in value["device_settings"]
+    ):
+        raise TypeError("figure device settings must be an array of objects")
     if root is not None and not isinstance(root, str):
         raise TypeError("figure lineage root must be text or null")
     if not isinstance(raw_nodes, list):
@@ -120,7 +128,9 @@ def _lineage_nodes(value: object) -> tuple[str | None, dict[str, Mapping[str, An
     nodes: dict[str, Mapping[str, Any]] = {}
     for node in raw_nodes:
         entry = node if isinstance(node, Mapping) else {}
-        if set(entry) != {"id", "event", "parents", "signals", "record"}:
+        if set(entry) != {
+            "id", "event", "parents", "signals", "record", "event_record"
+        }:
             raise ValueError("figure lineage node fields differ")
         node_id = entry["id"]
         if not isinstance(node_id, str) or not node_id or node_id in nodes:
@@ -146,6 +156,8 @@ def _lineage_nodes(value: object) -> tuple[str | None, dict[str, Mapping[str, An
             raise TypeError("figure lineage signals must be text")
         if not isinstance(entry["record"], Mapping):
             raise TypeError("figure lineage record must be an object")
+        if not isinstance(entry["event_record"], Mapping):
+            raise TypeError("figure lineage event_record must be an object")
         nodes[node_id] = entry
     if root is None:
         if nodes:
@@ -182,6 +194,18 @@ def _lineage_tree(value: object) -> tuple[tuple[str, tuple], ...]:
 def _lineage_rows(value: object) -> Rows:
     _root, nodes = _lineage_nodes(value)
     return tuple((node_id, _text(node["record"])) for node_id, node in nodes.items())
+
+
+def _device_rows(value: object) -> Rows:
+    _lineage_nodes(value)
+    assert isinstance(value, Mapping)
+    return tuple(
+        (
+            f"{item.get('device_key', 'device')} epoch {item.get('settings_epoch', '?')}",
+            _text(item),
+        )
+        for item in value["device_settings"]
+    )
 
 
 def _flatten(value: Any, prefix: str = "") -> Rows:

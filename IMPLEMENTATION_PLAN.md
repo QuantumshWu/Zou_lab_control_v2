@@ -75,6 +75,15 @@
 - Feedback failure记录last complete candidate与rollback receipt；Stop只从完整测量candidate
   选择结果，未测phase不得成为final。
 
+### 2.5 Device Control与settings provenance
+
+- Generic Device Control只消费adapter的`TunableField` contract，显示Current、Desired、Live apply、Apply、Status、Refresh及active owners；已删除旧的edit-immediate `field_committed/read_values/set_form`路径和demo残余。
+- Pylon公开`gain_db`的SDK bounds/current与grabbing-safe write；Virtual camera公开`exposure_seconds`。成功且effective实际改变才推进session-local epoch；Stepped Scan严格使用effective return，不能把hardware未接受的值写成Dataset coordinate。
+- Logic静态requirements与Stepped Scan运行时选择的device ports都形成field claim。DeviceUse按device-specific owner revision原子核风险授权、dependency closure与pending write；字段命令期间不能进入新Logic，owner变化取消尚未执行的write。
+- Device I/O只在现有串行worker/adapter command lane执行。Refresh去重合并且属于close guard；75 ms live input在相同policy projection及in-flight write期间保留每字段latest-only值，Qt owner只处理plain projection和已完成readback。
+- CameraFrameRecord在adapter边界冻结settings session/epoch；Pylon无法证明live tune前后buffer边界时首个read batch明确携带old+new，Virtual在trigger时冻结。Runtime使用event-varying record并保持generation-stable run record，finite/scan/indexed保留范围合并为压缩epoch ranges。
+- Figure lineage当前grammar包含每个event record及只解析实际引用epoch的device settings；FigureViewer Device tab读取同一事实。无active Logic的调整不写历史，完整参数状态不复制到每frame。
+
 ## 3. 当前验证状态
 
 ### 3.1 Fresh wheel与installed lanes
@@ -96,6 +105,7 @@
   最近一次pre-adaptive controller实测为6个probe candidate、22个总candidate、最佳34/35与ratio 1.1337。
 - 后续adaptive gain/formal-update accounting与Curve hover/lock切分运行6个直接聚焦用例，结果`6 passed`；未重新运行100-shot验收。
 - 固定nearest清理运行standalone/facet artist、Workbench parameter surface及Fluent Setting/Edit四个聚焦用例，结果`4 passed`。
+- Device Control当前回归：Workbench完整`425 passed`；Runtime完整加Figure grammar `112 passed`；adapter/camera/scan受影响组`53 passed`；Device Control Qt、风险revision、refresh close guard、in-flight latest-only和demo直接证据均通过。Atom完整回归同时暴露并修复Temperature sibling event record、Feedback输出声明和三条terminal/Stop残余；100-shot virtual Feedback仍为既有`34/35`上限，未用放宽断言冒充通过。
 - 第一次installed software尝试曾在重负载下出现一次本地SLM测试TCP connect timeout；
   同一wheel的精确case随后连续5/5通过，第二次完整installed software lane通过，因此没有
   用该不可复现事件改动产品remote timeout或server逻辑。

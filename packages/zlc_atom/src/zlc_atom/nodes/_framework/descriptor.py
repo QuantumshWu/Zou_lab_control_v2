@@ -249,12 +249,46 @@ class NodePreviewSpec:
 class DeviceRequirement:
     capability_token: str
     argument_name: str
+    protected_fields: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if not self.capability_token or not self.argument_name:
+        token = str(self.capability_token).strip()
+        argument = str(self.argument_name).strip()
+        protected = tuple(str(value).strip() for value in self.protected_fields)
+        if not token or not argument:
             raise ValueError(
                 "device requirement token and build argument name must be non-empty"
             )
+        if any(not value for value in protected):
+            raise ValueError("protected device fields must be non-empty text")
+        if len(set(protected)) != len(protected):
+            raise ValueError("protected device fields must be unique")
+        object.__setattr__(self, "capability_token", token)
+        object.__setattr__(self, "argument_name", argument)
+        object.__setattr__(self, "protected_fields", protected)
+
+
+@dataclass(frozen=True)
+class ResolvedDeviceClaim:
+    """One runtime-selected device and the fields this node will drive."""
+
+    device_key: str
+    device: object = field(compare=False)
+    protected_fields: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        key = str(self.device_key).strip()
+        protected = tuple(str(value).strip() for value in self.protected_fields)
+        if not key or not protected or any(not value for value in protected):
+            raise ValueError(
+                "resolved device claim needs a key and protected fields"
+            )
+        if len(set(protected)) != len(protected):
+            raise ValueError("resolved device claim fields must be unique")
+        object.__setattr__(self, "device_key", key)
+        object.__setattr__(self, "protected_fields", protected)
+
+
 @dataclass(frozen=True)
 class SelectionMapping:
     """Data-only translation from one semantic selection to a draft patch."""

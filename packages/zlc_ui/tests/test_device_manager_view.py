@@ -255,7 +255,25 @@ spec = FormSpec((
 control = open_device_control(
     title='qCMOS control',
     spec=spec,
-    values=(('gain', 2),),
+    projection={
+        'owners': ('Camera Measurement',),
+        'reason': 'gain is unclaimed but requires operator risk acceptance',
+        'risk_enabled': True,
+        'risk_accepted': False,
+        'fields': {
+            'gain': {
+                'current': 2,
+                'desired': 2,
+                'editable': False,
+                'live_apply': False,
+                'live_enabled': False,
+                'apply_enabled': False,
+                'status': 'Risk acceptance required',
+                'severity': 'warning',
+                'reason': 'Accept risk to edit this unclaimed live-safe field',
+            },
+        },
+    },
 )
 assert isinstance(control, DeviceControlHandle)
 assert not isinstance(control, QtWidgets.QWidget), 'a QWidget escaped zlc_ui'
@@ -264,18 +282,102 @@ assert control._window.size() == target, (
     control._window.size().width(), control._window.size().height(),
     target.width(), target.height(),
 )
-field_events = []
-control.field_committed.connect(field_events.append)
+refresh_events = []
+risk_events = []
+desired_events = []
+live_events = []
+apply_events = []
+control.refresh_requested.connect(lambda: refresh_events.append(True))
+control.risk_toggled.connect(risk_events.append)
+control.field_desired_changed.connect(lambda key, value: desired_events.append((key, value)))
+control.field_live_apply_toggled.connect(lambda key, value: live_events.append((key, value)))
+control.field_apply_requested.connect(lambda key, value: apply_events.append((key, value)))
+assert not hasattr(control, 'field_committed')
+assert not hasattr(control, 'set_form')
+assert not hasattr(control, 'read_values')
+assert control._view.owner_label.text() == 'Owner: Camera Measurement'
+assert 'operator risk acceptance' in control._view.reason_label.text()
+assert control._view.current_heading.text() == 'Current'
+assert control._view.desired_heading.text() == 'Desired'
+assert control._view.live_heading.text() == 'Live apply'
+control._view.refresh_button.click()
+assert refresh_events == [True]
+QtTest.QTest.mouseClick(control._view.risk_switch, QtCore.Qt.LeftButton)
+assert risk_events == [True]
 form = control._view.form
 widget = form.widget_for('gain')
-widget.setValue(4); app.processEvents()
-assert field_events == ['gain']
-assert control.read_values() == (('gain', 4),)
+assert not widget.isEnabled()
+assert control._view._field_rows['gain'][0].text() == '2'
 
-control.set_form(spec, (('gain', 7),))
+control.set_projection(spec, {
+    'owners': ('Camera Measurement',),
+    'reason': 'risk accepted for unclaimed fields',
+    'risk_enabled': True,
+    'risk_accepted': True,
+    'fields': {
+        'gain': {
+            'current': 2, 'desired': 2, 'editable': True,
+            'live_apply': False, 'live_enabled': True, 'apply_enabled': True,
+            'status': 'Ready', 'severity': 'ready', 'reason': '',
+        },
+    },
+})
 assert control._view.form is form
 assert form.widget_for('gain') is widget
-assert control.read_values() == (('gain', 7),)
+app.processEvents()
+row = form._rows['gain']
+current, live, apply, _dot, status = control._view._field_rows['gain']
+ordered = (row._label, current, widget, live, apply, status.parentWidget())
+for left, right in zip(ordered, ordered[1:]):
+    assert left.mapTo(row, left.rect().topRight()).x() <= right.mapTo(row, right.rect().topLeft()).x()
+widget.setValue(4); app.processEvents()
+assert desired_events == [('gain', 4)]
+assert apply_events == []
+control._view._field_rows['gain'][2].click()
+assert apply_events == [('gain', 4)]
+
+live = control._view._field_rows['gain'][1]
+QtTest.QTest.mouseClick(live, QtCore.Qt.LeftButton)
+assert live_events[-1] == ('gain', True)
+widget.setValue(5); widget.setValue(6)
+QtTest.QTest.qWait(30)
+control.set_projection(spec, {
+    'owners': ('Camera Measurement',),
+    'reason': 'unchanged policy projection',
+    'risk_enabled': True,
+    'risk_accepted': True,
+    'fields': {
+        'gain': {
+            'current': 2, 'desired': 6, 'editable': True,
+            'live_apply': True, 'live_enabled': True, 'apply_enabled': True,
+            'status': 'Ready', 'severity': 'ready', 'reason': '',
+        },
+    },
+})
+QtTest.QTest.qWait(110); app.processEvents()
+assert apply_events[-1] == ('gain', 6)
+assert apply_events.count(('gain', 5)) == 0
+assert control._view._field_rows['gain'][0].text() == '2'
+
+control.set_projection(spec, {
+    'owners': ('Camera Measurement',),
+    'reason': 'exposure working point is claimed',
+    'risk_enabled': True,
+    'risk_accepted': True,
+    'fields': {
+        'gain': {
+            'current': 6, 'desired': 6, 'editable': False,
+            'live_apply': False, 'live_enabled': False, 'apply_enabled': False,
+            'status': 'Protected', 'severity': 'warning',
+            'reason': 'Camera Measurement claims this field',
+        },
+    },
+})
+assert control._view._field_rows['gain'][0].text() == '6'
+assert control._view._field_rows['gain'][4].text() == 'Protected'
+assert not widget.isEnabled()
+assert widget.toolTip() == 'Camera Measurement claims this field'
+assert form.read_value('gain') == 6
 control.show_status('ready', 'idle')
 assert control._view.status_strip.text() == 'ready'
 

@@ -53,11 +53,13 @@ def _event_document(publication: object) -> dict[str, object]:
 def capture_run_chain(
     signal_plane: object,
     publication: object | None,
+    *,
+    resolve_device_settings: object | None = None,
 ) -> dict[str, object]:
     """Capture the exact causal DAG rooted at one displayed publication."""
 
     if publication is None:
-        return {"root": None, "nodes": []}
+        return {"root": None, "nodes": [], "device_settings": []}
     parents_of = getattr(signal_plane, "direct_parent_publications", None)
     if not callable(parents_of):
         raise TypeError("signal plane cannot resolve exact parent publications")
@@ -78,11 +80,26 @@ def capture_run_chain(
             "parents": [visit(parent) for parent in parents],
             "signals": [str(name) for name in getattr(current, "signals", {})],
             "record": _plain(getattr(current, "run_record", {})),
+            "event_record": _plain(getattr(current, "event_record", {})),
         }
         return node_id
 
     root = visit(publication)
-    return {"root": root, "nodes": [nodes[key] for key in identities.values()]}
+    ordered = [nodes[key] for key in identities.values()]
+    result: dict[str, object] = {
+        "root": root,
+        "nodes": ordered,
+        "device_settings": [],
+    }
+    if resolve_device_settings is not None:
+        if not callable(resolve_device_settings):
+            raise TypeError("resolve_device_settings must be callable or None")
+        result["device_settings"] = _plain(
+            resolve_device_settings(
+                tuple(node["event_record"] for node in ordered)
+            )
+        )
+    return result
 
 
 def _recipe(

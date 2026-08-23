@@ -36,8 +36,10 @@ from zlc_atom.nodes.scan import (
     ScanAxis,
     ScanDatasetWriter,
     ScanPlan,
+    ScanPort,
 )
 from zlc_atom.nodes.stepped_scan import GATING_MODES, STEPPED_SCAN_SCHEMA
+from zlc_atom.nodes.stepped_scan.measurement import SteppedScanMeasurement
 
 from tests.fakes import (
     SCRIPTED_SEED_VALUE,
@@ -314,6 +316,30 @@ def test_the_authored_settle_time_stops_the_board_before_every_point() -> None:
         )
 
 
+def test_device_scan_refuses_an_effective_value_different_from_its_coordinate() -> None:
+    class QuantizedDevice:
+        def tune(self, _field: str, value: float) -> float:
+            return float(value) + 0.5
+
+    port_name = DEVICE_PARAM_FAMILY + "camera:gain_db"
+    measurement = SteppedScanMeasurement(
+        sequencer=SimpleNamespace(safe=lambda: None),
+        source=object(),
+        sequence=_template_sequence(),
+        plan=ScanPlan((ScanAxis(port_name, (3.0,)),)),
+        ports=(ScanPort(port_name, "camera.gain_db", "", 0.0, 24.0),),
+        repeats=1,
+        shots_per_point=1,
+        settle_seconds=0.0,
+        gating="pulse_gated",
+        free_run_delay_seconds=0.0,
+        tunables={"camera": QuantizedDevice()},
+    )
+
+    with pytest.raises(RuntimeError, match="applied 3.5, not the scan coordinate 3.0"):
+        measurement._apply((3.0,), object())
+
+
 def test_scanning_a_device_port_moves_the_camera_exposure() -> None:
     """End to end: a ``device:`` axis tunes the camera and the frames show it.
 
@@ -363,6 +389,10 @@ def test_scanning_a_device_port_moves_the_camera_exposure() -> None:
             settle_seconds=0.02,
             tunable_devices=tunable_devices(installation),
         )
+        (claim,) = scan_node.resolved_device_claims()
+        assert claim.device_key == "mot_camera"
+        assert claim.device is installation.device("mot_camera")
+        assert claim.protected_fields == ("exposure_seconds",)
         host = _scan_host(scan_node, plane)
         host.start()
         deadline = time.monotonic() + 240.0

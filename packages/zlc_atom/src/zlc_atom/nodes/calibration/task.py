@@ -361,7 +361,11 @@ class SampleWriter:
                 arrays={"data": snapshot},
                 sections={
                     "plot": {"data": recipe},
-                    "lineage": {"root": None, "nodes": []},
+                    "lineage": {
+                        "root": None,
+                        "nodes": [],
+                        "device_settings": [],
+                    },
                     "source": {
                         "task": "calibration",
                         "artifact": "saved_sample",

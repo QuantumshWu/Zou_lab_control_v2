@@ -325,7 +325,9 @@ def save_figure_artifact(
     sections = {
         "plot": {"data": recipe},
         "lineage": _plain(
-            {"root": None, "nodes": []} if not lineage else lineage
+            {"root": None, "nodes": [], "device_settings": []}
+            if not lineage
+            else lineage
         ),
         "source": _plain(source_document),
     }

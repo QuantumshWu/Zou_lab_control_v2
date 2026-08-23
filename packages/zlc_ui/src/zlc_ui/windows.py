@@ -24,10 +24,10 @@ def open_device_control(
     *,
     title: str,
     spec: Any,
-    values: tuple[tuple[str, object], ...] = (),
+    projection: Any,
     window_ratio: float | None = None,
 ) -> Any:
-    """Open one generic device form without exposing its QWidget."""
+    """Open one projection-driven generic control without exposing Qt."""
 
     from .device_manager.handle import DeviceControlHandle
     from .device_manager.view import DeviceControlView
@@ -35,7 +35,7 @@ def open_device_control(
     held: dict[str, Any] = {}
 
     def _body() -> DeviceControlView:
-        view = DeviceControlView(spec, values)
+        view = DeviceControlView(spec, projection)
         held["view"] = view
         return view
 

@@ -16,12 +16,15 @@ imports this package, runs the virtual backend, and passes the whole suite.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from functools import wraps
+import threading
 import time
 from typing import Sequence
+from uuid import uuid4
 
 import numpy as np
 
-from ...authoring import AuthoringField
+from ...authoring import AuthoringField, TunableField
 from .contract import (
     CameraAcquisitionMode,
     CameraCaptureTerminalRecord,
@@ -32,6 +35,17 @@ from .photoelectrons import stated_conversion
 
 
 __all__ = ["PylonCameraAdapter", "PylonCameraConfig"]
+
+
+def _serialized(method):
+    """Keep every public SDK call on this adapter's single command lane."""
+
+    @wraps(method)
+    def call(self, *args, **kwargs):
+        with self._command_lock:
+            return method(self, *args, **kwargs)
+
+    return call
 
 
 def _snap_to_increment(value: int, low: int, high: int, increment: int) -> int:
@@ -121,6 +135,11 @@ class PylonCameraAdapter:
     def __init__(self, config: PylonCameraConfig, *, camera: object | None = None) -> None:
         self.config = config
         self._camera = camera
+        self._command_lock = threading.RLock()
+        self._device_session_id = uuid4().hex
+        self._settings_epoch = 0
+        self._settings_transition_epochs: set[int] = set()
+        self._gain_default = float(config.gain_db)
         self._armed_total: int | None = None
         self._grabbed = 0
         self._armed = False
@@ -131,6 +150,7 @@ class PylonCameraAdapter:
 
     # ------------------------------------------------------------------ open
 
+    @_serialized
     def open(self) -> None:
         """Attach to the camera and push every configured setting to it.
 
@@ -184,6 +204,7 @@ class PylonCameraAdapter:
             raise
         self._camera = camera
 
+    @_serialized
     def close(self) -> None:
         camera = self._camera
         if camera is None:
@@ -253,7 +274,8 @@ class PylonCameraAdapter:
         self.open()
         return self._camera.Gain
 
-    def tunable_fields(self) -> tuple[AuthoringField, ...]:
+    @_serialized
+    def tunable_fields(self) -> tuple[TunableField, ...]:
         """The runtime knob this camera volunteers, in the camera's own words.
 
         Bounds are read from the sensor rather than written down here: they
@@ -266,20 +288,38 @@ class PylonCameraAdapter:
 
         node = self._gain_node()
         return (
-            AuthoringField(
-                "gain_db",
-                "float",
-                "Gain (dB)",
-                float(node.GetValue()),
-                minimum=float(node.GetMin()),
-                maximum=float(node.GetMax()),
+            TunableField(
+                metadata=AuthoringField(
+                    "gain_db",
+                    "float",
+                    "Gain (dB)",
+                    self._gain_default,
+                    minimum=float(node.GetMin()),
+                    maximum=float(node.GetMax()),
+                ),
+                current=float(node.GetValue()),
+                live_write=True,
+                dependency_group=("gain_db",),
             ),
         )
 
-    def tune(self, name: str, value: float) -> None:
-        """Move one volunteered knob on the live camera."""
+    @_serialized
+    def tunable_values(self) -> dict[str, float]:
+        return {"gain_db": float(self._gain_node().GetValue())}
 
-        (field,) = self.tunable_fields()
+    @_serialized
+    def settings_provenance(self) -> dict[str, object]:
+        return {
+            "device_session_id": self._device_session_id,
+            "settings_epoch": self._settings_epoch,
+        }
+
+    @_serialized
+    def tune(self, name: str, value: float) -> float:
+        """Move one volunteered knob and return the sensor's effective value."""
+
+        (tunable,) = self.tunable_fields()
+        field = tunable.metadata
         if str(name) != field.name:
             raise ValueError(
                 f"pylon camera has no tunable field {name!r}; "
@@ -290,7 +330,20 @@ class PylonCameraAdapter:
             raise ValueError(
                 f"gain_db must lie in [{field.minimum:g}, {field.maximum:g}]"
             )
-        self._camera.Gain.SetValue(gain)
+        node = self._gain_node()
+        previous = float(node.GetValue())
+        if gain != previous:
+            node.SetValue(gain)
+        effective = float(node.GetValue())
+        self.config = replace(self.config, gain_db=effective)
+        if effective != previous:
+            previous_epoch = self._settings_epoch
+            self._settings_epoch += 1
+            if self._armed:
+                self._settings_transition_epochs.update(
+                    (previous_epoch, self._settings_epoch)
+                )
+        return effective
 
     def _apply_pixel_format(self) -> None:
         with self._paused_stream():
@@ -420,6 +473,7 @@ class PylonCameraAdapter:
             camera="pylon camera",
         )
 
+    @_serialized
     def set_exposure_seconds(self, seconds: float) -> CameraWorkingPoint:
         """Integrate for this long on every trigger, leaving the geometry."""
 
@@ -428,6 +482,7 @@ class PylonCameraAdapter:
             raise ValueError("exposure_seconds must be positive and finite")
         return self._reconfigure(replace(self.config, exposure_seconds=exposure))
 
+    @_serialized
     def set_roi(
         self, roi_xywh: tuple[int, int, int, int] | None
     ) -> CameraWorkingPoint:
@@ -467,6 +522,7 @@ class PylonCameraAdapter:
         )
         return point
 
+    @_serialized
     def working_point(self) -> CameraWorkingPoint:
         """Read the sensor's state back, rather than repeating what we asked for."""
 
@@ -525,6 +581,7 @@ class PylonCameraAdapter:
             electrons_per_count=None if conversion is None else conversion[1],
         )
 
+    @_serialized
     def arm(
         self,
         frames: int | None,
@@ -621,6 +678,7 @@ class PylonCameraAdapter:
         self._capture_incomplete = False
         self._monitor_mode = monitor
 
+    @_serialized
     def read_frame_records(
         self,
         n: int,
@@ -643,6 +701,9 @@ class PylonCameraAdapter:
         camera = self._camera
         records: list[CameraFrameRecord] = []
         deadline = time.monotonic() + float(timeout)
+        frame_epochs = tuple(sorted(self._settings_transition_epochs)) or (
+            self._settings_epoch,
+        )
 
         while len(records) < int(n):
             remaining = deadline - time.monotonic()
@@ -670,7 +731,17 @@ class PylonCameraAdapter:
             finally:
                 result.Release()
             self._grabbed += 1
-            records.append(CameraFrameRecord(image, self._grabbed - 1))
+            records.append(
+                CameraFrameRecord(
+                    image,
+                    self._grabbed - 1,
+                    settings_session_id=self._device_session_id,
+                    settings_epochs=frame_epochs,
+                )
+            )
+
+        if records:
+            self._settings_transition_epochs.clear()
 
         if exact and len(records) < int(n):
             raise RuntimeError(
@@ -679,6 +750,7 @@ class PylonCameraAdapter:
             )
         return tuple(records)
 
+    @_serialized
     def finish_record_capture(self) -> CameraCaptureTerminalRecord:
         """End this arm and restore the finite external-trigger working point."""
 
@@ -686,6 +758,7 @@ class PylonCameraAdapter:
         if camera is not None:
             self._stop_and_restore_external()
         self._armed = False
+        self._settings_transition_epochs.clear()
         return CameraCaptureTerminalRecord(
             self._grabbed,
             True,
@@ -693,6 +766,7 @@ class PylonCameraAdapter:
             True,
         )
 
+    @_serialized
     def capture_state(self) -> bool:
         return self._armed
 

@@ -22,6 +22,7 @@ rediscover them:
 from __future__ import annotations
 
 import sys
+import threading
 import types
 
 import numpy as np
@@ -569,18 +570,110 @@ def test_the_camera_volunteers_its_analog_gain_and_reports_the_real_one() -> Non
     adapter.open()
     assert camera.Gain.writes == [6.0], "the authored gain never reached the sensor"
 
-    (field,) = adapter.tunable_fields()
+    (tunable,) = adapter.tunable_fields()
+    field = tunable.metadata
     assert field.name == "gain_db"
     assert (field.minimum, field.maximum) == (0.0, 24.0)
     assert field.default == pytest.approx(6.0)
+    assert tunable.current == pytest.approx(6.0)
+    assert tunable.live_write is True
+    assert tunable.dependency_group == ("gain_db",)
+    provenance = adapter.settings_provenance()
+    assert provenance["settings_epoch"] == 0
+    assert adapter.tunable_values() == {"gain_db": pytest.approx(6.0)}
 
-    adapter.tune("gain_db", 12.0)
+    assert adapter.tune("gain_db", 12.0) == pytest.approx(12.0)
     assert camera.Gain.GetValue() == pytest.approx(12.0)
+    refreshed = adapter.tunable_fields()[0]
+    assert refreshed.metadata.default == pytest.approx(6.0)
+    assert refreshed.current == pytest.approx(12.0)
+    assert adapter.tunable_values() == {"gain_db": pytest.approx(12.0)}
+    assert adapter.settings_provenance() == {
+        "device_session_id": provenance["device_session_id"],
+        "settings_epoch": 1,
+    }
+    assert adapter.tune("gain_db", 12.0) == pytest.approx(12.0)
+    assert adapter.settings_provenance()["settings_epoch"] == 1
     # A working point carries the LINEAR factor, which is what every reader of
     # one means by gain; the camera states dB.
     assert adapter.working_point().gain == pytest.approx(10.0 ** (12.0 / 20.0))
 
     with pytest.raises(ValueError, match="gain_db must lie in"):
         adapter.tune("gain_db", 30.0)
+    assert adapter.settings_provenance()["settings_epoch"] == 1
     with pytest.raises(ValueError, match="no tunable field"):
         adapter.tune("exposure_seconds", 0.1)
+    other = PylonCameraAdapter(_config(), camera=_FakeCamera())
+    assert (
+        other.settings_provenance()["device_session_id"]
+        != provenance["device_session_id"]
+    )
+
+
+def test_live_gain_and_acquisition_readback_share_one_sdk_lane() -> None:
+    camera = _FakeCamera()
+    adapter = PylonCameraAdapter(_config(), camera=camera)
+    adapter.open()
+    camera._grabbing = True
+    entered = threading.Event()
+    release = threading.Event()
+    readback_done = threading.Event()
+    errors: list[BaseException] = []
+    original_set = camera.Gain.SetValue
+
+    def blocked_set(value: float) -> None:
+        entered.set()
+        if not release.wait(2.0):
+            raise TimeoutError("test did not release the gain write")
+        original_set(value)
+
+    camera.Gain.SetValue = blocked_set
+
+    def tune() -> None:
+        try:
+            adapter.tune("gain_db", 8.0)
+        except BaseException as error:
+            errors.append(error)
+
+    def readback() -> None:
+        try:
+            adapter.working_point()
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            readback_done.set()
+
+    tune_thread = threading.Thread(target=tune)
+    readback_thread = threading.Thread(target=readback)
+    tune_thread.start()
+    assert entered.wait(1.0)
+    readback_thread.start()
+    assert not readback_done.wait(0.05), "SDK readback bypassed the live-tune lock"
+    release.set()
+    tune_thread.join(2.0)
+    readback_thread.join(2.0)
+
+    assert not tune_thread.is_alive() and not readback_thread.is_alive()
+    assert not errors
+    assert camera.IsGrabbing() is True
+    assert "StopGrabbing" not in camera.grab_calls
+
+
+def test_live_gain_change_marks_the_first_read_as_a_conservative_transition(
+    fake_pypylon,
+) -> None:
+    camera = _FakeCamera(frames=[np.zeros((4, 4), np.uint8)] * 3)
+    adapter = PylonCameraAdapter(_config(), camera=camera)
+    adapter.open()
+    session_id = adapter.settings_provenance()["device_session_id"]
+    adapter.arm(2, source_group_sizes=(2,), buffer_frame_count=2, timeout=0.5)
+    adapter.tune("gain_db", 8.0)
+    changed = adapter.read_frame_records(2, timeout=0.5, exact=True)
+    assert {record.settings_session_id for record in changed} == {session_id}
+    assert {record.settings_epochs for record in changed} == {(0, 1)}
+    adapter.finish_record_capture()
+
+    adapter.arm(1, source_group_sizes=(1,), buffer_frame_count=1, timeout=0.5)
+    stable = adapter.read_frame_records(1, timeout=0.5, exact=True)
+    assert stable[0].settings_epochs == (1,)
+    adapter.finish_record_capture()

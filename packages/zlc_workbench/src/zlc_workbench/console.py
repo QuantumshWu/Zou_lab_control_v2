@@ -915,7 +915,13 @@ class ConsolePresenter:
             publication,
             snapshot,
             plot_input,
-            capture_run_chain(self.session.signal_plane, publication),
+            capture_run_chain(
+                self.session.signal_plane,
+                publication,
+                resolve_device_settings=(
+                    self.session.resolve_device_setting_records
+                ),
+            ),
             self._overlay_annotation(
                 binding, publication, plot_input, state=selected
             ),
@@ -4647,9 +4653,32 @@ class ConsolePresenter:
                 requirement.argument_name,
                 finalization.device_keys[requirement.argument_name],
                 arguments[requirement.argument_name],
+                requirement.protected_fields,
             )
             for requirement in binding.descriptor.device_requirements
         )
+        resolve_claims = getattr(node, "resolved_device_claims", None)
+        if callable(resolve_claims):
+            from zlc_atom.nodes import ResolvedDeviceClaim
+
+            runtime_claims = tuple(resolve_claims())
+            if any(
+                not isinstance(claim, ResolvedDeviceClaim)
+                for claim in runtime_claims
+            ):
+                raise TypeError(
+                    "resolved_device_claims must contain ResolvedDeviceClaim values"
+                )
+            claims += tuple(
+                DeviceClaim(
+                    f"runtime:{claim.device_key}",
+                    claim.device_key,
+                    claim.device,
+                    claim.protected_fields,
+                    False,
+                )
+                for claim in runtime_claims
+            )
         is_task = str(
             getattr(binding.descriptor.kind, "value", binding.descriptor.kind)
         ) == "task"

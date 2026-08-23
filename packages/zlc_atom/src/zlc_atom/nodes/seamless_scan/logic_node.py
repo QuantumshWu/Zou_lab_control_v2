@@ -158,7 +158,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     # number per point -- opens as the curve it is.
     node_previews=(NodePreviewSpec(SCAN_OUTPUT, "facet_grid"),),
     device_requirements=(
-        DeviceRequirement("sequencer.streamer", "sequencer"),
+        DeviceRequirement("sequencer.streamer", "sequencer", ("program",)),
     ),
     build=_build,
     # A region drawn on this scan's own plot is a statement about

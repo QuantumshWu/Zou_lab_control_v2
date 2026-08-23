@@ -239,7 +239,21 @@ LOGIC_NODE = LogicNodeDescriptor(
     outputs=(CAMERA_FRAMES_OUTPUT,),
     node_previews=(NodePreviewSpec(CAMERA_FRAMES_OUTPUT, "facet_grid"),),
     device_requirements=(
-        DeviceRequirement("camera.adapter", "camera"),
+        DeviceRequirement(
+            "camera.adapter",
+            "camera",
+            (
+                "exposure_seconds",
+                "roi_x",
+                "roi_y",
+                "roi_width",
+                "roi_height",
+                "trigger_source",
+                "readout_speed",
+                "offset_counts",
+                "electrons_per_count",
+            ),
+        ),
     ),
     build=_build,
     selection_mappings=(_IMAGE_AREA_TO_ROI,),

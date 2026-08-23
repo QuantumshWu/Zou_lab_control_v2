@@ -109,6 +109,13 @@ def test_tunable_devices_project_device_ports() -> None:
     try:
         tunables = tunable_devices(installation)
         assert "mot_camera" in tunables and "camera" in tunables
+        (exposure,) = tunables["mot_camera"].tunable_fields()
+        assert exposure.metadata.name == "exposure_seconds"
+        assert exposure.current == tunables["mot_camera"].tunable_values()[
+            "exposure_seconds"
+        ]
+        assert exposure.live_write is True
+        assert exposure.dependency_group == ("exposure_seconds",)
         ports = scan_ports_for_devices(tunables)
         by_name = {port.port: port for port in ports}
         key = DEVICE_PARAM_FAMILY + "mot_camera:exposure_seconds"
