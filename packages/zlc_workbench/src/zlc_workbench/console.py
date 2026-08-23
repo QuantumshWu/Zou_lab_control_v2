@@ -2724,7 +2724,7 @@ class ConsolePresenter:
             )
         self.view.set_panel_selectors_enabled(
             binding.panel_id,
-            self._deriving and not science_locked,
+            self._deriving,
         )
         self._offer_panel(binding.panel_id)
         self.refresh_panel_editor(binding.panel_id)
@@ -2854,7 +2854,7 @@ class ConsolePresenter:
             # The card applies the same global pointer gate to its plot.
             self.view.set_panel_selectors_enabled(
                 panel_id,
-                self._deriving and not self._task_science_locked(binding),
+                self._deriving,
             )
         self._report(
             "selectors enabled" if self._deriving else "selectors disabled",
@@ -3301,11 +3301,6 @@ class ConsolePresenter:
         binding = self.panels.get(str(panel_id))
         if binding is None:
             return
-        if self._task_panel_science_blocked(
-            binding,
-            "changing classifier selection",
-        ):
-            return
         target = tuple(thresholds)
         if binding.state.classifier_thresholds == target:
             return
@@ -3390,7 +3385,8 @@ class ConsolePresenter:
             self._remember_panel_view(binding, selector={})
             if other_host is not None:
                 mirror(_remove_panel_selection(other_host, previous))
-            self._resync_producer_draft(binding, previous)
+            if not self._task_science_locked(binding):
+                self._resync_producer_draft(binding, previous)
             return _UNCHANGED
 
         remembered = panel_selection_from_document(binding.state.selector)
@@ -3423,18 +3419,12 @@ class ConsolePresenter:
             return
         if binding.port is None:
             return
-        if (
-            viewport is _UNCHANGED
-            and self._task_panel_science_blocked(
-                binding,
-                "changing selector science state",
-            )
-        ):
-            return
         selection = self._synchronize_panel_interaction(
             binding, binding.editor_host, selection, viewport
         )
         if selection is _UNCHANGED:
+            return
+        if self._task_science_locked(binding):
             return
         publication = binding.port.presented_publication()
         if publication is None:
@@ -3469,18 +3459,12 @@ class ConsolePresenter:
             or binding.frozen_stale
         ):
             return
-        if (
-            viewport is _UNCHANGED
-            and self._task_panel_science_blocked(
-                binding,
-                "changing selector science state",
-            )
-        ):
-            return
         selection = self._synchronize_panel_interaction(
             binding, binding.host, selection, viewport
         )
         if selection is _UNCHANGED:
+            return
+        if self._task_science_locked(binding):
             return
         self._route_exact_panel_selection(
             panel_id,
