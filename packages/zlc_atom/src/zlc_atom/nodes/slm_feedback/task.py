@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 import json
 from pathlib import Path
 from typing import Mapping
@@ -18,6 +19,7 @@ from zlc_data import (
     AxisId,
     AxisSpec,
     PointColumn,
+    owned_snapshot_from_arrays,
 )
 from zlc_data.snapshot_projection import (
     restricted_values,
@@ -1279,6 +1281,19 @@ class SlmFeedbackTask:
             axis_specs={SITE: site_axis},
             generation=generation,
             revision=publication_revision,
+        )
+        site_map_event = owned_snapshot_from_arrays(
+            replace(
+                site_map_event.block.schema,
+                repeat_axis=camera_event.block.schema.repeat_axis,
+                point_table=camera_event.block.schema.point_table,
+                grid_topology=camera_event.block.schema.grid_topology,
+            ),
+            site_map_event.block.values,
+            publication_revision,
+            validity=site_map_event.expanded_validity(),
+            block_id=site_map_event.ref.block_id,
+            stream_generation=site_map_event.ref.stream_generation,
         )
         record = dict(self._run_record())
         record[IMAGE_POINT_OVERLAY_GEOMETRY_RECORD] = image_point_overlay_geometry(
