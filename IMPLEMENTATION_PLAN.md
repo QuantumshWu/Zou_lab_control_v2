@@ -69,6 +69,8 @@
   primary加PNG preview。normal或Stop只产生一个final Science Context。
 - Feedback Monitor固定自动打开四张图：canonical Camera Measurement逐帧publication经mean reduction得到的带编号site map实时图、observable
   uniformity、site signal evolution和Target share evolution；phase保留为信号和最终Figure但不自动开panel。
+- Feedback formal-double gain从authored `feedback_gain`起步，连续两次显著改善乘1.25、显著变差乘0.5、不确定性内保持；diagnostic probe/single不参与adaptive。`probe_combined`计入`maximum feedback updates`，diagnostic candidates不计。
+- Grouped Curve hover与lock已分离：hover仅轻微加粗，lock才压暗其它lines；无框标签固定axes右上角，lock加`* `并接管滚轮逐series移动。
 - Feedback failure记录last complete candidate与rollback receipt；Stop只从完整测量candidate
   选择结果，未测phase不得成为final。
 
@@ -90,8 +92,8 @@
   server成功。该follow-up只改变launcher/bootstrap，不改变science/runtime实现。
 - Calibration六张report Figure都经FigureViewer current reader重开；SLM Feedback六张Figure
   均经formal `zlc figure_viewer --check`读取。上述证据属于此前冻结tree；本次Feedback/Curve
-  改动按用户要求不再运行测试，最近一次controller实测为6个probe candidate、22个总candidate、
-  最佳34/35与ratio 1.1337，当前逻辑随后由用户明确冻结不再修改。
+  最近一次pre-adaptive controller实测为6个probe candidate、22个总candidate、最佳34/35与ratio 1.1337。
+- 后续adaptive gain/formal-update accounting与Curve hover/lock切分运行6个直接聚焦用例，结果`6 passed`；未重新运行100-shot验收。
 - 第一次installed software尝试曾在重负载下出现一次本地SLM测试TCP connect timeout；
   同一wheel的精确case随后连续5/5通过，第二次完整installed software lane通过，因此没有
   用该不可复现事件改动产品remote timeout或server逻辑。
