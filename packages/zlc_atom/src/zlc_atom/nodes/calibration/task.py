@@ -1300,11 +1300,23 @@ class CalibrationTask:
                 run_record,
                 writer,
             )
-        except BaseException:
+        except BaseException as error:
             if armed:
-                capture.close()
+                try:
+                    capture.close()
+                except BaseException as cleanup_error:
+                    error.add_note(
+                        "Camera cleanup also reported: "
+                        f"{type(cleanup_error).__name__}: {cleanup_error}"
+                    )
             if firing:
-                self._safe()
+                try:
+                    self._safe()
+                except BaseException as safe_error:
+                    error.add_note(
+                        "Sequencer SAFE also reported: "
+                        f"{type(safe_error).__name__}: {safe_error}"
+                    )
             raise
 
     def _replay_saved_frames(

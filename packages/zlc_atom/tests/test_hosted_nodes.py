@@ -650,7 +650,7 @@ def test_finite_cycle_rejects_a_physical_ordinal_gap() -> None:
 
 
 def test_finite_capture_rejects_incomplete_terminal_evidence() -> None:
-    with pytest.raises(RuntimeError, match="did not prove"):
+    with pytest.raises(RuntimeError, match="terminal count differs from completed cycles"):
         _strict_terminal(
             CameraCaptureTerminalRecord(2, True, True, True),
             expected_frames=3,

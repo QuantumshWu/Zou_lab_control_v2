@@ -278,9 +278,9 @@ def _strict_terminal(
         or not terminal.joined
     ):
         raise RuntimeError(
-            "camera did not prove exact capture completion: "
-            f"expected {expected_frames} frame(s), produced "
-            f"{terminal.produced_count}"
+            "camera terminal count differs from completed cycles: "
+            f"completed cycles account for {expected_frames} frame(s), camera "
+            f"produced {terminal.produced_count} (a partial cycle may be present)"
         )
     return terminal
 
@@ -630,22 +630,17 @@ class FiniteCapture:
             if monotonic() >= deadline:
                 break
         if len(records) != self.frames_per_cycle:
-            # The two numbers that decide this, from the sensor rather than
-            # from a guess: how long it integrates per trigger, and how often
-            # it will accept one.  A trigger that arrives while it is still
-            # busy is ignored, which is one frame short of a cycle, every
-            # cycle -- and "an incomplete atomic cycle" named none of that.
             point = self.node.actual_working_point
             exposure = "unknown" if point is None else format(point.exposure_seconds, "g")
             interval = None if point is None else point.required_external_trigger_interval_seconds
             raise RuntimeError(
                 f"the camera returned {len(records)} frame(s) of a "
-                f"{self.frames_per_cycle}-frame cycle: it integrates {exposure}s "
-                "per trigger and accepts one only every "
+                f"{self.frames_per_cycle}-frame cycle before timeout. Camera "
+                f"readback: exposure {exposure}s, minimum external-trigger "
+                "interval "
                 f"{'unknown' if interval is None else format(interval, 'g') + 's'}"
-                ", and a trigger arriving before that is ignored -- the pulse "
-                "must space its camera windows by more than that, or the "
-                "exposure must come down"
+                ". Camera Measurement has no Pulse schedule; inspect the "
+                "external rising-edge count, spacing, and source state"
             )
         expected = self.completed_cycles * self.frames_per_cycle
         cycle = _strict_cycle_ordinals(
