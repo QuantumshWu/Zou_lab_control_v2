@@ -2965,8 +2965,13 @@ def test_a_running_task_freezes_logic_identity_but_not_panels(
     preview.port = object()
     presenter.set_deriving(True)
     assert presenter.view._cards[preview.panel_id].selectors_enabled is True
-    presenter._settle_panel_threshold(preview.panel_id, None, (1.0,))
-    assert preview.state.classifier_thresholds == (1.0,)
+    threshold = {
+        "value": 1.0,
+        "scope": (),
+        "repeat_index": None,
+    }
+    presenter._settle_panel_threshold(preview.panel_id, None, (threshold,))
+    assert preview.state.classifier_thresholds == (threshold,)
     viewport = object()
     presenter._route_panel_selection(
         preview.panel_id,
