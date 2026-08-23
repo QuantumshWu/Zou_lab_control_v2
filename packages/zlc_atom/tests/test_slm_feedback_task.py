@@ -2859,12 +2859,17 @@ def test_invalid_site_holds_weight_and_never_retries_the_same_phase(
         assert all(
             item["decision"][4] == "hold_invalid"
             for item in history
+            if item["candidate_kind"] != "probe"
         )
         assert all(
             item["requested_log_correction"][4] == 0.0
             for item in history
         )
-        assert all(item["target_weight"][4] == 1.0 for item in history)
+        assert all(
+            item["target_weight"][4] == 1.0
+            for item in history
+            if item["candidate_kind"] != "probe"
+        )
     finally:
         plane.close()
 

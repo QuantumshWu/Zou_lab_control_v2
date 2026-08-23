@@ -286,12 +286,14 @@ def test_target_registration_keeps_a_never_loaded_site_as_unresolved(
     saved = result.calibration.save(tmp_path / "generic-calibration.json")
     calibration = type(result.calibration).load(saved)
     assert calibration.site_map.n_sites == 8
-    rows, columns, centers = _support(
+    rows, columns, registered = _support(
         target,
         calibration,
         science_context_path=context_path,
         command_receipt=receipt,
     )
-    assert len(rows) == len(columns) == len(centers) == 9
-    np.testing.assert_allclose(centers[missing], camera_centers[missing], atol=0.1)
+    assert len(rows) == len(columns) == registered.n_sites == 9
+    np.testing.assert_allclose(
+        registered.centers_xy[missing], camera_centers[missing], atol=0.1
+    )
     assert (rows[missing], columns[missing]) == (10, 9)

@@ -1134,6 +1134,8 @@ class SlmFeedbackTask:
             CANDIDATE_PHASE_OUTPUT,
             UNIFORMITY_HISTORY_OUTPUT,
             OBSERVABLE_UNIFORMITY_HISTORY_OUTPUT,
+            SITE_SIGNAL_HISTORY_OUTPUT,
+            TARGET_SHARE_HISTORY_OUTPUT,
         )
 
     def _run_record(self) -> dict[str, object]:
