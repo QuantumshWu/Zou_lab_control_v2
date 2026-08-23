@@ -4,10 +4,47 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 
 from zlc_workbench.tools.check_environment import OWNED, check
 from zou_lab_control import entry_specs
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def test_checkout_bootstrap_loads_all_layers_from_a_neutral_directory(
+    tmp_path: Path,
+) -> None:
+    script = r"""
+from pathlib import Path
+import zou_lab_control
+print(zou_lab_control.__file__)
+root = Path(zou_lab_control.__file__).resolve().parent.parent
+for name in (
+    "zlc_data", "zlc_durable", "zlc_runtime", "zlc_plot",
+    "zlc_ui", "zlc_pulse", "zlc_atom", "zlc_workbench",
+):
+    module = __import__(name)
+    origin = Path(module.__file__).resolve()
+    print(origin)
+    assert root in origin.parents
+"""
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(REPO_ROOT)
+    environment.pop("ZLC_TEST_INSTALLED", None)
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def test_every_package_resolves_to_its_own_product() -> None:

@@ -1,10 +1,11 @@
-"""Bootstrap and installed metadata for the single Zou Lab Control product."""
+"""One bootstrap for this checkout and the installed product."""
 
 from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 from typing import Mapping
+import sys
 import tomllib
 
 
@@ -13,6 +14,52 @@ __all__ = ["DISTRIBUTION_NAME", "ROOT", "entry_specs"]
 DISTRIBUTION_NAME = "zou-lab-control"
 # In a checkout this is the repository root; in a wheel it is site-packages.
 ROOT = Path(__file__).resolve().parent.parent
+_LAYERS = (
+    "zlc_data",
+    "zlc_durable",
+    "zlc_runtime",
+    "zlc_plot",
+    "zlc_ui",
+    "zlc_pulse",
+    "zlc_atom",
+    "zlc_workbench",
+)
+
+
+def _activate_checkout() -> None:
+    """Make this checkout authoritative when its bootstrap was imported."""
+
+    if not (ROOT / "pyproject.toml").is_file():
+        return
+    sources = tuple(ROOT / "packages" / name / "src" for name in _LAYERS)
+    missing = tuple(path for path in sources if not path.is_dir())
+    if missing:
+        raise ImportError(
+            "Zou Lab Control checkout is missing "
+            + ", ".join(str(path) for path in missing)
+        )
+    stale = []
+    for name, module in tuple(sys.modules.items()):
+        if not name.startswith("zlc_") or "." in name:
+            continue
+        origin = getattr(module, "__file__", None)
+        if origin is not None and not any(
+            source in Path(origin).resolve().parents for source in sources
+        ):
+            stale.append(f"{name} <- {origin}")
+    if stale:
+        raise ImportError(
+            "zlc packages were imported before the current checkout bootstrap:\n  "
+            + "\n  ".join(sorted(stale))
+        )
+    for source in reversed(sources):
+        text = str(source)
+        if text in sys.path:
+            sys.path.remove(text)
+        sys.path.insert(0, text)
+
+
+_activate_checkout()
 
 
 def entry_specs(group: str) -> Mapping[str, str]:

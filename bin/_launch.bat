@@ -1,5 +1,5 @@
 @echo off
-rem Shared installed-product launcher. The wrapper sets ZLC_COMMAND and this
+rem Shared checkout/product launcher. The wrapper sets ZLC_COMMAND and this
 rem file forwards the caller's original argument vector exactly once.
 setlocal EnableExtensions DisableDelayedExpansion
 
@@ -15,6 +15,15 @@ if errorlevel 1 (
   echo %ZLC_COMMAND% cannot start: this machine has no Python this launcher can run.
   if "%ZLC_NO_PAUSE%"=="" pause
   exit /b 1
+)
+
+rem A human launching this checkout runs this checkout.  The bootstrap adds
+rem its eight packages/*/src roots; preserving CD keeps workspace discovery
+rem anchored at the operator's experiment folder.
+if defined PYTHONPATH (
+  set "PYTHONPATH=%ZLC_HOME%;%PYTHONPATH%"
+) else (
+  set "PYTHONPATH=%ZLC_HOME%"
 )
 
 echo.

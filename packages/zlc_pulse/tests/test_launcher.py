@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # In bin/, with everything else a human clicks -- it still drives THIS layer's
 # board, which is why this layer is what checks it.
 LAUNCHER = ROOT.parents[1] / "bin" / "run_server.bat"
+SHARED_LAUNCHER = ROOT.parents[1] / "bin" / "_launch.bat"
 BUILD_LAUNCHER = ROOT.parents[1] / "bin" / "build_and_program.bat"
 ESTIMATE_LAUNCHER = ROOT.parents[1] / "bin" / "estimate_resources.bat"
 FPGA_SOURCES = ROOT / "fpga" / "pulse_streamer"
@@ -61,6 +62,9 @@ def test_real_batch_wrapper_forwards_exact_modes_without_inner_argument(tmp_path
         assert "--inner" not in result.stdout
     no_args = _run_batch(cwd=ROOT, python_path=fake)
     assert "-m zou_lab_control pulse_server" in no_args.stdout
+    shared = SHARED_LAUNCHER.read_text(encoding="utf-8")
+    assert 'set "PYTHONPATH=%ZLC_HOME%;%PYTHONPATH%"' in shared
+    assert 'set "PYTHONPATH=%ZLC_HOME%"' in shared
     assert "--host \"127.0.0.1\" --port \"18861\"" in no_args.stdout
     jtag = _run_batch("--backend", "jtag-axi", cwd=ROOT, python_path=fake)
     assert "--backend jtag-axi" in jtag.stdout

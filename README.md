@@ -15,8 +15,12 @@ python -m pip install -c constraints.txt -e ".[notebook]"
 zlc check
 ```
 
-On Windows, `bin\install_requirements.bat` performs the constrained root install
-and provenance check. A release wheel uses the same constraint surface:
+On a fresh Windows machine, run `bin\install_requirements.bat` once to install
+the constrained dependencies and root product. Afterwards the launchers can be
+double-clicked directly. A checkout launcher always activates that checkout's
+`zou_lab_control` bootstrap and eight `packages/*/src` roots, so pulling source
+changes does not require reinstalling the package merely to expose a renamed or
+new module. A release wheel uses the same constraint surface:
 
 ```powershell
 python -m pip install -c constraints.txt "zou_lab_control-2.0.0-py3-none-any.whl[dev]"

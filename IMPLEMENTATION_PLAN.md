@@ -74,8 +74,8 @@
 
 ### 3.1 Fresh wheel与installed lanes
 
-- Wheel：`zou_lab_control-2.0.0-py3-none-any.whl`，1,396,699 bytes，295 entries，
-  SHA256 `04BAE357F01038D6DCDD26D0EA640481CA4F377C3CEDB4D556241CD0C08E6CC4`。
+- Wheel：`zou_lab_control-2.0.0-py3-none-any.whl`，1,397,303 bytes，295 entries，
+  SHA256 `5F4C8360F40A5068B2EB4F006FAAF5441D7DE246CFB157707289D684F871E6D2`。
 - 全新venv按`constraints.txt`安装`[dev]`；`pip check`零问题；`zlc check`确认八层全部
   来自该venv中同一个`zou-lab-control` RECORD，且不存在第二bootstrap包。
 - Installed `software: PASS`：1,614 passed、4 skipped；4个skip仅因本机无Icarus，
@@ -83,6 +83,9 @@
 - Installed `gui_offscreen: PASS`，包含UI、Plot Qt、SLM Editor、FigureViewer、Workbench
   presenter/device/Pulse Editor以及每个TaskConsole case的独立进程生命周期。
 - Installed `virtual_vertical: PASS (9 passed)`；`notebook_offline: PASS`。
+- Checkout bootstrap follow-up：从系统临时目录运行`bin\run_server.bat --help`成功，八层路径
+  全部来自当前checkout；同一新wheel的isolated install从site-packages加载bootstrap与Pulse
+  server成功。该follow-up只改变launcher/bootstrap，不改变science/runtime实现。
 - Calibration六张report Figure都经FigureViewer current reader重开；SLM Feedback六张Figure
   均经formal `zlc figure_viewer --check`读取。100-shot virtual Feedback与完整SLM测试通过。
 - 第一次installed software尝试曾在重负载下出现一次本地SLM测试TCP connect timeout；
@@ -99,10 +102,10 @@
   TaskRun与Host接入、Calibration/Temperature产物接入、Workbench Task input projection和UI lineage tree。
 - Workbench重复archive wrapper、被忽略的Panel Save render callbacks、Figure/PanelState alternate readers、
   Calibration alternate readers、旧bootstrap和内部带版本contract全部删除；无compatibility alias。
-- Tests净删28行。删除的`test_archive.py`能力已合并到Data Figure codec、Panel Save与Viewer tests；
+- Tests净增13行。删除的`test_archive.py`能力已合并到Data Figure codec、Panel Save与Viewer tests；
   其它删除只针对不再存在的格式/兼容行为，没有通过删科学验收掩盖失败。
-- 冻结统计为143 files、production `+2,537/-1,472`（净+1,065）、tests
-  `+917/-945`（净删28）、docs `+351/-263`（净+88）。新增生产量集中在上述三个真实owner
+- 冻结统计为143 files、production `+2,599/-1,478`（净+1,121）、tests
+  `+958/-945`（净+13）、docs `+351/-255`（净+96）。新增生产量集中在上述三个真实owner
   和三个domain Task；没有新增plugin-specific manager/registry或平行lifecycle。
 - Unsupported format/alias、旧bootstrap/contract/API、重复owner、Markdown本地链接、JSON、
   conflict marker与`git diff --check`残余均为0；workspace实验数据未转换、未删除、未修改。
