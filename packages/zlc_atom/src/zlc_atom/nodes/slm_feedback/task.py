@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import replace
 import json
 from pathlib import Path
 from typing import Mapping
@@ -19,7 +18,6 @@ from zlc_data import (
     AxisId,
     AxisSpec,
     PointColumn,
-    owned_snapshot_from_arrays,
 )
 from zlc_data.snapshot_projection import (
     restricted_values,
@@ -33,7 +31,6 @@ from zlc_plot import (
     CurvePlot,
     FacetGridPlot,
     HistogramPlot,
-    IMAGE_POINT_OVERLAY_CONTRACT,
     IMAGE_POINT_OVERLAY_GEOMETRY_RECORD,
     ImageFrame,
     ImagePointOverlay,
@@ -66,8 +63,10 @@ from zlc_atom.nodes.calibration.calibration import (
 )
 from zlc_atom.nodes.calibration.pulse import arm_sequencer, resolve_pulse
 from zlc_atom.nodes.camera_measurement.measurement import (
+    CAMERA_FRAMES_OUTPUT,
     CameraMeasurementNode,
     CameraMeasurementRequest,
+    _finite_cycle_output,
 )
 from zlc_atom.nodes.scan.source import wait_for_board
 
@@ -88,12 +87,6 @@ SITE_SIGNAL_HISTORY_OUTPUT = DatasetOutputDeclaration(
 )
 TARGET_SHARE_HISTORY_OUTPUT = DatasetOutputDeclaration(
     "target_share_history", "slm-feedback.target-share-history"
-)
-CAMERA_MEAN_OUTPUT = DatasetOutputDeclaration(
-    "camera_mean", "slm-feedback.camera-mean"
-)
-SITE_MAP_OVERLAY_OUTPUT = DatasetOutputDeclaration(
-    "site_map", IMAGE_POINT_OVERLAY_CONTRACT
 )
 _CONTROLLER_CONTRACT = "slm-feedback.qcmos-bright-dark"
 READOUT_FRAME_COORDINATE = 0
@@ -1008,7 +1001,6 @@ class SlmFeedbackTask:
         self._effective_photoelectrons: bool | None = None
         self._effective_count_unit: str | None = None
         self._last_measured_phase: np.ndarray | None = None
-        self._latest_mean_frame: np.ndarray | None = None
         factors = tuple(float(value) for value in probe_factors)
         if (
             not factors
@@ -1254,56 +1246,7 @@ class SlmFeedbackTask:
             revision=publication_revision,
             validity=np.isfinite(target_share)[None],
         )
-        latest = self._latest_mean_frame
-        if latest is None:
-            camera_mean = np.zeros(
-                self.calibration.frame_contract.image_shape,
-                dtype=np.float32,
-            )
-            camera_validity = np.zeros(camera_mean.shape, dtype=np.bool_)
-        else:
-            camera_mean = np.asarray(latest, dtype=np.float32)
-            camera_validity = np.isfinite(camera_mean)
-        camera_event = snapshot_from_array(
-            camera_mean[None],
-            producer=self.instance_id,
-            signal=CAMERA_MEAN_OUTPUT.name,
-            roles=(SPATIAL_Y, SPATIAL_X),
-            generation=generation,
-            revision=publication_revision,
-            validity=camera_validity[None],
-        )
-        site_map_event = snapshot_from_array(
-            np.zeros((1, self._site_count), dtype=np.bool_),
-            producer=self.instance_id,
-            signal=SITE_MAP_OVERLAY_OUTPUT.name,
-            roles=(SITE,),
-            axis_specs={SITE: site_axis},
-            generation=generation,
-            revision=publication_revision,
-        )
-        site_map_event = owned_snapshot_from_arrays(
-            replace(
-                site_map_event.block.schema,
-                repeat_axis=camera_event.block.schema.repeat_axis,
-                point_table=camera_event.block.schema.point_table,
-                grid_topology=camera_event.block.schema.grid_topology,
-            ),
-            site_map_event.block.values,
-            publication_revision,
-            validity=site_map_event.expanded_validity(),
-            block_id=site_map_event.ref.block_id,
-            stream_generation=site_map_event.ref.stream_generation,
-        )
-        record = dict(self._run_record())
-        record[IMAGE_POINT_OVERLAY_GEOMETRY_RECORD] = image_point_overlay_geometry(
-            camera_event,
-            self._site_centers_xy,
-            self._registered_site_map.site_ids,
-            status_axis=site_axis,
-            labels=tuple(str(site) for site in range(1, self._site_count + 1)),
-            coordinates_are_indices=True,
-        )
+        record = self._run_record()
         outputs = {
             CANDIDATE_PHASE_OUTPUT.name: LiveDatasetOutput(
                 CANDIDATE_PHASE_OUTPUT,
@@ -1349,18 +1292,6 @@ class SlmFeedbackTask:
                     self._candidate_capacity,
                     retain_at_terminal=True,
                 ),
-                record,
-            ),
-            CAMERA_MEAN_OUTPUT.name: LiveDatasetOutput(
-                CAMERA_MEAN_OUTPUT,
-                camera_event,
-                MonitorCoverage(1, 1, retain_at_terminal=True),
-                record,
-            ),
-            SITE_MAP_OVERLAY_OUTPUT.name: LiveDatasetOutput(
-                SITE_MAP_OVERLAY_OUTPUT,
-                site_map_event,
-                MonitorCoverage(1, 1, retain_at_terminal=True),
                 record,
             ),
         }
@@ -1512,7 +1443,30 @@ class SlmFeedbackTask:
                 total=requested,
             )
             self.sequencer.fire(cycles=requested)
-            result = capture.collect(retain_cycles=False)
+
+            def commit_camera_cycle(cycle: object, index: int) -> None:
+                output = _finite_cycle_output(node, cycle, index)
+                record = node.run_record
+                if IMAGE_POINT_OVERLAY_GEOMETRY_RECORD not in record:
+                    record[IMAGE_POINT_OVERLAY_GEOMETRY_RECORD] = (
+                        image_point_overlay_geometry(
+                            output.snapshot,
+                            self._registered_site_map.centers_xy,
+                            self._registered_site_map.site_ids,
+                            status_axis=self._registered_site_map.site_axis,
+                            labels=tuple(
+                                str(site)
+                                for site in range(1, self._site_count + 1)
+                            ),
+                            coordinates_are_indices=True,
+                        )
+                    )
+                node._commit_direct_outputs({CAMERA_FRAMES_OUTPUT.name: output})
+
+            result = capture.collect(
+                commit_cycle=commit_camera_cycle,
+                retain_cycles=False,
+            )
             _check_cancelled(context)
             wait_for_board(self.sequencer, context)
             if result is None or result.cycle_count != requested:
@@ -1551,7 +1505,6 @@ class SlmFeedbackTask:
         complete = np.all(np.isfinite(box_samples), axis=0)
         missing_sites = set(int(index) for index in np.flatnonzero(~complete))
         mean_frame = np.asarray(np.mean(frames, axis=0), dtype=np.float32)
-        self._latest_mean_frame = np.array(mean_frame, copy=True)
         return (
             box_samples,
             tuple(sorted(saturated_sites)),
@@ -2282,7 +2235,6 @@ class SlmFeedbackTask:
             # the SLM now, so establish and confirm that starting state itself.
             self._mapping_revision = int(self.slm.mapping_revision)
             self._last_measured_phase = None
-            self._latest_mean_frame = None
             incoming = self._apply_exact(incoming)
             pulse = resolve_pulse(
                 self.sequence,
@@ -3262,11 +3214,9 @@ class SlmFeedbackTask:
             raise
 
 __all__ = [
-    "CAMERA_MEAN_OUTPUT",
     "CANDIDATE_PHASE_OUTPUT",
     "OBSERVABLE_UNIFORMITY_HISTORY_OUTPUT",
     "READOUT_FRAME_COORDINATE",
-    "SITE_MAP_OVERLAY_OUTPUT",
     "SITE_SIGNAL_HISTORY_OUTPUT",
     "SLM_PHASE_ARTIFACT_CONTRACT",
     "SlmFeedbackTask",

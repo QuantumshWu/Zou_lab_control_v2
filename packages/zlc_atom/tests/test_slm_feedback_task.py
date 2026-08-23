@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from zlc_pulse import PulseSequence
+from zlc_plot import Reduction
 from zlc_runtime import NodeHost, SignalDataPlane
 
 from zlc_atom.devices.camera import CameraWorkingPoint
@@ -535,20 +536,21 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
         ),
         ("site_signal_history", "slm-feedback.site-signal-history"),
         ("target_share_history", "slm-feedback.target-share-history"),
-        ("camera_mean", "slm-feedback.camera-mean"),
-        ("site_map", "zlc_plot.image-point-overlay-status"),
     )
     assert tuple(
         (item.output.name, item.plot_kind, item.producer)
         for item in descriptor.node_previews
     ) == (
-        ("camera_mean", "image", ""),
+        ("frames", "image", "camera"),
         ("observable_uniformity_history", "curve", ""),
         ("site_signal_history", "curve", ""),
         ("target_share_history", "curve", ""),
     )
     camera_preview = descriptor.node_previews[0]
-    assert camera_preview.overlay.name == "site_map"
+    assert camera_preview.semantic == {
+        "fate:repeat": "reduce",
+        "reduction": Reduction.MEAN,
+    }
     assert tuple(
         item.capability_token for item in descriptor.device_requirements
     ) == (
@@ -1167,8 +1169,6 @@ def test_uniformity_history_is_one_latest_curve_paired_with_candidate_phase(
             "observable_uniformity_history",
             "site_signal_history",
             "target_share_history",
-            "camera_mean",
-            "site_map",
         }
         column = output.snapshot.block.schema.point_table.columns[0]
         assert column.name == "candidate"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from zlc_pulse import PulseSequence
+from zlc_plot import Reduction
 
 from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
 from zlc_atom.devices.slm.solver import load_science_context
@@ -20,12 +21,11 @@ from zlc_atom.nodes._framework.descriptor import (
 )
 from zlc_atom.nodes.calibration import CALIBRATION_ARTIFACT_CODEC, TrapCalibration
 from zlc_atom.nodes.calibration.pulse import load_calibration_pulse_template
+from zlc_atom.nodes.camera_measurement.measurement import CAMERA_FRAMES_OUTPUT
 
 from .task import (
-    CAMERA_MEAN_OUTPUT,
     CANDIDATE_PHASE_OUTPUT,
     OBSERVABLE_UNIFORMITY_HISTORY_OUTPUT,
-    SITE_MAP_OVERLAY_OUTPUT,
     SITE_SIGNAL_HISTORY_OUTPUT,
     SLM_PHASE_ARTIFACT_CONTRACT,
     SlmFeedbackTask,
@@ -180,14 +180,16 @@ LOGIC_NODE = LogicNodeDescriptor(
         OBSERVABLE_UNIFORMITY_HISTORY_OUTPUT,
         SITE_SIGNAL_HISTORY_OUTPUT,
         TARGET_SHARE_HISTORY_OUTPUT,
-        CAMERA_MEAN_OUTPUT,
-        SITE_MAP_OVERLAY_OUTPUT,
     ),
     node_previews=(
         NodePreviewSpec(
-            CAMERA_MEAN_OUTPUT,
+            CAMERA_FRAMES_OUTPUT,
             "image",
-            overlay=SITE_MAP_OVERLAY_OUTPUT,
+            semantic={
+                "fate:repeat": "reduce",
+                "reduction": Reduction.MEAN,
+            },
+            producer="camera",
         ),
         NodePreviewSpec(OBSERVABLE_UNIFORMITY_HISTORY_OUTPUT, "curve"),
         NodePreviewSpec(

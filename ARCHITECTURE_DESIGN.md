@@ -235,7 +235,7 @@ Node new chunk
 - 保留sparse WGS-Kim、fixed far-field phase、selected DFT和caller-owned optimizer state。
 - Inner solve走到canonical numerical gate，不为省几十毫秒增加physical candidate。
 - Feedback mode是leaf-owned显式字段；当前唯一mode为`qcmos_bright_dark`。Pulse由operator显式选择；camera exposure是独立、可见、可编辑的authored字段，默认`0.1 s`。Task不从Pulse或Calibration猜exposure，也不自动判断Pulse/exposure的科学一致性。
-- 当前mode复用canonical Camera Measurement `repeat=N`，每cycle严格一张camera frame；估计读取同一sealed Dataset，Feedback只发布由该批数据已经计算出的candidate mean作为带site map的preview，不做第二次采集或三帧reference判据。
+- 当前mode复用canonical Camera Measurement `repeat=N`，每cycle严格一张camera frame；同一逐帧publication经mean reduction实时显示，Feedback只把完整registered Target SiteMap写入该次camera run geometry，不发布第二份camera数据或三帧reference判据。
 - Calibration只提供Target→camera注册所需的site centers、BOX半宽/积分方式和frame坐标几何；Feedback不读取其dark/bright/threshold、exposure、photoelectron mode、camera identity或readout working-point provenance。实际camera requested/actual exposure、effective unit与conversion进入本run metadata；saturation只由本次actual raw integer maximum转换到本次effective unit判断。
 - 每个site使用本candidate唯一一批authored shots的raw BOX值选择单高斯或双高斯；full/even/odd三份BIC证据一致支持双峰时，`bright_mean-dark_mean`才是observable；单峰没有伪造contrast，数值失败为invalid。
 - Controller保存每site的归一化Target share、正式double历史、probe方向与single/observable边界。没有可用正式double历史的single才使用用户`probe_factors`做两侧诊断；已有方向或bracket的single沿历史继续，double按`feedback_gain`作相对配平并受`maximum_weight_change`限制，invalid保持实际份额。Diagnostic probe不进入正式history、best candidate或反馈指标。

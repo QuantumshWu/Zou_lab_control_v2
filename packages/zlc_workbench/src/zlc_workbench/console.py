@@ -27,7 +27,7 @@ from zlc_plot import (
     PlotKind,
     image_point_overlay_from_signal,
 )
-from zlc_plot.primitives import ImageFrame
+from zlc_plot.primitives import ImageFrame, ImagePointOverlay, PointStatus
 from zlc_plot.ui import parameter_controls, parameter_controls_for_kind
 from zlc_runtime import IndexedHistoryLease, selection_output_catalog
 from zlc_ui import FormFieldProps, FormSpec
@@ -803,8 +803,6 @@ class ConsolePresenter:
             publication,
             primary_window=self._panel_primary_window(binding, selected),
         )
-        if not selected.overlay_signal or front is None:
-            return snapshot
         # The SEMANTIC surface, not the outer kind: a FacetGrid of image cells
         # paints images, and the overlay is a fact of the image.  A grid over
         # curve cells has nowhere to put a ring.
@@ -815,13 +813,32 @@ class ConsolePresenter:
             )
         if painted != PlotKind.IMAGE.value:
             return snapshot
-        overlay = self._image_point_overlay(
-            front,
-            publication,
-            selected.overlay_signal,
-            snapshot,
-            binding.overlay_revision + 1,
-        )
+        if selected.overlay_signal:
+            if front is None:
+                return snapshot
+            overlay = self._image_point_overlay(
+                front,
+                publication,
+                selected.overlay_signal,
+                snapshot,
+                binding.overlay_revision + 1,
+            )
+        else:
+            geometry = publication.run_record.get(
+                IMAGE_POINT_OVERLAY_GEOMETRY_RECORD
+            )
+            if not isinstance(geometry, Mapping):
+                return snapshot
+            point_ids = tuple(str(value) for value in geometry["point_ids"])
+            overlay = ImagePointOverlay(
+                revision=binding.overlay_revision + 1,
+                coordinates=geometry["coordinates_xy"],
+                point_ids=point_ids,
+                labels=tuple(str(value) for value in geometry["labels"]),
+                static_statuses=tuple(
+                    PointStatus.UNKNOWN for _ in point_ids
+                ),
+            )
         if overlay is None:
             return snapshot
         binding.overlay_revision += 1

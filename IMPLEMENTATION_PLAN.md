@@ -67,7 +67,7 @@
 - Feedback报告固定包含uniformity history、site signal evolution、weight evolution、selected
   site histograms、initial/selected camera mean和initial/selected phase；每张均为Figure NPZ
   primary加PNG preview。normal或Stop只产生一个final Science Context。
-- Feedback Monitor固定自动打开四张图：带编号site map的candidate camera mean、observable
+- Feedback Monitor固定自动打开四张图：canonical Camera Measurement逐帧publication经mean reduction得到的带编号site map实时图、observable
   uniformity、site signal evolution和Target share evolution；phase保留为信号和最终Figure但不自动开panel。
 - Feedback failure记录last complete candidate与rollback receipt；Stop只从完整测量candidate
   选择结果，未测phase不得成为final。
