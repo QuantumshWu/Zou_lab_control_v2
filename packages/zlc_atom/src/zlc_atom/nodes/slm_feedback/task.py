@@ -159,6 +159,93 @@ def _ratio_interval(
     return estimate, max(1.0, lower), upper, float(np.max(relative))
 
 
+def _adapt_double_gain(
+    previous_contrast: object,
+    previous_error: object,
+    previous_valid: object,
+    current_contrast: object,
+    current_error: object,
+    current_valid: object,
+    *,
+    gain: float,
+    improvement_streak: int,
+) -> tuple[float, int, str, int, float | None, float | None]:
+    """Adapt one scalar double-site gain from comparable formal candidates."""
+
+    before = np.asarray(previous_contrast, dtype=float)
+    before_error = np.asarray(previous_error, dtype=float)
+    before_valid = np.asarray(previous_valid, dtype=bool)
+    after = np.asarray(current_contrast, dtype=float)
+    after_error = np.asarray(current_error, dtype=float)
+    after_valid = np.asarray(current_valid, dtype=bool)
+    if not (
+        before.shape
+        == before_error.shape
+        == before_valid.shape
+        == after.shape
+        == after_error.shape
+        == after_valid.shape
+    ):
+        raise ValueError("adaptive double-gain histories differ in shape")
+    common = (
+        before_valid
+        & after_valid
+        & np.isfinite(before)
+        & np.isfinite(before_error)
+        & np.isfinite(after)
+        & np.isfinite(after_error)
+        & (before > 0.0)
+        & (after > 0.0)
+        & (before_error >= 0.0)
+        & (after_error >= 0.0)
+    )
+    common_count = int(np.count_nonzero(common))
+    if common_count < 2:
+        return float(gain), 0, "hold_insufficient_common_double", common_count, None, None
+
+    previous_ratio, previous_lower, previous_upper, _ = _ratio_interval(
+        before[common], before_error[common]
+    )
+    current_ratio, current_lower, current_upper, _ = _ratio_interval(
+        after[common], after_error[common]
+    )
+    previous_uncertainty = max(
+        np.log(previous_ratio / previous_lower),
+        np.log(previous_upper / previous_ratio),
+    )
+    current_uncertainty = max(
+        np.log(current_ratio / current_lower),
+        np.log(current_upper / current_ratio),
+    )
+    noise = float(np.hypot(previous_uncertainty, current_uncertainty))
+    improvement = float(np.log(previous_ratio / current_ratio))
+    selected_gain = float(gain)
+    streak = int(improvement_streak)
+    if improvement > noise:
+        streak += 1
+        if streak >= 2:
+            selected_gain *= 1.25
+            streak = 1
+            action = "increase_after_continuous_improvement"
+        else:
+            action = "hold_first_significant_improvement"
+    elif improvement < -noise:
+        selected_gain *= 0.5
+        streak = 0
+        action = "decrease_after_worsening"
+    else:
+        streak = 0
+        action = "hold_within_uncertainty"
+    return (
+        selected_gain,
+        streak,
+        action,
+        common_count,
+        previous_ratio,
+        current_ratio,
+    )
+
+
 def _bic_gain(samples: object, fit: object) -> float:
     column = np.asarray(samples, dtype=float).reshape(-1)
     if column.size < 4 or not np.all(np.isfinite(column)):
@@ -1017,7 +1104,7 @@ class SlmFeedbackTask:
         self._candidate_capacity = (
             1
             + self.max_updates
-            + (self.max_updates + 1) * (len(factors) + 1)
+            + self.max_updates * len(factors)
         )
         if (
             self.shots < 10
@@ -1963,6 +2050,22 @@ class SlmFeedbackTask:
             "candidate_count": len(history),
             "settings": self._run_record(),
             "outcome": None if outcome is None else dict(outcome),
+            "final_double_feedback_gain": (
+                None
+                if not formal_history
+                else formal_history[-1]["double_feedback_gain"]
+            ),
+            "double_gain_history": [
+                {
+                    "candidate": item["iteration"],
+                    "gain": item["double_feedback_gain"],
+                    "action": item["adaptive_gain_action"],
+                    "common_double_sites": item["adaptive_gain_common_sites"],
+                    "previous_ratio": item["adaptive_gain_previous_ratio"],
+                    "current_ratio": item["adaptive_gain_current_ratio"],
+                }
+                for item in formal_history
+            ],
             "probe_candidates": [
                 {
                     "candidate": item["iteration"],
@@ -2042,6 +2145,8 @@ class SlmFeedbackTask:
                         "total_observable_bright_minus_dark"
                     ],
                     "common_site_total_bright_minus_dark": common_total,
+                    "double_feedback_gain": item["double_feedback_gain"],
+                    "adaptive_gain_action": item["adaptive_gain_action"],
                 }
                 for item, common_total in zip(history, common_totals, strict=True)
             ],
@@ -2062,6 +2167,7 @@ class SlmFeedbackTask:
             f"SLM feedback status: {status}",
             f"Candidates measured: {len(history)}",
             f"Selected candidate: {selected_candidate if selected_candidate is not None else 'none'}",
+            f"Final double feedback gain: {document['final_double_feedback_gain']}",
         ]
         if outcome is not None and outcome.get("reason"):
             lines.append(f"Outcome: {outcome['reason']}")
@@ -2312,7 +2418,12 @@ class SlmFeedbackTask:
 
             candidate_number = 0
             candidate_kind = "baseline"
-            ordinary_updates = 0
+            formal_updates = 0
+            double_feedback_gain = self.feedback_gain
+            adaptive_improvement_streak = 0
+            previous_formal_contrast: np.ndarray | None = None
+            previous_formal_error: np.ndarray | None = None
+            previous_formal_valid: np.ndarray | None = None
             probe_sites = np.zeros(self._site_count, dtype=bool)
             probe_episode_used = np.zeros(self._site_count, dtype=bool)
             probe_baseline_target: np.ndarray | None = None
@@ -2432,6 +2543,38 @@ class SlmFeedbackTask:
                 contrast = np.asarray(fitted["contrast"], dtype=float)
                 error = np.asarray(fitted["standard_error"], dtype=float)
                 observable_valid = fit_valid
+                adaptive_gain_action = "ignored_diagnostic_probe"
+                adaptive_gain_common_sites = 0
+                adaptive_gain_previous_ratio: float | None = None
+                adaptive_gain_current_ratio: float | None = None
+                if candidate_kind != "probe":
+                    if (
+                        previous_formal_contrast is None
+                        or previous_formal_error is None
+                        or previous_formal_valid is None
+                    ):
+                        adaptive_gain_action = "initialize_formal_double_history"
+                    else:
+                        (
+                            double_feedback_gain,
+                            adaptive_improvement_streak,
+                            adaptive_gain_action,
+                            adaptive_gain_common_sites,
+                            adaptive_gain_previous_ratio,
+                            adaptive_gain_current_ratio,
+                        ) = _adapt_double_gain(
+                            previous_formal_contrast,
+                            previous_formal_error,
+                            previous_formal_valid,
+                            contrast,
+                            error,
+                            observable_valid,
+                            gain=double_feedback_gain,
+                            improvement_streak=adaptive_improvement_streak,
+                        )
+                    previous_formal_contrast = np.array(contrast, copy=True)
+                    previous_formal_error = np.array(error, copy=True)
+                    previous_formal_valid = np.array(observable_valid, copy=True)
                 needs_probe_sites = _needs_probe(
                     fit_single,
                     observable_valid,
@@ -2597,6 +2740,7 @@ class SlmFeedbackTask:
                             | recovery_probe
                         )
                         & ~probe_episode_used
+                        & (formal_updates < self.max_updates)
                     )
                     starts_probe_episode = bool(np.any(episode_probe_sites))
                     if starts_probe_episode:
@@ -2702,7 +2846,7 @@ class SlmFeedbackTask:
                             reference_valid=fit_valid,
                             previous_weights=previous_weights,
                             previous_contrast=previous_contrast,
-                            feedback_gain=self.feedback_gain,
+                            feedback_gain=double_feedback_gain,
                             maximum_weight_change=self.maximum_weight_change,
                             directed_log_step=directed_step,
                             control_boundary=allocation_boundary,
@@ -2748,7 +2892,13 @@ class SlmFeedbackTask:
                     "maximum_relative_standard_error": (
                         None if not valid else relative_sem
                     ),
-                    "feedback_gain": self.feedback_gain,
+                    "authored_feedback_gain": self.feedback_gain,
+                    "double_feedback_gain": double_feedback_gain,
+                    "adaptive_gain_action": adaptive_gain_action,
+                    "adaptive_gain_common_sites": adaptive_gain_common_sites,
+                    "adaptive_gain_previous_ratio": adaptive_gain_previous_ratio,
+                    "adaptive_gain_current_ratio": adaptive_gain_current_ratio,
+                    "formal_updates_applied": formal_updates,
                     "maximum_weight_change": self.maximum_weight_change,
                     "candidate_kind": candidate_kind,
                     "probe_requested_factor": active_probe_requested,
@@ -2979,7 +3129,7 @@ class SlmFeedbackTask:
                             reference_valid=probe_baseline_reference_valid,
                             previous_weights=probe_baseline_previous_weights,
                             previous_contrast=probe_baseline_previous_contrast,
-                            feedback_gain=self.feedback_gain,
+                            feedback_gain=double_feedback_gain,
                             maximum_weight_change=self.maximum_weight_change,
                             directed_log_step=combined_directed_step,
                             control_boundary=(
@@ -3003,8 +3153,9 @@ class SlmFeedbackTask:
                         else:
                             next_target = combined_target
                             next_kind = "probe_combined"
+                            formal_updates += 1
                 else:
-                    if ordinary_updates >= self.max_updates:
+                    if formal_updates >= self.max_updates:
                         continue_feedback = False
                         history[-1]["next_phase_changed"] = None
                     elif np.array_equal(proposed_target, current_target):
@@ -3018,7 +3169,7 @@ class SlmFeedbackTask:
                     else:
                         next_target = proposed_target
                         next_kind = "ordinary"
-                        ordinary_updates += 1
+                        formal_updates += 1
                 if continue_feedback:
                     assert next_target is not None
                     if next_kind == "probe":
@@ -3106,7 +3257,7 @@ class SlmFeedbackTask:
                 "selected_candidate": int(selected["candidate"]),
                 "shots_per_candidate": self.shots,
                 "candidates_measured": len(history),
-                "ordinary_updates_completed": ordinary_updates,
+                "formal_updates_completed": formal_updates,
                 "probe_candidates_measured": sum(
                     item["candidate_kind"] == "probe" for item in history
                 ),

@@ -30,6 +30,7 @@ from zlc_atom.nodes.calibration.pulse import resolve_pulse
 from zlc_atom.nodes.slm_feedback import task as feedback_module
 from zlc_atom.nodes.slm_feedback.task import (
     SlmFeedbackTask,
+    _adapt_double_gain,
     _allocate_requested_shares,
     _control_weights,
     _fit_contrasts,
@@ -590,6 +591,40 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
     assert lower <= estimate <= upper
     assert estimate == pytest.approx(1.4 / 0.6)
     assert max_relative_sem == pytest.approx(0.02)
+
+
+def test_double_gain_adapts_only_after_significant_formal_evidence() -> None:
+    valid = np.ones(3, dtype=bool)
+    zero = np.zeros(3)
+    gain, streak, action, common, previous, current = _adapt_double_gain(
+        (2.0, 1.0, 1.0), zero, valid,
+        (1.6, 1.0, 1.0), zero, valid,
+        gain=0.25,
+        improvement_streak=0,
+    )
+    assert (gain, streak, action, common) == (
+        0.25, 1, "hold_first_significant_improvement", 3
+    )
+    assert previous == pytest.approx(2.0)
+    assert current == pytest.approx(1.6)
+    gain, streak, action, *_ = _adapt_double_gain(
+        (1.6, 1.0, 1.0), zero, valid,
+        (1.3, 1.0, 1.0), zero, valid,
+        gain=gain,
+        improvement_streak=streak,
+    )
+    assert gain == pytest.approx(0.3125)
+    assert streak == 1 and action == "increase_after_continuous_improvement"
+    gain, streak, action, *_ = _adapt_double_gain(
+        (1.3, 1.0, 1.0), zero, valid,
+        (1.8, 1.0, 1.0), zero, valid,
+        gain=gain,
+        improvement_streak=streak,
+    )
+    assert gain == pytest.approx(0.15625)
+    assert streak == 0 and action == "decrease_after_worsening"
+
+
 def test_single_population_classification_and_baseline_relative_probe_selection() -> None:
     rng = np.random.default_rng(17)
     occupied = rng.random(500) < 0.45
@@ -1172,7 +1207,7 @@ def test_uniformity_history_is_one_latest_curve_paired_with_candidate_phase(
         }
         column = output.snapshot.block.schema.point_table.columns[0]
         assert column.name == "candidate"
-        assert tuple(column.values) == (1, 2, 3, 4, 5, 6)
+        assert tuple(column.values) == (1, 2, 3, 4, 5, 6, 7)
     finally:
         plane.close()
 
@@ -1695,7 +1730,7 @@ def test_single_population_sites_probe_both_sides_then_measure_combined_target(
     )
     try:
         result = task.execute(_Context(tmp_path))
-        assert result["feedback_status"] == "stalled"
+        assert result["feedback_status"] == "completed"
         assert len(measured_phases) == 4
         assert all(
             not np.array_equal(left, right)
@@ -1865,7 +1900,7 @@ def test_baseline_single_with_formal_history_steps_to_bracket_midpoint_without_p
         plane.close()
 
 
-def test_probe_bracket_survives_double_and_single_bisects_midpoint(
+def test_probe_combined_counts_as_formal_update_and_reuses_episode_baseline(
     tmp_path: Path, monkeypatch
 ) -> None:
     target = _asymmetric_target()
@@ -1929,10 +1964,11 @@ def test_probe_bracket_survives_double_and_single_bisects_midpoint(
                 valid=combined_valid,
                 single_population=combined_single,
             ),
-            _fitted_result(formal_double_contrast),
-            after_double_single_fit(),
-            after_double_single_fit(),
-        )
+                _fitted_result(formal_double_contrast),
+                after_double_single_fit(),
+                after_double_single_fit(),
+                after_double_single_fit(),
+            )
     )
     monkeypatch.setattr(
         feedback_module, "_fit_contrasts", lambda samples: next(fits)
@@ -1966,104 +2002,26 @@ def test_probe_bracket_survives_double_and_single_bisects_midpoint(
     try:
         result = task.execute(_Context(tmp_path))
         assert result["feedback_status"] == "completed"
-        rows, columns = np.nonzero(target > 0.0)
-        baseline = target[rows, columns]
-        assert solved_targets[2][rows[17], columns[17]] / baseline[17] == pytest.approx(
-            2.0**0.25
-        )
-        second_step = solved_targets[3][rows[17], columns[17]] / baseline[17]
-        assert second_step > 2.0**0.25
-        combined_control = _control_weights(
-            solved_targets[2][rows, columns]
-        )[18]
-        midpoint_control = _control_weights(
-            solved_targets[3][rows, columns]
-        )[18]
-        assert 1.0 < midpoint_control < combined_control
         for initial_phase, state in solve_inputs[:3]:
             np.testing.assert_array_equal(
                 initial_phase, science_context["pattern_phase"]
             )
             assert state == {}
-        np.testing.assert_array_equal(
-            solve_inputs[3][0], np.full(target.shape, 0.4, dtype=np.float32)
-        )
-        assert solve_inputs[3][1] == {"marker": 3}
+        for initial_phase, state in solve_inputs[3:6]:
+            np.testing.assert_array_equal(
+                initial_phase, np.full(target.shape, 0.4, dtype=np.float32)
+            )
+            assert state == {"marker": 3}
         history = _load_history(result["artifact_path"])
         assert [item["candidate_kind"] for item in history] == [
             "baseline", "probe", "probe", "probe_combined",
-            "ordinary", "ordinary", "ordinary",
+            "probe", "probe", "probe_combined", "ordinary",
         ]
-        assert history[3]["decision"][17] == "probe_direction_upper"
-        assert history[3]["decision"][18] == "single_bracket_midpoint"
-        assert history[4]["observable_valid"][17] is True
-        assert history[4]["fit_valid"][17] is True
-        for name in (
-            "probe_single_bound",
-            "probe_observable_bound",
-            "probe_control_boundary",
-        ):
-            assert np.isfinite(history[4][name][17])
-        assert history[5]["single_population"][17] is True
-        assert history[5]["observable_valid"][17] is False
-        assert history[5]["fit_valid"][17] is False
-        assert np.isnan(history[5]["bright_minus_dark"][17])
-        assert np.isnan(history[5]["contrast_standard_error"][17])
-        assert history[5]["decision"][17] == "single_bracket_midpoint"
-        assert np.isfinite(history[5]["probe_single_bound"][17])
-        assert np.isfinite(history[5]["probe_observable_bound"][17])
-        assert np.isfinite(history[5]["probe_control_boundary"][17])
-        current_control = _control_weights(
-            solved_targets[4][rows, columns]
-        )
-        single_bound = np.asarray(
-            history[5]["probe_single_bound"], dtype=float
-        )
-        observable_bound = np.asarray(
-            history[5]["probe_observable_bound"], dtype=float
-        )
-        boundary = np.asarray(
-            history[5]["probe_control_boundary"], dtype=float
-        )
-        direction = np.sign(observable_bound - single_bound)
-        directed = _single_bracket_step(
-            current_control,
-            boundary,
-            direction,
-            0.5,
-        )
-        expected, expected_step, *_details = _updated_target(
-            solved_targets[4],
-            np.asarray(history[5]["bright_minus_dark"], dtype=float),
-            np.asarray(history[5]["contrast_standard_error"], dtype=float),
-            np.asarray(history[5]["observable_valid"], dtype=bool),
-            rows,
-            columns,
-            reference_valid=np.asarray(history[5]["fit_valid"], dtype=bool),
-            previous_weights=np.asarray(
-                history[5]["previous_double_control_weight"], dtype=float
-            ),
-            previous_contrast=np.asarray(
-                history[5]["previous_double_bright_minus_dark"], dtype=float
-            ),
-            feedback_gain=0.25,
-            maximum_weight_change=0.5,
-            directed_log_step=directed,
-            control_boundary=boundary,
-            control_direction=direction,
-        )
-        np.testing.assert_allclose(solved_targets[5], expected)
-        assert expected_step[17] > 0.0
-        assert history[5]["requested_log_correction"][17] == pytest.approx(
-            expected_step[17]
-        )
-        for candidate in history[5:7]:
-            assert candidate["previous_double_control_weight"][17] == pytest.approx(
-                history[4]["control_weight"][17]
-            )
-            assert candidate["previous_double_bright_minus_dark"][17] == pytest.approx(
-                history[4]["bright_minus_dark"][17]
-            )
+        assert [item["formal_updates_applied"] for item in history] == [
+            0, 0, 0, 1, 1, 1, 2, 3
+        ]
+        assert sum(item["candidate_kind"] == "probe" for item in history) == 4
+        assert len(history) == 1 + task.max_updates + 4
     finally:
         plane.close()
 
@@ -2533,9 +2491,15 @@ def test_valid_site_history_changes_the_next_target_correction(
         np.testing.assert_array_equal(saved, phases[2])
         assert requested_shots == [10, 10, 10, 10]
         history = _load_history(result["artifact_path"])
-        assert all(
-            item["feedback_gain"] == pytest.approx(0.25)
-            for item in history
+        np.testing.assert_allclose(
+            [item["double_feedback_gain"] for item in history],
+            (0.25, 0.25, 0.3125, 0.390625),
+        )
+        assert history[0]["adaptive_gain_action"] == (
+            "initialize_formal_double_history"
+        )
+        assert history[2]["adaptive_gain_action"] == (
+            "increase_after_continuous_improvement"
         )
         base = _grid_target(slm.shape_yx)
         rows, columns = np.nonzero(base)
