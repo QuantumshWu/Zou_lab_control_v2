@@ -4393,18 +4393,12 @@ class ConsolePresenter:
         for binding in tuple(self.logic.values()):
             if binding.host is not None:
                 try:
-                    # A cancelled Monitor may retire its Plane generation in
-                    # poll().  Keep that terminal acknowledgement behind any
-                    # already-admitted Panel projection from the same causal
-                    # run; otherwise its queued current_dataset(publication)
-                    # wakes up after the generation has disappeared.  The
-                    # plot is already travelling, so this delays only owner
-                    # bookkeeping, never camera cancellation or disarm.
-                    if not (
-                        binding.host.cancel_requested
-                        and self._generation_surface_busy(binding.host)
-                    ):
-                        binding.host.poll()
+                    # Stop owns the Task lifecycle.  A failed or abandoned
+                    # Plot surface must never prevent Runtime from accepting
+                    # the worker's terminal completion; cancelled partial
+                    # publications are sealed by NodeHost before this owner
+                    # releases the device lease.
+                    binding.host.poll()
                 except Exception as error:
                     self._report(
                         f"{binding.node_id}: {_error_text(error)}",
