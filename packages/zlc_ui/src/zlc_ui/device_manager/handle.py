@@ -196,9 +196,6 @@ class DeviceManagerHandle(QtCore.QObject):
     def set_templates(self, templates: tuple[tuple[str, str], ...]) -> None:
         self._view.set_templates(templates)
 
-    def set_installation_source(self, source: str | None, detail: str) -> None:
-        self._view.set_installation_source(source, detail)
-
     def set_loaded_devices(
         self,
         devices: tuple[tuple[str, str, str], ...],

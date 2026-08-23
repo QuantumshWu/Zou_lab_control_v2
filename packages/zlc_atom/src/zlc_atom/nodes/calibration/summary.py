@@ -192,7 +192,7 @@ def readout_summary(
         reverse=True,
     )
     return {
-        "format": "calibration-summary.v1",
+        "format": "calibration-summary",
         "run": {
             "sites": int(site_map.n_sites),
             "samples": int(occupied.shape[0]),

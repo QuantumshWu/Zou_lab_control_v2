@@ -3288,7 +3288,7 @@ class MatplotlibRenderer:
         visible_axes: list[tuple[int, Any]] = []
         # ONE call draws a cell, and it is the same call that draws the
         # standalone plot of that kind.  The hand-copied per-kind chain that
-        # used to live here re-implemented the render half and never migrated
+        # used to live here re-implemented the render half and omitted
         # the interaction half, so every facility a cell should inherit had to
         # REMEMBER to delegate -- and the ones that forgot (colour-limit
         # dragging, square cells, the point overlay, the crosshair value rail)

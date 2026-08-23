@@ -27,7 +27,6 @@ from zlc_pulse.wire import (
     CMD_LOAD,
     CMD_SAFE,
     CtrlWords,
-    IMAGE_MAGIC,
     STATUS_DONE,
     STATUS_ERROR,
     STATUS_LOADED,
@@ -104,7 +103,7 @@ def test_pack_sparse_image_matches_frozen_byte_baseline() -> None:
         int(address).to_bytes(4, "little") + int(value).to_bytes(4, "little")
         for address, value in sorted(words.items())
     )
-    assert words[CtrlWords.MAGIC] == IMAGE_MAGIC
+    assert 0 not in words
     assert words[CtrlWords.PROG_COUNT] == 3
     assert words[CtrlWords.SCAN_COUNT] == 0
     assert words[CtrlWords.RESERVED_19] == 0
@@ -113,7 +112,7 @@ def test_pack_sparse_image_matches_frozen_byte_baseline() -> None:
     with pytest.raises(ValueError, match="reserved control word 19"):
         unpack_program(invalid, geom)
     assert hashlib.sha256(payload).hexdigest() == (
-        "be9f123b9d4aa3046f65bb0fc828966764f5725f763fe9822893ccecfd4dada2"
+        "9fa95a92e7c93c8b16c329ef8f662e9c749dc122799230262113a6cac2080854"
     )
 
 

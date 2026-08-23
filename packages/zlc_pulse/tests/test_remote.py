@@ -85,6 +85,9 @@ def _client(server: PulseRemoteServer) -> RemotePulseStreamer:
 
 
 def test_canonical_and_pulse_json_boundaries_do_not_coerce_or_drop_input() -> None:
+    assert pulse_codec.PULSE_TREE_FORMAT == "zlc.pulse"
+    assert sequence_to_tree(_sequence())["format"] == "zlc.pulse"
+
     with pytest.raises(TypeError, match="mapping keys must be strings"):
         canonical_bytes({1: "not the same key as text one"})
 
@@ -100,10 +103,10 @@ def test_canonical_and_pulse_json_boundaries_do_not_coerce_or_drop_input() -> No
 
     with pytest.raises(ValueError, match="duplicate key.*format"):
         pulse_codec.parse_pulse_tree_json(
-            '{"format":"wrong","format":"zlc.pulse.v1"}'
+            '{"format":"wrong","format":"zlc.pulse"}'
         )
     with pytest.raises(ValueError, match="non-finite JSON constant.*NaN"):
-        pulse_codec.parse_pulse_tree_json('{"format":"zlc.pulse.v1","x":NaN}')
+        pulse_codec.parse_pulse_tree_json('{"format":"zlc.pulse","x":NaN}')
 
     document = sequence_to_tree(_sequence())
     document["editor"] = {

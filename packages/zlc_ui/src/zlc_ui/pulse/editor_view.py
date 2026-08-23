@@ -87,9 +87,9 @@ class PulseEditorView(QtWidgets.QWidget):
         self.tabs.currentChanged.connect(
             lambda index: self.page_changed.emit(self.tabs.tabText(index))
         )
-        # What just happened is SAID, in the one modal this project already
-        # owns -- the same dialog v1 used for every refusal and every
-        # confirmation.  A strip along the bottom was invented here instead,
+        # What just happened is SAID, in the one modal this project owns for
+        # every refusal and confirmation.  A strip along the bottom was
+        # invented here instead,
         # and inventing it brought its own severity vocabulary, which this
         # window then got wrong: a Save or a Sync that worked raised
         # ValueError out of a Qt slot and took the process with it.

@@ -81,12 +81,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     values = report.as_dict()
     from importlib.metadata import version
-    import zou_lab_control_v2
+    import zou_lab_control
     import zlc_ui
     import zlc_workbench
 
     print(f"product_version={version('zou-lab-control')}")
-    print(f"product_bootstrap={Path(zou_lab_control_v2.__file__).resolve()}")
+    print(f"product_bootstrap={Path(zou_lab_control.__file__).resolve()}")
     print(f"ui_layer={Path(zlc_ui.__file__).resolve()}")
     print(f"workbench_layer={Path(zlc_workbench.__file__).resolve()}")
     for key in (

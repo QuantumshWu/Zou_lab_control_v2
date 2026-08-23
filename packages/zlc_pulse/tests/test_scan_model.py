@@ -205,8 +205,8 @@ def test_a_resolved_scan_point_is_a_plain_pulse_carrying_that_row() -> None:
     Saying it the other way round is what broke holding on hardware: the board
     was handed a one-point table looping forever -- a state nothing else ever
     asks it for -- and its DAC segments were never re-applied while the digital
-    edges kept playing.  v1 resolved the point into the document and ran a
-    plain pulse; this is that.
+    edges kept playing.  Resolve the point into the document and run a plain
+    pulse; this is that.
     """
 
     from zlc_pulse import AnalogStep, resolve_scan_point

@@ -5,7 +5,7 @@
     zlc pulse_editor --connect remote:127.0.0.1:18861
 
 The window opens whether or not there is a pulse to show; with none it says how
-to get one.  Product pulses are ``zlc.pulse.v1`` JSON documents in an
+to get one.  Product pulses are ``zlc.pulse`` JSON documents in an
 experiment's ``pulses/`` directory, read through the same loader the session
 uses so the window cannot show a pulse assembled differently from the one that
 will fire.

@@ -6,12 +6,11 @@ import importlib.util
 from importlib.metadata import PackageNotFoundError, distribution, packages_distributions
 from pathlib import Path
 
-from zou_lab_control_v2 import DISTRIBUTION_NAME, ROOT, entry_specs
+from zou_lab_control import DISTRIBUTION_NAME, ROOT, entry_specs
 
 
 _LAYER_GROUP = "zou_lab_control.layers"
 OWNED = {name: name for name in entry_specs(_LAYER_GROUP)}
-RETIRED = ("zlc_storage", "zlc_frontend", "zlc_neutral_atom")
 
 
 def _origin(name: str) -> tuple[str, Path | None]:
@@ -64,10 +63,6 @@ def check() -> list[str]:
                     f"{DISTRIBUTION_NAME}"
                 )
 
-    for name in RETIRED:
-        kind, where = _origin(name)
-        if kind != "missing":
-            problems.append(f"{name}: retired package is still importable from {where}")
     return problems
 
 
@@ -83,5 +78,5 @@ def main() -> int:
             print(f"FAIL  {problem}")
         return 1
     mode = "source manifest" if (ROOT / "pyproject.toml").is_file() else DISTRIBUTION_NAME
-    print(f"all {len(OWNED)} layers belong to one {mode}; {len(RETIRED)} retired names are gone")
+    print(f"all {len(OWNED)} layers belong to one {mode}")
     return 0

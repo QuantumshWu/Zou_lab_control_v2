@@ -57,7 +57,7 @@ guard accepts the close.
 
 ```powershell
 $env:QT_QPA_PLATFORM = "offscreen"
-zlc evidence gui_offscreen --repo C:\path\to\Zou_lab_control_v2
+zlc evidence gui_offscreen --repo C:\path\to\Zou_lab_control
 ```
 
 The stable reusable facade is intentionally small:

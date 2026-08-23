@@ -332,7 +332,7 @@ def semantic_spec(spec: PlotSpec) -> PlotSpec:
     Re-typing it inline is how a per-plot facility ends up honouring the
     cell in one half of the renderer and the grid in the other: colour-limit
     dragging, cell squareness, the point overlay and the crosshair value
-    rail were each half-migrated that way, and each was a user-visible bug.
+    rail were each split that way, and each was a user-visible bug.
     ``test_semantic_spec_has_one_authority`` holds the line mechanically.
     """
 

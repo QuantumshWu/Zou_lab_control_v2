@@ -47,7 +47,7 @@
   "target_pct": 98.0,
 
   "board": {
-    "id": "atk-df7a35-zlc-pulse-v1",
+    "id": "atk-df7a35-zlc-pulse",
     "lanes": [
       {"index": 0, "logical_signal": "cooling", "rtl_port": "cooling", "package_pin": "F15", "electrical_role": "digital"},
       {"index": 1, "logical_signal": "cooling_pgc", "rtl_port": "cooling_pgc", "package_pin": "F13", "electrical_role": "digital"},

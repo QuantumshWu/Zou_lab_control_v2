@@ -170,11 +170,16 @@ def test_profile_is_strict_and_records_physical_provenance_boundaries(
     (tmp_path / "duplicate.json").write_text(duplicate, encoding="utf-8")
     payload["settle_seconds"] = "0.05"
     (tmp_path / "coerced.json").write_text(json.dumps(payload), encoding="utf-8")
+    payload["settle_seconds"] = 0.05
+    payload["unexpected"] = 2
+    (tmp_path / "unknown-field.json").write_text(json.dumps(payload), encoding="utf-8")
     monkeypatch.setattr(module, "_PROFILE_DIRECTORY", tmp_path)
     with pytest.raises(ValueError, match="strict JSON"):
         _load_profile("duplicate")
     with pytest.raises(ValueError, match="settle_seconds"):
         _load_profile("coerced")
+    with pytest.raises(ValueError, match="invalid field set"):
+        _load_profile("unknown-field")
 
 
 def test_real_installation_dials_its_server_endpoint_and_starts_unknown(
@@ -895,7 +900,7 @@ def test_slm_server_launcher_uses_the_product_entry() -> None:
     assert 'set "ZLC_COMMAND=slm_server"' in launcher
     assert 'call "%~dp0_launch.bat" %*' in launcher
 
-    from zou_lab_control_v2 import entry_specs
+    from zou_lab_control import entry_specs
 
     assert entry_specs("zou_lab_control.commands")["slm_server"] == (
         "zlc_atom.devices.slm.device_types:main"

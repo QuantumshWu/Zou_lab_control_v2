@@ -1,4 +1,4 @@
-"""Ordinary ``zlc.pulse.v1`` JSON fixtures for Workbench tests.
+"""Ordinary ``zlc.pulse`` JSON fixtures for Workbench tests.
 
 These are deliberately not the Calibration task's template.  They exercise the
 normal session/editor pulse path without making Calibration a startup default.
@@ -59,7 +59,7 @@ def write_ordinary_pulse(
     file_stem: str = PULSE_NAME,
     sequence: PulseSequence | None = None,
 ) -> Path:
-    """Write a real v2 ``zlc.pulse.v1`` JSON into an explicit test workspace."""
+    """Write a real ``zlc.pulse`` JSON into an explicit test workspace."""
 
     pulses = Path(workspace) / "pulses"
     pulses.mkdir(parents=True, exist_ok=True)

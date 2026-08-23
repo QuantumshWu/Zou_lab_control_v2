@@ -95,6 +95,9 @@ class FigureViewerHandle(QtCore.QObject):
     def set_info(self, tabs: tuple[tuple[str, tuple[tuple[str, object], ...]], ...]) -> None:
         self._view.set_info(tabs)
 
+    def set_lineage_tree(self, tree: object) -> None:
+        self._view.set_lineage_tree(tree)
+
     def set_datasets(self, datasets: tuple[tuple[str, str], ...], current: str = "") -> None:
         self._view.set_datasets(datasets, current)
 

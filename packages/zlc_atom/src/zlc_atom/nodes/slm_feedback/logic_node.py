@@ -40,7 +40,7 @@ _SCIENCE_CONTEXT_CODEC = ArtifactCodec(
 )
 _PULSE_RESOURCE = WorkspaceResourceSpec(
     "pulse_template",
-    "zlc.pulse.v1/slm-feedback",
+    "zlc.pulse/slm-feedback",
     "pulses",
     (".json",),
     load_calibration_pulse_template,
@@ -112,7 +112,6 @@ def _build(
     calibration: ResolvedArtifact,
     science_context: ResolvedArtifact,
     pulse_resource: ResolvedWorkspaceResource,
-    artifact_directory: object,
     **values: object,
 ) -> SlmFeedbackTask:
     authored = SLM_FEEDBACK_SCHEMA.project_values(values)
@@ -147,7 +146,6 @@ def _build(
         feedback_gain=float(authored["feedback_gain"]),
         maximum_weight_change=float(authored["maximum_weight_change"]),
         max_updates=int(authored["max_updates"]),
-        artifact_directory=artifact_directory,
     )
 
 

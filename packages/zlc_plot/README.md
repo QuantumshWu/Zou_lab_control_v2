@@ -64,6 +64,19 @@ session = curve(
 session.save("curve.png")
 ```
 
+## Data-backed Figure artifacts
+
+`save_figure_artifact(...)` is the common TaskConsole/domain-report path. It
+atomically writes a `zlc.figure` NPZ first, then renders the same-stem PNG
+preview. The NPZ contains the typed Dataset, exact PlotSpec recipe, complete
+normalized parameters, viewport, classifier/fit configuration, image overlay and causal
+lineage. `read_figure_plot(...)` restores that typed input and recipe without
+inferring a plot kind from array shape.
+
+`build_figure_host`和`open_figure_host`是TaskConsole、
+Panel Save与FigureViewer共享的host路径。FigureViewer因此重现保存时的语义，而不是
+重新选择一个“看起来合适”的图。Reader只接受当前完整recipe，不接受alternate alias。
+
 ## Notebook 交互
 
 Notebook 使用 `zlc_plot.raster.RasterFront` 与一个标准 `anywidget` DOM canvas，不生成额外的按钮、下拉框或参数面板。安装 `zou-lab-control[notebook]` 后，导入并构造 `zlc_plot.notebook.NotebookView` 时会自动加载这个 adapter，不需要运行 `%matplotlib widget` 或任何 IPython Matplotlib magic：
@@ -297,7 +310,9 @@ Notebook 和 Qt 都消费同一个 `SurfacePlan`。宿主窗口或浏览器区�
 
 - `zlc_data.save_npz/load_npz` 持有科学数据 snapshot 的 NPZ 格式。
 - 当前已经显示的 Edit-tab snapshot 直接使用 immutable `widget.presented_front`；它包含准确的 RGBA、surface identity 与 interaction transform，不触发重绘。需要独立交互或 local fit 的 Edit surface，则由应用用冻结的 `zlc_data.OwnedSnapshot`、原 `PlotSpec` 和应用持有的 authored parameters 创建另一个 `RasterPlotHost`。这与 live panel 隔离，且不需要复制运行中 session 或恢复异步句柄。
-- plot specification、authored panel parameters、same-shot/EventRef、archive codec、文件路径、设备配置、设备调用关系、Logic route、实验 workflow 与项目文件均由上层应用持有；`zlc_plot` 不定义第二套项目格式。
+- `zlc_data`拥有Figure NPZ grammar，`zlc_durable`拥有原子路径发布；`zlc_plot`拥有
+  exact Plot recipe与archive-first/render-second公共流程。设备配置、Logic route、
+  实验workflow与项目文件仍由上层应用持有，不建立第二套项目格式。
 
 API 与数据契约：
 

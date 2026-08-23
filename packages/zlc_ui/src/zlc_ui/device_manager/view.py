@@ -185,7 +185,7 @@ class DeviceControlView(QtWidgets.QWidget):
 
 
 class DeviceManagerView(QtWidgets.QWidget):
-    """The v1-shaped Config surface for one plain-data apparatus draft."""
+    """The Config surface for one plain-data apparatus draft."""
 
     device_add_requested = QtCore.pyqtSignal(str)
     save_requested = QtCore.pyqtSignal()
@@ -241,7 +241,7 @@ class DeviceManagerView(QtWidgets.QWidget):
         self.heading_label = FluentSectionLabel("Devices")
         header.addWidget(self.heading_label)
         header.addStretch(1)
-        # Match the v1 chrome: the left-hand title never changes; runtime state
+        # In the compact chrome, the left-hand title never changes; runtime state
         # and the edited document are a compact pair on the right.
         self.status_dot = FluentStatusDot(size=12)
         self.status_dot.set_color(GREY)
@@ -338,8 +338,8 @@ class DeviceManagerView(QtWidgets.QWidget):
     def set_apparatus(self, name: str, dirty: bool, saved: bool) -> None:
         """Project the document name and its ordinary unsaved ``*`` marker.
 
-        The adjacent dot deliberately remains a session-state indicator, as
-        it was in v1; :meth:`set_lifecycle` is its sole writer.
+        The adjacent dot deliberately remains a session-state indicator;
+        :meth:`set_lifecycle` is its sole writer.
         """
 
         self._dirty = bool(dirty)
@@ -439,13 +439,6 @@ class DeviceManagerView(QtWidgets.QWidget):
         finally:
             self.new_combo.blockSignals(False)
         self._refresh_controls()
-
-    def set_installation_source(self, source: str | None, detail: str) -> None:
-        # Kept as a plain-data compatibility seam for the current presenter.
-        # Installation/template provenance is not a visible Device Manager
-        # section; templates are selected only through the ordinary New menu.
-        self._installation_source = None if source is None else str(source)
-        self._installation_detail = str(detail)
 
     def set_loaded_devices(
         self,

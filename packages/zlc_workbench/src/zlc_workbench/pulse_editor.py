@@ -1107,7 +1107,7 @@ class PulseEditorPresenter:
         return self.open_pulse(chosen)
 
     def open_pulse(self, path: str) -> bool:
-        """Replace what is being edited with one ``zlc.pulse.v1`` JSON file."""
+        """Replace what is being edited with one ``zlc.pulse`` JSON file."""
 
         try:
             candidate = read_pulse(path)
@@ -2397,7 +2397,7 @@ class PulseEditorPresenter:
         return "dirty-ready" if self.sequence is not None else "idle"
 
     def save_pulse(self) -> str:
-        """Write what is on screen as a ``zlc.pulse.v1`` JSON document."""
+        """Write what is on screen as a ``zlc.pulse`` JSON document."""
 
         if self.sequence is None:
             self._warn("there is no pulse to save")
@@ -2626,8 +2626,8 @@ class PulseEditorPresenter:
 
         A scan table has one column per bound field, so with nothing bound
         there is no table to make or read -- and the operator's next move is a
-        click on a dot in the Edit tab, which is what v1 told them.  Failing
-        later, on a column count, names the symptom instead.
+        click on a dot in the Edit tab.  Failing later, on a column count,
+        names the symptom instead.
         """
 
         if self.sequence is not None and self.sequence.slots:
@@ -2909,8 +2909,7 @@ class PulseEditorPresenter:
             # table looping forever, a state nothing else ever asks it for, and
             # its DAC segments were never re-applied while the digital edges
             # kept playing.  So resolve the row into the document and load a
-            # plain pulse, which is what v1 did and what the board has always
-            # been good at.
+            # plain pulse, which is the state the board is designed to hold.
             resolved = resolve_scan_point(
                 resolve_api_parameters(self.sequence),
                 rows[self._held_point],
@@ -3103,7 +3102,7 @@ class PulseEditorPresenter:
 
         So the size it was drawn at is no longer the right one, and any size
         the operator pinned was pinned for a different picture: drop the pin
-        and let the content choose again, exactly as v1 did.
+        and let the content choose again.
         """
 
         self._pinned_size = None

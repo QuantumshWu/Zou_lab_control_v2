@@ -287,32 +287,6 @@ class PanelState:
 
         if not isinstance(document, Mapping):
             raise TypeError("panel state must be an object")
-        legacy_base = {
-            "signal", "title", "kind", "cell_kind", "size", "interval_ms",
-            "semantic", "display", "fit",
-        }
-        legacy_site = set(document) == legacy_base | {"site_overlay"}
-        legacy_signal = set(document) == legacy_base | {"overlay_signal"}
-        if legacy_site or legacy_signal:
-            document = dict(document)
-        if legacy_site:
-            site_overlay = document["site_overlay"]
-            if site_overlay not in ("off", "centers"):
-                raise ValueError(
-                    "legacy panel site_overlay must be 'off' or 'centers'"
-                )
-            # v1 stored only an on/off wish, not the identity of an overlay
-            # signal. Preserve recoverable display choices and make the absent
-            # binding explicit as no overlay.
-            document.pop("site_overlay")
-            document["overlay_signal"] = ""
-        if legacy_site or legacy_signal:
-            document.update(
-                published_outputs={},
-                selector={},
-                classifier_thresholds=[],
-                focused_cell=None,
-            )
         expected = {
             "signal",
             "title",
@@ -391,7 +365,7 @@ class PanelFrozenData:
     publication: object | None
     snapshot: object
     plot_input: object | None = None
-    run_chain: tuple[Mapping[str, Any], ...] = ()
+    lineage: Mapping[str, Any] = field(default_factory=dict)
     overlay: Mapping[str, Any] = field(default_factory=dict)
     #: The coherent freeze this panel was frozen FROM.  Edit shows one exact
     #: moment, and a panel may read more than one signal of it (an image and

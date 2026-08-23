@@ -62,7 +62,7 @@ class PointStatus(str, Enum):
     INVALID = "invalid"
 
 
-IMAGE_POINT_OVERLAY_CONTRACT = "zlc_plot.image-point-overlay-status.v1"
+IMAGE_POINT_OVERLAY_CONTRACT = "zlc_plot.image-point-overlay-status"
 IMAGE_POINT_OVERLAY_GEOMETRY_RECORD = "image_point_overlay_geometry"
 
 

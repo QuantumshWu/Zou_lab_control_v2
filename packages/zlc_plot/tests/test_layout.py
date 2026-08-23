@@ -55,7 +55,7 @@ def test_a_pulse_gets_the_smallest_preset_that_draws_it_legibly() -> None:
 
     pulse_row_min_px and pulse_period_min_px are the floors that make a channel
     row and a period readable.  Both lived here with nothing using them -- the
-    rule that consumed them had been left behind in the migration, so every
+    consuming rule was absent, so every
     pulse was drawn at whatever size the caller happened to pick and two
     pulses could not be compared.
     """

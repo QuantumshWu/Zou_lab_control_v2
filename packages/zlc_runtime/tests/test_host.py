@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from threading import Event
 import time
@@ -83,7 +84,8 @@ def _host(
     outputs: tuple[DatasetOutputDeclaration, ...] = (),
     source: str | None = None,
     delivery: str | None = None,
-    artifacts: tuple[str, ...] = (),
+    artifacts: dict[str, str] | None = None,
+    task_name: str | None = None,
 ) -> NodeHost:
     return NodeHost(
         node,
@@ -94,7 +96,8 @@ def _host(
         dataset_output_declarations=outputs,
         input_signal=source,
         input_delivery=delivery,
-        required_artifact_names=artifacts,
+        required_artifacts={} if artifacts is None else artifacts,
+        task_name=task_name,
     )
 
 
@@ -245,36 +248,36 @@ def test_measurement_and_task_terminal_contracts_fail_loudly(tmp_path: Path) -> 
         (
             "measurement",
             (declaration,),
-            (),
+            {},
             lambda _context: None,
             "without a live Dataset commit",
         ),
         (
             "task",
             (),
-            (),
+            {},
             lambda _context: {"ok": True},
             "without reporting progress",
         ),
         (
             "task",
             (),
-            ("artifact_path",),
+            {"artifact_path": "test.artifact"},
             lambda context: (
                 context.report_progress("saving"),
                 {"artifact_path": tmp_path / "missing.json"},
             )[1],
-            "is not a file",
+            "did not register required final artifact",
         ),
         (
             "task",
             (),
-            ("artifact_path",),
+            {"artifact_path": "test.artifact"},
             lambda context: (
                 context.report_progress("saving"),
                 {"artifact_path": tmp_path},
             )[1],
-            "is not a file",
+            "did not register required final artifact",
         ),
     )
     for index, (kind, outputs, artifacts, execute, message) in enumerate(cases):
@@ -291,7 +294,10 @@ def test_measurement_and_task_terminal_contracts_fail_loudly(tmp_path: Path) -> 
             artifacts=artifacts,
         )
         try:
-            host.start()
+            if kind == "task":
+                host.start(run_root=tmp_path, input_summary={"case": index})
+            else:
+                host.start()
             observation = _wait(host, wake)
             assert observation.phase == "failed"
             assert message in (observation.error or "")
@@ -303,13 +309,19 @@ def test_measurement_and_task_terminal_contracts_fail_loudly(tmp_path: Path) -> 
 
 
 def test_task_requires_and_preserves_an_existing_declared_artifact(tmp_path: Path) -> None:
-    artifact = tmp_path / "result.json"
-    artifact.write_text("{}", encoding="utf-8")
     wake = Event()
     plane = SignalDataPlane()
 
     class Node:
         def execute(self, context):
+            artifact = context.run_directory / "result.json"
+            artifact.write_text("{}", encoding="utf-8")
+            context.register_artifact(
+                "artifact_path",
+                artifact,
+                role="final",
+                contract_id="test.artifact",
+            )
             context.report_progress("saved")
             return {"artifact_path": artifact}
 
@@ -319,12 +331,106 @@ def test_task_requires_and_preserves_an_existing_declared_artifact(tmp_path: Pat
         wake,
         instance_id="artifact-task",
         kind="task",
-        artifacts=("artifact_path",),
+        artifacts={"artifact_path": "test.artifact"},
     )
     try:
-        host.start()
+        assert list(tmp_path.iterdir()) == []
+        host.start(run_root=tmp_path, input_summary={"shots": 3})
         assert _wait(host, wake).phase == "done"
-        assert host.final_result == {"artifact_path": artifact}
+        artifact = host.artifacts[0]
+        assert host.final_result == {"artifact_path": artifact.path}
+        document = json.loads((host.run_directory / "run.json").read_text())
+        assert document["status"]["state"] == "completed"
+        assert document["input"] == {"shots": 3}
+        assert document["artifacts"] == [{
+            "name": artifact.name,
+            "path": artifact.relative_path,
+            "role": artifact.role,
+            "contract_id": artifact.contract_id,
+            "size_bytes": artifact.size_bytes,
+        }]
+    finally:
+        host.shutdown()
+        plane.close()
+
+
+def test_task_failure_keeps_registered_process_artifacts_and_error(
+    tmp_path: Path,
+) -> None:
+    wake = Event()
+    plane = SignalDataPlane()
+
+    class Node:
+        def execute(self, context):
+            process = context.run_directory / "process"
+            process.mkdir()
+            checkpoint = process / "candidate.json"
+            checkpoint.write_text('{"candidate": 1}', encoding="utf-8")
+            context.register_artifact(
+                "candidate-1",
+                checkpoint,
+                role="checkpoint",
+            )
+            context.report_progress("measured candidate", current=1, total=3)
+            raise ValueError("fit exploded")
+
+    host = _host(
+        Node(),
+        plane,
+        wake,
+        instance_id="feedback",
+        kind="task",
+        task_name="slm-feedback",
+    )
+    try:
+        host.start(run_root=tmp_path, input_summary={"shots": 100})
+        observation = _wait(host, wake)
+        assert observation.phase == "failed"
+        assert host.run_directory is not None
+        assert host.run_directory.name == "slm-feedback"
+        assert host.artifacts[0].path.read_text(encoding="utf-8") == '{"candidate": 1}'
+        document = json.loads((host.run_directory / "run.json").read_text())
+        assert document["status"]["state"] == "failed"
+        assert document["error"]["type"].endswith("ValueError")
+        assert document["error"]["message"] == "fit exploded"
+        assert document["artifacts"][0]["role"] == "checkpoint"
+    finally:
+        host.shutdown()
+        plane.close()
+
+
+def test_task_stop_keeps_run_and_process_artifact(tmp_path: Path) -> None:
+    running = Event()
+    wake = Event()
+    plane = SignalDataPlane()
+
+    class Node:
+        def execute(self, context):
+            checkpoint = context.run_directory / "partial.json"
+            checkpoint.write_text("{}", encoding="utf-8")
+            context.register_artifact("partial", checkpoint, role="process")
+            context.report_progress("waiting")
+            running.set()
+            while not context.cancel_requested():
+                time.sleep(0.001)
+
+    host = _host(
+        Node(),
+        plane,
+        wake,
+        instance_id="long-task",
+        kind="task",
+    )
+    try:
+        host.start(run_root=tmp_path, input_summary={})
+        assert running.wait(2.0)
+        host.cancel("operator Stop")
+        assert _wait(host, wake).phase == "cancelled"
+        assert host.artifacts[0].path.is_file()
+        document = json.loads((host.run_directory / "run.json").read_text())
+        assert document["status"]["state"] == "stopped"
+        assert document["status"]["stop_reason"] == "operator Stop"
+        assert document["error"] is None
     finally:
         host.shutdown()
         plane.close()
@@ -535,7 +641,7 @@ def test_successful_partial_exact_output_requires_explicit_terminal_intent(
         plane.close()
 
 
-def test_task_can_accept_a_stop_inside_its_terminal_commit() -> None:
+def test_task_can_accept_a_stop_inside_its_terminal_commit(tmp_path: Path) -> None:
     running = Event()
     wake = Event()
     plane = SignalDataPlane()
@@ -557,13 +663,15 @@ def test_task_can_accept_a_stop_inside_its_terminal_commit() -> None:
         kind="task",
     )
     try:
-        host.start()
+        host.start(run_root=tmp_path, input_summary={})
         assert running.wait(2.0)
         host.cancel("accept best")
         observation = _wait(host, wake)
         assert observation.phase == "done"
         assert observation.progress is None
         assert host.final_result == {"accepted_stop": True}
+        document = json.loads((host.run_directory / "run.json").read_text())
+        assert document["status"]["state"] == "stopped"
     finally:
         host.shutdown()
         plane.close()

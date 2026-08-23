@@ -687,25 +687,15 @@ class ReadoutModel:
                 raise ValueError("dark sample variance must match its effective count")
         with np.errstate(invalid="ignore", over="ignore"):
             response = bright_mean - dark_mean
-        legacy_unknown = (
-            np.isnan(dark_mean)
-            & np.isnan(bright_mean)
-            & (dark_count == 0)
-            & np.isnan(dark_variance)
-        )
         finite_response = (
             np.isfinite(dark_mean)
             & np.isfinite(bright_mean)
             & np.isfinite(response)
             & (response > 0.0)
         )
-        if np.any(
-            usable
-            & ~(finite_response | legacy_unknown)
-        ):
+        if np.any(usable & ~finite_response):
             raise ValueError(
-                "usable sites require finite bright_mean > dark_mean or exact "
-                "legacy unknown statistics"
+                "usable sites require finite bright_mean > dark_mean"
             )
         if not isinstance(self.kind, ReadoutModelKind):
             raise TypeError("kind must be ReadoutModelKind")
@@ -789,27 +779,22 @@ class ReadoutModel:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "ReadoutModel":
-        legacy_fields = frozenset(
+        fields = frozenset(
             {
                 "kind", "site_ids", "thresholds", "dark_mean", "bright_mean",
-                "usable_sites", "quality", "threshold_method", "integration",
+                "usable_sites", "quality", "dark_statistics", "threshold_method",
+                "integration",
             }
         )
-        legacy = type(payload) is dict and set(payload) == legacy_fields
         values = _exact_fields(
             payload,
             "ReadoutModel",
-            legacy_fields if legacy else legacy_fields | {"dark_statistics"},
+            fields,
         )
-        dark_statistics = (
-            {"sample_count": [0] * len(values["site_ids"]),
-             "sample_variance": [None] * len(values["site_ids"])}
-            if legacy
-            else _exact_fields(
-                values["dark_statistics"],
-                "ReadoutModel.dark_statistics",
-                frozenset({"sample_count", "sample_variance"}),
-            )
+        dark_statistics = _exact_fields(
+            values["dark_statistics"],
+            "ReadoutModel.dark_statistics",
+            frozenset({"sample_count", "sample_variance"}),
         )
         integration = _exact_fields(
             values["integration"],
@@ -845,10 +830,7 @@ class ReadoutModel:
             background=integration["background"],
             psf_padding=integration["padding"],
         )
-        canonical = result.to_dict()
-        if legacy:
-            canonical.pop("dark_statistics")
-        _require_canonical(canonical, dict(values), "ReadoutModel")
+        _require_canonical(result.to_dict(), dict(values), "ReadoutModel")
         return result
 
 
@@ -857,8 +839,7 @@ class TrapCalibration:
     """One SiteMap and the aligned readout models trained from one capture."""
 
     FORMAT: ClassVar[str] = "zlc.calibration.readout"
-    VERSION: ClassVar[int] = 1
-    CONTRACT_ID: ClassVar[str] = "calibration.readout.v1"
+    CONTRACT_ID: ClassVar[str] = "calibration.readout"
 
     site_map: SiteMap
     models: tuple[ReadoutModel, ...]
@@ -1039,7 +1020,6 @@ class TrapCalibration:
     def to_dict(self) -> dict[str, Any]:
         return {
             "format": self.FORMAT,
-            "version": self.VERSION,
             "site_map": self.site_map.to_dict(),
             "models": [model.to_dict() for model in self.models],
             "default_model_kind": self.default_model_kind.value,
@@ -1049,131 +1029,32 @@ class TrapCalibration:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "TrapCalibration":
-        formal_fields = frozenset(
+        fields = frozenset(
             {
-                "format", "version", "site_map", "models",
+                "format", "site_map", "models",
                 "default_model_kind", "frame_contract", "report",
             }
         )
-        multi_fields = formal_fields - {"format", "version"}
-        singular_fields = frozenset(
-            {"site_map", "readout_model", "frame_contract", "report"}
-        )
-        keys = set(payload) if type(payload) is dict else set()
-        formal = keys == formal_fields
-        singular = keys == singular_fields
-        if formal:
-            values = dict(_exact_fields(payload, "TrapCalibration", formal_fields))
-            version = values["version"]
-            if (
-                values["format"] != cls.FORMAT
-                or isinstance(version, bool)
-                or not isinstance(version, int)
-                or version != cls.VERSION
-            ):
-                raise ValueError(
-                    f"unsupported Calibration format {values['format']!r} "
-                    f"version {version!r}"
-                )
-        elif keys == multi_fields:
-            values = dict(_exact_fields(payload, "TrapCalibration", multi_fields))
-        elif singular:
-            legacy = _exact_fields(payload, "TrapCalibration", singular_fields)
-            raw_model = dict(
-                _exact_fields(
-                    legacy["readout_model"],
-                    "legacy ReadoutModel",
-                    frozenset(
-                        {
-                            "site_ids", "thresholds", "usable_sites", "quality",
-                            "threshold_method", "integration",
-                        }
-                    ),
-                )
+        values = dict(_exact_fields(payload, "TrapCalibration", fields))
+        if values["format"] != cls.FORMAT:
+            raise ValueError(
+                f"unsupported Calibration format {values['format']!r}"
             )
-            integration = dict(
-                _exact_fields(
-                    raw_model["integration"],
-                    "legacy ReadoutModel.integration",
-                    frozenset(
-                        {
-                            "method", "half_width", "reducer", "psf_weights",
-                            "psf_boxes", "background", "padding",
-                        }
-                    ),
-                )
-            )
-            kind = ReadoutModelKind(integration.pop("method"))
-            if kind is ReadoutModelKind.BOX:
-                integration["background"] = None
-                integration["padding"] = None
-            site_ids = raw_model["site_ids"]
-            if type(site_ids) is not list:
-                raise TypeError("legacy ReadoutModel site_ids must be an array")
-            count = len(site_ids)
-            raw_model.update(
-                kind=kind.value,
-                dark_mean=[None] * count,
-                bright_mean=[None] * count,
-                dark_statistics={
-                    "sample_count": [0] * count,
-                    "sample_variance": [None] * count,
-                },
-                integration=integration,
-            )
-            values = {
-                "site_map": legacy["site_map"],
-                "models": [raw_model],
-                "default_model_kind": kind.value,
-                "frame_contract": legacy["frame_contract"],
-                "report": legacy["report"],
-            }
-        else:
-            _exact_fields(payload, "TrapCalibration", formal_fields)
-            raise AssertionError("unreachable Calibration grammar")
 
         models = values["models"]
         if type(models) is not list:
             raise TypeError("models must be an array")
-        legacy_model_fields = frozenset(
-            {
-                "kind", "site_ids", "thresholds", "dark_mean", "bright_mean",
-                "usable_sites", "quality", "threshold_method", "integration",
-            }
-        )
-        missing_response_fields = legacy_model_fields - {"dark_mean", "bright_mean"}
-        normalized_models: list[dict[str, Any]] = []
-        for model in models:
-            if type(model) is not dict:
-                raise TypeError("ReadoutModel must be an object")
-            normalized = dict(model)
-            model_keys = set(normalized)
-            if model_keys == missing_response_fields:
-                site_ids = normalized["site_ids"]
-                if type(site_ids) is not list:
-                    raise TypeError("ReadoutModel site_ids must be an array")
-                normalized["dark_mean"] = [None] * len(site_ids)
-                normalized["bright_mean"] = [None] * len(site_ids)
-                model_keys = set(normalized)
-            if model_keys == legacy_model_fields:
-                count = len(normalized["site_ids"])
-                normalized["dark_statistics"] = {
-                    "sample_count": [0] * count,
-                    "sample_variance": [None] * count,
-                }
-            normalized_models.append(normalized)
         report = values["report"]
         if type(report) is not dict:
             raise TypeError("report must be an object")
         result = cls(
             SiteMap.from_dict(values["site_map"]),
-            tuple(ReadoutModel.from_dict(model) for model in normalized_models),
+            tuple(ReadoutModel.from_dict(model) for model in models),
             ReadoutModelKind(values["default_model_kind"]),
             FrameContract.from_dict(values["frame_contract"]),
             report,
         )
-        if formal:
-            _require_canonical(result.to_dict(), dict(values), "TrapCalibration")
+        _require_canonical(result.to_dict(), dict(values), "TrapCalibration")
         return result
 
     def save(self, path: str | Path) -> Path:
@@ -2392,11 +2273,9 @@ def validate_target_registration(
         raise ValueError("Calibration SiteMap has no registered Target topology")
     topology = site_map.topology
     if set(topology) != {
-        "kind", "version", "target_support_yx", "target_site_intensity",
+        "kind", "target_support_yx", "target_site_intensity",
         "observed_sites", "affine_target_xy_to_image_xy", "provenance",
-    } or topology.get("kind") != "slm_target_registration" or topology.get(
-        "version"
-    ) != 1:
+    } or topology.get("kind") != "slm_target_registration":
         raise ValueError("Calibration SiteMap has invalid registered Target topology")
     support = np.asarray(topology["target_support_yx"])
     intensity = np.asarray(topology["target_site_intensity"])
@@ -2649,7 +2528,6 @@ def _register_target_sites(
     quality[observed] = detected.quality[source_indices[observed]]
     topology = {
         "kind": "slm_target_registration",
-        "version": 1,
         "target_support_yx": np.column_stack((rows, columns)).astype(int).tolist(),
         "target_site_intensity": target[rows, columns].astype(float).tolist(),
         "observed_sites": observed.tolist(),

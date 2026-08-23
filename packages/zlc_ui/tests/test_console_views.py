@@ -33,8 +33,8 @@ def _run_qt(code: str) -> None:
 def test_panel_card_construct_and_setters() -> None:
     _run_qt(
         """
-import zou_lab_control_v2
-print(zou_lab_control_v2.__file__)
+import zou_lab_control
+print(zou_lab_control.__file__)
 from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.fluent import FluentTreeComboBox
@@ -137,7 +137,7 @@ assert not card._placeholder.isHidden()
 card.set_panel_projection(dict(state, size='1x4'), surface_projection)
 assert card.panel_size == '1x4'
 try:
-    card.set_panel_projection(dict(state, size='not-a-v1-size'), surface_projection)
+    card.set_panel_projection(dict(state, size='not-a-panel-size'), surface_projection)
 except ValueError:
     pass
 else:
@@ -149,8 +149,8 @@ else:
 def test_panel_card_qtest_signal_payloads() -> None:
     _run_qt(
         """
-import zou_lab_control_v2
-print(zou_lab_control_v2.__file__)
+import zou_lab_control
+print(zou_lab_control.__file__)
 from zlc_ui.console import panel_card_view as tested_module
 print(tested_module.__file__)
 from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
@@ -276,8 +276,8 @@ app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete); app.processEvents()
 def test_fluent_popup_retires_with_its_owner_window() -> None:
     _run_qt(
         """
-import zou_lab_control_v2
-print(zou_lab_control_v2.__file__)
+import zou_lab_control
+print(zou_lab_control.__file__)
 from zlc_ui.fluent import fluent as tested_module
 print(tested_module.__file__)
 from PyQt5 import QtCore, QtTest, QtWidgets
@@ -372,8 +372,8 @@ app.processEvents()
 def test_public_panel_removal_retires_its_popup_and_card() -> None:
     _run_qt(
         """
-import zou_lab_control_v2
-print(zou_lab_control_v2.__file__)
+import zou_lab_control
+print(zou_lab_control.__file__)
 from PyQt5 import QtCore, sip
 from zlc_ui import open_task_console
 from zlc_ui.console import board_view as board_module
@@ -681,7 +681,7 @@ assert events == ['start', 'edit']
 def test_logic_editor_is_a_live_closable_draft_projection() -> None:
     _run_qt(
         """
-import zou_lab_control_v2
+import zou_lab_control
 import zlc_ui.console.logic_editor_view as tested_module
 print(tested_module.__file__)
 from PyQt5 import QtCore, QtTest
@@ -713,7 +713,7 @@ projection = {
     'auto_preview': True,
     'preview_offered': True,
     'artifact_results': ({
-        'name': 'artifact_path', 'contract_id': 'calibration.readout.v1',
+        'name': 'artifact_path', 'contract_id': 'calibration.readout',
         'path': 'C:/data/calibration-2.json',
     },),
     'source_required': True,
@@ -890,9 +890,9 @@ assert 'panel-1' not in handle._panel_publisher_editors
 def test_panel_editor_and_setting_are_views_of_the_same_projection() -> None:
     _run_qt(
         """
-import zou_lab_control_v2
+import zou_lab_control
 import zlc_ui.console.panel_editor_view as tested_module
-print(zou_lab_control_v2.__file__)
+print(zou_lab_control.__file__)
 print(tested_module.__file__)
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -1439,7 +1439,7 @@ assert view.summary_label.text() == 'one fake card'
 assert view.status_strip.current_severity == 'idle'
 assert view.board._cards['panel-1'] is card
 assert view.selectors_switch.width() > 0
-# The v1 header is one semantic row: identity on the left, telemetry as the
+# The header is one semantic row: identity on the left, telemetry as the
 # only flexible middle cell, and the command cluster pinned to the right.
 # A wrapping row top-aligned every sizeHint and left the spare width after the
 # final button, making both the grey summary and the action cluster visibly
@@ -1493,7 +1493,7 @@ assert row_b.status_label.text() == 'also usable'
 
 def test_task_console_qtest_signal_payloads() -> None:
     _run_qt(
-        """import zou_lab_control_v2
+        """import zou_lab_control
 from zlc_ui.console import task_console_view as tested_module
 print(tested_module.__file__)
 from PyQt5 import QtCore, QtTest
@@ -1626,7 +1626,7 @@ assert asked == [True, False], asked
 def test_the_signal_chooser_lists_rows_under_their_producer() -> None:
     """It is asked for at the moment it is needed, so it can be readable.
 
-    A picker squeezed into the v1 header collapsed to an ellipsis and clipped
+    A picker squeezed into the header collapsed to an ellipsis and clipped
     the control beside it; a chooser you cannot read is not a chooser.
     """
 
@@ -1671,7 +1671,7 @@ assert not dialog.accept_button.isEnabled()
     )
 
 
-def test_task_console_acceptance_launcher_keeps_v1_target_and_left_anchored_empty_status() -> None:
+def test_task_console_acceptance_launcher_keeps_target_size_and_left_anchored_empty_status() -> None:
     _run_qt(
         """
 from PyQt5 import QtCore
@@ -1849,8 +1849,8 @@ def test_every_panel_kind_opens_its_setting_form_with_exact_keys() -> None:
 
     _run_qt(
         """
-import zou_lab_control_v2
-print(zou_lab_control_v2.__file__)
+import zou_lab_control
+print(zou_lab_control.__file__)
 from PyQt5 import QtCore, QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.console import panel_card_view as tested_module
@@ -1951,8 +1951,8 @@ def test_the_auto_preview_control_is_a_switch_that_looks_different_when_on() -> 
 
     _run_qt(
         """
-import zou_lab_control_v2
-print(zou_lab_control_v2.__file__)
+import zou_lab_control
+print(zou_lab_control.__file__)
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.fluent import FluentSwitch
 from zlc_ui.console import logic_row_view as tested_module
@@ -2013,8 +2013,8 @@ def test_the_editor_shows_the_same_preview_switch_beside_its_own_start() -> None
 
     _run_qt(
         """
-import zou_lab_control_v2
-print(zou_lab_control_v2.__file__)
+import zou_lab_control
+print(zou_lab_control.__file__)
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.fluent import FluentSwitch
 from zlc_ui.form import FormSpec

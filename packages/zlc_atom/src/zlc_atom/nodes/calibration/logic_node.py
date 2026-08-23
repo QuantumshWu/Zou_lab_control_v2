@@ -33,7 +33,7 @@ from .task import (
 
 _CALIBRATION_PULSE_RESOURCE = WorkspaceResourceSpec(
     "pulse_template",
-    "zlc.pulse.v1/calibration",
+    "zlc.pulse/calibration",
     "pulses",
     (".json",),
     load_calibration_pulse_template,
@@ -217,7 +217,6 @@ def _build(
     sequencer_key: str,
     pulse_resource: ResolvedWorkspaceResource,
     signal_plane: object,
-    artifact_directory: object,
     **values: object,
 ) -> CalibrationTask:
     authored = CALIBRATION_SCHEMA.project_values(values)
@@ -259,7 +258,6 @@ def _build(
         pulse_sequence=pulse_resource.value,
         pulse_path=pulse_resource.path,
         signal_plane=signal_plane,
-        artifact_directory=artifact_directory,  # type: ignore[arg-type]
     )
 
 

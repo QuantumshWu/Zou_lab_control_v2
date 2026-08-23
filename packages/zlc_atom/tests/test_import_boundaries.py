@@ -48,10 +48,6 @@ def _is_concrete_plugin(path: Path) -> bool:
 
 def test_foundation_stays_headless_while_concrete_plugins_may_own_views() -> None:
     paths = _python_files("")
-    package_text = "\n".join(path.read_text(encoding="utf-8") for path in paths)
-    for forbidden in ("zlc_neutral_atom", "_VirtualSequencerConnection"):
-        assert forbidden not in package_text
-
     foundation_view_imports = tuple(
         (path.relative_to(SRC), imported)
         for path in paths
@@ -84,9 +80,9 @@ def test_calibration_does_not_depend_on_the_workbench_composition_root(
 
     script = r'''
 import sys
-import zou_lab_control_v2
+import zou_lab_control
 import zlc_atom
-print(zou_lab_control_v2.ROOT)
+print(zou_lab_control.ROOT)
 print(zlc_atom.__file__)
 class BlockWorkbench:
     def find_spec(self, fullname, path=None, target=None):

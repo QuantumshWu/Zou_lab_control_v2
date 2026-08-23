@@ -104,7 +104,7 @@ def build_panel_host(plot_input, state):
     spec, _semantic, parameters = project_panel_state(
         snapshot.block.schema, spec, state
     )
-    return plot.RasterPlotHost.from_plot(
+    return plot.build_figure_host(
         plot_input,
         spec,
         size=state.size,
@@ -725,7 +725,7 @@ def create_window(
         Releasing them on ``closed`` -- after the close is committed -- means
         a failure part-way leaves an open device set with no window left to
         reach it.  A close guard is
-        the migrated mechanism for exactly that and had no caller: the X now
+        the mechanism for exactly that: the X now
         does nothing until the owners are confirmed down, and a failure leaves
         the window up so the operator can try again.
         """

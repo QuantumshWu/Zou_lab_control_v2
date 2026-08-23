@@ -23,8 +23,8 @@ This file describes the approved board and frozen deployment geometry:
 
 `zlc_pulse.pulse_target_from_xdc()` generates the complete `PulseTarget` from
 the explicit manifest indices, then requires both checked-in projections to
-match: the XDC port/pin set and the RTL top assignments. The public function
-name is historical; the XDC no longer creates lane identity.
+match: the XDC port/pin set and the RTL top assignments. The XDC does not create
+lane identity.
 
 The returned target keeps the manifest package pin for every raw lane in
 `target.package_pins`. Any missing, extra, or differently pinned pulse port in
@@ -33,7 +33,7 @@ the XDC fails immediately. A top-level RTL assignment to the wrong
 
 Editing JSON cannot alter a programmed FPGA. A hardware change needs an
 approved rebuild and qualification. The layout fingerprint proves geometry
-compatibility; it is not by itself a receipt for a particular board or
+identity match; it is not by itself a receipt for a particular board or
 qualified bitstream.
 
 ## `board.xdc`

@@ -60,7 +60,7 @@ def test_real_batch_wrapper_forwards_exact_modes_without_inner_argument(tmp_path
         assert "FAKE_ARGS=" in result.stdout
         assert "--inner" not in result.stdout
     no_args = _run_batch(cwd=ROOT, python_path=fake)
-    assert "-m zou_lab_control_v2 pulse_server" in no_args.stdout
+    assert "-m zou_lab_control pulse_server" in no_args.stdout
     assert "--host \"127.0.0.1\" --port \"18861\"" in no_args.stdout
     jtag = _run_batch("--backend", "jtag-axi", cwd=ROOT, python_path=fake)
     assert "--backend jtag-axi" in jtag.stdout
@@ -117,10 +117,9 @@ def test_create_project_deletes_only_its_marked_child_and_requires_geometry() ->
     assert ".zlc_generated_project" in guard
     assert "file dirname $out" in guard and "file tail $out" in guard
     assert "file normalize $project_root" in guard
-    assert "${project_name}.xpr" in guard
-    assert "${project_name}.runs" in guard
-    assert "${project_name}.srcs" in guard
-    assert "migrating legacy generated Vivado project" in guard
+    assert 'marker_text ne "zlc_pulse_vivado_project"' in guard
+    assert 'puts $zlc_marker "zlc_pulse_vivado_project"' in source
+    assert "Refusing to delete unmarked directory" in guard
     assert "ZLC_PS_GEOM_TCL is required" in source
     assert "source $zlc_geom_tcl" in source
     assert "if {![info exists zlc_edge_addr_width]}" not in source

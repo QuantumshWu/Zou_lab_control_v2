@@ -2744,8 +2744,7 @@ class FluentTabWidget(QtWidgets.QTabWidget):
         self._schedule_overflow_update()
 
     def add_permanent_tab(self, widget: QtWidgets.QWidget, title: str) -> int:
-        """Add a fixture tab with NO close button (e.g. Monitor).  A plain
-        ``addTab`` is already permanent, so this is just an explicit alias."""
+        """Add a fixture tab with no close button (for example, Monitor)."""
         return self.addTab(widget, title)
 
     def add_closable_tab(self, widget: QtWidgets.QWidget, title: str, *,
@@ -3654,7 +3653,7 @@ def launch_fluent_window(
     size from ``window_ratio``; a caller no longer has to remember a per-demo
     ``fixed_size=False`` switch.
 
-    The legacy fixed-content mode remains available explicitly with
+    The fixed-content mode remains available explicitly with
     ``fixed_size=True`` for small embedded/test shells.  It is intentionally
     not the default for a top-level human window.
 

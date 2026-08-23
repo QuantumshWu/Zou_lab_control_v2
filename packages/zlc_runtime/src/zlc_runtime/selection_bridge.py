@@ -1336,13 +1336,10 @@ class SelectionBridge:
     @staticmethod
     def _contract_id(role: str, name: str) -> str:
         if role == "selection":
-            # No version suffix: nothing anywhere parses one, and the single
-            # fabricated ".v2" this file once held proved the numbers were
-            # already fiction.  The id is an identity, not a version.
             return f"zlc.selection.{name}"
         if name.endswith("_err"):
-            return "zlc.selection.fit.error.v2"
-        return "zlc.selection.fit.parameter.v2"
+            return "zlc.selection.fit.error"
+        return "zlc.selection.fit.parameter"
 
     def _selection_output_names(self, state: SelectionState) -> tuple[str, ...]:
         return tuple(
@@ -1750,13 +1747,13 @@ class SelectionBridge:
                 (
                     "",
                     event.parameter_values[parameter],
-                    "zlc.selection.fit.parameter.v2",
+                    "zlc.selection.fit.parameter",
                     value_validity,
                 ),
                 (
                     "_err",
                     event.parameter_errors[parameter],
-                    "zlc.selection.fit.error.v2",
+                    "zlc.selection.fit.error",
                     error_validity[parameter],
                 ),
             ):

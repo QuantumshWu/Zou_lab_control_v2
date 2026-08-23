@@ -11,7 +11,7 @@ declares them: every device type carries an authoring schema, and that schema is
 the form.  A window that listed its own device types would be a second catalog
 to keep in step with the real one.
 
-The draft remains plain data, but the v1 lifecycle boundary is restored: an
+The draft remains plain data, with an explicit lifecycle boundary: an
 embedding application may inject the one operation that turns the current
 ``InstallationConfig`` into its shared Experiment/session.  On success this
 presenter retains that exact object until explicit shutdown; it never performs
@@ -1036,16 +1036,6 @@ class DeviceManagerPresenter:
                     for field in spec.fields
                 ),
             )
-        template = self._template_name(self.devices)
-        self.view.set_installation_source(
-            template,
-            (
-                f"{template.replace('_', ' ').title()} template"
-                if template is not None
-                else "Custom apparatus"
-            )
-            + f" · {len(self.devices)} named device(s)",
-        )
         loaded_keys = (
             frozenset()
             if self._active_session is None

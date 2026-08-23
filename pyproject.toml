@@ -45,7 +45,7 @@ dev = [
 ]
 
 [project.scripts]
-zlc = "zou_lab_control_v2.__main__:main"
+zlc = "zou_lab_control.__main__:main"
 
 # These two groups are the installed projection of this single manifest.
 # The root dispatcher and environment check read the generated entry-point
@@ -64,7 +64,7 @@ zlc_workbench = "zlc_workbench"
 capture = "zlc_workbench.tools.capture_acceptance:main"
 check = "zlc_workbench.tools.check_environment:main"
 device_manager = "zlc_workbench.apps.device_manager:main"
-evidence = "zou_lab_control_v2.__main__:evidence"
+evidence = "zou_lab_control.__main__:evidence"
 figure_viewer = "zlc_workbench.apps.figure_viewer:main"
 fpga = "zlc_pulse.fpga:_main"
 pulse_editor = "zlc_workbench.apps.pulse_editor:main"
@@ -73,12 +73,12 @@ slm_server = "zlc_atom.devices.slm.device_types:main"
 task_console = "zlc_workbench.apps.task_console:main"
 
 [project.entry-points."zou_lab_control.evidence"]
-software = "zou_lab_control_v2.__main__:evidence"
-gui_offscreen = "zou_lab_control_v2.__main__:evidence"
-virtual_vertical = "zou_lab_control_v2.__main__:evidence"
-notebook_offline = "zou_lab_control_v2.__main__:evidence"
-real_screen = "zou_lab_control_v2.__main__:evidence"
-hardware = "zou_lab_control_v2.__main__:evidence"
+software = "zou_lab_control.__main__:evidence"
+gui_offscreen = "zou_lab_control.__main__:evidence"
+virtual_vertical = "zou_lab_control.__main__:evidence"
+notebook_offline = "zou_lab_control.__main__:evidence"
+real_screen = "zou_lab_control.__main__:evidence"
+hardware = "zou_lab_control.__main__:evidence"
 
 [tool.setuptools]
 # Every layer lives under packages/ and keeps its own root -- src/, tests/,
@@ -107,7 +107,7 @@ where = [
     "packages/zlc_atom/src",
     "packages/zlc_workbench/src",
 ]
-include = ["zou_lab_control_v2", "zlc_*"]
+include = ["zou_lab_control", "zlc_*"]
 namespaces = false
 
 [tool.setuptools.package-data]

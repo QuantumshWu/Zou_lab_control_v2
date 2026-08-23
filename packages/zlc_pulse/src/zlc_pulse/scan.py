@@ -195,9 +195,8 @@ def resolve_scan_point(
     row's numbers -- and saying it the other way round is what broke it: the
     board was handed a one-point table (SCAN_COUNT=1, SCAN_ENABLE=1) looping
     forever, a state nothing else ever asks it for, and its DAC segments were
-    never re-applied while the digital edges kept playing.  v1 resolved the
-    point into the document and ran a plain pulse; this is that, in this
-    package's own terms.
+    never re-applied while the digital edges kept playing.  Resolve the point
+    into the document and run a plain pulse, in this package's own terms.
 
     ``values`` are in each field's authored unit, the same numbers a scan table
     row holds -- a signed DAC code, or a duration/delay in the unit shown by

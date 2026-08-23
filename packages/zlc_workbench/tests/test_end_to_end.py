@@ -19,7 +19,7 @@ from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
 
 @pytest.fixture
 def workspace(tmp_path) -> Workspace:
-    """A workspace with one ordinary v2 ``zlc.pulse.v1`` JSON pulse.
+    """A workspace with one ordinary ``zlc.pulse`` JSON pulse.
 
     Pulse definitions are experiment content and live in the workspace, so a
     session is given a directory rather than an implicit Calibration template.
@@ -128,8 +128,8 @@ def test_a_session_starts_from_a_written_down_apparatus(tmp_path) -> None:
     """The bench routine: describe the apparatus once, start from it every day.
 
     A live device object cannot be written down, so an apparatus that could only
-    be built by injecting one could never be reopened.  This is the property
-    that regression removed and this round restored.
+    be built by injecting one could never be reopened.  The saved apparatus
+    must therefore retain the same world profile resource.
     """
 
     from zlc_atom.install.configuration import (
@@ -143,7 +143,6 @@ def test_a_session_starts_from_a_written_down_apparatus(tmp_path) -> None:
         json.dumps(
             {
                 "format": "zlc.simulation.world_profile",
-                "version": 1,
                 "offset_counts": 123.0,
                 "conversion_e_per_count": 0.2,
             }
@@ -217,7 +216,7 @@ def _world_profile_config(profile: object):
 
 def _write_world_profile(path):
     path.write_text(
-        '{"format":"zlc.simulation.world_profile","version":1}',
+        '{"format":"zlc.simulation.world_profile"}',
         encoding="utf-8",
     )
     return path

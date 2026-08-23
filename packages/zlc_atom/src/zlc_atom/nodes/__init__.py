@@ -20,7 +20,7 @@ from ._framework.discovery import discover_logic_nodes
 
 
 def calibration_pulse_template_bytes() -> bytes:
-    """Return the shipped v2 imaging template exactly as packaged."""
+    """Return the shipped imaging template exactly as packaged."""
 
     return (
         files("zlc_atom.nodes.calibration")

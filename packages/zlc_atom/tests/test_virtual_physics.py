@@ -225,7 +225,6 @@ def test_direct_world_profile_is_resolved_before_virtual_device_init(
         json.dumps(
             {
                 "format": "zlc.simulation.world_profile",
-                "version": 1,
                 "offset_counts": 123.0,
                 "conversion_e_per_count": 0.2,
                 "loading_probability": 0.75,
@@ -256,13 +255,25 @@ def test_direct_world_profile_is_resolved_before_virtual_device_init(
 
     duplicate = tmp_path / "duplicate-world.json"
     duplicate.write_text(
-        '{"format":"zlc.simulation.world_profile","version":1,'
+        '{"format":"zlc.simulation.world_profile",'
         '"atom_rate":1,"atom_rate":2}',
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="strict JSON"):
         SimulationWorldConfig.from_profile(
             duplicate,
+            geometry=SimulationWorldConfig().geometry,
+            seed=0,
+        )
+
+    unknown = tmp_path / "unknown-world-field.json"
+    unknown.write_text(
+        '{"format":"zlc.simulation.world_profile","unexpected":1}',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="unknown fields"):
+        SimulationWorldConfig.from_profile(
+            unknown,
             geometry=SimulationWorldConfig().geometry,
             seed=0,
         )
@@ -2624,11 +2635,14 @@ def test_slm_target_json_is_a_strict_objective_bearing_artifact(tmp_path: Path) 
     loaded_target, loaded_objective = load_target(target_path)
     np.testing.assert_array_equal(loaded_target, target)
     assert loaded_objective == "image"
+    assert set(json.loads(target_path.read_text(encoding="utf-8"))) == {
+        "format", "shape", "intensity", "objective_kind",
+    }
 
     malformed_target = tmp_path / "bad-target.json"
     malformed_target.write_text(
         '{"format":"zlc.slm.target","format":"zlc.slm.target",'
-        '"version":2,"shape":[1,1],"intensity":[[1.0]],'
+        '"shape":[1,1],"intensity":[[1.0]],'
         '"objective_kind":"spots"}',
         encoding="utf-8",
     )
@@ -2637,21 +2651,27 @@ def test_slm_target_json_is_a_strict_objective_bearing_artifact(tmp_path: Path) 
 
     for name, payload in (
         (
-            "bad-version.json",
-            '{"format":"zlc.slm.target","version":true,'
+            "unknown-field.json",
+            '{"format":"zlc.slm.target","unexpected":2,'
             '"shape":[2,2],"intensity":[[1,0],[0,1]],'
             '"objective_kind":"spots"}',
         ),
         (
             "bad-shape.json",
-            '{"format":"zlc.slm.target","version":2,'
+            '{"format":"zlc.slm.target",'
             '"shape":[2.0,2],"intensity":[[1,0],[0,1]],'
             '"objective_kind":"spots"}',
         ),
         (
             "bad-value.json",
-            '{"format":"zlc.slm.target","version":2,'
+            '{"format":"zlc.slm.target",'
             '"shape":[2,2],"intensity":[["1",0],[0,1]],'
+            '"objective_kind":"spots"}',
+        ),
+        (
+            "bad-format.json",
+            '{"format":"zlc.slm.other",'
+            '"shape":[2,2],"intensity":[[1,0],[0,1]],'
             '"objective_kind":"spots"}',
         ),
     ):
@@ -2727,6 +2747,17 @@ def test_science_context_roundtrip_freezes_layers_pupil_receipt_and_correction(
         operator_metadata={"carrier_waves_xy": [1.0, -0.5]},
     )
     context = load_science_context(path)
+    assert slm_solver.SCIENCE_CONTEXT_ARTIFACT_CONTRACT == (
+        "zlc.slm.science-context"
+    )
+    with np.load(path, allow_pickle=False) as archive:
+        assert set(archive.files) == {
+            "phase", "pattern_phase", "operator_wavefront", "pupil_amplitude",
+            "pupil_support", "target_intensity", "metadata",
+        }
+        assert json.loads(str(archive["metadata"].item()))["format"] == (
+            "zlc.slm.science-context"
+        )
     for key, expected in (
         ("phase", phase),
         ("pattern_phase", pattern),
@@ -2742,21 +2773,32 @@ def test_science_context_roundtrip_freezes_layers_pupil_receipt_and_correction(
     assert context["command_receipt"] == receipt
     assert context["pupil"]["center_xy"] == [4.5, 3.5]
 
-    legacy_path = tmp_path / "legacy-context.npz"
+    missing_target_path = tmp_path / "missing-target-context.npz"
     with np.load(path, allow_pickle=False) as archive:
-        legacy_metadata = json.loads(str(archive["metadata"].item()))
-        legacy_metadata["version"] = 1
         np.savez(
-            legacy_path,
+            missing_target_path,
             **{
                 key: archive[key]
-                for key in archive.files
-                if key not in {"target_intensity", "metadata"}
+                for key in archive.files if key != "target_intensity"
             },
-            metadata=np.asarray(json.dumps(legacy_metadata)),
         )
-    legacy = load_science_context(legacy_path)
-    assert legacy["target_intensity"] is None
+    with pytest.raises(ValueError, match="wrong members"):
+        load_science_context(missing_target_path)
+
+    unknown_path = tmp_path / "unknown-context-field.npz"
+    with np.load(path, allow_pickle=False) as archive:
+        unknown_metadata = json.loads(str(archive["metadata"].item()))
+        unknown_metadata["unexpected"] = 2
+        np.savez(
+            unknown_path,
+            **{
+                key: archive[key]
+                for key in archive.files if key != "metadata"
+            },
+            metadata=np.asarray(json.dumps(unknown_metadata)),
+        )
+    with pytest.raises(ValueError, match="metadata has the wrong fields"):
+        load_science_context(unknown_path)
 
     save_science_context(
         tmp_path / "response-context.npz",

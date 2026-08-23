@@ -25,10 +25,10 @@ def test_figure_viewer_mount_reconcile_and_open_intent() -> None:
     _run_qt(
         """
 from PyQt5 import QtCore, QtTest, QtWidgets
-from zlc_ui.figure_viewer import FigureViewerView
+from zlc_ui.figure_viewer import FigureViewerHandle, FigureViewerView
 from zlc_ui.qt import ensure_qt_app
 app = ensure_qt_app(["figure-test"])
-view = FigureViewerView(); view.set_info((("Summary", (("Name", "fake"),)),))
+view = FigureViewerView(); view.set_info((("Summary", (("Name", "fake"),)), ("Flow", ())))
 assert view.info_pane.path_edit._filter == "Saved figure archives (*.npz)"
 first = QtWidgets.QLabel("first"); second = QtWidgets.QLabel("second")
 view.set_figure_surface(first); view.set_figure_surface(first); view.set_figure_surface(second)
@@ -40,6 +40,12 @@ committed = []; view.path_committed.connect(committed.append)
 view.set_path("D:/data/2026_08_05/run.npz")
 assert view.info_pane.path_edit.text() == "D:/data/2026_08_05/run.npz"
 assert committed == []
+
+handle = FigureViewerHandle(None, view)
+tree = (("fit @3", (("roi @2", (("camera @1", ()),)),)),)
+handle.set_lineage_tree(tree)
+assert view._lineage_tree == tree
+assert view.info_pane._tab_layouts["Flow"].count() == 3
 """
     )
 

@@ -1,7 +1,7 @@
-"""The v1-shaped console panel card.
+"""The compact console panel card.
 
 The board owns placement; this widget owns only the titled Fluent surface and
-the small ``Setting`` affordance from v1.  Signal/size/update controls remain
+the small ``Setting`` affordance.  Signal/size/update controls remain
 available through the settings popup for the lightweight presenter API, but
 they do not add an invented toolbar to the card face.
 """
@@ -85,7 +85,7 @@ def _set_interaction(surface: object | None, enabled: bool) -> None:
 
 
 class PanelCardView(FluentGroupBox):
-    """A v1 titled card with a replaceable QWidget surface."""
+    """A titled card with a replaceable QWidget surface."""
 
     signal_picked = QtCore.pyqtSignal(str)
     size_picked = QtCore.pyqtSignal(str)

@@ -35,15 +35,17 @@ class FigureViewerView(QtWidgets.QWidget):
         self._figure_surface: QtWidgets.QWidget | None = None
         self._retiring_surfaces: set[QtWidgets.QWidget] = set()
         self._closing = False
+        self._info_tabs: tuple = ()
+        self._lineage_tree: tuple = ()
         root = QtWidgets.QHBoxLayout(self)
-        # The InfoPane owns the left/right window inset, exactly like the v1
-        # FigureInfoPane.  The host supplies only the top/bottom frame.
+        # InfoPane owns the left/right window inset.  The host supplies only
+        # the top/bottom frame.
         root.setContentsMargins(0, window_pad(1), 0, window_pad(1))
         root.setSpacing(window_pad(0.5))
 
         self.info_pane = InfoPane(
-            # These are the v1 formal projection keys.  They are also what
-            # determines the fixed left-pane width, so using invented labels
+            # These formal projection keys also determine the fixed left-pane
+            # width, so using invented labels
             # changes the entire FigureViewer split even while the pane looks
             # otherwise correct.
             label_names=("schema_fingerprint", "coordinate_frame"),
@@ -63,7 +65,7 @@ class FigureViewerView(QtWidgets.QWidget):
         self.info_pane.path_committed.connect(self.path_committed)
         root.addWidget(self.info_pane, 0)
 
-        # The v1 host is a transparent QWidget.  The presenter-owned surface
+        # The host is a transparent QWidget.  The presenter-owned surface
         # supplies its own paint/border when mounted; the empty shell must not
         # invent a second card around it.
         holder = QtWidgets.QWidget(self)
@@ -92,7 +94,7 @@ class FigureViewerView(QtWidgets.QWidget):
         bar_layout.addWidget(self.save_image_button)
         self._dataset_bar.hide()
         self._surface_layout.addWidget(self._dataset_bar)
-        # The v1 empty surface is a white FluentFrame inside the transparent
+        # The empty surface is a white FluentFrame inside the transparent
         # host.  Putting the label directly on the host leaks the outer
         # window's grey background through the whole plot area and creates a
         # large, misleading outer-background mismatch.
@@ -116,7 +118,36 @@ class FigureViewerView(QtWidgets.QWidget):
         root.addWidget(holder, 1)
 
     def set_info(self, tabs: tuple[tuple[str, tuple[tuple[str, object], ...]], ...]) -> None:
-        self.info_pane.set_tabs(tabs)
+        self._info_tabs = tuple(tabs)
+        self._render_info()
+
+    def set_lineage_tree(self, tree: object) -> None:
+        """Show an exact causal tree through the view's plain-data seam."""
+
+        if not isinstance(tree, tuple):
+            raise TypeError("lineage tree must be a tuple")
+        self._lineage_tree = tree
+        self._render_info()
+
+    def _render_info(self) -> None:
+        def rows(branches: tuple, prefix: str = "") -> tuple:
+            result = []
+            for index, branch in enumerate(branches):
+                if not isinstance(branch, tuple) or len(branch) != 2:
+                    raise ValueError("lineage branch must contain label and children")
+                label, children = branch
+                if not isinstance(label, str) or not isinstance(children, tuple):
+                    raise TypeError("lineage branch label/children are malformed")
+                last = index == len(branches) - 1
+                result.append((f"{prefix}{'└─' if last else '├─'} {label}", ""))
+                result.extend(rows(children, prefix + ("   " if last else "│  ")))
+            return tuple(result)
+
+        lineage_rows = rows(self._lineage_tree)
+        self.info_pane.set_tabs(tuple(
+            (title, lineage_rows if title == "Flow" else tab_rows)
+            for title, tab_rows in self._info_tabs
+        ))
 
     def set_datasets(
         self, datasets: tuple[tuple[str, str], ...], current: str = ""

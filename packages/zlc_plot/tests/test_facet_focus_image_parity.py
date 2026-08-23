@@ -1,6 +1,6 @@
 """A focused FacetGrid image cell IS the standalone Image surface.
 
-Contract from the migration review: the focused facet cell must show
+The focused facet cell must show
 everything the standalone image kind shows -- the ``_split_image`` layout
 (data + distribution + colorbar axes), the colorbar with its value label,
 the image spatial tick budget, the authored figure title, and a parameter

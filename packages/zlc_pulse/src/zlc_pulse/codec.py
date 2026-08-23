@@ -3,9 +3,9 @@
 A PulseSequence had no persisted form at all, so an editor could change one and
 had nowhere to put the change: the Save button was wired to a refusal whose
 stated reason -- "a pulse is a Python module, do not overwrite the author's
-file" -- was true and answered a different question.  v1 saved a pulse as JSON
-beside the module; this is the same fact, owned by the package that owns the
-model rather than re-derived by whoever happens to be writing a file.
+file" -- was true and answered a different question.  A pulse is saved as JSON
+beside the module, with that fact owned by the package that owns the model
+rather than re-derived by whoever happens to be writing a file.
 
 Trees only.  Reading and writing files belongs to whoever knows where an
 experiment keeps things, which is not this package.
@@ -33,7 +33,7 @@ from .model import (
 
 
 #: What a reader checks before trusting the rest.
-PULSE_TREE_FORMAT = "zlc.pulse.v1"
+PULSE_TREE_FORMAT = "zlc.pulse"
 PULSE_EDITOR_FIELDS = (
     "visible_ports",
     "scan_source",

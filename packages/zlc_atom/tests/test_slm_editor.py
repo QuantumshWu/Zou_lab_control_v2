@@ -27,10 +27,10 @@ from zlc_workbench.session import ExperimentSession, Workspace
 
 def test_slm_control_factory_is_plugin_owned_and_lazy(tmp_path: Path) -> None:
     script = r"""
-import zou_lab_control_v2
+import zou_lab_control
 import sys
 import zlc_atom.install as tested
-print(zou_lab_control_v2.__file__)
+print(zou_lab_control.__file__)
 print(tested.__file__)
 assert "PyQt5" not in sys.modules
 assert "zlc_plot" not in sys.modules
@@ -761,11 +761,6 @@ def test_pattern_wavefront_compose_and_science_phase_roundtrip(
         assert control._zernike["defocus"].value() == 0.125
         assert control._zernike_enabled.isChecked()
 
-        draft_target = np.zeros(control.shape, dtype=np.float32)
-        control.set_target(draft_target, objective_kind="image")
-        control._set_context({**context, "target_intensity": None})
-        np.testing.assert_array_equal(control._target, draft_target)
-
         control.set_phase(np.zeros(control.shape), {})
         control._zernike_enabled.setChecked(True)
         control._carrier_x.setValue(1.0)
@@ -1294,6 +1289,9 @@ def test_context_prevalidation_never_partially_mutates_editor(
         wrong_target = deepcopy(valid)
         wrong_target["target_intensity"] = wrong_target["target_intensity"][:-1]
         malformed.append(wrong_target)
+        missing_target = deepcopy(valid)
+        missing_target["target_intensity"] = None
+        malformed.append(missing_target)
         bad_operator = deepcopy(valid)
         bad_operator["operator_metadata"]["carrier_waves_xy"] = [np.nan, 0.0]
         malformed.append(bad_operator)

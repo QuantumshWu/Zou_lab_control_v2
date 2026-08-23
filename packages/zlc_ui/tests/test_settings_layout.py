@@ -44,7 +44,7 @@ def _run_qt(code: str) -> None:
 
 
 _SURFACE_PROLOGUE = """
-import zou_lab_control_v2
+import zou_lab_control
 from PyQt5 import QtCore
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.console.panel_card_view import PanelCardView
@@ -173,7 +173,7 @@ assert viewport.width() >= required, (viewport.width(), required)
 def test_reconcile_replaces_the_enabled_when_dependency_graph() -> None:
     _run_qt(
         """
-import zou_lab_control_v2
+import zou_lab_control
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.form import FormFieldProps, FormSpec
 from zlc_ui.form.qt_form import FluentParameterForm

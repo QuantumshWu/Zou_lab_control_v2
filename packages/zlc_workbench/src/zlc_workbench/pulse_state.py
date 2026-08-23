@@ -99,7 +99,7 @@ def state_from_tree(tree: Mapping[str, Any]) -> PulseEditorState:
 
 
 def state_to_tree(state: PulseEditorState) -> dict[str, Any]:
-    """Encode exactly the state the Workbench owns, with no legacy fields."""
+    """Encode exactly the state the Workbench owns."""
 
     if not isinstance(state, PulseEditorState):
         raise TypeError("state must be PulseEditorState")
@@ -125,7 +125,7 @@ def state_to_tree(state: PulseEditorState) -> dict[str, Any]:
 
 
 def read_pulse(path: str | os.PathLike[str]) -> PulseEditorState:
-    """Read one complete ``zlc.pulse.v1`` Workbench authoring state."""
+    """Read one complete ``zlc.pulse`` Workbench authoring state."""
 
     source = Path(path)
     if source.suffix.lower() != ".json":

@@ -31,7 +31,7 @@ from zlc_atom.data import snapshot_from_array
 from zlc_atom.devices.camera.contract import CameraFrameRecord
 
 CAPTURE_PREVIEW_DECLARATION = DatasetOutputDeclaration(
-    "capture_preview", "calibration.capture-preview.v1"
+    "capture_preview", "calibration.capture-preview"
 )
 
 #: One calibration acquisition fires three camera windows -- long, readout,

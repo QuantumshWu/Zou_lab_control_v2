@@ -31,7 +31,7 @@ class StatusStrip(FluentStatusStrip):
         # ``FluentStatusStrip.__init__`` initializes its own empty message
         # before this subclass has the priority state.  Re-apply the public
         # idle path so a freshly constructed console has the same left-anchored
-        # empty marker as the v1 status strip.
+        # empty marker as the resting status strip.
         self.show_status("", "idle")
 
     @property

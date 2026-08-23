@@ -311,7 +311,7 @@ class PulseTarget:
         object.__setattr__(
             self,
             "_abi_fingerprint",
-            canonical_digest({"schema": "zlc_pulse.PulseTargetABI/v1", "lanes": list(raw), "ports": abi_ports}),
+            canonical_digest({"schema": "zlc_pulse.PulseTargetABI", "lanes": list(raw), "ports": abi_ports}),
         )
 
     @property

@@ -1,6 +1,6 @@
 """Choosing which signal to open a panel on.
 
-This does not live in the header.  The v1 header is already full at the window
+This does not live in the header.  The single-row header is already full at the window
 width the launcher targets, and a picker squeezed in beside it collapsed to
 "fra..." while clipping the control next to it -- a chooser you cannot read is
 not a chooser.  Asked for at the moment it is needed, it can be as wide as the

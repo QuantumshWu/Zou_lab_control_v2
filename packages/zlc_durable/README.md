@@ -34,11 +34,13 @@ The top-level facade contains only these names:
 
 ## Where things live
 
-Saved work groups **by date**, with no per-run subdirectory:
+Saved work groups first **by date**. Ordinary explicit saves may be files in the
+day folder; hosted long-running Tasks allocate one exclusive directory per run:
 
 ```
 <save_root>/2026_08_05/mot-loading.npz
-<save_root>/2026_08_05/mot-loading-2.npz
+<save_root>/2026_08_05/calibration/run.json
+<save_root>/2026_08_05/calibration-2/run.json
 <save_root>/2026_08_06/...
 ```
 
@@ -56,5 +58,6 @@ performs an exclusive `mkdir`; it takes no writer.
 ## What is deliberately not here
 
 **No format encoder and no content digests.** Each artifact owner validates its
-own declared format and version. This package only makes the resulting bytes or
-arrays land durably at an explicit or uniquely allocated path.
+own stable format identity and strict current grammar. This package only makes
+the resulting bytes or arrays land durably at an explicit or uniquely allocated
+path.

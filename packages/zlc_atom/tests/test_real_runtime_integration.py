@@ -104,10 +104,9 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
             pulse_sequence=IMAGING_PULSE_RESOURCE.value,
             pulse_path=IMAGING_PULSE_RESOURCE.path,
             signal_plane=SignalDataPlane(),
-            artifact_directory=tmp_path,
-        ).run()
-        report_directory = task_result.artifact_path.parent / "report"
-        report_images = tuple(sorted(report_directory.glob("*.png")))
+        ).run(tmp_path)
+        figure_directory = task_result.artifact_path.parents[1] / "figures"
+        report_images = tuple(sorted(figure_directory.glob("*.png")))
         assert tuple(path.name for path in report_images) == (
             "box.png",
             "fidelity.png",
@@ -117,6 +116,9 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
             "uniform_psf.png",
         )
         assert all(path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n") for path in report_images)
+        assert tuple(
+            path.name for path in sorted(figure_directory.glob("*.npz"))
+        ) == tuple(path.with_suffix(".npz").name for path in report_images)
         occupancy_node = OccupancyProcessor(
             task_result.calibration,
         )

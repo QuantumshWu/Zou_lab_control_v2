@@ -27,7 +27,7 @@ from .logic import (
 from .panel_state import PanelState
 
 
-LAYOUT_FORMAT = "zlc.console-board/v7"
+LAYOUT_FORMAT = "zlc.console-board"
 
 
 class LayoutError(ValueError):

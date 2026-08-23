@@ -18,9 +18,9 @@ One apparatus-level `simulation` mapping owns the virtual world's
 device factory runs. `camera.virtual` consequently authors only camera facts
 (currently exposure) and consumes the world's image geometry; the independent
 `camera.virtual_mot` keeps its own frame geometry and does not declare a site
-grid. The installation grammar is strict: files with the former camera-owned
-world fields are refused with the required root migration instead of silently
-creating a second owner.
+grid. The installation grammar is strict: only the current apparatus root is
+accepted; unsupported camera-owned world fields are refused and cannot create a
+second owner.
 
 The virtual SLM has one physical trap roster: the dominant local peaks of the
 currently commanded phase after one shared pupil illumination and one shared
@@ -48,13 +48,14 @@ exact-spacing Grid, geometrically staggered Checkerboard, Gaussian, Flat Top,
 and English/Chinese Text with both minimum site spacing and atom budget.
 A strict Target JSON stores intensity plus objective only for Editor authoring
 import/export. Run consumers take no separate Target: a strict Science Context
-v2 NPZ is their sole Target truth and freezes it together with Pattern/base
-phase, numeric pupil,
+NPZ is their sole Target truth and freezes it together with Pattern/base phase,
+numeric pupil,
 operator wavefront, typed reusable system-correction reference and command
-receipt. Loading a v2 Context atomically adopts all of those authored facts but
-never writes hardware. A v1 Context loads only as an explicit authoring
-migration with `target=None`; the Editor preserves its current Target draft,
-while registered Feedback refuses the legacy Context until it is resaved as v2.
+receipt. Loading a Context atomically adopts all of those authored facts but
+never writes hardware. Target uses `zlc.slm.target` and Science Context uses
+`zlc.slm.science-context`; both are stable strict formats with no numeric
+version. Readers accept only the current complete grammar and never fill missing
+fields.
 Only **Send to SLM** takes an exclusive claim
 and applies the composed science phase. If a Task changes the command or
 correction mapping, the Editor shows the divergence and refuses the old draft
@@ -126,11 +127,11 @@ DVI/USB experiment-machine acceptance remains an unexecuted runbook:
 
 The calibration mathematics under `nodes/calibration/` is headless and has no
 Qt dependency. Calibration consumes a project-owned
-`zlc.pulse.v1` JSON document through the public `zlc_pulse` codec/resolution
+`zlc.pulse` JSON document through the public `zlc_pulse` codec/resolution
 API; there is no Python pulse-module format or second resolver. After one
 calibration run produces one result, the Calibration plugin saves its JSON and
-passes that same result directly to the public `zlc_plot` API for six report
-images. The Atom foundation does not depend on plotting; this plugin-local
+passes that same result directly to the public `zlc_plot` API for typed report
+Figures and PNG previews. The Atom foundation does not depend on plotting; this plugin-local
 report belongs to the Calibration task itself. Per-site report thresholds are
 passed as coordinate-addressed site targets, so facet insertion/reordering
 cannot move a threshold by index. Camera sample archives stream through the
@@ -141,6 +142,12 @@ Logic Nodes commit `zlc-data` role-axis event chunks, so repeat, site, and
 readout-event meaning is carried by `DatasetSchema` rather than inferred from
 array shape. Runtime owns their accumulated current/partial/final
 `OwnedSnapshot`; a plugin does not keep a second live history.
+
+Hosted Calibration, Temperature and SLM Feedback receive the TaskRun directory
+from Runtime after actual Start. Each leaf writes only curated domain files,
+registers completed artifacts through the execution context, and leaves
+`run.json` lifecycle ownership to Runtime. Stop/failure keep registered partial
+artifacts; no leaf invents another run manager or dumps all live publications.
 
 ## Leaf pattern
 
@@ -187,13 +194,13 @@ The runtime has one direction of responsibility:
 | --- | --- | --- |
 | Device | camera/sequencer protocols, buffers, trigger routing, virtual imaging world | calibration policy or analysis |
 | Measurement | arm/read/finish observation and publication of camera frames | pulse selection or `sequencer.load/fire` |
-| Task | pulse resolution, sequencer load/fire, repeated capture, progress/current preview, calibration, JSON artifact, and its six report-image saves | reusable readout mathematics or renderer internals |
+| Task | pulse resolution, sequencer load/fire, repeated capture, progress/current preview, curated domain artifacts, summary and important typed Figures | reusable readout mathematics or renderer internals |
 | Processor | consume a frames signal plus calibration and publish counts, occupied validity, and the exact frame judged with lineage | excitation or camera control |
 
 For a manually controlled experiment, the product notebook calls
 `ExperimentSession.load_pulse` and `ExperimentSession.fire` around a pure
 camera measurement; those methods own compile/load and sequencer execution. For
-an automated experiment, `CalibrationTask.run()` owns that whole sequence and
+an automated experiment, hosted Calibration owns that whole sequence and
 returns a saved calibration artifact. Calibration discovers its site count and
 centers from acquired images and accepts no Target, Science Context, authored
 grid rows, columns, or site count. Feedback later combines that ordinary
@@ -203,17 +210,17 @@ Missing weak sites become predicted boxes, so a regular symmetric grid needs
 no artificial fiducial. While hosted Calibration publishes
 only the current `capture_preview` for Monitor. When the loop finishes it
 computes one result, writes one plain JSON, and passes that same result to
-`zlc_plot` for the six reports. Workbench neither renders nor opens those files,
-and no calibration object/report blob is put on the signal plane. Each
+`zlc_plot` for data-backed report Figures. Every important plot has a
+FigureViewer-readable NPZ and a same-stem PNG preview. Workbench neither
+reconstructs the science nor owns those files, and no calibration object/report
+blob is put on the signal plane. Each
 classifier grid binds every finite threshold to the canonical
 `calibration.site` coordinate that measured it rather than to the current facet
 index. The BOX readout model also persists its dark sample count and sample
-variance. New files have the exact root
-`format="zlc.calibration.readout", version=1`. The two known unversioned
-generations (singular `readout_model` and plural `models`) migrate in this same
-owner; unavailable response statistics remain explicit `NaN`, count `0`, and
-variance `NaN`. Their thresholds remain usable for ordinary classification,
-but those unknown statistics cannot authorize registered Feedback.
+variance. Calibration uses the exact stable root
+`format="zlc.calibration.readout"` with no numeric version. Its reader accepts
+only the current complete grammar; missing statistics or alternate roots are
+errors.
 
 Camera Measurement and camera-backed Calibration request photoelectrons by
 default. A camera with a complete configured offset/scale publishes converted
@@ -240,10 +247,11 @@ valid, initially occupied pair is a survival trial. It publishes the binary
 per-site `survival` dataset only. Its declared preview and artifact both pool
 that same dataset and its validity into survival rate against trap-off time;
 there is no second rate history. It does not fit a temperature or lifetime and
-does not derive a 1/e crossing.
+does not derive a 1/e crossing. Its run retains one final JSON, summary and a
+typed survival-rate Figure NPZ with PNG preview.
 
 The `slm_feedback` Task takes one ordinary camera/readout Calibration and one
-strict Science Context v2. Calibration has no SLM or Science Context input.
+strict Science Context. Calibration has no SLM or Science Context input.
 Feedback registers the Context's frozen spots Target to the measured camera
 sites at its own composition boundary; the full roster, including predicted
 zero-capture sites, is then the stable site index.
@@ -277,17 +285,19 @@ share increases; a low contrast makes it decrease. Three authored parameters
 own the update: `single_gaussian_boost`, `feedback_gain`, and
 `maximum_weight_change`. Dark-only sites receive the exact feasible normalized
 share increase; invalid sites keep their share; loaded sites divide only the
-remaining power by their relative corrections. Historical dark/loaded bounds
+remaining power by their relative corrections. Accumulated dark/loaded bounds
 form a per-site loading floor which later normalization may not cross.
-Comparable history survives only when mode, Pulse, exposure and all three
+Prior response state is reused only when mode, Pulse, exposure and all three
 controller parameters match.
 
 Normal terminal and Stop retain the best fully measured candidate (or the most
 observable measured candidate when no all-site ratio exists); an applied but
 unmeasured phase is never promoted. A Stop already requested before the initial
 solve makes zero solver calls. A genuine failure restores the Context starting
-phase. Each Candidate Context freezes its actual evolving Target and can be
-selected directly for the next run.
+phase. The run stores each completed candidate's curated BOX samples, fit,
+weights, actions, metrics, phase-change fact and command receipt. It does not
+repeat full phase rasters or Contexts per candidate; only the initial/selected
+Figure and selected normal/Stop final Science Context carry complete phases.
 
 `candidate_phase` publishes immediately after the SLM confirms each phase and
 before that candidate's shots begin. `uniformity_history` contains only true
@@ -297,18 +307,17 @@ published after terminal.
 Starting the next run keeps the previous Monitor surfaces visible until the
 replacement generation has rendered its first values.
 
+Each Feedback run writes summary JSON/text and six important Figure pairs:
+`uniformity_history`, `site_signal_evolution`, `weight_evolution`,
+`selected_site_histograms`, `camera_initial_selected`, and
+`phase_initial_selected`. The NPZ is the typed primary artifact and PNG is its
+preview. Raw camera frames and per-shot images are not saved by default.
+
 The loop defaults to 100 shots and 12 updates and normally completes every one.
 Afterwards it retains the all-site candidate with the smallest measured ratio,
 or the most observable measured candidate if no all-site ratio exists. No
 built-in ratio threshold ends a run early. The simultaneous interval is
 recorded as uncertainty but never triggers an extra acquisition.
-
-With `calibration-5.json` (23 detected sites) registered to
-`science-context_5x7.npz` (35 Target sites), the exact virtual 100-shot chain
-reached observable counts `23→26→29→32→32→33→35`; candidate 7 measured an
-all-site ratio of `1.098487`. The Task continues through the authored update
-count before selecting the best result. Every candidate used one 100-shot batch
-and a distinct phase. This is software/virtual evidence, not hardware acceptance.
 
 The supported product path discovers seven logic descriptors: `calibration`,
 `camera_measurement`, `occupancy`, `seamless_scan`, `slm_feedback`,
@@ -336,7 +345,7 @@ to the explicitly selected source-test mode:
 
 ```powershell
 zlc check
-zlc evidence virtual_vertical --repo C:\path\to\Zou_lab_control_v2
+zlc evidence virtual_vertical --repo C:\path\to\Zou_lab_control
 ```
 
 The formal virtual guard uses the real `zlc_runtime.SignalDataPlane`, catalog,

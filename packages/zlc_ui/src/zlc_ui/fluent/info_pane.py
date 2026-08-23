@@ -53,7 +53,7 @@ class InfoPane(QtWidgets.QWidget):
         super().__init__(parent)
         self.setStyleSheet("background: transparent;")
 
-        # The declared names set the pane's RESTING split (they are the v1
+        # The declared names set the pane's resting split (they are the
         # formal keys).  The labels actually shown then widen it if they need
         # more: a settings label that clips is a name an operator has to guess.
         self._declared_labels = tuple(str(name) for name in label_names)

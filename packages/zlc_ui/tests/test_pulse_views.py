@@ -405,7 +405,7 @@ assert left.verticalScrollBar().value() + left.viewport().height() >= left.widge
 def test_clicking_a_period_or_a_gap_decides_where_the_next_one_lands() -> None:
     """Selection is what makes a sequence buildable at all.
 
-    v1's rule: a selected gap inserts there, a selected card inserts AFTER it,
+    A selected gap inserts there, a selected card inserts AFTER it,
     Remove takes the selected one, and clicking the current selection again
     clears it.  Here ``_selected_before_id`` returned None unconditionally and
     ``gap_clicked`` was declared but never emitted, so a period could only ever
@@ -511,7 +511,7 @@ assert view.add_digital_button.isEnabled() and view.apply_button.isEnabled()
 def test_hiding_a_port_takes_its_delay_row_with_it() -> None:
     """One visible-row list, three columns.
 
-    v1 ran ``_display_rows`` -- already filtered by ``visible_ports`` -- through
+    ``_display_rows`` -- already filtered by ``visible_ports`` -- feeds
     the names column, the delay column and every period card, so the three read
     across as one table by construction.  Here the delay rows arrived as "every
     output the board can delay" and were handed over unfiltered, so Hide Off
@@ -564,7 +564,7 @@ app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete); app.processEvents()
 
 
 def test_the_repeat_posts_are_built_to_frame_the_cards_they_span() -> None:
-    """v1's bracket art, and the art carries the meaning.
+    """The bracket art carries the repeat meaning.
 
     Two untitled posts the same height as a period card, each with "Repeat" on
     the cards' own header line and the count on their first control line, so

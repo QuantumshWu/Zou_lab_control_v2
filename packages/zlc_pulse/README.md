@@ -28,6 +28,10 @@ count; it is not trigger scheduling, expected-frame accounting, or
 point-by-point reconciliation. `trigger_times()` is a pure host-side projection
 and is not sent to the device.
 
+Pulse documents use the stable strict root `zlc.pulse` with no numeric format
+version. The codec accepts only the current complete grammar; unsupported
+workspace files are refused.
+
 For a separated FPGA machine, `bin\run_server.bat` starts the thin
 length-prefixed-JSON facade. The server process is the only hardware-transport
 owner. The first valid RPC claims the board; a newer valid client takes over

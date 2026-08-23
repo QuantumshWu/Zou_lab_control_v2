@@ -107,7 +107,7 @@ def test_target_rows_carry_the_package_pin_of_every_lane(board) -> None:
 
 
 def test_on_pulse_runs_the_whole_pulse_until_stop() -> None:
-    """v1's On Pulse is a cycle an experiment holds running, not one shot.
+    """On Pulse is a cycle an experiment holds running, not one shot.
 
     Asked of a real board, not of the source text.  Reading fire() for the
     explicit outer ``cycles`` passed for as long as that execution was requested
@@ -144,7 +144,7 @@ def test_on_pulse_runs_the_whole_pulse_until_stop() -> None:
         applied = streamer.applied()
         assert applied is not None, "the board was never told anything"
         assert applied.cycles is None, (
-            "On Pulse must ask the board to repeat until Stop, which is what v1 does"
+            "On Pulse must ask the board to repeat until Stop"
         )
     finally:
         presenter.stop()
@@ -181,9 +181,9 @@ def test_holding_a_scan_point_leaves_no_scan_on_the_board() -> None:
     The two paths differed in exactly one register.  Holding wrote the point as
     a scan table of length one (SCAN_COUNT=1, SCAN_ENABLE=1) and looped it
     forever, a state nothing else ever asks the board for, and its bus segments
-    were never re-applied.  v1 never produced that state: it resolved the point
-    into the document and ran a plain pulse.  This asserts the board is back in
-    ordinary territory, which is the part that can be checked without hardware.
+    were never re-applied.  Resolve the point into the document and run a plain
+    pulse.  This asserts the board is back in ordinary territory, which is the
+    part that can be checked without hardware.
     """
 
     from zlc_pulse import load_streamer_config, pulse_target_from_xdc

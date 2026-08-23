@@ -6,11 +6,11 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
-from zlc_workbench.tools.check_environment import OWNED, RETIRED, check
-from zou_lab_control_v2 import entry_specs
+from zlc_workbench.tools.check_environment import OWNED, check
+from zou_lab_control import entry_specs
 
 
-def test_every_package_resolves_to_its_own_repo_and_no_retired_name_survives() -> None:
+def test_every_package_resolves_to_its_own_product() -> None:
     problems = check()
     assert problems == [], "\n".join(problems)
 
@@ -20,7 +20,6 @@ def test_product_manifest_owns_all_commands_and_layers() -> None:
         "zlc_data", "zlc_durable", "zlc_runtime", "zlc_plot", "zlc_ui",
         "zlc_pulse", "zlc_atom", "zlc_workbench",
     }
-    assert set(RETIRED) == {"zlc_storage", "zlc_frontend", "zlc_neutral_atom"}
     assert set(entry_specs("zou_lab_control.commands")) == {
         "capture", "check", "device_manager", "evidence", "figure_viewer", "fpga",
         "pulse_editor", "pulse_server", "slm_server", "task_console",
@@ -37,7 +36,7 @@ def test_product_manifest_owns_all_commands_and_layers() -> None:
 
 
 def test_manual_evidence_never_prepares_an_automated_lane(monkeypatch, capsys) -> None:
-    from zou_lab_control_v2.__main__ import evidence
+    from zou_lab_control.__main__ import evidence
 
     monkeypatch.setenv("QT_QPA_PLATFORM", "windows")
     monkeypatch.setenv("MPLBACKEND", "QtAgg")
@@ -52,7 +51,7 @@ def test_automated_evidence_forces_installed_offscreen_environment(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from zou_lab_control_v2 import __main__ as product_entry
+    from zou_lab_control import __main__ as product_entry
     from zlc_workbench.tools import check_environment
 
     repo = tmp_path / "source"

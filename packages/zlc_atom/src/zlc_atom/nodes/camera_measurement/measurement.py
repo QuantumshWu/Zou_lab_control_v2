@@ -37,7 +37,7 @@ from zlc_atom.devices.camera.photoelectrons import PHOTOELECTRONS
 from zlc_atom.data import cell_axis_id, snapshot_from_array
 
 
-_CAMERA_FRAME_CONTRACT = "camera.frames.v1"
+_CAMERA_FRAME_CONTRACT = "camera.frames"
 
 #: The camera's ONE output: a cycle of frames on the dataset's POINT axis.
 #: A cycle is one acquisition event; publishing its frames as N sibling

@@ -1,4 +1,4 @@
-import zou_lab_control_v2
+import zou_lab_control
 
 import os
 import time

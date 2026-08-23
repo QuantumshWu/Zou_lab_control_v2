@@ -36,7 +36,7 @@ def _run_qt(code: str) -> None:
 
 def test_device_manager_construct_and_plain_data_setters() -> None:
     _run_qt(
-        """import zou_lab_control_v2
+        """import zou_lab_control
 import zlc_ui.device_manager.view as tested_module
 print(tested_module.__file__)
 from zlc_ui.device_manager import DeviceManagerView
@@ -73,7 +73,7 @@ assert card.isHidden()
 
 def test_device_manager_qtest_signal_payloads() -> None:
     _run_qt(
-        """import zou_lab_control_v2
+        """import zou_lab_control
 import zlc_ui.device_manager.view as tested_module
 print(tested_module.__file__)
 from PyQt5 import QtCore, QtTest
@@ -116,7 +116,7 @@ assert ('remove', 'id-1') in events
 
 def test_device_manager_demo_is_a_reusable_human_entry() -> None:
     _run_qt(
-        """import zou_lab_control_v2
+        """import zou_lab_control
 import zlc_ui.device_manager.view as tested_module
 print(tested_module.__file__)
 from examples.demo_device_manager import create_window
@@ -137,14 +137,14 @@ assert view.status_strip.text() == 'Offline fake devices · edit only'
     )
 
 
-def test_device_manager_keeps_the_v1_config_surface_and_lifecycle_verbs() -> None:
+def test_device_manager_keeps_the_compact_config_surface_and_lifecycle_verbs() -> None:
     _run_qt(
-        """import zou_lab_control_v2
+        """import zou_lab_control
 import zlc_ui.device_manager.view as tested_module
 print(tested_module.__file__)
 from zlc_ui.device_manager import DeviceManagerView
 from zlc_ui.qt import ensure_qt_app
-app = ensure_qt_app(['device-manager-v1-surface'])
+app = ensure_qt_app(['device-manager-config-surface'])
 view = DeviceManagerView()
 view.set_device_choices((
     ('Virtual camera', 'camera.virtual', 'camera'),
@@ -213,8 +213,8 @@ assert view.status_dot.toolTip() == 'Configuration differs from the active insta
 
 def test_loaded_device_opens_one_independent_generic_control_surface() -> None:
     _run_qt(
-        """import zou_lab_control_v2
-print(zou_lab_control_v2.__file__)
+        """import zou_lab_control
+print(zou_lab_control.__file__)
 import zlc_ui.device_manager.view as tested_module
 print(tested_module.__file__)
 from PyQt5 import QtCore, QtTest, QtWidgets

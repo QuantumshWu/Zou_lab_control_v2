@@ -1,6 +1,5 @@
 {
   "format": "zlc.slm.hamamatsu_x15213.device_profile",
-  "version": 2,
   "model": "X15213 (exact type suffix not recorded)",
   "serial": "LSH0804382",
   "default_wavelength_nm": 852,

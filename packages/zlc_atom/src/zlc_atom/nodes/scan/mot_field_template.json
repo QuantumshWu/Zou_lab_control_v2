@@ -1,5 +1,5 @@
 {
- "format": "zlc.pulse.v1",
+ "format": "zlc.pulse",
  "name": "mot_field_template",
  "time_step_ns": 20.0,
  "target": {

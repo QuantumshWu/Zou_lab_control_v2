@@ -40,7 +40,8 @@ from pathlib import Path
 
 import numpy as np
 from zlc_data import SCAN_POINT, SITE, AxisId, OwnedSnapshot, PointColumn, PointTable
-from zlc_durable import readable_json_bytes, unique_path
+from zlc_data.figure_archive import FIGURE_SCHEMA
+from zlc_durable import atomic_write_text, durable_makedirs, write_readable_json
 from zlc_pulse import TIME_UNIT_TO_NS, PulseSequence
 from zlc_runtime import (
     DatasetCoverage,
@@ -79,10 +80,10 @@ PROBE_FRAMES = 2
 
 #: Survival per (repeat, release time, site).  Its validity is the loaded-pair
 #: denominator, so a mean projection is exactly the pooled recapture curve.
-SURVIVAL_OUTPUT = DatasetOutputDeclaration("survival", "temperature.survival.v1")
+SURVIVAL_OUTPUT = DatasetOutputDeclaration("survival", "temperature.survival")
 
 #: The saved result: the survival table against the authored trap-off time.
-TEMPERATURE_ARTIFACT_CONTRACT = "temperature.release-recapture.v1"
+TEMPERATURE_ARTIFACT_CONTRACT = "temperature.release-recapture"
 
 #: How long the pulse stays stopped before the table plays.  Every cycle loads
 #: its own atoms, so this is only what the bench needs to reach the state the
@@ -126,7 +127,6 @@ class TemperatureTask:
         repeats: int,
         exposure_seconds: float | None = None,
         model_kind: ReadoutModelKind | None,
-        artifact_directory: str | Path,
     ) -> None:
         if not isinstance(calibration, TrapCalibration):
             raise TypeError("calibration must be TrapCalibration")
@@ -134,9 +134,6 @@ class TemperatureTask:
             raise TypeError("sequence must be PulseSequence")
         if not isinstance(plan, ScanPlan):
             raise TypeError("plan must be ScanPlan")
-        directory = Path(artifact_directory).expanduser().resolve()
-        if not directory.is_dir():
-            raise ValueError("artifact_directory must be an existing directory")
         release_port = PULSE_PARAM_FAMILY + T_OFF_PARAMETER
         if len(plan.axes) != 1 or plan.axes[0].port != release_port:
             played = tuple(axis.port for axis in plan.axes)
@@ -152,7 +149,6 @@ class TemperatureTask:
         self._calibration = calibration
         self._calibration_path = Path(calibration_path).expanduser().resolve()
         self._model = calibration.select_model(model_kind)
-        self._artifact_directory = directory
         self._port = ports[0]
         self._t_off = plan.axes[0].values
         self._repeats = int(repeats)
@@ -377,13 +373,92 @@ class TemperatureTask:
             },
             "run_record": record,
         }
-        artifact_path = unique_path(
-            self._artifact_directory,
-            "temperature",
-            ".json",
-            writer=lambda temporary: temporary.write_bytes(
-                readable_json_bytes(artifact)
-            ),
+        final_root = context.run_directory / "final"
+        durable_makedirs(final_root)
+        artifact_path = write_readable_json(
+            final_root / "temperature.json",
+            artifact,
+        )
+        context.register_artifact(
+            "artifact_path",
+            artifact_path,
+            role="final",
+            contract_id=TEMPERATURE_ARTIFACT_CONTRACT,
+        )
+        summary = {
+            "format": "zlc.temperature.summary",
+            "exposure_seconds": self._exposure_seconds,
+            "points": len(self._t_off),
+            "repeats": self._repeats,
+            "curve": curve,
+        }
+        summary_path = write_readable_json(
+            context.run_directory / "summary.json", summary
+        )
+        summary_text = [
+            "Release-recapture survival",
+            f"Exposure seconds: {self._exposure_seconds}",
+            f"Repeats: {self._repeats}",
+        ]
+        summary_text.extend(
+            f"{time_value} s: {rate} ({loaded} loaded pairs)"
+            for time_value, rate, loaded in zip(
+                curve["t_off_seconds"],
+                curve["survival_rate"],
+                curve["loaded_pairs"],
+                strict=True,
+            )
+        )
+        summary_text_path = atomic_write_text(
+            context.run_directory / "summary.txt",
+            "\n".join(summary_text) + "\n",
+        )
+        context.register_artifact(
+            "temperature_summary", summary_path, role="summary"
+        )
+        context.register_artifact(
+            "temperature_summary_text", summary_text_path, role="summary"
+        )
+
+        from zlc_plot import AxisRef, CurvePlot, PlotLabels, save_figure_artifact
+
+        figure_base = context.run_directory / "figures" / "survival"
+        try:
+            preview_path, figure_path = save_figure_artifact(
+                figure_base,
+                plot_input=survival,
+                spec=CurvePlot(
+                    AxisRef.point("temperature.t_off"),
+                    labels=PlotLabels(
+                        title="Release-recapture survival",
+                        x="Trap-off time",
+                        y="Survival",
+                    ),
+                ),
+                parameters={},
+                size="4x4",
+                source={"task": self.instance_id, "signal": SURVIVAL_OUTPUT.name},
+            )
+        except BaseException:
+            figure_path = figure_base.with_suffix(".npz")
+            if figure_path.is_file():
+                context.register_artifact(
+                    "survival_figure",
+                    figure_path,
+                    role="figure",
+                    contract_id=FIGURE_SCHEMA,
+                )
+            raise
+        context.register_artifact(
+            "survival_figure",
+            figure_path,
+            role="figure",
+            contract_id=FIGURE_SCHEMA,
+        )
+        context.register_artifact(
+            "survival_preview",
+            preview_path,
+            role="preview",
         )
         return {"artifact_path": artifact_path}
 

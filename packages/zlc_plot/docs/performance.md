@@ -1,6 +1,6 @@
 # Plot performance
 
-## Current M4 performance closure (2026-08-20)
+## Current performance baseline (2026-08-20)
 
 - One `PlotSession` owns one serial analysis executor. Frame preparation,
   manual fit and live fit submit to that same lane; there is no package-global

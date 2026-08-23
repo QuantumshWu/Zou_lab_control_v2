@@ -57,7 +57,7 @@ def _schema_families() -> tuple[DatasetSchema, ...]:
         DatasetSchema.create(
             Axis.create("repeat", size=2),
             PointTable.from_columns(
-                {"site": np.arange(6.0)}, ids={"site": "readout.site.v1"}
+                {"site": np.arange(6.0)}, ids={"site": "readout.site"}
             ),
             generation="kind-default-renamed-point",
         ),

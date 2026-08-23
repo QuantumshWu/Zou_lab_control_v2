@@ -1,4 +1,4 @@
-# Zou_lab_control_v2 agent execution rules
+# Zou Lab Control agent execution rules
 
 These rules apply to every agent and sub-agent working in this repository.
 They constrain implementation method; product and architecture truth remain in
@@ -29,7 +29,7 @@ They constrain implementation method; product and architecture truth remain in
 
 以上约束适用于本仓库此后的每一次任务和上下文恢复，除非用户本人明确修改。
 
-## Read the v2 authority before designing
+## Read the current authority before designing
 
 - For every defect, design conflict, performance problem, or implementation
   choice, first search both `ARCHITECTURE_DESIGN.md` and
@@ -37,11 +37,11 @@ They constrain implementation method; product and architecture truth remain in
   proposing or editing code.
 - If those documents already specify the solution, implement that solution
   inside the existing architecture. Do not replace it with a new abstraction,
-  a v1-shaped implementation, or an agent-invented framework.
+  a superseded implementation, or an agent-invented framework.
 - If the two documents are silent, incomplete, or contradictory, report the
   exact gap before editing and choose the smallest solution in an existing
-  owner. Reading v1 never overrides the v2 authority unless the user explicitly
-  asks for a particular v1 behavior comparison.
+  owner. Reading the v1 reference never overrides the current authority unless
+  the user explicitly asks for a particular v1 behavior comparison.
 
 ## Simplicity is the default
 
@@ -88,7 +88,7 @@ They constrain implementation method; product and architecture truth remain in
    `C:\Users\eadri\Dropbox\WorkCode\Github\Zou_lab_control_v1_claude\Zou_lab_control_v1`.
    Use it only for behavior explicitly requested as a v1 reference.
 12. Every Python verification process must first import
-    `zou_lab_control_v2` and print the root and tested package `__file__` paths.
+    `zou_lab_control` and print the root and tested package `__file__` paths.
 13. GUI acceptance uses the formal launcher/composition and real Qt or desktop
     button interaction. Direct presenter calls do not prove the human flow.
 14. Keep one topic in flight, stage only its exact files, run the narrow red/green

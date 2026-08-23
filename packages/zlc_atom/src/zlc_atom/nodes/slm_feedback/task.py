@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Mapping
 
 import numpy as np
 from scipy import special
 from zlc_data import (
+    COMPONENT,
     SCAN_POINT,
+    SITE,
     SPATIAL_X,
     SPATIAL_Y,
     AxisId,
+    AxisSpec,
     PointColumn,
 )
 from zlc_data.snapshot_projection import (
@@ -19,8 +23,17 @@ from zlc_data.snapshot_projection import (
     selection_indices,
     value_selection,
 )
-from zlc_durable import unique_path
+from zlc_durable import atomic_write_file, atomic_write_text, write_readable_json
 from zlc_pulse import PulseSequence
+from zlc_plot import (
+    AxisRef,
+    CurvePlot,
+    FacetGridPlot,
+    HistogramPlot,
+    ImagePlot,
+    PlotLabels,
+    save_figure_artifact,
+)
 from zlc_runtime import DatasetOutputDeclaration, LiveDatasetOutput, MonitorCoverage
 
 from zlc_atom.data import snapshot_from_array
@@ -52,16 +65,16 @@ from zlc_atom.nodes.scan.source import wait_for_board
 
 SLM_PHASE_ARTIFACT_CONTRACT = SCIENCE_CONTEXT_ARTIFACT_CONTRACT
 CANDIDATE_PHASE_OUTPUT = DatasetOutputDeclaration(
-    "candidate_phase", "slm-feedback.candidate-phase.v1"
+    "candidate_phase", "slm-feedback.candidate-phase"
 )
 UNIFORMITY_HISTORY_OUTPUT = DatasetOutputDeclaration(
-    "uniformity_history", "slm-feedback.uniformity-history.v1"
+    "uniformity_history", "slm-feedback.uniformity-history"
 )
 OBSERVABLE_UNIFORMITY_HISTORY_OUTPUT = DatasetOutputDeclaration(
     "observable_uniformity_history",
-    "slm-feedback.observable-uniformity-history.v1",
+    "slm-feedback.observable-uniformity-history",
 )
-_CONTROLLER_VERSION = 2
+_CONTROLLER_CONTRACT = "slm-feedback.qcmos-bright-dark"
 READOUT_FRAME_COORDINATE = 0
 
 
@@ -348,6 +361,93 @@ def _json_floats(values: object) -> list[float | None]:
     return [float(value) if np.isfinite(value) else None for value in np.asarray(values)]
 
 
+def _plain_json(value: object) -> object:
+    """Freeze the small metadata side of a feedback checkpoint."""
+
+    if value is None or type(value) in (str, bool, int):
+        return value
+    if isinstance(value, (float, np.floating)):
+        numeric = float(value)
+        return numeric if np.isfinite(numeric) else None
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
+        if any(type(key) is not str for key in value):
+            raise TypeError("feedback metadata keys must be text")
+        return {key: _plain_json(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_plain_json(item) for item in value]
+    raise TypeError(f"feedback metadata contains unsupported {type(value).__name__}")
+
+
+def _write_npz(
+    path: str | Path,
+    *,
+    arrays: Mapping[str, object],
+    metadata: Mapping[str, object],
+) -> Path:
+    """Atomically write one current, pickle-free feedback data checkpoint."""
+
+    selected = Path(path).expanduser().resolve()
+    selected.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, np.ndarray] = {}
+    for name, value in arrays.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError("feedback checkpoint array names must be non-empty text")
+        array = np.asarray(value)
+        if array.dtype.kind == "O":
+            raise TypeError(f"feedback checkpoint {name!r} cannot use object dtype")
+        payload[name] = array
+    encoded = json.dumps(
+        _plain_json(dict(metadata)),
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    payload["metadata"] = np.asarray(encoded)
+    return atomic_write_file(
+        selected,
+        lambda stream: np.savez_compressed(stream, **payload),
+    )
+
+
+_CANDIDATE_VECTOR_FIELDS = (
+    "target_weight",
+    "control_weight",
+    "dark_mean",
+    "dark_sigma",
+    "dark_standard_error",
+    "bright_mean",
+    "bright_sigma",
+    "fit_threshold",
+    "bright_minus_dark",
+    "contrast_standard_error",
+    "bright_fraction",
+    "fit_fidelity",
+    "fit_bic_gain",
+    "fit_valid",
+    "observable_valid",
+    "single_population",
+    "single_dark_only",
+    "single_bright_only",
+    "fit_invalid",
+    "single_mean",
+    "single_sigma",
+    "decision",
+    "requested_log_correction",
+    "response_log_slope",
+    "previous_valid_control_weight",
+    "previous_valid_bright_minus_dark",
+    "previous_valid_dark_mean",
+    "previous_valid_dark_standard_error",
+    "loading_dark_bound",
+    "loading_loaded_bound",
+    "loading_floor",
+)
+
+
 def _control_weights(values: object) -> np.ndarray:
     """Put positive Target intensities in the solver's relative log gauge."""
 
@@ -614,25 +714,18 @@ class SlmFeedbackTask:
         feedback_gain: float,
         maximum_weight_change: float,
         max_updates: int,
-        artifact_directory: str | Path,
     ) -> None:
         if not isinstance(slm, SlmAdapter):
             raise TypeError("slm must implement SlmAdapter")
         if not isinstance(calibration, TrapCalibration) or not isinstance(pulse_sequence, PulseSequence):
             raise TypeError("feedback requires TrapCalibration and PulseSequence")
-        directory = Path(artifact_directory).expanduser().resolve()
-        if not directory.is_dir():
-            raise ValueError("artifact_directory must be an existing directory")
         if not isinstance(science_context, Mapping):
             raise TypeError("science_context must be a loaded Science Context mapping")
         if science_context.get("objective_kind") != "spots":
             raise ValueError("SLM feedback Science Context must use the spots objective")
         context_target = science_context.get("target_intensity")
         if context_target is None:
-            raise ValueError(
-                "legacy Science Context has no frozen Target; load it in the "
-                "SLM Editor with the intended Target and resave"
-            )
+            raise ValueError("Science Context has no frozen Target")
         frozen_target = validate_target(context_target)
         if frozen_target.shape != slm.shape_yx:
             raise ValueError("Science Context Target shape differs from the selected SLM")
@@ -697,8 +790,7 @@ class SlmFeedbackTask:
             "measurement",
             "updates",
             "solver",
-            "history",
-            "retained",
+            "outcome",
         }
         self._pattern_metadata = {
             key: value
@@ -747,7 +839,6 @@ class SlmFeedbackTask:
             site_mask[y0:y1, x0:x1] = True
             windows.append((slice(y0, y1), slice(x0, x1)))
         self._site_mask, self._site_windows = site_mask, tuple(windows)
-        self.artifact_directory = directory
 
     @property
     def dataset_output_declarations(self) -> tuple[DatasetOutputDeclaration, ...]:
@@ -768,7 +859,7 @@ class SlmFeedbackTask:
                 "slm": self.slm_key,
             },
             "max_updates": self.max_updates,
-            "feedback_controller_version": _CONTROLLER_VERSION,
+            "feedback_controller": _CONTROLLER_CONTRACT,
             "feedback_mode": self.feedback_mode,
             "exposure_seconds": self.exposure_seconds,
             "shots_per_candidate": self.shots,
@@ -796,7 +887,7 @@ class SlmFeedbackTask:
             },
             "candidate": int(candidate),
             "status": str(status),
-            "feedback_controller_version": _CONTROLLER_VERSION,
+            "feedback_controller": _CONTROLLER_CONTRACT,
             "feedback_mode": self.feedback_mode,
             "exposure_seconds": self.exposure_seconds,
             "shots_per_candidate": self.shots,
@@ -954,40 +1045,20 @@ class SlmFeedbackTask:
     def _incoming_candidate(
         self,
         *,
-        stem: str,
-        status: str,
-        history: list[dict[str, object]],
         observed: Mapping[str, object] | None,
         phase: np.ndarray,
         pattern: np.ndarray,
     ) -> dict[str, object]:
         candidate = 1 if observed is None else int(observed["candidate"])
-        metadata = self._candidate_metadata(
-            candidate=0,
-            status=status,
-            history=history,
-        )
-        artifact_path = unique_path(
-            self.artifact_directory,
-            stem,
-            ".npz",
-            writer=lambda temporary: self._save_candidate(
-                temporary,
-                phase,
-                pattern,
-                self.target,
-                metadata,
-            ),
-        )
         return {
             "candidate": candidate,
-            "artifact_candidate": 0,
             "phase": np.array(phase, copy=True),
             "pattern_phase": np.array(pattern, copy=True),
-            "artifact_path": artifact_path,
             "target": np.array(self.target, copy=True),
             "solver": None,
             "history": None if observed is None else observed["history"],
+            "samples": None if observed is None else observed.get("samples"),
+            "mean_frame": None if observed is None else observed.get("mean_frame"),
         }
 
     def _apply_exact(self, phase: object) -> np.ndarray:
@@ -1047,6 +1118,7 @@ class SlmFeedbackTask:
         np.ndarray,
         tuple[int, ...],
         tuple[int, ...],
+        np.ndarray,
     ]:
         contract = self.calibration.frame_contract
         requested = self.shots
@@ -1158,7 +1230,538 @@ class SlmFeedbackTask:
             box_samples,
             tuple(sorted(saturated_sites)),
             tuple(sorted(missing_sites)),
+            np.asarray(np.mean(frames, axis=0), dtype=np.float32),
         )
+
+    def _prepare_artifacts(self, context: object) -> dict[str, Path]:
+        root = Path(context.run_directory).expanduser().resolve()
+        paths = {
+            "root": root,
+            "data": root / "data",
+            "candidates": root / "data" / "candidates",
+            "figures": root / "figures",
+            "final": root / "final",
+        }
+        for name in ("data", "candidates", "figures", "final"):
+            paths[name].mkdir(parents=True, exist_ok=True)
+        site_path = _write_npz(
+            paths["data"] / "sites.npz",
+            arrays={
+                "target_row": np.asarray(self._rows, dtype="<i8"),
+                "target_column": np.asarray(self._columns, dtype="<i8"),
+                "camera_center_xy": np.asarray(self._site_centers_xy, dtype="<f8"),
+                "initial_target_weight": np.asarray(
+                    self.target[self._rows, self._columns], dtype="<f4"
+                ),
+            },
+            metadata={
+                "format": "zlc.slm.feedback-sites",
+                "box_half_width": int(self.model.integration_half_width),
+                "box_reducer": str(self.model.reducer),
+                "calibration_path": str(self.calibration_path),
+                "science_context_path": str(self.science_context_path),
+            },
+        )
+        context.register_artifact("site_geometry", site_path, role="process")
+        return paths
+
+    def _save_candidate_checkpoint(
+        self,
+        context: object,
+        paths: Mapping[str, Path],
+        *,
+        candidate: int,
+        samples: np.ndarray,
+        measurement: Mapping[str, object],
+        solver: Mapping[str, object] | None,
+    ) -> Path:
+        arrays: dict[str, object] = {
+            "box_samples": np.asarray(samples, dtype="<f8"),
+        }
+        bool_fields = {
+            "fit_valid",
+            "observable_valid",
+            "single_population",
+            "single_dark_only",
+            "single_bright_only",
+            "fit_invalid",
+        }
+        for name in _CANDIDATE_VECTOR_FIELDS:
+            values = measurement[name]
+            if name == "decision":
+                arrays[name] = np.asarray(values, dtype="U32")
+            elif name in bool_fields:
+                arrays[name] = np.asarray(values, dtype=np.bool_)
+            else:
+                arrays[name] = np.asarray(
+                    [np.nan if value is None else value for value in values],
+                    dtype="<f8",
+                )
+        metadata = {
+            key: value
+            for key, value in measurement.items()
+            if key not in _CANDIDATE_VECTOR_FIELDS and key != "artifact_path"
+        }
+        metadata.update(
+            {
+                "format": "zlc.slm.feedback-candidate",
+                "solver": None if solver is None else dict(solver),
+                "slm_command_receipt": dict(self.slm.last_command_receipt),
+            }
+        )
+        path = _write_npz(
+            paths["candidates"] / f"candidate-{int(candidate):04d}.npz",
+            arrays=arrays,
+            metadata=metadata,
+        )
+        context.register_artifact(
+            f"candidate_{int(candidate):04d}", path, role="checkpoint"
+        )
+        return path
+
+    def _save_figure(
+        self,
+        context: object,
+        paths: Mapping[str, Path],
+        name: str,
+        *,
+        snapshot: object,
+        spec: object,
+        parameters: Mapping[str, object] | None = None,
+        size: str = "4x4",
+    ) -> tuple[Path, Path]:
+        base = paths["figures"] / f"{name}.png"
+        try:
+            image, archive = save_figure_artifact(
+                base,
+                plot_input=snapshot,
+                spec=spec,
+                parameters={} if parameters is None else parameters,
+                size=size,
+                source={
+                    "task": self.instance_id,
+                    "calibration_path": str(self.calibration_path),
+                    "science_context_path": str(self.science_context_path),
+                },
+            )
+        except BaseException:
+            archive = base.with_suffix(".npz")
+            if archive.is_file():
+                context.register_artifact(
+                    f"{name}_figure", archive, role="figure", contract_id="zlc.figure"
+                )
+            raise
+        context.register_artifact(
+            f"{name}_figure", archive, role="figure", contract_id="zlc.figure"
+        )
+        context.register_artifact(f"{name}_preview", image, role="preview")
+        return image, archive
+
+    def _save_figures(
+        self,
+        context: object,
+        paths: Mapping[str, Path],
+        *,
+        history: list[dict[str, object]],
+        selected: Mapping[str, object],
+        initial_phase: np.ndarray,
+        initial_mean_frame: np.ndarray,
+    ) -> None:
+        count = len(history)
+        if count < 1:
+            return
+        generation = str(getattr(context.generation, "value", context.generation))
+        candidate_id = AxisId("slm_feedback.candidate")
+        candidate_column = PointColumn(
+            candidate_id,
+            "candidate",
+            SCAN_POINT,
+            PointColumn.NUMERIC,
+            tuple(range(1, count + 1)),
+        )
+        site_axis = AxisSpec(
+            AxisId("slm_feedback.site"),
+            "site",
+            SITE,
+            self._site_count,
+            tuple(range(self._site_count)),
+            coordinate_labels=tuple(
+                f"({int(row)}, {int(column)})"
+                for row, column in zip(self._rows, self._columns, strict=True)
+            ),
+        )
+
+        def site_history_snapshot(field: str, signal: str) -> object:
+            values = np.asarray(
+                [
+                    [np.nan if value is None else value for value in item[field]]
+                    for item in history
+                ],
+                dtype="<f8",
+            )
+            return snapshot_from_array(
+                values[None],
+                producer=self.instance_id,
+                signal=signal,
+                roles=(SCAN_POINT, SITE),
+                axis_specs={SITE: site_axis},
+                point_columns={SCAN_POINT: candidate_column},
+                generation=generation,
+                revision=count,
+                validity=np.isfinite(values)[None],
+            )
+
+        uniformity_axis = AxisSpec(
+            AxisId("slm_feedback.uniformity.metric"),
+            "metric",
+            COMPONENT,
+            2,
+            (0, 1),
+            coordinate_labels=("all sites", "observable sites"),
+        )
+        uniformity = np.asarray(
+            [
+                [
+                    np.nan if item["uniformity_ratio"] is None else item["uniformity_ratio"],
+                    np.nan
+                    if item["observable_uniformity_ratio"] is None
+                    else item["observable_uniformity_ratio"],
+                ]
+                for item in history
+            ],
+            dtype="<f8",
+        )
+        uniformity_snapshot = snapshot_from_array(
+            uniformity[None],
+            producer=self.instance_id,
+            signal="uniformity_figure",
+            roles=(SCAN_POINT, COMPONENT),
+            axis_specs={COMPONENT: uniformity_axis},
+            point_columns={SCAN_POINT: candidate_column},
+            generation=generation,
+            revision=count,
+            validity=np.isfinite(uniformity)[None],
+        )
+        self._save_figure(
+            context,
+            paths,
+            "uniformity_history",
+            snapshot=uniformity_snapshot,
+            spec=CurvePlot(
+                AxisRef.point(str(candidate_id)),
+                group=AxisRef.data(str(uniformity_axis.axis_id)),
+                labels=PlotLabels(
+                    title="SLM feedback uniformity",
+                    x="candidate",
+                    y="max / min bright-dark",
+                ),
+            ),
+        )
+
+        self._save_figure(
+            context,
+            paths,
+            "site_signal_evolution",
+            snapshot=site_history_snapshot(
+                "bright_minus_dark", "site_signal_figure"
+            ),
+            spec=CurvePlot(
+                AxisRef.point(str(candidate_id)),
+                group=AxisRef.data(str(site_axis.axis_id)),
+                labels=PlotLabels(
+                    title="Per-site bright-dark evolution",
+                    x="candidate",
+                    y="bright - dark",
+                ),
+            ),
+        )
+
+        self._save_figure(
+            context,
+            paths,
+            "weight_evolution",
+            snapshot=site_history_snapshot("control_weight", "weight_figure"),
+            spec=CurvePlot(
+                AxisRef.point(str(candidate_id)),
+                group=AxisRef.data(str(site_axis.axis_id)),
+                labels=PlotLabels(
+                    title="Per-site target weight evolution",
+                    x="candidate",
+                    y="normalized weight",
+                ),
+            ),
+        )
+
+        selected_samples = np.asarray(selected["samples"], dtype="<f8")
+        shot_axis = AxisSpec(
+            AxisId("slm_feedback.shot"),
+            "shot",
+            COMPONENT,
+            selected_samples.shape[0],
+        )
+        histogram_snapshot = snapshot_from_array(
+            selected_samples.T[None],
+            producer=self.instance_id,
+            signal="selected_histogram_figure",
+            roles=(SITE, COMPONENT),
+            axis_specs={SITE: site_axis, COMPONENT: shot_axis},
+            generation=generation,
+            revision=count,
+        )
+        self._save_figure(
+            context,
+            paths,
+            "selected_site_histograms",
+            snapshot=histogram_snapshot,
+            spec=FacetGridPlot(
+                AxisRef.data(str(site_axis.axis_id)),
+                HistogramPlot(
+                    PlotLabels(
+                        title="Selected candidate site distributions",
+                        x="box signal",
+                        y="shots",
+                    )
+                ),
+            ),
+            parameters={"bin_count": min(60, max(10, self.shots // 2))},
+        )
+
+        selected_number = int(selected["candidate"])
+        comparison_id = AxisId("slm_feedback.comparison")
+        comparison_column = PointColumn(
+            comparison_id,
+            "state",
+            SCAN_POINT,
+            PointColumn.NUMERIC,
+            (0, selected_number),
+            coordinate_labels=("initial", f"selected {selected_number}"),
+        )
+
+        def comparison_snapshot(
+            name: str,
+            initial: object,
+            retained: object,
+            *,
+            unit: str | None = None,
+        ) -> tuple[object, AxisSpec, AxisSpec]:
+            first = np.asarray(initial, dtype="<f4")
+            second = np.asarray(retained, dtype="<f4")
+            if first.ndim != 2 or second.shape != first.shape:
+                raise ValueError(f"{name} comparison images differ in shape")
+            y_axis = AxisSpec(
+                AxisId(f"slm_feedback.{name}.y"),
+                f"{name} y",
+                SPATIAL_Y,
+                first.shape[0],
+            )
+            x_axis = AxisSpec(
+                AxisId(f"slm_feedback.{name}.x"),
+                f"{name} x",
+                SPATIAL_X,
+                first.shape[1],
+            )
+            return (
+                snapshot_from_array(
+                    np.stack((first, second), axis=0)[None],
+                    producer=self.instance_id,
+                    signal=f"{name}_comparison_figure",
+                    roles=(SCAN_POINT, SPATIAL_Y, SPATIAL_X),
+                    axis_specs={SPATIAL_Y: y_axis, SPATIAL_X: x_axis},
+                    point_columns={SCAN_POINT: comparison_column},
+                    value_unit=unit,
+                    generation=generation,
+                    revision=count,
+                ),
+                x_axis,
+                y_axis,
+            )
+
+        camera_snapshot, image_x, image_y = comparison_snapshot(
+            "camera", initial_mean_frame, selected["mean_frame"]
+        )
+        self._save_figure(
+            context,
+            paths,
+            "camera_initial_selected",
+            snapshot=camera_snapshot,
+            spec=FacetGridPlot(
+                AxisRef.point(str(comparison_id)),
+                ImagePlot(
+                    AxisRef.data(str(image_x.axis_id)),
+                    AxisRef.data(str(image_y.axis_id)),
+                ),
+                labels=PlotLabels(title="Initial and selected camera mean"),
+            ),
+        )
+
+        phase_snapshot, phase_x, phase_y = comparison_snapshot(
+            "phase", initial_phase, selected["phase"], unit="rad"
+        )
+        self._save_figure(
+            context,
+            paths,
+            "phase_initial_selected",
+            snapshot=phase_snapshot,
+            spec=FacetGridPlot(
+                AxisRef.point(str(comparison_id)),
+                ImagePlot(
+                    AxisRef.data(str(phase_x.axis_id)),
+                    AxisRef.data(str(phase_y.axis_id)),
+                ),
+                labels=PlotLabels(title="Initial and selected SLM phase"),
+            ),
+        )
+
+    def _write_summary(
+        self,
+        context: object,
+        paths: Mapping[str, Path],
+        *,
+        status: str,
+        history: list[dict[str, object]],
+        selected_candidate: int | None,
+        error: BaseException | None = None,
+        rollback: Mapping[str, object] | None = None,
+    ) -> None:
+        initial = None if not history else history[0]
+        selected = next(
+            (
+                item
+                for item in history
+                if int(item["iteration"]) == selected_candidate
+            ),
+            None,
+        )
+        common_mask = (
+            np.logical_and.reduce(
+                [np.asarray(item["observable_valid"], dtype=bool) for item in history]
+            )
+            if history
+            else np.zeros(self._site_count, dtype=bool)
+        )
+        common_site_count = int(np.count_nonzero(common_mask))
+        common_totals: list[float | None] = []
+        for item in history:
+            contrast = np.asarray(
+                [np.nan if value is None else value for value in item["bright_minus_dark"]],
+                dtype=float,
+            )
+            values = contrast[common_mask]
+            common_totals.append(
+                float(np.sum(values))
+                if len(values) and np.all(np.isfinite(values))
+                else None
+            )
+        selected_common_total = next(
+            (
+                total
+                for item, total in zip(history, common_totals, strict=True)
+                if int(item["iteration"]) == selected_candidate
+            ),
+            None,
+        )
+        document = {
+            "format": "zlc.slm.feedback-summary",
+            "status": str(status),
+            "selected_candidate": selected_candidate,
+            "candidate_count": len(history),
+            "settings": self._run_record(),
+            "initial_uniformity_ratio": (
+                None if initial is None else initial["uniformity_ratio"]
+            ),
+            "initial_observable_uniformity_ratio": (
+                None if initial is None else initial["observable_uniformity_ratio"]
+            ),
+            "selected_uniformity_ratio": (
+                None if selected is None else selected["uniformity_ratio"]
+            ),
+            "selected_observable_uniformity_ratio": (
+                None if selected is None else selected["observable_uniformity_ratio"]
+            ),
+            "selected_observable_sites": (
+                None if selected is None else selected["observable_sites"]
+            ),
+            "selected_total_observable_bright_minus_dark": (
+                None
+                if selected is None
+                else selected["total_observable_bright_minus_dark"]
+            ),
+            "actual_exposure_seconds": self._actual_exposure_seconds,
+            "effective_photoelectrons": self._effective_photoelectrons,
+            "effective_count_unit": self._effective_count_unit,
+            "selected_uniformity_confidence_lower": (
+                None if selected is None else selected["uniformity_confidence_lower"]
+            ),
+            "selected_uniformity_confidence_upper": (
+                None if selected is None else selected["uniformity_confidence_upper"]
+            ),
+            "selected_maximum_relative_standard_error": (
+                None
+                if selected is None
+                else selected["maximum_relative_standard_error"]
+            ),
+            "common_observable_sites": common_site_count,
+            "selected_common_site_total_bright_minus_dark": selected_common_total,
+            "uniformity_history": [
+                {
+                    "candidate": item["iteration"],
+                    "all_sites": item["uniformity_ratio"],
+                    "observable_sites": item["observable_uniformity_ratio"],
+                    "observable_site_count": item["observable_sites"],
+                    "total_observable_bright_minus_dark": item[
+                        "total_observable_bright_minus_dark"
+                    ],
+                    "common_site_total_bright_minus_dark": common_total,
+                }
+                for item, common_total in zip(history, common_totals, strict=True)
+            ],
+            "rollback": None if rollback is None else dict(rollback),
+            "error": (
+                None
+                if error is None
+                else {
+                    "type": f"{type(error).__module__}.{type(error).__qualname__}",
+                    "message": str(error),
+                }
+            ),
+        }
+        json_path = write_readable_json(
+            paths["root"] / "summary.json", _plain_json(document)
+        )
+        lines = [
+            f"SLM feedback status: {status}",
+            f"Candidates measured: {len(history)}",
+            f"Selected candidate: {selected_candidate if selected_candidate is not None else 'none'}",
+        ]
+        if initial is not None:
+            lines.append(
+                "Initial observable-site uniformity ratio: "
+                f"{initial['observable_uniformity_ratio']}"
+            )
+        if selected is not None:
+            lines.extend(
+                (
+                    f"All-site uniformity ratio: {selected['uniformity_ratio']}",
+                    "Observable-site uniformity ratio: "
+                    f"{selected['observable_uniformity_ratio']}",
+                    f"Observable sites: {selected['observable_sites']}/{self._site_count}",
+                    f"Common observable sites: {common_site_count}/{self._site_count}",
+                    "Selected common-site total bright-dark: "
+                    f"{selected_common_total}",
+                    "Simultaneous 95% interval: "
+                    f"[{selected['uniformity_confidence_lower']}, "
+                    f"{selected['uniformity_confidence_upper']}]",
+                )
+            )
+        if rollback is not None:
+            lines.append(f"Rollback: {rollback.get('status')}")
+        if error is not None:
+            lines.append(f"Error: {type(error).__name__}: {error}")
+        text_path = atomic_write_text(
+            paths["root"] / "summary.txt", "\n".join(lines) + "\n"
+        )
+        context.register_artifact("summary_json", json_path, role="summary")
+        context.register_artifact("summary_text", text_path, role="summary")
 
     def _finish_candidate(
         self,
@@ -1166,6 +1769,9 @@ class SlmFeedbackTask:
         candidate: dict[str, object],
         history: list[dict[str, object]],
         *,
+        paths: Mapping[str, Path],
+        initial_phase: np.ndarray,
+        initial_mean_frame: np.ndarray | None,
         status: str,
         republish: bool,
     ) -> dict[str, object]:
@@ -1184,15 +1790,41 @@ class SlmFeedbackTask:
                 candidate=candidate_number,
                 history=history,
             )
-        artifact_path = Path(candidate["artifact_path"])
+        retained_history = candidate.get("history")
+        if (
+            history
+            and isinstance(retained_history, Mapping)
+            and candidate.get("samples") is not None
+            and candidate.get("mean_frame") is not None
+            and initial_mean_frame is not None
+        ):
+            self._save_figures(
+                context,
+                paths,
+                history=history,
+                selected=candidate,
+                initial_phase=initial_phase,
+                initial_mean_frame=initial_mean_frame,
+            )
+        artifact_path = paths["final"] / "science-context.npz"
         metadata = self._candidate_metadata(
-            candidate=int(candidate.get("artifact_candidate", candidate_number)),
+            candidate=(candidate_number if isinstance(retained_history, Mapping) else 0),
             status=status,
             history=history,
             solver=candidate.get("solver"),
         )
-        metadata["retained"] = candidate.get("history")
-        metadata["history"] = history
+        outcome = candidate.get("outcome")
+        metadata["outcome"] = (
+            dict(outcome)
+            if isinstance(outcome, Mapping)
+            else {
+                "status": str(status),
+                "selected_candidate": (
+                    candidate_number if isinstance(retained_history, Mapping) else None
+                ),
+                "candidates_measured": len(history),
+            }
+        )
         self._save_candidate(
             artifact_path,
             applied,
@@ -1200,7 +1832,21 @@ class SlmFeedbackTask:
             candidate["target"],
             metadata,
         )
-        retained_history = candidate.get("history")
+        context.register_artifact(
+            "artifact_path",
+            artifact_path,
+            role="final",
+            contract_id=SLM_PHASE_ARTIFACT_CONTRACT,
+        )
+        self._write_summary(
+            context,
+            paths,
+            status=status,
+            history=history,
+            selected_candidate=(
+                candidate_number if isinstance(retained_history, Mapping) else None
+            ),
+        )
         terminal_uniformity = (
             retained_history.get("uniformity_ratio")
             if isinstance(retained_history, Mapping)
@@ -1235,9 +1881,11 @@ class SlmFeedbackTask:
     def execute(self, context: object) -> dict[str, object]:
         incoming = self._incoming_phase
         incoming_pattern = self._pattern_phase
+        paths = self._prepare_artifacts(context)
         history: list[dict[str, object]] = []
         retained_valid: dict[str, object] | None = None
         most_visible_observed: dict[str, object] | None = None
+        initial_mean_frame: np.ndarray | None = None
         stalled = False
         termination_reason = "all authored feedback updates completed"
         try:
@@ -1272,11 +1920,10 @@ class SlmFeedbackTask:
             loading_loaded_bound = np.full(
                 self._site_count, np.nan, dtype=float
             )
-            prior_history = self._prior_pattern_metadata.get("history")
             prior_measurement = self._prior_pattern_metadata.get("measurement")
             comparable_history = bool(
-                self._prior_pattern_metadata.get("feedback_controller_version")
-                == _CONTROLLER_VERSION
+                self._prior_pattern_metadata.get("feedback_controller")
+                == _CONTROLLER_CONTRACT
                 and self._prior_pattern_metadata.get("feedback_mode") == self.feedback_mode
                 and self._prior_pattern_metadata.get("pulse_path") == str(self.pulse_path)
                 and type(self._prior_pattern_metadata.get("exposure_seconds"))
@@ -1293,19 +1940,11 @@ class SlmFeedbackTask:
                     self._prior_pattern_metadata.get("maximum_weight_change", -1.0)
                 )
                 == self.maximum_weight_change
-                and isinstance(prior_history, list)
-                and prior_history
-                and isinstance(prior_history[-1], Mapping)
+                and isinstance(prior_measurement, Mapping)
             )
             if comparable_history:
-                # A bounded run may retain an earlier, better candidate.  Its
-                # saved Target and phase must resume from that candidate's own
-                # measurement state, not from a later rejected history row.
-                prior = (
-                    prior_measurement
-                    if isinstance(prior_measurement, Mapping)
-                    else prior_history[-1]
-                )
+                prior = prior_measurement
+                assert isinstance(prior, Mapping)
                 def restored(name: str, dtype: object) -> np.ndarray | None:
                     try:
                         return np.asarray(prior[name], dtype=dtype).reshape(
@@ -1383,26 +2022,9 @@ class SlmFeedbackTask:
                     else self._apply_exact(current_phase)
                 )
                 candidate_number = iteration + 1
-                applied_metadata = self._candidate_metadata(
-                    candidate=candidate_number,
-                    status="applied",
-                    history=history,
-                    solver=solver_metadata,
-                )
-                artifact_path = unique_path(
-                    self.artifact_directory,
-                    f"slm_feedback_candidate_{candidate_number:04d}",
-                    ".npz",
-                    writer=lambda temporary: self._save_candidate(
-                        temporary,
-                        applied,
-                        current_pattern,
-                        current_target,
-                        applied_metadata,
-                    ),
-                )
+                candidate_solver = solver_metadata
                 context.report_progress(
-                    f"Candidate {candidate_number} phase saved to {artifact_path}"
+                    f"Measuring SLM feedback candidate {candidate_number}"
                 )
                 # The operator must see the phase which is already on the SLM
                 # before this candidate's camera exposure begins.  Publishing
@@ -1414,9 +2036,11 @@ class SlmFeedbackTask:
                     candidate=candidate_number,
                     history=history,
                 )
-                samples, saturated_sites, missing_sites = self._measure(
+                samples, saturated_sites, missing_sites, mean_frame = self._measure(
                     pulse, context, iteration
                 )
+                if initial_mean_frame is None:
+                    initial_mean_frame = np.array(mean_frame, copy=True)
                 fitted = _fit_contrasts(samples)
                 fit_valid = np.asarray(fitted["valid"], dtype=bool).copy()
                 fit_single = np.asarray(
@@ -1446,6 +2070,12 @@ class SlmFeedbackTask:
                 observable_valid = fit_valid | bright_only
                 valid = bool(np.all(observable_valid))
                 observable_contrast = contrast[observable_valid]
+                total_observable_contrast = (
+                    float(np.sum(observable_contrast))
+                    if len(observable_contrast)
+                    and np.all(np.isfinite(observable_contrast))
+                    else float("nan")
+                )
                 observed_score = (
                     float(np.max(observable_contrast) / np.min(observable_contrast))
                     if len(observable_contrast)
@@ -1544,6 +2174,11 @@ class SlmFeedbackTask:
                     "observable_uniformity_ratio": (
                         None if not np.isfinite(observed_score) else observed_score
                     ),
+                    "total_observable_bright_minus_dark": (
+                        None
+                        if not np.isfinite(total_observable_contrast)
+                        else total_observable_contrast
+                    ),
                     "uniformity_confidence_lower": (
                         None if not valid else confidence_lower
                     ),
@@ -1616,19 +2251,9 @@ class SlmFeedbackTask:
                         int(value) for value in np.flatnonzero(fit_invalid)
                     ],
                     "minimum_visibility_confidence": visibility_margin,
-                    "artifact_path": str(artifact_path),
                 })
-                self._save_candidate(
-                    artifact_path,
-                    applied,
-                    current_pattern,
-                    current_target,
-                    self._candidate_metadata(
-                        candidate=candidate_number,
-                        status="measured",
-                        history=history,
-                        solver=solver_metadata,
-                    ),
+                history[-1]["checkpoint_path"] = (
+                    f"data/candidates/candidate-{candidate_number:04d}.npz"
                 )
                 self._publish_candidate(
                     context,
@@ -1640,13 +2265,14 @@ class SlmFeedbackTask:
                     "candidate": candidate_number,
                     "phase": np.array(applied, copy=True),
                     "pattern_phase": np.array(current_pattern, copy=True),
-                    "artifact_path": artifact_path,
                     "target": np.array(current_target, copy=True),
-                    "solver": solver_metadata,
+                    "solver": candidate_solver,
                     "history": history[-1],
                     "score": observed_score,
                     "contrast": np.array(contrast, copy=True),
                     "standard_error": np.array(error, copy=True),
+                    "samples": np.array(samples, copy=True),
+                    "mean_frame": np.array(mean_frame, copy=True),
                 }
                 completed["visibility_rank"] = (
                     visibility,
@@ -1675,74 +2301,93 @@ class SlmFeedbackTask:
                         f"{self._site_count} site fits valid; applying only "
                         "history-supported site updates"
                     )
-                if candidate_number == self._candidate_capacity:
-                    break
-                previous_weights[observable_valid] = current_control_weights[
-                    observable_valid
-                ]
-                previous_contrast[observable_valid] = contrast[observable_valid]
-                previous_dark_mean[fit_valid] = np.asarray(
-                    fitted["dark_mean"], dtype=float
-                )[fit_valid]
-                previous_dark_standard_error[fit_valid] = np.asarray(
-                    fitted["dark_standard_error"], dtype=float
-                )[fit_valid]
-                if np.array_equal(proposed_target, current_target):
-                    stalled = True
-                    termination_reason = (
-                        "all sites held because this shot batch supplied no "
-                        "actionable update"
-                    )
-                    break
-                next_pattern, solver_metadata = solve_phase(
-                    proposed_target,
-                    pupil_amplitude=self._pupil_amplitude,
-                    initial_phase=current_pattern,
-                    objective_kind="spots",
-                    iterations=None,
-                    stop_requested=context.cancel_requested,
-                    spot_optimizer_state=spot_optimizer_state,
+                continue_feedback = candidate_number < self._candidate_capacity
+                if continue_feedback:
+                    previous_weights[observable_valid] = current_control_weights[
+                        observable_valid
+                    ]
+                    previous_contrast[observable_valid] = contrast[observable_valid]
+                    previous_dark_mean[fit_valid] = np.asarray(
+                        fitted["dark_mean"], dtype=float
+                    )[fit_valid]
+                    previous_dark_standard_error[fit_valid] = np.asarray(
+                        fitted["dark_standard_error"], dtype=float
+                    )[fit_valid]
+                    if np.array_equal(proposed_target, current_target):
+                        stalled = True
+                        continue_feedback = False
+                        history[-1]["next_phase_changed"] = False
+                        termination_reason = (
+                            "all sites held because this shot batch supplied no "
+                            "actionable update"
+                        )
+                    else:
+                        try:
+                            next_pattern, solver_metadata = solve_phase(
+                                proposed_target,
+                                pupil_amplitude=self._pupil_amplitude,
+                                initial_phase=current_pattern,
+                                objective_kind="spots",
+                                iterations=None,
+                                stop_requested=context.cancel_requested,
+                                spot_optimizer_state=spot_optimizer_state,
+                            )
+                        except BaseException:
+                            history[-1]["next_phase_changed"] = None
+                            self._save_candidate_checkpoint(
+                                context,
+                                paths,
+                                candidate=candidate_number,
+                                samples=samples,
+                                measurement=history[-1],
+                                solver=candidate_solver,
+                            )
+                            raise
+                        next_phase = self._science_phase(next_pattern)
+                        if np.array_equal(next_phase, applied):
+                            stalled = True
+                            continue_feedback = False
+                            history[-1]["next_phase_changed"] = False
+                            termination_reason = (
+                                "the target correction produced no different SLM phase; "
+                                "no second shot batch was taken"
+                            )
+                        else:
+                            history[-1]["next_phase_changed"] = True
+                            current_target = proposed_target
+                            current_pattern = next_pattern
+                            current_phase = next_phase
+                else:
+                    history[-1]["next_phase_changed"] = None
+                self._save_candidate_checkpoint(
+                    context,
+                    paths,
+                    candidate=candidate_number,
+                    samples=samples,
+                    measurement=history[-1],
+                    solver=candidate_solver,
                 )
-                next_phase = self._science_phase(next_pattern)
-                if np.array_equal(next_phase, applied):
-                    stalled = True
-                    history[-1]["next_phase_changed"] = False
-                    termination_reason = (
-                        "the target correction produced no different SLM phase; "
-                        "no second shot batch was taken"
-                    )
-                    self._save_candidate(
-                        artifact_path,
-                        applied,
-                        current_pattern,
-                        current_target,
-                        self._candidate_metadata(
-                            candidate=candidate_number,
-                            status="stalled",
-                            history=history,
-                            solver=solver_metadata,
-                        ),
-                    )
+                if not continue_feedback:
                     break
-                history[-1]["next_phase_changed"] = True
-                current_target = proposed_target
-                current_pattern = next_pattern
-                current_phase = next_phase
             selected = retained_valid or most_visible_observed
             if selected is None:
                 raise RuntimeError("qCMOS feedback produced no completed candidate")
             status = "stalled" if stalled else "completed"
-            selected["history"]["outcome"] = {
+            selected["outcome"] = {
                 "status": status,
                 "reason": termination_reason,
                 "selected_candidate": int(selected["candidate"]),
                 "shots_per_candidate": self.shots,
+                "candidates_measured": len(history),
             }
             context.seal_terminal()
             return self._finish_candidate(
                 context,
                 selected,
                 history,
+                paths=paths,
+                initial_phase=incoming,
+                initial_mean_frame=initial_mean_frame,
                 status=status,
                 republish=True,
             )
@@ -1753,17 +2398,28 @@ class SlmFeedbackTask:
                     retained = retained_valid or most_visible_observed
                     if retained is None:
                         retained = self._incoming_candidate(
-                            stem="slm_feedback_stopped",
-                            status="stopped-before-measurement",
-                            history=history,
                             observed=most_visible_observed,
                             phase=incoming,
                             pattern=incoming_pattern,
                         )
+                    retained["outcome"] = {
+                        "status": "stopped",
+                        "reason": "operator Stop",
+                        "selected_candidate": (
+                            int(retained["candidate"])
+                            if isinstance(retained.get("history"), Mapping)
+                            else None
+                        ),
+                        "shots_per_candidate": self.shots,
+                        "candidates_measured": len(history),
+                    }
                     return self._finish_candidate(
                         context,
                         retained,
                         history,
+                        paths=paths,
+                        initial_phase=incoming,
+                        initial_mean_frame=initial_mean_frame,
                         status="stopped",
                         republish=True,
                     )
@@ -1779,10 +2435,48 @@ class SlmFeedbackTask:
             try:
                 self._apply_exact(incoming)
             except BaseException as restore_error:
+                try:
+                    self._write_summary(
+                        context,
+                        paths,
+                        status="failed",
+                        history=history,
+                        selected_candidate=None,
+                        error=error,
+                        rollback={
+                            "status": "failed",
+                            "error": (
+                                f"{type(restore_error).__name__}: {restore_error}"
+                            ),
+                        },
+                    )
+                except BaseException as summary_error:
+                    error.add_note(
+                        "Feedback failure summary could not be saved: "
+                        f"{type(summary_error).__name__}: {summary_error}"
+                    )
                 raise RuntimeError(
                     "SLM feedback failed and the incoming phase could not be "
                     f"restored: {error}"
                 ) from restore_error
+            try:
+                self._write_summary(
+                    context,
+                    paths,
+                    status="failed",
+                    history=history,
+                    selected_candidate=None,
+                    error=error,
+                    rollback={
+                        "status": "restored",
+                        "slm_command_receipt": dict(self.slm.last_command_receipt),
+                    },
+                )
+            except BaseException as summary_error:
+                error.add_note(
+                    "Feedback failure summary could not be saved: "
+                    f"{type(summary_error).__name__}: {summary_error}"
+                )
             raise
 
 __all__ = [

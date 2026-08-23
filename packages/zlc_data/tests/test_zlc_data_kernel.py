@@ -454,9 +454,9 @@ def test_repeat_role_has_exactly_one_structural_owner():
         )
 
 
-def test_import_is_headless_and_does_not_pull_legacy_domain():
+def test_import_is_headless():
     import tempfile
-    import zou_lab_control_v2
+    import zou_lab_control
     import zlc_data
 
     repo_root = Path(__file__).resolve().parents[3]
@@ -474,16 +474,16 @@ def test_import_is_headless_and_does_not_pull_legacy_domain():
 from pathlib import Path
 import sys
 
-import zou_lab_control_v2
+import zou_lab_control
 import zlc_data
 
-root_file = Path(zou_lab_control_v2.__file__).resolve()
+root_file = Path(zou_lab_control.__file__).resolve()
 data_file = Path(zlc_data.__file__).resolve()
 print("root", root_file)
 print("zlc_data", data_file)
 assert root_file == Path(sys.argv[1]).resolve()
 assert data_file == Path(sys.argv[2]).resolve()
-for forbidden in ('matplotlib', 'PyQt5', 'Zou_lab_control'):
+for forbidden in ('matplotlib', 'PyQt5'):
     assert forbidden not in sys.modules, (forbidden, sorted(sys.modules))
 """
     with tempfile.TemporaryDirectory() as folder:
@@ -492,7 +492,7 @@ for forbidden in ('matplotlib', 'PyQt5', 'Zou_lab_control'):
                 sys.executable,
                 "-c",
                 code,
-                str(Path(zou_lab_control_v2.__file__).resolve()),
+                str(Path(zou_lab_control.__file__).resolve()),
                 str(Path(zlc_data.__file__).resolve()),
             ],
             check=True,

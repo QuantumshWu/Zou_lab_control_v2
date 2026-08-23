@@ -299,7 +299,7 @@ def test_pulse_resolver_uses_the_project_json_document(
         "delays",
         "repeat",
     )
-    assert tree["format"] == PULSE_TREE_FORMAT == "zlc.pulse.v1"
+    assert tree["format"] == PULSE_TREE_FORMAT == "zlc.pulse"
     assert not {
         "schema",
         "PulseDocument",
@@ -424,7 +424,6 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             sequencer_key="sequencer",
             pulse_resource=IMAGING_PULSE_RESOURCE,
             signal_plane=plane,
-            artifact_directory=tmp_path,
             repeats=30,
         )
         assert calibration_node.camera is camera
@@ -440,9 +439,12 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             instance_id="calibration",
             kind=NodeKind.TASK.value,
             dataset_output_declarations=CALIBRATION_LOGIC_NODE.outputs,
-            required_artifact_names=("artifact_path",),
+            required_artifacts={"artifact_path": "calibration.readout"},
         )
-        calibration_host.start()
+        calibration_host.start(
+            run_root=tmp_path,
+            input_summary=calibration_node.request.to_dict(),
+        )
         deadline = time.monotonic() + 10.0
         while not calibration_host.observation.terminal and time.monotonic() < deadline:
             calibration_host.poll()
@@ -463,7 +465,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             sorted(
                 path.name
                 for path in (
-                    task_result.artifact_path.parent / "report"
+                    task_result.artifact_path.parents[1] / "figures"
                 ).glob("*.png")
             )
         )
@@ -539,7 +541,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert tuple(
             (value.name, value.contract_id)
             for value in descriptors["calibration"].outputs
-        ) == (("capture_preview", "calibration.capture-preview.v1"),)
+        ) == (("capture_preview", "calibration.capture-preview"),)
         assert tuple(
             (preview.output.name, preview.plot_kind)
             for preview in descriptors["calibration"].node_previews
@@ -557,7 +559,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert [
             (value.name, value.contract_id)
             for value in descriptors["calibration"].artifact_outputs
-        ] == [("artifact_path", "calibration.readout.v1")]
+        ] == [("artifact_path", "calibration.readout")]
         assert descriptors["calibration"].authoring_schema.field_names == (
             "pulse_template",
             "repeats",
@@ -606,7 +608,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert isinstance(descriptors["occupancy"].input_specs[1], ArtifactInputSpec)
         assert descriptors["occupancy"].input_specs[1].name == "calibration_path"
         assert descriptors["occupancy"].input_specs[1].contract_id == (
-            "calibration.readout.v1"
+            "calibration.readout"
         )
         assert tuple(output.name for output in descriptors["occupancy"].outputs) == (
             "counts",
@@ -645,10 +647,9 @@ def test_calibration_task_safes_sequencer_when_capture_fails(tmp_path: Path) -> 
             pulse_sequence=IMAGING_PULSE_RESOURCE.value,
             pulse_path=IMAGING_PULSE_RESOURCE.path,
             signal_plane=plane,
-            artifact_directory=tmp_path,
         )
         with pytest.raises(RuntimeError, match="fire failure"):
-            task.run()
+            task.run(tmp_path)
         assert [event for event, _ in sequencer.events].count("safe") == 1
         assert [event for event, _ in camera.events].count("finish") == 1
         assert installation.device("camera").capture_state() is False

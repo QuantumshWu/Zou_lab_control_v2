@@ -46,8 +46,8 @@ def _run_qt(code: str) -> None:
 _PROLOGUE = """
 import time
 
-import zou_lab_control_v2
-print(zou_lab_control_v2.__file__)
+import zou_lab_control
+print(zou_lab_control.__file__)
 import numpy as np
 from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
@@ -253,8 +253,8 @@ def test_a_mounted_surfaces_error_report_reaches_the_handle() -> None:
 
     _run_qt(
         """
-import zou_lab_control_v2
-print(zou_lab_control_v2.__file__)
+import zou_lab_control
+print(zou_lab_control.__file__)
 from PyQt5 import QtCore, QtWidgets
 from zlc_ui.console import TaskConsoleHandle, TaskConsoleView, panel_card_view
 print(panel_card_view.__file__)

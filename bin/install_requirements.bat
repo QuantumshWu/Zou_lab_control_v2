@@ -27,7 +27,7 @@ if not "%ZLC_STATUS%"=="0" goto zlc_failed
 %ZLC_PY_CMD% -m pip check
 set "ZLC_STATUS=%ERRORLEVEL%"
 if not "%ZLC_STATUS%"=="0" goto zlc_failed
-%ZLC_PY_CMD% -m zou_lab_control_v2 check
+%ZLC_PY_CMD% -m zou_lab_control check
 set "ZLC_STATUS=%ERRORLEVEL%"
 if not "%ZLC_STATUS%"=="0" goto zlc_failed
 echo.

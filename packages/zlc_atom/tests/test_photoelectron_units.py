@@ -37,7 +37,7 @@ from tests.pulse_fixture import IMAGING_PULSE_RESOURCE
 from test_installation_and_nodes import _calibration_request
 
 
-def _task(request, directory: Path) -> CalibrationTask:
+def _task(request) -> CalibrationTask:
     installation = create_installation("virtual")
     return CalibrationTask(
         camera=installation.device("camera"),
@@ -46,7 +46,6 @@ def _task(request, directory: Path) -> CalibrationTask:
         pulse_sequence=IMAGING_PULSE_RESOURCE.value,
         pulse_path=IMAGING_PULSE_RESOURCE.path,
         signal_plane=FakePlane(),
-        artifact_directory=directory,
     )
 
 
@@ -125,10 +124,10 @@ def test_a_calibration_in_photoelectrons_reads_the_same_atoms(tmp_path: Path) ->
     request = replace(
         _calibration_request(repeats=10), photoelectrons=False
     )
-    counts = _task(request, tmp_path).run()
+    counts = _task(request).run(tmp_path)
     electrons = _task(
-        replace(request, photoelectrons=True), tmp_path
-    ).run()
+        replace(request, photoelectrons=True)
+    ).run(tmp_path)
 
     assert electrons.capture.frames[0].image.dtype == np.float32
     assert counts.capture.frames[0].image.dtype == np.uint16
@@ -190,8 +189,7 @@ def test_a_run_in_the_other_unit_is_refused(tmp_path: Path) -> None:
 
     calibration = _task(
         replace(_calibration_request(repeats=8), photoelectrons=True),
-        tmp_path,
-    ).run()
+    ).run(tmp_path)
     processor = OccupancyProcessor(calibration.calibration)
     frames = np.asarray(
         [record.image for record in calibration.capture.frames[:3]],
@@ -356,6 +354,7 @@ def test_calibration_preview_and_saved_sample_keep_raw_count_unit(
     from zlc_atom.nodes.calibration.outputs import capture_preview_output
     from zlc_atom.nodes.calibration.task import SampleWriter
     from zlc_data.figure_archive import read_archive, read_dataset
+    from zlc_runtime import TaskRun
 
     point = CameraWorkingPoint(
         "EXTERNAL_TRIGGERED",
@@ -389,12 +388,20 @@ def test_calibration_preview_and_saved_sample_keep_raw_count_unit(
     )
     assert preview.snapshot.block.schema.cell_schema.value_unit == "count"
 
+    artifact_run = TaskRun(
+        tmp_path,
+        task_name="calibration",
+        instance_id="calibration",
+        input_summary={"photoelectrons": False},
+    )
+    artifact_run.mark_running()
     writer = SampleWriter(
         tmp_path,
         working_point=point,
         run_record=run_record,
         generation="saved-count-unit",
         photoelectrons=False,
+        artifact_context=artifact_run,
     )
     archive = writer.write(0, cycle).with_suffix(".npz")
     info, arrays = read_archive(archive)
@@ -423,14 +430,13 @@ def test_saved_samples_and_the_preview_keep_the_unit_they_were_read_in(
             photoelectrons=True,
             save_frames=True,
         ),
-        tmp_path,
-    ).run()
+    ).run(tmp_path)
 
     analysed = np.asarray(result.capture.frames[0].image)
     assert analysed.dtype == np.float32
     assert analysed.min() < 0.0, "a dark pixel below the offset is negative in electrons"
 
-    samples = sorted((tmp_path / "calibration" / "frames").glob("sample_*.npz"))
+    samples = sorted((tmp_path / "calibration" / "figures").glob("sample_*.npz"))
     assert samples, "save_frames must leave the samples it paid for"
     for path in samples:
         info, arrays = read_archive(path)

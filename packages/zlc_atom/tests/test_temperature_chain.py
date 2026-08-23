@@ -1,4 +1,4 @@
-import zou_lab_control_v2
+import zou_lab_control
 
 """The temperature Task, end to end on the virtual bench.
 
@@ -35,6 +35,7 @@ import time
 
 import numpy as np
 from zlc_data import SITE
+from zlc_data.figure_archive import FIGURE_SCHEMA, read_archive
 from zlc_pulse import compile_sequence, resolve_api_parameters, sequence_from_tree
 from zlc_pulse.schedule import trigger_windows
 from zlc_runtime import NodeHost, SignalDataPlane
@@ -65,9 +66,11 @@ def _host(descriptor: object, node: object, plane: SignalDataPlane) -> NodeHost:
         instance_id=node.instance_id,
         kind=descriptor.kind.value,
         dataset_output_declarations=descriptor.outputs,
-        required_artifact_names=tuple(
-            output.name for output in descriptor.artifact_outputs
-        ),
+        required_artifacts={
+            output.name: output.contract_id
+            for output in descriptor.artifact_outputs
+        },
+        task_name=descriptor.api_name,
     )
 
 
@@ -130,13 +133,15 @@ def test_the_temperature_task_publishes_release_recapture_survival(
             sequencer_key="sequencer",
             pulse_resource=IMAGING_PULSE_RESOURCE,
             signal_plane=plane,
-            artifact_directory=tmp_path,
             repeats=30,
         )
         calibration_host = _host(
             descriptors["calibration"], calibration_node, plane
         )
-        calibration_host.start()
+        calibration_host.start(
+            run_root=tmp_path,
+            input_summary={"repeats": 30},
+        )
         _wait_terminal(calibration_host, timeout=120.0)
         calibration_host.shutdown()
         artifact_path = calibration_node.result.artifact_path
@@ -164,7 +169,6 @@ def test_the_temperature_task_publishes_release_recapture_survival(
                 SCAN_PULSE_CONTRACT,
                 sequence,
             ),
-            artifact_directory=tmp_path,
             # Authored the way the editor authors it: the plan field is the
             # JSON text that editor writes back into the draft.
             plan=json.dumps(plan.to_tree()),
@@ -176,7 +180,10 @@ def test_the_temperature_task_publishes_release_recapture_survival(
         ), "the Task judges frames at the exposure its thresholds were measured at"
 
         host = _host(descriptors["temperature"], task, plane)
-        host.start()
+        host.start(
+            run_root=tmp_path,
+            input_summary={"plan": plan.to_tree(), "repeats": REPEATS},
+        )
         deadline = time.monotonic() + 420.0
         while time.monotonic() < deadline and not host.observation.terminal:
             plane.freeze()
@@ -255,8 +262,9 @@ def test_the_temperature_task_publishes_release_recapture_survival(
         result = host.final_result
         assert set(result) == {"artifact_path"}
         saved = Path(result["artifact_path"])
-        assert saved.is_file() and saved.parent == tmp_path
+        assert saved.is_file() and saved.parent == host.run_directory / "final"
         payload = json.loads(saved.read_text(encoding="utf-8"))
+        assert set(payload) == {"format", "t_off", "run_record"}
         assert payload["t_off"] == {"unit": "ms", "values": list(T_OFF_MS)}
         curve = payload["run_record"]["curve"]
         np.testing.assert_allclose(curve["survival_rate"], rate, rtol=0, atol=1e-12)
@@ -272,6 +280,33 @@ def test_the_temperature_task_publishes_release_recapture_survival(
             "nothing on this bench declares the trap's reach, so a kelvin "
             "number here would be the operator's own input squared"
         )
+        summary = json.loads(
+            (host.run_directory / "summary.json").read_text(encoding="utf-8")
+        )
+        assert summary["curve"] == curve
+        assert summary["points"] == len(T_OFF_MS)
+        assert (host.run_directory / "summary.txt").is_file()
+
+        figure_path = host.run_directory / "figures" / "survival.npz"
+        preview_path = host.run_directory / "figures" / "survival.png"
+        assert figure_path.is_file() and preview_path.is_file()
+        info, arrays = read_archive(figure_path)
+        assert info["schema"] == FIGURE_SCHEMA
+        from zlc_plot import PlotKind, read_figure_plot
+
+        figure_data, recipe = read_figure_plot(info, arrays, "data")
+        assert recipe["spec"].kind is PlotKind.CURVE
+        np.testing.assert_array_equal(
+            figure_data.block.values,
+            survival_value.block.values,
+        )
+        registered = {artifact.name: artifact for artifact in host.artifacts}
+        assert registered["artifact_path"].role == "final"
+        assert registered["temperature_summary"].role == "summary"
+        assert registered["temperature_summary_text"].role == "summary"
+        assert registered["survival_figure"].contract_id == FIGURE_SCHEMA
+        assert registered["survival_preview"].role == "preview"
+        assert registered["survival_preview"].contract_id == ""
 
         # --- A Task's results outlive its run: the panel that watched them is
         #     still holding data after the host is gone.

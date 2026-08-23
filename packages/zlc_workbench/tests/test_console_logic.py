@@ -8,6 +8,7 @@ a notebook running beside the window.
 from __future__ import annotations
 
 import ast
+import json
 import os
 import time
 from dataclasses import replace
@@ -165,7 +166,7 @@ def test_starting_a_node_runs_it_and_the_row_says_so(presenter, session) -> None
     assert "1/1 node(s) running" in presenter.view.summary
     declarations = presenter.logic[node_id].host.dataset_output_declarations
     assert tuple(value.name for value in declarations) == ("frames",)
-    assert {value.contract_id for value in declarations} == {"camera.frames.v1"}
+    assert {value.contract_id for value in declarations} == {"camera.frames"}
 
     session.fire(shots=1)
     deadline = time.monotonic() + 10.0
@@ -756,18 +757,26 @@ def test_saved_artifact_paths_are_visible_and_seed_matching_input_drafts(
     )
     from zlc_runtime import DatasetOutputDeclaration
 
-    produced = presenter.session.day_folder() / "declared-calibration.json"
-    produced.write_text("{}", encoding="utf-8")
+    produced_paths: list[Path] = []
 
     class _Task:
         def execute(self, context):
+            produced = context.run_directory / "calibration.json"
+            produced.write_text("{}", encoding="utf-8")
+            context.register_artifact(
+                "artifact_path",
+                produced,
+                role="final",
+                contract_id="calibration.readout",
+            )
+            produced_paths.append(produced)
             context.report_progress("artifact saved")
             return SimpleNamespace(artifact_path=produced)
 
-    built_in: list[Path] = []
+    builds: list[bool] = []
 
-    def _build(*, artifact_directory):
-        built_in.append(Path(artifact_directory))
+    def _build():
+        builds.append(True)
         return _Task()
 
     descriptor = LogicNodeDescriptor(
@@ -775,7 +784,7 @@ def test_saved_artifact_paths_are_visible_and_seed_matching_input_drafts(
         NodeKind.TASK,
         AuthoringSchema(),
         artifact_outputs=(
-            ArtifactOutputSpec("artifact_path", "calibration.readout.v1"),
+            ArtifactOutputSpec("artifact_path", "calibration.readout"),
         ),
         node_previews=(),
         build=_build,
@@ -785,12 +794,12 @@ def test_saved_artifact_paths_are_visible_and_seed_matching_input_drafts(
         NodeKind.PROCESSOR,
         AuthoringSchema(),
         input_specs=(
-            DatasetInputSpec("frames", "camera.frames.v1", "exact"),
+            DatasetInputSpec("frames", "camera.frames", "exact"),
             ArtifactInputSpec(
                 "calibration_path",
                 "Calibration artifact",
                 ArtifactCodec(
-                    "calibration.readout.v1",
+                    "calibration.readout",
                     "Calibration artifacts (*.json)",
                     (".json",),
                     lambda path: path.read_text(encoding="utf-8"),
@@ -798,46 +807,65 @@ def test_saved_artifact_paths_are_visible_and_seed_matching_input_drafts(
                 argument_name="calibration",
             ),
         ),
-        outputs=(DatasetOutputDeclaration("judged", "judged.v1"),),
+        outputs=(DatasetOutputDeclaration("judged", "judged"),),
         build=lambda *, calibration, source_signal, signal_plane: object(),
     )
     presenter.catalog = LogicCatalog((descriptor, consumer))
     node_id = presenter.add_logic("artifact_task")
-    assert built_in == [], "Add read the artifact workspace and built the task"
+    assert builds == [], "Add read the artifact workspace and built the task"
     assert presenter.logic_editor_projection(node_id)["artifact_results"] == ()
     assert presenter.start_logic(node_id) is True
-    assert built_in == [presenter.session.day_folder()]
+    assert builds == [True]
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline and presenter.logic[node_id].host.running:
         presenter.poll_logic()
         time.sleep(0.001)
 
     projection = presenter.logic_editor_projection(node_id)
+    produced = produced_paths[0].resolve()
+    run_document = json.loads((produced.parent / "run.json").read_text())
+    assert run_document["task"] == {
+        "api_name": "artifact_task",
+        "instance_id": node_id,
+    }
+    assert run_document["input"] == {
+        "authored": {},
+        "source_signal": None,
+        "devices": {},
+        "artifacts": {},
+        "resources": {},
+    }
     assert projection["artifact_results"] == (
         {
             "name": "artifact_path",
-            "contract_id": "calibration.readout.v1",
-            "path": str(produced.resolve()),
+            "contract_id": "calibration.readout",
+            "path": str(produced),
+            "role": "final",
+        },
+        {
+            "name": "run_directory",
+            "contract_id": "zlc.task-run",
+            "path": str(produced.parent),
+            "role": "run",
         },
     )
 
     consumer_id = presenter.add_logic("artifact_consumer")
     assert presenter.logic[consumer_id].draft.artifact_inputs == {
-        "calibration_path": str(produced.resolve())
+        "calibration_path": str(produced)
     }
     assert presenter.logic_editor_projection(consumer_id)["artifact_values"] == {
-        "calibration_path": str(produced.resolve())
+        "calibration_path": str(produced)
     }
 
-    newer = presenter.session.day_folder() / "newer-calibration.json"
-    newer.write_text("{}", encoding="utf-8")
-    produced = newer
     newer_task = presenter.add_logic("artifact_task")
     assert presenter.start_logic(newer_task) is True
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline and presenter.logic[newer_task].host.running:
         presenter.poll_logic()
         time.sleep(0.001)
+    newer = produced_paths[1].resolve()
+    assert newer.parent.name == "artifact_task-2"
     newer_consumer = presenter.add_logic("artifact_consumer")
     assert presenter.logic[newer_consumer].draft.artifact_inputs == {
         "calibration_path": str(newer.resolve())
@@ -901,12 +929,12 @@ def test_make_host_passes_descriptor_contract_without_reading_node_attributes() 
     from zlc_atom.nodes import DatasetInputSpec, LogicNodeDescriptor, NodeKind
     from zlc_runtime import DatasetOutputDeclaration, SignalDataPlane
 
-    output = DatasetOutputDeclaration("judged", "occupancy.judged.v1")
+    output = DatasetOutputDeclaration("judged", "occupancy.judged")
     descriptor = LogicNodeDescriptor(
         "explicit_processor",
         NodeKind.PROCESSOR,
         AuthoringSchema(),
-        input_specs=(DatasetInputSpec("frames", "camera.frames.v1", "exact"),),
+        input_specs=(DatasetInputSpec("frames", "camera.frames", "exact"),),
         outputs=(output,),
         build=lambda **_values: object(),
     )
@@ -1065,7 +1093,7 @@ def test_artifact_contract_resolves_once_and_passes_exact_typed_value(
                 "artifact_path",
                 "Probe artifact",
                 ArtifactCodec(
-                    "probe.v1",
+                    "probe",
                     "Probe artifacts (*.json)",
                     (".json",),
                     decode,
@@ -1077,7 +1105,7 @@ def test_artifact_contract_resolves_once_and_passes_exact_typed_value(
     )
     presenter.catalog = LogicCatalog((descriptor,))
     selected = tmp_path / "selected.json"
-    selected.write_text('{"format":"probe.v1"}', encoding="utf-8")
+    selected.write_text('{"format":"probe"}', encoding="utf-8")
     node_id = presenter.add_logic(
         "artifact_consumer",
         artifact_inputs={"artifact_path": str(selected)},
@@ -1096,7 +1124,7 @@ def test_artifact_contract_resolves_once_and_passes_exact_typed_value(
         "artifact_path"
     ]
     assert resolved.path == selected.resolve()
-    assert resolved.value == {"format": "probe.v1"}
+    assert resolved.value == {"format": "probe"}
 
 
 def test_reading_in_photoelectrons_is_offered_only_when_the_camera_can(

@@ -42,6 +42,7 @@ __all__ = [
     "device_key_options",
     "finalize_logic_draft",
     "stable_signal_key",
+    "task_input_summary",
 ]
 
 
@@ -107,6 +108,8 @@ class LogicCandidate:
     previews: tuple = ()
     claims: tuple[DeviceClaim, ...] = ()
     reservation: LogicReservation | None = None
+    run_root: Path | None = None
+    input_summary: Mapping[str, object] = field(default_factory=dict)
 
     @property
     def waiting_for(self) -> tuple[str, ...]:
@@ -163,6 +166,44 @@ def stable_signal_key(node_id: str, output_name: str) -> str:
     """The stable signal spelling shared by stopped drafts and NodeHost."""
 
     return f"@logic/{str(node_id)}/{str(output_name)}"
+
+
+def task_input_summary(
+    descriptor: Any,
+    finalization: LogicDraftFinalization,
+) -> dict[str, object]:
+    """Descriptor-owned Start facts, without device objects or live data."""
+
+    artifacts = {
+        spec.name: {
+            "contract_id": str(spec.contract_id),
+            "path": str(finalization.artifacts[spec.name].path),
+        }
+        for spec in artifact_input_specs(descriptor)
+        if spec.name in finalization.artifacts
+    }
+    resources = {
+        spec.field_name: {
+            "contract_id": str(spec.contract_id),
+            "path": str(finalization.resources[spec.field_name].path),
+        }
+        for spec in descriptor.workspace_resources
+        if spec.field_name in finalization.resources
+    }
+    summary = {
+        "authored": dict(finalization.values),
+        "source_signal": finalization.source_signal or None,
+        "devices": {
+            requirement.argument_name: {
+                "instance_id": finalization.device_keys[requirement.argument_name],
+                "capability": requirement.capability_token,
+            }
+            for requirement in descriptor.device_requirements
+        },
+        "artifacts": artifacts,
+        "resources": resources,
+    }
+    return summary
 
 
 def dataset_inputs(descriptor: Any) -> tuple[Any, ...]:
@@ -572,7 +613,9 @@ def make_host(
         input_delivery=(
             str(inputs[0].delivery) if processor_input else None
         ),
-        required_artifact_names=tuple(
-            output.name for output in descriptor.artifact_outputs
-        ),
+        required_artifacts={
+            output.name: output.contract_id
+            for output in descriptor.artifact_outputs
+        },
+        task_name=str(descriptor.api_name),
     )

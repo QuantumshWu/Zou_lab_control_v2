@@ -37,6 +37,6 @@ if "%ZLC_PS_CONFIG%"=="" set "ZLC_PS_CONFIG=%FPGA_DIR%\board_config\streamer_con
 
 echo Reading config: %ZLC_PS_CONFIG%
 echo.
-%ZLC_PY_CMD% -m zou_lab_control_v2 fpga --config "%ZLC_PS_CONFIG%"
+%ZLC_PY_CMD% -m zou_lab_control fpga --config "%ZLC_PS_CONFIG%"
 set "ZLC_RC=%ERRORLEVEL%"
 exit /b %ZLC_RC%

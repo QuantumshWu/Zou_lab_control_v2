@@ -81,9 +81,6 @@ class _ManagerView:
     def set_templates(self, templates) -> None:
         self.templates = tuple(templates)
 
-    def set_installation_source(self, source, detail) -> None:
-        self.installation_source = (source, str(detail))
-
     def set_lifecycle(
         self,
         text: str,
@@ -168,13 +165,6 @@ def test_one_catalog_snapshot_drives_choices_unavailable_and_templates(tmp_path)
         tuple(manager.devices), simulation=manager.simulation
     ) == installation_config_from_template(
         catalog, "virtual"
-    )
-    camera = next(item for item in manager.devices if item.role == "camera")
-    manager.view.values[camera.instance_id]["exposure_seconds"] += 0.01
-    manager.view.parameter_committed.emit(camera.instance_id, "exposure_seconds")
-    assert manager.view.installation_source[0] is None, (
-        "a template name describes the complete canonical configuration, "
-        "not only its device type outline"
     )
 
 
@@ -350,7 +340,7 @@ def test_choice_projection_keeps_owner_labels_and_typed_values() -> None:
     assert schema.project_values({"binning": 2}) == {"binning": 2}
 
 
-def test_legacy_camera_owned_world_fields_are_reported_not_guessed(tmp_path) -> None:
+def test_installation_missing_required_fields_is_reported(tmp_path) -> None:
 
     path = tmp_path / "apparatus.json"
     path.write_text(
@@ -375,7 +365,7 @@ def test_legacy_camera_owned_world_fields_are_reported_not_guessed(tmp_path) -> 
 
     assert presenter.devices == []
     assert view.status[-1][0] == "error"
-    assert "root simulation" in view.status[-1][1]
+    assert "exactly" in view.status[-1][1]
     del presenter
 
 
@@ -410,7 +400,7 @@ def test_a_family_this_machine_cannot_build_is_named_with_its_reason(tmp_path, m
 def test_the_window_says_whether_the_file_has_what_is_on_screen(tmp_path) -> None:
     """"Can I close this?" is a question the window has to answer.
 
-    v1 kept a dot and a [*] in the header and recomputed both on every edit.
+    The compact header keeps a dot and a [*] and recomputes both on every edit.
     Here nothing said it at all: an apparatus edited and not saved looked
     exactly like one just opened, which is how an afternoon of wiring gets
     closed away.

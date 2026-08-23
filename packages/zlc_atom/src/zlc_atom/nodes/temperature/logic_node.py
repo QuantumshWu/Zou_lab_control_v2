@@ -125,7 +125,6 @@ def _build(
     signal_plane: object,
     calibration: ResolvedArtifact,
     pulse_resource: ResolvedWorkspaceResource,
-    artifact_directory: object,
     **values: object,
 ) -> TemperatureTask:
     authored = TEMPERATURE_SCHEMA.project_values(values)
@@ -158,7 +157,6 @@ def _build(
             else float(authored["exposure_seconds"])
         ),
         model_kind=readout_model_kind_from_choice(authored["model_kind"]),
-        artifact_directory=artifact_directory,
     )
 
 

@@ -44,34 +44,11 @@ def build(
 
     install_panel_sizes()
     import zlc_plot as plot
-    from zlc_plot.primitives import ImageFrame
-
-    from ..panel_spec import fitting_panel_spec
-    from ..panel_state import project_panel_state
     from ..viewer import FigureViewerPresenter
 
-    def make_host(plot_input, name: str, state):
-        # Which plot suits a dataset is a question about the dataset, and the
-        # saved schema answers it.  This window used to answer it itself, in a
-        # two-branch copy of a rule zlc_plot already owns per kind -- so a
-        # dataset that was neither a plain image nor a point table opened as an
-        # exception instead of a plot.  Asking zlc_plot means one answer.
-        snapshot = plot_input.snapshot if isinstance(plot_input, ImageFrame) else plot_input
-        kind = "" if state is None else state.kind
-        cell_kind = "" if state is None else state.cell_kind
-        spec = fitting_panel_spec(
-            snapshot.block.schema, kind, cell_kind
-        )
-        if spec is None:
-            raise ValueError(
-                f"nothing in {name!r} can be drawn as {kind or 'an inferred plot'}"
-            )
-        parameters: dict = {}
-        if state is not None:
-            spec, _semantic, parameters = project_panel_state(
-                snapshot.block.schema, spec, state
-            )
-        return plot.RasterPlotHost.from_plot(plot_input, spec, parameters=parameters)
+    def make_host(plot_input, name: str, recipe):
+        del name
+        return plot.open_figure_host(plot_input, recipe)
 
     return FigureViewerPresenter(
         view,

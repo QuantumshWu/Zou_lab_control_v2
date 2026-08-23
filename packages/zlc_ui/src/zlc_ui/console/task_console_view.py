@@ -1,7 +1,7 @@
-"""Pure v1-style TaskConsole chrome.
+"""TaskConsole chrome.
 
 The presenter still owns cards, logic rows and persistence.  This module only
-recreates the v1 window shell: the flat 48 px header, persistent status strip,
+builds the window shell: the flat 48 px header, persistent status strip,
 and the permanent ``Monitor`` / ``Logic`` tabs.
 """
 
@@ -36,9 +36,9 @@ from .status_strip import StatusStrip
 
 
 class TaskConsoleView(QtWidgets.QWidget):
-    """A presenter-friendly shell with the original v1 arrangement."""
+    """A presenter-friendly shell with the product arrangement."""
 
-    #: The v1 header has one combined chooser and one Add Panel button.  These
+    #: The header has one combined chooser and one Add Panel button.  These
     #: two signals are the typed result of that one visible action.
     add_panel_requested = QtCore.pyqtSignal(str)
     add_logic_requested = QtCore.pyqtSignal(str)
@@ -68,7 +68,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         outer.setContentsMargins(margin, margin, margin, margin)
         outer.setSpacing(window_pad(0.5))
 
-        # One semantic row, as in v1: identity on the left, telemetry as the
+        # One semantic row: identity on the left, telemetry as the
         # only flexible middle cell, and commands pinned to the right.  The
         # telemetry elides when space is tight; commands never wrap into a
         # second pseudo-toolbar whose alignment depends on label size hints.
@@ -91,7 +91,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         self._task_takeover = False
         self._panel_kind_choices: tuple[tuple[str, str], ...] = ()
         self._logic_kind_choices: tuple[tuple[str, str, str, str], ...] = ()
-        # v1's toolbar token: keep the full kind label and its arrow in the
+        # Keep the full kind label and its arrow in the
         # same fixed slot on every screen scale.
         self.kind_combo.setFixedWidth(scaled_px(170, minimum=130))
         self.add_panel_button = FluentButton("Add Panel", color=ACCENT)
@@ -129,7 +129,7 @@ class TaskConsoleView(QtWidgets.QWidget):
             header.addWidget(widget, 0, QtCore.Qt.AlignVCenter)
         outer.addWidget(header_frame)
 
-        # v1 keeps this status surface between the header and tabs.  It is not
+        # Keep this status surface between the header and tabs.  It is not
         # a bottom log panel and therefore never shifts the board vertically.
         self.status_strip = StatusStrip(action_text="Stop task")
         self.status_strip.action_clicked.connect(self.stop_task_requested.emit)
@@ -189,7 +189,7 @@ class TaskConsoleView(QtWidgets.QWidget):
         self.load_layout_button.clicked.connect(self.load_layout_requested.emit)
 
     def set_panel_kinds(self, kinds: tuple[tuple[str, str], ...], current: str = "") -> None:
-        """Replace the Plot entries in the combined v1 chooser."""
+        """Replace the Plot entries in the combined chooser."""
 
         self._panel_kind_choices = tuple(
             (str(key), str(label or key)) for key, label in kinds

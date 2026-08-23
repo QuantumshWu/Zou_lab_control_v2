@@ -1,4 +1,4 @@
-import zou_lab_control_v2
+import zou_lab_control
 
 import json
 import time
@@ -20,7 +20,7 @@ from zlc_atom.nodes.calibration import (
     TrapCalibration,
 )
 from zlc_runtime import NodeHost
-from zlc_workbench.archive import read_archive, read_dataset
+from zlc_data.figure_archive import read_archive, read_dataset
 from zlc_workbench.console import ConsolePresenter
 from zlc_workbench.logic import stable_signal_key
 from zlc_workbench.panel_catalog import task_console_fitting_spec
@@ -75,20 +75,6 @@ def _calibration(path: Path) -> TrapCalibration:
     )
     calibration.save(path)
     return calibration
-
-
-def _records(value) -> list[dict]:
-    found: list[dict] = []
-    if isinstance(value, dict):
-        if isinstance(value.get("node"), str):
-            found.append(value)
-        for child in value.values():
-            found.extend(_records(child))
-    elif isinstance(value, list):
-        for child in value:
-            found.extend(_records(child))
-    return found
-
 
 def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
     tmp_path, monkeypatch
@@ -288,22 +274,23 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
         restored = read_dataset(info, arrays, dataset_name)
         np.testing.assert_array_equal(restored.block.values, frozen_values)
 
-        panel_section = sections["panel"]
-        panel_state = panel_section.get("state", panel_section)
-        assert panel_state["kind"] == "image"
-        assert panel_state["fit"] == {"model": "anisotropic_gaussian_center"}
-        assert panel_state["overlay_signal"] == status_signal
-        assert sections["overlay"]["overlay_signal"] == status_signal
-        assert "calibration_path" not in sections["overlay"]
+        recipe = sections["plot"][dataset_name]
+        assert recipe["spec"]["kind"] == "image"
+        assert recipe["fit"] == {"model": "anisotropic_gaussian_center"}
+        assert sections["source"]["overlay_signal"] == status_signal
+        assert "calibration_path" not in sections["source"]
         # The rings themselves are IN the archive: geometry once, beside the
         # typed status Dataset view it projects.  No flattened
         # repeat/point status table is a second truth.
         assert set(arrays) >= {
-            "overlay.coordinates",
-            "overlay.status",
+            "data.overlay.coordinates",
+            "data.overlay.status",
         }
 
-        records = {record["node"]: record for record in _records(sections["run_chain"])}
+        records = {
+            node["record"]["node"]: node["record"]
+            for node in sections["lineage"]["nodes"]
+        }
         assert set(records) >= {"camera_measurement", "occupancy"}
         assert records["camera_measurement"]["named_devices"] == {"camera": "camera"}
         assert records["camera_measurement"]["device_snapshots"]["camera"][

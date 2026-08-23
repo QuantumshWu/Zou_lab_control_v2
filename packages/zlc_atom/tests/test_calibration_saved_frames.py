@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -23,16 +24,18 @@ from zlc_atom.nodes.calibration.task import (
     read_saved_samples,
 )
 from zlc_data import StreamGenerationId
-from zlc_data.figure_archive import read_archive, read_dataset
+from zlc_data.figure_archive import FIGURE_SCHEMA, read_archive, read_dataset
+from zlc_runtime import TaskRun
 from zlc_runtime.host import NodeHost
 from zlc_runtime.plane import SignalDataPlane
+from zlc_plot import read_figure_plot
 
 from tests.fakes import FakePlane
 from tests.pulse_fixture import IMAGING_PULSE_RESOURCE
 from test_installation_and_nodes import _calibration_request
 
 
-def _task(request: CalibrationRequest, directory: Path) -> CalibrationTask:
+def _task(request: CalibrationRequest) -> CalibrationTask:
     installation = create_installation("virtual")
     return CalibrationTask(
         camera=installation.device("camera"),
@@ -41,7 +44,6 @@ def _task(request: CalibrationRequest, directory: Path) -> CalibrationTask:
         pulse_sequence=IMAGING_PULSE_RESOURCE.value,
         pulse_path=IMAGING_PULSE_RESOURCE.path,
         signal_plane=FakePlane(),
-        artifact_directory=directory,
     )
 
 
@@ -61,12 +63,20 @@ def _sample_writer(folder: Path, *, run: str, generation: str) -> SampleWriter:
         1.0,
         "default",
     )
+    artifact_run = TaskRun(
+        folder.parent,
+        task_name="calibration",
+        instance_id="calibration",
+        input_summary={"run": run},
+    )
+    artifact_run.mark_running()
     return SampleWriter(
         folder,
         working_point=point,
         run_record={"run": run},
         generation=StreamGenerationId(generation),
         photoelectrons=False,
+        artifact_context=artifact_run,
     )
 
 
@@ -107,9 +117,9 @@ def test_saved_samples_are_written_as_they_arrive_and_calibrate_again(
     """
 
     request = replace(_calibration_request(repeats=12), save_frames=True)
-    first = _task(request, tmp_path).run()
+    first = _task(request).run(tmp_path)
 
-    folder = first.artifact_path.parent / "frames"
+    folder = first.artifact_path.parents[1] / "figures"
     archives = sorted(folder.glob("sample_*.npz"))
     pictures = sorted(folder.glob("sample_*.png"))
     assert len(archives) == 12
@@ -118,7 +128,13 @@ def test_saved_samples_are_written_as_they_arrive_and_calibrate_again(
     info, arrays = read_archive(archives[0])
     snapshot = read_dataset(info, arrays, "data")
     assert np.asarray(snapshot.block.values).shape[:2] == (1, 3)
-    assert info["sections"]["run_chain"], "the crop and exposure travel with the frames"
+    assert set(info["sections"]["plot"]) == {"data"}
+    reopened, recipe = read_figure_plot(info, arrays, "data")
+    assert reopened.block.schema == snapshot.block.schema
+    assert recipe["spec"].kind.value == "facet_grid"
+    assert info["sections"]["source"]["run_record"], (
+        "the crop and exposure travel with the frames"
+    )
     assert "panel" not in info["sections"], "Calibration must not copy Workbench panel state"
 
     # Read straight back: the same three frames per sample, in order.
@@ -141,8 +157,7 @@ def test_saved_samples_are_written_as_they_arrive_and_calibrate_again(
                 saved_frames_path=str(folder),
                 **changes,
             ),
-            tmp_path,
-        ).run()
+        ).run(tmp_path)
 
     replayed = replay()
     assert replayed.calibration.site_map.n_sites == first.calibration.site_map.n_sites
@@ -179,8 +194,8 @@ def test_a_replay_publishes_what_the_node_declares(tmp_path: Path) -> None:
     """
 
     request = replace(_calibration_request(repeats=6), save_frames=True)
-    acquired = _task(request, tmp_path).run()
-    folder = acquired.artifact_path.parent / "frames"
+    acquired = _task(request).run(tmp_path)
+    folder = acquired.artifact_path.parents[1] / "figures"
 
     plane = SignalDataPlane()
     host = None
@@ -192,7 +207,6 @@ def test_a_replay_publishes_what_the_node_declares(tmp_path: Path) -> None:
                 frame_source=FRAMES_FROM_FOLDER,
                 saved_frames_path=str(folder),
             ),
-            tmp_path,
         )
         task.signal_plane = plane
         host = NodeHost(
@@ -202,9 +216,12 @@ def test_a_replay_publishes_what_the_node_declares(tmp_path: Path) -> None:
             instance_id="calibration-replay",
             kind="task",
             dataset_output_declarations=CALIBRATION_LOGIC_NODE.outputs,
-            required_artifact_names=("artifact_path",),
+            required_artifacts={
+                "artifact_path": CALIBRATION_LOGIC_NODE.artifact_outputs[0].contract_id
+            },
+            task_name=CALIBRATION_LOGIC_NODE.api_name,
         )
-        host.start()
+        host.start(run_root=tmp_path, input_summary=request.to_dict())
         deadline = time.monotonic() + 120.0
         while time.monotonic() < deadline:
             host.poll()
@@ -228,12 +245,52 @@ def test_a_replay_publishes_what_the_node_declares(tmp_path: Path) -> None:
 
 
 def test_nothing_is_written_unless_the_operator_asks(tmp_path: Path) -> None:
-    result = _task(_calibration_request(repeats=8), tmp_path).run()
-    assert not (result.artifact_path.parent / "frames").exists()
+    task = _task(_calibration_request(repeats=8))
+    assert list(tmp_path.iterdir()) == []
+    result = task.run(tmp_path)
+    run_root = result.artifact_path.parents[1]
+    assert not tuple((run_root / "figures").glob("sample_*.npz"))
+
+    run = json.loads((run_root / "run.json").read_text())
+    assert run["status"]["state"] == "completed"
+    assert next(
+        item for item in run["artifacts"] if item["name"] == "artifact_path"
+    ) == {
+        "name": "artifact_path",
+        "path": "final/calibration.json",
+        "role": "final",
+        "contract_id": CALIBRATION_LOGIC_NODE.artifact_outputs[0].contract_id,
+        "size_bytes": result.artifact_path.stat().st_size,
+    }
+    summary = json.loads((run_root / "summary.json").read_text())
+    assert set(summary) == {
+        "format", "run", "models", "default_model", "best_model", "run_chain"
+    }
+    assert (run_root / "summary.txt").is_file()
+    figures = run_root / "figures"
+    for preview in sorted(figures.glob("*.png")):
+        archive = preview.with_suffix(".npz")
+        assert archive.is_file()
+        info, arrays = read_archive(archive)
+        assert info["schema"] == FIGURE_SCHEMA
+        assert set(info["sections"]["plot"]) == {"data"}
+        reopened, recipe = read_figure_plot(info, arrays, "data")
+        snapshot = getattr(reopened, "snapshot", reopened)
+        assert snapshot.block.values.size
+        assert recipe["spec"].kind.value in {"curve", "image", "facet_grid"}
+    registered = {item["path"]: item for item in run["artifacts"]}
+    for preview in figures.glob("*.png"):
+        assert registered[preview.relative_to(run_root).as_posix()]["contract_id"] == ""
+        assert (
+            registered[preview.with_suffix(".npz").relative_to(run_root).as_posix()][
+                "contract_id"
+            ]
+            == FIGURE_SCHEMA
+        )
 
 
 def test_calibration_run_result_deep_owns_nested_plain_truth(tmp_path: Path) -> None:
-    base = _task(_calibration_request(repeats=4), tmp_path).run()
+    base = _task(_calibration_request(repeats=4)).run(tmp_path)
     report = {
         "nested": {"values": [1, 2]},
         "array": np.asarray([3.0, 4.0]),
@@ -284,7 +341,10 @@ def test_a_folder_with_no_samples_says_so(tmp_path: Path) -> None:
         saved_frames_path=str(empty),
     )
     with pytest.raises(ValueError, match="no saved calibration samples"):
-        _task(request, tmp_path).run()
+        _task(request).run(tmp_path)
+    run = json.loads((tmp_path / "calibration" / "run.json").read_text())
+    assert run["status"]["state"] == "failed"
+    assert "no saved calibration samples" in run["error"]["message"]
 
 
 def test_calibrating_from_a_folder_needs_the_folder() -> None:

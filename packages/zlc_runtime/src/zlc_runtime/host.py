@@ -16,6 +16,7 @@ from .dataset_output import (
 from .owner_mailbox import RunOwnerMailbox
 from .plane import SignalDataPlane, SignalPublication, SignalValue
 from .streams import FollowTap, StreamEndedEarly
+from .task_run import TaskArtifact, TaskRun
 
 
 __all__ = [
@@ -23,6 +24,8 @@ __all__ = [
     "NodeExecutionContext",
     "NodeHost",
     "NodeProgress",
+    "TaskArtifact",
+    "TaskRun",
 ]
 
 
@@ -167,6 +170,32 @@ class NodeExecutionContext:
 
         self._host._report_progress(NodeProgress(message, current, total))
 
+    @property
+    def run_directory(self) -> Path:
+        """The directory durably allocated for this hosted Task run."""
+
+        directory = self._host.run_directory
+        if directory is None:
+            raise RuntimeError("only a hosted Task has a run directory")
+        return directory
+
+    def register_artifact(
+        self,
+        name: str,
+        path: str | Path,
+        *,
+        role: str,
+        contract_id: str = "",
+    ) -> TaskArtifact:
+        """Register one already-complete, run-contained domain artifact."""
+
+        return self._host._register_task_artifact(
+            name,
+            path,
+            role=role,
+            contract_id=contract_id,
+        )
+
 class NodeHost:
     """Host one worker or source-bound processor with one lifecycle surface."""
 
@@ -181,7 +210,8 @@ class NodeHost:
         dataset_output_declarations: Iterable[DatasetOutputDeclaration],
         input_signal: str | None = None,
         input_delivery: str | None = None,
-        required_artifact_names: Iterable[str] = (),
+        required_artifacts: Mapping[str, str] | None = None,
+        task_name: str | None = None,
         signal_namer: Callable[[str, str], str] | None = None,
     ) -> None:
         if not callable(getattr(data_plane, "freeze", None)):
@@ -244,12 +274,22 @@ class NodeHost:
         elif delivery is not None and delivery not in _INPUT_DELIVERIES:
             raise ValueError("worker input_delivery must be 'exact' or 'latest'")
 
-        artifacts = tuple(
-            canonical_text(value, "required artifact name")
-            for value in required_artifact_names
+        if required_artifacts is None:
+            required_artifacts = {}
+        if not isinstance(required_artifacts, Mapping):
+            raise TypeError("required_artifacts must be a mapping")
+        artifacts = {
+            canonical_text(name, "required artifact name"): canonical_text(
+                contract_id,
+                "required artifact contract",
+            )
+            for name, contract_id in required_artifacts.items()
+        }
+        selected_task_name = (
+            identity
+            if task_name is None
+            else canonical_text(task_name, "Task run name")
         )
-        if len(set(artifacts)) != len(artifacts):
-            raise ValueError("required artifact names must be unique")
 
         self._node = node
         self._mode = mode
@@ -258,7 +298,8 @@ class NodeHost:
         self._dataset_outputs = declarations
         self._source_signal = source_signal
         self._input_delivery = delivery
-        self._required_artifact_names = artifacts
+        self._required_artifacts = artifacts
+        self._task_name = selected_task_name
         self._data_plane = data_plane
         self._request_owner_wake = request_owner_wake
         self._signal_namer = signal_namer
@@ -292,6 +333,7 @@ class NodeHost:
         self._source_publication: SignalPublication | None = None
         self._terminal_source: SignalValue | None = None
         self._follow_tap: FollowTap[SignalPublication] | None = None
+        self._task_run: TaskRun | None = None
 
     @property
     def dataset_output_declarations(self) -> tuple[DatasetOutputDeclaration, ...]:
@@ -324,6 +366,16 @@ class NodeHost:
         return self._result is not _UNRESOLVED
 
     @property
+    def run_directory(self) -> Path | None:
+        run = self._task_run
+        return None if run is None else run.directory
+
+    @property
+    def artifacts(self) -> tuple[TaskArtifact, ...]:
+        run = self._task_run
+        return () if run is None else run.artifacts
+
+    @property
     def cancel_requested(self) -> bool:
         return self._stop_event.is_set()
 
@@ -345,7 +397,12 @@ class NodeHost:
             self._progress,
         )
 
-    def start(self) -> None:
+    def start(
+        self,
+        *,
+        run_root: str | Path | None = None,
+        input_summary: Mapping[str, object] | None = None,
+    ) -> None:
         if self._closed:
             raise RuntimeError("NodeHost is closed")
         if self._active:
@@ -355,8 +412,21 @@ class NodeHost:
         self._retire_plane_state()
         self._reset_generation()
         if self._mode == "processor":
+            if run_root is not None or input_summary is not None:
+                raise ValueError("only a Task start accepts run metadata")
             self._start_processor()
         else:
+            if self._kind == "task":
+                if run_root is None or input_summary is None:
+                    raise ValueError("a hosted Task start requires run_root and input_summary")
+                self._task_run = TaskRun.create(
+                    run_root,
+                    task_name=self._task_name,
+                    instance_id=self.instance_id,
+                    input_summary=input_summary,
+                )
+            elif run_root is not None or input_summary is not None:
+                raise ValueError("only a Task start accepts run metadata")
             self._start_worker()
 
     def _ensure_owner(self) -> RunOwnerMailbox:
@@ -380,6 +450,14 @@ class NodeHost:
             self._stop_reason = reason
             self._stop_event.set()
         self._phase = "stopping"
+        if self._task_run is not None:
+            try:
+                self._task_run.mark_stopping(reason)
+            except BaseException as record_error:
+                self._error = (
+                    "TaskRun stopping record failed: "
+                    f"{type(record_error).__name__}: {record_error}"
+                )
         if self._mode == "processor" and self._processor_path == "latest":
             idle = self._data_plane.cancel_latest_only_processor(self)
             self._plane_state = False
@@ -445,6 +523,7 @@ class NodeHost:
         self._source_publication = None
         self._terminal_source = None
         self._follow_tap = None
+        self._task_run = None
 
     def _start_worker(self) -> None:
         assert self._owner is not None
@@ -454,17 +533,20 @@ class NodeHost:
         self._active = True
         generation = self._owner.begin_generation()
         try:
+            if self._task_run is not None:
+                self._task_run.mark_running()
             self._owner.submit(
                 "execute",
                 self._execute_worker,
                 generation=generation,
             )
             self._phase = "running"
-        except BaseException:
+        except BaseException as error:
             self._active = False
             self._terminal = True
             self._phase = "failed"
-            self._error = "worker could not be submitted"
+            self._error = f"{type(error).__name__}: {error}"
+            self._mark_task_run_failed(error)
             self._retire_plane_state()
             raise
 
@@ -504,7 +586,7 @@ class NodeHost:
     def _finish_worker_cancelled(self) -> None:
         self._end_run("cancelled", None)
 
-    def _end_run(self, phase: str, error: str | None) -> None:
+    def _end_run(self, phase: str, error: BaseException | None) -> None:
         """How a run that did not succeed leaves the bench.
 
         Cancelled and failed differ in one thing, and it is the thing that
@@ -523,7 +605,10 @@ class NodeHost:
 
         kept = False
         terminal_phase = phase
-        terminal_error = error
+        terminal_exception = error
+        terminal_error_text = (
+            None if error is None else f"{type(error).__name__}: {error}"
+        )
         if phase == "cancelled" and self._live_commit_count:
             try:
                 self._seal_committed_plane_state(cut_short=True)
@@ -531,18 +616,32 @@ class NodeHost:
             except BaseException as seal_error:
                 kept = False
                 terminal_phase = "failed"
-                terminal_error = (
+                terminal_exception = RuntimeError(
                     "stopped partial Dataset could not be sealed: "
                     f"{type(seal_error).__name__}: {seal_error}"
                 )
+                terminal_error_text = str(terminal_exception)
         if not kept:
             self._retire_plane_state()
         self._result = _UNRESOLVED
         self._phase = terminal_phase
-        self._error = terminal_error
+        self._error = terminal_error_text
         self._progress = None
         self._active = False
         self._terminal = True
+        if self._task_run is not None:
+            try:
+                if terminal_phase == "cancelled":
+                    self._task_run.mark_stopped()
+                else:
+                    assert terminal_exception is not None
+                    self._task_run.mark_failed(terminal_exception)
+            except BaseException as record_error:
+                self._phase = "failed"
+                self._error = (
+                    "TaskRun terminal record failed: "
+                    f"{type(record_error).__name__}: {record_error}"
+                )
 
     def _finish_worker_success(self, result: object) -> None:
         try:
@@ -551,6 +650,11 @@ class NodeHost:
                 self._seal_committed_plane_state(
                     cut_short=self._worker_partial_seal
                 )
+            if self._task_run is not None:
+                if self._worker_stop_accepted:
+                    self._task_run.mark_stopped()
+                else:
+                    self._task_run.mark_completed()
         except BaseException as error:
             self._finish_worker_failure(error)
             return
@@ -570,7 +674,7 @@ class NodeHost:
         ):
             self._end_run("cancelled", None)
             return
-        self._end_run("failed", f"{type(error).__name__}: {error}")
+        self._end_run("failed", error)
 
     def _seal_worker_terminal(
         self,
@@ -618,30 +722,59 @@ class NodeHost:
             )
         if self._kind == "task" and not self._progress_reported:
             raise RuntimeError("hosted Task finished without reporting progress")
-        for name in self._required_artifact_names:
-            value = (
-                result.get(name)
-                if isinstance(result, Mapping)
-                else getattr(result, name, None)
-            )
-            if value is None:
+        for name, contract_id in self._required_artifacts.items():
+            run = self._task_run
+            artifact = None if run is None else run.artifact(name)
+            if artifact is None:
                 raise RuntimeError(
-                    f"node result lacks required artifact {name!r}"
+                    f"Task did not register required final artifact {name!r}"
                 )
-            if isinstance(value, str) and not value.strip():
+            if artifact.role != "final":
                 raise RuntimeError(
-                    f"required artifact {name!r} is an empty path"
+                    f"required artifact {name!r} must be registered as final"
                 )
-            try:
-                path = Path(value).expanduser().resolve()
-            except TypeError as error:
-                raise TypeError(
-                    f"required artifact {name!r} must be a filesystem path"
-                ) from error
-            if not path.is_file():
+            if artifact.contract_id != contract_id:
+                raise RuntimeError(
+                    f"required artifact {name!r} contract differs from {contract_id!r}"
+                )
+            if not artifact.path.is_file():
                 raise FileNotFoundError(
-                    f"required artifact {name!r} is not a file: {path}"
+                    f"registered final artifact {name!r} is missing: {artifact.path}"
                 )
+            if artifact.path.stat().st_size != artifact.size_bytes:
+                raise RuntimeError(
+                    f"registered final artifact {name!r} changed after registration"
+                )
+
+    def _register_task_artifact(
+        self,
+        name: str,
+        path: str | Path,
+        *,
+        role: str,
+        contract_id: str,
+    ) -> TaskArtifact:
+        run = self._task_run
+        if self._kind != "task" or run is None or not self._active:
+            raise RuntimeError("only an active hosted Task can register artifacts")
+        return run.register_artifact(
+            name,
+            path,
+            role=role,
+            contract_id=contract_id,
+        )
+
+    def _mark_task_run_failed(self, error: BaseException) -> None:
+        run = self._task_run
+        if run is None:
+            return
+        try:
+            run.mark_failed(error)
+        except BaseException as record_error:
+            self._error = (
+                f"{self._error}; TaskRun failure record failed: "
+                f"{type(record_error).__name__}: {record_error}"
+            )
 
     def _retire_plane_state(self) -> None:
         if not self._plane_state:
@@ -1036,6 +1169,12 @@ class NodeHost:
             raise TypeError("progress must be NodeProgress")
         if not self._active:
             raise RuntimeError("inactive node cannot report progress")
+        if self._task_run is not None:
+            self._task_run.report_progress(
+                progress.message,
+                current=progress.current,
+                total=progress.total,
+            )
         with self._start_lock:
             self._progress = progress
             self._progress_reported = True

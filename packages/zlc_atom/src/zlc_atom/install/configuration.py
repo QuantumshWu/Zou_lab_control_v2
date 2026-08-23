@@ -163,13 +163,6 @@ class InstallationConfig:
             raise TypeError("installation document must be a mapping")
         if value.get("format") != DOCUMENT_FORMAT:
             raise ValueError(f"unknown installation format {value.get('format')!r}")
-        if set(value) == {"format", "devices"}:
-            raise ValueError(
-                "legacy installation has no root simulation mapping; add "
-                "'simulation': {}, rename camera 'frame_shape_yx' to root "
-                "'simulation.image_shape_yx', and move grid_shape_yx, seed and "
-                "world_profile there"
-            )
         if set(value) != _DOCUMENT_KEYS:
             raise ValueError(f"an installation document has exactly {sorted(_DOCUMENT_KEYS)}")
         devices = value["devices"]

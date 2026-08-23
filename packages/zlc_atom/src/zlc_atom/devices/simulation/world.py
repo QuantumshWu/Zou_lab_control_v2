@@ -242,17 +242,12 @@ class SimulationWorldConfig:
             raise ValueError("simulation world profile must be a JSON object")
         allowed = {
             "format",
-            "version",
             "mot_field_optimum_dac",
             *_SIMULATION_FLOAT_FIELDS,
         }
         if set(payload) - allowed:
             raise ValueError("simulation world profile has unknown fields")
-        if (
-            payload.get("format") != _WORLD_PROFILE_FORMAT
-            or type(payload.get("version")) is not int
-            or payload["version"] != 1
-        ):
+        if payload.get("format") != _WORLD_PROFILE_FORMAT:
             raise ValueError("simulation world profile has an unsupported format")
         changes: dict[str, object] = {}
         for name in _SIMULATION_FLOAT_FIELDS:

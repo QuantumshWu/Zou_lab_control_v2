@@ -268,18 +268,13 @@ def test_npz_missing_cell_validity_member_is_rejected(tmp_path: Path):
         load_npz(malformed)
 
 
-@pytest.mark.parametrize("field, value", [("format", "other-format"), ("version", 99)])
-def test_npz_rejects_manifest_format_and_version_changes(
-    tmp_path: Path,
-    field: str,
-    value: object,
-):
+def test_npz_rejects_non_current_manifest_format(tmp_path: Path):
     original = tmp_path / "original.npz"
-    malformed = tmp_path / f"bad-{field}.npz"
+    malformed = tmp_path / "bad-format.npz"
     _write_npz(original, _snapshot())
     arrays = _archive_members(original)
     manifest = json.loads(str(arrays["manifest"].item()))
-    manifest[field] = value
+    manifest["format"] = "other-format"
     arrays["manifest"] = np.asarray(
         json.dumps(manifest, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     )
@@ -295,7 +290,11 @@ def test_npz_rejects_duplicate_manifest_json_keys(tmp_path: Path):
     _write_npz(original, _snapshot())
     arrays = _archive_members(original)
     manifest_text = str(arrays["manifest"].item())
-    duplicate = manifest_text.replace('"version":1', '"version":1,"version":1', 1)
+    duplicate = manifest_text.replace(
+        '"format":"zlc.dataset"',
+        '"format":"zlc.dataset","format":"zlc.dataset"',
+        1,
+    )
     assert duplicate != manifest_text
     arrays["manifest"] = np.asarray(duplicate)
     np.savez_compressed(malformed, **arrays)
@@ -339,7 +338,7 @@ def _figure_payload(members: dict[str, np.ndarray]) -> bytes:
     return stream.getvalue()
 
 
-def test_figure_archive_round_trip_validates_version_members_and_dataset_shape():
+def test_figure_archive_round_trip_validates_members_and_dataset_shape():
     snapshot = _snapshot(CellValidity(np.array([[True, False], [False, True]])))
     stream = _figure_stream(
         "strict figure",
@@ -350,97 +349,21 @@ def test_figure_archive_round_trip_validates_version_members_and_dataset_shape()
     info, arrays = read_archive(stream)
 
     assert info["schema"] == FIGURE_SCHEMA
-    assert info["version"] == 2
     assert set(info["members"]) == {"data", "data.validity", "trace"}
     assert set(arrays) == {"data", "data.validity", "trace"}
     assert read_dataset(info, arrays, "data").exactly_equals(snapshot)
 
 
-def test_figure_v1_migrates_only_exact_legacy_dataset_fields():
-    repeat = AxisSpec(AxisId("legacy.repeat"), "repeat", REPEAT, 2, (0, 1))
-    sites = PointColumn(
-        AxisId("legacy.site"), "site", SITE, PointColumn.TEXT, ("a", "b")
+@pytest.mark.parametrize("extra", ({"unexpected": 2}, {"schema": "not-zlc.figure"}))
+def test_figure_reader_rejects_non_current_roots(extra):
+    members = _figure_members(
+        _figure_stream("current", arrays={"trace": np.arange(2)}, sections={})
     )
-    schema = DatasetSchema(
-        repeat,
-        PointTable(2, (sites,)),
-        None,
-        ValueSchema.scalar(np.dtype("<f4")),
-    )
-    block = DataBlock(
-        BlockId("legacy-block"),
-        DatasetRevision(2),
-        np.arange(4, dtype="<f4").reshape(schema.physical_shape),
-        VALID,
-        schema,
-    )
-    source = OwnedSnapshot(block.ref(StreamGenerationId("legacy-generation")), block)
-    stored: dict[str, np.ndarray] = {}
-    manifest = snapshot_manifest(source, stored, values_key="data")
-    manifest["ref"].pop("schema_fingerprint")
-
-    def without_labels(value):
-        if isinstance(value, dict):
-            result = {key: without_labels(item) for key, item in value.items()}
-            if result.get("schema") in ("zlc_data.AxisSpec", "zlc_data.PointColumn"):
-                result.pop("coordinate_labels")
-            return result
-        if isinstance(value, list):
-            return [without_labels(item) for item in value]
-        return value
-
-    legacy_info = {
-        "schema": "zlc.figure/v1",
-        "name": "legacy figure",
-        "sections": {"dataset": {"data": without_labels(manifest)}},
-    }
-    stream = BytesIO()
-    np.savez_compressed(
-        stream,
-        info=np.asarray(json.dumps(legacy_info, separators=(",", ":"))),
-        **stored,
-    )
-    stream.seek(0)
-
-    info, arrays = read_archive(stream)
-
-    assert info["schema"] == FIGURE_SCHEMA
-    assert info["version"] == 2
-    assert info["members"] == {
-        "data": {"dtype": "<f4", "shape": list(source.block.values.shape)}
-    }
-    assert read_dataset(info, arrays, "data").exactly_equals(source)
-
-    empty_member = BytesIO()
-    np.savez_compressed(
-        empty_member,
-        info=np.asarray(json.dumps(legacy_info)),
-        **{"": np.zeros(1, dtype="|i1")},
-    )
-    empty_member.seek(0)
-    with pytest.raises(ValueError, match="member names must be non-empty"):
-        read_archive(empty_member)
-
-    legacy_info["unexpected"] = True
-    malformed = BytesIO()
-    np.savez_compressed(
-        malformed,
-        info=np.asarray(json.dumps(legacy_info)),
-        **stored,
-    )
-    malformed.seek(0)
-    with pytest.raises(ValueError, match="legacy figure metadata keys mismatch"):
-        read_archive(malformed)
-
-    object_member = BytesIO()
-    np.savez_compressed(
-        object_member,
-        info=np.asarray(json.dumps(legacy_info)),
-        data=np.asarray([object()], dtype=object),
-    )
-    object_member.seek(0)
-    with pytest.raises(ValueError, match="legacy figure metadata keys mismatch"):
-        read_archive(object_member)
+    info = json.loads(str(members["info"].item()))
+    info.update(extra)
+    members["info"] = np.asarray(json.dumps(info, sort_keys=True))
+    with pytest.raises(ValueError, match="metadata keys mismatch|unsupported figure format"):
+        read_archive(BytesIO(_figure_payload(members)))
 
 
 def test_figure_writer_preplans_snapshot_member_namespace():
@@ -508,16 +431,12 @@ def test_figure_writer_rejects_unknown_or_lossy_metadata(bad):
         )
 
 
-@pytest.mark.parametrize(
-    "field,value",
-    (("schema", "other-format"), ("version", 99)),
-)
-def test_figure_reader_rejects_wrong_format_or_version(field, value):
+def test_figure_reader_rejects_wrong_format():
     members = _figure_members(
         _figure_stream("format", arrays={"trace": np.arange(2)}, sections={})
     )
     info = json.loads(str(members["info"].item()))
-    info[field] = value
+    info["schema"] = "other-format"
     members["info"] = np.asarray(json.dumps(info, sort_keys=True))
 
     with pytest.raises(ValueError, match="unsupported figure format"):
@@ -568,7 +487,7 @@ def test_figure_reader_rejects_duplicate_keys_and_nonfinite_metadata():
         _figure_stream("metadata", arrays={"trace": np.arange(2)}, sections={})
     )
     text = str(members["info"].item())
-    duplicate = text.replace('"version":2', '"version":2,"version":2', 1)
+    duplicate = text.replace('"schema":"zlc.figure"', '"schema":"zlc.figure","schema":"zlc.figure"', 1)
     assert duplicate != text
     members["info"] = np.asarray(duplicate)
     with pytest.raises(ValueError, match="duplicate metadata key"):

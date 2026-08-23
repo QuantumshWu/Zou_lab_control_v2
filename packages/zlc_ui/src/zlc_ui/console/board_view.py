@@ -184,7 +184,7 @@ class ConsoleBoardView(QtWidgets.QWidget):
         # not reflow the remaining cards or paint a dashed insertion ghost.
 
     def _card_drag_moved(self, card: PanelCardView, local_point: tuple[int, int]) -> None:
-        # Kept as a signal seam for presenters; v1 does no live board layout
+        # Kept as a signal seam for presenters; no live board layout runs
         # work while the pointer is down.
         return None
 

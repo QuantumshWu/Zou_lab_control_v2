@@ -1,9 +1,10 @@
-"""Where saved work lands: a save root, a folder per calendar day, unique names.
+"""Where saved work lands: a save root, calendar days, and unique names.
 
-The owner's rule is that everything saved on a given day sits together under a
-folder named for that day -- ``<save_root>/2026_08_05/`` -- with no per-run
-subdirectory.  A physicist looks for today's data by today's date, so the date
-IS the organising key.
+Everything saved on a given day starts under a folder named for that day --
+``<save_root>/2026_08_05/``.  An ordinary Save can allocate a unique file there;
+a long-running Task can allocate a unique directory there and own everything
+inside it.  A physicist still finds the work by date, while one Task run remains
+one copyable and failure-retaining unit.
 
 Date routing lives here, beside atomic writing and escape-safe path resolution,
 because they are one concern: deciding where a file goes and putting it there

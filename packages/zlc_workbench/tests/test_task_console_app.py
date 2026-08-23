@@ -90,7 +90,7 @@ def _run_app(
     """Run one app only after this checkout's product bootstrap is imported."""
 
     script = (
-        "import zou_lab_control_v2\n"
+        "import zou_lab_control\n"
         f"from zlc_workbench.apps import {app} as tested_module\n"
         "print(tested_module.__file__)\n"
         f"raise SystemExit(tested_module.main({arguments!r}))\n"
@@ -253,7 +253,7 @@ def test_app_build_installs_the_plot_size_policy(
 ) -> None:
     if app_name == "task_console":
         completed = _run_script(
-            "import zou_lab_control_v2\n"
+        "import zou_lab_control\n"
             "import zlc_ui.board.panel_geometry as geometry\n"
             "before = geometry.panel_display_size('2x2')\n"
             "import zlc_workbench\n"
@@ -529,6 +529,7 @@ def test_formal_panel_save_keeps_qt_live_and_close_waits_for_archive_and_render(
     from zlc_workbench.apps.task_console import create_window
     from zlc_workbench.panel_state import PanelFrozenData
     import zlc_workbench.panel_save as panel_save_module
+    import zlc_plot.figure_artifact as figure_module
 
     application = ensure_qt_app(["panel-save-worker"])
     window = create_window(
@@ -567,14 +568,14 @@ def test_formal_panel_save_keeps_qt_live_and_close_waits_for_archive_and_render(
     save_release = Event()
     target = workspace / "formal-save.png"
     archive = target.with_suffix(".npz")
-    real_write = panel_save_module.write_figure_file
+    real_write = figure_module.atomic_write_file
 
     def gated_write(*args, **kwargs):
         writer_started.set()
         assert writer_release.wait(5.0)
         return real_write(*args, **kwargs)
 
-    monkeypatch.setattr(panel_save_module, "write_figure_file", gated_write)
+    monkeypatch.setattr(figure_module, "atomic_write_file", gated_write)
 
     def configure(**configuration):
         assert configuration["fit"] == {"model": "gaussian_offset"}
@@ -587,11 +588,11 @@ def test_formal_panel_save_keeps_qt_live_and_close_waits_for_archive_and_render(
         assert save_release.wait(5.0)
         Path(path).write_bytes(b"png")
 
-    presenter._make_host = lambda _snapshot, _state: SimpleNamespace(
+    monkeypatch.setattr(figure_module, "build_figure_host", lambda *_args, **_kwargs: SimpleNamespace(
         configure=configure,
         save=save,
         close=lambda: None,
-    )
+    ))
     turns: list[bool] = []
     heartbeat = QtCore.QTimer()
     heartbeat.setInterval(5)
@@ -667,7 +668,7 @@ def test_the_pulse_editor_opens_the_pulse_it_is_told_to(workspace) -> None:
     write_ordinary_pulse(workspace)
     environment = _subprocess_environment()
     script = (
-        "import zou_lab_control_v2\n"
+        "import zou_lab_control\n"
         "from zlc_workbench.apps import pulse_editor as tested_module\n"
         "print(tested_module.__file__)\n"
         f"raise SystemExit(tested_module.main(['--workspace', {str(workspace)!r}, "
@@ -704,7 +705,7 @@ def test_a_launcher_started_from_its_own_folder_still_finds_the_experiment(works
     deep.mkdir(parents=True)
 
     script = (
-        "import zou_lab_control_v2\n"
+        "import zou_lab_control\n"
         "from zlc_workbench.apps import task_console as tested_module\n"
         "print(tested_module.__file__)\n"
         "raise SystemExit(tested_module.main(['--template', 'virtual', '--check']))\n"
@@ -752,11 +753,11 @@ def test_the_pulse_editor_opens_where_there_is_no_experiment_at_all(tmp_path) ->
 
 
 def test_task_console_opens_empty_and_adds_only_a_stopped_camera_draft(workspace) -> None:
-    """The v1-style combined Add Panel control reaches both endpoints."""
+    """The combined Add Panel control reaches both current endpoints."""
 
     environment = _subprocess_environment()
     script = """import time
-import zou_lab_control_v2
+import zou_lab_control
 from zlc_ui import ensure_qt_app
 application = ensure_qt_app([])
 from PyQt5 import QtCore, QtTest
@@ -846,7 +847,7 @@ def test_task_takeover_and_live_preview_follow_the_real_buttons(workspace) -> No
 
     environment = _subprocess_environment()
     script = """import time
-import zou_lab_control_v2
+import zou_lab_control
 from PyQt5 import QtCore, QtTest
 from zlc_ui import ensure_qt_app
 from zlc_workbench.apps import task_console as tested_module
@@ -922,7 +923,7 @@ print('TASK_TAKEOVER_PREVIEW_OK')
     assert "TASK_TAKEOVER_PREVIEW_OK" in completed.stdout
 
 
-def test_calibration_terminal_writes_six_images_without_report_panels(
+def test_calibration_terminal_writes_six_figure_pairs_without_report_panels(
     workspace,
 ) -> None:
     """The Task owns its files; Workbench only owns the live preview."""
@@ -934,8 +935,8 @@ def test_calibration_terminal_writes_six_images_without_report_panels(
     )
 
     environment = _subprocess_environment()
-    script = """import zou_lab_control_v2
-print(zou_lab_control_v2.__file__)
+    script = """import zou_lab_control
+print(zou_lab_control.__file__)
 import time
 from pathlib import Path
 from PyQt5 import QtCore, QtTest
@@ -996,24 +997,23 @@ for _ in range(20):
 
 artifact_row = presenter.logic['calibration'].artifact_results[0]
 artifact_path = Path(artifact_row['path'])
-report_root = artifact_path.parent / 'report'
+run_root = artifact_path.parents[1]
+figure_root = run_root / 'figures'
+stems = ('site_map', 'fidelity', 'box', 'psf', 'uniform_psf', 'psf_kernels')
 expected_report_files = {
-    report_root / f'{stem}.png'
-    for stem in (
-        'site_map', 'fidelity', 'box', 'psf', 'uniform_psf', 'psf_kernels'
-    )
+    figure_root / f'{stem}{suffix}'
+    for stem in stems
+    for suffix in ('.npz', '.png')
 }
 until(lambda: all(
     path.is_file() and path.stat().st_size > 0
     for path in expected_report_files
 ))
-assert {path.name for path in report_root.iterdir()} == {
-    'site_map.png', 'fidelity.png', 'box.png', 'psf.png',
-    'uniform_psf.png', 'psf_kernels.png',
-    # The report holds the numbers as well as the pictures: which model
-    # won, at what fidelity, and how the two errors split.
-    'summary.json', 'summary.txt',
+assert {path.name for path in figure_root.iterdir()} == {
+    f'{stem}{suffix}' for stem in stems for suffix in ('.npz', '.png')
 }
+assert (run_root / 'summary.json').is_file()
+assert (run_root / 'summary.txt').is_file()
 
 first_artifact_path = artifact_path
 QtTest.QTest.mouseClick(editor.start_button, QtCore.Qt.LeftButton)
@@ -1096,9 +1096,9 @@ def test_device_controls_open_on_demand_over_the_one_experiment_session(workspac
     """Init opens only Console; loaded-card Control owns every device window."""
 
     environment = _subprocess_environment()
-    script = """import zou_lab_control_v2
+    script = """import zou_lab_control
 from zlc_workbench.apps import task_console as tested_module
-print(zou_lab_control_v2.__file__)
+print(zou_lab_control.__file__)
 print(tested_module.__file__)
 from PyQt5 import QtCore, QtTest
 from zlc_ui import ensure_qt_app
@@ -1276,7 +1276,7 @@ print('SHARED_EXPERIMENT_FLOW')
 def test_live_device_close_and_reopen_preserve_session_and_unchanged_devices(
     workspace,
 ) -> None:
-    script = r"""import zou_lab_control_v2
+    script = r"""import zou_lab_control
 from PyQt5 import QtCore, QtTest
 from zlc_ui import ensure_qt_app
 from zlc_workbench.apps import task_console as tested_module
@@ -1346,9 +1346,9 @@ print('LIVE_DEVICE_RECONCILE_OK')
 def test_generic_device_tune_keeps_qt_live_and_refuses_false_close(workspace) -> None:
     script = """import time, threading
 from types import SimpleNamespace
-import zou_lab_control_v2
+import zou_lab_control
 from zlc_workbench.apps import task_console as tested_module
-print(zou_lab_control_v2.__file__)
+print(zou_lab_control.__file__)
 print(tested_module.__file__)
 from PyQt5 import QtCore, QtTest
 from zlc_atom.authoring import AuthoringField

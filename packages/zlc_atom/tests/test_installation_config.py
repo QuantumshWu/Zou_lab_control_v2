@@ -128,8 +128,8 @@ def test_a_document_that_is_not_ours_is_refused(tmp_path) -> None:
         load_installation_config(path)
 
 
-def test_legacy_camera_owned_world_configuration_is_refused(tmp_path) -> None:
-    path = tmp_path / "legacy.json"
+def test_an_installation_without_simulation_is_refused(tmp_path) -> None:
+    path = tmp_path / "missing-simulation.json"
     path.write_text(
         json.dumps(
             {
@@ -146,7 +146,7 @@ def test_legacy_camera_owned_world_configuration_is_refused(tmp_path) -> None:
         ),
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="root simulation"):
+    with pytest.raises(ValueError, match="exactly"):
         load_installation_config(path)
 
 

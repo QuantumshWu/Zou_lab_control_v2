@@ -91,7 +91,7 @@ def test_geometry_header_regenerates_through_the_documented_package_command(tmp_
         [
             sys.executable,
             "-m",
-            "zou_lab_control_v2",
+            "zou_lab_control",
             "fpga",
             "--emit-geometry-vh",
             str(output),
@@ -247,5 +247,5 @@ def test_fpga_launchers_use_the_package_wire_cli() -> None:
     assert "fpga.pulse_streamer.host" not in estimate
     # Both hardware wrappers use the installed product manifest command; no
     # launcher imports a layer module or mutates PYTHONPATH.
-    assert "zou_lab_control_v2 fpga" in build
-    assert "zou_lab_control_v2 fpga" in estimate
+    assert "zou_lab_control fpga" in build
+    assert "zou_lab_control fpga" in estimate

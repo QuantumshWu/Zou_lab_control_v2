@@ -30,8 +30,7 @@ from .validity import (
 )
 
 
-_FORMAT = "zlc-data-role-axis-npz"
-_VERSION = 1
+_FORMAT = "zlc.dataset"
 _MANIFEST = "manifest"
 _VALUES = "values"
 _VALIDITY = "validity"
@@ -131,7 +130,6 @@ def snapshot_manifest(
     arrays[values_key] = snapshot.block.values
     return {
         "format": _FORMAT,
-        "version": _VERSION,
         "schema": dataset_schema_to_tree(snapshot.block.schema),
         "ref": dataset_revision_ref_to_tree(snapshot.ref),
         "values_key": values_key,
@@ -165,19 +163,11 @@ def snapshot_from_manifest(
         raise NPZFormatError("manifest root must be an object")
     _exact_keys(
         manifest,
-        {"format", "version", "schema", "ref", "values_key", "validity"},
+        {"format", "schema", "ref", "values_key", "validity"},
         "manifest",
     )
-    if (
-        manifest["format"] != _FORMAT
-        or isinstance(manifest["version"], bool)
-        or not isinstance(manifest["version"], int)
-        or manifest["version"] != _VERSION
-    ):
-        raise NPZFormatError(
-            f"unsupported data format {manifest['format']!r} "
-            f"version {manifest['version']!r}"
-        )
+    if manifest["format"] != _FORMAT:
+        raise NPZFormatError(f"unsupported data format {manifest['format']!r}")
     referenced: set[str] = set()
     schema = dataset_schema_from_tree(manifest["schema"])
     ref_tree = dict(manifest["ref"])

@@ -23,7 +23,7 @@ echo ZLC - %ZLC_COMMAND%
 echo Interpreter: %ZLC_PY_CMD%
 echo Started in:  %CD%
 echo ============================================================
-%ZLC_PY_CMD% -m zou_lab_control_v2 %ZLC_COMMAND% %*
+%ZLC_PY_CMD% -m zou_lab_control %ZLC_COMMAND% %*
 set "ZLC_STATUS=%ERRORLEVEL%"
 if not "%ZLC_STATUS%"=="0" (
   echo.

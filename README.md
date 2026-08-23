@@ -1,7 +1,8 @@
 # Zou Lab Control
 
 Neutral-atom experiment control shipped as one Python distribution with eight
-internal dependency layers.
+internal dependency layers. The distribution bootstrap is `zou_lab_control`;
+the internal packages remain the eight `zlc_*` dependency boundaries.
 
 ## Install one product
 
@@ -66,12 +67,12 @@ Virtual and physical devices use the same descriptor/catalog/NodeHost/session
 path:
 
 ```text
-Calibration Task -> calibration JSON + report images
+Calibration Task -> run folder + calibration JSON + typed report Figures
 Camera Measurement -> canonical frames Dataset
 Occupancy Processor(frames + Calibration) -> counts/occupied/judged frame
 SLM Editor -> strict Target/Science Context -> explicit Send
-SLM Feedback(Calibration + Science Context + pulse + exposure) -> completed/stalled Context
-Panel -> matching data/fit/overlay -> archive-first Save Fig
+SLM Feedback(Calibration + Science Context + pulse + exposure) -> report + final Context
+Panel -> matching data/fit/overlay -> data-backed Figure + PNG preview
 ```
 
 Task Console, Device Control, Pulse Editor and SLM Editor share one
@@ -88,6 +89,12 @@ active+latest solve and atomically show matching data/fit revisions. The three
 save actions stay separate: Save Layout writes stopped wiring, Save Screenshot
 writes a GUI image, and Panel Save Fig writes only that panel's frozen data/image
 plus actual run/device provenance.
+
+Every hosted Task allocates its unique run folder only when execution actually
+starts. An atomically replaced `run.json` records inputs, progress, registered
+artifacts, terminal status and failure. Tasks save only curated domain outputs;
+Runtime does not dump all live data or intermediate shots. Calibration,
+Temperature and SLM Feedback use this same lifecycle.
 
 ### Camera and qCMOS
 
@@ -112,11 +119,12 @@ host and port. The server is the sole DVI/USB output owner. DVI exact-raster is
 the default and does not load the vendor DLL; USB is selected explicitly. The
 trusted-lab-LAN proxy has no TLS/authentication and must not be exposed publicly.
 
-Target v2 stores intensity/objective. Science Context v2 stores the frozen
+Target stores intensity/objective. Science Context stores the frozen
 Target, numeric pupil, Pattern/base phase, operator wavefront, correction
 reference and command receipt. Loading/saving artifacts never writes hardware;
 only explicit Send or the Feedback task's own confirmed apply establishes a
-known command.
+known command. Both formats are strict current-only and carry no numeric format
+version; unsupported files are refused.
 
 Calibration remains an SLM-independent camera/readout artifact and supplies only
 registered site BOX geometry to Feedback. Feedback uses one canonical single-
@@ -128,6 +136,14 @@ floor. Every next acquisition requires a confirmed different phase. The task
 runs all authored updates (12 by default), then keeps the best measured
 candidate; it has no built-in uniformity magic-number stop and no hidden retry or
 validation batch.
+
+Feedback stores a stable site table and curated per-candidate BOX samples,
+fit/classification, weights, actions, metrics, phase-change facts and command
+receipts. It does not save raw camera frames, full per-candidate phase rasters,
+or duplicate a complete Science Context per candidate. Its summary and six important plots cover uniformity, site signals,
+weights, selected-site histograms, initial/selected camera means and
+initial/selected phases. Each plot is a `zlc.figure` NPZ plus same-stem PNG;
+normal completion or Stop produces one final Science Context.
 
 The virtual plant uses one commanded-phase Fourier trap roster, one shared
 non-symmetric imaging PSF and a fixed apparatus aberration independent of Target
@@ -152,10 +168,16 @@ and `packages/zlc_pulse/fpga/README.md`.
 
 ## Persistence and notebook
 
-Figure writer emits v2; its one reader migrates the exact supported v1 grammar
-and rejects unknown formats. Calibration writer emits
-`zlc.calibration.readout/v1`; its owner migrates only the two known unversioned
-roots without inventing missing statistics.
+Figure uses stable `zlc.figure`; Calibration uses
+`zlc.calibration.readout`; Pulse uses `zlc.pulse`; Target uses `zlc.slm.target`;
+Science Context uses `zlc.slm.science-context`. Readers accept only the current
+complete grammar. Existing workspace files are not converted and may be outside
+the current grammar; formats have no alias or numeric version.
+
+A Figure NPZ is the primary artifact and contains typed Dataset data, exact Plot
+recipe, overlay, viewport and causal lineage. PNG is only its preview.
+FigureViewer reopens that recipe through the same Plot host path as TaskConsole;
+it never guesses plot semantics from array shape.
 
 The only supported tutorial is
 `packages/zlc_workbench/notebooks/usage.ipynb`. It uses the installed product, a
@@ -168,10 +190,10 @@ output or execution count.
 Automated release lanes run from a fresh wheel outside the checkout:
 
 ```powershell
-zlc evidence software --repo C:\path\to\Zou_lab_control_v2
-zlc evidence gui_offscreen --repo C:\path\to\Zou_lab_control_v2
-zlc evidence virtual_vertical --repo C:\path\to\Zou_lab_control_v2
-zlc evidence notebook_offline --repo C:\path\to\Zou_lab_control_v2
+zlc evidence software --repo C:\path\to\Zou_lab_control
+zlc evidence gui_offscreen --repo C:\path\to\Zou_lab_control
+zlc evidence virtual_vertical --repo C:\path\to\Zou_lab_control
+zlc evidence notebook_offline --repo C:\path\to\Zou_lab_control
 ```
 
 `real_screen` and `hardware` are manual-only; the CLI reports them as
@@ -195,6 +217,7 @@ pass/fail.
 | `zlc_atom` | device plugins and atom-science nodes | Workbench composition |
 | `zlc_workbench` | session/composition/device claims/layout | plugin science or second pipelines |
 
-`ARCHITECTURE_DESIGN.md` records final invariants. `IMPLEMENTATION_PLAN.md`
-records the current M7 checkpoint, evidence already obtained, pending final
-lanes, and explicit experiment-machine acceptance boundary.
+`ARCHITECTURE_DESIGN.md` records current product invariants.
+`IMPLEMENTATION_PLAN.md` records the active implementation checkpoint, pending
+current-tree verification, retained hardware build evidence and explicit
+experiment-machine acceptance boundary.

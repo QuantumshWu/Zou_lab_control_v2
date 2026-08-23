@@ -125,7 +125,6 @@ module zlc_pulse_streamer_top #(
     localparam integer R_TOTAL_WORDS = R_DELAY_BASE + R_DELAY_WORDS;
 
     // CTRL regfile word offsets (== host.image.CtrlWords).
-    localparam integer C_MAGIC = 0;
     localparam integer C_COMMAND = 1;   // bit0 LOAD bit1 FIRE bit2 RESET bit3 SAFE
     localparam integer C_STATUS = 2;    // bit0 LOADED bit1 RUNNING bit2 DONE bit3 ERROR bit4 UNDERFLOW
     localparam integer C_PROG_COUNT = 3;

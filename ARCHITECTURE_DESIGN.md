@@ -1,8 +1,8 @@
-# Zou Lab Control v2 — Approved Target Architecture
+# Zou Lab Control — Current Product Architecture
 
-状态：`FINAL SOFTWARE PRODUCT / IMPLEMENTED`。Real-screen、camera、SLM、optical与FPGA board acceptance仍是明确的实验机runbook，不由software evidence代替。
+状态：`CURRENT PRODUCT AUTHORITY`。Real-screen、camera、SLM、optical与FPGA board acceptance仍是明确的实验机runbook，不由software evidence代替。
 
-本文只定义最终产品不变量，不保存历史commit、旧测试数字或阶段日志。当前验证证据和未执行的实验机验收只看`IMPLEMENTATION_PLAN.md`。
+本文只定义当前产品不变量。当前验证证据和未执行的实验机验收只看`IMPLEMENTATION_PLAN.md`。
 
 ## 1. Authority与原则
 
@@ -13,12 +13,12 @@
 3. `IMPLEMENTATION_PLAN.md`当前Checkpoint；
 4. 当前代码与实验事实。
 
-Package README、旧GOAL、survey、acceptance、历史contract和旧tests不是目标规格；它们在Milestone 1中删除或按当前产品重写。
+所有活文档只描述当前产品；Git记录不构成产品规格。
 
 总体原则：
 
 - 保留八层骨架，删除平行truth和单消费者framework；
-- 默认删，不为旧测试、兼容或“以后可能”保留历史路径；
+- 默认删，不保留unsupported path或“以后可能”使用的抽象；
 - 每个事实只有一个owner；
 - 优先扩展现有Data、Plane、Host、Session和device骨架，不新增manager/registry/base-class；
 - Workbench不得import或分支判断`zlc_atom.nodes.<concrete_leaf>`；它只消费discovered descriptor、Runtime signal与Data/Plot等中立层拥有的通用contract。新增/删除普通Logic Node的修改必须闭合在该leaf目录、资源与测试内；只有新增真正跨节点能力时，才先在中立层定义contract。
@@ -55,9 +55,11 @@ Package README、旧GOAL、survey、acceptance、历史contract和旧tests不是
 
 - 一个writer、一个reader、一个format owner。
 - Writer写入前规划全部member namespace并拒绝碰撞。
-- Reader在解释内容前严格验证format/version、required members、shape、duplicates和non-finite metadata。
+- Reader在解释内容前严格验证format、required members、shape、duplicates和non-finite metadata。
 - 未知metadata类型拒绝，不自动字符串化。
-- 当前writer只写Figure v2；reader只迁移精确`zlc.figure/v1`根和其缺失的Dataset label字段，member dtype/shape从实际NPY推导，其它legacy/unknown格式仍拒绝。
+- Figure只使用稳定`zlc.figure`格式，无数字版本；reader只接受当前完整grammar，其它root或缺失字段均loud拒绝。
+- Figure NPZ是可重绘的数据真相，包含typed Dataset、exact PlotSpec、完整normalized parameters、overlay、viewport和exact causal lineage graph；PNG只是同stem preview。
+- FigureViewer按保存的recipe恢复typed plot input，并和TaskConsole使用同一个Plot host/configure路径；不得按array shape重新猜plot kind。Lineage以root、event nodes和direct parent IDs保存，并投影成树。
 - Dataset/Figure encoder只写caller-owned binary IO；路径原子发布唯一属于`zlc_durable`。
 
 ### 3.3 Durable paths
@@ -112,7 +114,17 @@ Node new chunk
 - Concrete Logic Node不得要求Workbench识别其模块、output spelling或domain helper；通用显示/overlay/selection能力由中立层contract表达，Workbench只路由contract。
 - 通用discovery test必须走真实NodeHost、SignalDataPlane和preview contract。
 
-### 4.4 Task运行中冻结
+### 4.4 TaskRun与durable artifacts
+
+- 只有实际`Start`进入NodeHost worker时才分配唯一run directory；打开Editor、draft validation或build failure不得留下空run。
+- 每个run在任何不可逆工作前原子写`run.json`。它是run identity、normalized inputs、状态、latest progress、artifact inventory、terminal result和failure的唯一lifecycle记录。
+- Task只保存由domain owner挑选的重要、可复算或不可替代artifact；Runtime不得自动dump live Dataset、全部shot或所有中间状态。
+- Artifact必须先完整原子写入run directory，再按semantic contract注册；`run.json`只列已存在、已注册的文件。声明的final artifact未注册时Task不得成功。
+- Run根保存`run.json`与summary；domain final进入`final/`，重要图进入`figures/`，精选candidate/site数据进入`data/`。
+- Figure始终成对保存：同stem `zlc.figure` NPZ为primary data artifact，PNG为无science contract的preview。Calibration、Temperature和SLM Feedback遵守同一TaskRun规则。
+- Stop保留已完成的精选artifact和明确partial状态；failure保留错误、last progress、已注册artifact与rollback outcome。进程异常终止留下非terminal `run.json`，不得清理或伪装成功。
+
+### 4.5 Task运行中冻结
 
 冻结：Add Logic Node、当前Node source/preview signal、overlay binding、scope/reduction/fate以及冲突硬件配置。
 
@@ -158,7 +170,7 @@ Node new chunk
 - Pulse Stop UI立即进入Stopping；Stop/SAFE高优先级并可取消普通wait/transport，hardware ack后台完成。
 - Timeout显示真实错误但不冻结UI；未确认前不能显示Safe。
 - Form reconcile必须按当前schema重建dependency graph。
-- PanelState decoder、owner wake和产品Figure save各只有一个实现。
+- PanelState decoder只接受当前完整grammar；owner wake和产品Figure save各只有一个实现。
 
 ## 7. Pulse、Camera、Remote与FPGA
 
@@ -213,8 +225,8 @@ Node new chunk
 
 ### 8.2 Context与artifacts
 
-- Target v2保存intensity和objective，只是Editor authoring import/export artifact，不是run consumer的第二Target truth。
-- Science Context v2保存run的唯一strict frozen Target、numeric pupil、Pattern/base、operator wavefront和system correction引用；Editor的v2 Load是一次atomic adopt。v1只允许显式migration为`target=None`的authoring input，Feedback必须拒绝。Candidate Context保存实际evolving Target，可直接作为下一run的唯一Context input。
+- Target使用稳定`zlc.slm.target` strict格式保存intensity和objective，只是Editor authoring import/export artifact，不是run consumer的第二Target truth。
+- Science Context使用稳定`zlc.slm.science-context` strict格式保存run的唯一frozen Target、numeric pupil、Pattern/base、operator wavefront和system correction引用；Editor Load是一次atomic adopt。Reader只接受当前完整Context，其它root或缺失字段均loud拒绝。
 - Command receipt保存USB/profile/wavelength/orientation/correction/outcome。
 - `SystemCorrectionArtifact`明确区分pupil phase map与target response map；不得把per-geometry site weights冒充通用wavefront correction。
 
@@ -222,41 +234,46 @@ Node new chunk
 
 - 保留sparse WGS-Kim、fixed far-field phase、selected DFT和caller-owned optimizer state。
 - Inner solve走到canonical numerical gate，不为省几十毫秒增加physical candidate。
-- Feedback mode是leaf-owned显式字段；当前唯一mode为`qcmos_bright_dark`。Pulse由operator显式选择；camera exposure是独立、可见、可编辑的authored字段，默认`0.1 s`。Task不从Pulse或Calibration猜exposure，也不做Pulse/exposure科学“兼容性”判断。
+- Feedback mode是leaf-owned显式字段；当前唯一mode为`qcmos_bright_dark`。Pulse由operator显式选择；camera exposure是独立、可见、可编辑的authored字段，默认`0.1 s`。Task不从Pulse或Calibration猜exposure，也不自动判断Pulse/exposure的科学一致性。
 - 当前mode复用canonical Camera Measurement `repeat=N`，每cycle严格一张camera frame；preview与估计读取同一sealed Dataset，不另写camera average或三帧reference判据。
 - Calibration只提供Target→camera注册所需的site centers、BOX半宽/积分方式和frame坐标几何；Feedback不读取其dark/bright/threshold、exposure、photoelectron mode、camera identity或readout working-point provenance。实际camera requested/actual exposure、effective unit与conversion进入本run metadata；saturation只由本次actual raw integer maximum转换到本次effective unit判断。
 - 每个site使用本candidate唯一一批authored shots的raw BOX值选择单高斯或双高斯；能返回有限fit即为valid，只有数值失败才hold。双高斯observable为`bright_mean-dark_mean`；单高斯结合本批dark基线与per-site历史判为dark-only或bright-only。
-- Controller保存每site的归一化Target share、bright-dark、fit选择、动作、局部`d log C / d log share`及dark/loaded边界。dark-only按用户`single_gaussian_boost`保证绝对份额增加；loaded按用户`feedback_gain`只作相对配平并受`maximum_weight_change`限制；invalid保持实际份额。历史边界形成loading floor，归一化不得把site压到floor以下。
-- mode、Pulse、exposure或任一控制参数变化时不复用旧响应历史；用户要求的dark增幅若在固定总功率下不可行，静默缩到本轮最大可行值。
+- Controller保存每site的归一化Target share、bright-dark、fit选择、动作、局部`d log C / d log share`及dark/loaded边界。dark-only按用户`single_gaussian_boost`保证绝对份额增加；loaded按用户`feedback_gain`只作相对配平并受`maximum_weight_change`限制；invalid保持实际份额。累计边界形成loading floor，归一化不得把site压到floor以下。
+- mode、Pulse、exposure或任一控制参数变化时丢弃prior response state；用户要求的dark增幅若在固定总功率下不可行，静默缩到本轮最大可行值。
 - 默认每candidate为100 shots、12次update；每个phase严格一批shots，下一批前必须确认不同phase。正常运行完成全部authored updates后选择全site ratio最低的candidate；没有内置ratio停止阈值。Stop保留最佳已测candidate，置信区间只作记录，不触发额外采集。
 - Feedback取得SLM后自己apply并确认frozen Science Context phase，并在shot前发布该phase；Context receipt是provenance，不要求operator事先Send/Save。normal terminal与Stop只从完整测量过的candidate中保留最佳/最可观测状态，异常failure恢复Context起始phase。
+- Feedback run只保存精选candidate数据：stable site table、每candidate BOX shot×site samples、fit/classification、Target/control weights、update action、metrics、phase-change fact和command receipt；完整phase只保留initial/selected Figure与唯一final Context，不保存raw camera frames，也不为每candidate重复完整Context。
+- Feedback summary同时提供机器可读JSON和人读文本，明确initial/selected uniformity、confidence、observable sites、common-site total brightness、selected candidate、Stop/failure与rollback。
+- Feedback重要图固定为`uniformity_history`、`site_signal_evolution`、`weight_evolution`、`selected_site_histograms`、`camera_initial_selected`和`phase_initial_selected`；每张都保存typed Figure NPZ与PNG preview。正常或Stop终态只写一个final Science Context。
 - Sparse-only contract明确；dense Gaussian/Flat Top先修算法定义和early stop，再profile CPU，不引GPU。
 
 ## 9. Calibration、Scan与Simulation
 
-- 不重设计Calibration对外流程、主要artifact、默认raw policy或三帧report。
+- Calibration保持既有科学流程、当前artifact和三帧preview。
 - 允许不改变外部行为的dependency解耦、明确corruption修复和内存优化。
 - Calibration只产生与SLM无关的camera/readout artifact，UI和Task都不接受Science Context。SLM Feedback在同时拿到Calibration与Context后做Target X/Y→camera X/Y直接正向注册，并为未观测site生成predicted BOX；不枚举翻转、旋转或轴交换。
 - BOX model仍为Calibration/Occupancy持久化自己的readout事实；Feedback只取BOX geometry。未观测Target site由注册产生predicted BOX，并与实测site一起接受本次run的双高斯估计，不伪造Calibration dark/bright样本。
-- Calibration writer固定`format="zlc.calibration.readout", version=1`；reader只迁移两套精确unversioned root。不可恢复的dark/bright统计保持NaN/count0/varianceNaN，阈值分类可继续但Feedback必须loud拒绝。
+- Calibration只使用稳定`format="zlc.calibration.readout"`，无数字版本；reader只接受当前完整grammar，alternate root或缺失统计均loud拒绝。
+- Calibration run保存final JSON、summary JSON/text及精选报告图；每张报告图都有可由FigureViewer重开的typed Figure NPZ，PNG仅为preview。默认不保存全部raw frames；operator显式请求时才保存采样数据。
+- Temperature使用同一TaskRun lifecycle，保存final JSON、summary和生存率typed Figure/PNG，不建立第二套run管理。
 - Scan正常完成、Stop或失败都默认restore pre-run device values。
 - SimulationWorld保持一个类和一个state owner，不拆层。
 - SimulationWorld的物理site只有当前SLM phase经共同pupil illumination、共同low-order wavefront aberration和FFT得到的dominant local peaks这一份动态roster；trap位置、强度、occupancy与Camera位置不得再拆成nominal/extra双状态。所有peaks经过同一个Fourier→camera affine；fluorescence imaging使用一个由共同imaging pupil/aberration生成的shared非对称PSF，不存在逐site随机gain/ellipse/angle/skew。Probe为红失谐，正的trap light-shift参数只把detuning进一步推红，因此occupied bright-dark随trap depth单调下降；loading probability随depth上升。Camera shot真实混合dark/bright population，Feedback不得读取hidden depth/occupancy truth。
 - 默认plant的全部不均匀度必须来自FFT前同一个固定pupil amplitude/wavefront phase；该world wavefront与SLM command、Target和grid完全独立，并在每次propagation中始终相加。不得使用grid-resonant phase、target-specific correction或far-field site/field gain。默认nominal depth固定为520 µK；固定20 µK cooling温度下，低于500 µK的trap不load，超过阈值后按一个cooling-temperature尺度指数趋近全局loading ceiling。因nominal本身贴近实验loading edge，普通光学不均匀在不同grid中都会让至少约10% sites不可见，不得按某个grid反推nominal或由测试手改Target weight；`bright-dark`继续由现有probe参数决定。
-- Apparatus root `simulation`是image/grid geometry、seed与profile的唯一持久化owner；virtual qCMOS只声明camera事实并消费world image geometry，virtual MOT保持独立的camera geometry。旧的camera-owned world字段不保留双owner或静默migration，必须loud refusal并给出root grammar。
+- Apparatus root `simulation`是image/grid geometry、seed与profile的唯一持久化owner；virtual qCMOS只声明camera事实并消费world image geometry，virtual MOT保持独立的camera geometry。非当前grammar必须loud拒绝且不能形成第二owner。
 - Simulation参数在init前通过单一API/immutable config确定；workspace-relative profile必须在任何device factory前解析且保持在workspace内，Device Manager Init不运行时改写。
 - Tests使用config override，不修改public mutable world attributes；hidden truth不泄漏给production算法。
 
 ## 10. Deployment、Evidence与Docs
 
-- 一个可安装`zou-lab-control` distribution，内部八层不独立发wheel或版本。
+- 一个可安装`zou-lab-control` distribution，bootstrap package为`zou_lab_control`；内部八层不独立发wheel或维护版本。
 - 根`pyproject.toml`是唯一product manifest，`constraints.txt`是唯一resolved dependency surface，`zlc`是唯一console entry并从manifest加载commands/layers/evidence。
 - Wheel必须包含bootstrap、八层、Calibration/Scan templates、SLM profile、Plot font及完整有效FPGA RTL/XDC/Tcl assets；installed environment check按distribution RECORD验证归属。
 - 正式evidence lanes：software、gui_offscreen、virtual_vertical、notebook_offline、real_screen和hardware runbooks。
 - Mock/virtual/offscreen证据不得冒充真hardware/optical acceptance。
-- Root Architecture只保存目标不变量；Implementation Plan只保存当前Checkpoint、milestone状态和最新证据。
-- 旧package GOAL、survey、acceptance和历史contracts删除或重写；不在活文档尾部追加修补记录。
+- Root Architecture只保存目标不变量；Implementation Plan只保存当前Checkpoint和最新证据。
+- 活文档保持current-only，不在尾部追加change log或修补记录。
 
 ## 11. 当前实现状态
 
-上述software product不变量已实现；精确wheel、fresh-install、lane与全树结果见`IMPLEMENTATION_PLAN.md`。任何未执行的real-screen/hardware/optical步骤必须继续标为`UNEXECUTED`。
+当前tree正在按上述不变量完成无版本strict persistence与统一TaskRun收口；当前验证状态见`IMPLEMENTATION_PLAN.md`。任何未执行的real-screen/hardware/optical步骤必须继续标为`UNEXECUTED`。

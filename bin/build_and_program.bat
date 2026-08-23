@@ -3,7 +3,6 @@ setlocal EnableExtensions EnableDelayedExpansion
 
 if /I not "%~1"=="--inner" (
   set "ZLC_ACTION=build + program"
-  if /I "%~1"=="--check" set "ZLC_ACTION=synth check"
   if /I "%~1"=="--diagnose" set "ZLC_ACTION=hardware diagnose"
   if /I "%~1"=="--build-only" set "ZLC_ACTION=build"
   if /I "%~1"=="--program-only" set "ZLC_ACTION=program"
@@ -46,15 +45,13 @@ set "ZLC_OPTION_OK="
 if "%~1"=="" set "ZLC_OPTION_OK=1"
 if "%~1"=="--help" goto zlc_help
 if "%~1"=="/?" goto zlc_help
-if /I "%~1"=="--check" (set "MODE=check"& set "ZLC_OPTION_OK=1")
 if /I "%~1"=="--diagnose" (set "MODE=diagnose"& set "ZLC_OPTION_OK=1")
 if /I "%~1"=="--build-only" (set "MODE=build"& set "ZLC_OPTION_OK=1")
 if /I "%~1"=="--program-only" (set "MODE=program"& set "ZLC_OPTION_OK=1")
 if /I "%~1"=="--flash" (set "MODE=flash"& set "ZLC_OPTION_OK=1")
-rem --force-build / --rebuild: rebuild even if the sources are unchanged (default mode otherwise
+rem --force-build rebuilds even if the sources are unchanged (default mode otherwise
 rem skips the build and programs the existing bitstream when nothing changed).
 if /I "%~1"=="--force-build" (set "ZLC_FORCE_BUILD=1"& set "ZLC_OPTION_OK=1")
-if /I "%~1"=="--rebuild" (set "ZLC_FORCE_BUILD=1"& set "ZLC_OPTION_OK=1")
 if not defined ZLC_OPTION_OK (
   echo Unknown option: %~1
   echo.
@@ -103,7 +100,7 @@ if errorlevel 1 exit /b 1
 
 rem Skip the slow synth+implementation when a bitstream and its routed reports already match
 rem every recorded source/artifact input.  Default mode still PROGRAMS that qualified bit;
-rem --build-only / --check stop after proving it current.
+rem --build-only stops after proving the bitstream current.
 call :zlc_check_prebuilt
 if not defined ZLC_FORCE_BUILD if defined ZLC_PREBUILT (
   echo ZLC bitstream is up to date ^(sources unchanged since last build^) -- skipping build.
@@ -121,7 +118,6 @@ if errorlevel 1 exit /b 1
 
 if /I "%MODE%"=="build_program" goto zlc_program
 if /I "%MODE%"=="build" exit /b 0
-if /I "%MODE%"=="check" exit /b 0
 
 :zlc_program
 echo ZLC FPGA pulse streamer: program FINAL bitstream
@@ -139,7 +135,6 @@ echo   bin\build_and_program.bat --force-build Rebuild, then PROGRAM volatile FP
 echo   bin\build_and_program.bat --build-only Build only
 echo   bin\build_and_program.bat --program-only Program existing bitstream (VOLATILE: lost on power-off)
 echo   bin\build_and_program.bat --flash      Program the SPI flash so the program SURVIVES a power cycle
-echo   bin\build_and_program.bat --check      Build only (alias of --build-only)
 echo   bin\build_and_program.bat --diagnose   List Vivado hw targets/devices
 echo.
 echo --program-only loads the VOLATILE FPGA config (lost when the board powers off).  --flash writes
@@ -151,7 +146,7 @@ echo.
 echo The default mode SKIPS the (slow) synth+impl only when the Vivado build, target part,
 echo engine/top HDL, create tcl, board XDC, streamer_config and generated geometry all match,
 echo and the bitstream plus routed reports match their saved receipt; it then PROGRAMS that bit.
-echo --force-build ^(or --rebuild^) forces a rebuild before programming.  The qualified build receipt
+echo --force-build forces a rebuild before programming.  The qualified build receipt
 echo is fpga\build\ps\.zlc_src_hash.
 echo.
 echo Real build XDC:
@@ -235,7 +230,7 @@ rem Hardware projection must come from the one installed distribution. Running
 rem from a neutral directory prevents this checkout's bootstrap or a neighboring
 rem standalone layer from masking a missing or stale product install.
 pushd "%TEMP%"
-%ZLC_PY_CMD% -m zou_lab_control_v2 check
+%ZLC_PY_CMD% -m zou_lab_control check
 set "ZLC_PRODUCT_STATUS=!ERRORLEVEL!"
 popd
 if not "!ZLC_PRODUCT_STATUS!"=="0" (
@@ -252,7 +247,7 @@ if not exist "%ZLC_CFG_JSON%" (
   exit /b 1
 )
 pushd "%TEMP%"
-%ZLC_PY_CMD% -c "import dataclasses,json,pathlib,sys;import zou_lab_control_v2;from zlc_pulse.fpga import load_streamer_config;from zlc_pulse.wire import StreamerParams;p=pathlib.Path(sys.argv[1]).resolve();pairs=lambda x:dict(x) if len(x)==len(dict(x)) else (_ for _ in ()).throw(ValueError('duplicate key in streamer_config.json'));raw=json.loads(p.read_text(encoding='utf-8'),object_pairs_hook=pairs,parse_constant=lambda x:(_ for _ in ()).throw(ValueError('non-finite JSON constant '+x)));top={'_README','_field_docs','fpga_part','clock_hz','target_pct','params','board'};expected={f.name for f in dataclasses.fields(StreamerParams)}|{'slot_mul_width'};assert isinstance(raw,dict) and set(raw)==top,'streamer_config.json fields are not exact';assert isinstance(raw['params'],dict) and set(raw['params'])==expected,'streamer_config.json params fields are not exact';assert isinstance(raw['board'],dict),'streamer_config.json board must be an object';assert isinstance(raw['fpga_part'],str) and raw['fpga_part'].strip(),'fpga_part must be non-empty text';cfg=load_streamer_config(p);assert cfg['source'] is not None and pathlib.Path(cfg['source']).resolve()==p,'build config fell back from the requested file';assert not cfg['warnings'],'; '.join(cfg['warnings']);print(cfg['fpga_part'])" "%ZLC_CFG_JSON%"
+%ZLC_PY_CMD% -c "import dataclasses,json,pathlib,sys;import zou_lab_control;from zlc_pulse.fpga import load_streamer_config;from zlc_pulse.wire import StreamerParams;p=pathlib.Path(sys.argv[1]).resolve();pairs=lambda x:dict(x) if len(x)==len(dict(x)) else (_ for _ in ()).throw(ValueError('duplicate key in streamer_config.json'));raw=json.loads(p.read_text(encoding='utf-8'),object_pairs_hook=pairs,parse_constant=lambda x:(_ for _ in ()).throw(ValueError('non-finite JSON constant '+x)));top={'_README','_field_docs','fpga_part','clock_hz','target_pct','params','board'};expected={f.name for f in dataclasses.fields(StreamerParams)}|{'slot_mul_width'};assert isinstance(raw,dict) and set(raw)==top,'streamer_config.json fields are not exact';assert isinstance(raw['params'],dict) and set(raw['params'])==expected,'streamer_config.json params fields are not exact';assert isinstance(raw['board'],dict),'streamer_config.json board must be an object';assert isinstance(raw['fpga_part'],str) and raw['fpga_part'].strip(),'fpga_part must be non-empty text';cfg=load_streamer_config(p);assert cfg['source'] is not None and pathlib.Path(cfg['source']).resolve()==p,'build config fell back from the requested file';assert not cfg['warnings'],'; '.join(cfg['warnings']);print(cfg['fpga_part'])" "%ZLC_CFG_JSON%"
 set "ZLC_CONFIG_STATUS=%ERRORLEVEL%"
 popd
 if not "%ZLC_CONFIG_STATUS%"=="0" (
@@ -301,11 +296,11 @@ rem NOT >nul 2>nul.  The generic "failed to derive FPGA geometry" below is
 rem worth nothing on its own -- the reason is whatever Python printed, and
 rem throwing it away is the same mistake that hid "python is not recognized"
 rem behind an empty source hash for months.
-%ZLC_PY_CMD% -m zou_lab_control_v2 fpga --config "%ZLC_CFG_JSON%" --emit-geometry-vh "%STREAMER_DIR%\zlc_geometry.vh" >nul
+%ZLC_PY_CMD% -m zou_lab_control fpga --config "%ZLC_CFG_JSON%" --emit-geometry-vh "%STREAMER_DIR%\zlc_geometry.vh" >nul
 if errorlevel 1 goto zlc_emit_geom_fail
 if "%ZLC_PS_GEOM_TCL%"=="" (
   set "ZLC_GEOM_OUT=%ZLC_PS_BUILD_ROOT%\geom.tcl"
-  %ZLC_PY_CMD% -m zou_lab_control_v2 fpga --config "%ZLC_CFG_JSON%" --emit-geom-tcl "!ZLC_GEOM_OUT!" >nul
+  %ZLC_PY_CMD% -m zou_lab_control fpga --config "%ZLC_CFG_JSON%" --emit-geom-tcl "!ZLC_GEOM_OUT!" >nul
   if errorlevel 1 goto zlc_emit_geom_fail
   set "ZLC_PS_GEOM_TCL=!ZLC_GEOM_OUT!"
 )
@@ -421,7 +416,7 @@ exit /b 0
 set "ZLC_EST_PART=%ZLC_PS_FPGA_PART%"
 if "%ZLC_EST_PART%"=="" set "ZLC_EST_PART=xc7a35tfgg484-2"
 pushd "%TEMP%"
-%ZLC_PY_CMD% -m zou_lab_control_v2 fpga --part "%ZLC_EST_PART%"
+%ZLC_PY_CMD% -m zou_lab_control fpga --part "%ZLC_EST_PART%"
 popd
 exit /b 0
 

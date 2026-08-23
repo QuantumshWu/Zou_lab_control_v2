@@ -37,9 +37,9 @@ from zlc_atom.nodes.calibration.calibration import classify_threshold
 # source-index history is an explicit declaration used by fit/selection outputs,
 # not an implicit property of being a Processor.
 OCCUPANCY_OUTPUTS = (
-    DatasetOutputDeclaration("counts", "occupancy.counts.v1"),
+    DatasetOutputDeclaration("counts", "occupancy.counts"),
     DatasetOutputDeclaration("occupied", IMAGE_POINT_OVERLAY_CONTRACT),
-    DatasetOutputDeclaration("frame_judged", "occupancy.frame_judged.v1"),
+    DatasetOutputDeclaration("frame_judged", "occupancy.frame_judged"),
 )
 
 

@@ -27,6 +27,7 @@ from .selection_bridge import (
     selection_output_catalog,
 )
 from .host import NodeHost
+from .task_run import TaskArtifact, TaskRun
 
 __all__ = (
     "BoardScheduler",
@@ -43,6 +44,8 @@ __all__ = (
     "SignalPublication",
     "SignalDescription",
     "NodeHost",
+    "TaskArtifact",
+    "TaskRun",
     "SelectionBridge",
     "SelectionChange",
     "SelectionRange",

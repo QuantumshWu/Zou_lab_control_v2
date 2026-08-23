@@ -39,7 +39,6 @@ DEFAULT_HOST = "127.0.0.1"
 #: down three other places instead: the server prints 30 in the connect
 #: example it hands operators, the apparatus device passes 30, and the
 #: client class defaulted to 5 -- which is the one the pulse editor got.
-#: v1 waited 120 for the same conversation.
 DEFAULT_REQUEST_TIMEOUT = 30.0
 
 #: How long a client waits to REACH the server at all.  A different

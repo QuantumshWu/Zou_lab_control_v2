@@ -7,9 +7,8 @@ The RTL detects commands on a rising edge and never clears COMMAND itself:
 
 So writing the same command code twice in a row produces no edge and the board
 silently ignores the second one -- while the host still starts its observer and
-reports a normal DoneReport.  The standalone host shipped without the
-return-to-zero that the v1 host always wrote, which killed every fire after the
-first one in a repeated-fire acquisition loop.
+reports a normal DoneReport.  A host without the return-to-zero kills every
+fire after the first one in a repeated-fire acquisition loop.
 
 These tests replay the recorded COMMAND writes through the RTL's own edge rule,
 so they fail for exactly the reason the board would go quiet.
@@ -358,8 +357,8 @@ def test_replaying_a_scan_table_re_arms_the_banks_at_point_zero() -> None:
     assert transport.read_word(CtrlWords.BANK_READY) == 0b11
 
 
-def test_load_drives_v1_physical_safe_before_the_image_and_load_strobe() -> None:
-    """The v1 prepare order is SAFE, clocks-off/readback, SAFE, image, LOAD.
+def test_load_drives_physical_safe_before_the_image_and_load_strobe() -> None:
+    """The prepare order is SAFE, clocks-off/readback, SAFE, image, LOAD.
 
     Each strobe is its OWN transaction now, after the data it acts on has been
     acknowledged.  A frame the link loses is sent again, and a command must

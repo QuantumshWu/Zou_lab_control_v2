@@ -715,7 +715,7 @@ class ExperimentSession:
     # ------------------------------------------------------------------ pulse
 
     def load_pulse(self, name: str) -> Mapping[str, Any]:
-        """Compile and apply the named workspace ``zlc.pulse.v1`` JSON pulse."""
+        """Compile and apply the named workspace ``zlc.pulse`` JSON pulse."""
 
         path = self.workspace.pulse(name)
         if not path.is_file():

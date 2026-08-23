@@ -24,10 +24,10 @@ else:
     sys.path.insert(0, str(REPO_ROOT))
 
 # Deliberately the first product import in the verification process.
-import zou_lab_control_v2  # noqa: E402
+import zou_lab_control  # noqa: E402
 
-if INSTALLED and REPO_ROOT in Path(zou_lab_control_v2.__file__).resolve().parents:
-    raise RuntimeError("installed evidence imported zou_lab_control_v2 from the checkout")
+if INSTALLED and REPO_ROOT in Path(zou_lab_control.__file__).resolve().parents:
+    raise RuntimeError("installed evidence imported zou_lab_control from the checkout")
 if INSTALLED:
     # Windows spawn must be able to unpickle pytest's importlib-mode module
     # name (packages.<layer>.tests...). Append, never prepend: site-packages

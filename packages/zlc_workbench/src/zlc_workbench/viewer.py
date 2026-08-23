@@ -21,19 +21,14 @@ grep for.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from zlc_plot import DEFAULTS
+from zlc_plot import DEFAULTS, read_figure_plot
 
-from .archive import read_archive, read_dataset
-from .panel_save import (
-    restore_panel_plot_input,
-    restore_panel_viewport,
-)
-from .panel_state import PanelState
+from zlc_data.figure_archive import read_archive
 
 
 __all__ = ["ArchiveDescription", "FigureViewerPresenter", "describe_archive"]
@@ -54,6 +49,7 @@ class ArchiveDescription:
     #: key is the archive's own name for it; the label is what it IS, taken
     #: from the panel record that was saved beside it.
     datasets: tuple[tuple[str, str], ...]
+    lineage: tuple[tuple[str, tuple], ...]
 
     @property
     def dataset_keys(self) -> tuple[str, ...]:
@@ -67,66 +63,38 @@ def describe_archive(
     """Project one archive's info document into rows a person can read."""
 
     sections = info.get("sections", {})
-    provenance = sections.get("provenance", {})
-    def _label(key: str) -> str:
-        entry = _panel_record(sections, key)
-        if not isinstance(entry, Mapping):
-            return key
-        title = str(entry.get("title") or "").strip()
-        signal = str(entry.get("signal") or "").strip()
-        if title and signal and title != signal:
-            return f"{title} — {signal}"
-        return title or signal or key
-
-    keys = tuple(sections.get("dataset", {}))
-    datasets = tuple((key, _label(key)) for key in keys)
+    if not isinstance(sections, Mapping) or set(sections) != {
+        "dataset", "plot", "lineage", "source"
+    }:
+        raise ValueError("FigureViewer requires dataset, plot, lineage, and source sections")
+    source = sections["source"]
+    if not isinstance(source, Mapping):
+        raise TypeError("figure source section must be an object")
+    keys = tuple(sections["dataset"])
+    title = str(source.get("title") or "").strip()
+    signal = str(source.get("signal") or "").strip()
+    label = f"{title} — {signal}" if title and signal and title != signal else title or signal
+    datasets = tuple((key, label or key) for key in keys)
+    recipes = {key: read_figure_plot(info, arrays, key)[1] for key in keys}
+    lineage = _lineage_tree(sections["lineage"])
     return ArchiveDescription(
         name=str(info.get("name", "")),
         schema=str(info.get("schema", "")),
         datasets=datasets,
+        lineage=lineage,
         tabs=(
-            ("Plot", _plot_rows(sections, arrays, keys)),
-            ("Measurement", _measurement_rows(sections, provenance)),
-            ("Device", _device_rows(provenance)),
-            ("Flow", _flow_rows(sections, provenance)),
+            ("Plot", _plot_rows(arrays, recipes)),
+            ("Measurement", _lineage_rows(sections["lineage"])),
+            ("Device", ()),
+            ("Flow", ()),
             ("Raw", _flatten(sections)),
         ),
     )
 
 
-def _panel_record(
-    sections: Mapping[str, Any],
-    dataset: str,
-) -> Mapping[str, Any] | None:
-    """Return the panel record which explicitly names ``dataset``."""
-
-    panel = sections.get("panel", {})
-    if not isinstance(panel, Mapping):
-        return None
-    if str(panel.get("dataset", "")) == str(dataset):
-        state = panel.get("state")
-        return state if isinstance(state, Mapping) else panel
-    record = panel.get(str(dataset))
-    return record if isinstance(record, Mapping) else None
-
-
-def _panel_state(
-    sections: Mapping[str, Any],
-    dataset: str,
-) -> PanelState | None:
-    panel = sections.get("panel", {})
-    if not isinstance(panel, Mapping) or str(panel.get("dataset", "")) != str(dataset):
-        return None
-    document = panel.get("state")
-    if not isinstance(document, Mapping):
-        return None
-    return PanelState.from_document(document)
-
-
 def _plot_rows(
-    sections: Mapping[str, Any],
     arrays: Mapping[str, Any],
-    datasets: Sequence[str],
+    recipes: Mapping[str, Mapping[str, object]],
 ) -> Rows:
     """What is in the file, and what each panel was showing."""
 
@@ -134,91 +102,86 @@ def _plot_rows(
     for name, array in sorted(arrays.items()):
         shape = "x".join(str(size) for size in getattr(array, "shape", ()))
         dtype = getattr(getattr(array, "dtype", None), "name", "")
-        reopenable = "" if name in datasets else "  (array only)"
+        reopenable = "" if name in recipes else "  (array only)"
         rows.append((name, f"{shape} {dtype}{reopenable}".strip()))
-    for dataset in datasets:
-        entry = _panel_record(sections, dataset)
-        if isinstance(entry, Mapping):
-            title = entry.get("title") or dataset
-            rows.append(
-                (f"panel {dataset}", f"{title} — {entry.get('signal', '')}")
-            )
+    for dataset, recipe in recipes.items():
+        rows.append((f"plot {dataset}", f"{recipe['spec'].kind.value}, {recipe['size']}"))
     return tuple(rows)
 
 
-def _measurement_rows(
-    sections: Mapping[str, Any],
-    provenance: Mapping[str, Any],
-) -> Rows:
-    """What was asked of the apparatus, and what drove it."""
+def _lineage_nodes(value: object) -> tuple[str | None, dict[str, Mapping[str, Any]]]:
+    if not isinstance(value, Mapping) or set(value) != {"root", "nodes"}:
+        raise ValueError("figure lineage must contain root and nodes")
+    root, raw_nodes = value["root"], value["nodes"]
+    if root is not None and not isinstance(root, str):
+        raise TypeError("figure lineage root must be text or null")
+    if not isinstance(raw_nodes, list):
+        raise TypeError("figure lineage nodes must be an array")
+    nodes: dict[str, Mapping[str, Any]] = {}
+    for node in raw_nodes:
+        entry = node if isinstance(node, Mapping) else {}
+        if set(entry) != {"id", "event", "parents", "signals", "record"}:
+            raise ValueError("figure lineage node fields differ")
+        node_id = entry["id"]
+        if not isinstance(node_id, str) or not node_id or node_id in nodes:
+            raise ValueError("figure lineage node IDs must be unique text")
+        event = entry["event"]
+        if not isinstance(event, Mapping) or set(event) != {"stream", "generation", "sequence"}:
+            raise ValueError("figure lineage event fields differ")
+        if (
+            not isinstance(event["stream"], str)
+            or not event["stream"]
+            or not isinstance(event["generation"], str)
+            or not event["generation"]
+            or isinstance(event["sequence"], bool)
+            or not isinstance(event["sequence"], int)
+            or event["sequence"] < 0
+        ):
+            raise TypeError("figure lineage event identity is malformed")
+        if not isinstance(entry["parents"], list) or not all(isinstance(item, str) for item in entry["parents"]):
+            raise TypeError("figure lineage parents must be text IDs")
+        if len(set(entry["parents"])) != len(entry["parents"]):
+            raise ValueError("figure lineage parents must be unique")
+        if not isinstance(entry["signals"], list) or not all(isinstance(item, str) for item in entry["signals"]):
+            raise TypeError("figure lineage signals must be text")
+        if not isinstance(entry["record"], Mapping):
+            raise TypeError("figure lineage record must be an object")
+        nodes[node_id] = entry
+    if root is None:
+        if nodes:
+            raise ValueError("empty figure lineage cannot contain nodes")
+        return None, nodes
+    if root not in nodes or any(parent not in nodes for node in nodes.values() for parent in node["parents"]):
+        raise ValueError("figure lineage refers to an unknown node")
+    return root, nodes
 
-    rows: list[tuple[str, str]] = []
-    for node, record in sorted(provenance.items()):
-        if not isinstance(record, Mapping):
-            continue
-        rows.append((node, str(record.get("layer", ""))))
-        captured = record.get("captured_at")
-        if captured:
-            rows.append((f"{node} captured", str(captured)))
-        for key in ("acquisition_parameters", "source_acquisition_parameters"):
-            for label, value in sorted(dict(record.get(key, {})).items()):
-                rows.append((f"{node}.{label}", _text(value)))
-    for label, value in sorted(dict(sections.get("pulse", {})).items()):
-        rows.append((f"pulse.{label}", _text(value)))
-    return tuple(rows)
+
+def _lineage_tree(value: object) -> tuple[tuple[str, tuple], ...]:
+    root, nodes = _lineage_nodes(value)
+    if root is None:
+        return ()
+    visiting: set[str] = set()
+    visited: set[str] = set()
+    def branch(node_id: str) -> tuple[str, tuple]:
+        if node_id in visiting:
+            raise ValueError("figure lineage contains a cycle")
+        visiting.add(node_id)
+        node = nodes[node_id]
+        event = node["event"]
+        signals = ", ".join(node["signals"]) or event["stream"]
+        children = tuple(branch(parent) for parent in node["parents"])
+        visiting.remove(node_id)
+        visited.add(node_id)
+        return f"{signals} @{event['sequence']}", children
+    tree = (branch(root),)
+    if visited != set(nodes):
+        raise ValueError("figure lineage contains nodes outside the root graph")
+    return tree
 
 
-def _device_rows(provenance: Mapping[str, Any]) -> Rows:
-    """The apparatus, exactly as each device reported itself."""
-
-    rows: list[tuple[str, str]] = []
-    for node, record in sorted(provenance.items()):
-        if not isinstance(record, Mapping):
-            continue
-        for role, state in sorted(dict(record.get("devices", {})).items()):
-            rows.append((f"{node}.{role}", ""))
-            if isinstance(state, Mapping):
-                for label, value in sorted(state.items()):
-                    rows.append((f"    {label}", _text(value)))
-            else:
-                rows.append(("    state", _text(state)))
-    return tuple(rows)
-
-
-def _flow_rows(
-    sections: Mapping[str, Any],
-    provenance: Mapping[str, Any],
-) -> Rows:
-    """Who fed whom: the chain from apparatus to the panel on screen.
-
-    This is the question a saved figure is least able to answer on its own and
-    the one most often asked -- "where did this number come from" -- so it gets
-    its own reading rather than being spelled out across three other tabs.
-    """
-
-    rows: list[tuple[str, str]] = []
-    signal_to_panel: dict[str, str] = {}
-    for panel, entry in sorted(sections.get("panel", {}).items()):
-        if isinstance(entry, Mapping) and entry.get("signal"):
-            signal_to_panel[str(entry["signal"])] = str(entry.get("title") or panel)
-
-    for node, record in sorted(provenance.items()):
-        if not isinstance(record, Mapping):
-            continue
-        upstream = record.get("consumes") or []
-        devices = sorted(dict(record.get("devices", {})))
-        source = ", ".join(str(item) for item in upstream) or ", ".join(devices) or "—"
-        shown = [
-            f"{signal}→{panel}"
-            for signal, panel in signal_to_panel.items()
-            if f"/{node}/" in signal
-        ]
-        rows.append((node, f"{source}  ⇒  {', '.join(shown) or 'not shown'}"))
-
-    for signal, panel in sorted(signal_to_panel.items()):
-        if not any(f"/{node}/" in signal for node in provenance):
-            rows.append((panel, f"{signal}  (no record of what produced it)"))
-    return tuple(rows)
+def _lineage_rows(value: object) -> Rows:
+    _root, nodes = _lineage_nodes(value)
+    return tuple((node_id, _text(node["record"])) for node_id, node in nodes.items())
 
 
 def _flatten(value: Any, prefix: str = "") -> Rows:
@@ -247,7 +210,7 @@ class FigureViewerPresenter:
         self,
         view: object,
         *,
-        make_host: Callable[[Any, str, PanelState | None], Any],
+        make_host: Callable[[Any, str, Mapping[str, object]], Any],
         run_off_thread: Callable[
             [
                 Callable[[], object],
@@ -275,7 +238,7 @@ class FigureViewerPresenter:
         self._info: Mapping[str, Any] = {}
         self._arrays: Mapping[str, Any] = {}
         self.dataset = ""
-        self.panel_state: PanelState | None = None
+        self.recipe: dict[str, object] | None = None
         self._host: Any = None
         self._retired_host: Any = None
         self._retirement_pending = False
@@ -354,23 +317,15 @@ class FigureViewerPresenter:
         arrays: Mapping[str, Any],
         description: ArchiveDescription,
         name: str,
-    ) -> tuple[str, PanelState | None, object | None, Any]:
+    ) -> tuple[str, dict[str, object] | None, object | None, Any]:
         if not name:
             return "", None, None, None
         label = dict(description.datasets).get(str(name), str(name))
         host: Any = None
         try:
-            snapshot = read_dataset(info, arrays, str(name))
-            plot_input = restore_panel_plot_input(info, arrays, str(name), snapshot)
-            panel_state = _panel_state(info.get("sections", {}), str(name))
-            viewport = (
-                None
-                if panel_state is None
-                else restore_panel_viewport(info, str(name))
-            )
-            host = self._make_host(plot_input, label, panel_state)
-            self._configure_host(host, panel_state, viewport)
-            return str(name), panel_state, viewport, host
+            plot_input, recipe = read_figure_plot(info, arrays, str(name))
+            host = self._make_host(plot_input, label, recipe)
+            return str(name), recipe, recipe["viewport"], host
         except BaseException:
             if host is not None:
                 self._close_host(host)
@@ -384,6 +339,7 @@ class FigureViewerPresenter:
             self.view.set_title(description.name or resolved.stem)
             self.view.set_path(str(resolved))
             self.view.set_info(description.tabs)
+            self.view.set_lineage_tree(description.lineage)
             self.view.set_datasets(
                 description.datasets,
                 description.dataset_keys[0] if description.datasets else "",
@@ -393,13 +349,13 @@ class FigureViewerPresenter:
             self._discard_candidate(candidate)
             raise
 
-        name, panel_state, _viewport, host = candidate
+        name, recipe, _viewport, host = candidate
         self.path = resolved
         self.description = description
         self._info, self._arrays = info, arrays
         self._host = host
         self.dataset = str(name)
-        self.panel_state = panel_state
+        self.recipe = recipe
         return self._retire_previous(previous)
 
     def _accept_dataset(self, candidate: object) -> bool:
@@ -414,10 +370,10 @@ class FigureViewerPresenter:
             self._discard_candidate(candidate)
             raise
 
-        name, panel_state, _viewport, host = candidate
+        name, recipe, _viewport, host = candidate
         self._host = host
         self.dataset = str(name)
-        self.panel_state = panel_state
+        self.recipe = recipe
         return self._retire_previous(previous)
 
     def _show_candidate(
@@ -425,10 +381,10 @@ class FigureViewerPresenter:
         candidate: object,
         description: ArchiveDescription,
     ) -> None:
-        name, panel_state, _viewport, host = candidate
+        name, recipe, _viewport, host = candidate
         self.view.show_figure(host)
-        if panel_state is not None:
-            self.view.set_figure_size(panel_state.size)
+        if recipe is not None:
+            self.view.set_figure_size(str(recipe["size"]))
         if host is None:
             self.view.set_status(
                 "opened; its arrays were saved without axes, so it cannot be replotted"
@@ -449,9 +405,10 @@ class FigureViewerPresenter:
                 )
                 self.view.set_path("" if self.path is None else str(self.path))
                 self.view.set_info(description.tabs)
+                self.view.set_lineage_tree(description.lineage)
                 self.view.set_datasets(description.datasets, self.dataset)
-            if self.panel_state is not None:
-                self.view.set_figure_size(self.panel_state.size)
+            if self.recipe is not None:
+                self.view.set_figure_size(str(self.recipe["size"]))
         except BaseException:
             # Preserve the original candidate refusal.  The previous presenter
             # state is still authoritative and a later owner turn can repaint it.
@@ -529,29 +486,6 @@ class FigureViewerPresenter:
     def _await(operation: object) -> object:
         return operation.result() if hasattr(operation, "result") else operation
 
-    @classmethod
-    def _configure_host(
-        cls,
-        host: object,
-        state: PanelState | None,
-        viewport: object | None,
-    ) -> None:
-        """Apply the saved panel decisions through the plot host's public API."""
-
-        # The host was built from this same record and already holds the
-        # appearance it accepts; re-sending the whole saved bag is how names
-        # authored under another kind reached a vocabulary that never
-        # declared them.  Only what this call adds travels.
-        configuration: dict[str, object] = {
-            "viewport": viewport,
-        }
-        if state is not None:
-            configuration["size"] = state.size
-            configuration["classifier_thresholds"] = state.classifier_thresholds
-            configuration["fit"] = dict(state.fit)
-            configuration["fit_live"] = False
-        cls._await(host.configure(**configuration))
-
     def resize_figure(self, size: str) -> None:
         """The card and the picture inside it have to agree.
 
@@ -564,8 +498,8 @@ class FigureViewerPresenter:
         host = self._host
         previous_size = (
             DEFAULTS.layout.default_preset
-            if self.panel_state is None
-            else self.panel_state.size
+            if self.recipe is None
+            else str(self.recipe["size"])
         )
 
         def resize() -> object:
@@ -574,8 +508,8 @@ class FigureViewerPresenter:
 
         def accepted(selected: object) -> None:
             resolved = str(selected)
-            if self._host is host and self.panel_state is not None:
-                self.panel_state = replace(self.panel_state, size=resolved)
+            if self._host is host and self.recipe is not None:
+                self.recipe = {**self.recipe, "size": resolved}
             self.view.set_figure_size(resolved)
             self.view.set_status(f"resized to {resolved}")
 
@@ -706,7 +640,7 @@ class FigureViewerPresenter:
             def retired(_result: object) -> None:
                 if self._host is host:
                     self._host = None
-                    self.panel_state = None
+                    self.recipe = None
                     self.view.show_figure(None)
                 self._finish_operation()
 

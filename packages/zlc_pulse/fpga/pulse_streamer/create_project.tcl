@@ -46,8 +46,7 @@ proc zlc_default_project_root {script_dir} {
 # dir, so the only fix is a SHORT project path.  The build deliberately stays in
 # fpga/build (in-repo, tracked, no extra drive/junction, cross-platform clean) and
 # uses the SHORT project name "ps" (-> ps.runs) to keep the run path well under the
-# limit even on a deep checkout (e.g. .../Zou_lab_control_v1/fpga/build/ps -> ~141
-# chars here vs ~165 with the old long name).  If even that is too long, the repo
+# limit even on a deep checkout.  If even that is too long, the repo
 # itself is checked out too deep -- shorten the CHECKOUT location (keep the build
 # in fpga/), do not split the build out.
 proc zlc_debug_tmp_path {dir project_name} {
@@ -72,28 +71,13 @@ proc zlc_safe_project_dir {project_dir project_root project_name} {
     if {[file exists $out]} {
         set marker [file join $out .zlc_generated_project]
         if {![file isfile $marker]} {
-            # Builds created before the marker was introduced are already on
-            # experiment machines.  Recognise only Vivado's exact legacy
-            # project signature at the already-approved <root>/ps path; an
-            # arbitrary unmarked directory remains untouchable.
-            set legacy_xpr [file join $out ${project_name}.xpr]
-            set legacy_runs [file join $out ${project_name}.runs]
-            set legacy_srcs [file join $out ${project_name}.srcs]
-            if {
-                ![file isfile $legacy_xpr]
-                || ![file isdirectory $legacy_runs]
-                || ![file isdirectory $legacy_srcs]
-            } {
-                error "Refusing to delete unmarked directory: $out"
-            }
-            puts "ZLC migrating legacy generated Vivado project: $out"
-        } else {
-            set handle [open $marker r]
-            set marker_text [string trim [read $handle]]
-            close $handle
-            if {$marker_text ne "zlc_pulse_vivado_project_v1"} {
-                error "Refusing to delete directory with an invalid generated-project marker: $out"
-            }
+            error "Refusing to delete unmarked directory: $out"
+        }
+        set handle [open $marker r]
+        set marker_text [string trim [read $handle]]
+        close $handle
+        if {$marker_text ne "zlc_pulse_vivado_project"} {
+            error "Refusing to delete directory with an invalid generated-project marker: $out"
         }
     }
     return $out
@@ -224,7 +208,7 @@ if {[file exists $project_dir]} {
 file mkdir [file dirname $project_dir]
 create_project $project_name $project_dir -part $part -force
 set zlc_marker [open [file join $project_dir .zlc_generated_project] w]
-puts $zlc_marker "zlc_pulse_vivado_project_v1"
+puts $zlc_marker "zlc_pulse_vivado_project"
 close $zlc_marker
 set_property target_language Verilog [current_project]
 

@@ -1,4 +1,4 @@
-"""Continuous SLM targets, phase retrieval, and their two file formats."""
+"""Continuous SLM targets, phase retrieval, and their file formats."""
 
 from __future__ import annotations
 
@@ -20,22 +20,20 @@ from .device import canonical_phase
 
 _TARGET_FORMAT = "zlc.slm.target"
 _TARGET_KEYS = frozenset(
-    {"format", "version", "shape", "intensity", "objective_kind"}
+    {"format", "shape", "intensity", "objective_kind"}
 )
-_SCIENCE_CONTEXT_FORMAT = "zlc.slm.science_context"
-SCIENCE_CONTEXT_ARTIFACT_CONTRACT = "zlc.slm.science-context.v2"
+_SCIENCE_CONTEXT_FORMAT = "zlc.slm.science-context"
+SCIENCE_CONTEXT_ARTIFACT_CONTRACT = _SCIENCE_CONTEXT_FORMAT
 _CONTEXT_ARRAY_KEYS = (
     "phase", "pattern_phase", "operator_wavefront", "pupil_amplitude",
     "pupil_support",
 )
-_SCIENCE_CONTEXT_V1_MEMBERS = frozenset((*_CONTEXT_ARRAY_KEYS, "metadata"))
 _SCIENCE_CONTEXT_MEMBERS = frozenset(
     (*_CONTEXT_ARRAY_KEYS, "target_intensity", "metadata")
 )
 _SCIENCE_CONTEXT_KEYS = frozenset(
     {
         "format",
-        "version",
         "objective_kind",
         "pupil",
         "system_correction",
@@ -708,7 +706,7 @@ def _mapping_seed(desired: np.ndarray, pupil: np.ndarray) -> np.ndarray:
 
 
 def _quadratic_seed(shape: tuple[int, int]) -> np.ndarray:
-    """The legacy defocus seed: stronger than the mapping under hard apertures."""
+    """A defocus seed that is stronger under hard apertures."""
 
     yy, xx = np.ogrid[
         -1.0:1.0:shape[0] * 1j,
@@ -1224,7 +1222,7 @@ def solve_phase(
             field = build_field(seed_phase)
         else:
             # Measured across horizons (12..300 iterations) the mapping seed
-            # dominates the legacy quadratic on both apodized and hard
+            # dominates the quadratic seed on both apodized and hard
             # illumination: same iteration budget, better figure of merit
             # and better interior uniformity every time.
             radial = _radial_transport_seed(desired, pupil)
@@ -1454,7 +1452,6 @@ def save_target(
         path,
         {
             "format": _TARGET_FORMAT,
-            "version": 2,
             "shape": list(intensity.shape),
             "intensity": intensity.tolist(),
             "objective_kind": _objective_kind(objective_kind),
@@ -1469,14 +1466,10 @@ def load_target(path: str | Path) -> tuple[np.ndarray, str]:
     )
     if not isinstance(payload, dict) or set(payload) != _TARGET_KEYS:
         raise ValueError(
-            "target JSON fields differ from strict v2 intensity/objective format"
+            "target JSON fields differ from the strict intensity/objective format"
         )
-    if (
-        payload["format"] != _TARGET_FORMAT
-        or type(payload["version"]) is not int
-        or payload["version"] != 2
-    ):
-        raise ValueError("unsupported target JSON format; expected strict v2")
+    if payload["format"] != _TARGET_FORMAT:
+        raise ValueError(f"unsupported target JSON format; expected {_TARGET_FORMAT!r}")
     shape = payload["shape"]
     if (
         not isinstance(shape, list)
@@ -1676,7 +1669,6 @@ def save_science_context(
         raise ValueError("Science Context Target must match the phase shape")
     metadata = {
         "format": _SCIENCE_CONTEXT_FORMAT,
-        "version": 2,
         "objective_kind": _objective_kind(objective_kind),
         "pupil": _pupil_metadata(pupil),
         "system_correction": _system_correction(system_correction),
@@ -1702,15 +1694,14 @@ def save_science_context(
 
 def load_science_context(path: str | Path) -> dict[str, object]:
     with np.load(path, allow_pickle=False) as archive:
-        members = set(archive.files)
-        if members not in {_SCIENCE_CONTEXT_V1_MEMBERS, _SCIENCE_CONTEXT_MEMBERS}:
+        members = tuple(archive.files)
+        if (
+            len(members) != len(_SCIENCE_CONTEXT_MEMBERS)
+            or set(members) != _SCIENCE_CONTEXT_MEMBERS
+        ):
             raise ValueError("science context NPZ has the wrong members")
         arrays = {key: np.asarray(archive[key]) for key in _CONTEXT_ARRAY_KEYS}
-        target = (
-            None
-            if "target_intensity" not in archive
-            else np.asarray(archive["target_intensity"])
-        )
+        target = np.asarray(archive["target_intensity"])
         encoded = np.asarray(archive["metadata"])
         if encoded.shape != () or encoded.dtype.kind != "U":
             raise ValueError("science context metadata must be scalar Unicode JSON")
@@ -1721,19 +1712,8 @@ def load_science_context(path: str | Path) -> dict[str, object]:
         )
     if not isinstance(metadata, dict) or set(metadata) != _SCIENCE_CONTEXT_KEYS:
         raise ValueError("science context metadata has the wrong fields")
-    if (
-        metadata["format"] != _SCIENCE_CONTEXT_FORMAT
-        or type(metadata["version"]) is not int
-        or metadata["version"] not in {1, 2}
-    ):
+    if metadata["format"] != _SCIENCE_CONTEXT_FORMAT:
         raise ValueError("unsupported science context format")
-    expected_members = (
-        _SCIENCE_CONTEXT_V1_MEMBERS
-        if metadata["version"] == 1
-        else _SCIENCE_CONTEXT_MEMBERS
-    )
-    if members != expected_members:
-        raise ValueError("science context members differ from its format version")
     phase = arrays["phase"]
     if phase.dtype != np.dtype("<f4") or phase.ndim != 2:
         raise ValueError("science context phase must be a float32 matrix")
@@ -1749,12 +1729,11 @@ def load_science_context(path: str | Path) -> dict[str, object]:
         raise ValueError("science context pupil amplitude must be float32")
     arrays["pupil_amplitude"] = _pupil_array(arrays["pupil_amplitude"], shape)
     arrays["pupil_support"] = _pupil_mask(arrays["pupil_support"], shape)
-    if target is not None:
-        if target.dtype != np.dtype("<f4") or target.shape != shape:
-            raise ValueError(
-                "science context target intensity must be a matching float32 matrix"
-            )
-        target = validate_target(target)
+    if target.dtype != np.dtype("<f4") or target.shape != shape:
+        raise ValueError(
+            "science context target intensity must be a matching float32 matrix"
+        )
+    target = validate_target(target)
     composed = canonical_phase(
         arrays["pattern_phase"].astype(np.float64)
         + arrays["operator_wavefront"].astype(np.float64),

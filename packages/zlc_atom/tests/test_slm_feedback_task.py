@@ -1,4 +1,5 @@
 import inspect
+import json
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -112,11 +113,13 @@ class _Context:
     instance_id = "slm_feedback"
     generation = "slm-feedback-test"
 
-    def __init__(self, cancelled: bool = False) -> None:
+    def __init__(self, run_directory: Path | None = None, cancelled: bool = False) -> None:
         self.cancelled = cancelled
+        self.run_directory = run_directory
         self.terminal_sealed = False
         self.progress: list[tuple] = []
         self.commits: list[dict[str, object]] = []
+        self.artifacts: dict[str, tuple[Path, str, str]] = {}
 
     def cancel_requested(self) -> bool:
         return self.cancelled
@@ -139,6 +142,14 @@ class _Context:
         committed = dict(outputs)
         self.commits.append(committed)
         return committed
+
+    def register_artifact(self, name, path, *, role, contract_id=""):
+        selected = Path(path).resolve()
+        assert self.run_directory is not None
+        selected.relative_to(self.run_directory.resolve())
+        assert selected.is_file()
+        self.artifacts[str(name)] = (selected, str(role), str(contract_id))
+        return SimpleNamespace(path=selected)
 
 
 def _wait_host(host: NodeHost, wake: Event):
@@ -164,7 +175,8 @@ def _task_host(
         instance_id=task.instance_id,
         kind="task",
         dataset_output_declarations=task.dataset_output_declarations,
-        required_artifact_names=("artifact_path",),
+        required_artifacts={"artifact_path": "zlc.slm.science-context"},
+        task_name="slm_feedback",
     )
 
 
@@ -289,6 +301,19 @@ def _science_context(
 def _load_candidate(path: str | Path) -> tuple[np.ndarray, dict[str, object]]:
     context = load_science_context(path)
     return context["phase"], context["pattern_metadata"]
+
+
+def _load_history(path: str | Path) -> list[dict[str, object]]:
+    root = Path(path).resolve().parent.parent
+    history: list[dict[str, object]] = []
+    for checkpoint in sorted((root / "data" / "candidates").glob("candidate-*.npz")):
+        with np.load(checkpoint, allow_pickle=False) as archive:
+            metadata = json.loads(str(np.asarray(archive["metadata"]).item()))
+            for name in archive.files:
+                if name != "metadata":
+                    metadata[name] = np.asarray(archive[name]).tolist()
+        history.append(metadata)
+    return history
 
 
 def _fitted_result(
@@ -428,7 +453,6 @@ def _task(
         feedback_gain=0.25,
         maximum_weight_change=0.5,
         max_updates=updates,
-        artifact_directory=tmp_path,
     )
 
 
@@ -467,21 +491,21 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
         "science_context_path",
     )
     assert tuple(item.contract_id for item in descriptor.input_specs) == (
-        "calibration.readout.v1",
-        "zlc.slm.science-context.v2",
+        "calibration.readout",
+        "zlc.slm.science-context",
     )
     assert tuple(item.field_name for item in descriptor.workspace_resources) == (
         "pulse_template",
     )
     assert tuple(
         (item.name, item.contract_id) for item in descriptor.artifact_outputs
-    ) == (("artifact_path", "zlc.slm.science-context.v2"),)
+    ) == (("artifact_path", "zlc.slm.science-context"),)
     assert tuple((item.name, item.contract_id) for item in descriptor.outputs) == (
-        ("candidate_phase", "slm-feedback.candidate-phase.v1"),
-        ("uniformity_history", "slm-feedback.uniformity-history.v1"),
+        ("candidate_phase", "slm-feedback.candidate-phase"),
+        ("uniformity_history", "slm-feedback.uniformity-history"),
         (
             "observable_uniformity_history",
-            "slm-feedback.observable-uniformity-history.v1",
+            "slm-feedback.observable-uniformity-history",
         ),
     )
     assert tuple(
@@ -727,6 +751,7 @@ def test_feedback_applies_science_context_then_measures_before_solving_update(
             np.zeros((self.shots, 35)),
             (),
             (),
+            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
         ),
     )
     plane = SignalDataPlane()
@@ -746,7 +771,7 @@ def test_feedback_applies_science_context_then_measures_before_solving_update(
             science_context=selected_context,
         )
 
-    with pytest.raises(ValueError, match="legacy Science Context"):
+    with pytest.raises(ValueError, match="no frozen Target"):
         build(
             selected_context={**science_context, "target_intensity": None}
         )
@@ -766,7 +791,7 @@ def test_feedback_applies_science_context_then_measures_before_solving_update(
     build(selected_calibration=calibration_without_dark_history)
     task = build()
     try:
-        result = task.execute(_Context())
+        result = task.execute(_Context(tmp_path))
         artifact = load_science_context(result["artifact_path"])
         expected = canonical_phase(
             solved_pattern.astype(float) + wavefront.astype(float), shape
@@ -840,6 +865,7 @@ def test_arbitrary_sparse_geometry_matches_calibration_sites_before_updating_tar
             np.zeros((self.shots, len(rows))),
             (),
             (),
+            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
         ),
     )
     plane = SignalDataPlane()
@@ -854,7 +880,7 @@ def test_arbitrary_sparse_geometry_matches_calibration_sites_before_updating_tar
         updates=2,
     )
     try:
-        result = task.execute(_Context())
+        result = task.execute(_Context(tmp_path))
         expected, *_details = _updated_target(
             target,
             target_contrast,
@@ -871,17 +897,12 @@ def test_arbitrary_sparse_geometry_matches_calibration_sites_before_updating_tar
             minimum_control_weight=np.full(len(rows), np.nan),
         )
         np.testing.assert_allclose(solved_targets[0], expected)
-        candidates = {
-            context["pattern_metadata"]["candidate"]: context
-            for context in map(
-                load_science_context,
-                tmp_path.glob("slm_feedback_candidate_*.npz"),
-            )
-        }
-        np.testing.assert_allclose(candidates[2]["target_intensity"], expected)
-        _saved, metadata = _load_candidate(result["artifact_path"])
+        history = _load_history(result["artifact_path"])
         np.testing.assert_allclose(
-            metadata["history"][0]["bright_minus_dark"],
+            history[1]["target_weight"], expected[rows, columns]
+        )
+        np.testing.assert_allclose(
+            history[0]["bright_minus_dark"],
             target_contrast,
         )
     finally:
@@ -893,7 +914,7 @@ def test_uniformity_history_is_one_latest_curve_paired_with_candidate_phase(
 ) -> None:
     slm = _Slm((17, 23))
     plane = SignalDataPlane()
-    context = _Context()
+    context = _Context(tmp_path)
     contrasts = iter(
         (
             np.concatenate(([4.0], np.ones(34))),
@@ -927,6 +948,7 @@ def test_uniformity_history_is_one_latest_curve_paired_with_candidate_phase(
             np.zeros((self.shots, 35)),
             (),
             (),
+            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
         ),
     )
     task = _task(
@@ -1224,7 +1246,7 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
             return current_dataset(*args, **kwargs)
 
         monkeypatch.setattr(plane, "current_dataset", one_result_lookup)
-        samples, saturated, missing = task._measure(pulse, _Context(), 0)
+        samples, saturated, missing, _mean = task._measure(pulse, _Context(), 0)
         assert lookup_count == 1
         monkeypatch.setattr(plane, "current_dataset", current_dataset)
         np.testing.assert_allclose(samples, np.broadcast_to(fluorescence, (10, 35)))
@@ -1282,7 +1304,7 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
 
         monkeypatch.setattr(feedback_module, "extract_box_signals", partial_signals)
         slm.apply_phase(np.full(slm.shape_yx, 0.25, dtype=np.float32))
-        partial_samples, _saturated, partial_missing = task._measure(
+        partial_samples, _saturated, partial_missing, _mean = task._measure(
             pulse, _Context(), 1
         )
         assert partial_missing == (0,)
@@ -1375,7 +1397,7 @@ def test_electron_measurement_uses_current_conversion_and_saturation(
             calibration=calibration(),
         )
         try:
-            _samples, saturated, missing = task._measure(pulse, _Context(), 0)
+            _samples, saturated, missing, _mean = task._measure(pulse, _Context(), 0)
             assert saturated == (17,) and not missing
             assert task._effective_photoelectrons is effective_photoelectrons
         finally:
@@ -1430,7 +1452,12 @@ def test_single_gaussian_site_updates_after_one_batch_and_next_capture_has_new_p
 
     def measure(self, pulse, context, iteration):
         measured_phases.append(np.array(self.slm.last_commanded_phase, copy=True))
-        return np.zeros((self.shots, 35)), (), ()
+        return (
+            np.zeros((self.shots, 35)),
+            (),
+            (),
+            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
+        )
 
     monkeypatch.setattr(SlmFeedbackTask, "_measure", measure)
     monkeypatch.setattr(
@@ -1450,7 +1477,7 @@ def test_single_gaussian_site_updates_after_one_batch_and_next_capture_has_new_p
         updates=1,
     )
     try:
-        result = task.execute(_Context())
+        result = task.execute(_Context(tmp_path))
         assert result["feedback_status"] == "completed"
         assert len(measured_phases) == 2
         assert not np.array_equal(measured_phases[0], measured_phases[1])
@@ -1462,9 +1489,7 @@ def test_single_gaussian_site_updates_after_one_batch_and_next_capture_has_new_p
         assert float(
             np.max(support_values) / np.min(support_values)
         ) == pytest.approx(1.03, rel=0.01)
-        candidate_context = load_science_context(result["artifact_path"])
-        metadata = candidate_context["pattern_metadata"]
-        first = metadata["history"][0]
+        first = _load_history(result["artifact_path"])[0]
         assert first["single_gaussian_sites"] == [17]
         assert first["shots"] == 10
         assert first["decision"][17] == "boost_dark_single_gaussian"
@@ -1510,7 +1535,12 @@ def test_unchanged_solved_phase_stops_without_a_second_shot_batch(
     def measure(self, pulse, context, iteration):
         nonlocal calls
         calls += 1
-        return np.zeros((self.shots, 35)), (), ()
+        return (
+            np.zeros((self.shots, 35)),
+            (),
+            (),
+            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
+        )
 
     monkeypatch.setattr(SlmFeedbackTask, "_measure", measure)
     task = _task(
@@ -1523,11 +1553,11 @@ def test_unchanged_solved_phase_stops_without_a_second_shot_batch(
         calibration=_calibration_with_unresolved_site(target, missing=17),
     )
     try:
-        result = task.execute(_Context())
+        result = task.execute(_Context(tmp_path))
         assert calls == 1
         assert result["feedback_status"] == "stalled"
         _phase, metadata = _load_candidate(result["artifact_path"])
-        assert "no different SLM phase" in metadata["retained"]["outcome"]["reason"]
+        assert "no different SLM phase" in metadata["outcome"]["reason"]
     finally:
         plane.close()
 
@@ -1546,7 +1576,7 @@ def test_persistently_dark_site_updates_every_phase_and_retains_latest_candidate
         "resolve_pulse",
         lambda *args, **kwargs: SimpleNamespace(program=object()),
     )
-    context = _Context()
+    context = _Context(tmp_path)
     solved_targets: list[np.ndarray] = []
 
     def solve(candidate, **_kwargs):
@@ -1573,7 +1603,12 @@ def test_persistently_dark_site_updates_every_phase_and_retains_latest_candidate
 
     def measure(self, pulse, run_context, iteration):
         measured_phases.append(np.array(self.slm.last_commanded_phase, copy=True))
-        return np.zeros((self.shots, 35)), (), ()
+        return (
+            np.zeros((self.shots, 35)),
+            (),
+            (),
+            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
+        )
 
     monkeypatch.setattr(SlmFeedbackTask, "_measure", measure)
     plane = SignalDataPlane()
@@ -1632,10 +1667,9 @@ def test_virtual_feedback_recovers_missing_sites_and_retains_best_candidate(
             sequencer_key="sequencer",
             signal_plane=plane,
             pulse_resource=IMAGING_PULSE_RESOURCE,
-            artifact_directory=tmp_path,
             repeats=30,
         )
-        calibration_result = calibration_node.run()
+        calibration_result = calibration_node.run(tmp_path)
         calibration = TrapCalibration.load(calibration_result.artifact_path)
         assert calibration.site_map.n_sites == 25
         assert calibration.site_map.topology is None
@@ -1649,7 +1683,7 @@ def test_virtual_feedback_recovers_missing_sites_and_retains_best_candidate(
         sequencer = installation.device("sequencer")
         slm = installation.device("slm")
         slm.apply_phase(pattern)
-        context = _Context()
+        context = _Context(tmp_path)
         task = SlmFeedbackTask(
             camera=camera,
             camera_key="camera",
@@ -1671,7 +1705,6 @@ def test_virtual_feedback_recovers_missing_sites_and_retains_best_candidate(
             feedback_gain=0.25,
             maximum_weight_change=0.5,
             max_updates=12,
-            artifact_directory=tmp_path,
         )
         result = task.execute(context)
         saved, metadata = _load_candidate(result["artifact_path"])
@@ -1679,7 +1712,7 @@ def test_virtual_feedback_recovers_missing_sites_and_retains_best_candidate(
         assert not np.array_equal(saved, pattern)
         assert result["feedback_status"] in {"completed", "stalled"}
         assert metadata["status"] == result["feedback_status"]
-        history = metadata["history"]
+        history = _load_history(result["artifact_path"])
         assert 5 <= len(history) <= 13  # baseline plus at most twelve updates
         ratios = np.asarray(
             [item["uniformity_ratio"] for item in history], dtype=float
@@ -1693,7 +1726,7 @@ def test_virtual_feedback_recovers_missing_sites_and_retains_best_candidate(
         assert float(progress[-1]) < float(progress[0])
         if len(finite):
             assert metadata["measurement"]["valid"]
-            assert metadata["retained"]["uniformity_ratio"] == pytest.approx(
+            assert metadata["measurement"]["uniformity_ratio"] == pytest.approx(
                 float(np.min(finite))
             )
         else:
@@ -1706,11 +1739,11 @@ def test_virtual_feedback_recovers_missing_sites_and_retains_best_candidate(
             if args and "site fits valid" in str(args[0])
         ]
         assert incomplete_messages
-        artifacts = tuple(tmp_path.glob("slm_feedback_candidate_*.npz"))
+        root = Path(result["artifact_path"]).parent.parent
+        artifacts = tuple((root / "data" / "candidates").glob("candidate-*.npz"))
         assert len(artifacts) == len(history)
-        assert { _load_candidate(path)[1]["status"] for path in artifacts } <= {
-            "measured", "completed", "stalled"
-        }
+        assert len(tuple((root / "figures").glob("*.npz"))) == 6
+        assert len(tuple((root / "figures").glob("*.png"))) == 6
     finally:
         plane.close()
         if installation is not None:
@@ -1762,6 +1795,7 @@ def test_completed_run_selects_best_candidate_without_extra_shots(
             np.zeros((self.shots, 35)),
             (),
             (),
+            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
         )[1:],
     )
     task = _task(
@@ -1774,11 +1808,11 @@ def test_completed_run_selects_best_candidate_without_extra_shots(
         updates=2,
     )
     try:
-        result = task.execute(_Context())
+        result = task.execute(_Context(tmp_path))
         saved, metadata = _load_candidate(result["artifact_path"])
         np.testing.assert_array_equal(saved, slm.last_commanded_phase)
         np.testing.assert_array_equal(saved, np.full(slm.shape_yx, 0.75, np.float32))
-        assert metadata["retained"]["uniformity_ratio"] <= 1.10
+        assert metadata["measurement"]["uniformity_ratio"] <= 1.10
         assert requested_shots == [10, 10, 10]
         assert resolved_api_values == [{}]
         assert result["updates"] == 3
@@ -1833,6 +1867,7 @@ def test_valid_site_history_changes_the_next_target_correction(
             np.zeros((self.shots, 35)),
             (),
             (),
+            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
         )[1:],
     )
     task = _task(
@@ -1845,13 +1880,14 @@ def test_valid_site_history_changes_the_next_target_correction(
         updates=3,
     )
     try:
-        result = task.execute(_Context())
+        result = task.execute(_Context(tmp_path))
         saved, metadata = _load_candidate(result["artifact_path"])
         np.testing.assert_array_equal(saved, phases[2])
         assert requested_shots == [10, 10, 10, 10]
+        history = _load_history(result["artifact_path"])
         assert all(
             item["feedback_gain"] == pytest.approx(0.25)
-            for item in metadata["history"]
+            for item in history
         )
         base = _grid_target(slm.shape_yx)
         rows, columns = np.nonzero(base)
@@ -1887,7 +1923,7 @@ def test_valid_site_history_changes_the_next_target_correction(
         )
         np.testing.assert_allclose(solved_targets[0], first_target)
         np.testing.assert_allclose(solved_targets[1], second_target)
-        assert metadata["history"][1]["decision"][0] == "feedback_history_slope"
+        assert history[1]["decision"][0] == "feedback_history_slope"
         np.testing.assert_array_equal(slm.commands[0], incoming)
         np.testing.assert_array_equal(slm.commands[1], phases[0])
         np.testing.assert_array_equal(slm.commands[2], phases[1])
@@ -1896,7 +1932,7 @@ def test_valid_site_history_changes_the_next_target_correction(
         plane.close()
 
 
-def test_stop_during_failed_first_candidate_save_restores_incoming(
+def test_stop_during_failed_first_checkpoint_retains_measured_candidate(
     tmp_path: Path, monkeypatch
 ) -> None:
     slm = _Slm((17, 23), incoming=0.125)
@@ -1919,13 +1955,30 @@ def test_stop_during_failed_first_candidate_save_restores_incoming(
         ),
     )
 
-    def fail_first_save(path, phase, **kwargs):
-        if kwargs["pattern_metadata"]["status"] == "applied":
-            save_entered.set()
-            assert release_save.wait(2.0)
-        raise OSError("first candidate artifact failed")
+    monkeypatch.setattr(
+        feedback_module,
+        "_fit_contrasts",
+        lambda samples, **_kwargs: _fitted_result(np.ones(35)),
+    )
+    monkeypatch.setattr(
+        SlmFeedbackTask,
+        "_measure",
+        lambda self, pulse, context, iteration: (
+            np.zeros((self.shots, 35)),
+            (),
+            (),
+            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
+        ),
+    )
 
-    monkeypatch.setattr(feedback_module, "save_science_context", fail_first_save)
+    def fail_first_checkpoint(self, context, paths, **kwargs):
+        save_entered.set()
+        assert release_save.wait(2.0)
+        raise OSError("first candidate checkpoint failed")
+
+    monkeypatch.setattr(
+        SlmFeedbackTask, "_save_candidate_checkpoint", fail_first_checkpoint
+    )
     task = _task(
         tmp_path,
         slm=slm,
@@ -1936,15 +1989,17 @@ def test_stop_during_failed_first_candidate_save_restores_incoming(
     )
     host = _task_host(task, plane, wake)
     try:
-        host.start()
-        assert save_entered.wait(2.0)
-        host.cancel("while first candidate phase is not durable")
+        host.start(run_root=tmp_path, input_summary={})
+        assert save_entered.wait(10.0)
+        host.cancel("while first candidate checkpoint is not durable")
         release_save.set()
         observation = _wait_host(host, wake)
-        assert observation.phase == "failed"
-        assert "first candidate artifact failed" in (observation.error or "")
+        assert observation.phase == "done"
+        assert host.final_result["feedback_status"] == "stopped"
         np.testing.assert_array_equal(slm.last_commanded_phase, incoming)
-        assert not tuple(tmp_path.glob("slm_feedback_candidate_*.npz"))
+        run_root = Path(host.final_result["artifact_path"]).parent.parent
+        assert not tuple((run_root / "data" / "candidates").glob("candidate-*.npz"))
+        assert (run_root / "summary.json").is_file()
     finally:
         release_save.set()
         if not host.terminal:
@@ -1993,6 +2048,7 @@ def test_stop_after_terminal_commit_keeps_host_success_and_artifact(
             np.zeros((self.shots, 35)),
             (),
             (),
+            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
         ),
     )
     original_save = feedback_module.save_science_context
@@ -2015,8 +2071,8 @@ def test_stop_after_terminal_commit_keeps_host_success_and_artifact(
     )
     host = _task_host(task, plane, wake)
     try:
-        host.start()
-        assert save_entered.wait(2.0)
+        host.start(run_root=tmp_path, input_summary={})
+        assert save_entered.wait(10.0)
         host.cancel("after terminal commit")
         release_save.set()
         observation = _wait_host(host, wake)
@@ -2026,6 +2082,24 @@ def test_stop_after_terminal_commit_keeps_host_success_and_artifact(
         saved, _metadata = _load_candidate(result["artifact_path"])
         np.testing.assert_array_equal(saved, best)
         np.testing.assert_array_equal(slm.last_commanded_phase, best)
+        run_root = host.run_directory
+        assert run_root is not None
+        run = json.loads((run_root / "run.json").read_text(encoding="utf-8"))
+        assert run["status"]["state"] == "completed"
+        assert {item["name"] for item in run["artifacts"]} >= {
+            "artifact_path",
+            "summary_json",
+            "summary_text",
+            "uniformity_history_figure",
+            "uniformity_history_preview",
+        }
+        assert len(tuple((run_root / "figures").glob("*.npz"))) == 6
+        assert len(tuple((run_root / "figures").glob("*.png"))) == 6
+        summary = json.loads((run_root / "summary.json").read_text(encoding="utf-8"))
+        assert summary["initial_observable_uniformity_ratio"] is not None
+        assert summary["selected_observable_uniformity_ratio"] is not None
+        assert summary["common_observable_sites"] == 35
+        assert summary["rollback"] is None
     finally:
         release_save.set()
         if not host.terminal:
@@ -2073,6 +2147,7 @@ def test_terminal_save_failure_restores_incoming_and_fails_host(
             np.zeros((self.shots, 35)),
             (),
             (),
+            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
         ),
     )
     task = _task(
@@ -2096,20 +2171,22 @@ def test_terminal_save_failure_restores_incoming_and_fails_host(
     )
     host = _task_host(task, plane, wake)
     try:
-        host.start()
+        host.start(run_root=tmp_path, input_summary={})
         observation = _wait_host(host, wake)
         assert observation.phase == "failed"
         assert observation.error == "OSError: terminal save failed"
         assert not host.final_result_resolved
         np.testing.assert_array_equal(slm.last_commanded_phase, incoming)
-        artifacts = tuple(tmp_path.glob("slm_feedback_candidate_*.npz"))
+        run_root = host.run_directory
+        assert run_root is not None
+        artifacts = tuple((run_root / "data" / "candidates").glob("candidate-*.npz"))
         assert len(artifacts) == 3
-        candidates = {
-            _load_candidate(path)[1]["candidate"]: path for path in artifacts
-        }
-        saved, metadata = _load_candidate(candidates[3])
-        np.testing.assert_array_equal(saved, best)
-        assert metadata["status"] == "measured"
+        assert artifacts[-1].name == "candidate-0003.npz"
+        assert not (run_root / "final" / "science-context.npz").exists()
+        summary = json.loads((run_root / "summary.json").read_text(encoding="utf-8"))
+        assert summary["status"] == "failed"
+        assert summary["candidate_count"] == 3
+        assert summary["rollback"]["status"] == "restored"
     finally:
         if not host.terminal:
             _wait_host(host, wake)
@@ -2134,7 +2211,12 @@ def test_invalid_site_holds_weight_and_never_retries_the_same_phase(
 
     def measure(self, pulse, context, iteration):
         measured_phases.append(np.array(self.slm.last_commanded_phase, copy=True))
-        return first, (), (4,)
+        return (
+            first,
+            (),
+            (4,),
+            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
+        )
 
     monkeypatch.setattr(
         SlmFeedbackTask,
@@ -2151,26 +2233,30 @@ def test_invalid_site_holds_weight_and_never_retries_the_same_phase(
         updates=2,
     )
     try:
-        result = task.execute(_Context())
+        result = task.execute(_Context(tmp_path))
         assert result["feedback_status"] in {"completed", "stalled"}
         assert measured_phases
         assert all(
             not np.array_equal(left, right)
             for left, right in zip(measured_phases, measured_phases[1:])
         )
-        artifacts = tuple(tmp_path.glob("slm_feedback_candidate_*.npz"))
+        artifacts = tuple(
+            (Path(result["artifact_path"]).parent.parent / "data" / "candidates").glob(
+                "candidate-*.npz"
+            )
+        )
         assert len(artifacts) == len(measured_phases)
-        _saved, metadata = _load_candidate(result["artifact_path"])
-        assert all(item["invalid_sites"] == [4] for item in metadata["history"])
+        history = _load_history(result["artifact_path"])
+        assert all(item["invalid_sites"] == [4] for item in history)
         assert all(
             item["decision"][4] == "hold_invalid"
-            for item in metadata["history"]
+            for item in history
         )
         assert all(
             item["requested_log_correction"][4] == 0.0
-            for item in metadata["history"]
+            for item in history
         )
-        assert all(item["target_weight"][4] == 1.0 for item in metadata["history"])
+        assert all(item["target_weight"][4] == 1.0 for item in history)
     finally:
         plane.close()
 
@@ -2208,7 +2294,7 @@ def test_stop_before_first_candidate_accepts_incoming_as_formal_artifact(
         target=_grid_target(slm.shape_yx),
     )
     try:
-        context = _Context(cancelled=True)
+        context = _Context(tmp_path, cancelled=True)
         result = task.execute(context)
         assert solve_calls == 0
         assert context.terminal_sealed
@@ -2222,8 +2308,8 @@ def test_stop_before_first_candidate_accepts_incoming_as_formal_artifact(
         np.testing.assert_array_equal(phase.snapshot.block.values[0, 0], incoming)
         assert not np.any(history.snapshot.expanded_validity())
         assert not slm.commands
-        assert tuple(tmp_path.glob("slm_feedback*.npz")) == (
-            Path(result["artifact_path"]),
-        )
+        root = Path(result["artifact_path"]).parent.parent
+        assert not tuple((root / "data" / "candidates").glob("candidate-*.npz"))
+        assert Path(result["artifact_path"]) == root / "final" / "science-context.npz"
     finally:
         plane.close()

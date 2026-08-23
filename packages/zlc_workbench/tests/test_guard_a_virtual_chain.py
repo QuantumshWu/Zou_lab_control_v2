@@ -1,4 +1,4 @@
-import zou_lab_control_v2
+import zou_lab_control
 
 """Guard A: the formal headless virtual Calibration -> frames -> Occupancy chain."""
 
@@ -19,6 +19,7 @@ from zlc_atom.nodes.camera_measurement import logic_node as camera_logic_node
 from zlc_atom.nodes.occupancy import logic_node as occupancy_logic_node
 from zlc_runtime import DatasetCoverage, MonitorCoverage, SignalDataPlane
 import zlc_runtime.host as runtime_host
+from zlc_data.figure_archive import read_archive
 from zlc_workbench.logic import (
     LogicCatalog,
     LogicDraft,
@@ -29,6 +30,7 @@ from zlc_workbench.logic import (
 )
 import zlc_plot.primitives as overlay_contract_module
 from zlc_workbench.session import Workspace
+from zlc_workbench.viewer import describe_archive
 
 
 def _one_camera_window_program():
@@ -175,7 +177,6 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
             calibration_descriptor,
             signal_plane=plane,
             finalization=calibration_finalization,
-            extras={"artifact_directory": tmp_path},
         )
         calibration_node = calibration_descriptor.instantiate(
             **calibration_arguments
@@ -189,22 +190,24 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         )
         hosts.append(calibration_host)
 
-        calibration_host.start()
+        calibration_host.start(
+            run_root=tmp_path,
+            input_summary=calibration_node.request.to_dict(),
+        )
         _wait_terminal(calibration_host, phase="done")
         first_calibration = calibration_host.final_result
         assert first_calibration is not None
         # One run, one folder: the artifact sits in it, beside the report
         # and the frames it left, so a calibration is a directory an operator
         # copies or deletes whole.
-        run_folder = first_calibration.artifact_path.parent
+        run_folder = first_calibration.artifact_path.parents[1]
         assert run_folder.parent == tmp_path.resolve()
-        assert run_folder.name == first_calibration.artifact_path.stem
+        assert run_folder.name == "calibration"
         assert first_calibration.artifact_path.is_file()
         assert set(
             json.loads(first_calibration.artifact_path.read_text(encoding="utf-8"))
         ) == {
             "format",
-            "version",
             "site_map",
             "models",
             "default_model_kind",
@@ -220,33 +223,34 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         assert tuple(
             (output.name, output.contract_id)
             for output in calibration_descriptor.outputs
-        ) == (("capture_preview", "calibration.capture-preview.v1"),)
-        assert {
-            path.name
-            for path in (
-                first_calibration.artifact_path.parent / "report"
-            ).iterdir()
-        } == {
+        ) == (("capture_preview", "calibration.capture-preview"),)
+        assert {path.name for path in (run_folder / "figures").iterdir()} == {
             # What it measured, first: a run that cannot draw has still
             # measured it, and these are the numbers an operator judges the
             # calibration by.
-            "summary.json",
-            "summary.txt",
+            "site_map.npz",
             "site_map.png",
+            "fidelity.npz",
             "fidelity.png",
+            "box.npz",
             "box.png",
+            "psf.npz",
             "psf.png",
+            "uniform_psf.npz",
             "uniform_psf.png",
+            "psf_kernels.npz",
             "psf_kernels.png",
         }
+        for figure_path in (run_folder / "figures").glob("*.npz"):
+            info, arrays = read_archive(figure_path)
+            assert describe_archive(info, arrays).dataset_keys == ("data",)
         # The numbers are only readable beside what produced them, so the
         # file a person opens keeps the same provenance a saved panel does:
         # the run records, with the request, the device snapshots and the
-        # pulse.  It used to hold headline numbers and nothing else, and the
-        # exposure they were measured at lived only in the artifact.
+        # pulse, including the actual exposure used for those numbers.
         summary = json.loads(
             (
-                first_calibration.artifact_path.parent / "report" / "summary.json"
+                run_folder / "summary.json"
             ).read_text(encoding="utf-8")
         )
         assert summary["run_chain"], "the summary states no provenance"
@@ -262,29 +266,35 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         # artifact above is the terminal truth.
         preview_signal = calibration_host.signal_key("capture_preview")
         assert preview_signal not in plane.freeze().signals
-        calibration_host.start()
+        calibration_host.start(
+            run_root=tmp_path,
+            input_summary=calibration_node.request.to_dict(),
+        )
         _wait_terminal(calibration_host, phase="done")
         second_calibration = calibration_host.final_result
         assert second_calibration is not None
         assert second_calibration.artifact_path.is_file()
         assert second_calibration.artifact_path != first_calibration.artifact_path
-        assert {first_calibration.artifact_path.name, second_calibration.artifact_path.name} == {
-            "calibration.json",
-            "calibration-2.json",
-        }
+        assert first_calibration.artifact_path.name == "calibration.json"
+        assert second_calibration.artifact_path.name == "calibration.json"
+        assert second_calibration.artifact_path.parents[1].name == "calibration-2"
         assert {
             path.name
             for path in (
-                second_calibration.artifact_path.parent / "report"
+                second_calibration.artifact_path.parents[1] / "figures"
             ).iterdir()
         } == {
-            "summary.json",
-            "summary.txt",
+            "site_map.npz",
             "site_map.png",
+            "fidelity.npz",
             "fidelity.png",
+            "box.npz",
             "box.png",
+            "psf.npz",
             "psf.png",
+            "uniform_psf.npz",
             "uniform_psf.png",
+            "psf_kernels.npz",
             "psf_kernels.png",
         }
         assert preview_signal not in plane.freeze().signals

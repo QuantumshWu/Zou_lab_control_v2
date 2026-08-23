@@ -751,6 +751,7 @@ def test_header_save_layout_writes_no_panel_dataset(
     import json
 
     document = json.loads(path.read_text(encoding="utf-8"))
+    assert presenter.LAYOUT_FORMAT == "zlc.console-board"
     assert document["format"] == presenter.LAYOUT_FORMAT
     assert document["panels"][0]["signal"] == node.signal_key("frames")
     assert not tuple(tmp_path.glob("*.npz"))
@@ -1742,7 +1743,7 @@ def test_committed_selection_outputs_enter_the_real_occupancy_input(
     fit_signals = tuple(
         row
         for row in session.signal_plane.describe_signals()
-        if row.contract_id == "zlc.selection.fit.parameter.v2"
+        if row.contract_id == "zlc.selection.fit.parameter"
     )
     assert fit_signals, (binding.bridge.last_error, binding.selections.last_error)
     assert all(
@@ -1754,7 +1755,7 @@ def test_committed_selection_outputs_enter_the_real_occupancy_input(
         for row in session.signal_plane.describe_signals()
         if row.name.rsplit("/", 1)[-1] == "center_x_err"
     )
-    assert error_signal.contract_id == "zlc.selection.fit.error.v2"
+    assert error_signal.contract_id == "zlc.selection.fit.error"
     projection = presenter.logic_editor_projection(consumer_id)
     assert projection is not None
     assert any(
@@ -2755,9 +2756,9 @@ def test_a_file_that_is_not_a_board_is_refused_by_name(presenter) -> None:
     assert presenter.apply_layout({"format": "zlc.figure"}) is False
     assert any("not a saved board" in text for _severity, text in presenter.view.status)
 
-    old_layout = presenter.layout()
-    old_layout["format"] = "zlc.console-board/v2"
-    assert presenter.apply_layout(old_layout) is False
+    invalid_layout = presenter.layout()
+    invalid_layout["format"] = "not-a-console-board"
+    assert presenter.apply_layout(invalid_layout) is False
 
 
 def test_panel_edit_projects_the_direct_producer_restarts_it_and_ages(

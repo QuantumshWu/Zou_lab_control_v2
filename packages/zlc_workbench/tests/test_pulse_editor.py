@@ -2903,7 +2903,7 @@ def test_sync_brings_the_board_s_pulse_back_into_the_editor(sequence) -> None:
 
 
 def test_the_scan_page_says_what_to_do_before_it_says_what_failed(sequence) -> None:
-    """v1 told the operator their next move; this named a symptom.
+    """Tell the operator their next move instead of naming a symptom.
 
     A scan table has one column per bound field, so with nothing bound there
     is no table to make or read at all -- and the answer is a click on a dot

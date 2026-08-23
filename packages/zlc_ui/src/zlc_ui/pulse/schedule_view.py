@@ -522,9 +522,9 @@ BRACKET_WIDTH = 78
 class RepeatBracket(FluentGroupBox):
     """One of the two posts that frame a repeated run of periods.
 
-    v1's shape, and the shape is the point: an untitled column built to the
-    same height and header block as a period card, so its "Repeat" sits on the
-    cards' own header line and its count on their first control line.  The
+    The shape is the point: an untitled column built to the same height and
+    header block as a period card, so its "Repeat" sits on the cards' own
+    header line and its count on their first control line.  The
     bracket then reads as a frame drawn around cards rather than a widget
     wedged between them.
 
@@ -1449,9 +1449,9 @@ class PulseScheduleView(QtWidgets.QWidget):
     def _selected_before_id(self) -> str | None:
         """Which period the next Add goes BEFORE, or None to append.
 
-        v1's rule, which is what makes a sequence buildable at all: a selected
-        gap inserts there, a selected card inserts AFTER it, and with neither
-        the new period is appended.  This returned None unconditionally, so a
+        A selected gap inserts there, a selected card inserts AFTER it, and
+        with neither the new period is appended.  This returned None
+        unconditionally, so a
         period could only ever be added to the end.
         """
 

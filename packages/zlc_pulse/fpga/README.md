@@ -104,13 +104,13 @@ resolver: an explicit `ZLC_FPGA_PYTHON` override wins, then the repository
 `ZLC_PS_VIVADO_BIN`, known installation roots, then PATH. Set
 `ZLC_NO_PAUSE=1` for automation.
 
-## Hardware acceptance runbook (not executed by software milestones)
+## Hardware acceptance runbook
 
-M5 validates RTL in simulation but does not program or flash a board. A human
-hardware acceptance must use the following order and retain one receipt:
+Software and RTL simulation do not program or flash a board. A human hardware
+acceptance must use the following order and retain one receipt:
 
-1. Record the repository commit, `streamer_config.json` path, `board.id`, FPGA
-   part, 50 MHz constraint, and generated project directory.
+1. Record the installed distribution identity, `streamer_config.json` path,
+   `board.id`, FPGA part, 50 MHz constraint, and generated project directory.
 2. Run the build-only action. Preserve timing status and the exact `.bit` and
    `.ltx` paths; do not program or flash as a side effect of building.
 3. Diagnose the cable and require exactly one target, device, and JTAG AXI.
@@ -125,8 +125,8 @@ hardware acceptance must use the following order and retain one receipt:
 7. Flash only as a separate, explicitly requested action after all volatile
    programming checks pass.
 
-The receipt records: operator and time; repository commit; config path and
-`board.id`; FPGA part; Vivado version; build/project/bit/ltx paths; selected
+The receipt records: operator and time; installed distribution identity; config
+path and `board.id`; FPGA part; Vivado version; build/project/bit/ltx paths; selected
 target/device/transport; word-63 layout fingerprint; SAFE status and clock-word
 readback; timing result; each check above as pass/fail with raw log path; and
 whether the image was volatile-programmed, flashed, or not written. A manifest

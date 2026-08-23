@@ -66,10 +66,10 @@ def test_device_discovery_is_the_leaf_manifest() -> None:
 
 def test_sequencer_control_is_plugin_owned_and_lazily_discovered(tmp_path: Path) -> None:
     script = r"""
-import zou_lab_control_v2
+import zou_lab_control
 import sys
 import zlc_atom.install as tested_module
-print(zou_lab_control_v2.ROOT)
+print(zou_lab_control.ROOT)
 print(tested_module.__file__)
 assert "zlc_ui" not in sys.modules
 assert "zlc_workbench" not in sys.modules
@@ -243,7 +243,7 @@ def test_task_preview_policy_and_typed_output_reference_are_explicit() -> None:
     )
     assert explicit_none.node_previews == ()
 
-    output = DatasetOutputDeclaration("frames", "camera.frames.v1")
+    output = DatasetOutputDeclaration("frames", "camera.frames")
     own_preview = NodePreviewSpec(output, "facet_grid")
     descriptor = LogicNodeDescriptor(
         "camera-task",
@@ -254,7 +254,7 @@ def test_task_preview_policy_and_typed_output_reference_are_explicit() -> None:
     )
     assert descriptor.outputs[0] is descriptor.node_previews[0].output
 
-    copied_declaration = DatasetOutputDeclaration("frames", "camera.frames.v1")
+    copied_declaration = DatasetOutputDeclaration("frames", "camera.frames")
     with pytest.raises(ValueError, match="undeclared outputs"):
         LogicNodeDescriptor(
             "copied-output",
@@ -264,7 +264,7 @@ def test_task_preview_policy_and_typed_output_reference_are_explicit() -> None:
             node_previews=(NodePreviewSpec(copied_declaration, "image"),),
         )
 
-    companion = DatasetOutputDeclaration("frames", "camera.frames.v1")
+    companion = DatasetOutputDeclaration("frames", "camera.frames")
     companion_preview = NodePreviewSpec(
         companion,
         "image",
@@ -341,8 +341,7 @@ def test_virtual_installation_runs_measurement_occupancy_and_same_shot_front(
             pulse_sequence=IMAGING_PULSE_RESOURCE.value,
             pulse_path=IMAGING_PULSE_RESOURCE.path,
             signal_plane=FakePlane(),
-            artifact_directory=tmp_path,
-        ).run()
+        ).run(tmp_path)
         assert plane.freeze().signals == {}
         second = CalibrationTask(
             camera=installation.device("camera"),
@@ -351,15 +350,13 @@ def test_virtual_installation_runs_measurement_occupancy_and_same_shot_front(
             pulse_sequence=IMAGING_PULSE_RESOURCE.value,
             pulse_path=IMAGING_PULSE_RESOURCE.path,
             signal_plane=FakePlane(),
-            artifact_directory=tmp_path,
-        ).run()
+        ).run(tmp_path)
         assert result.artifact_path.name == "calibration.json"
-        assert second.artifact_path.name == "calibration-2.json"
+        assert second.artifact_path.name == "calibration.json"
         assert result.artifact_path != second.artifact_path
         artifact = json.loads(result.artifact_path.read_text(encoding="utf-8"))
         assert set(artifact) == {
             "format",
-            "version",
             "site_map",
             "models",
             "default_model_kind",
@@ -430,8 +427,7 @@ def test_virtual_installation_auto_calibration_path_matches_usage_notebook(
             pulse_sequence=IMAGING_PULSE_RESOURCE.value,
             pulse_path=IMAGING_PULSE_RESOURCE.path,
             signal_plane=FakePlane(),
-            artifact_directory=tmp_path,
-        ).run()
+        ).run(tmp_path)
         frames = camera_cycle_snapshot([(record,) for record in result.capture.short])
         occupancy = OccupancyProcessor(result.calibration).process(
             frames,

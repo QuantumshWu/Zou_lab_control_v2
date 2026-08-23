@@ -34,7 +34,7 @@ from .wire import (
 )
 
 
-# v1 transport/session.py used the same 5 s budget for the loader handshake.
+# Loader and SAFE handshakes share the same five-second action budget.
 LOAD_TIMEOUT = 5.0
 SAFE_TIMEOUT = 5.0
 SAFE_RETRY_AFTER = 0.05
@@ -644,7 +644,7 @@ class PulseStreamer:
                 retried = True
             remaining = deadline - time.monotonic()
             # Once zero is observed, take the adjacent confirming read
-            # immediately; a non-zero acknowledgement keeps v1's 1 ms cadence.
+            # immediately; a non-zero acknowledgement keeps the 1 ms cadence.
             if remaining > 0 and status != 0:
                 time.sleep(min(SAFE_POLL_INTERVAL, remaining))
         raise TimeoutError("pulse streamer did not acknowledge SAFE with stable STATUS=0")

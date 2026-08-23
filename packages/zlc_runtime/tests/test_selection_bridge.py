@@ -1943,7 +1943,7 @@ def test_grid_dimensions_resolve_without_matching_point_columns() -> None:
 
 
 def _frames_on_point_axis_schema(cycles: int = 2, frames: int = 3) -> DatasetSchema:
-    """Camera frames after the migration: (cycles, frame POINTS, y, x)."""
+    """Camera frames use (cycles, frame POINTS, y, x)."""
 
     repeat = AxisSpec(
         AxisId("cycle"), "cycle", REPEAT, cycles, tuple(range(cycles))
@@ -1966,7 +1966,7 @@ def _frames_on_point_axis_schema(cycles: int = 2, frames: int = 3) -> DatasetSch
 
 
 def test_frames_on_point_axis_keep_deriving_and_facet_by_frame() -> None:
-    """The uncommitted frames migration: point rows are frames now.
+    """Point rows represent frames.
 
     An image cell over the DATA spatial axes must still cut spatially, keep
     every frame row, and a facet condition on the 'frame' point column must

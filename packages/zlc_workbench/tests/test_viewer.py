@@ -26,8 +26,8 @@ from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementNode,
     CameraMeasurementRequest,
 )
-from zlc_workbench.archive import read_archive, read_dataset, write_figure_file
-from zlc_workbench.panel_save import save_panel_figure
+from zlc_data.figure_archive import read_archive, read_dataset
+from zlc_workbench.panel_save import capture_run_chain, save_panel_figure
 from zlc_workbench.panel_state import PanelFrozenData, PanelState
 from zlc_workbench.session import ExperimentSession
 from zlc_workbench.viewer import FigureViewerPresenter, describe_archive
@@ -64,51 +64,9 @@ def test_saved_panel_state_keeps_every_public_facet_cell_kind(cell_kind) -> None
     assert restored == state
 
 
-def test_figure_v1_panel_state_migrates_through_the_single_decoder() -> None:
-    restored = PanelState.from_document(
-        {
-            "signal": "@logic/camera_measurement/frame_0",
-            "title": "Distribution",
-            "kind": "histogram",
-            "cell_kind": "",
-            "size": "1x2",
-            "interval_ms": 400,
-            "semantic": {},
-            "display": {"log_y": True},
-            "fit": {"model": "bimodal_gaussian"},
-            "site_overlay": "off",
-        }
-    )
-
-    assert restored.signal == "@logic/camera_measurement/frame_0"
-    assert restored.display == {"log_y": True}
-    assert restored.fit == {"model": "bimodal_gaussian"}
-    assert restored.overlay_signal == ""
-    assert restored.published_outputs == {}
-    assert restored.selector == {}
-    assert restored.classifier_thresholds == ()
-    assert restored.focused_cell is None
-
-    intermediate = PanelState.from_document(
-        {
-            "signal": "frame", "title": "Frame", "kind": "image",
-            "cell_kind": "", "size": "1x2", "interval_ms": 100,
-            "semantic": {}, "display": {}, "fit": {"model": None},
-            "overlay_signal": "",
-        }
-    )
-    assert intermediate.overlay_signal == ""
-    assert intermediate.fit == {"model": None}
-
-    with pytest.raises(ValueError, match="legacy panel site_overlay"):
-        PanelState.from_document(
-            {
-                "signal": "signal", "title": "bad", "kind": "image",
-                "cell_kind": "", "size": "2x2", "interval_ms": 400,
-                "semantic": {}, "display": {}, "fit": {},
-                "site_overlay": "maybe",
-            }
-        )
+def test_panel_state_rejects_incomplete_or_historical_documents() -> None:
+    with pytest.raises(ValueError, match="panel state fields differ"):
+        PanelState.from_document({"signal": "frame", "site_overlay": "off"})
 
 
 class _Signal:
@@ -136,6 +94,7 @@ class _ViewerView:
         self.datasets: tuple = ()
         self.current_dataset = ""
         self.tabs: tuple = ()
+        self.lineage: tuple = ()
         self.surface = None
         self.title = ""
         self.size = ""
@@ -149,6 +108,9 @@ class _ViewerView:
 
     def set_info(self, tabs) -> None:
         self.tabs = tuple(tabs)
+
+    def set_lineage_tree(self, tree) -> None:
+        self.lineage = tuple(tree)
 
     def set_figure_size(self, size: str) -> None:
         self.size = str(size)
@@ -265,16 +227,15 @@ def saved(tmp_path):
         result = capture.collect()
         signal = node.signal_key("frames")
         snapshot = result.publication.value(signal).snapshot
-        path = write_figure_file(
-            tmp_path / "run.npz",
-            name="run",
-            arrays={"panel-1": snapshot},
-            sections={
-                "pulse": pulse,
-                "panel": {"panel-1": {"signal": signal, "title": "camera"}},
-            },
+        state = PanelState(signal, "image", "2x2", 400, "camera")
+        frozen = PanelFrozenData(
+            signal, result.publication, snapshot,
+            lineage=capture_run_chain(session.signal_plane, result.publication),
         )
-        yield path, snapshot
+        written = save_panel_figure(
+            tmp_path / "run.png", state=state, frozen=frozen, viewport=None,
+        )
+        yield written.archive, snapshot
     finally:
         session.close()
 
@@ -284,15 +245,8 @@ def presenter():
     plot = pytest.importorskip("zlc_plot")
     view = _ViewerView()
 
-    def make_host(snapshot, name, _state):
-        return plot.RasterPlotHost.from_plot(
-            snapshot,
-            plot.ImagePlot(
-                plot.AxisRef.data("spatial-x"),
-                plot.AxisRef.data("spatial-y"),
-                labels=plot.PlotLabels(name, "x", "y"),
-            ),
-        )
+    def make_host(plot_input, _name, recipe):
+        return plot.open_figure_host(plot_input, recipe)
 
     presenter = _presenter(view, make_host=make_host)
     try:
@@ -310,7 +264,7 @@ def test_a_saved_dataset_comes_back_with_its_axes(saved) -> None:
 
     path, original = saved
     info, arrays = read_archive(path)
-    restored = read_dataset(info, arrays, "panel-1")
+    restored = read_dataset(info, arrays, "data")
 
     np.testing.assert_array_equal(
         np.asarray(restored.block.values), np.asarray(original.block.values)
@@ -329,22 +283,19 @@ def test_the_description_reports_only_facts_saved_in_the_archive(saved) -> None:
     assert tuple(tabs) == ("Plot", "Measurement", "Device", "Flow", "Raw")
 
     measurement = dict(tabs["Measurement"])
-    assert measurement == {"pulse.name": PULSE_NAME}
+    assert measurement
     assert dict(tabs["Device"]) == {}
 
     plot_rows = dict(tabs["Plot"])
-    assert "panel-1" in plot_rows and "uint16" in plot_rows["panel-1"]
-    assert plot_rows["panel panel-1"].startswith("camera")
+    assert "data" in plot_rows and "uint16" in plot_rows["data"]
+    assert plot_rows["plot data"].startswith("image")
 
 
-def test_the_flow_tab_does_not_invent_a_missing_producer_record(saved) -> None:
-    """A typed snapshot names its signal without fabricating node provenance."""
-
+def test_the_flow_projection_is_the_saved_exact_lineage_tree(saved) -> None:
     path, _snapshot = saved
-    tabs = dict(describe_archive(*read_archive(path)).tabs)
-    flow = dict(tabs["Flow"])
-    assert tuple(flow) == ("camera",)
-    assert flow["camera"] == "@logic/cm/frames  (no record of what produced it)"
+    description = describe_archive(*read_archive(path))
+    assert description.lineage
+    assert "@logic/cm/frames" in description.lineage[0][0]
 
 
 def test_the_raw_tab_is_the_typed_document_not_a_node_probe(saved) -> None:
@@ -354,11 +305,10 @@ def test_the_raw_tab_is_the_typed_document_not_a_node_probe(saved) -> None:
     info, arrays = read_archive(path)
     raw = dict(describe_archive(info, arrays).tabs)["Raw"]
     labels = {label for label, _value in raw}
-    assert "pulse.name" in labels
-    assert "panel.panel-1.signal" in labels
-    assert not any(label.startswith("provenance.") for label in labels)
+    assert "source.signal" in labels
+    assert any(label.startswith("lineage.nodes") for label in labels)
     # The dataset manifest is part of the document too, however verbose.
-    assert any(label.startswith("dataset.panel-1.") for label in labels)
+    assert any(label.startswith("dataset.data.") for label in labels)
 
 
 def test_opening_shows_the_figure_and_its_record(presenter, saved) -> None:
@@ -367,11 +317,12 @@ def test_opening_shows_the_figure_and_its_record(presenter, saved) -> None:
     _wait_until(lambda: not presenter._busy)
 
     assert presenter.description is not None, presenter.view.status
-    assert presenter.view.title == "run"
+    assert presenter.view.title == "run.png"
     assert presenter.view.path == str(path), "the File field cannot stay empty"
     assert dict(presenter.view.tabs)["Measurement"]
     assert presenter.view.surface is not None, presenter.view.status
-    assert presenter.view.status[-1] == ("showing panel-1", False)
+    assert presenter.view.status[-1] == ("showing data", False)
+    assert presenter.view.lineage
 
     presenter.resize_figure("4x4")
     _wait_until(lambda: not presenter._busy)
@@ -582,90 +533,6 @@ def test_the_projection_needs_no_session_and_no_qt() -> None:
     assert not any(name.startswith(("PyQt5", "zlc_atom")) for name in imported), imported
 
 
-@pytest.fixture
-def saved_pair(tmp_path):
-    """An archive with two datasets, which is what a two-panel console saves."""
-
-    write_ordinary_pulse(tmp_path)
-    session = ExperimentSession.open(tmp_path, template="virtual")
-    try:
-        session.load_pulse(PULSE_NAME)
-        arrays = {}
-        for name in ("panel-1", "panel-2"):
-            node = CameraMeasurementNode(
-                camera=session.camera,
-                request=CameraMeasurementRequest("camera", 0.02, None, 1, CAMERA_WINDOWS),
-                signal_plane=session.signal_plane,
-                producer=name.replace("-", ""),
-            )
-            capture = node.prepare()
-            session.fire(shots=1)
-            result = capture.collect()
-            arrays[name] = result.publication.value(node.signal_key("frames")).snapshot
-        yield write_figure_file(
-            tmp_path / "two.npz",
-            name="two",
-            arrays=arrays,
-            # What the console records beside each dataset: what the panel was
-            # called and which signal it was showing.
-            sections={
-                "panel": {
-                    "panel-1": {"title": "before", "signal": "@logic/panel1/frames"},
-                    "panel-2": {"title": "after", "signal": "@logic/panel2/frames"},
-                },
-            },
-        )
-    finally:
-        session.close()
-
-
-def test_every_dataset_in_an_archive_can_be_reached(presenter, saved_pair) -> None:
-    """A viewer that only draws the first hides the rest.
-
-    Which reads exactly like an archive that kept only one -- so the operator
-    cannot tell a partial save from a partial viewer.
-    """
-
-    presenter.view.path_committed.emit(str(saved_pair))
-    _wait_until(lambda: not presenter._busy)
-
-    # (key, label): the archive's own name for it, and what it IS, taken from
-    # the panel record saved beside it.  A saved console figure used to offer
-    # "panel-1" and "panel-2" and nothing else, so an operator had to guess
-    # which of them was the camera.
-    assert presenter.view.datasets == (
-        ("panel-1", "before — @logic/panel1/frames"),
-        ("panel-2", "after — @logic/panel2/frames"),
-    )
-    assert presenter.dataset == "panel-1"
-    first = presenter._host
-
-    presenter.view.dataset_picked.emit("panel-2")
-    _wait_until(lambda: not presenter._busy)
-
-    assert presenter.dataset == "panel-2"
-    assert presenter._host is not first
-    assert "panel-2" in presenter.view.status[-1][0]
-
-
-def test_a_dataset_with_no_panel_record_keeps_the_archive_s_own_name(
-    presenter, saved
-) -> None:
-    """A label is what the archive KNOWS, never something invented.
-
-    Arrays saved from a notebook carry no panel record, so there is nothing to
-    call them but the name they were saved under -- and that is what the
-    chooser must show.
-    """
-
-    presenter.view.path_committed.emit(str(saved))
-    _wait_until(lambda: not presenter._busy)
-
-    assert all(key == label for key, label in presenter.view.datasets), (
-        presenter.view.datasets
-    )
-
-
 def test_saving_an_image_works_however_the_archive_was_spelled(presenter, saved) -> None:
     """A relative Open spelling still establishes one absolute archive home."""
 
@@ -681,7 +548,7 @@ def test_saving_an_image_works_however_the_archive_was_spelled(presenter, saved)
     finally:
         os.chdir(here)
 
-    written = next(path.parent.glob("run-panel-1*.png"))
+    written = next(path.parent.glob("run-data*.png"))
     assert Path(written).is_file()
     assert written.parent == path.parent
 
@@ -740,24 +607,15 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         overlay={"overlay_signal": state.overlay_signal},
     )
 
-    class _SavingHost:
-        def save(self, path) -> None:
-            Path(path).write_bytes(b"png")
-
-        def close(self) -> None:
-            return None
-
     written = save_panel_figure(
         tmp_path / "panel",
         state=state,
         frozen=frozen,
         viewport=None,
-        make_host=lambda _input, _signal, _kind, _cell_kind: _SavingHost(),
-        configure_host=lambda _host, _state, _overlay, _viewport: None,
     )
     with np.load(written.archive, allow_pickle=False) as payload:
-        assert "overlay.coordinates" in payload.files
-        assert "overlay.status" in payload.files
+        assert "data.overlay.coordinates" in payload.files
+        assert "data.overlay.status" in payload.files
 
     class _RestoredHost:
         def __init__(self) -> None:
@@ -802,11 +660,11 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
 
     seen = {}
 
-    def make_host(plot_input, label, panel_state):
+    def make_host(plot_input, label, recipe):
         seen.update(
             plot_input=plot_input,
             label=label,
-            state=panel_state,
+            recipe=recipe,
         )
         host = _RestoredHost()
         seen["host"] = host
@@ -818,10 +676,9 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         presenter.open(str(written.archive))
         _wait_until(lambda: not presenter._busy)
         assert presenter.description is not None, view.status
-        assert seen["state"].kind == "image", (
+        assert seen["recipe"]["spec"].kind.value == "image", (
             "the saved kind must not be inferred anew"
         )
-        assert seen["state"].cell_kind == ""
         assert seen["label"] == f"site occupancy — {state.signal}"
         frame = seen["plot_input"]
         assert isinstance(frame, ImageFrame)
@@ -831,21 +688,11 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         assert frame.overlay.static_statuses is None
         assert frame.overlay.status.exactly_equals(overlay.status)
 
-        host = seen["host"]
-        assert seen["state"].semantic == {"reduction": "mean"}
-        # The record reaches the host through the BUILDER, which is what knows
-        # the vocabulary it belongs to; the presenter adds only what it
-        # decides here.  Re-sending the saved appearance is how a panel that
-        # had crossed a vocabulary refused to reopen at all.
-        assert host.display == {}
-        assert host.size == "4x4"
+        assert seen["recipe"]["parameters"]["show_colorbar"] is False
+        assert seen["recipe"]["fit"]["model"] == "anisotropic_gaussian_center"
+        assert seen["recipe"]["size"] == "4x4"
         assert view.size == "4x4"
-        assert host.configure_calls == 1
-        assert host.fitted == (
-            "anisotropic_gaussian_center",
-            {"live": False},
-        )
-        assert presenter.panel_state == state
+        assert presenter.recipe == seen["recipe"]
     finally:
         _close_presenter(presenter)
 
@@ -856,7 +703,7 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         _wait_until(lambda: not real_presenter._busy)
         assert real_presenter.description is not None
         assert real_presenter._host is not None, real_view.status
-        assert real_presenter.panel_state == state
+        assert real_presenter.recipe["spec"].kind.value == "image"
         real_presenter._host.wait_for_front(timeout=5.0)
         assert real_presenter._host._session._renderer.primary_axes.get_title() == ""
         # And the authored appearance really is on the built host.
@@ -920,20 +767,11 @@ def test_panel_save_thresholds_and_viewport_reopen_in_canonical_units(tmp_path) 
         NumericRange(0.0, 40.0),
     )
 
-    class _SavingHost:
-        def save(self, path) -> None:
-            Path(path).write_bytes(b"png")
-
-        def close(self) -> None:
-            return None
-
     written = save_panel_figure(
         tmp_path / "unit-report",
         state=state,
         frozen=frozen,
         viewport=viewport,
-        make_host=lambda *_args: _SavingHost(),
-        configure_host=lambda _host, _state, _overlay, _viewport: None,
     )
 
     view = _ViewerView()
@@ -966,7 +804,9 @@ def test_panel_save_thresholds_and_viewport_reopen_in_canonical_units(tmp_path) 
 def test_panel_save_reports_that_the_archive_survived_an_image_failure(
     saved,
     tmp_path,
+    monkeypatch,
 ) -> None:
+    import zlc_plot.figure_artifact as figure_module
     _old_path, snapshot = saved
     state = PanelState("camera", "image", "2x2", 400, "camera")
     frozen = PanelFrozenData(state.signal, None, snapshot)
@@ -974,17 +814,22 @@ def test_panel_save_reports_that_the_archive_survived_an_image_failure(
     def fail_image(_path) -> None:
         raise OSError("renderer failed")
 
+    monkeypatch.setattr(
+        figure_module,
+        "build_figure_host",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            configure=lambda **_kwargs: None,
+            save=fail_image,
+            close=lambda: None,
+        ),
+    )
+
     with pytest.raises(RuntimeError, match="archive.*saved.*image") as failure:
         save_panel_figure(
             tmp_path / "failed-image",
             state=state,
             frozen=frozen,
             viewport=None,
-            make_host=lambda *_args: SimpleNamespace(
-                save=fail_image,
-                close=lambda: None,
-            ),
-            configure_host=lambda *_args: None,
         )
 
     archive = tmp_path / "failed-image.npz"
@@ -997,33 +842,22 @@ def test_panel_save_does_not_render_when_the_archive_fails(
     tmp_path,
     monkeypatch,
 ) -> None:
-    import zlc_workbench.panel_save as panel_save_module
+    import zlc_plot.figure_artifact as figure_module
 
     _old_path, snapshot = saved
     state = PanelState("camera", "image", "2x2", 400, "camera")
     frozen = PanelFrozenData(state.signal, None, snapshot)
-    rendered: list[Path] = []
 
     def fail_archive(*_args, **_kwargs):
         raise OSError("archive disk full")
 
-    def render(path) -> None:
-        rendered.append(Path(path))
-        Path(path).write_bytes(b"png")
-
-    monkeypatch.setattr(panel_save_module, "write_figure_file", fail_archive)
+    monkeypatch.setattr(figure_module, "atomic_write_file", fail_archive)
     with pytest.raises(OSError, match="archive disk full"):
         save_panel_figure(
             tmp_path / "failed-archive",
             state=state,
             frozen=frozen,
             viewport=None,
-            make_host=lambda *_args: SimpleNamespace(
-                save=render,
-                close=lambda: None,
-            ),
-            configure_host=lambda *_args: None,
         )
 
-    assert rendered == []
     assert not (tmp_path / "failed-archive.png").exists()

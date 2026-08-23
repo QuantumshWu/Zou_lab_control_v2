@@ -30,7 +30,6 @@ _RASTER_YX = (1024, 1280)
 _TWO_PI = 2.0 * np.pi
 _TYPE_ID = "slm.hamamatsu_x15213"
 _PROFILE_FORMAT = "zlc.slm.hamamatsu_x15213.device_profile"
-_PROFILE_VERSION = 2
 _PROFILE_DIRECTORY = Path(__file__).resolve().parent / "profiles"
 _SDK_LIBRARY = "hpkSLMdaLV.dll"
 _REMOTE_TIMEOUT_SECONDS = 10.0
@@ -595,7 +594,6 @@ def _prepare_dvi_controller(sdk_directory: str, serial: str) -> bool:
 _PROFILE_FIELDS = frozenset(
     {
         "format",
-        "version",
         "model",
         "serial",
         "default_wavelength_nm",
@@ -639,7 +637,7 @@ def _load_profile(profile_name: str) -> dict[str, object]:
         raise ValueError(f"X15213 device profile {requested!r} is not strict JSON") from error
     if not isinstance(payload, dict) or set(payload) != _PROFILE_FIELDS:
         raise ValueError(f"X15213 device profile {requested!r} has an invalid field set")
-    if payload["format"] != _PROFILE_FORMAT or payload["version"] != _PROFILE_VERSION:
+    if payload["format"] != _PROFILE_FORMAT:
         raise ValueError(f"X15213 device profile {requested!r} has an unsupported format")
     for field in ("model", "serial", "phase_curve_source", "settle_source"):
         value = payload[field]

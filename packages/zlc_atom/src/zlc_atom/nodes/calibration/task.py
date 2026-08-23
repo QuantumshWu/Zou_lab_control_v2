@@ -17,14 +17,20 @@ from zlc_data import (
     AxisId,
     AxisSpec,
 )
-from zlc_data.figure_archive import read_archive, read_dataset, write_figure_archive
+from zlc_data.figure_archive import (
+    FIGURE_SCHEMA,
+    read_archive,
+    read_dataset,
+    write_figure_archive,
+)
 from zlc_durable import (
     atomic_write_file,
+    atomic_write_text,
     durable_makedirs,
-    unique_path,
     write_readable_json,
 )
 from zlc_pulse import PulseSequence, convert_time
+from zlc_runtime import TaskRun
 
 from zlc_atom.devices.camera.contract import (
     CameraAdapter,
@@ -287,12 +293,14 @@ class SampleWriter:
         run_record: Mapping[str, object],
         generation: object,
         photoelectrons: bool,
+        artifact_context: object,
     ) -> None:
         self.folder = Path(folder)
         durable_makedirs(self.folder)
         self._point = working_point
         self._run_record = dict(run_record)
         self._generation = generation
+        self._artifact_context = artifact_context
         self._value_unit = (
             None if photoelectrons else working_point.count_unit
         )
@@ -312,6 +320,14 @@ class SampleWriter:
         Workbench panel state into this science plugin.
         """
 
+        from zlc_plot import (
+            AxisRef,
+            FacetGridPlot,
+            ImagePlot,
+            PlotLabels,
+            encode_plot_recipe,
+        )
+
         snapshot = cycle_snapshot(
             cycle,
             frame_shape=self._point.frame_shape_yx,
@@ -322,29 +338,8 @@ class SampleWriter:
             value_unit=self._value_unit,
         )
         image_path, archive_path = self._paths(index)
-        atomic_write_file(
-            archive_path,
-            lambda stream: write_figure_archive(
-                stream,
-                image_path.name,
-                arrays={"data": snapshot},
-                sections={"run_chain": [dict(self._run_record)]},
-            ),
-        )
-        self._samples[int(index)] = archive_path
-        return archive_path
-
-    def render(self) -> int:
-        """Draw every written sample, once the camera is no longer waiting."""
-
-        from zlc_plot import AxisRef, ImagePlot, PlotLabels, facet_grid
-
-        for index, archive_path in sorted(self._samples.items()):
-            info, arrays = read_archive(archive_path)
-            snapshot = read_dataset(info, arrays, "data")
-            image_path, _archive_path = self._paths(index)
-            with facet_grid(
-                snapshot,
+        recipe = encode_plot_recipe(
+            FacetGridPlot(
                 AxisRef.point("calibration.capture_preview.frame"),
                 ImagePlot(
                     AxisRef.data("calibration.image.x"),
@@ -353,9 +348,58 @@ class SampleWriter:
                 labels=PlotLabels(
                     title=f"calibration {SAVED_SAMPLE_STEM}_{int(index):04d}"
                 ),
-                size="4x4",
-            ) as plot:
-                plot.save(image_path)
+            ),
+            parameters={},
+            size="4x4",
+        )
+        atomic_write_file(
+            archive_path,
+            lambda stream: write_figure_archive(
+                stream,
+                image_path.name,
+                arrays={"data": snapshot},
+                sections={
+                    "plot": {"data": recipe},
+                    "lineage": {"root": None, "nodes": []},
+                    "source": {
+                        "task": "calibration",
+                        "artifact": "saved_sample",
+                        "index": int(index),
+                        "run_record": dict(self._run_record),
+                    },
+                },
+            ),
+        )
+        self._artifact_context.register_artifact(
+            f"sample_{int(index):04d}",
+            archive_path,
+            role="figure",
+            contract_id=FIGURE_SCHEMA,
+        )
+        self._samples[int(index)] = archive_path
+        return archive_path
+
+    def render(self) -> int:
+        """Draw every written sample, once the camera is no longer waiting."""
+
+        from zlc_plot import open_figure_host, read_figure_plot
+
+        for index, archive_path in sorted(self._samples.items()):
+            info, arrays = read_archive(archive_path)
+            plot_input, recipe = read_figure_plot(info, arrays, "data")
+            image_path, _archive_path = self._paths(index)
+            plot = open_figure_host(plot_input, recipe)
+            try:
+                saved = plot.save(image_path)
+                if hasattr(saved, "result"):
+                    saved.result()
+            finally:
+                plot.close()
+            self._artifact_context.register_artifact(
+                f"sample_{int(index):04d}_preview",
+                image_path,
+                role="preview",
+            )
         return len(self._samples)
 
 
@@ -432,16 +476,17 @@ def read_saved_samples(
                 CameraFrameRecord(values[0, 2], ordinal * 3 + 2),
             )
         )
-        chain = info["sections"].get("run_chain")
+        source = info["sections"].get("source")
         if (
-            type(chain) is not list
-            or len(chain) != 1
-            or type(chain[0]) is not dict
+            type(source) is not dict
+            or set(source) != {"task", "artifact", "index", "run_record"}
+            or source["task"] != "calibration"
+            or source["artifact"] != "saved_sample"
+            or source["index"] != ordinal
+            or type(source["run_record"]) is not dict
         ):
-            raise ValueError(
-                f"{path.name} must carry exactly one calibration run record"
-            )
-        observed_record = dict(chain[0])
+            raise ValueError(f"{path.name} has invalid calibration source metadata")
+        observed_record = dict(source["run_record"])
         if run_record is None:
             run_record = observed_record
         elif observed_record != run_record:
@@ -565,7 +610,7 @@ class CalibrationRunResult:
         )
 
 
-def _save_report(result: CalibrationRunResult) -> Path:
+def _save_report(result: CalibrationRunResult, artifact_context: object) -> Path:
     """Everything a calibration leaves for a person: the numbers and the pictures.
 
     The numbers first.  A run that fails to draw -- a backend that cannot
@@ -573,34 +618,94 @@ def _save_report(result: CalibrationRunResult) -> Path:
     what it measured is what an operator needs.
     """
 
-    report_root = result.artifact_path.parent / "report"
-    report_root.mkdir(parents=True)
-    write_readable_json(report_root / "summary.json", _plain(result.summary))
-    (report_root / "summary.txt").write_text(
+    run_root = result.artifact_path.parents[1]
+    summary_path = write_readable_json(
+        run_root / "summary.json", _plain(result.summary)
+    )
+    artifact_context.register_artifact(
+        "calibration_summary",
+        summary_path,
+        role="summary",
+        contract_id="calibration.summary",
+    )
+    summary_preview = atomic_write_text(
+        run_root / "summary.txt",
         "\n".join(summary_lines(result.summary)) + "\n", encoding="utf-8"
     )
-    _save_report_images(result, report_root)
-    return report_root
+    artifact_context.register_artifact(
+        "calibration_summary_text",
+        summary_preview,
+        role="summary",
+    )
+    figure_root = run_root / "figures"
+    _save_report_images(result, figure_root, artifact_context)
+    return figure_root
 
 
-def _save_report_images(result: CalibrationRunResult, report_root: Path) -> Path:
+def _save_report_images(
+    result: CalibrationRunResult,
+    figure_root: Path,
+    artifact_context: object,
+) -> Path:
     """Render the SiteMap and each readout model directly through zlc_plot."""
 
     from zlc_plot import (
         AxisRef,
+        CurvePlot,
+        FacetGridPlot,
         HistogramPlot,
+        ImageFrame,
         ImagePlot,
         ImagePointOverlay,
         PlotLabels,
         PointStatus,
-        curve,
-        facet_grid,
-        image,
+        save_figure_artifact,
     )
+
+    def save(
+        stem: str,
+        plot_input: object,
+        spec: object,
+        *,
+        parameters: Mapping[str, object] | None = None,
+        classifier_thresholds: object = (),
+    ) -> None:
+        base_path = figure_root / stem
+        try:
+            preview_path, figure_path = save_figure_artifact(
+                base_path,
+                plot_input=plot_input,
+                spec=spec,
+                parameters={} if parameters is None else parameters,
+                size="4x4",
+                classifier_thresholds=classifier_thresholds,
+                source={"task": "calibration", "report": stem},
+            )
+        except BaseException:
+            figure_path = base_path.with_suffix(".npz")
+            if figure_path.is_file():
+                artifact_context.register_artifact(
+                    f"report_{stem}",
+                    figure_path,
+                    role="figure",
+                    contract_id=FIGURE_SCHEMA,
+                )
+            raise
+        artifact_context.register_artifact(
+            f"report_{stem}",
+            figure_path,
+            role="figure",
+            contract_id=FIGURE_SCHEMA,
+        )
+        artifact_context.register_artifact(
+            f"report_{stem}_preview",
+            preview_path,
+            role="preview",
+        )
 
     calibration = result.calibration
     site_map = calibration.site_map
-    generation = result.artifact_path.stem
+    generation = result.artifact_path.parents[1].name
     revision = len(result.capture.cycles)
 
     # Where the crop sat on the sensor: the pictures and the points drawn on
@@ -643,15 +748,17 @@ def _save_report_images(result: CalibrationRunResult, report_root: Path) -> Path
             for valid in site_map.valid_sites
         ),
     )
-    with image(
-        site_map_snapshot,
-        AxisRef.data("calibration.image.x"),
-        AxisRef.data("calibration.image.y"),
-        overlay=overlay,
-        labels=PlotLabels(title="Site map", x="x (pixel)", y="y (pixel)"),
-        size="4x4",
-    ) as plot:
-        plot.save(report_root / "site_map.png")
+    save(
+        "site_map",
+        ImageFrame(site_map_snapshot, overlay),
+        ImagePlot(
+            AxisRef.data("calibration.image.x"),
+            AxisRef.data("calibration.image.y"),
+            labels=PlotLabels(
+                title="Site map", x="x (pixel)", y="y (pixel)"
+            ),
+        ),
+    )
 
     # ONE declaration of site identity, owned by the SiteMap that measured it.
     # A site array is one image resampled onto the trap lattice: cell data, not
@@ -699,18 +806,19 @@ def _save_report_images(result: CalibrationRunResult, report_root: Path) -> Path
         validity_axis_ids=(site_axis_id, model_axis.axis_id),
         validity_mask=fidelity_valid[:, np.newaxis, ...],
     )
-    with curve(
+    save(
+        "fidelity",
         fidelity_snapshot,
-        AxisRef.data("calibration.site"),
-        group=AxisRef.data("calibration.model"),
-        labels=PlotLabels(
-            title="Held-out fidelity by readout model",
-            x="Site",
-            y="Fidelity",
+        CurvePlot(
+            AxisRef.data("calibration.site"),
+            group=AxisRef.data("calibration.model"),
+            labels=PlotLabels(
+                title="Held-out fidelity by readout model",
+                x="Site",
+                y="Fidelity",
+            ),
         ),
-        size="4x4",
-    ) as plot:
-        plot.save(report_root / "fidelity.png")
+    )
 
     for model in calibration.models:
         model_report = model_reports[model.kind.value]
@@ -756,18 +864,17 @@ def _save_report_images(result: CalibrationRunResult, report_root: Path) -> Path
             if valid
         )
         title = f"{model.kind.value.replace('_', ' ')} readout"
-        with facet_grid(
+        save(
+            model.kind.value,
             samples,
-            AxisRef.data("calibration.site"),
-            HistogramPlot(PlotLabels(x="Readout signal", y="Count")),
-            labels=PlotLabels(title=title),
-            size="4x4",
-        ) as plot:
-            plot.configure(
-                parameters={"threshold_classifier": True},
-                classifier_thresholds=thresholds,
-            )
-            plot.save(report_root / f"{model.kind.value}.png")
+            FacetGridPlot(
+                AxisRef.data("calibration.site"),
+                HistogramPlot(PlotLabels(x="Readout signal", y="Count")),
+                labels=PlotLabels(title=title),
+            ),
+            parameters={"threshold_classifier": True},
+            classifier_thresholds=thresholds,
+        )
 
     psf_model = calibration.select_model(ReadoutModelKind.PER_SITE_PSF)
     psf_kernels = np.asarray(psf_model.psf_weights, dtype="<f8")
@@ -809,20 +916,23 @@ def _save_report_images(result: CalibrationRunResult, report_root: Path) -> Path
         validity_axis_ids=(site_axis_id,),
         validity_mask=kernel_valid[:, np.newaxis, :],
     )
-    with facet_grid(
+    save(
+        "psf_kernels",
         psf_snapshot,
-        AxisRef.data("calibration.site"),
-        ImagePlot(
-            AxisRef.data("calibration.psf.x"),
-            AxisRef.data("calibration.psf.y"),
-            labels=PlotLabels(x="x (pixel)", y="y (pixel)", value="Weight"),
+        FacetGridPlot(
+            AxisRef.data("calibration.site"),
+            ImagePlot(
+                AxisRef.data("calibration.psf.x"),
+                AxisRef.data("calibration.psf.y"),
+                labels=PlotLabels(
+                    x="x (pixel)", y="y (pixel)", value="Weight"
+                ),
+            ),
+            labels=PlotLabels(title="Per-site PSF kernels"),
         ),
-        labels=PlotLabels(title="Per-site PSF kernels"),
-        size="4x4",
-    ) as plot:
-        plot.save(report_root / "psf_kernels.png")
+    )
 
-    return report_root
+    return figure_root
 
 
 def _camera_snapshot(point: CameraWorkingPoint) -> dict[str, object]:
@@ -910,7 +1020,6 @@ class CalibrationTask:
         pulse_sequence: PulseSequence,
         pulse_path: str | Path,
         signal_plane: object,
-        artifact_directory: str | Path,
     ) -> None:
         if not isinstance(camera, CameraAdapter):
             raise TypeError("camera must implement CameraAdapter")
@@ -921,9 +1030,6 @@ class CalibrationTask:
             raise TypeError("request must be CalibrationRequest")
         if not isinstance(pulse_sequence, PulseSequence):
             raise TypeError("pulse_sequence must be PulseSequence")
-        directory = Path(artifact_directory).expanduser().resolve()
-        if not directory.is_dir():
-            raise ValueError("artifact_directory must be an existing directory")
         self.camera = camera
         self.sequencer = sequencer
         self._request = request
@@ -932,7 +1038,6 @@ class CalibrationTask:
         if signal_plane is None:
             raise TypeError("signal_plane must be supplied by the runtime owner")
         self.signal_plane = signal_plane
-        self.artifact_directory = directory
         self._actual_working_point: CameraWorkingPoint | None = None
         self._result: CalibrationRunResult | None = None
 
@@ -1056,6 +1161,7 @@ class CalibrationTask:
         pulse: ResolvedPulse,
         *,
         context: object | None,
+        artifact_context: object,
         pulse_facts: Mapping[str, object],
         frames_folder: Path | None,
     ) -> tuple[
@@ -1166,6 +1272,7 @@ class CalibrationTask:
                                 else self.request.camera_key
                             ),
                             photoelectrons=photoelectrons,
+                            artifact_context=artifact_context,
                         )
                     writer.write(len(cycles) - 1, cycle)
                 if context is not None:
@@ -1354,11 +1461,15 @@ class CalibrationTask:
             detection_sigma=self.request.detection_sigma,
         )
 
-    def _run(self, context: object | None) -> CalibrationRunResult:
+    def _run(
+        self,
+        context: object | None,
+        artifact_context: object,
+    ) -> CalibrationRunResult:
         self._actual_working_point = None
         self._result = None
         try:
-            # The run's own folder is named BEFORE anything is acquired, so
+            # TaskRun names the run's own folder BEFORE anything is acquired, so
             # the frames can be written into it as they arrive rather than
             # after a result exists.  A run that never produces one still
             # leaves every sample it paid for.
@@ -1367,8 +1478,13 @@ class CalibrationTask:
             # included: one calibration is one directory an operator can
             # copy, move or delete whole, rather than a file that has to be
             # kept beside a folder of the same name.
-            run_folder = unique_path(self.artifact_directory, "calibration", "")
-            artifact_path = run_folder / f"{run_folder.name}.json"
+            run_folder = Path(
+                artifact_context.directory
+                if isinstance(artifact_context, TaskRun)
+                else artifact_context.run_directory
+            )
+            final_root = run_folder / "final"
+            artifact_path = final_root / "calibration.json"
             writer: SampleWriter | None = None
             if self.request.frame_source == FRAMES_FROM_FOLDER:
                 if context is not None:
@@ -1383,9 +1499,10 @@ class CalibrationTask:
                 capture, run_record, writer = self._capture(
                     pulse,
                     context=context,
+                    artifact_context=artifact_context,
                     pulse_facts=pulse_facts,
                     frames_folder=(
-                        run_folder / "frames"
+                        run_folder / "figures"
                         if self.request.save_frames
                         else None
                     ),
@@ -1420,7 +1537,14 @@ class CalibrationTask:
                 # or relabel durable output as a cancelled run.
                 context.seal_terminal()
                 context.report_progress("Saving calibration")
+            durable_makedirs(final_root)
             calibration.save(artifact_path)
+            artifact_context.register_artifact(
+                "artifact_path",
+                artifact_path,
+                role="final",
+                contract_id=TrapCalibration.CONTRACT_ID,
+            )
             result = CalibrationRunResult(
                 artifact_path,
                 calibration,
@@ -1432,7 +1556,7 @@ class CalibrationTask:
             )
             if context is not None:
                 context.report_progress("Saving calibration report")
-            _save_report(result)
+            _save_report(result, artifact_context)
             self._result = result
             if context is not None:
                 # What it found, not just that it finished: the operator's
@@ -1450,11 +1574,19 @@ class CalibrationTask:
             self._safe()
             raise
 
-    def run(self) -> CalibrationRunResult:
-        return self._run(None)
+    def run(self, run_root: str | Path) -> CalibrationRunResult:
+        task_run = TaskRun.create(
+            run_root,
+            task_name=self.instance_id,
+            instance_id=self.instance_id,
+            input_summary=self.request.to_dict(),
+        )
+        return task_run.execute(
+            lambda active_run: self._run(None, active_run)
+        )
 
     def execute(self, context: object) -> CalibrationRunResult:
-        return self._run(context)
+        return self._run(context, context)
 
 
 __all__ = [

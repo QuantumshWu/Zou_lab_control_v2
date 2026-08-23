@@ -101,6 +101,20 @@ projection are frozen. Other panels and pure display controls remain usable;
 Workbench does not duplicate Task lifecycle or scientific state to enforce
 this.
 
+## TaskRun wiring
+
+Workbench supplies the workspace save root but does not allocate run folders
+while an editor or draft is merely open. NodeHost allocates one unique folder
+when the worker actually starts, establishes `run.json`, and gives the execution
+context the only artifact-registration path. Workbench projects that lifecycle;
+it does not maintain a second Task status or plugin-specific report manager.
+
+Calibration, Temperature and SLM Feedback all use the same TaskRun contract.
+Their domain owners select final JSON/NPZ, summaries and important typed Figure
+artifacts. Stop and failure leave the run folder reachable with its truthful
+partial inventory. Runtime never asks Workbench to dump every publication or
+intermediate shot.
+
 ## Save boundaries
 
 - Header **Save Layout** writes stopped node drafts, named-device choices,
@@ -108,27 +122,25 @@ this.
   running state/device snapshots.
 - Header **Save Screenshot** writes one ordinary image of the TaskConsole GUI,
   with no layout, data archive or provenance.
-- Panel Edit **Save Fig** writes only the frozen image/data currently shown by
-  that panel, its plot/overlay state, and the run-time call chain and actual
-  device snapshots already captured when the runs executed. It does not include
-  another panel or the whole monitor board. At the click, Workbench freezes the
-  exact state/data and the identity-matched display viewport; viewport belongs
-  to this Figure archive's strict `view` section, not reusable Save Layout.
-  A dedicated composition-owned worker streams the archive first, then performs
-  one saved-host configure/render and image write. The Qt beat and Stop remain
-  live; a second Save for the same panel is rejected rather than queued.
+- Panel Edit **Save Fig** writes only that panel's frozen typed data, exact Plot
+  recipe, overlay, viewport and causal lineage. The `zlc.figure` NPZ is primary;
+  its same-stem PNG is a preview. It does not include another panel or the whole
+  monitor board. A dedicated composition-owned worker publishes the archive
+  first and then renders through the same Plot host/configure path used by
+  TaskConsole and FigureViewer. The Qt beat and Stop remain live; a second Save
+  for the same panel is rejected rather than queued.
 
-Calibration JSON is a separate Task artifact. Panel Save records its actual
-path where relevant, without embedding the JSON or adding fingerprint/hash.
+Domain final JSON/NPZ files remain separate Task artifacts inside their run
+folders. A Figure records their actual lineage/path where relevant without
+embedding them or adding fingerprint/hash.
 
 ## Qt and owner shutdown
 
 Figure Viewer reads and fully prepares a candidate off the Qt owner, atomically
 mounts only a successful candidate, and keeps the previous accepted figure on
-failure. Historical v1 panel state is decoded by the same `PanelState` owner;
-all recoverable display/fit choices survive, while the old anonymous
-`site_overlay=centers` wish becomes no overlay because it never recorded a signal
-identity. Its resize/save/host retirement are likewise asynchronous. TaskConsole
+failure. It accepts only the current exact Figure recipe, reconstructs the typed
+plot input without shape inference, and displays the saved direct-parent lineage
+as a tree. Its resize/save/host retirement are likewise asynchronous. TaskConsole
 keeps its lifecycle beat running while nodes, projections, plot hosts or Panel
 Save retire; the window stays visible until every owner is actually stopped.
 Session/device shutdown runs on the one flow-owned serial device worker used by

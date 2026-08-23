@@ -55,6 +55,7 @@ from .logic import (
     finalize_logic_draft,
     make_host,
     stable_signal_key,
+    task_input_summary,
 )
 from .panel_save import (
     capture_run_chain,
@@ -2558,44 +2559,12 @@ class ConsolePresenter:
             measured_on, remembered = binding.interaction_viewport
             if measured_on == self._panel_view_identity(binding):
                 viewport = remembered
-        plot_input = frozen.snapshot if frozen.plot_input is None else frozen.plot_input
-        overlay = plot_input.overlay if isinstance(plot_input, ImageFrame) else None
-        configuration = self._panel_host_configuration(
-            state,
-            binding.parameter_surface,
-            overlay=overlay,
-            viewport=viewport,
-            live=False,
-            restore_interaction=True,
-        )
-        make_host = self._make_host
-
-        def make_saved_host(
-            _initial: object,
-            _signal: str,
-            _kind: str,
-            _cell_kind: str,
-        ) -> object:
-            return make_host(frozen.snapshot, state)
-
-        def configure_saved_host(
-            host: object,
-            _state: PanelState,
-            _overlay: object,
-            _viewport: object,
-        ) -> None:
-            pending = host.configure(**configuration)
-            if hasattr(pending, "result"):
-                pending.result()
-
         def work() -> object:
             return _save_panel_figure(
                 selected,
                 state=state,
                 frozen=frozen,
                 viewport=viewport,
-                make_host=make_saved_host,
-                configure_host=configure_saved_host,
             )
 
         title = state.title
@@ -4683,7 +4652,21 @@ class ConsolePresenter:
             )
             for requirement in binding.descriptor.device_requirements
         )
-        return LogicCandidate(node, host, previews, claims)
+        is_task = str(
+            getattr(binding.descriptor.kind, "value", binding.descriptor.kind)
+        ) == "task"
+        return LogicCandidate(
+            node,
+            host,
+            previews,
+            claims,
+            run_root=self.session.day_folder() if is_task else None,
+            input_summary=(
+                task_input_summary(binding.descriptor, finalization)
+                if is_task
+                else {}
+            ),
+        )
 
     def _discard_pending(self, binding: LogicBinding) -> None:
         candidate, binding.pending = binding.pending, None
@@ -4768,7 +4751,13 @@ class ConsolePresenter:
         binding.artifact_result_host = None
         binding.artifact_completion_order = 0
         try:
-            candidate.host.start()
+            if candidate.run_root is None:
+                candidate.host.start()
+            else:
+                candidate.host.start(
+                    run_root=candidate.run_root,
+                    input_summary=candidate.input_summary,
+                )
         except Exception as error:
             lease.release()
             binding.lease = None
@@ -4836,8 +4825,8 @@ class ConsolePresenter:
     def _bench_offer_extras(self) -> dict[str, Any]:
         """Bench facts an EDITOR may offer from: side-effect free by contract.
 
-        artifact_directory is deliberately absent -- computing it CREATES the
-        day folder, and opening an editor must not touch the filesystem.
+        Run paths are deliberately absent: opening an editor must not create
+        the day folder or otherwise touch the filesystem.
         """
 
         from zlc_atom.install import tunable_devices
@@ -4847,9 +4836,7 @@ class ConsolePresenter:
     def _logic_extras(self) -> dict[str, Any]:
         """Facts a START can bind beyond its devices and the signal plane."""
 
-        extras = self._bench_offer_extras()
-        extras["artifact_directory"] = self.session.day_folder()
-        return extras
+        return self._bench_offer_extras()
 
     def _artifact_results(
         self,
@@ -4862,40 +4849,38 @@ class ConsolePresenter:
         return ()
 
     def _capture_artifact_results(self, binding: LogicBinding) -> None:
-        """Freeze artifact paths when polling first observes terminal success."""
+        """Project this Task run directory and its explicitly registered files."""
 
         host = binding.host
-        if (
-            host is None
-            or host.running
-            or not host.terminal
-            or host.observation.error is not None
-            or not host.final_result_resolved
-        ):
+        run_directory = None if host is None else getattr(host, "run_directory", None)
+        if host is None or run_directory is None:
             return
-        if binding.artifact_result_host is host:
-            return
-        result = host.final_result
         rows: list[Mapping[str, str]] = []
-        for output in getattr(binding.descriptor, "artifact_outputs", ()):
-            value = (
-                result.get(output.name)
-                if isinstance(result, Mapping)
-                else getattr(result, output.name, None)
-            )
-            if value is None:
-                continue
-            path = str(Path(value).expanduser().resolve())
+        for artifact in getattr(host, "artifacts", ()):
             rows.append(
                 {
-                    "name": str(output.name),
-                    "contract_id": str(output.contract_id),
-                    "path": path,
+                    "name": artifact.name,
+                    "contract_id": artifact.contract_id,
+                    "path": str(artifact.path),
+                    "role": artifact.role,
                 }
             )
+        rows.append(
+            {
+                "name": "run_directory",
+                "contract_id": "zlc.task-run",
+                "path": str(run_directory),
+                "role": "run",
+            }
+        )
         binding.artifact_result_host = host
         binding.artifact_results = tuple(rows)
-        if rows:
+        if (
+            host.terminal
+            and host.observation.error is None
+            and binding.artifact_completion_order == 0
+            and any(row.get("role") == "final" for row in rows)
+        ):
             self._artifact_completion_order += 1
             binding.artifact_completion_order = self._artifact_completion_order
 
@@ -4904,7 +4889,11 @@ class ConsolePresenter:
 
         available: dict[str, tuple[int, str]] = {}
         for binding in self.logic.values():
+            if binding.artifact_completion_order <= 0:
+                continue
             for row in self._artifact_results(binding):
+                if row.get("role") != "final" or not row.get("contract_id"):
+                    continue
                 contract = str(row["contract_id"])
                 candidate = (binding.artifact_completion_order, str(row["path"]))
                 if candidate[0] >= available.get(contract, (-1, ""))[0]:

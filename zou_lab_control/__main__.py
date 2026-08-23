@@ -48,8 +48,8 @@ def _pytest_process(names: tuple[str, ...], paths: tuple[object, ...]) -> int:
 from importlib import import_module
 from pathlib import Path
 import sys
-import zou_lab_control_v2
-print(f'root={Path(zou_lab_control_v2.__file__).resolve()}')
+import zou_lab_control
+print(f'root={Path(zou_lab_control.__file__).resolve()}')
 for name in sys.argv[1].split(','):
     module = import_module(name)
     print(f'tested={Path(module.__file__).resolve()}')
@@ -87,8 +87,8 @@ def _pytest_items(names: tuple[str, ...], path: Path) -> int:
 from importlib import import_module
 from pathlib import Path
 import sys
-import zou_lab_control_v2
-print(f'root={Path(zou_lab_control_v2.__file__).resolve()}')
+import zou_lab_control
+print(f'root={Path(zou_lab_control.__file__).resolve()}')
 for name in sys.argv[1].split(','):
     module = import_module(name)
     print(f'tested={Path(module.__file__).resolve()}')
@@ -242,7 +242,7 @@ def evidence(argv: list[str] | None = None) -> int:
             if item.get("output_type") == "stream"
         )
         expected = (
-            f"product bootstrap: {Path(sys.modules['zou_lab_control_v2'].__file__).resolve()}",
+            f"product bootstrap: {Path(sys.modules['zou_lab_control'].__file__).resolve()}",
             f"workbench layer: {Path(zlc_workbench.__file__).resolve()}",
         )
         if any(line not in output for line in expected):

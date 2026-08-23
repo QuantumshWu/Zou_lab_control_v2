@@ -19,10 +19,7 @@ FORBIDDEN_ROOTS = {
     "numpy",
     "zlc_plot",
     "zlc_data",
-    "zlc_storage",
-    "zlc_neutral_atom",
     "zlc_workbench",
-    "Zou_lab_control",
 }
 
 
