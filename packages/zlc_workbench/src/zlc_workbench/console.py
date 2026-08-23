@@ -3866,14 +3866,7 @@ class ConsolePresenter:
 
     def _reconcile_task_previews(self, binding: LogicBinding) -> None:
         tracked = self._auto_task_previews.pop(binding.node_id, {})
-        if not tracked:
-            return
-        front = self.session.signal_plane.freeze()
-        for panel_id, signal in tracked.items():
-            # Runtime has already sealed or retired the generation.  Existence
-            # is the terminal fact; a payload's old live flag is not.
-            if front.value(signal) is not None:
-                continue
+        for panel_id in tracked:
             self._remove_panel_now(panel_id)
 
     def _finish_task_takeover(

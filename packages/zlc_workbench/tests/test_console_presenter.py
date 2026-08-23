@@ -3391,7 +3391,7 @@ def test_partial_grid_points_mount_and_reproject_one_canonical_snapshot(
     )
 
 
-def test_task_preview_retirement_uses_runtime_signal_existence(
+def test_task_terminal_removes_only_its_auto_previews(
     presenter,
     session,
 ) -> None:
@@ -3416,7 +3416,7 @@ def test_task_preview_retirement_uses_runtime_signal_existence(
     }
 
     presenter._reconcile_task_previews(task)
-    assert retained.panel_id in presenter.panels
+    assert retained.panel_id not in presenter.panels
     assert missing.panel_id not in presenter.panels
     assert manual.panel_id in presenter.panels
 

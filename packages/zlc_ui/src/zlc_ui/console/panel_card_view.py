@@ -1,7 +1,7 @@
 """The compact console panel card.
 
 The board owns placement; this widget owns only the titled Fluent surface and
-the small ``Setting`` affordance.  Signal/size/update controls remain
+the compact ``Setting`` / guarded ``×`` affordances.  Signal/size/update controls remain
 available through the settings popup for the lightweight presenter API, but
 they do not add an invented toolbar to the card face.
 """
@@ -155,11 +155,26 @@ class PanelCardView(FluentGroupBox):
         self._live = True
         self._editing_enabled = True
         self.settings_button = FluentButton("Setting", color=GREY)
+        button_height = scaled_px(26, minimum=22)
         self.settings_button.setFixedSize(
-            scaled_px(74, minimum=64),
-            scaled_px(26, minimum=22),
+            self.settings_button.fontMetrics().horizontalAdvance("Setting")
+            + scaled_px(18, minimum=14),
+            button_height,
         )
         self.settings_button.clicked.connect(self._open_settings)
+        self.close_button = FluentButton("×", color=GREY)
+        self.close_button.setFixedSize(
+            scaled_px(28, minimum=24),
+            button_height,
+        )
+        self.close_button.setToolTip(
+            "Click once to arm; click again to remove this panel"
+        )
+        self._remove_armed = False
+        self._remove_timer = QtCore.QTimer(self)
+        self._remove_timer.setSingleShot(True)
+        self._remove_timer.timeout.connect(self._disarm_header_remove)
+        self.close_button.clicked.connect(self._header_remove_clicked)
 
         # The presenter marks the card a board-wide error line is about.  The
         # card body reserves no status row, so the dot rides the title strip
@@ -197,7 +212,13 @@ class PanelCardView(FluentGroupBox):
         band_layout.setSpacing(CARD_PAD)
         band_layout.addWidget(self._title_label, 1)
         band_layout.addWidget(self.status_dot, 0, QtCore.Qt.AlignVCenter)
-        band_layout.addWidget(self.settings_button, 0, QtCore.Qt.AlignVCenter)
+        self._title_commands = QtWidgets.QWidget(self._title_band)
+        command_layout = QtWidgets.QHBoxLayout(self._title_commands)
+        command_layout.setContentsMargins(0, 0, 0, 0)
+        command_layout.setSpacing(scaled_px(3, minimum=2))
+        command_layout.addWidget(self.settings_button)
+        command_layout.addWidget(self.close_button)
+        band_layout.addWidget(self._title_commands, 0, QtCore.Qt.AlignVCenter)
         self._title_band.setFixedHeight(self._band_height())
 
         # The body is exactly CARD_PAD / 2 px / CARD_PAD around the surface,
@@ -314,6 +335,9 @@ class PanelCardView(FluentGroupBox):
         """
 
         self._live = bool(live)
+        self.close_button.setVisible(self._live)
+        if not self._live:
+            self._disarm_header_remove()
         remove = getattr(self, "remove_button", None)
         if remove is not None:
             remove.setVisible(self._live)
@@ -915,10 +939,14 @@ class PanelCardView(FluentGroupBox):
     def _settings_available_height(self) -> int:
         """Vertical room the popup may take: from below Setting to the card foot."""
 
+        anchor_bottom = self.settings_button.mapTo(
+            self,
+            QtCore.QPoint(0, self.settings_button.height()),
+        ).y()
         return max(
             1,
             self.rect().bottom()
-            - self.settings_button.geometry().bottom()
+            - anchor_bottom
             - popup_gap(),
         )
 
@@ -1020,6 +1048,28 @@ class PanelCardView(FluentGroupBox):
     def _request_remove(self) -> None:
         self.retire_settings_popup()
         self.remove_requested.emit()
+
+    def _header_remove_clicked(self) -> None:
+        if not self._live:
+            return
+        if self._remove_armed:
+            self._remove_timer.stop()
+            self._disarm_header_remove()
+            self.remove_requested.emit()
+            return
+        self._remove_armed = True
+        self.close_button.set_color(RED)
+        self.close_button.setToolTip("Click again to remove this panel")
+        application = QtWidgets.QApplication.instance()
+        interval = 400 if application is None else application.doubleClickInterval()
+        self._remove_timer.start(max(250, int(interval)))
+
+    def _disarm_header_remove(self) -> None:
+        self._remove_armed = False
+        self.close_button.set_color(GREY)
+        self.close_button.setToolTip(
+            "Click once to arm; click again to remove this panel"
+        )
 
     def _setting_changed(self, key: str) -> None:
         if self._settings_form is None:

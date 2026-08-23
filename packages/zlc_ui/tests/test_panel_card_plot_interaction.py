@@ -372,11 +372,17 @@ app.processEvents()
 assert card.size() == reserved, (card.size(), reserved)
 assert card.minimumSizeHint().width() <= reserved.width()
 
-# The command sits on the strip, right-padded the same as top and bottom.
-right_pad = band.width() - (card.settings_button.x() + card.settings_button.width())
+# Compact Setting and × sit together on the strip; × owns the right padding.
+close_x = card.close_button.mapTo(band, QtCore.QPoint()).x()
+settings_x = card.settings_button.mapTo(band, QtCore.QPoint()).x()
+right_pad = band.width() - (close_x + card.close_button.width())
 top_pad = card.settings_button.y()
 assert right_pad == tested_module.CARD_TITLE_PAD, (right_pad, top_pad)
 assert abs((band.height() - card.settings_button.height()) // 2 - top_pad) <= 1
+assert card.settings_button.width() < tested_module.scaled_px(74, minimum=64)
+assert 0 < close_x - (
+    settings_x + card.settings_button.width()
+) <= tested_module.scaled_px(3, minimum=2)
 
 card.set_surface(None)
 widget.close_adapter()

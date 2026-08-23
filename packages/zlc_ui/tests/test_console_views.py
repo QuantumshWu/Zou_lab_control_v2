@@ -76,7 +76,8 @@ assert RED in card.status_dot.styleSheet()
 # Geometry is only true once the layout has run: the dot and the Setting
 # button are items in the title strip's row, not free-floating overlays.
 card.show(); app.processEvents()
-assert card.status_dot.x() < card.settings_button.x(), 'the dot must sit beside Setting'
+settings_x = card.settings_button.mapTo(card._title_band, QtCore.QPoint()).x()
+assert card.status_dot.x() < settings_x, 'the dot must sit beside Setting'
 assert card.status_dot.y() >= 0 and card.status_dot.y() < card._title_band.height()
 card.set_status('', error=False)
 assert card.status_dot.isHidden(), 'clearing the status must clear the mark'
@@ -175,9 +176,15 @@ events = []
 card.remove_requested.connect(lambda: events.append(('remove',)))
 card.edit_requested.connect(lambda: events.append(('edit',)))
 card.state_changed.connect(lambda patch: events.append(('state', patch)))
-# The operator's own route: Edit and Remove live in the Setting popup, beside
-# every other per-panel decision.  Reached any other way they were hidden
-# widgets nothing ever showed, so a panel could not be removed at all.
+# The header × is guarded against a stray click: first click turns red, the
+# second click inside the platform double-click interval removes the panel.
+QtTest.QTest.mouseClick(card.close_button, QtCore.Qt.LeftButton)
+assert events == []
+assert RED in card.close_button.styleSheet()
+QtTest.QTest.mouseClick(card.close_button, QtCore.Qt.LeftButton)
+assert events == [('remove',)]
+assert GREY in card.close_button.styleSheet()
+# Edit and the explicit text Remove remain available in Setting as well.
 top_levels = {widget for widget in app.topLevelWidgets() if widget.isVisible()}
 shown_top_levels = []
 class _TopLevelShowSpy(QtCore.QObject):
