@@ -2047,16 +2047,31 @@ class MatplotlibRenderer:
         return hit
 
     def _apply_series_focus(self) -> None:
-        active = self._series_locked or self._series_hover
+        locked = self._series_locked
+        active = locked or self._series_hover
         identity = None if active is None else active[1]
         focus_line = None
         for axis_id, entries in self._series_lines.items():
             for line, series_id, _label in entries:
                 focused = identity is not None and series_id == identity
-                line.set_linewidth(self.style.artists.curve.linewidth * (2 if focused else 1))
-                line.set_alpha(1.0 if focused else
-                               (0.18 if identity is not None else self.style.artists.curve.alpha))
-                line.set_zorder(4.0 if focused else 2.0)
+                if locked is not None:
+                    line.set_linewidth(
+                        self.style.artists.curve.linewidth * (2 if focused else 1)
+                    )
+                    line.set_alpha(1.0 if focused else 0.18)
+                    line.set_zorder(4.0 if focused else 2.0)
+                elif active is not None:
+                    line.set_linewidth(
+                        self.style.artists.curve.linewidth * (1.45 if focused else 1)
+                    )
+                    line.set_alpha(
+                        1.0 if focused else self.style.artists.curve.alpha
+                    )
+                    line.set_zorder(3.0 if focused else 2.0)
+                else:
+                    line.set_linewidth(self.style.artists.curve.linewidth)
+                    line.set_alpha(self.style.artists.curve.alpha)
+                    line.set_zorder(2.0)
                 if focused and active is not None and axis_id == active[0]:
                     focus_line = line
         for annotation in self._series_annotations.values():
@@ -2066,20 +2081,33 @@ class MatplotlibRenderer:
         axis_id = active[0]
         annotation = self._series_annotations.get(axis_id)
         if annotation is None:
-            annotation = focus_line.axes.annotate(
-                "", (0, 0), xytext=(6, 6), textcoords="offset points",
-                fontsize=self.style.fonts.annotation_pt, clip_on=True, zorder=12,
-                bbox={"boxstyle": "round,pad=0.2", "facecolor": "white", "alpha": 0.9})
+            annotation = focus_line.axes.text(
+                0.98,
+                0.98,
+                "",
+                transform=focus_line.axes.transAxes,
+                horizontalalignment="right",
+                verticalalignment="top",
+                fontsize=self.style.fonts.annotation_pt,
+                clip_on=True,
+                zorder=12,
+            )
             self._series_annotations[axis_id] = annotation
             self._artists[f"series-inspector:{axis_id}"] = annotation
-        annotation.xy = (active[3], active[4])
-        annotation.set_text(active[2] or "Series")
+        annotation.set_text(
+            f"{'* ' if locked is not None else ''}{active[2] or 'Series'}"
+        )
         annotation.set_color(focus_line.get_color())
         annotation.set_visible(True)
 
     def series_focus(self, action: str, axes: Any | None, px: float, py: float, *,
                      hit_radius: float, click_radius: float = 0.0, redraw: bool = True) -> bool:
         before = self._series_locked or self._series_hover
+        before_state = (
+            "locked" if self._series_locked is not None else
+            "hover" if self._series_hover is not None else "none",
+            None if before is None else before[1],
+        )
         handled = False
         if action == "press":
             hit = self._series_hit(axes, px, py, hit_radius)
@@ -2113,7 +2141,12 @@ class MatplotlibRenderer:
         elif action == "clear":
             self._series_press = self._series_hover = self._series_locked = None
         after = self._series_locked or self._series_hover
-        if (None if before is None else before[1]) == (None if after is None else after[1]):
+        after_state = (
+            "locked" if self._series_locked is not None else
+            "hover" if self._series_hover is not None else "none",
+            None if after is None else after[1],
+        )
+        if before_state == after_state:
             return handled
         self._apply_series_focus()
         if redraw:

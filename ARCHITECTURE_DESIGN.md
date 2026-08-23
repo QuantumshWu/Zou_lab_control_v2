@@ -157,6 +157,7 @@ Node new chunk
 - ROI/binning坐标只由一个transform owner处理。
 - Selector Off时plot不消费任何pointer gesture：不画selector、不zoom/pan，也不响应双击facet focus；普通滚轮继续滚外层board。
 - Selector On时，FacetGrid overview只响应双击进入cell，不得在overview开始area selector；进入具体cell后，selector才按该cell的canonical projection工作。
+- Grouped Curve hover只轻微加粗命中的line，其他lines保持正常alpha；click lock才加粗并压暗其余lines。Series文字固定在对应axes内部右上角、无背景框，locked文字以`* `开头；locked时滚轮按Group axis顺序切换line，未锁定时滚轮仍缩放viewport。
 
 ## 6. UI与Lifecycle
 

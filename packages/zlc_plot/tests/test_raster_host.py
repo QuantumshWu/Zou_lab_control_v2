@@ -985,10 +985,18 @@ def test_curve_series_inspector_is_stable_sticky_and_redraw_bounded(
         hovered = pointer("move", 2.0, 3.0)
         assert hovered.publish_front
         assert renderer.raster_generation == generation + 1
-        assert sorted(line.get_alpha() for line in lines) == [0.18, 1.0]
+        assert sorted(line.get_alpha() for line in lines) == [0.8, 1.0]
+        base_width = renderer.style.artists.curve.linewidth
+        np.testing.assert_allclose(
+            sorted(line.get_linewidth() for line in lines),
+            (base_width, 1.45 * base_width),
+        )
         annotation = next(item for item in renderer._series_annotations.values()
                           if item.get_visible())
         assert "site=17" in annotation.get_text()
+        assert not annotation.get_text().startswith("*")
+        assert annotation.get_position() == (0.98, 0.98)
+        assert annotation.get_bbox_patch() is None
 
         generation = renderer.raster_generation
         assert not pointer("move", 4.0, 5.0).publish_front
@@ -998,6 +1006,8 @@ def test_curve_series_inspector_is_stable_sticky_and_redraw_bounded(
         pointer("release", 2.0, 3.0, button=1)
         assert session.selectors == ()
         locked = renderer._series_locked[1]
+        assert sorted(line.get_alpha() for line in lines) == [0.18, 1.0]
+        assert annotation.get_text().startswith("* ")
         pointer("move", 2.0, 13.0)
         assert renderer._series_locked[1] == locked
 
