@@ -144,6 +144,7 @@ Node new chunk
 ### 5.2 Performance与state
 
 - PanelState一次应用是幂等transaction；no-op产生0 solve、0 render、0 front。
+- ImagePlot及FacetGrid的image cell统一使用`nearest`像素呈现；interpolation不是Parameter、PanelState、Figure recipe或UI字段，任何Logic/Task不得另行设置。
 - Title/layout等非plot变化不得re-fit。
 - 删除重复configure/clear/replay与多front handoff。
 - Histogram只有`bins`变更需要一次完整sample projection；`density`/`cumulative`只是已接受bins的representation，不得再扫描full payload。复用已settle tick unit时必须在枚举lattice前先核上界，不得因range大幅变化卡住UI。

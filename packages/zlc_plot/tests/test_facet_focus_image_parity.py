@@ -217,6 +217,18 @@ def test_focused_image_cell_matches_the_standalone_image_surface() -> None:
         focused_names = set(facet.describe_display().parameter_schema)
         assert focused_names - alone_names == {"facet_display_unit"}
         assert alone_names - focused_names == set()
+        assert "interpolation" not in alone_names | focused_names
+
+        from matplotlib.image import AxesImage
+
+        for renderer in (alone, focused):
+            images = tuple(
+                artist
+                for artist in renderer._artists.values()
+                if isinstance(artist, AxesImage)
+            )
+            assert images
+            assert {image.get_interpolation() for image in images} == {"nearest"}
 
         # The authored figure title stays visible alongside the cell title.
         title_artist = focused._artists["figure:title"]

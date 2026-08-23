@@ -1532,7 +1532,7 @@ class MatplotlibRenderer:
             and shown.shape[2] == 4
         ):
             return False
-        if artist.get_interpolation() not in ("nearest", "antialiased", "auto"):
+        if artist.get_interpolation() != "nearest":
             return False
         left, right, bottom, top = (float(v) for v in artist.get_extent())
         x_low, x_high = sorted(map(float, axes.get_xlim()))
@@ -2539,8 +2539,7 @@ class MatplotlibRenderer:
             # like a different fact from an empty image plot.
             cmap.set_bad("none")
             self._artists["image:cmap_cache"] = (cmap_cache_key, cmap)
-        interpolation = str(state["interpolation"])
-        mapping_state = (cmap_name, interpolation, color_limits)
+        mapping_state = (cmap_name, color_limits)
         mapping_key = f"{key}:mapping_state"
         previous_mapping = self._artists.get(mapping_key)
 
@@ -2609,17 +2608,12 @@ class MatplotlibRenderer:
         # Precomposed RGBA sidesteps Matplotlib's per-draw normalize + LUT +
         # second mask-resample machinery: the same 256-level quantization is
         # applied once per (front, colormap, limits) here instead of on every
-        # draw.  Nearest resampling commutes with colormapping exactly; the
-        # default antialiased/auto kernels act on the prepared front's ≤1.25x
-        # residual only, where filtering composed colors is indistinguishable
-        # from filtering scalars for the closed colormap set.  Explicitly
-        # smooth kernels, masked fronts and unresolved limits keep the scalar
-        # path.
+        # draw.  Nearest resampling commutes with colormapping exactly; masked
+        # fronts and unresolved limits keep the scalar path.
         self._artists[f"{key}:prepared_current"] = prepared
         rgba_front = (
             self._image_rgba_front(key, prepared, cmap_name, cmap, color_limits)
             if color_limits is not None
-            and interpolation in ("nearest", "antialiased", "auto")
             and not isinstance(prepared.values, np.ma.MaskedArray)
             else None
         )
@@ -2644,8 +2638,7 @@ class MatplotlibRenderer:
                 origin=policy.image_origin,
                 aspect="auto" if coordinate_aspect is None else coordinate_aspect,
                 extent=prepared.extent,
-                interpolation=interpolation,
-                interpolation_stage=prepared.interpolation_stage,
+                interpolation="nearest",
                 **scalar_options,
             )
             if rgba_front is not None:
@@ -2663,10 +2656,6 @@ class MatplotlibRenderer:
                 image.set_data(shown)
                 image.set_extent(prepared.extent)
                 self._artists[applied_key] = shown
-            if previous_mapping is None or previous_mapping[1] != interpolation:
-                image.set_interpolation(interpolation)
-            if image.get_interpolation_stage() != prepared.interpolation_stage:
-                image.set_interpolation_stage(prepared.interpolation_stage)
             # The artist's cmap/clim stay authoritative in both modes: RGBA
             # rendering ignores them, but selector handles, rail guides and
             # pointer snapshots all read the painted limits off the artist.
@@ -2676,7 +2665,7 @@ class MatplotlibRenderer:
                 color_limits is not None
                 and (
                     previous_mapping is None
-                    or previous_mapping[2] != color_limits
+                    or previous_mapping[1] != color_limits
                     or not np.allclose(
                         np.asarray(image.get_clim(), dtype=float),
                         np.asarray(color_limits, dtype=float),

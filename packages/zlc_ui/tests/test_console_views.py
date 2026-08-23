@@ -962,10 +962,6 @@ surface = {
         {'key': 'show_colorbar', 'label': 'Colorbar', 'kind': 'boolean',
          'value': True, 'allow_none': False, 'choices': (),
          'minimum': None, 'maximum': None, 'step': None},
-        {'key': 'interpolation', 'label': 'Interpolation', 'kind': 'choice',
-         'value': 'nearest', 'allow_none': False,
-         'choices': (('Nearest', 'nearest'), ('Bilinear', 'bilinear')),
-         'minimum': None, 'maximum': None, 'step': None},
     ),
     'fit': ({
         'key': 'model', 'label': 'Fit model', 'kind': 'choice', 'value': None,
@@ -1135,7 +1131,6 @@ assert not card._settings_form.widget_for('display__title').isEnabled()
 assert card._settings_form.read_all()['semantic__x'] == 'sensor_x'
 assert card._settings_form.widget_for('fit__model').currentText() == '(none)'
 assert card._settings_form.read_all()['overlay_signal'] == '@logic/occ/site_overlay'
-assert 'display__interpolation' in card._settings_form.spec.keys
 interval_combo = card._settings_form.widget_for('interval_ms')
 assert isinstance(interval_combo, QtWidgets.QComboBox)
 assert tuple(interval_combo.itemData(index) for index in range(interval_combo.count())) == (
@@ -1248,7 +1243,7 @@ assert not editor._producer_editor.start_button.isVisible()
 assert editor.parameter_forms['semantic'].spec.keys == ('x',)
 assert editor.parameter_forms['display'].spec.keys == (
     'title', 'x_label', 'x_display_unit', 'color_min',
-    'colormap', 'show_colorbar', 'interpolation'
+    'colormap', 'show_colorbar'
 )
 assert editor.parameter_forms['fit'].spec.keys == ('model',)
 locked_surface = dict(surface, science_locked=True)

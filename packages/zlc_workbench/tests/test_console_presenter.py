@@ -808,7 +808,6 @@ def test_add_panel_puts_a_blank_fixed_kind_panel_on_the_board(presenter) -> None
         "colormap",
         "color_min",
         "color_max",
-        "interpolation",
         "show_colorbar",
     }.issubset(display)
     assert display["title"]["automatic"] is True

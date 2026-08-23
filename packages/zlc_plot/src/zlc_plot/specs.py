@@ -545,11 +545,7 @@ def _histogram_parameters() -> tuple[ParameterSpec[object], ...]:
     )
 
 
-def _image_parameters(
-    style: PlotStyleConfig,
-    *,
-    default_interpolation: str,
-) -> tuple[ParameterSpec[object], ...]:
+def _image_parameters(style: PlotStyleConfig) -> tuple[ParameterSpec[object], ...]:
     policy = style.render
     entries: list[ParameterSpec[object]] = [
         ParameterSpec(
@@ -587,15 +583,6 @@ def _image_parameters(
             normalizer=_finite_or_none,
             allow_none=True,
             label="Color maximum",
-        ),
-        ParameterSpec(
-            "interpolation",
-            str,
-            RenderEffect.BASE_STYLE,
-            default=default_interpolation,
-            normalizer=_normalize_nonempty_text,
-            label="Interpolation",
-            choices=policy.image_interpolations,
         ),
     ]
     entries.append(
@@ -726,16 +713,7 @@ def _parameter_schema_for_context(
         # the focused cell is the standalone Image kind, so its parameters
         # (colorbar included) must exist here too.  The overview keeps the
         # colorbar hidden through the renderer's visibility mechanism.
-        entries.extend(
-            _image_parameters(
-                style,
-                default_interpolation=(
-                    style.render.facet_image_interpolation
-                    if kind is PlotKind.FACET_GRID
-                    else style.render.image_default_interpolation
-                ),
-            )
-        )
+        entries.extend(_image_parameters(style))
     if kind is PlotKind.ROLLING:
         entries.extend(
             (

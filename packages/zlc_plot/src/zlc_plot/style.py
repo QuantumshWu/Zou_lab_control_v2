@@ -546,15 +546,7 @@ class RenderPolicyConfig:
 
     image_default_colormap: str = "gray"
     image_colormaps: tuple[str, ...] = ("inferno", "viridis", "magma", "plasma", "gray")
-    image_default_interpolation: str = "antialiased"
-    facet_image_interpolation: str = "nearest"
     image_front: ImageFrontPolicy = ImageFrontPolicy()
-    image_interpolations: tuple[str, ...] = (
-        "none", "auto", "antialiased", "nearest", "bilinear", "bicubic",
-        "spline16", "spline36", "hanning", "hamming", "hermite", "kaiser",
-        "quadric", "catrom", "gaussian", "bessel", "mitchell", "sinc",
-        "lanczos", "blackman",
-    )
     image_origin: str = "upper"
     image_anchor: str = "W"
     axes_title_pad_pt: float = 2.5
@@ -593,29 +585,22 @@ class RenderPolicyConfig:
     def __post_init__(self) -> None:
         if not isinstance(self.image_front, ImageFrontPolicy):
             raise TypeError("image_front must be ImageFrontPolicy")
-        for field in ("image_colormaps", "image_interpolations"):
-            values = tuple(_text(value, field) for value in getattr(self, field))
-            if not values or len(values) != len(set(values)):
-                raise ValueError(f"{field} must contain unique non-empty values")
-            object.__setattr__(self, field, values)
+        colormaps = tuple(
+            _text(value, "image_colormaps") for value in self.image_colormaps
+        )
+        if not colormaps or len(colormaps) != len(set(colormaps)):
+            raise ValueError(
+                "image_colormaps must contain unique non-empty values"
+            )
+        object.__setattr__(self, "image_colormaps", colormaps)
         for field in (
             "image_default_colormap",
-            "image_default_interpolation",
-            "facet_image_interpolation",
             "image_origin",
             "image_anchor",
         ):
             object.__setattr__(self, field, _text(getattr(self, field), field))
         if self.image_default_colormap not in self.image_colormaps:
             raise ValueError("image_default_colormap must be one of image_colormaps")
-        if any(
-            value not in self.image_interpolations
-            for value in (
-                self.image_default_interpolation,
-                self.facet_image_interpolation,
-            )
-        ):
-            raise ValueError("image interpolation defaults must be declared choices")
         if self.image_origin not in {"lower", "upper"}:
             raise ValueError("image_origin must be 'lower' or 'upper'")
         if self.image_anchor not in {"C", "SW", "S", "SE", "E", "NE", "N", "NW", "W"}:
@@ -739,7 +724,6 @@ class PlotStyleConfig:
             "lines.markersize": self.artists.curve_marker_size_pt,
             "image.cmap": render.image_default_colormap,
             "image.origin": render.image_origin,
-            "image.interpolation": render.image_default_interpolation,
         }
 
     def matplotlib_rc_params(self) -> dict[str, RcValue]:

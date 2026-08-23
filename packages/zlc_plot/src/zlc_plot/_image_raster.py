@@ -1,9 +1,8 @@
 """One policy-owned display front for regular two-dimensional images.
 
 The immutable source remains authoritative for selection and analysis.  This
-module prepares the scalar front handed to Matplotlib.  Cropping, optional
-area reduction, and Matplotlib's interpolation stage are decided together so
-the renderer cannot silently apply a second independent raster policy.
+module prepares the scalar front handed to Matplotlib through cropping and
+optional area reduction; the renderer always presents it with nearest pixels.
 """
 
 from __future__ import annotations
@@ -26,7 +25,6 @@ class ImageFrontPolicy:
     """
 
     minimum_reduction_ratio: float = 1.25
-    interpolation_stage: str = "data"
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,7 +33,6 @@ class PreparedImageFront:
 
     values: np.ndarray | np.ma.MaskedArray
     extent: tuple[float, float, float, float]
-    interpolation_stage: str
 
 
 def _all_true(values: np.ndarray) -> bool:
@@ -262,7 +259,6 @@ def prepare_image_front(
     return PreparedImageFront(
         shown,
         tuple(float(value) for value in shown_extent),
-        policy.interpolation_stage,
     )
 
 
