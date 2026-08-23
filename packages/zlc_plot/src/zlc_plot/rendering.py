@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+import hashlib
 from io import BytesIO
 import math
 from numbers import Real
@@ -72,6 +73,7 @@ class _PreparedSeries:
     y: np.ndarray
     valid: np.ndarray
     label: str
+    identity: tuple[tuple[str, str | None, str], ...]
 
 
 def _display_array(value: Any) -> np.ndarray:
@@ -89,6 +91,16 @@ def _valid_array(value: Any, shape: tuple[int, ...]) -> np.ndarray:
 def _unit_symbol(value: Any) -> str:
     unit = getattr(value, "display_unit", None)
     return "" if unit is None else str(getattr(unit, "symbol", unit))
+
+
+def _series_identity(item: Any) -> tuple[tuple[str, str | None, str], ...]:
+    return tuple((value.ref.domain.value, value.ref.axis_id, repr(value.canonical))
+                 for value in getattr(item, "group_key", ()))
+
+
+def _series_slot(identity: object, count: int) -> int:
+    digest = hashlib.blake2s(repr(identity).encode(), digest_size=2).digest()
+    return 0 if not identity else int.from_bytes(digest, "big") % count
 
 
 _EXPLICIT_UNIT_SUFFIX = re.compile(r"(?:\[[^\[\]]+\]|\([^()]+\))\s*$")
@@ -717,6 +729,12 @@ class MatplotlibRenderer:
         self._line_sources: dict[
             int, tuple[Any, Any, np.ndarray, np.ndarray]
         ] = {}
+        self._series_lines: dict[int, tuple[tuple[Any, object, str], ...]] = {}
+        self._series_indices: dict[int, dict[object, int]] = {}
+        self._series_hover: tuple[int, object, str, float, float] | None = None
+        self._series_locked: tuple[int, object, str, float, float] | None = None
+        self._series_press: tuple[float, float, object | None] | None = None
+        self._series_annotations: dict[int, Any] = {}
         self._raster_generation = 0
         self._focused_facet_index: int | None = None
         self._facet_focus_index: int | None = None
@@ -941,6 +959,8 @@ class MatplotlibRenderer:
             self._axes = self._create_axes(figure, plan)
         self._artists.clear()
         self._line_sources.clear()
+        self._series_lines.clear(); self._series_indices.clear(); self._series_annotations.clear()
+        self._series_hover = self._series_locked = self._series_press = None
         self._boundary_chrome_cache.clear()
         self._boundary_chrome_signature = None
         self._selector_artists.clear()
@@ -1825,7 +1845,7 @@ class MatplotlibRenderer:
             if label is None:
                 group_key = getattr(item, "group_key", ())
                 label = ", ".join(str(value) for value in group_key) if group_key else ""
-            prepared.append(_PreparedSeries(x, y, valid, str(label)))
+            prepared.append(_PreparedSeries(x, y, valid, str(label), _series_identity(item)))
         return tuple(prepared)
 
     def _ensure_lines(self, axes: Any, count: int, key: str) -> list[Any]:
@@ -1898,12 +1918,18 @@ class MatplotlibRenderer:
         # gathering and concatenating every valid sample (two full copies of
         # a million-point trace per frame) and asking for the extremes then.
         extremes = np.array([np.inf, -np.inf, np.inf, -np.inf])
+        series_lines: list[tuple[Any, object, str]] = []
+        cycle = self.style.palette.line_cycle
         for index, item in enumerate(series):
             # NaNs preserve invalid runs as gaps instead of joining neighbours.
             plotted_y = np.where(item.valid, item.y, np.nan)
             self._apply_line_data(axes, lines[index], item.x, plotted_y)
+            lines[index].set_color(cycle[_series_slot(item.identity, len(cycle))])
+            lines[index].set_linewidth(self.style.artists.curve.linewidth)
+            lines[index].set_alpha(self.style.artists.curve.alpha)
             if lines[index].get_label() != item.label:
                 lines[index].set_label(item.label)
+            series_lines.append((lines[index], item.identity, item.label))
             if limits is None and bool(np.any(item.valid)):
                 extremes[0] = min(
                     extremes[0],
@@ -1921,6 +1947,10 @@ class MatplotlibRenderer:
                     extremes[3],
                     float(np.max(item.y, where=item.valid, initial=-np.inf)),
                 )
+        self._series_lines[id(axes)] = tuple(series_lines)
+        self._series_indices[id(axes)] = {
+            identity: index for index, (_line, identity, _label) in enumerate(series_lines)
+        }
         if limits is not None:
             self._set_xlim(axes, *limits[0])
             self._set_ylim(axes, *limits[1])
@@ -1952,6 +1982,170 @@ class MatplotlibRenderer:
             if axes.get_ylabel() != y_label:
                 axes.set_ylabel(y_label)
         apply_smart_ticks(axes, label_pt=self.style.fonts.tick_pt)
+        self._apply_series_focus()
+
+    def _series_hit(self, axes: Any | None, px: float, py: float, radius: float
+                    ) -> tuple[int, object, str, float, float] | None:
+        if axes is None or not axes.get_visible():
+            return None
+        point = np.asarray((px, py), dtype=float)
+        best = (float(radius) * self.plan.device_pixel_ratio) ** 2
+        hit = None
+        entries = self._series_lines.get(id(axes), ())
+        current = None if self._series_hover is None else self._series_hover[1]
+        if current is not None:
+            entries = tuple(item for item in entries if item[1] == current) + tuple(
+                item for item in entries if item[1] != current)
+        for line, identity, label in entries:
+            if not line.get_visible():
+                continue
+            x = np.asarray(line.get_xdata(), dtype=float).reshape(-1)
+            y = np.asarray(line.get_ydata(), dtype=float).reshape(-1)
+            if x.size > _ENVELOPE_MAX_COLUMNS * 4:
+                registered = self._line_sources.get(id(line))
+                if registered is not None and registered[0] is line:
+                    _line, _owner, x, y = registered
+                    low, high = sorted(map(float, axes.get_xlim()))
+                    start = max(0, int(np.searchsorted(x, low)) - 1)
+                    stop = min(x.size, int(np.searchsorted(x, high, side="right")) + 1)
+                    x, y = x[start:stop], y[start:stop]
+            finite = np.isfinite(x) & np.isfinite(y)
+            if not np.any(finite):
+                continue
+            pixels = np.full((x.size, 2), np.nan)
+            pixels[finite] = axes.transData.transform(np.column_stack((x[finite], y[finite])))
+            adjacent = finite[:-1] & finite[1:]
+            starts, ends = pixels[:-1][adjacent], pixels[1:][adjacent]
+            if starts.size:
+                delta = ends - starts
+                length = np.einsum("ij,ij->i", delta, delta)
+                t = np.zeros(length.shape)
+                usable = length > 0
+                t[usable] = np.einsum("ij,ij->i", point - starts[usable],
+                                      delta[usable]) / length[usable]
+                np.clip(t, 0.0, 1.0, out=t)
+                closest = starts + t[:, None] * delta - point
+                distance = np.einsum("ij,ij->i", closest, closest)
+                local = int(np.argmin(distance))
+                if float(distance[local]) <= best:
+                    indices = np.flatnonzero(adjacent)
+                    source = int(indices[local])
+                    best = float(distance[local])
+                    hit = (id(axes), identity, label,
+                           float(x[source] + t[local] * (x[source + 1] - x[source])),
+                           float(y[source] + t[local] * (y[source + 1] - y[source])))
+                    if identity == current:
+                        return hit
+            elif finite.sum() == 1:
+                source = int(np.flatnonzero(finite)[0])
+                distance = float(np.sum((pixels[source] - point) ** 2))
+                if distance <= best:
+                    best = distance
+                    hit = (id(axes), identity, label, float(x[source]), float(y[source]))
+                    if identity == current:
+                        return hit
+        return hit
+
+    def _apply_series_focus(self) -> None:
+        active = self._series_locked or self._series_hover
+        identity = None if active is None else active[1]
+        focus_line = None
+        for axis_id, entries in self._series_lines.items():
+            for line, series_id, _label in entries:
+                focused = identity is not None and series_id == identity
+                line.set_linewidth(self.style.artists.curve.linewidth * (2 if focused else 1))
+                line.set_alpha(1.0 if focused else
+                               (0.18 if identity is not None else self.style.artists.curve.alpha))
+                line.set_zorder(4.0 if focused else 2.0)
+                if focused and active is not None and axis_id == active[0]:
+                    focus_line = line
+        for annotation in self._series_annotations.values():
+            annotation.set_visible(False)
+        if active is None or focus_line is None:
+            return
+        axis_id = active[0]
+        annotation = self._series_annotations.get(axis_id)
+        if annotation is None:
+            annotation = focus_line.axes.annotate(
+                "", (0, 0), xytext=(6, 6), textcoords="offset points",
+                fontsize=self.style.fonts.annotation_pt, clip_on=True, zorder=12,
+                bbox={"boxstyle": "round,pad=0.2", "facecolor": "white", "alpha": 0.9})
+            self._series_annotations[axis_id] = annotation
+            self._artists[f"series-inspector:{axis_id}"] = annotation
+        annotation.xy = (active[3], active[4])
+        annotation.set_text(active[2] or "Series")
+        annotation.set_color(focus_line.get_color())
+        annotation.set_visible(True)
+
+    def series_focus(self, action: str, axes: Any | None, px: float, py: float, *,
+                     hit_radius: float, click_radius: float = 0.0, redraw: bool = True) -> bool:
+        before = self._series_locked or self._series_hover
+        handled = False
+        if action == "press":
+            hit = self._series_hit(axes, px, py, hit_radius)
+            self._series_press = (px, py, None if hit is None else hit[1])
+            return False
+        if action == "move":
+            if self._series_locked is not None:
+                return False
+            hit = self._series_hit(axes, px, py, hit_radius)
+            if (None if before is None else before[1]) == (None if hit is None else hit[1]):
+                return False
+            self._series_hover = hit
+        elif action == "release":
+            press, self._series_press = self._series_press, None
+            if press is None or math.hypot(px - press[0], py - press[1]) > (
+                click_radius * self.plan.device_pixel_ratio
+            ):
+                return False
+            hit = self._series_hit(axes, px, py, hit_radius)
+            if press[2] != (None if hit is None else hit[1]):
+                return False
+            handled = hit is not None or before is not None
+            self._series_hover = None
+            same = hit is not None and self._series_locked is not None
+            self._series_locked = None if hit is None or (same and self._series_locked[1] == hit[1]) else hit
+        elif action == "leave":
+            self._series_press = None
+            if self._series_locked is not None:
+                return False
+            self._series_hover = None
+        elif action == "clear":
+            self._series_press = self._series_hover = self._series_locked = None
+        after = self._series_locked or self._series_hover
+        if (None if before is None else before[1]) == (None if after is None else after[1]):
+            return handled
+        self._apply_series_focus()
+        if redraw:
+            with style_context(self.style):
+                self._compose_frame(chrome_stable=True)
+        return handled if action == "release" else True
+
+    def series_focus_scroll(self, axes: Any | None, step: float) -> bool:
+        locked = self._series_locked
+        if (
+            locked is None or axes is None or id(axes) != locked[0]
+            or not locked[1] or not isinstance(self.semantic_spec, CurvePlot)
+            or (isinstance(self.spec, FacetGridPlot) and self._facet_focus_index is None)
+        ):
+            return False
+        entries = self._series_lines.get(locked[0], ())
+        current = self._series_indices.get(locked[0], {}).get(locked[1])
+        if current is None or not entries:
+            return False
+        target = max(0, min(len(entries) - 1, current + (-1 if step > 0 else 1)))
+        if target == current:
+            return True
+        line, identity, label = entries[target]
+        x, y = np.asarray(line.get_xdata()), np.asarray(line.get_ydata())
+        anchor = (locked[3], locked[4])
+        if x.size and y.size and np.isfinite((x[0], y[0])).all():
+            anchor = (float(x[0]), float(y[0]))
+        self._series_locked = (locked[0], identity, label, *anchor)
+        self._apply_series_focus()
+        with style_context(self.style):
+            self._compose_frame(chrome_stable=True)
+        return True
 
     def _histogram_arrays(
         self, payload: Any, state: DisplayState
@@ -2940,7 +3134,9 @@ class MatplotlibRenderer:
             label = getattr(item, "label", "")
             if label is None:
                 label = ""
-            sliced.append(_PreparedSeries(x_values, y_values, valid, str(label)))
+            sliced.append(_PreparedSeries(
+                x_values, y_values, valid, str(label), _series_identity(item)
+            ))
 
         labels = self.spec.labels
         explicit_y = _state_label(state, "y_label", None)
@@ -4789,9 +4985,16 @@ class MatplotlibRenderer:
         return self._rgba_buffer()
 
     def save(self, path: str | Path | BytesIO, *, dpi: float | None = None, **kwargs: Any) -> None:
-        with style_context(self.style):
-            self._figure.savefig(path, dpi=dpi or self.plan.dpi, **kwargs)
-        self.draw()
+        locked, hover = self._series_locked, self._series_hover
+        try:
+            self._series_locked = self._series_hover = None
+            self._apply_series_focus()
+            with style_context(self.style):
+                self._figure.savefig(path, dpi=dpi or self.plan.dpi, **kwargs)
+        finally:
+            self._series_locked, self._series_hover = locked, hover
+            self._apply_series_focus()
+            self.draw()
 
 
 __all__ = ["MatplotlibRenderer", "RenderFrame"]

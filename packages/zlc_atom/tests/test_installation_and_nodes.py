@@ -212,7 +212,11 @@ def test_logic_discovery_is_derived_from_leaf_modules() -> None:
     )
     assert all(
         preview.producer
-        or any(preview.output is output for output in descriptor.outputs)
+        or all(
+            any(declaration is output for output in descriptor.outputs)
+            for declaration in (preview.output, preview.overlay)
+            if declaration is not None
+        )
         for descriptor in descriptors
         for preview in descriptor.node_previews
     )
@@ -244,15 +248,22 @@ def test_task_preview_policy_and_typed_output_reference_are_explicit() -> None:
     assert explicit_none.node_previews == ()
 
     output = DatasetOutputDeclaration("frames", "camera.frames")
-    own_preview = NodePreviewSpec(output, "facet_grid")
+    overlay = DatasetOutputDeclaration("occupied", "atom.occupied")
+    own_preview = NodePreviewSpec(output, "facet_grid", overlay=overlay)
     descriptor = LogicNodeDescriptor(
         "camera-task",
         NodeKind.TASK,
         AuthoringSchema(),
-        outputs=(output,),
+        outputs=(output, overlay),
         node_previews=(own_preview,),
     )
     assert descriptor.outputs[0] is descriptor.node_previews[0].output
+    assert descriptor.outputs[1] is descriptor.node_previews[0].overlay
+
+    with pytest.raises(ValueError, match="primary output"):
+        NodePreviewSpec(output, "image", overlay=output)
+    with pytest.raises(TypeError, match="DatasetOutputDeclaration"):
+        NodePreviewSpec(output, "image", overlay=object())
 
     copied_declaration = DatasetOutputDeclaration("frames", "camera.frames")
     with pytest.raises(ValueError, match="undeclared outputs"):
@@ -263,13 +274,26 @@ def test_task_preview_policy_and_typed_output_reference_are_explicit() -> None:
             outputs=(output,),
             node_previews=(NodePreviewSpec(copied_declaration, "image"),),
         )
+    copied_overlay = DatasetOutputDeclaration("occupied", "atom.occupied")
+    with pytest.raises(ValueError, match="undeclared outputs"):
+        LogicNodeDescriptor(
+            "copied-overlay",
+            NodeKind.TASK,
+            AuthoringSchema(),
+            outputs=(output, overlay),
+            node_previews=(
+                NodePreviewSpec(output, "image", overlay=copied_overlay),
+            ),
+        )
 
     companion = DatasetOutputDeclaration("frames", "camera.frames")
+    companion_overlay = DatasetOutputDeclaration("occupied", "atom.occupied")
     companion_preview = NodePreviewSpec(
         companion,
         "image",
         {"fate:frame": 1},
         producer="camera",
+        overlay=companion_overlay,
     )
     companion_task = LogicNodeDescriptor(
         "feedback",
@@ -278,6 +302,7 @@ def test_task_preview_policy_and_typed_output_reference_are_explicit() -> None:
         node_previews=(companion_preview,),
     )
     assert companion_task.node_previews[0].producer == "camera"
+    assert companion_task.node_previews[0].overlay is companion_overlay
     with pytest.raises(TypeError):
         companion_task.node_previews[0].semantic["fate:frame"] = 2
 

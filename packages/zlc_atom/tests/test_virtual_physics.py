@@ -208,8 +208,8 @@ def test_qcmos_parameters_and_derived_poisson_signal_are_single_world_physics() 
         with pytest.raises(ValueError, match=field):
             replace(SimulationWorldConfig(), seed=4, **{field: invalid})
 
-    configured = _world(seed=4, loading_probability=0.75, atom_rate=10_000.0)
-    assert configured.config.loading_probability == 0.75
+    configured = _world(seed=4, loading_probability=0.5, atom_rate=10_000.0)
+    assert configured.config.loading_probability == 0.5
     assert configured.atom_rate == 10_000.0
     with pytest.raises(AttributeError):
         configured.loading_probability = 1.0
@@ -227,7 +227,7 @@ def test_direct_world_profile_is_resolved_before_virtual_device_init(
                 "format": "zlc.simulation.world_profile",
                 "offset_counts": 123.0,
                 "conversion_e_per_count": 0.2,
-                "loading_probability": 0.75,
+                "loading_probability": 0.5,
                 "atom_rate": 10_000.0,
                 "mot_field_optimum_dac": [11, -12, 13],
             }
@@ -246,7 +246,7 @@ def test_direct_world_profile_is_resolved_before_virtual_device_init(
     )
     try:
         world = installation.world
-        assert world.loading_probability == 0.75
+        assert world.loading_probability == 0.5
         assert world.atom_rate == 10_000.0
         assert world.config.mot_field_optimum_dac == (11, -12, 13)
         assert installation.device("camera").photoelectron_conversion == (123.0, 0.2)
@@ -277,6 +277,21 @@ def test_direct_world_profile_is_resolved_before_virtual_device_init(
             geometry=SimulationWorldConfig().geometry,
             seed=0,
         )
+
+
+def test_loading_probability_is_a_half_probability_ceiling() -> None:
+    assert SimulationWorldConfig(loading_probability=0.5).loading_probability == 0.5
+    for invalid in (0.500_001, 1.0):
+        with pytest.raises(ValueError, match="loading_probability"):
+            SimulationWorldConfig(loading_probability=invalid)
+
+    world = _world(loading_probability=0.5)
+    scale = world._loading_intensity_scale
+    assert scale is not None
+    depths = scale * np.concatenate(((-1.0, 0.0), np.geomspace(1e-9, 1e9, 1000)))
+    probabilities = world._loading_probabilities(depths)
+    assert np.all((0.0 <= probabilities) & (probabilities <= 0.5))
+    assert probabilities[-1] == pytest.approx(0.5)
 
 
 def test_qcmos_reuses_byte_exact_fixed_site_psfs(monkeypatch) -> None:
@@ -738,7 +753,7 @@ def test_arbitrary_grid_spacing_uses_one_fourier_to_camera_map() -> None:
 def test_a_removed_trap_cannot_resurrect_its_atom(monkeypatch) -> None:
     installation = create_installation(
         "virtual",
-        world=_world(loading_probability=1.0, atom_rate=100_000.0),
+        world=_world(loading_probability=0.5, atom_rate=100_000.0),
     )
     world = installation.world
     camera = installation.device("camera")
@@ -865,7 +880,7 @@ def test_add_remove_and_move_change_the_next_triggered_qcmos_frame(
 
     installation = create_installation(
         "virtual",
-        world=_world(loading_probability=1.0, atom_rate=100_000.0),
+        world=_world(loading_probability=0.5, atom_rate=100_000.0),
     )
     world = installation.world
     camera = installation.device("camera")
@@ -1220,7 +1235,7 @@ def test_safe_has_no_persistent_test_only_occupancy_mode() -> None:
 
 
 def test_virtual_trap_off_time_removes_loaded_atoms() -> None:
-    world = _world(seed=3, loading_probability=1.0)
+    world = _world(seed=3, loading_probability=0.5)
     _fire_world(world, _world_pulse(trap=True))
     assert not np.any(world._occupancy), "a pulse without cooling cannot load atoms"
     _fire_world(world, _world_pulse(cooling=True, trap=True))

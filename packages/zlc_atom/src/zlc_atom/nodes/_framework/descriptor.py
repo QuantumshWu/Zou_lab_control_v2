@@ -208,12 +208,14 @@ class NodePreviewSpec:
     node's own output; a plain suffix names a stable companion producer owned
     by the same run.  ``semantic`` is the existing plot projection assignment,
     shared unchanged with any estimator that consumes the same publication.
+    ``overlay`` optionally names a distinct output from that same producer.
     """
 
     output: DatasetOutputDeclaration
     plot_kind: str
     semantic: Mapping[str, object] = field(default_factory=dict)
     producer: str = ""
+    overlay: DatasetOutputDeclaration | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.output, DatasetOutputDeclaration):
@@ -229,6 +231,15 @@ class NodePreviewSpec:
         producer = str(self.producer).strip()
         if producer and ("/" in producer or "\\" in producer):
             raise ValueError("node preview producer must be a plain owner suffix")
+        overlay = self.overlay
+        if overlay is not None and not isinstance(
+            overlay, DatasetOutputDeclaration
+        ):
+            raise TypeError(
+                "node preview overlay must be DatasetOutputDeclaration or None"
+            )
+        if overlay is not None and overlay.name == self.output.name:
+            raise ValueError("node preview overlay must differ from its primary output")
         object.__setattr__(self, "plot_kind", plot_kind)
         object.__setattr__(self, "semantic", MappingProxyType(semantic))
         object.__setattr__(self, "producer", producer)
@@ -369,10 +380,12 @@ class LogicNodeDescriptor:
         if len(set(preview_keys)) != len(preview_keys):
             raise ValueError("node preview producer/output pairs must be unique")
         unknown_previews = {
-            value.output.name
+            declaration.name
             for value in node_previews
             if not value.producer
-            and not any(value.output is output for output in outputs)
+            for declaration in (value.output, value.overlay)
+            if declaration is not None
+            and not any(declaration is output for output in outputs)
         }
         if unknown_previews:
             raise ValueError(

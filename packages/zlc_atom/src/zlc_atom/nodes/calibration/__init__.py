@@ -27,6 +27,7 @@ from .calibration import (
     readout_model_kind_from_choice,
 )
 from .logic_node import LOGIC_NODE
+from .outputs import site_map_image_overlay
 from .psf import gaussian_psf_kernel, normalized_psf_kernel
 from .task import (
     CalibrationCapture,
@@ -65,4 +66,5 @@ __all__ = [
     "optimal_gaussian_threshold",
     "per_site_fidelity",
     "readout_model_kind_from_choice",
+    "site_map_image_overlay",
 ]

@@ -235,16 +235,17 @@ Node new chunk
 - 保留sparse WGS-Kim、fixed far-field phase、selected DFT和caller-owned optimizer state。
 - Inner solve走到canonical numerical gate，不为省几十毫秒增加physical candidate。
 - Feedback mode是leaf-owned显式字段；当前唯一mode为`qcmos_bright_dark`。Pulse由operator显式选择；camera exposure是独立、可见、可编辑的authored字段，默认`0.1 s`。Task不从Pulse或Calibration猜exposure，也不自动判断Pulse/exposure的科学一致性。
-- 当前mode复用canonical Camera Measurement `repeat=N`，每cycle严格一张camera frame；preview与估计读取同一sealed Dataset，不另写camera average或三帧reference判据。
+- 当前mode复用canonical Camera Measurement `repeat=N`，每cycle严格一张camera frame；估计读取同一sealed Dataset，Feedback只发布由该批数据已经计算出的candidate mean作为带site map的preview，不做第二次采集或三帧reference判据。
 - Calibration只提供Target→camera注册所需的site centers、BOX半宽/积分方式和frame坐标几何；Feedback不读取其dark/bright/threshold、exposure、photoelectron mode、camera identity或readout working-point provenance。实际camera requested/actual exposure、effective unit与conversion进入本run metadata；saturation只由本次actual raw integer maximum转换到本次effective unit判断。
-- 每个site使用本candidate唯一一批authored shots的raw BOX值选择单高斯或双高斯；能返回有限fit即为valid，只有数值失败才hold。双高斯observable为`bright_mean-dark_mean`；单高斯结合本批dark基线与per-site历史判为dark-only或bright-only。
-- Controller保存每site的归一化Target share、bright-dark、fit选择、动作、局部`d log C / d log share`及dark/loaded边界。dark-only按用户`single_gaussian_boost`保证绝对份额增加；loaded按用户`feedback_gain`只作相对配平并受`maximum_weight_change`限制；invalid保持实际份额。累计边界形成loading floor，归一化不得把site压到floor以下。
+- 每个site使用本candidate唯一一批authored shots的raw BOX值选择单高斯或双高斯；full/even/odd三份BIC证据一致支持双峰时，`bright_mean-dark_mean`才是observable；单峰没有伪造contrast，数值失败为invalid。
+- Controller保存每site的归一化Target share、正式double历史、probe方向与single/observable边界。没有可用正式double历史的single才使用用户`probe_factors`做两侧诊断；已有方向或bracket的single沿历史继续，double按`feedback_gain`作相对配平并受`maximum_weight_change`限制，invalid保持实际份额。Diagnostic probe不进入正式history、best candidate或反馈指标。
 - mode、Pulse、exposure或任一控制参数变化时丢弃prior response state；用户要求的dark增幅若在固定总功率下不可行，静默缩到本轮最大可行值。
 - 默认每candidate为100 shots、12次update；每个phase严格一批shots，下一批前必须确认不同phase。正常运行完成全部authored updates后选择全site ratio最低的candidate；没有内置ratio停止阈值。Stop保留最佳已测candidate，置信区间只作记录，不触发额外采集。
 - Feedback取得SLM后自己apply并确认frozen Science Context phase，并在shot前发布该phase；Context receipt是provenance，不要求operator事先Send/Save。normal terminal与Stop只从完整测量过的candidate中保留最佳/最可观测状态，异常failure恢复Context起始phase。
 - Feedback run只保存精选candidate数据：stable site table、每candidate BOX shot×site samples、fit/classification、Target/control weights、update action、metrics、phase-change fact和command receipt；完整phase只保留initial/selected Figure与唯一final Context，不保存raw camera frames，也不为每candidate重复完整Context。
 - Feedback summary同时提供机器可读JSON和人读文本，明确initial/selected uniformity、confidence、observable sites、common-site total brightness、selected candidate、Stop/failure与rollback。
 - Feedback重要图固定为`uniformity_history`、`site_signal_evolution`、`weight_evolution`、`selected_site_histograms`、`camera_initial_selected`和`phase_initial_selected`；每张都保存typed Figure NPZ与PNG preview。正常或Stop终态只写一个final Science Context。
+- Feedback自动preview固定为带编号site map的candidate camera mean、observable uniformity、site signal evolution与Target share evolution；phase仍发布且保存最终Figure，但不自动占用Monitor panel。
 - Sparse-only contract明确；dense Gaussian/Flat Top先修算法定义和early stop，再profile CPU，不引GPU。
 
 ## 9. Calibration、Scan与Simulation

@@ -89,7 +89,7 @@ def test_bound_plot_controls_never_wait_for_the_raster_worker() -> None:
 def test_qt_widget_receives_front_and_commits_area_drag() -> None:
     try:
         app = ensure_qt5_application([])
-        from PyQt5.QtCore import QPoint, Qt
+        from PyQt5.QtCore import QEvent, QPoint, Qt
         from PyQt5.QtTest import QTest
     except Exception as error:  # pragma: no cover - environment-dependent
         pytest.skip(f"Qt5 offscreen unavailable: {error}")
@@ -137,6 +137,29 @@ def test_qt_widget_receives_front_and_commits_area_drag() -> None:
         widget.set_interaction_enabled(True)
 
         width, height = widget.width(), widget.height()
+        axis = widget.presented_front.interaction.axes[0]
+        nx, ny = axis.display_to_normalized(0.5, 0.5)
+        hover = QPoint(round(nx * width), round(ny * height))
+        sequence = widget.presented_front.identity.sequence
+        QTest.mouseMove(widget, hover, delay=10)
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            app.processEvents()
+            if widget.presented_front.identity.sequence > sequence:
+                break
+            time.sleep(0.01)
+        assert widget.presented_front.identity.sequence > sequence
+
+        sequence = widget.presented_front.identity.sequence
+        app.sendEvent(widget, QEvent(QEvent.Leave))
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            app.processEvents()
+            if widget.presented_front.identity.sequence > sequence:
+                break
+            time.sleep(0.01)
+        assert widget.presented_front.identity.sequence > sequence
+
         start = QPoint(max(2, width // 3), max(2, height // 3))
         end = QPoint(max(3, width * 2 // 3), max(3, height * 2 // 3))
         QTest.mousePress(widget, Qt.LeftButton, pos=start)

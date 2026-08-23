@@ -3676,6 +3676,8 @@ class ConsolePresenter:
                 else f"{active.node_id}/{preview.producer}"
             )
             names.add(stable_signal_key(producer, preview.output.name))
+            if preview.overlay is not None:
+                names.add(stable_signal_key(producer, preview.overlay.name))
         return frozenset(names)
 
     def _task_science_locked(self, binding: PanelBinding) -> bool:
@@ -3802,11 +3804,18 @@ class ConsolePresenter:
                 else f"{binding.node_id}/{preview.producer}"
             )
             signal = stable_signal_key(producer, output_name)
+            overlay_signal = (
+                ""
+                if preview.overlay is None
+                else stable_signal_key(producer, preview.overlay.name)
+            )
             value = front.value(signal)
             # Nothing published yet is not an answer -- a run that ends in one
             # tick publishes on the same poll that stops it, and gating on
             # "still running" is how that node's plot never appeared.
-            if value is None:
+            if value is None or (
+                overlay_signal and front.value(overlay_signal) is None
+            ):
                 continue
             if any(panel.state.signal == signal for panel in self.panels.values()):
                 binding.previewed += (signal,)
@@ -3834,6 +3843,7 @@ class ConsolePresenter:
                     title=signal,
                     kind=kind,
                     semantic=preview.semantic,
+                    overlay_signal=overlay_signal,
                     initial_publication=publication,
                 )
             except Exception as error:

@@ -131,6 +131,24 @@ def _project_value(field: AuthoringField, value: object) -> object:
     if value is None:
         return None
     declared = str(field.value_type)
+    if declared == "numeric_tuple":
+        try:
+            parts = tuple(
+                piece for piece in value.replace(",", " ").split() if piece
+            ) if isinstance(value, str) else tuple(value)
+        except TypeError as error:
+            raise TypeError(f"{field.label} must be a numeric list") from error
+        if not parts:
+            raise ValueError(f"{field.label} needs at least one number")
+        try:
+            if any(isinstance(part, bool) for part in parts):
+                raise TypeError
+            projected = tuple(float(part) for part in parts)
+        except (TypeError, ValueError) as error:
+            raise TypeError(f"{field.label} items must be finite numbers") from error
+        if not all(math.isfinite(item) for item in projected):
+            raise ValueError(f"{field.label} items must be finite")
+        return projected
     if declared == "pair":
         if isinstance(value, (tuple, list)):
             parts = tuple(value)

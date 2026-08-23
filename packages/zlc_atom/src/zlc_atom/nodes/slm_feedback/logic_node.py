@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from zlc_pulse import PulseSequence
-from zlc_plot import Reduction
 
 from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
 from zlc_atom.devices.slm.solver import load_science_context
@@ -21,13 +20,16 @@ from zlc_atom.nodes._framework.descriptor import (
 )
 from zlc_atom.nodes.calibration import CALIBRATION_ARTIFACT_CODEC, TrapCalibration
 from zlc_atom.nodes.calibration.pulse import load_calibration_pulse_template
-from zlc_atom.nodes.camera_measurement.measurement import CAMERA_FRAMES_OUTPUT
 
 from .task import (
+    CAMERA_MEAN_OUTPUT,
     CANDIDATE_PHASE_OUTPUT,
     OBSERVABLE_UNIFORMITY_HISTORY_OUTPUT,
+    SITE_MAP_OVERLAY_OUTPUT,
+    SITE_SIGNAL_HISTORY_OUTPUT,
     SLM_PHASE_ARTIFACT_CONTRACT,
     SlmFeedbackTask,
+    TARGET_SHARE_HISTORY_OUTPUT,
     UNIFORMITY_HISTORY_OUTPUT,
 )
 
@@ -46,6 +48,14 @@ _PULSE_RESOURCE = WorkspaceResourceSpec(
     load_calibration_pulse_template,
     argument_name="pulse_resource",
 )
+
+
+def _validate_feedback(values: dict[str, object]) -> None:
+    factors = tuple(float(value) for value in values["probe_factors"])
+    if len(set(factors)) != len(factors) or any(
+        value <= 0.0 or value == 1.0 for value in factors
+    ):
+        raise ValueError("probe_factors must be unique positive numbers excluding 1")
 
 SLM_FEEDBACK_SCHEMA = AuthoringSchema(
     (
@@ -75,11 +85,10 @@ SLM_FEEDBACK_SCHEMA = AuthoringSchema(
             "shots_per_candidate", "int", "qCMOS shots per candidate", 100, minimum=10
         ),
         AuthoringField(
-            "single_gaussian_boost",
-            "float",
-            "Single-Gaussian weight increase",
-            0.03,
-            minimum=0.0,
+            "probe_factors",
+            "numeric_tuple",
+            "Single-population probe factors",
+            (0.5, 2.0),
         ),
         AuthoringField(
             "feedback_gain",
@@ -96,7 +105,8 @@ SLM_FEEDBACK_SCHEMA = AuthoringSchema(
             minimum=0.0,
         ),
         AuthoringField("max_updates", "int", "Maximum feedback updates", 12, minimum=1),
-    )
+    ),
+    validator=_validate_feedback,
 )
 
 
@@ -142,7 +152,7 @@ def _build(
         feedback_mode=str(authored["feedback_mode"]),
         exposure_seconds=float(authored["exposure_seconds"]),
         shots_per_candidate=int(authored["shots_per_candidate"]),
-        single_gaussian_boost=float(authored["single_gaussian_boost"]),
+        probe_factors=tuple(float(value) for value in authored["probe_factors"]),
         feedback_gain=float(authored["feedback_gain"]),
         maximum_weight_change=float(authored["maximum_weight_change"]),
         max_updates=int(authored["max_updates"]),
@@ -168,19 +178,28 @@ LOGIC_NODE = LogicNodeDescriptor(
         CANDIDATE_PHASE_OUTPUT,
         UNIFORMITY_HISTORY_OUTPUT,
         OBSERVABLE_UNIFORMITY_HISTORY_OUTPUT,
+        SITE_SIGNAL_HISTORY_OUTPUT,
+        TARGET_SHARE_HISTORY_OUTPUT,
+        CAMERA_MEAN_OUTPUT,
+        SITE_MAP_OVERLAY_OUTPUT,
     ),
     node_previews=(
         NodePreviewSpec(
-            CAMERA_FRAMES_OUTPUT,
+            CAMERA_MEAN_OUTPUT,
             "image",
-            semantic={
-                "fate:repeat": "reduce",
-                "reduction": Reduction.MEAN,
-            },
-            producer="camera",
+            overlay=SITE_MAP_OVERLAY_OUTPUT,
         ),
-        NodePreviewSpec(CANDIDATE_PHASE_OUTPUT, "image"),
         NodePreviewSpec(OBSERVABLE_UNIFORMITY_HISTORY_OUTPUT, "curve"),
+        NodePreviewSpec(
+            SITE_SIGNAL_HISTORY_OUTPUT,
+            "curve",
+            semantic={"fate:candidate": "x", "fate:Site": "group"},
+        ),
+        NodePreviewSpec(
+            TARGET_SHARE_HISTORY_OUTPUT,
+            "curve",
+            semantic={"fate:candidate": "x", "fate:Site": "group"},
+        ),
     ),
     artifact_outputs=(
         ArtifactOutputSpec("artifact_path", SLM_PHASE_ARTIFACT_CONTRACT),

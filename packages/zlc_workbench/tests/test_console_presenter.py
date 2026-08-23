@@ -2830,9 +2830,10 @@ def test_a_running_task_freezes_logic_identity_but_not_panels(
     open a panel for it, and used to be told to stop the run first.
     """
 
+    from zlc_runtime import DatasetOutputDeclaration
     from zlc_runtime.host import LogicNodeObservation, NodeProgress
-    from zlc_atom.nodes import calibration_pulse_template_bytes
-    from zlc_workbench.logic import LogicCandidate
+    from zlc_atom.nodes import NodePreviewSpec, calibration_pulse_template_bytes
+    from zlc_workbench.logic import LogicCandidate, stable_signal_key
 
     (presenter.session.workspace.pulses / "imaging_template.json").write_bytes(
         calibration_pulse_template_bytes()
@@ -2914,6 +2915,19 @@ def test_a_running_task_freezes_logic_identity_but_not_panels(
     assert presenter.view.task_takeover is True
     assert presenter._active_task_id == task_id
     assert presenter.view.status[-1] == ("task", "calibration: Capturing 2/5")
+    primary = DatasetOutputDeclaration("frames", "camera.frames")
+    overlay = DatasetOutputDeclaration("occupied", "atom.occupied")
+    presenter.logic[task_id].preview_specs = (
+        NodePreviewSpec(
+            primary,
+            "image",
+            producer="camera",
+            overlay=overlay,
+        ),
+    )
+    protected = presenter._task_protected_signals()
+    assert stable_signal_key(f"{task_id}/camera", primary.name) in protected
+    assert stable_signal_key(f"{task_id}/camera", overlay.name) in protected
 
     previous_repeat = presenter.logic[other_id].draft.values["repeat"]
     # Panel monitoring remains usable, while the Logic graph and every draft
@@ -3410,7 +3424,7 @@ def test_task_preview_retirement_uses_runtime_signal_existence(
 
 
 def test_a_facet_grid_panel_of_frames_carries_the_occupancy_overlay(
-    presenter, session, tmp_path
+    presenter, session, tmp_path, monkeypatch
 ) -> None:
     """The kind gates test the SEMANTIC surface, not the outer plot kind.
 
@@ -3429,6 +3443,7 @@ def test_a_facet_grid_panel_of_frames_carries_the_occupancy_overlay(
         SiteMap,
         TrapCalibration,
     )
+    from zlc_atom.nodes import NodePreviewSpec
     from zlc_plot.primitives import ImageFrame
     from zlc_workbench.logic import stable_signal_key
 
@@ -3520,14 +3535,28 @@ def test_a_facet_grid_panel_of_frames_carries_the_occupancy_overlay(
             1,
         )
 
-    binding = presenter.add_panel(
-        judged_signal,
-        judged.snapshot,
-        title="frames side by side",
-        kind="facet_grid",
-        overlay_signal=status_signal,
-        initial_publication=publication,
+    logic_binding = presenter.logic[occupancy_id]
+    outputs = {output.name: output for output in logic_binding.descriptor.outputs}
+    logic_binding.preview_specs = (
+        NodePreviewSpec(
+            outputs["frame_judged"],
+            "facet_grid",
+            overlay=outputs["occupied"],
+        ),
     )
+    original_freeze = session.signal_plane.freeze
+    primary_only = SimpleNamespace(
+        value=lambda name: None if name == status_signal else front.value(name),
+        publication=front.publication,
+    )
+    monkeypatch.setattr(session.signal_plane, "freeze", lambda: primary_only)
+    presenter._ensure_node_previews(logic_binding)
+    assert not presenter.panels, "auto-preview waits for its declared overlay"
+
+    monkeypatch.setattr(session.signal_plane, "freeze", lambda: front)
+    presenter._ensure_node_previews(logic_binding)
+    binding = next(iter(presenter.panels.values()))
+    monkeypatch.setattr(session.signal_plane, "freeze", original_freeze)
     _settle_panel_hosts(presenter, lambda: binding.frozen_data is not None)
 
     assert binding.state.kind == "facet_grid"

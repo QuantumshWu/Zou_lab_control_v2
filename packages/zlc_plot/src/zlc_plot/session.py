@@ -4272,6 +4272,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             "scroll",
             "key",
             "cancel",
+            "leave",
         }:
             raise ValueError(f"unknown raster pointer action {action!r}")
         coordinates = np.asarray((x, y), dtype=float)
@@ -4294,9 +4295,20 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         pixel_x = float(x) * float(width)
         pixel_y = (1.0 - float(y)) * float(height)
         interaction_transform = axes_snapshot
+        def series(action: str, axes: Any | None = None) -> bool:
+            return self._renderer.series_focus(
+                action, axes, pixel_x, pixel_y,
+                hit_radius=self._defaults.interaction.selector_handle_radius_px,
+                click_radius=self._defaults.interaction.double_click_radius_px,
+            )
         if selected_action == "cancel":
+            series("clear")
             self.cancel_interaction()
+        elif selected_action == "leave":
+            series("leave")
         elif selected_action == "key":
+            if str(key or "").lower() == "escape":
+                series("clear")
             self._on_key_press(
                 KeyEvent(
                     "key_press_event",
@@ -4322,10 +4334,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 event.inaxes = self._axis_for_transform(
                     interaction_transform
                 )
-            self._on_scroll(
-                event,
-                interaction_transform=interaction_transform,
-            )
+            axes = self._renderer.interactive_axes_at(event)
+            if not self._renderer.series_focus_scroll(axes, float(step)):
+                self._on_scroll(event, interaction_transform=interaction_transform)
         else:
             event = MouseEvent(
                 f"button_{selected_action}_event"
@@ -4337,16 +4348,28 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 button=button,
                 dblclick=bool(double),
             )
+            event_axes = (
+                self._axis_for_transform(interaction_transform)
+                if interaction_transform is not None
+                else self._renderer.interactive_axes_at(event)
+            )
             if selected_action == "press":
+                if button == 1 and not double:
+                    series("press", event_axes)
                 self._on_button_press(
                     event,
                     interaction_transform=interaction_transform,
                 )
+            elif selected_action == "move" and button is None:
+                series("move", event_axes)
+            elif selected_action == "release":
+                handled = button == 1 and series("release", event_axes)
+                if handled:
+                    self.cancel_interaction()
+                else:
+                    self._on_button_release(event)
             else:
-                {
-                    "move": self._on_motion,
-                    "release": self._on_button_release,
-                }[selected_action](event)
+                self._on_motion(event)
         return self._raster_pointer_state(
             # Native (baked) previews redraw the raster without a full
             # presentation pass; either signal means the pixels changed.

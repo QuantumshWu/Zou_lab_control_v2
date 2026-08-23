@@ -300,18 +300,40 @@ def test_an_edited_value_comes_back_in_the_type_its_device_declared() -> None:
             AuthoringField("n", "int", "N"),
             AuthoringField("x", "float", "X"),
             AuthoringField("s", "pair", "S"),
+            AuthoringField(
+                "factors", "numeric_tuple", "Factors", (0.5, 2.0)
+            ),
         )
     )
 
-    frozen = schema.project_values({"n": "12", "x": "1.5", "s": "3 4"})
+    frozen = schema.project_values(
+        {"n": "12", "x": "1.5", "s": "3 4", "factors": "0.25, 4"}
+    )
 
-    assert frozen == {"n": 12, "x": 1.5, "s": [3, 4]}
+    assert frozen == {
+        "n": 12,
+        "x": 1.5,
+        "s": [3, 4],
+        "factors": (0.25, 4.0),
+    }
+    form_field = project_schema(schema).fields[-1]
+    assert form_field.kind == "text"
+    assert form_field.default == "0.5, 2.0"
+    assert form_field.description == "comma-separated finite numbers"
     with pytest.raises(ValueError):
         schema.project_values({"n": 1, "x": 1.0, "s": "3"})
     with pytest.raises(TypeError):
         schema.project_values({"n": 1.5, "x": 1.0, "s": "3 4"})
     with pytest.raises(TypeError):
         schema.project_values({"n": 1, "x": 1.0, "s": (3.5, 4)})
+    with pytest.raises(TypeError, match="finite numbers"):
+        schema.project_values(
+            {"n": 1, "x": 1.0, "s": "3 4", "factors": (True, 2.0)}
+        )
+    with pytest.raises(ValueError, match="finite"):
+        schema.project_values(
+            {"n": 1, "x": 1.0, "s": "3 4", "factors": "nan, 2"}
+        )
 
 
 def test_choice_projection_keeps_owner_labels_and_typed_values() -> None:

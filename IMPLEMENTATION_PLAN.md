@@ -67,6 +67,8 @@
 - Feedback报告固定包含uniformity history、site signal evolution、weight evolution、selected
   site histograms、initial/selected camera mean和initial/selected phase；每张均为Figure NPZ
   primary加PNG preview。normal或Stop只产生一个final Science Context。
+- Feedback Monitor固定自动打开四张图：带编号site map的candidate camera mean、observable
+  uniformity、site signal evolution和Target share evolution；phase保留为信号和最终Figure但不自动开panel。
 - Feedback failure记录last complete candidate与rollback receipt；Stop只从完整测量candidate
   选择结果，未测phase不得成为final。
 
@@ -87,7 +89,9 @@
   全部来自当前checkout；同一新wheel的isolated install从site-packages加载bootstrap与Pulse
   server成功。该follow-up只改变launcher/bootstrap，不改变science/runtime实现。
 - Calibration六张report Figure都经FigureViewer current reader重开；SLM Feedback六张Figure
-  均经formal `zlc figure_viewer --check`读取。100-shot virtual Feedback与完整SLM测试通过。
+  均经formal `zlc figure_viewer --check`读取。上述证据属于此前冻结tree；本次Feedback/Curve
+  改动按用户要求不再运行测试，最近一次controller实测为6个probe candidate、22个总candidate、
+  最佳34/35与ratio 1.1337，当前逻辑随后由用户明确冻结不再修改。
 - 第一次installed software尝试曾在重负载下出现一次本地SLM测试TCP connect timeout；
   同一wheel的精确case随后连续5/5通过，第二次完整installed software lane通过，因此没有
   用该不可复现事件改动产品remote timeout或server逻辑。

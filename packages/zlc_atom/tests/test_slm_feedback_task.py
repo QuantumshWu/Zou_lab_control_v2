@@ -9,7 +9,6 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from zlc_pulse import PulseSequence
-from zlc_plot import Reduction
 from zlc_runtime import NodeHost, SignalDataPlane
 
 from zlc_atom.devices.camera import CameraWorkingPoint
@@ -30,10 +29,16 @@ from zlc_atom.nodes.calibration.pulse import resolve_pulse
 from zlc_atom.nodes.slm_feedback import task as feedback_module
 from zlc_atom.nodes.slm_feedback.task import (
     SlmFeedbackTask,
+    _allocate_requested_shares,
     _control_weights,
     _fit_contrasts,
+    _needs_probe,
+    _probe_boundary,
+    _relative_probe_target,
     _ratio_interval,
-    _single_population_observables,
+    _selected_probe_target,
+    _single_bracket_step,
+    _updated_single_bracket,
     _updated_target,
 )
 from zlc_atom.nodes.calibration.calibration import (
@@ -344,6 +349,7 @@ def _fitted_result(
     fit_valid &= ~fit_invalid
     fit_single &= ~fit_invalid
     error = np.broadcast_to(np.asarray(standard_error, dtype=float), (sites,)).copy()
+    error[~fit_valid] = np.nan
     return {
         "contrast": values,
         "standard_error": error,
@@ -356,6 +362,9 @@ def _fitted_result(
         "threshold": 10.0 + 0.5 * values,
         "fidelity": np.full(sites, 0.999),
         "bic_gain": np.full(sites, 100.0),
+        "bic_gain_even": np.full(sites, 100.0),
+        "bic_gain_odd": np.full(sites, 100.0),
+        "bic_stable": np.array(fit_valid, copy=True),
         "single_mean": np.full(sites, 10.0),
         "single_sigma": np.full(sites, 0.1),
         "valid": fit_valid,
@@ -422,6 +431,7 @@ def _task(
     calibration: TrapCalibration | None = None,
     shots: int = 10,
     updates: int = 3,
+    probe_factors: tuple[float, ...] = (0.5, 2.0),
     science_context: dict[str, object] | None = None,
 ) -> SlmFeedbackTask:
     if science_context is None:
@@ -449,7 +459,7 @@ def _task(
         feedback_mode="qcmos_bright_dark",
         exposure_seconds=0.020,
         shots_per_candidate=shots,
-        single_gaussian_boost=0.03,
+        probe_factors=probe_factors,
         feedback_gain=0.25,
         maximum_weight_change=0.5,
         max_updates=updates,
@@ -463,7 +473,7 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
         field.name: field.default for field in descriptor.authoring_schema.fields
     }
     assert defaults["shots_per_candidate"] == 100
-    assert defaults["single_gaussian_boost"] == pytest.approx(0.03)
+    assert defaults["probe_factors"] == (0.5, 2.0)
     assert defaults["feedback_gain"] == pytest.approx(0.25)
     assert defaults["maximum_weight_change"] == pytest.approx(0.5)
     assert defaults["max_updates"] == 12
@@ -476,6 +486,22 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
         {"pulse_template": "operator-selected.json"}
     )
     assert pulse_only["exposure_seconds"] == pytest.approx(0.1)
+    assert pulse_only["probe_factors"] == (0.5, 2.0)
+    projected = descriptor.authoring_schema.project_values(
+        {
+            "pulse_template": "operator-selected.json",
+            "probe_factors": "0.25, 4",
+        }
+    )
+    assert projected["probe_factors"] == (0.25, 4.0)
+    for invalid in ((), (0.0, 2.0), (0.5, 1.0), (2.0, 2.0)):
+        with pytest.raises(ValueError, match="probe"):
+            descriptor.authoring_schema.project_values(
+                {
+                    "pulse_template": "operator-selected.json",
+                    "probe_factors": invalid,
+                }
+            )
     authored = descriptor.authoring_schema.project_values(
         {
             "pulse_template": "operator-selected.json",
@@ -507,20 +533,22 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
             "observable_uniformity_history",
             "slm-feedback.observable-uniformity-history",
         ),
+        ("site_signal_history", "slm-feedback.site-signal-history"),
+        ("target_share_history", "slm-feedback.target-share-history"),
+        ("camera_mean", "slm-feedback.camera-mean"),
+        ("site_map", "zlc_plot.image-point-overlay-status"),
     )
     assert tuple(
         (item.output.name, item.plot_kind, item.producer)
         for item in descriptor.node_previews
     ) == (
-        ("frames", "image", "camera"),
-        ("candidate_phase", "image", ""),
+        ("camera_mean", "image", ""),
         ("observable_uniformity_history", "curve", ""),
+        ("site_signal_history", "curve", ""),
+        ("target_share_history", "curve", ""),
     )
     camera_preview = descriptor.node_previews[0]
-    assert camera_preview.semantic == {
-        "fate:repeat": "reduce",
-        "reduction": Reduction.MEAN,
-    }
+    assert camera_preview.overlay.name == "site_map"
     assert tuple(
         item.capability_token for item in descriptor.device_requirements
     ) == (
@@ -539,15 +567,13 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
         contrast,
         np.zeros(35),
         np.ones(35, dtype=bool),
-        np.zeros(35, dtype=bool),
         rows,
         columns,
+        reference_valid=np.ones(35, dtype=bool),
         previous_weights=np.full(35, np.nan),
         previous_contrast=np.full(35, np.nan),
         feedback_gain=0.25,
-        single_gaussian_boost=0.03,
         maximum_weight_change=0.5,
-        minimum_control_weight=np.full(35, np.nan),
     )
     assert updated[rows[0], columns[0]] < updated[rows[-1], columns[-1]]
     assert correction[0] < 0.0 < correction[-1]
@@ -562,7 +588,7 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
     assert lower <= estimate <= upper
     assert estimate == pytest.approx(1.4 / 0.6)
     assert max_relative_sem == pytest.approx(0.02)
-def test_single_frame_mixture_and_site_history_control_weak_or_disappearing_sites() -> None:
+def test_single_population_classification_and_baseline_relative_probe_selection() -> None:
     rng = np.random.default_rng(17)
     occupied = rng.random(500) < 0.45
     samples = np.column_stack(
@@ -579,97 +605,261 @@ def test_single_frame_mixture_and_site_history_control_weak_or_disappearing_site
     assert fitted["valid"].tolist() == [True, False]
     assert fitted["single_population"].tolist() == [False, True]
     assert fitted["invalid"].tolist() == [False, False]
+    assert fitted["bic_stable"].tolist() == [True, False]
+    assert np.all(
+        np.asarray((
+            fitted["bic_gain"][0],
+            fitted["bic_gain_even"][0],
+            fitted["bic_gain_odd"][0],
+        )) > 0.0
+    )
     assert fitted["contrast"][0] == pytest.approx(22.0, rel=0.04)
-
-    single_fit = _fitted_result(
-        np.full(3, np.nan),
-        valid=np.zeros(3, dtype=bool),
-        single_population=np.ones(3, dtype=bool),
-    )
-    single_fit["single_mean"] = np.asarray((10.0, 32.0, 10.25))
-    single_fit["single_sigma"] = np.full(3, 0.2)
-    recovered, _error, dark_only, bright_only = (
-        _single_population_observables(
-            single_fit,
-            shots=100,
-            previous_dark_mean=np.asarray((np.nan, 10.0, 10.0)),
-            previous_dark_standard_error=np.asarray((np.nan, 0.1, 0.1)),
-        )
-    )
-    assert dark_only.tolist() == [True, False, True]
-    assert bright_only.tolist() == [False, True, False]
-    assert recovered[1] == pytest.approx(22.0)
+    assert np.isnan(fitted["contrast"][1])
+    assert np.isnan(fitted["standard_error"][1])
 
     target = _grid_target((17, 23))
     rows, columns = np.nonzero(target)
-    contrast = np.ones(35)
-    error = np.zeros(35)
-    valid = np.ones(35, dtype=bool)
-    dark_only = np.zeros(35, dtype=bool)
-    valid[17], dark_only[17], contrast[17] = False, True, np.nan
-    boosted, _correction, _slope, decision = _updated_target(
+    probe = np.zeros(35, dtype=bool)
+    probe[17] = True
+    requested = np.ones(35)
+    requested[17] = 2.0
+    higher, effective = _relative_probe_target(
         target,
-        contrast,
-        error,
-        valid,
-        dark_only,
+        requested,
+        probe,
         rows,
         columns,
-        previous_weights=np.full(35, np.nan),
-        previous_contrast=np.full(35, np.nan),
-        feedback_gain=0.25,
-        single_gaussian_boost=0.03,
-        maximum_weight_change=0.5,
-        minimum_control_weight=np.full(35, np.nan),
     )
-    assert decision[17] == "boost_dark_single_gaussian"
-    assert boosted[rows[17], columns[17]] > boosted[rows[0], columns[0]]
     before_share = target[rows[17], columns[17]] / np.sum(target[rows, columns])
-    after_share = boosted[rows[17], columns[17]] / np.sum(
-        boosted[rows, columns]
+    after_share = higher[rows[17], columns[17]] / np.sum(
+        higher[rows, columns]
     )
-    assert after_share / before_share == pytest.approx(1.03)
+    assert after_share / before_share == pytest.approx(2.0)
+    assert effective[17] == pytest.approx(2.0)
+    nonprobe_ratio = higher[rows[~probe], columns[~probe]] / target[
+        rows[~probe], columns[~probe]
+    ]
+    assert np.ptp(nonprobe_ratio) == pytest.approx(0.0)
+    assert np.sum(higher[rows, columns]) == pytest.approx(
+        np.sum(target[rows, columns])
+    )
 
-    previous_weights = np.ones(35)
-    previous_contrast = np.ones(35)
-    below_edge = np.array(target, copy=True)
-    below_edge[rows[17], columns[17]] = 0.7
-    recovered, _correction, _slope, decision = _updated_target(
-        below_edge,
-        contrast,
-        error,
-        valid,
-        dark_only,
+    crowded = np.zeros(35, dtype=bool)
+    crowded[:30] = True
+    crowded_requested = np.ones(35)
+    crowded_requested[crowded] = 2.0
+    _crowded_target, crowded_effective = _relative_probe_target(
+        target,
+        crowded_requested,
+        crowded,
         rows,
         columns,
-        previous_weights=previous_weights,
-        previous_contrast=previous_contrast,
-        feedback_gain=0.25,
-        single_gaussian_boost=0.03,
-        maximum_weight_change=0.5,
-        minimum_control_weight=np.full(35, np.nan),
     )
-    assert decision[17] == "boost_dark_single_gaussian"
-    assert recovered[rows[17], columns[17]] == pytest.approx(0.7 * 1.03)
+    assert 1.0 < crowded_effective[0] < 2.0
+    assert np.all(crowded_effective[crowded] == crowded_effective[0])
 
-    floor = np.full(35, np.nan)
-    floor[17] = 1.0
-    floored, *_details = _updated_target(
-        below_edge,
-        contrast,
-        error,
-        valid,
-        dark_only,
+    selected_sites = np.zeros(35, dtype=bool)
+    selected_sites[:4] = True
+    baseline_contrast = np.ones(35)
+    baseline_valid = ~selected_sites
+    lower_contrast = np.full(35, np.nan)
+    lower_contrast[[0, 2]] = (0.8, 0.8)
+    lower_valid = np.zeros(35, dtype=bool)
+    lower_valid[[0, 2]] = True
+    upper_contrast = np.full(35, np.nan)
+    upper_contrast[[1, 2]] = (1.1, 1.3)
+    upper_valid = np.zeros(35, dtype=bool)
+    upper_valid[[1, 2]] = True
+    combined, selected, decisions, observed_factors = _selected_probe_target(
+        target,
+        selected_sites,
+        baseline_contrast,
+        baseline_valid,
+        [
+            (0.5, lower_contrast, np.full(35, 0.01), lower_valid),
+            (2.0, upper_contrast, np.full(35, 0.01), upper_valid),
+        ],
         rows,
         columns,
-        previous_weights=previous_weights,
-        previous_contrast=previous_contrast,
         feedback_gain=0.25,
-        single_gaussian_boost=0.03,
         maximum_weight_change=0.5,
-        minimum_control_weight=floor,
     )
-    assert _control_weights(floored[rows, columns])[17] >= 1.0 - 1e-12
+    np.testing.assert_allclose(
+        selected[:4], (0.5**0.25, 2.0**0.25, 0.5**0.25, 1.0)
+    )
+    np.testing.assert_allclose(observed_factors[:4], (0.5, 2.0, 0.5, 1.0))
+    assert decisions[:4].tolist() == [
+        "probe_choose_lower_only",
+        "probe_choose_upper_only",
+        "probe_choose_lower_closest",
+        "probe_hold_unobservable",
+    ]
+    assert not np.array_equal(combined, target)
+
+
+
+    np.testing.assert_allclose(
+        _probe_boundary(
+            np.asarray((1.0, 2.0, 1.0)),
+            np.asarray((2.0, 1.0, 1.0)),
+            np.asarray((1.0, -1.0, 1.0)),
+        )[:2],
+        (np.sqrt(2.0), np.sqrt(2.0)),
+    )
+    tightened = _probe_boundary(
+        np.asarray((1.2, 1.8)),
+        np.asarray((1.8, 1.2)),
+        np.asarray((1.0, -1.0)),
+    )
+    np.testing.assert_allclose(tightened, np.sqrt((2.16, 2.16)))
+
+    first_midpoint = _probe_boundary(
+        np.asarray((1.0, 2.0)),
+        np.asarray((2.0, 1.0)),
+        np.asarray((1.0, -1.0)),
+    )
+    first_step = _single_bracket_step(
+        np.asarray((1.0, 2.0)),
+        first_midpoint,
+        np.asarray((1.0, -1.0)),
+        0.5,
+    )
+    np.testing.assert_allclose(first_step, (np.log(np.sqrt(2.0)), -np.log(np.sqrt(2.0))))
+    second_midpoint = _probe_boundary(
+        first_midpoint,
+        np.asarray((2.0, 1.0)),
+        np.asarray((1.0, -1.0)),
+    )
+    second_step = _single_bracket_step(
+        first_midpoint,
+        second_midpoint,
+        np.asarray((1.0, -1.0)),
+        0.5,
+    )
+    assert second_step[0] > 0.0 > second_step[1]
+    flipped_single, flipped_observable, flipped_direction, crossed = (
+        _updated_single_bracket(
+            np.asarray((2.5, 0.5)),
+            np.ones(2, dtype=bool),
+            np.asarray((1.0, 2.0)),
+            np.asarray((2.0, 1.0)),
+            np.asarray((1.0, -1.0)),
+        )
+    )
+    assert crossed.tolist() == [True, True]
+    np.testing.assert_allclose(flipped_single, (2.5, 0.5))
+    np.testing.assert_allclose(flipped_observable, (2.0, 1.0))
+    np.testing.assert_allclose(flipped_direction, (-1.0, 1.0))
+    flipped_midpoint = _probe_boundary(
+        flipped_single, flipped_observable, flipped_direction
+    )
+    flipped_step = _single_bracket_step(
+        np.asarray((2.5, 0.5)),
+        flipped_midpoint,
+        flipped_direction,
+        0.5,
+    )
+    assert flipped_step[0] < 0.0 < flipped_step[1]
+
+
+def test_direction_preserving_share_allocator_moves_only_balanced_requested_power() -> None:
+    shares = np.asarray((0.4, 0.3, 0.2, 0.1))
+    requested = np.log((1.5, 0.5, 1.0, 1.0))
+    allocated, transfer, increase_scale, decrease_scale = (
+        _allocate_requested_shares(shares, requested)
+    )
+    np.testing.assert_allclose(allocated, (0.55, 0.15, 0.2, 0.1))
+    assert transfer == pytest.approx(0.15)
+    assert increase_scale == pytest.approx(0.75)
+    assert decrease_scale == pytest.approx(1.0)
+    assert np.sum(allocated) == pytest.approx(1.0)
+    np.testing.assert_array_equal(
+        np.sign(allocated - shares), np.sign(requested)
+    )
+
+    one_sided, transfer, *_scales = _allocate_requested_shares(
+        shares, np.log((1.1, 1.2, 1.0, 1.0))
+    )
+    np.testing.assert_array_equal(one_sided, shares)
+    assert transfer == 0.0
+
+    bounded, transfer, *_scales = _allocate_requested_shares(
+        np.asarray((0.5, 0.5)),
+        np.log((2.0, 0.5)),
+        upper=np.asarray((0.6, np.inf)),
+    )
+    np.testing.assert_allclose(bounded, (0.6, 0.4))
+    assert transfer == pytest.approx(0.1)
+
+    target = np.asarray(((0.4, 0.3), (0.2, 0.1)), dtype=np.float32)
+    rows, columns = np.nonzero(target)
+    restored, applied_step, *_details = _updated_target(
+        target,
+        np.full(4, np.nan),
+        np.zeros(4),
+        np.zeros(4, dtype=bool),
+        rows,
+        columns,
+        reference_valid=np.zeros(4, dtype=bool),
+        previous_weights=np.full(4, np.nan),
+        previous_contrast=np.full(4, np.nan),
+        feedback_gain=0.25,
+        maximum_weight_change=0.5,
+        directed_log_step=np.log((1.25, 0.5, 1.0, 1.0)),
+        control_boundary=np.asarray((2.0, np.nan, np.nan, np.nan)),
+        control_direction=np.asarray((1.0, 0.0, 0.0, 0.0)),
+    )
+    np.testing.assert_allclose(restored[rows, columns], (0.5, 0.2, 0.2, 0.1))
+    np.testing.assert_allclose(
+        np.exp(applied_step), (1.25, 2.0 / 3.0, 1.0, 1.0)
+    )
+
+    ordinary, ordinary_step, *_details = _updated_target(
+        target,
+        np.asarray((0.1, 10.0, 10.0, 10.0)),
+        np.zeros(4),
+        np.ones(4, dtype=bool),
+        rows,
+        columns,
+        reference_valid=np.ones(4, dtype=bool),
+        previous_weights=np.full(4, np.nan),
+        previous_contrast=np.full(4, np.nan),
+        feedback_gain=0.25,
+        maximum_weight_change=0.5,
+        control_boundary=np.asarray((1.4, np.nan, np.nan, np.nan)),
+        control_direction=np.asarray((1.0, 0.0, 0.0, 0.0)),
+    )
+    assert ordinary_step[0] < 0.0
+    assert ordinary[rows[0], columns[0]] == pytest.approx(0.35)
+
+    rng = np.random.default_rng(91)
+    for _ in range(100):
+        current = rng.random(12)
+        current /= np.sum(current)
+        steps = rng.uniform(-0.4, 0.4, 12)
+        steps[rng.random(12) < 0.25] = 0.0
+        result, *_details = _allocate_requested_shares(current, steps)
+        assert np.sum(result) == pytest.approx(1.0)
+        assert np.all(result > 0.0)
+        moved = result - current
+        assert np.all((moved == 0.0) | (np.sign(moved) == np.sign(steps)))
+        np.testing.assert_array_equal(result[steps == 0.0], current[steps == 0.0])
+
+
+def test_probe_admission_excludes_observable_invalid_and_formal_history_sites() -> None:
+    single = np.ones(4, dtype=bool)
+    observable = np.asarray((False, True, False, False))
+    acquisition_invalid = np.asarray((False, False, True, False))
+    previous_weight = np.asarray((np.nan, np.nan, np.nan, 1.0))
+    previous_contrast = np.asarray((np.nan, np.nan, np.nan, 2.0))
+    assert _needs_probe(
+        single,
+        observable,
+        acquisition_invalid,
+        previous_weight,
+        previous_contrast,
+    ).tolist() == [True, False, False, False]
+
 
 def test_feedback_applies_science_context_then_measures_before_solving_update(
     tmp_path: Path, monkeypatch
@@ -709,14 +899,12 @@ def test_feedback_applies_science_context_then_measures_before_solving_update(
         first_contrast,
         np.zeros(35),
         np.ones(35, dtype=bool),
-        np.zeros(35, dtype=bool),
         *np.nonzero(frozen_target),
+        reference_valid=np.ones(35, dtype=bool),
         previous_weights=np.full(35, np.nan),
         previous_contrast=np.full(35, np.nan),
         feedback_gain=0.25,
-        single_gaussian_boost=0.03,
         maximum_weight_change=0.5,
-        minimum_control_weight=np.full(35, np.nan),
     )
 
     def solve(target, **kwargs):
@@ -804,7 +992,7 @@ def test_feedback_applies_science_context_then_measures_before_solving_update(
         np.testing.assert_array_equal(slm.last_commanded_phase, expected)
         assert artifact["pattern_metadata"]["solver"]["iterations_run"] == 19
         assert artifact["pattern_metadata"]["feedback_mode"] == "qcmos_bright_dark"
-        assert artifact["pattern_metadata"]["single_gaussian_boost"] == pytest.approx(0.03)
+        assert artifact["pattern_metadata"]["probe_factors"] == [0.5, 2.0]
         assert artifact["pattern_metadata"]["feedback_gain"] == pytest.approx(0.25)
         assert artifact["pattern_metadata"]["maximum_weight_change"] == pytest.approx(0.5)
         assert artifact["pattern_metadata"]["exposure_seconds"] == pytest.approx(0.020)
@@ -886,15 +1074,13 @@ def test_arbitrary_sparse_geometry_matches_calibration_sites_before_updating_tar
             target_contrast,
             np.zeros(len(rows)),
             np.ones(len(rows), dtype=bool),
-            np.zeros(len(rows), dtype=bool),
             rows,
             columns,
+            reference_valid=np.ones(len(rows), dtype=bool),
             previous_weights=np.full(len(rows), np.nan),
             previous_contrast=np.full(len(rows), np.nan),
             feedback_gain=0.25,
-            single_gaussian_boost=0.03,
             maximum_weight_change=0.5,
-            minimum_control_weight=np.full(len(rows), np.nan),
         )
         np.testing.assert_allclose(solved_targets[0], expected)
         history = _load_history(result["artifact_path"])
@@ -979,10 +1165,14 @@ def test_uniformity_history_is_one_latest_curve_paired_with_candidate_phase(
             "candidate_phase",
             "uniformity_history",
             "observable_uniformity_history",
+            "site_signal_history",
+            "target_share_history",
+            "camera_mean",
+            "site_map",
         }
         column = output.snapshot.block.schema.point_table.columns[0]
         assert column.name == "candidate"
-        assert tuple(column.values) == (1.0, 2.0, 3.0)
+        assert tuple(column.values) == (1, 2, 3, 4, 5, 6)
     finally:
         plane.close()
 
@@ -1409,7 +1599,7 @@ def test_electron_measurement_uses_current_conversion_and_saturation(
     run(recorded_offset, 0.6, True)
 
 
-def test_single_gaussian_site_updates_after_one_batch_and_next_capture_has_new_phase(
+def test_single_population_sites_probe_both_sides_then_measure_combined_target(
     tmp_path: Path, monkeypatch
 ) -> None:
     target = _asymmetric_target()
@@ -1436,15 +1626,39 @@ def test_single_gaussian_site_updates_after_one_batch_and_next_capture_has_new_p
     )
 
     valid = np.ones(35, dtype=bool)
-    valid[17] = False
+    valid[[17, 18]] = False
     single = np.zeros(35, dtype=bool)
-    single[17] = True
+    single[[17, 18]] = True
+    lower_valid = np.ones(35, dtype=bool)
+    lower_valid[18] = False
+    lower_single = np.zeros(35, dtype=bool)
+    lower_single[18] = True
+    upper_valid = np.ones(35, dtype=bool)
+    upper_valid[17] = False
+    upper_single = np.zeros(35, dtype=bool)
+    upper_single[17] = True
+    baseline_values = np.linspace(0.8, 1.2, 35)
+    baseline_values[~valid] = np.nan
+    lower_values = np.linspace(4.0, 2.0, 35)
+    lower_values[~lower_valid] = np.nan
+    upper_values = np.linspace(0.2, 0.4, 35)
+    upper_values[~upper_valid] = np.nan
     fits = iter(
         (
             _fitted_result(
-                np.where(valid, 1.0, np.nan),
+                baseline_values,
                 valid=valid,
                 single_population=single,
+            ),
+            _fitted_result(
+                lower_values,
+                valid=lower_valid,
+                single_population=lower_single,
+            ),
+            _fitted_result(
+                upper_values,
+                valid=upper_valid,
+                single_population=upper_single,
             ),
             _fitted_result(np.ones(35)),
         )
@@ -1460,6 +1674,9 @@ def test_single_gaussian_site_updates_after_one_batch_and_next_capture_has_new_p
         )
 
     monkeypatch.setattr(SlmFeedbackTask, "_measure", measure)
+    monkeypatch.setattr(
+        SlmFeedbackTask, "_save_figures", lambda *args, **kwargs: None
+    )
     monkeypatch.setattr(
         feedback_module,
         "_fit_contrasts",
@@ -1478,22 +1695,442 @@ def test_single_gaussian_site_updates_after_one_batch_and_next_capture_has_new_p
     )
     try:
         result = task.execute(_Context(tmp_path))
-        assert result["feedback_status"] == "completed"
-        assert len(measured_phases) == 2
-        assert not np.array_equal(measured_phases[0], measured_phases[1])
+        assert result["feedback_status"] == "stalled"
+        assert len(measured_phases) == 4
+        assert all(
+            not np.array_equal(left, right)
+            for left, right in zip(
+                measured_phases[:-1], measured_phases[1:], strict=True
+            )
+        )
         rows, columns = np.nonzero(target > 0.0)
-        assert solved_targets[0][rows[17], columns[17]] > solved_targets[0][
-            rows[0], columns[0]
+        baseline = target[rows, columns]
+        np.testing.assert_allclose(
+            solved_targets[0][rows[[17, 18]], columns[[17, 18]]] / baseline[[17, 18]],
+            (0.5, 0.5),
+        )
+        np.testing.assert_allclose(
+            solved_targets[1][rows[[17, 18]], columns[[17, 18]]] / baseline[[17, 18]],
+            (2.0, 2.0),
+        )
+        directed = np.zeros(35)
+        directed[[17, 18]] = np.log((0.5**0.25, 2.0**0.25))
+        expected, *_details = _updated_target(
+            target,
+            baseline_values,
+            np.zeros(35),
+            valid,
+            rows,
+            columns,
+            reference_valid=valid,
+            previous_weights=np.full(35, np.nan),
+            previous_contrast=np.full(35, np.nan),
+            feedback_gain=0.25,
+            maximum_weight_change=0.5,
+            directed_log_step=directed,
+        )
+        np.testing.assert_allclose(solved_targets[2], expected)
+        history = _load_history(result["artifact_path"])
+        assert [item["candidate_kind"] for item in history] == [
+            "baseline", "probe", "probe", "probe_combined"
         ]
-        support_values = solved_targets[0][rows, columns]
-        assert float(
-            np.max(support_values) / np.min(support_values)
-        ) == pytest.approx(1.03, rel=0.01)
-        first = _load_history(result["artifact_path"])[0]
-        assert first["single_gaussian_sites"] == [17]
-        assert first["shots"] == 10
-        assert first["decision"][17] == "boost_dark_single_gaussian"
-        assert first["next_phase_changed"] is True
+        assert history[1]["probe_requested_factor"] == pytest.approx(0.5)
+        assert history[1]["probe_group_effective_factor"] == pytest.approx(0.5)
+        assert history[2]["probe_requested_factor"] == pytest.approx(2.0)
+        assert history[2]["probe_group_effective_factor"] == pytest.approx(2.0)
+        np.testing.assert_allclose(
+            history[1]["probe_effective_factor"],
+            solved_targets[0][rows, columns] / baseline,
+        )
+        np.testing.assert_allclose(
+            history[2]["probe_effective_factor"],
+            solved_targets[1][rows, columns] / baseline,
+        )
+        selected_formal = np.asarray(
+            history[3]["probe_selected_formal_factor"], dtype=float
+        )
+        assert np.all(np.isnan(selected_formal[~single]))
+        np.testing.assert_allclose(
+            selected_formal[single], (0.5**0.25, 2.0**0.25)
+        )
+        assert history[3]["probe_decision"][17] == "probe_choose_lower_only"
+        assert history[3]["probe_decision"][18] == "probe_choose_upper_only"
+        assert history[0]["decision"][17] == "hold_for_probe"
+        assert history[0]["decision"][0] == "feedback_assumed_slope"
+        assert np.isnan(history[3]["previous_double_control_weight"][17])
+        assert history[3]["previous_double_control_weight"][0] == pytest.approx(1.0)
+        _phase, metadata = _load_candidate(result["artifact_path"])
+        assert metadata["candidate"] == 4
+    finally:
+        plane.close()
+
+
+def test_baseline_single_with_formal_history_steps_to_bracket_midpoint_without_probe(
+    tmp_path: Path, monkeypatch
+) -> None:
+    target = _grid_target((17, 23))
+    rows, columns = np.nonzero(target > 0.0)
+    slm = _Slm(target.shape)
+    context_mapping = _science_context(slm, target=target)
+    previous_weights = np.ones(35)
+    previous_weights[17] = 1.2
+    context_mapping["pattern_metadata"] = {
+        "feedback_controller": "slm-feedback.qcmos-bright-dark",
+        "feedback_mode": "qcmos_bright_dark",
+        "pulse_path": str(Path(IMAGING_PULSE_RESOURCE.path).resolve()),
+        "exposure_seconds": 0.020,
+        "probe_factors": [0.5, 2.0],
+        "feedback_gain": 0.25,
+        "maximum_weight_change": 0.5,
+        "measurement": {
+            "previous_double_control_weight": previous_weights.tolist(),
+            "previous_double_bright_minus_dark": np.ones(35).tolist(),
+        },
+    }
+    valid = np.ones(35, dtype=bool)
+    valid[17] = False
+    single = np.zeros(35, dtype=bool)
+    single[17] = True
+    baseline_contrast = np.ones(35)
+    baseline_contrast[0] = 0.1
+    baseline_error = 0.24 * baseline_contrast
+    baseline_error[0] = 0.0
+    fits = iter((
+        _fitted_result(
+            np.where(valid, baseline_contrast, np.nan),
+            valid=valid,
+            single_population=single,
+            standard_error=baseline_error,
+        ),
+        _fitted_result(np.ones(35)),
+    ))
+    solved_targets: list[np.ndarray] = []
+    monkeypatch.setattr(
+        feedback_module,
+        "resolve_pulse",
+        lambda *args, **kwargs: SimpleNamespace(program=object()),
+    )
+    monkeypatch.setattr(
+        feedback_module,
+        "solve_phase",
+        lambda candidate, **_kwargs: (
+            solved_targets.append(np.array(candidate, copy=True))
+            or np.full(candidate.shape, 0.2, dtype=np.float32),
+            {},
+        ),
+    )
+    monkeypatch.setattr(
+        feedback_module,
+        "_fit_contrasts",
+        lambda samples, **_kwargs: next(fits),
+    )
+    monkeypatch.setattr(
+        SlmFeedbackTask,
+        "_measure",
+        lambda self, pulse, context, iteration: (
+            np.zeros((self.shots, 35)),
+            (),
+            (),
+            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
+        ),
+    )
+    monkeypatch.setattr(
+        SlmFeedbackTask, "_save_figures", lambda *args, **kwargs: None
+    )
+    plane = SignalDataPlane()
+    task = _task(
+        tmp_path,
+        slm=slm,
+        camera=object(),
+        sequencer=SimpleNamespace(describe=lambda: object()),
+        plane=plane,
+        calibration=_calibration_at(
+            np.column_stack((columns, rows)), shape=target.shape
+        ),
+        science_context=context_mapping,
+        updates=1,
+    )
+    try:
+        result = task.execute(_Context(tmp_path))
+        history = _load_history(result["artifact_path"])
+        assert [item["candidate_kind"] for item in history] == [
+            "baseline", "ordinary"
+        ]
+        assert history[0]["probe_sites"] == []
+        assert history[0]["decision"][17] == "single_bracket_midpoint"
+        assert _control_weights(
+            solved_targets[0][rows, columns]
+        )[17] == pytest.approx(np.sqrt(1.2))
+    finally:
+        plane.close()
+
+
+def test_probe_bracket_survives_double_and_single_bisects_midpoint(
+    tmp_path: Path, monkeypatch
+) -> None:
+    target = _asymmetric_target()
+    slm = _Slm(target.shape)
+    solved_targets: list[np.ndarray] = []
+    solve_inputs: list[tuple[np.ndarray, dict[str, object]]] = []
+    monkeypatch.setattr(
+        feedback_module,
+        "resolve_pulse",
+        lambda *args, **kwargs: SimpleNamespace(program=object()),
+    )
+    def solve(candidate, **kwargs):
+        solved_targets.append(np.array(candidate, copy=True))
+        solve_inputs.append((
+            np.array(kwargs["initial_phase"], copy=True),
+            dict(kwargs["spot_optimizer_state"]),
+        ))
+        kwargs["spot_optimizer_state"]["marker"] = len(solved_targets)
+        return np.full(
+            candidate.shape, 0.1 * (len(solved_targets) + 1), np.float32
+        ), {}
+
+    monkeypatch.setattr(feedback_module, "solve_phase", solve)
+    valid = np.ones(35, dtype=bool)
+    valid[17] = False
+    single = np.zeros(35, dtype=bool)
+    single[17] = True
+    baseline_contrast = np.ones(35)
+    baseline_contrast[0] = 0.1
+    baseline_error = 0.24 * baseline_contrast
+    baseline_error[0] = 0.0
+    single_fit = lambda: _fitted_result(
+        np.where(valid, baseline_contrast, np.nan),
+        valid=valid,
+        single_population=single,
+        standard_error=baseline_error,
+    )
+    combined_valid = np.array(valid, copy=True)
+    combined_valid[18] = False
+    combined_single = ~combined_valid
+    formal_double_contrast = 100.0 * np.exp(np.linspace(-0.15, 0.15, 35))
+    formal_double_contrast[17] = 80.0
+
+    def after_double_single_fit() -> dict[str, np.ndarray]:
+        current_valid = np.ones(35, dtype=bool)
+        current_valid[17] = False
+        current_single = ~current_valid
+        return _fitted_result(
+            np.where(current_valid, formal_double_contrast, np.nan),
+            valid=current_valid,
+            single_population=current_single,
+        )
+
+    fits = iter(
+        (
+            single_fit(),
+            single_fit(),
+            _fitted_result(np.ones(35)),
+            _fitted_result(
+                np.where(combined_valid, 1.0, np.nan),
+                valid=combined_valid,
+                single_population=combined_single,
+            ),
+            _fitted_result(formal_double_contrast),
+            after_double_single_fit(),
+            after_double_single_fit(),
+        )
+    )
+    monkeypatch.setattr(
+        feedback_module, "_fit_contrasts", lambda samples: next(fits)
+    )
+    monkeypatch.setattr(
+        SlmFeedbackTask,
+        "_measure",
+        lambda self, pulse, context, iteration: (
+            np.zeros((self.shots, 35)),
+            (),
+            (),
+            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
+        ),
+    )
+    monkeypatch.setattr(
+        SlmFeedbackTask, "_save_figures", lambda *args, **kwargs: None
+    )
+    plane = SignalDataPlane()
+    science_context = _science_context(slm, target=target)
+    task = _task(
+        tmp_path,
+        slm=slm,
+        camera=object(),
+        sequencer=SimpleNamespace(describe=lambda: object()),
+        plane=plane,
+        target=target,
+        calibration=_calibration_with_unresolved_site(target, missing=17),
+        science_context=science_context,
+        updates=3,
+    )
+    try:
+        result = task.execute(_Context(tmp_path))
+        assert result["feedback_status"] == "completed"
+        rows, columns = np.nonzero(target > 0.0)
+        baseline = target[rows, columns]
+        assert solved_targets[2][rows[17], columns[17]] / baseline[17] == pytest.approx(
+            2.0**0.25
+        )
+        second_step = solved_targets[3][rows[17], columns[17]] / baseline[17]
+        assert second_step > 2.0**0.25
+        combined_control = _control_weights(
+            solved_targets[2][rows, columns]
+        )[18]
+        midpoint_control = _control_weights(
+            solved_targets[3][rows, columns]
+        )[18]
+        assert 1.0 < midpoint_control < combined_control
+        for initial_phase, state in solve_inputs[:3]:
+            np.testing.assert_array_equal(
+                initial_phase, science_context["pattern_phase"]
+            )
+            assert state == {}
+        np.testing.assert_array_equal(
+            solve_inputs[3][0], np.full(target.shape, 0.4, dtype=np.float32)
+        )
+        assert solve_inputs[3][1] == {"marker": 3}
+        history = _load_history(result["artifact_path"])
+        assert [item["candidate_kind"] for item in history] == [
+            "baseline", "probe", "probe", "probe_combined",
+            "ordinary", "ordinary", "ordinary",
+        ]
+        assert history[3]["decision"][17] == "probe_direction_upper"
+        assert history[3]["decision"][18] == "single_bracket_midpoint"
+        assert history[4]["observable_valid"][17] is True
+        assert history[4]["fit_valid"][17] is True
+        for name in (
+            "probe_single_bound",
+            "probe_observable_bound",
+            "probe_control_boundary",
+        ):
+            assert np.isfinite(history[4][name][17])
+        assert history[5]["single_population"][17] is True
+        assert history[5]["observable_valid"][17] is False
+        assert history[5]["fit_valid"][17] is False
+        assert np.isnan(history[5]["bright_minus_dark"][17])
+        assert np.isnan(history[5]["contrast_standard_error"][17])
+        assert history[5]["decision"][17] == "single_bracket_midpoint"
+        assert np.isfinite(history[5]["probe_single_bound"][17])
+        assert np.isfinite(history[5]["probe_observable_bound"][17])
+        assert np.isfinite(history[5]["probe_control_boundary"][17])
+        current_control = _control_weights(
+            solved_targets[4][rows, columns]
+        )
+        single_bound = np.asarray(
+            history[5]["probe_single_bound"], dtype=float
+        )
+        observable_bound = np.asarray(
+            history[5]["probe_observable_bound"], dtype=float
+        )
+        boundary = np.asarray(
+            history[5]["probe_control_boundary"], dtype=float
+        )
+        direction = np.sign(observable_bound - single_bound)
+        directed = _single_bracket_step(
+            current_control,
+            boundary,
+            direction,
+            0.5,
+        )
+        expected, expected_step, *_details = _updated_target(
+            solved_targets[4],
+            np.asarray(history[5]["bright_minus_dark"], dtype=float),
+            np.asarray(history[5]["contrast_standard_error"], dtype=float),
+            np.asarray(history[5]["observable_valid"], dtype=bool),
+            rows,
+            columns,
+            reference_valid=np.asarray(history[5]["fit_valid"], dtype=bool),
+            previous_weights=np.asarray(
+                history[5]["previous_double_control_weight"], dtype=float
+            ),
+            previous_contrast=np.asarray(
+                history[5]["previous_double_bright_minus_dark"], dtype=float
+            ),
+            feedback_gain=0.25,
+            maximum_weight_change=0.5,
+            directed_log_step=directed,
+            control_boundary=boundary,
+            control_direction=direction,
+        )
+        np.testing.assert_allclose(solved_targets[5], expected)
+        assert expected_step[17] > 0.0
+        assert history[5]["requested_log_correction"][17] == pytest.approx(
+            expected_step[17]
+        )
+        for candidate in history[5:7]:
+            assert candidate["previous_double_control_weight"][17] == pytest.approx(
+                history[4]["control_weight"][17]
+            )
+            assert candidate["previous_double_bright_minus_dark"][17] == pytest.approx(
+                history[4]["bright_minus_dark"][17]
+            )
+    finally:
+        plane.close()
+
+
+def test_all_single_population_sites_stall_at_baseline_without_fake_probe(
+    tmp_path: Path, monkeypatch
+) -> None:
+    target = _asymmetric_target()
+    slm = _Slm(target.shape)
+    measured: list[np.ndarray] = []
+    monkeypatch.setattr(
+        feedback_module,
+        "resolve_pulse",
+        lambda *args, **kwargs: SimpleNamespace(program=object()),
+    )
+    monkeypatch.setattr(
+        feedback_module,
+        "solve_phase",
+        lambda *args, **kwargs: pytest.fail("relative all-site probe must not solve"),
+    )
+    monkeypatch.setattr(
+        feedback_module,
+        "_fit_contrasts",
+        lambda samples: _fitted_result(
+            np.full(35, np.nan),
+            valid=np.zeros(35, dtype=bool),
+            single_population=np.ones(35, dtype=bool),
+        ),
+    )
+    monkeypatch.setattr(
+        SlmFeedbackTask,
+        "_measure",
+        lambda self, pulse, context, iteration: (
+            measured.append(np.array(self.slm.last_commanded_phase, copy=True)),
+            np.zeros((self.shots, 35)),
+            (),
+            (),
+            np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
+        )[1:],
+    )
+    monkeypatch.setattr(
+        SlmFeedbackTask, "_save_figures", lambda *args, **kwargs: None
+    )
+    plane = SignalDataPlane()
+    task = _task(
+        tmp_path,
+        slm=slm,
+        camera=object(),
+        sequencer=SimpleNamespace(describe=lambda: object()),
+        plane=plane,
+        target=target,
+        calibration=_calibration_with_unresolved_site(target, missing=17),
+        updates=1,
+    )
+    try:
+        result = task.execute(_Context(tmp_path))
+        assert result["feedback_status"] == "stalled"
+        assert len(measured) == 1
+        history = _load_history(result["artifact_path"])
+        assert len(history) == 1
+        assert history[0]["candidate_kind"] == "baseline"
+        assert history[0]["next_phase_changed"] is False
+        summary = json.loads((tmp_path / "summary.json").read_text())
+        assert summary["outcome"]["reason"] == (
+            "relative SLM probe has no non-probe power reservoir"
+        )
+        assert summary["probe_candidates"] == []
     finally:
         plane.close()
 
@@ -1543,6 +2180,9 @@ def test_unchanged_solved_phase_stops_without_a_second_shot_batch(
         )
 
     monkeypatch.setattr(SlmFeedbackTask, "_measure", measure)
+    monkeypatch.setattr(
+        SlmFeedbackTask, "_save_figures", lambda *args, **kwargs: None
+    )
     task = _task(
         tmp_path,
         slm=slm,
@@ -1557,12 +2197,12 @@ def test_unchanged_solved_phase_stops_without_a_second_shot_batch(
         assert calls == 1
         assert result["feedback_status"] == "stalled"
         _phase, metadata = _load_candidate(result["artifact_path"])
-        assert "no different SLM phase" in metadata["outcome"]["reason"]
+        assert "no different phase" in metadata["outcome"]["reason"]
     finally:
         plane.close()
 
 
-def test_persistently_dark_site_updates_every_phase_and_retains_latest_candidate(
+def test_persistently_single_site_probes_both_sides_then_restores_baseline(
     tmp_path: Path, monkeypatch
 ) -> None:
     target = _asymmetric_target()
@@ -1611,6 +2251,9 @@ def test_persistently_dark_site_updates_every_phase_and_retains_latest_candidate
         )
 
     monkeypatch.setattr(SlmFeedbackTask, "_measure", measure)
+    monkeypatch.setattr(
+        SlmFeedbackTask, "_save_figures", lambda *args, **kwargs: None
+    )
     plane = SignalDataPlane()
     task = _task(
         tmp_path,
@@ -1626,19 +2269,23 @@ def test_persistently_dark_site_updates_every_phase_and_retains_latest_candidate
         result = task.execute(context)
         artifact = load_science_context(result["artifact_path"])
         metadata = artifact["pattern_metadata"]
-        assert result["feedback_status"] == "completed"
-        assert len(measured_phases) == 5
+        assert result["feedback_status"] == "stalled"
+        assert len(measured_phases) == 3
         assert all(
             not np.array_equal(left, right)
             for left, right in zip(measured_phases, measured_phases[1:])
         )
-        assert metadata["candidate"] == 5
-        np.testing.assert_array_equal(artifact["phase"], measured_phases[-1])
-        np.testing.assert_array_equal(slm.last_commanded_phase, measured_phases[-1])
-        rows, columns = np.nonzero(target > 0.0)
-        assert artifact["target_intensity"][rows[17], columns[17]] == pytest.approx(
-            target[rows[17], columns[17]] * 1.03**4,
-            rel=1e-5,
+        assert metadata["candidate"] == 1
+        np.testing.assert_array_equal(artifact["phase"], measured_phases[0])
+        np.testing.assert_array_equal(slm.last_commanded_phase, measured_phases[0])
+        np.testing.assert_array_equal(artifact["target_intensity"], target)
+        history = _load_history(result["artifact_path"])
+        assert [item["candidate_kind"] for item in history] == [
+            "baseline", "probe", "probe"
+        ]
+        assert metadata["outcome"]["reason"] == (
+            "two-sided SLM probes supplied no observable direction; "
+            "baseline restored"
         )
     finally:
         plane.close()
@@ -1701,7 +2348,7 @@ def test_virtual_feedback_recovers_missing_sites_and_retains_best_candidate(
             feedback_mode="qcmos_bright_dark",
             exposure_seconds=0.020,
             shots_per_candidate=100,
-            single_gaussian_boost=0.03,
+            probe_factors=(0.5, 2.0),
             feedback_gain=0.25,
             maximum_weight_change=0.5,
             max_updates=12,
@@ -1713,7 +2360,8 @@ def test_virtual_feedback_recovers_missing_sites_and_retains_best_candidate(
         assert result["feedback_status"] in {"completed", "stalled"}
         assert metadata["status"] == result["feedback_status"]
         history = _load_history(result["artifact_path"])
-        assert 5 <= len(history) <= 13  # baseline plus at most twelve updates
+        assert 5 <= len(history) < 40
+        assert sum(item["candidate_kind"] == "probe" for item in history) < 18
         ratios = np.asarray(
             [item["uniformity_ratio"] for item in history], dtype=float
         )
@@ -1722,7 +2370,7 @@ def test_virtual_feedback_recovers_missing_sites_and_retains_best_candidate(
             [item["observable_uniformity_ratio"] for item in history],
             dtype=float,
         )
-        assert max(item["observable_sites"] for item in history) >= 34
+        assert max(item["observable_sites"] for item in history) == 35
         assert float(progress[-1]) < float(progress[0])
         if len(finite):
             assert metadata["measurement"]["valid"]
@@ -1896,30 +2544,26 @@ def test_valid_site_history_changes_the_next_target_correction(
             first_contrast,
             np.zeros(35),
             np.ones(35, dtype=bool),
-            np.zeros(35, dtype=bool),
             rows,
             columns,
+            reference_valid=np.ones(35, dtype=bool),
             previous_weights=np.full(35, np.nan),
             previous_contrast=np.full(35, np.nan),
             feedback_gain=0.25,
-            single_gaussian_boost=0.03,
             maximum_weight_change=0.5,
-            minimum_control_weight=np.full(35, np.nan),
         )
         second_target, *_details = _updated_target(
             first_target,
             np.concatenate(([1.8], np.ones(34))),
             np.zeros(35),
             np.ones(35, dtype=bool),
-            np.zeros(35, dtype=bool),
             rows,
             columns,
+            reference_valid=np.ones(35, dtype=bool),
             previous_weights=base[rows, columns],
             previous_contrast=first_contrast,
             feedback_gain=0.25,
-            single_gaussian_boost=0.03,
             maximum_weight_change=0.5,
-            minimum_control_weight=np.full(35, np.nan),
         )
         np.testing.assert_allclose(solved_targets[0], first_target)
         np.testing.assert_allclose(solved_targets[1], second_target)

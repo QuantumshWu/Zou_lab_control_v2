@@ -28,7 +28,7 @@ from zlc_data.figure_archive import FIGURE_SCHEMA, read_archive, read_dataset
 from zlc_runtime import TaskRun
 from zlc_runtime.host import NodeHost
 from zlc_runtime.plane import SignalDataPlane
-from zlc_plot import read_figure_plot
+from zlc_plot import ImageFrame, PointStatus, read_figure_plot
 
 from tests.fakes import FakePlane
 from tests.pulse_fixture import IMAGING_PULSE_RESOURCE
@@ -278,6 +278,29 @@ def test_nothing_is_written_unless_the_operator_asks(tmp_path: Path) -> None:
         snapshot = getattr(reopened, "snapshot", reopened)
         assert snapshot.block.values.size
         assert recipe["spec"].kind.value in {"curve", "image", "facet_grid"}
+
+    site_info, site_arrays = read_archive(figures / "site_map.npz")
+    site_figure, _site_recipe = read_figure_plot(site_info, site_arrays, "data")
+    assert isinstance(site_figure, ImageFrame)
+    site_map = result.calibration.site_map
+    contract = result.calibration.frame_contract
+    roi = contract.roi_xywh
+    origin_x, origin_y = (0, 0) if roi is None else (int(roi[0]), int(roi[1]))
+    binning_y, binning_x = (int(value) for value in contract.binning_yx)
+    expected_centers = np.asarray(site_map.centers_xy, dtype=float) * (
+        binning_x,
+        binning_y,
+    ) + (origin_x, origin_y)
+    np.testing.assert_allclose(site_figure.overlay.coordinates, expected_centers)
+    assert site_figure.overlay.point_ids == site_map.site_ids
+    assert site_figure.overlay.labels == tuple(
+        str(index) for index in range(1, site_map.n_sites + 1)
+    )
+    assert site_figure.overlay.static_statuses == tuple(
+        PointStatus.UNKNOWN if valid else PointStatus.INVALID
+        for valid in site_map.valid_sites
+    )
+
     registered = {item["path"]: item for item in run["artifacts"]}
     for preview in figures.glob("*.png"):
         assert registered[preview.relative_to(run_root).as_posix()]["contract_id"] == ""

@@ -331,7 +331,7 @@ def _plot_input_revision(data: object) -> int | None:
 
 def _pointer_coalesce(args: tuple[Any, ...], _kwargs: Mapping[str, Any]) -> object | None:
     action = args[0]
-    if action == "move":
+    if action in {"move", "leave"}:
         return "pointer-motion"
     if action == "scroll":
         return "pointer-scroll"
@@ -1865,6 +1865,7 @@ class RasterPlotHost:
             "scroll",
             "key",
             "cancel",
+            "leave",
         }:
             raise ValueError(f"unknown pointer action {action!r}")
         x_value = _finite(x, "pointer x")

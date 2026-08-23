@@ -202,8 +202,8 @@ class SimulationWorldConfig:
         ):
             if getattr(self, name) < 0.0:
                 raise ValueError(f"{name} must be non-negative")
-        if not 0.0 <= self.loading_probability <= 1.0:
-            raise ValueError("loading_probability must be between zero and one")
+        if not 0.0 <= self.loading_probability <= 0.5:
+            raise ValueError("loading_probability must be in [0.0, 0.5] (maximum 0.5)")
         if self.trap_light_shift_linewidths < 0.0:
             raise ValueError("trap_light_shift_linewidths must be non-negative")
 

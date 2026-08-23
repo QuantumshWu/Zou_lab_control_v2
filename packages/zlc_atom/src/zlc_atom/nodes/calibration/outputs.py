@@ -1,8 +1,9 @@
-"""The live camera preview published while Calibration is running."""
+"""Calibration image presentation and its live camera preview."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING
 
 import numpy as np
 from zlc_data import (
@@ -29,6 +30,11 @@ from zlc_runtime import (
 
 from zlc_atom.data import snapshot_from_array
 from zlc_atom.devices.camera.contract import CameraFrameRecord
+
+if TYPE_CHECKING:
+    from zlc_plot import ImagePointOverlay, PointStatus
+
+    from .calibration import SiteMap
 
 CAPTURE_PREVIEW_DECLARATION = DatasetOutputDeclaration(
     "capture_preview", "calibration.capture-preview"
@@ -86,6 +92,51 @@ def _image_axis_specs(
             coordinate_frame=frame,
         ),
     }
+
+
+def site_map_image_overlay(
+    image: OwnedSnapshot,
+    site_map: SiteMap,
+    *,
+    revision: int,
+    static_statuses: Sequence[PointStatus] | None = None,
+) -> ImagePointOverlay:
+    """Place one SiteMap's stable identities on an image's canonical axes.
+
+    SiteMap centers are positions in the image array's own pixel indices.  The
+    image Dataset owns where those indices lie on the sensor, including ROI
+    origin and binning, so the neutral Plot geometry helper performs that one
+    coordinate transform.  Calibration reports and Feedback figures can then
+    share the same IDs, 1-based labels and ImagePointOverlay representation.
+    """
+
+    from zlc_plot import ImagePointOverlay, image_point_overlay_geometry
+
+    from .calibration import SiteMap
+
+    if not isinstance(site_map, SiteMap):
+        raise TypeError("site_map must be SiteMap")
+    site_axis = site_map.site_axis
+    labels = tuple(
+        str(site_axis.coordinate_at(index)) for index in range(site_map.n_sites)
+    )
+    geometry = image_point_overlay_geometry(
+        image,
+        site_map.centers_xy,
+        site_map.site_ids,
+        status_axis=site_axis,
+        labels=labels,
+        coordinates_are_indices=True,
+    )
+    return ImagePointOverlay(
+        revision=revision,
+        coordinates=geometry["coordinates_xy"],
+        point_ids=tuple(geometry["point_ids"]),
+        labels=tuple(geometry["labels"]),
+        static_statuses=(
+            None if static_statuses is None else tuple(static_statuses)
+        ),
+    )
 
 
 def _generation_text(value: object) -> str:
@@ -279,4 +330,5 @@ __all__ = [
     "CAPTURE_PREVIEW_DECLARATION",
     "capture_preview_output",
     "cycle_snapshot",
+    "site_map_image_overlay",
 ]

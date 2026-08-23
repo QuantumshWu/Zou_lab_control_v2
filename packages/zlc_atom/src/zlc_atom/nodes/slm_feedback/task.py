@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 from pathlib import Path
 from typing import Mapping
@@ -30,8 +31,14 @@ from zlc_plot import (
     CurvePlot,
     FacetGridPlot,
     HistogramPlot,
+    IMAGE_POINT_OVERLAY_CONTRACT,
+    IMAGE_POINT_OVERLAY_GEOMETRY_RECORD,
+    ImageFrame,
+    ImagePointOverlay,
     ImagePlot,
     PlotLabels,
+    PointStatus,
+    image_point_overlay_geometry,
     save_figure_artifact,
 )
 from zlc_runtime import DatasetOutputDeclaration, LiveDatasetOutput, MonitorCoverage
@@ -73,6 +80,18 @@ UNIFORMITY_HISTORY_OUTPUT = DatasetOutputDeclaration(
 OBSERVABLE_UNIFORMITY_HISTORY_OUTPUT = DatasetOutputDeclaration(
     "observable_uniformity_history",
     "slm-feedback.observable-uniformity-history",
+)
+SITE_SIGNAL_HISTORY_OUTPUT = DatasetOutputDeclaration(
+    "site_signal_history", "slm-feedback.site-signal-history"
+)
+TARGET_SHARE_HISTORY_OUTPUT = DatasetOutputDeclaration(
+    "target_share_history", "slm-feedback.target-share-history"
+)
+CAMERA_MEAN_OUTPUT = DatasetOutputDeclaration(
+    "camera_mean", "slm-feedback.camera-mean"
+)
+SITE_MAP_OVERLAY_OUTPUT = DatasetOutputDeclaration(
+    "site_map", IMAGE_POINT_OVERLAY_CONTRACT
 )
 _CONTROLLER_CONTRACT = "slm-feedback.qcmos-bright-dark"
 READOUT_FRAME_COORDINATE = 0
@@ -145,6 +164,52 @@ def _ratio_interval(
     return estimate, max(1.0, lower), upper, float(np.max(relative))
 
 
+def _bic_gain(samples: object, fit: object) -> float:
+    column = np.asarray(samples, dtype=float).reshape(-1)
+    if column.size < 4 or not np.all(np.isfinite(column)):
+        return float("nan")
+    one_sigma = max(float(np.std(column)), np.finfo(float).tiny)
+    one_mean = float(np.mean(column))
+    log_one = float(np.sum(
+        -0.5 * np.square((column - one_mean) / one_sigma)
+        - np.log(one_sigma * np.sqrt(2.0 * np.pi))
+    ))
+    try:
+        dark_mean = float(fit.dark_mean)
+        dark_sigma = float(fit.dark_sigma)
+        bright_mean = float(fit.bright_mean)
+        bright_sigma = float(fit.bright_sigma)
+        fraction = float(fit.bright_fraction)
+    except (AttributeError, TypeError, ValueError):
+        return float("nan")
+    if (
+        not all(np.isfinite(value) for value in (
+            dark_mean, dark_sigma, bright_mean, bright_sigma, fraction
+        ))
+        or dark_sigma <= 0.0
+        or bright_sigma <= 0.0
+        or not 0.0 < fraction < 1.0
+    ):
+        return float("nan")
+    dark_density = (
+        np.exp(-0.5 * np.square((column - dark_mean) / dark_sigma))
+        / (dark_sigma * np.sqrt(2.0 * np.pi))
+    )
+    bright_density = (
+        np.exp(-0.5 * np.square((column - bright_mean) / bright_sigma))
+        / (bright_sigma * np.sqrt(2.0 * np.pi))
+    )
+    mixture = (1.0 - fraction) * dark_density + fraction * bright_density
+    if not np.all(np.isfinite(mixture)) or np.any(mixture <= 0.0):
+        return float("nan")
+    log_two = float(np.sum(np.log(mixture)))
+    return float(
+        2.0 * log_two
+        - 5.0 * np.log(column.size)
+        - (2.0 * log_one - 2.0 * np.log(column.size))
+    )
+
+
 def _fit_contrasts(samples: object) -> dict[str, np.ndarray]:
     """Classify each site's one user-authored shot batch.
 
@@ -156,7 +221,7 @@ def _fit_contrasts(samples: object) -> dict[str, np.ndarray]:
     """
 
     values = np.asarray(samples, dtype=float)
-    if values.ndim != 2 or values.shape[0] < 4 or values.shape[1] < 1:
+    if values.ndim != 2 or values.shape[0] < 10 or values.shape[1] < 1:
         raise ValueError("feedback box samples must have shape (shots, sites)")
     sites = values.shape[1]
     contrast = np.full(sites, np.nan, dtype=float)
@@ -170,6 +235,9 @@ def _fit_contrasts(samples: object) -> dict[str, np.ndarray]:
     threshold = np.full(sites, np.nan, dtype=float)
     fidelity = np.full(sites, np.nan, dtype=float)
     bic_gain = np.full(sites, np.nan, dtype=float)
+    bic_gain_even = np.full(sites, np.nan, dtype=float)
+    bic_gain_odd = np.full(sites, np.nan, dtype=float)
+    bic_stable = np.zeros(sites, dtype=bool)
     single_mean = np.full(sites, np.nan, dtype=float)
     single_sigma = np.full(sites, np.nan, dtype=float)
     separated = np.zeros(sites, dtype=bool)
@@ -185,6 +253,8 @@ def _fit_contrasts(samples: object) -> dict[str, np.ndarray]:
         single_mean[site] = one_mean
         single_sigma[site] = one_sigma
         fit = fit_bimodal(column, min_component_fraction=0.01)
+        fit_even = fit_bimodal(column[0::2], min_component_fraction=0.01)
+        fit_odd = fit_bimodal(column[1::2], min_component_fraction=0.01)
         dark_mean[site] = fit.dark_mean
         dark_sigma[site] = fit.dark_sigma
         bright_mean[site] = fit.bright_mean
@@ -202,7 +272,6 @@ def _fit_contrasts(samples: object) -> dict[str, np.ndarray]:
                 fit.bright_fraction,
             )
         ):
-            single_population[site] = True
             continue
         fraction = float(fit.bright_fraction)
         count_bright = max(fraction * column.size, 1.0)
@@ -215,36 +284,26 @@ def _fit_contrasts(samples: object) -> dict[str, np.ndarray]:
                 + fit.dark_sigma**2 / count_dark
             )
         )
-        sigma_one = max(one_sigma, np.finfo(float).tiny)
-        log_one = float(
-            np.sum(
-                -0.5 * np.square((column - np.mean(column)) / sigma_one)
-                - np.log(sigma_one * np.sqrt(2.0 * np.pi))
-            )
-        )
-        dark_density = (
-            np.exp(-0.5 * np.square((column - fit.dark_mean) / fit.dark_sigma))
-            / (fit.dark_sigma * np.sqrt(2.0 * np.pi))
-        )
-        bright_density = (
-            np.exp(-0.5 * np.square((column - fit.bright_mean) / fit.bright_sigma))
-            / (fit.bright_sigma * np.sqrt(2.0 * np.pi))
-        )
-        mixture = (1.0 - fraction) * dark_density + fraction * bright_density
-        if np.all(np.isfinite(mixture)) and np.all(mixture > 0.0):
-            log_two = float(np.sum(np.log(mixture)))
-            bic_gain[site] = (
-                2.0 * log_two
-                - 5.0 * np.log(column.size)
-                - (2.0 * log_one - 2.0 * np.log(column.size))
-            )
+        bic_gain[site] = _bic_gain(column, fit)
+        bic_gain_even[site] = _bic_gain(column[0::2], fit_even)
+        bic_gain_odd[site] = _bic_gain(column[1::2], fit_odd)
         finite_pair = bool(
             estimate > 0.0
             and np.isfinite(sem)
             and sem >= 0.0
             and np.isfinite(bic_gain[site])
+            and np.isfinite(bic_gain_even[site])
+            and np.isfinite(bic_gain_odd[site])
         )
-        if finite_pair and bic_gain[site] > 0.0:
+        if not finite_pair:
+            continue
+        bic_stable[site] = bool(
+            fit.ok
+            and bic_gain[site] > 0.0
+            and bic_gain_even[site] > 0.0
+            and bic_gain_odd[site] > 0.0
+        )
+        if bic_stable[site]:
             contrast[site], error[site] = estimate, sem
             separated[site] = True
         else:
@@ -261,98 +320,15 @@ def _fit_contrasts(samples: object) -> dict[str, np.ndarray]:
         "threshold": threshold,
         "fidelity": fidelity,
         "bic_gain": bic_gain,
+        "bic_gain_even": bic_gain_even,
+        "bic_gain_odd": bic_gain_odd,
+        "bic_stable": bic_stable,
         "single_mean": single_mean,
         "single_sigma": single_sigma,
         "valid": separated,
         "single_population": single_population,
         "invalid": ~(separated | single_population),
     }
-
-
-def _single_population_observables(
-    fitted: Mapping[str, np.ndarray],
-    *,
-    shots: int,
-    previous_dark_mean: np.ndarray,
-    previous_dark_standard_error: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Use the last resolved mixture to disambiguate a present single peak.
-
-    With no per-site history the experiment's authored prior is that one peak
-    is the dark/no-loading population.  Once a trustworthy mixture exists,
-    the current batch's resolved dark components (or that site's historical
-    dark component) decide whether the new single population is dark-only or
-    bright-only.  A bright-only population still supplies a contrast by
-    subtracting that dark reference.
-    """
-
-    count = int(shots)
-    if count < 4:
-        raise ValueError("single-population classification needs at least four shots")
-    single = np.asarray(fitted["single_population"], dtype=bool)
-    mean = np.asarray(fitted["single_mean"], dtype=float)
-    sigma = np.asarray(fitted["single_sigma"], dtype=float)
-    prior_dark = np.asarray(previous_dark_mean, dtype=float)
-    prior_dark_error = np.asarray(previous_dark_standard_error, dtype=float)
-    shape = single.shape
-    if any(
-        value.shape != shape
-        for value in (
-            mean,
-            sigma,
-            prior_dark,
-            prior_dark_error,
-        )
-    ):
-        raise ValueError("single-population history shapes differ")
-
-    contrast = np.asarray(fitted["contrast"], dtype=float).copy()
-    error = np.asarray(fitted["standard_error"], dtype=float).copy()
-    dark_only = np.zeros(shape, dtype=bool)
-    bright_only = np.zeros(shape, dtype=bool)
-    single_error = sigma / np.sqrt(float(count))
-    direct_valid = np.asarray(fitted["valid"], dtype=bool)
-    direct_dark = np.asarray(fitted["dark_mean"], dtype=float)
-    direct_dark_error = np.asarray(
-        fitted["dark_standard_error"], dtype=float
-    )
-    fallback = direct_valid & np.isfinite(direct_dark) & np.isfinite(direct_dark_error)
-    fallback_dark = (
-        float(np.median(direct_dark[fallback])) if np.any(fallback) else float("nan")
-    )
-    fallback_dark_error = (
-        float(np.median(direct_dark_error[fallback]))
-        if np.any(fallback)
-        else float("nan")
-    )
-    for site in np.flatnonzero(single):
-        has_history = bool(
-            np.isfinite(prior_dark[site])
-            and np.isfinite(prior_dark_error[site])
-            and prior_dark_error[site] >= 0.0
-        )
-        reference = (
-            float(prior_dark[site]) if has_history else fallback_dark
-        )
-        reference_error = (
-            float(prior_dark_error[site])
-            if has_history
-            else fallback_dark_error
-        )
-        if not np.isfinite(reference) or not np.isfinite(reference_error):
-            # With no bright/dark reference at all, use the experiment's
-            # authored prior: a one-population site starts as no-loading.
-            dark_only[site] = True
-            continue
-        estimate = float(mean[site] - reference)
-        estimate_error = float(np.hypot(single_error[site], reference_error))
-        if estimate > 3.0 * estimate_error:
-            bright_only[site] = True
-            contrast[site] = estimate
-            error[site] = estimate_error
-        else:
-            dark_only[site] = True
-    return contrast, error, dark_only, bright_only
 
 
 def _json_floats(values: object) -> list[float | None]:
@@ -426,25 +402,27 @@ _CANDIDATE_VECTOR_FIELDS = (
     "contrast_standard_error",
     "bright_fraction",
     "fit_fidelity",
-    "fit_bic_gain",
+    "bic_gain",
+    "bic_gain_even",
+    "bic_gain_odd",
+    "bic_stable",
     "fit_valid",
     "observable_valid",
     "single_population",
-    "single_dark_only",
-    "single_bright_only",
     "fit_invalid",
     "single_mean",
     "single_sigma",
     "decision",
     "requested_log_correction",
     "response_log_slope",
-    "previous_valid_control_weight",
-    "previous_valid_bright_minus_dark",
-    "previous_valid_dark_mean",
-    "previous_valid_dark_standard_error",
-    "loading_dark_bound",
-    "loading_loaded_bound",
-    "loading_floor",
+    "previous_double_control_weight",
+    "previous_double_bright_minus_dark",
+    "probe_effective_factor",
+    "probe_selected_formal_factor",
+    "probe_decision",
+    "probe_single_bound",
+    "probe_observable_bound",
+    "probe_control_boundary",
 )
 
 
@@ -462,17 +440,58 @@ def _control_weights(values: object) -> np.ndarray:
     return weights * (len(weights) / float(np.sum(weights)))
 
 
+def _allocate_requested_shares(
+    shares: object,
+    requested_log_step: object,
+    *,
+    lower: object | None = None,
+    upper: object | None = None,
+) -> tuple[np.ndarray, float, float, float]:
+    current = np.asarray(shares, dtype=float)
+    requested = np.asarray(requested_log_step, dtype=float)
+    if (
+        current.ndim != 1
+        or requested.shape != current.shape
+        or not np.all(np.isfinite(current))
+        or np.any(current <= 0.0)
+        or not np.isclose(float(np.sum(current)), 1.0)
+        or not np.all(np.isfinite(requested))
+    ):
+        raise ValueError("requested share allocation inputs are invalid")
+    minimum = (
+        np.zeros_like(current) if lower is None else np.asarray(lower, dtype=float)
+    )
+    maximum = (
+        np.full_like(current, np.inf)
+        if upper is None else np.asarray(upper, dtype=float)
+    )
+    if minimum.shape != current.shape or maximum.shape != current.shape:
+        raise ValueError("requested share allocation bounds differ")
+    desired = current * np.exp(requested)
+    increase = np.minimum(
+        np.maximum(desired - current, 0.0),
+        np.maximum(maximum - current, 0.0),
+    )
+    decrease = np.minimum(
+        np.maximum(current - desired, 0.0),
+        np.maximum(current - minimum, 0.0),
+    )
+    increase_total = float(np.sum(increase))
+    decrease_total = float(np.sum(decrease))
+    transfer = min(increase_total, decrease_total)
+    increase_scale = 0.0 if increase_total == 0.0 else transfer / increase_total
+    decrease_scale = 0.0 if decrease_total == 0.0 else transfer / decrease_total
+    allocated = current + increase_scale * increase - decrease_scale * decrease
+    return allocated, transfer, increase_scale, decrease_scale
+
+
 def _support(
     target: np.ndarray,
     calibration: TrapCalibration,
     *,
     science_context_path: str | Path,
     command_receipt: Mapping[str, object],
-) -> tuple[
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-]:
+) -> tuple[np.ndarray, np.ndarray, SiteMap]:
     """Register only the Calibration's site boxes to this Feedback Target."""
 
     model = calibration.select_model(ReadoutModelKind.BOX)
@@ -511,8 +530,202 @@ def _support(
     if provenance["command_receipt"] != dict(command_receipt):
         raise RuntimeError("Feedback registration lost its Science Context receipt")
 
-    centers = np.asarray(registered.centers_xy, dtype=float)
-    return rows, columns, centers
+    return rows, columns, registered
+
+
+def _relative_probe_target(
+    target: np.ndarray,
+    requested_factors: object,
+    probe_sites: object,
+    rows: np.ndarray,
+    columns: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    factors = np.asarray(requested_factors, dtype=float)
+    probe = np.asarray(probe_sites, dtype=bool)
+    raw = np.asarray(target[rows, columns], dtype=float)
+    shares = raw / float(np.sum(raw))
+    effective = np.ones(len(rows), dtype=float)
+    if not np.any(probe) or np.all(probe):
+        return np.array(target, dtype=np.float32, copy=True), effective
+    effective[probe] = factors[probe]
+    probe_total = float(np.sum(shares[probe] * effective[probe]))
+    while probe_total >= 1.0:
+        effective[probe] = 1.0 + 0.5 * (effective[probe] - 1.0)
+        probe_total = float(np.sum(shares[probe] * effective[probe]))
+    remaining = 1.0 - probe_total
+    nonprobe_total = float(np.sum(shares[~probe]))
+    next_shares = np.empty_like(shares)
+    next_shares[probe] = shares[probe] * effective[probe]
+    next_shares[~probe] = shares[~probe] * (remaining / nonprobe_total)
+    updated = np.array(target, dtype=np.float32, copy=True)
+    updated[rows, columns] = (next_shares * float(np.sum(raw))).astype(np.float32)
+    return validate_target(updated), next_shares / shares
+
+
+def _selected_probe_target(
+    target: np.ndarray,
+    probe_sites: np.ndarray,
+    baseline_contrast: np.ndarray,
+    baseline_valid: np.ndarray,
+    measurements: list[tuple[float, np.ndarray, np.ndarray, np.ndarray]],
+    rows: np.ndarray,
+    columns: np.ndarray,
+    *,
+    feedback_gain: float,
+    maximum_weight_change: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    probe = np.asarray(probe_sites, dtype=bool)
+    values = np.asarray(baseline_contrast, dtype=float)
+    valid = np.asarray(baseline_valid, dtype=bool)
+    shape = (len(rows),)
+    reasonable = (
+        valid & np.isfinite(values) & (values > 0.0)
+    )
+    reference = (
+        float(np.exp(np.mean(np.log(values[reasonable]))))
+        if np.any(reasonable) else float("nan")
+    )
+    selected = np.ones(shape, dtype=float)
+    decisions = np.full(shape, "not_probed", dtype="<U32")
+    for site in np.flatnonzero(probe):
+        options: list[tuple[bool, float, float, float]] = []
+        for factor, contrasts, standard_errors, observable_values in measurements:
+            observable = bool(observable_values[site])
+            value = float(contrasts[site])
+            uncertainty = float(standard_errors[site])
+            if (
+                not observable or not np.isfinite(value) or value <= 0.0
+                or not np.isfinite(uncertainty) or uncertainty < 0.0
+                or uncertainty > 0.25 * value
+            ):
+                continue
+            options.append(
+                (
+                    factor < 1.0,
+                    abs(float(np.log(value / reference)))
+                    if np.isfinite(reference) else float("inf"),
+                    uncertainty / value,
+                    factor,
+                )
+            )
+        sides = {option[0] for option in options}
+        if not options:
+            decisions[site] = "probe_hold_unobservable"
+        elif len(sides) == 2 and not np.isfinite(reference):
+            decisions[site] = "probe_hold_no_reference"
+        else:
+            chosen = min(options, key=lambda item: (item[1], item[2]))
+            selected[site] = chosen[3]
+            side = "lower" if chosen[0] else "upper"
+            decisions[site] = f"probe_choose_{side}_{'closest' if len(sides) == 2 else 'only'}"
+    gain = float(feedback_gain)
+    limit = float(maximum_weight_change)
+    cap = np.log1p(limit)
+    requested_log = np.log(selected[probe])
+    observed_factors = np.array(selected, copy=True)
+    selected[probe] = np.exp(
+        np.sign(requested_log) * np.minimum(gain * np.abs(requested_log), cap)
+    )
+    updated, effective = _relative_probe_target(
+        target, selected, probe, rows, columns
+    )
+    selected_effective = np.ones(shape, dtype=float)
+    selected_effective[probe] = effective[probe]
+    return updated, selected_effective, decisions, observed_factors
+
+
+def _probe_boundary(
+    single: np.ndarray, observable: np.ndarray, direction: np.ndarray
+) -> np.ndarray:
+    bracket = (
+        np.isfinite(single) & np.isfinite(observable)
+        & (((direction > 0.0) & (single < observable))
+           | ((direction < 0.0) & (observable < single)))
+    )
+    boundary = np.full(single.shape, np.nan, dtype=float)
+    boundary[bracket] = np.sqrt(single[bracket] * observable[bracket])
+    return boundary
+
+
+def _updated_single_bracket(
+    current: object,
+    active_single: object,
+    single_bound: object,
+    observable_bound: object,
+    direction: object,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    present = np.asarray(current, dtype=float)
+    active = np.asarray(active_single, dtype=bool)
+    single = np.asarray(single_bound, dtype=float).copy()
+    observable = np.asarray(observable_bound, dtype=float).copy()
+    sign = np.asarray(direction, dtype=float).copy()
+    if not all(
+        value.shape == present.shape
+        for value in (active, single, observable, sign)
+    ):
+        raise ValueError("single bracket shapes differ")
+    crossed = (
+        active
+        & np.isfinite(observable)
+        & (((sign > 0.0) & (present > observable))
+           | ((sign < 0.0) & (present < observable)))
+    )
+    sign[crossed] = np.sign(observable[crossed] - present[crossed])
+    single[crossed] = present[crossed]
+    up = sign > 0.0
+    down = sign < 0.0
+    single[active & up] = np.fmax(single[active & up], present[active & up])
+    single[active & down] = np.fmin(single[active & down], present[active & down])
+    return single, observable, sign, crossed
+
+
+def _single_bracket_step(
+    current: np.ndarray,
+    boundary: np.ndarray,
+    direction: np.ndarray,
+    maximum_weight_change: float,
+) -> np.ndarray:
+    present = np.asarray(current, dtype=float)
+    midpoint = np.asarray(boundary, dtype=float)
+    sign = np.asarray(direction, dtype=float)
+    active = (
+        np.isfinite(present) & (present > 0.0)
+        & np.isfinite(midpoint) & (midpoint > 0.0)
+        & (((sign > 0.0) & (midpoint > present))
+           | ((sign < 0.0) & (midpoint < present)))
+    )
+    step = np.zeros(present.shape, dtype=float)
+    cap = np.log1p(float(maximum_weight_change))
+    step[active] = np.clip(
+        np.log(midpoint[active] / present[active]), -cap, cap
+    )
+    return step
+
+
+def _needs_probe(
+    single: np.ndarray,
+    observable: np.ndarray,
+    acquisition_invalid: np.ndarray,
+    previous_weights: np.ndarray,
+    previous_contrast: np.ndarray,
+) -> np.ndarray:
+    has_history = (
+        np.isfinite(previous_weights) & (previous_weights > 0.0)
+        & np.isfinite(previous_contrast) & (previous_contrast > 0.0)
+    )
+    return _unobservable_single(single, observable, acquisition_invalid) & ~has_history
+
+
+def _unobservable_single(
+    single: object,
+    observable: object,
+    acquisition_invalid: object,
+) -> np.ndarray:
+    return (
+        np.asarray(single, dtype=bool)
+        & ~np.asarray(observable, dtype=bool)
+        & ~np.asarray(acquisition_invalid, dtype=bool)
+    )
 
 
 def _updated_target(
@@ -520,61 +733,75 @@ def _updated_target(
     contrast: np.ndarray,
     standard_error: np.ndarray,
     valid: np.ndarray,
-    dark_only: np.ndarray,
     rows: np.ndarray,
     columns: np.ndarray,
     *,
+    reference_valid: np.ndarray,
     previous_weights: np.ndarray,
     previous_contrast: np.ndarray,
     feedback_gain: float,
-    single_gaussian_boost: float,
     maximum_weight_change: float,
-    minimum_control_weight: np.ndarray,
+    directed_log_step: np.ndarray | None = None,
+    control_boundary: np.ndarray | None = None,
+    control_direction: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Update loaded sites relatively and dark-only sites absolutely."""
+    """Update observable sites relatively while holding all others."""
 
     values = np.asarray(contrast, dtype=float)
     errors = np.asarray(standard_error, dtype=float)
-    fit_valid = np.asarray(valid, dtype=bool)
-    fit_dark_only = np.asarray(dark_only, dtype=bool)
+    control_valid = np.asarray(valid, dtype=bool)
+    references = np.asarray(reference_valid, dtype=bool)
     prior_weights = np.asarray(previous_weights, dtype=float)
     prior_values = np.asarray(previous_contrast, dtype=float)
     gain = float(feedback_gain)
-    dark_boost = float(single_gaussian_boost)
     maximum_change = float(maximum_weight_change)
-    minimum_control = np.asarray(minimum_control_weight, dtype=float)
     site_shape = (len(rows),)
+    direction = (
+        np.zeros(site_shape, dtype=float)
+        if directed_log_step is None
+        else np.asarray(directed_log_step, dtype=float)
+    )
+    boundary = (
+        np.full(site_shape, np.nan, dtype=float)
+        if control_boundary is None else np.asarray(control_boundary, dtype=float)
+    )
+    boundary_direction = (
+        np.zeros(site_shape, dtype=float)
+        if control_direction is None else np.asarray(control_direction, dtype=float)
+    )
     if (
         values.shape != site_shape
         or errors.shape != site_shape
-        or fit_valid.shape != site_shape
-        or fit_dark_only.shape != site_shape
+        or control_valid.shape != site_shape
+        or references.shape != site_shape
         or prior_weights.shape != site_shape
         or prior_values.shape != site_shape
-        or minimum_control.shape != site_shape
-        or np.any(np.isfinite(minimum_control) & (minimum_control <= 0.0))
-        or np.any(fit_valid & fit_dark_only)
+        or direction.shape != site_shape
+        or boundary.shape != site_shape
+        or boundary_direction.shape != site_shape
+        or np.any(references & ~control_valid)
+        or np.any(~np.isfinite(direction))
         or not np.isfinite(gain)
         or gain < 0.0
-        or not np.isfinite(dark_boost)
-        or dark_boost < 0.0
         or not np.isfinite(maximum_change)
         or maximum_change < 0.0
     ):
         raise ValueError("feedback site history shapes differ")
-    if not np.any(fit_valid):
+    if np.any(
+        ~np.isfinite(values[control_valid]) | (values[control_valid] <= 0.0)
+    ):
+        raise ValueError("valid feedback contrasts must be finite and positive")
+    if not np.any(references):
         reference = float("nan")
     else:
-        if np.any(~np.isfinite(values[fit_valid]) | (values[fit_valid] <= 0.0)):
-            raise ValueError("valid feedback contrasts must be finite and positive")
-        reference = float(np.exp(np.mean(np.log(values[fit_valid]))))
+        reference = float(np.exp(np.mean(np.log(values[references]))))
     raw_weights = np.asarray(target[rows, columns], dtype=float)
     current_weights = _control_weights(raw_weights)
     log_correction = np.zeros(site_shape, dtype=float)
     response_slope = np.full(site_shape, np.nan, dtype=float)
     decision = np.full(site_shape, "hold_invalid", dtype="<U32")
     for site in range(len(rows)):
-        if fit_valid[site]:
+        if control_valid[site] and np.isfinite(reference):
             residual = float(np.log(values[site] / reference))
             relative_error = max(float(errors[site]), 0.0) / values[site]
             quality = float(np.clip(1.0 - 4.0 * relative_error, 0.1, 1.0))
@@ -605,79 +832,41 @@ def _updated_target(
                     np.log1p(maximum_change),
                 )
             )
-        elif fit_dark_only[site]:
-            log_correction[site] = float(np.log1p(dark_boost))
-            decision[site] = "boost_dark_single_gaussian"
-
-    # The solver consumes relative intensity shares.  Applying independent raw
-    # multipliers and normalizing afterwards can make a no-loading site's
-    # actual share DECREASE when the loaded sites collectively grow more.  Set
-    # the constrained shares directly: dark sites receive the exact authored
-    # increase, invalid sites keep their physical share, and loaded sites own
-    # only the relative distribution of the remaining power.
+        elif direction[site] != 0.0:
+            log_correction[site] = float(
+                np.clip(
+                    direction[site],
+                    -np.log1p(maximum_change),
+                    np.log1p(maximum_change),
+                )
+            )
+            decision[site] = (
+                "probe_direction_lower"
+                if log_correction[site] < 0.0
+                else "probe_direction_upper"
+            )
+        elif control_valid[site]:
+            decision[site] = "hold_no_double_reference"
     shares = raw_weights / float(np.sum(raw_weights))
-    invalid = ~(fit_valid | fit_dark_only)
-    next_shares = np.zeros_like(shares)
-    next_shares[invalid] = shares[invalid]
-    invalid_total = float(np.sum(next_shares[invalid]))
-    loaded = np.flatnonzero(fit_valid)
-    floors = np.where(
-        np.isfinite(minimum_control),
-        minimum_control / float(len(rows)),
+    boundary_share = boundary / float(len(rows))
+    lower = np.where(
+        (boundary_direction > 0.0) & np.isfinite(boundary_share),
+        boundary_share,
         0.0,
     )
-    loaded_floors = floors[loaded]
-    dark = np.flatnonzero(fit_dark_only)
-    dark_base = np.maximum(shares[dark], floors[dark])
-    dark_requested = np.maximum(
-        shares[dark] * (1.0 + dark_boost), floors[dark]
+    upper = np.where(
+        (boundary_direction < 0.0) & np.isfinite(boundary_share),
+        boundary_share,
+        np.inf,
     )
-    dark_budget = max(
-        0.0,
-        1.0 - invalid_total - float(np.sum(loaded_floors)),
-    )
-    base_total = float(np.sum(dark_base))
-    requested_extra = dark_requested - dark_base
-    if not len(loaded):
-        next_shares = np.array(shares, copy=True)
-    elif base_total >= dark_budget:
-        available = max(
-            0.0, dark_budget - float(np.sum(shares[dark]))
+    next_shares, _transfer, _increase_scale, _decrease_scale = (
+        _allocate_requested_shares(
+            shares,
+            log_correction,
+            lower=lower,
+            upper=upper,
         )
-        needed = float(np.sum(np.maximum(dark_base - shares[dark], 0.0)))
-        fraction = 0.0 if needed <= 0.0 else min(1.0, available / needed)
-        next_shares[dark] = shares[dark] + fraction * (
-            dark_base - shares[dark]
-        )
-    else:
-        available = dark_budget - base_total
-        needed = float(np.sum(requested_extra))
-        fraction = 1.0 if needed <= 0.0 else min(1.0, available / needed)
-        next_shares[dark] = dark_base + fraction * requested_extra
-    remaining = 1.0 - float(
-        np.sum(next_shares[fit_dark_only]) + np.sum(next_shares[invalid])
     )
-    loaded_requested = shares[loaded] * np.exp(log_correction[loaded])
-    loaded_total = float(np.sum(loaded_requested))
-    if len(loaded) and (not np.isfinite(loaded_total) or loaded_total <= 0.0):
-        raise RuntimeError("loaded-site feedback produced no positive power share")
-    if len(loaded):
-        free = np.ones(len(loaded), dtype=bool)
-        allocated = np.zeros(len(loaded), dtype=float)
-        while np.any(free):
-            available = remaining - float(np.sum(allocated[~free]))
-            requested_total = float(np.sum(loaded_requested[free]))
-            scale = available / requested_total
-            candidate = scale * loaded_requested[free]
-            below_floor = candidate < loaded_floors[free]
-            if not np.any(below_floor):
-                allocated[free] = candidate
-                break
-            free_indices = np.flatnonzero(free)
-            fixed_indices = free_indices[below_floor]
-            allocated[fixed_indices] = loaded_floors[fixed_indices]
-            free[fixed_indices] = False
-        next_shares[loaded] = allocated
     log_correction = np.log(next_shares / shares)
     updated = np.array(target, dtype=np.float32, copy=True)
     updated[rows, columns] = (
@@ -710,7 +899,7 @@ class SlmFeedbackTask:
         feedback_mode: str,
         exposure_seconds: float,
         shots_per_candidate: int,
-        single_gaussian_boost: float,
+        probe_factors: tuple[float, ...],
         feedback_gain: float,
         maximum_weight_change: float,
         max_updates: int,
@@ -755,7 +944,7 @@ class SlmFeedbackTask:
         (
             self._rows,
             self._columns,
-            self._site_centers_xy,
+            self._registered_site_map,
         ) = _support(
             frozen_target,
             calibration,
@@ -763,6 +952,9 @@ class SlmFeedbackTask:
             command_receipt=receipt,
         )
         self._site_count = len(self._rows)
+        self._site_centers_xy = np.asarray(
+            self._registered_site_map.centers_xy, dtype=float
+        ).copy()
         self._site_centers_xy.setflags(write=False)
         self.camera, self.sequencer, self.slm = camera, sequencer, slm
         self.camera_key, self.sequencer_key, self.slm_key = camera_key, sequencer_key, slm_key
@@ -806,21 +998,36 @@ class SlmFeedbackTask:
         if not np.isfinite(self.exposure_seconds) or self.exposure_seconds <= 0.0:
             raise ValueError("feedback exposure_seconds must be finite and positive")
         self.shots = int(shots_per_candidate)
-        self.single_gaussian_boost = float(single_gaussian_boost)
         self.feedback_gain = float(feedback_gain)
         self.maximum_weight_change = float(maximum_weight_change)
         self.max_updates = int(max_updates)
-        self._candidate_capacity = self.max_updates + 1
         self._publication_revision = 0
         self._actual_exposure_seconds: float | None = None
         self._effective_photoelectrons: bool | None = None
         self._effective_count_unit: str | None = None
         self._last_measured_phase: np.ndarray | None = None
+        self._latest_mean_frame: np.ndarray | None = None
+        factors = tuple(float(value) for value in probe_factors)
+        if (
+            not factors
+            or any(
+                not np.isfinite(value) or value <= 0.0 or value == 1.0
+                for value in factors
+            )
+            or len(set(factors)) != len(factors)
+        ):
+            raise ValueError(
+                "probe_factors must be unique positive numbers excluding 1"
+            )
+        self.probe_factors = factors
+        self._candidate_capacity = (
+            1
+            + self.max_updates
+            + (self.max_updates + 1) * (len(factors) + 1)
+        )
         if (
             self.shots < 10
             or self.max_updates < 1
-            or not np.isfinite(self.single_gaussian_boost)
-            or self.single_gaussian_boost < 0.0
             or not np.isfinite(self.feedback_gain)
             or self.feedback_gain < 0.0
             or not np.isfinite(self.maximum_weight_change)
@@ -863,7 +1070,7 @@ class SlmFeedbackTask:
             "feedback_mode": self.feedback_mode,
             "exposure_seconds": self.exposure_seconds,
             "shots_per_candidate": self.shots,
-            "single_gaussian_boost": self.single_gaussian_boost,
+            "probe_factors": list(self.probe_factors),
             "feedback_gain": self.feedback_gain,
             "maximum_weight_change": self.maximum_weight_change,
         }
@@ -891,7 +1098,7 @@ class SlmFeedbackTask:
             "feedback_mode": self.feedback_mode,
             "exposure_seconds": self.exposure_seconds,
             "shots_per_candidate": self.shots,
-            "single_gaussian_boost": self.single_gaussian_boost,
+            "probe_factors": list(self.probe_factors),
             "feedback_gain": self.feedback_gain,
             "maximum_weight_change": self.maximum_weight_change,
             "actual_exposure_seconds": self._actual_exposure_seconds,
@@ -957,7 +1164,6 @@ class SlmFeedbackTask:
         self._publication_revision += 1
         publication_revision = self._publication_revision
         generation = str(getattr(context.generation, "value", context.generation))
-        record = self._run_record()
         canonical = canonical_phase(phase, self.slm.shape_yx)
         phase_event = snapshot_from_array(
             canonical[None],
@@ -971,6 +1177,10 @@ class SlmFeedbackTask:
         coordinate_id = AxisId("slm_feedback.candidate")
         curve = np.full(self._candidate_capacity, np.nan, dtype="<f8")
         observable_curve = np.full_like(curve, np.nan)
+        site_signal = np.full(
+            (self._candidate_capacity, self._site_count), np.nan, dtype="<f8"
+        )
+        target_share = np.full_like(site_signal, np.nan)
         for item in history:
             index = int(item["iteration"]) - 1
             full_ratio = item.get("uniformity_ratio")
@@ -979,6 +1189,14 @@ class SlmFeedbackTask:
                 curve[index] = float(full_ratio)
             if observable_ratio is not None:
                 observable_curve[index] = float(observable_ratio)
+            for field, destination in (
+                ("bright_minus_dark", site_signal),
+                ("control_weight", target_share),
+            ):
+                destination[index] = np.asarray(
+                    [np.nan if value is None else value for value in item[field]],
+                    dtype=float,
+                )
         point_columns = {
             SCAN_POINT: PointColumn(
                 coordinate_id,
@@ -1011,36 +1229,127 @@ class SlmFeedbackTask:
             revision=publication_revision,
             validity=np.isfinite(observable_curve)[None],
         )
-        context.commit_live(
-            {
-                CANDIDATE_PHASE_OUTPUT.name: LiveDatasetOutput(
-                    CANDIDATE_PHASE_OUTPUT,
-                    phase_event,
-                    MonitorCoverage(1, 1, retain_at_terminal=True),
-                    record,
-                ),
-                UNIFORMITY_HISTORY_OUTPUT.name: LiveDatasetOutput(
-                    UNIFORMITY_HISTORY_OUTPUT,
-                    history_event,
-                    MonitorCoverage(
-                        self._candidate_capacity,
-                        self._candidate_capacity,
-                        retain_at_terminal=True,
-                    ),
-                    record,
-                ),
-                OBSERVABLE_UNIFORMITY_HISTORY_OUTPUT.name: LiveDatasetOutput(
-                    OBSERVABLE_UNIFORMITY_HISTORY_OUTPUT,
-                    observable_history_event,
-                    MonitorCoverage(
-                        self._candidate_capacity,
-                        self._candidate_capacity,
-                        retain_at_terminal=True,
-                    ),
-                    record,
-                ),
-            }
+        site_axis = self._registered_site_map.site_axis
+        site_signal_event = snapshot_from_array(
+            site_signal[None],
+            producer=self.instance_id,
+            signal=SITE_SIGNAL_HISTORY_OUTPUT.name,
+            roles=(SCAN_POINT, SITE),
+            axis_specs={SITE: site_axis},
+            point_columns=point_columns,
+            generation=generation,
+            revision=publication_revision,
+            validity=np.isfinite(site_signal)[None],
         )
+        target_share_event = snapshot_from_array(
+            target_share[None],
+            producer=self.instance_id,
+            signal=TARGET_SHARE_HISTORY_OUTPUT.name,
+            roles=(SCAN_POINT, SITE),
+            axis_specs={SITE: site_axis},
+            point_columns=point_columns,
+            generation=generation,
+            revision=publication_revision,
+            validity=np.isfinite(target_share)[None],
+        )
+        latest = self._latest_mean_frame
+        if latest is None:
+            camera_mean = np.zeros(
+                self.calibration.frame_contract.image_shape,
+                dtype=np.float32,
+            )
+            camera_validity = np.zeros(camera_mean.shape, dtype=np.bool_)
+        else:
+            camera_mean = np.asarray(latest, dtype=np.float32)
+            camera_validity = np.isfinite(camera_mean)
+        camera_event = snapshot_from_array(
+            camera_mean[None],
+            producer=self.instance_id,
+            signal=CAMERA_MEAN_OUTPUT.name,
+            roles=(SPATIAL_Y, SPATIAL_X),
+            generation=generation,
+            revision=publication_revision,
+            validity=camera_validity[None],
+        )
+        site_map_event = snapshot_from_array(
+            np.zeros((1, self._site_count), dtype=np.bool_),
+            producer=self.instance_id,
+            signal=SITE_MAP_OVERLAY_OUTPUT.name,
+            roles=(SITE,),
+            axis_specs={SITE: site_axis},
+            generation=generation,
+            revision=publication_revision,
+        )
+        record = dict(self._run_record())
+        record[IMAGE_POINT_OVERLAY_GEOMETRY_RECORD] = image_point_overlay_geometry(
+            camera_event,
+            self._site_centers_xy,
+            self._registered_site_map.site_ids,
+            status_axis=site_axis,
+            labels=tuple(str(site) for site in range(1, self._site_count + 1)),
+            coordinates_are_indices=True,
+        )
+        outputs = {
+            CANDIDATE_PHASE_OUTPUT.name: LiveDatasetOutput(
+                CANDIDATE_PHASE_OUTPUT,
+                phase_event,
+                MonitorCoverage(1, 1, retain_at_terminal=True),
+                record,
+            ),
+            UNIFORMITY_HISTORY_OUTPUT.name: LiveDatasetOutput(
+                UNIFORMITY_HISTORY_OUTPUT,
+                history_event,
+                MonitorCoverage(
+                    self._candidate_capacity,
+                    self._candidate_capacity,
+                    retain_at_terminal=True,
+                ),
+                record,
+            ),
+            OBSERVABLE_UNIFORMITY_HISTORY_OUTPUT.name: LiveDatasetOutput(
+                OBSERVABLE_UNIFORMITY_HISTORY_OUTPUT,
+                observable_history_event,
+                MonitorCoverage(
+                    self._candidate_capacity,
+                    self._candidate_capacity,
+                    retain_at_terminal=True,
+                ),
+                record,
+            ),
+            SITE_SIGNAL_HISTORY_OUTPUT.name: LiveDatasetOutput(
+                SITE_SIGNAL_HISTORY_OUTPUT,
+                site_signal_event,
+                MonitorCoverage(
+                    self._candidate_capacity,
+                    self._candidate_capacity,
+                    retain_at_terminal=True,
+                ),
+                record,
+            ),
+            TARGET_SHARE_HISTORY_OUTPUT.name: LiveDatasetOutput(
+                TARGET_SHARE_HISTORY_OUTPUT,
+                target_share_event,
+                MonitorCoverage(
+                    self._candidate_capacity,
+                    self._candidate_capacity,
+                    retain_at_terminal=True,
+                ),
+                record,
+            ),
+            CAMERA_MEAN_OUTPUT.name: LiveDatasetOutput(
+                CAMERA_MEAN_OUTPUT,
+                camera_event,
+                MonitorCoverage(1, 1, retain_at_terminal=True),
+                record,
+            ),
+            SITE_MAP_OVERLAY_OUTPUT.name: LiveDatasetOutput(
+                SITE_MAP_OVERLAY_OUTPUT,
+                site_map_event,
+                MonitorCoverage(1, 1, retain_at_terminal=True),
+                record,
+            ),
+        }
+        context.commit_live(outputs)
 
     def _incoming_candidate(
         self,
@@ -1226,11 +1535,13 @@ class SlmFeedbackTask:
         )
         complete = np.all(np.isfinite(box_samples), axis=0)
         missing_sites = set(int(index) for index in np.flatnonzero(~complete))
+        mean_frame = np.asarray(np.mean(frames, axis=0), dtype=np.float32)
+        self._latest_mean_frame = np.array(mean_frame, copy=True)
         return (
             box_samples,
             tuple(sorted(saturated_sites)),
             tuple(sorted(missing_sites)),
-            np.asarray(np.mean(frames, axis=0), dtype=np.float32),
+            mean_frame,
         )
 
     def _prepare_artifacts(self, context: object) -> dict[str, Path]:
@@ -1282,13 +1593,12 @@ class SlmFeedbackTask:
             "fit_valid",
             "observable_valid",
             "single_population",
-            "single_dark_only",
-            "single_bright_only",
             "fit_invalid",
+            "bic_stable",
         }
         for name in _CANDIDATE_VECTOR_FIELDS:
             values = measurement[name]
-            if name == "decision":
+            if name in {"decision", "probe_decision"}:
                 arrays[name] = np.asarray(values, dtype="U32")
             elif name in bool_fields:
                 arrays[name] = np.asarray(values, dtype=np.bool_)
@@ -1379,17 +1689,7 @@ class SlmFeedbackTask:
             PointColumn.NUMERIC,
             tuple(range(1, count + 1)),
         )
-        site_axis = AxisSpec(
-            AxisId("slm_feedback.site"),
-            "site",
-            SITE,
-            self._site_count,
-            tuple(range(self._site_count)),
-            coordinate_labels=tuple(
-                f"({int(row)}, {int(column)})"
-                for row, column in zip(self._rows, self._columns, strict=True)
-            ),
-        )
+        site_axis = self._registered_site_map.site_axis
 
         def site_history_snapshot(field: str, signal: str) -> object:
             values = np.asarray(
@@ -1579,11 +1879,32 @@ class SlmFeedbackTask:
         camera_snapshot, image_x, image_y = comparison_snapshot(
             "camera", initial_mean_frame, selected["mean_frame"]
         )
+        camera_overlay_geometry = image_point_overlay_geometry(
+            camera_snapshot,
+            self._registered_site_map.centers_xy,
+            self._registered_site_map.site_ids,
+            status_axis=site_axis,
+            labels=tuple(str(site) for site in range(1, self._site_count + 1)),
+            coordinates_are_indices=True,
+        )
         self._save_figure(
             context,
             paths,
             "camera_initial_selected",
-            snapshot=camera_snapshot,
+            snapshot=ImageFrame(
+                camera_snapshot,
+                ImagePointOverlay(
+                    revision=count,
+                    coordinates=np.asarray(
+                        camera_overlay_geometry["coordinates_xy"], dtype=float
+                    ),
+                    point_ids=tuple(camera_overlay_geometry["point_ids"]),
+                    labels=tuple(camera_overlay_geometry["labels"]),
+                    static_statuses=tuple(
+                        PointStatus.UNKNOWN for _ in range(self._site_count)
+                    ),
+                ),
+            ),
             spec=FacetGridPlot(
                 AxisRef.point(str(comparison_id)),
                 ImagePlot(
@@ -1620,10 +1941,14 @@ class SlmFeedbackTask:
         status: str,
         history: list[dict[str, object]],
         selected_candidate: int | None,
+        outcome: Mapping[str, object] | None = None,
         error: BaseException | None = None,
         rollback: Mapping[str, object] | None = None,
     ) -> None:
         initial = None if not history else history[0]
+        formal_history = [
+            item for item in history if item["candidate_kind"] != "probe"
+        ]
         selected = next(
             (
                 item
@@ -1634,9 +1959,12 @@ class SlmFeedbackTask:
         )
         common_mask = (
             np.logical_and.reduce(
-                [np.asarray(item["observable_valid"], dtype=bool) for item in history]
+                [
+                    np.asarray(item["observable_valid"], dtype=bool)
+                    for item in formal_history
+                ]
             )
-            if history
+            if formal_history
             else np.zeros(self._site_count, dtype=bool)
         )
         common_site_count = int(np.count_nonzero(common_mask))
@@ -1666,6 +1994,40 @@ class SlmFeedbackTask:
             "selected_candidate": selected_candidate,
             "candidate_count": len(history),
             "settings": self._run_record(),
+            "outcome": None if outcome is None else dict(outcome),
+            "probe_candidates": [
+                {
+                    "candidate": item["iteration"],
+                    "requested_factor": item["probe_requested_factor"],
+                    "group_effective_factor": item[
+                        "probe_group_effective_factor"
+                    ],
+                    "site_effective_factor": item[
+                        "probe_effective_factor"
+                    ],
+                    "sites": item["probe_sites"],
+                    "observable_sites": item["observable_sites"],
+                }
+                for item in history
+                if item["candidate_kind"] == "probe"
+            ],
+            "probe_combination": next(
+                (
+                    {
+                        "candidate": item["iteration"],
+                        "selected_formal_factor": item[
+                            "probe_selected_formal_factor"
+                        ],
+                        "decision": item["probe_decision"],
+                    }
+                    for item in history
+                    if item["candidate_kind"] == "probe_combined"
+                ),
+                None,
+            ),
+            "final_probe_control_boundary": (
+                None if not history else history[-1]["probe_control_boundary"]
+            ),
             "initial_uniformity_ratio": (
                 None if initial is None else initial["uniformity_ratio"]
             ),
@@ -1733,6 +2095,15 @@ class SlmFeedbackTask:
             f"Candidates measured: {len(history)}",
             f"Selected candidate: {selected_candidate if selected_candidate is not None else 'none'}",
         ]
+        if outcome is not None and outcome.get("reason"):
+            lines.append(f"Outcome: {outcome['reason']}")
+        for item in document["probe_candidates"]:
+            lines.append(
+                "Probe candidate "
+                f"{item['candidate']}: {item['requested_factor']}x requested, "
+                f"{item['group_effective_factor']}x effective, "
+                f"{len(item['sites'])} sites"
+            )
         if initial is not None:
             lines.append(
                 "Initial observable-site uniformity ratio: "
@@ -1846,6 +2217,7 @@ class SlmFeedbackTask:
             selected_candidate=(
                 candidate_number if isinstance(retained_history, Mapping) else None
             ),
+            outcome=metadata["outcome"],
         )
         terminal_uniformity = (
             retained_history.get("uniformity_ratio")
@@ -1895,6 +2267,7 @@ class SlmFeedbackTask:
             # the SLM now, so establish and confirm that starting state itself.
             self._mapping_revision = int(self.slm.mapping_revision)
             self._last_measured_phase = None
+            self._latest_mean_frame = None
             incoming = self._apply_exact(incoming)
             pulse = resolve_pulse(
                 self.sequence,
@@ -1910,17 +2283,8 @@ class SlmFeedbackTask:
             solver_metadata: Mapping[str, object] | None = None
             previous_weights = np.full(self._site_count, np.nan, dtype=float)
             previous_contrast = np.full(self._site_count, np.nan, dtype=float)
-            previous_dark_mean = np.full(self._site_count, np.nan, dtype=float)
-            previous_dark_standard_error = np.full(
-                self._site_count, np.nan, dtype=float
-            )
-            loading_dark_bound = np.full(
-                self._site_count, np.nan, dtype=float
-            )
-            loading_loaded_bound = np.full(
-                self._site_count, np.nan, dtype=float
-            )
             prior_measurement = self._prior_pattern_metadata.get("measurement")
+            prior_probe_factors = self._prior_pattern_metadata.get("probe_factors")
             comparable_history = bool(
                 self._prior_pattern_metadata.get("feedback_controller")
                 == _CONTROLLER_CONTRACT
@@ -1930,10 +2294,9 @@ class SlmFeedbackTask:
                 in (int, float)
                 and float(self._prior_pattern_metadata["exposure_seconds"])
                 == self.exposure_seconds
-                and float(
-                    self._prior_pattern_metadata.get("single_gaussian_boost", -1.0)
-                )
-                == self.single_gaussian_boost
+                and isinstance(prior_probe_factors, (tuple, list))
+                and tuple(float(value) for value in prior_probe_factors)
+                == self.probe_factors
                 and float(self._prior_pattern_metadata.get("feedback_gain", -1.0))
                 == self.feedback_gain
                 and float(
@@ -1954,78 +2317,121 @@ class SlmFeedbackTask:
                         return None
 
                 restored_control = restored(
-                    "previous_valid_control_weight", float
+                    "previous_double_control_weight", float
                 )
                 if restored_control is not None:
                     previous_weights[:] = restored_control
-                for name, destination in (
-                    ("previous_valid_bright_minus_dark", previous_contrast),
-                    ("previous_valid_dark_mean", previous_dark_mean),
-                    (
-                        "previous_valid_dark_standard_error",
-                        previous_dark_standard_error,
-                    ),
-                    ("loading_dark_bound", loading_dark_bound),
-                    ("loading_loaded_bound", loading_loaded_bound),
-                ):
-                    restored_values = restored(name, float)
-                    if restored_values is not None:
-                        destination[:] = restored_values
+                restored_contrast = restored(
+                    "previous_double_bright_minus_dark", float
+                )
+                if restored_contrast is not None:
+                    previous_contrast[:] = restored_contrast
 
                 prior_weights = restored("control_weight", float)
-                if prior_weights is None:
-                    raw_prior_weights = restored("target_weight", float)
-                    if raw_prior_weights is not None:
-                        prior_weights = _control_weights(raw_prior_weights)
                 prior_contrast = restored("bright_minus_dark", float)
-                prior_observable = restored("observable_valid", bool)
-                if prior_observable is None:
-                    prior_observable = restored("fit_valid", bool)
+                prior_fit_valid = restored("fit_valid", bool)
                 if (
                     prior_weights is not None
                     and prior_contrast is not None
-                    and prior_observable is not None
+                    and prior_fit_valid is not None
                 ):
                     usable = (
-                        prior_observable
+                        prior_fit_valid
                         & np.isfinite(prior_weights)
                         & np.isfinite(prior_contrast)
                     )
                     previous_weights[usable] = prior_weights[usable]
                     previous_contrast[usable] = prior_contrast[usable]
 
-                prior_fit_valid = restored("fit_valid", bool)
-                prior_dark = restored("dark_mean", float)
-                prior_dark_error = restored("dark_standard_error", float)
-                if all(
-                    value is not None
-                    for value in (
-                        prior_fit_valid,
-                        prior_dark,
-                        prior_dark_error,
-                    )
-                ):
-                    gaussian_usable = (
-                        prior_fit_valid
-                        & np.isfinite(prior_dark)
-                        & np.isfinite(prior_dark_error)
-                    )
-                    previous_dark_mean[gaussian_usable] = prior_dark[gaussian_usable]
-                    previous_dark_standard_error[gaussian_usable] = (
-                        prior_dark_error[gaussian_usable]
-                    )
-            for iteration in range(self._candidate_capacity):
+            candidate_number = 0
+            candidate_kind = "baseline"
+            ordinary_updates = 0
+            probe_sites = np.zeros(self._site_count, dtype=bool)
+            probe_episode_used = np.zeros(self._site_count, dtype=bool)
+            probe_baseline_target: np.ndarray | None = None
+            probe_baseline_pattern: np.ndarray | None = None
+            probe_baseline_optimizer_state: dict[str, object] | None = None
+            probe_baseline_contrast = np.full(
+                self._site_count, np.nan, dtype=float
+            )
+            probe_baseline_error = np.full(
+                self._site_count, np.nan, dtype=float
+            )
+            probe_baseline_valid = np.zeros(self._site_count, dtype=bool)
+            probe_baseline_reference_valid = np.zeros(
+                self._site_count, dtype=bool
+            )
+            probe_baseline_previous_weights = np.full(
+                self._site_count, np.nan, dtype=float
+            )
+            probe_baseline_previous_contrast = np.full(
+                self._site_count, np.nan, dtype=float
+            )
+            probe_baseline_directed_step = np.zeros(
+                self._site_count, dtype=float
+            )
+            probe_baseline_control_boundary = np.full(
+                self._site_count, np.nan, dtype=float
+            )
+            probe_baseline_control_direction = np.zeros(
+                self._site_count, dtype=float
+            )
+            pending_probes: list[
+                tuple[float, float, np.ndarray, np.ndarray]
+            ] = []
+            probe_measurements: list[
+                tuple[float, np.ndarray, np.ndarray, np.ndarray]
+            ] = []
+            active_probe_requested: float | None = None
+            active_probe_effective: float | None = None
+            active_probe_site_factors: np.ndarray | None = None
+            probe_selected_factors = np.ones(self._site_count, dtype=float)
+            probe_direction_log_step = np.zeros(self._site_count, dtype=float)
+            probe_direction_sign = np.zeros(self._site_count, dtype=float)
+            probe_single_bound = np.full(
+                self._site_count, np.nan, dtype=float
+            )
+            probe_observable_bound = np.full(
+                self._site_count, np.nan, dtype=float
+            )
+            probe_control_boundary = np.full(
+                self._site_count, np.nan, dtype=float
+            )
+            probe_decisions = np.full(
+                self._site_count, "not_probed", dtype="<U32"
+            )
+            probe_baseline_candidate: dict[str, object] | None = None
+            forced_terminal_candidate: dict[str, object] | None = None
+            def take_probe() -> tuple[np.ndarray, float, float, np.ndarray]:
+                requested, effective, target, site_factors = pending_probes.pop(0)
+                return target, requested, effective, site_factors
+
+            while candidate_number < self._candidate_capacity:
                 _check_cancelled(context)
                 applied = (
                     current_phase
-                    if iteration == 0
+                    if candidate_number == 0
                     else self._apply_exact(current_phase)
                 )
-                candidate_number = iteration + 1
+                candidate_number += 1
+                iteration = candidate_number - 1
                 candidate_solver = solver_metadata
-                context.report_progress(
-                    f"Measuring SLM feedback candidate {candidate_number}"
-                )
+                if candidate_kind == "probe":
+                    context.report_progress(
+                        "Measuring SLM feedback probe "
+                        f"{active_probe_requested:g}x requested / "
+                        f"{active_probe_effective:g}x effective for "
+                        f"{int(np.count_nonzero(probe_sites))} sites"
+                    )
+                elif candidate_kind == "probe_combined":
+                    context.report_progress(
+                        "Measuring combined SLM probe decision for "
+                        f"{int(np.count_nonzero(probe_sites))} sites"
+                    )
+                else:
+                    context.report_progress(
+                        f"Measuring SLM feedback candidate {candidate_number}"
+                    )
                 # The operator must see the phase which is already on the SLM
                 # before this candidate's camera exposure begins.  Publishing
                 # only after the shot batch made Monitor lag one candidate and
@@ -2056,18 +2462,16 @@ class SlmFeedbackTask:
                 fitted["valid"] = fit_valid
                 fitted["single_population"] = fit_single
                 fitted["invalid"] = fit_invalid
-                (
-                    contrast,
-                    error,
-                    dark_only,
-                    bright_only,
-                ) = _single_population_observables(
-                    fitted,
-                    shots=self.shots,
-                    previous_dark_mean=previous_dark_mean,
-                    previous_dark_standard_error=previous_dark_standard_error,
+                contrast = np.asarray(fitted["contrast"], dtype=float)
+                error = np.asarray(fitted["standard_error"], dtype=float)
+                observable_valid = fit_valid
+                needs_probe_sites = _needs_probe(
+                    fit_single,
+                    observable_valid,
+                    acquisition_invalid,
+                    previous_weights,
+                    previous_contrast,
                 )
-                observable_valid = fit_valid | bright_only
                 valid = bool(np.all(observable_valid))
                 observable_contrast = contrast[observable_valid]
                 total_observable_contrast = (
@@ -2105,58 +2509,247 @@ class SlmFeedbackTask:
                     current_target[self._rows, self._columns], dtype=float
                 )
                 current_control_weights = _control_weights(current_weights)
-                for site in np.flatnonzero(dark_only):
-                    loaded_bound = loading_loaded_bound[site]
-                    if not np.isfinite(loaded_bound) or (
-                        current_control_weights[site] < loaded_bound
-                    ):
-                        prior_dark = loading_dark_bound[site]
-                        loading_dark_bound[site] = (
-                            current_control_weights[site]
-                            if not np.isfinite(prior_dark)
-                            else max(prior_dark, current_control_weights[site])
+                bracket_recovery = np.zeros(self._site_count, dtype=bool)
+                episode_probe_sites = np.zeros(self._site_count, dtype=bool)
+                starts_probe_episode = False
+                if candidate_kind != "probe":
+                    probe_direction_log_step[fit_valid] = 0.0
+                    unobservable_single = _unobservable_single(
+                        fit_single,
+                        observable_valid,
+                        acquisition_invalid,
+                    )
+                    has_double_history = (
+                        unobservable_single
+                        & np.isfinite(previous_weights)
+                        & (previous_weights > 0.0)
+                        & np.isfinite(previous_contrast)
+                        & (previous_contrast > 0.0)
+                    )
+                    new_history_branch = (
+                        has_double_history & (probe_direction_sign == 0.0)
+                    )
+                    history_direction = np.zeros(self._site_count, dtype=float)
+                    history_direction[new_history_branch] = np.sign(np.log(
+                        previous_weights[new_history_branch]
+                        / current_control_weights[new_history_branch]
+                    ))
+                    new_history_branch &= history_direction != 0.0
+                    probe_direction_sign[new_history_branch] = history_direction[
+                        new_history_branch
+                    ]
+                    probe_single_bound[new_history_branch] = (
+                        current_control_weights[new_history_branch]
+                    )
+                    probe_observable_bound[new_history_branch] = previous_weights[
+                        new_history_branch
+                    ]
+                    (
+                        probe_single_bound,
+                        probe_observable_bound,
+                        probe_direction_sign,
+                        _crossed_bracket,
+                    ) = _updated_single_bracket(
+                        current_control_weights,
+                        unobservable_single,
+                        probe_single_bound,
+                        probe_observable_bound,
+                        probe_direction_sign,
+                    )
+                    up = probe_direction_sign > 0.0
+                    down = probe_direction_sign < 0.0
+                    probe_observable_bound[observable_valid & up] = np.fmin(
+                        probe_observable_bound[observable_valid & up], current_control_weights[observable_valid & up]
+                    )
+                    probe_observable_bound[observable_valid & down] = np.fmax(
+                        probe_observable_bound[observable_valid & down], current_control_weights[observable_valid & down]
+                    )
+                    probe_direction_log_step[observable_valid] = 0.0
+                    probe_control_boundary[:] = _probe_boundary(
+                        probe_single_bound,
+                        probe_observable_bound,
+                        probe_direction_sign,
+                    )
+                    midpoint_step = _single_bracket_step(
+                        current_control_weights,
+                        probe_control_boundary,
+                        probe_direction_sign,
+                        self.maximum_weight_change,
+                    )
+                    bracket_recovery = unobservable_single & (midpoint_step != 0.0)
+                    probe_direction_log_step[bracket_recovery] = midpoint_step[
+                        bracket_recovery
+                    ]
+                    relative_move = np.full(
+                        self._site_count, np.inf, dtype=float
+                    )
+                    relative_move[has_double_history] = np.abs(np.log(
+                        current_control_weights[has_double_history]
+                        / previous_weights[has_double_history]
+                    ))
+                    stored_probe_step = np.log(probe_selected_factors)
+                    has_probe_direction = (
+                        np.isfinite(stored_probe_step)
+                        & (stored_probe_step != 0.0)
+                    )
+                    reuse_probe_direction = (
+                        unobservable_single
+                        & has_probe_direction
+                        & (
+                            ~bracket_recovery
+                            | (
+                                has_double_history
+                                & (relative_move < 0.02)
+                            )
                         )
-                for site in np.flatnonzero(observable_valid):
-                    dark_bound = loading_dark_bound[site]
-                    if not np.isfinite(dark_bound) or (
-                        current_control_weights[site] > dark_bound
-                    ):
-                        prior_loaded = loading_loaded_bound[site]
-                        loading_loaded_bound[site] = (
-                            current_control_weights[site]
-                            if not np.isfinite(prior_loaded)
-                            else min(prior_loaded, current_control_weights[site])
+                    )
+                    probe_direction_log_step[reuse_probe_direction] = np.clip(
+                        stored_probe_step[reuse_probe_direction],
+                        -np.log1p(self.maximum_weight_change),
+                        np.log1p(self.maximum_weight_change),
+                    )
+                    probe_direction_sign[reuse_probe_direction] = np.sign(
+                        stored_probe_step[reuse_probe_direction]
+                    )
+                    recovery_probe = (
+                        has_double_history
+                        & ~_crossed_bracket
+                        & ~has_probe_direction
+                        & (
+                            (relative_move < 0.02)
+                            | (probe_direction_sign == 0.0)
+                            | (
+                                np.isfinite(probe_observable_bound)
+                                & ~np.isfinite(probe_control_boundary)
+                            )
                         )
-                loading_floor = np.full(
+                    )
+                    episode_probe_sites = (
+                        (
+                            (needs_probe_sites & ~has_probe_direction)
+                            | recovery_probe
+                        )
+                        & ~probe_episode_used
+                    )
+                    starts_probe_episode = bool(np.any(episode_probe_sites))
+                    if starts_probe_episode:
+                        probe_direction_log_step[episode_probe_sites] = 0.0
+                        probe_direction_sign[episode_probe_sites] = 0.0
+                        probe_single_bound[episode_probe_sites] = np.nan
+                        probe_observable_bound[episode_probe_sites] = np.nan
+                        probe_control_boundary[episode_probe_sites] = np.nan
+                feedback_valid = observable_valid
+                if starts_probe_episode:
+                    probe_sites = np.array(episode_probe_sites, copy=True)
+                    probe_episode_used[probe_sites] = True
+                    pending_probes.clear()
+                    probe_measurements.clear()
+                    probe_selected_factors[probe_sites] = 1.0
+                    probe_decisions[probe_sites] = "not_probed"
+                    probe_baseline_candidate = None
+                    probe_baseline_target = np.array(
+                        current_target, dtype=np.float32, copy=True
+                    )
+                    probe_baseline_pattern = np.array(
+                        current_pattern, dtype=np.float32, copy=True
+                    )
+                    probe_baseline_optimizer_state = deepcopy(
+                        spot_optimizer_state
+                    )
+                    probe_baseline_contrast[:] = contrast
+                    probe_baseline_error[:] = error
+                    probe_baseline_valid[:] = observable_valid
+                    probe_baseline_reference_valid[:] = fit_valid
+                    probe_baseline_previous_weights[:] = previous_weights
+                    probe_baseline_previous_contrast[:] = previous_contrast
+                    for requested_factor in self.probe_factors:
+                        requested = np.ones(self._site_count, dtype=float)
+                        requested[probe_sites] = requested_factor
+                        probe_target, effective = _relative_probe_target(
+                            probe_baseline_target,
+                            requested,
+                            probe_sites,
+                            self._rows,
+                            self._columns,
+                        )
+                        if np.array_equal(probe_target, probe_baseline_target):
+                            continue
+                        if any(
+                            np.array_equal(probe_target, item[2])
+                            for item in pending_probes
+                        ):
+                            continue
+                        pending_probes.append((
+                            requested_factor,
+                            float(effective[probe_sites][0]),
+                            probe_target,
+                            np.array(effective, copy=True),
+                        ))
+                record_probe_effective = np.full(
                     self._site_count, np.nan, dtype=float
                 )
-                bracketed = (
-                    np.isfinite(loading_dark_bound)
-                    & np.isfinite(loading_loaded_bound)
-                    & (loading_dark_bound < loading_loaded_bound)
+                record_probe_selection = np.full(
+                    self._site_count, np.nan, dtype=float
                 )
-                loading_floor[bracketed] = np.sqrt(
-                    loading_dark_bound[bracketed]
-                    * loading_loaded_bound[bracketed]
+                record_probe_decisions = np.full(
+                    self._site_count, "not_probed", dtype="<U32"
                 )
-                feedback_valid = observable_valid
-                proposed_target, log_correction, response_slope, decisions = (
-                    _updated_target(
-                        current_target,
-                        contrast,
-                        error,
-                        feedback_valid,
-                        dark_only,
-                        self._rows,
-                        self._columns,
-                        previous_weights=previous_weights,
-                        previous_contrast=previous_contrast,
-                        feedback_gain=self.feedback_gain,
-                        single_gaussian_boost=self.single_gaussian_boost,
-                        maximum_weight_change=self.maximum_weight_change,
-                        minimum_control_weight=loading_floor,
+                if starts_probe_episode:
+                    record_probe_decisions[probe_sites] = "probe_required"
+                elif candidate_kind == "probe":
+                    assert active_probe_site_factors is not None
+                    record_probe_effective[:] = active_probe_site_factors
+                    record_probe_decisions[probe_sites] = "probe_measurement"
+                elif candidate_kind in {"probe_combined", "ordinary"}:
+                    record_probe_selection[probe_sites] = (
+                        probe_selected_factors[probe_sites]
                     )
-                )
+                    record_probe_decisions[:] = probe_decisions
+                if candidate_kind == "probe":
+                    proposed_target = np.array(
+                        current_target, dtype=np.float32, copy=True
+                    )
+                    log_correction = np.zeros(self._site_count, dtype=float)
+                    response_slope = np.full(
+                        self._site_count, np.nan, dtype=float
+                    )
+                    decisions = np.full(
+                        self._site_count, "hold_for_probe", dtype="<U32"
+                    )
+                else:
+                    directed_step = np.array(
+                        probe_direction_log_step, copy=True
+                    )
+                    directed_step[acquisition_invalid] = 0.0
+                    allocation_boundary = np.array(
+                        probe_control_boundary, copy=True
+                    )
+                    proposed_target, log_correction, response_slope, decisions = (
+                        _updated_target(
+                            current_target,
+                            contrast,
+                            error,
+                            feedback_valid,
+                            self._rows,
+                            self._columns,
+                            reference_valid=fit_valid,
+                            previous_weights=previous_weights,
+                            previous_contrast=previous_contrast,
+                            feedback_gain=self.feedback_gain,
+                            maximum_weight_change=self.maximum_weight_change,
+                            directed_log_step=directed_step,
+                            control_boundary=allocation_boundary,
+                            control_direction=probe_direction_sign,
+                        )
+                    )
+                    decisions[bracket_recovery] = "single_bracket_midpoint"
+                    if starts_probe_episode:
+                        decisions[probe_sites] = "hold_for_probe"
+                        probe_baseline_directed_step[:] = directed_step
+                        probe_baseline_control_boundary[:] = allocation_boundary
+                        probe_baseline_control_direction[:] = (
+                            probe_direction_sign
+                        )
                 history.append({
                     "iteration": candidate_number,
                     "shots": self.shots,
@@ -2189,8 +2782,13 @@ class SlmFeedbackTask:
                         None if not valid else relative_sem
                     ),
                     "feedback_gain": self.feedback_gain,
-                    "single_gaussian_boost": self.single_gaussian_boost,
                     "maximum_weight_change": self.maximum_weight_change,
+                    "candidate_kind": candidate_kind,
+                    "probe_requested_factor": active_probe_requested,
+                    "probe_group_effective_factor": active_probe_effective,
+                    "probe_sites": [
+                        int(value) for value in np.flatnonzero(probe_sites)
+                    ],
                     "feedback_mode": self.feedback_mode,
                     "requested_exposure_seconds": self.exposure_seconds,
                     "actual_exposure_seconds": self._actual_exposure_seconds,
@@ -2210,41 +2808,45 @@ class SlmFeedbackTask:
                     "contrast_standard_error": _json_floats(error),
                     "bright_fraction": _json_floats(fitted["bright_fraction"]),
                     "fit_fidelity": _json_floats(fitted["fidelity"]),
-                    "fit_bic_gain": _json_floats(fitted["bic_gain"]),
+                    "bic_gain": _json_floats(fitted["bic_gain"]),
+                    "bic_gain_even": _json_floats(fitted["bic_gain_even"]),
+                    "bic_gain_odd": _json_floats(fitted["bic_gain_odd"]),
+                    "bic_stable": [bool(value) for value in fitted["bic_stable"]],
                     "fit_valid": [bool(value) for value in fit_valid],
                     "observable_valid": [
                         bool(value) for value in observable_valid
                     ],
                     "single_population": [bool(value) for value in fit_single],
-                    "single_dark_only": [bool(value) for value in dark_only],
-                    "single_bright_only": [bool(value) for value in bright_only],
                     "fit_invalid": [bool(value) for value in fit_invalid],
                     "single_mean": _json_floats(fitted["single_mean"]),
                     "single_sigma": _json_floats(fitted["single_sigma"]),
                     "decision": [str(value) for value in decisions],
                     "requested_log_correction": _json_floats(log_correction),
                     "response_log_slope": _json_floats(response_slope),
-                    "previous_valid_control_weight": _json_floats(
+                    "previous_double_control_weight": _json_floats(
                         previous_weights
                     ),
-                    "previous_valid_bright_minus_dark": _json_floats(
+                    "previous_double_bright_minus_dark": _json_floats(
                         previous_contrast
                     ),
-                    "previous_valid_dark_mean": _json_floats(
-                        previous_dark_mean
+                    "probe_effective_factor": _json_floats(
+                        record_probe_effective
                     ),
-                    "previous_valid_dark_standard_error": _json_floats(
-                        previous_dark_standard_error
+                    "probe_selected_formal_factor": _json_floats(
+                        record_probe_selection
                     ),
-                    "loading_dark_bound": _json_floats(
-                        loading_dark_bound
+                    "probe_decision": [
+                        str(value) for value in record_probe_decisions
+                    ],
+                    "probe_single_bound": _json_floats(probe_single_bound),
+                    "probe_observable_bound": _json_floats(
+                        probe_observable_bound
                     ),
-                    "loading_loaded_bound": _json_floats(
-                        loading_loaded_bound
+                    "probe_control_boundary": _json_floats(
+                        probe_control_boundary
                     ),
-                    "loading_floor": _json_floats(loading_floor),
                     "missing_sites": list(missing_sites),
-                    "single_gaussian_sites": [
+                    "single_population_sites": [
                         int(value) for value in np.flatnonzero(fit_single)
                     ],
                     "invalid_sites": [
@@ -2279,13 +2881,13 @@ class SlmFeedbackTask:
                     -int(np.count_nonzero(fit_invalid)),
                     float("-inf") if visibility_margin is None else visibility_margin,
                 )
-                if (
+                if candidate_kind != "probe" and (
                     most_visible_observed is None
                     or completed["visibility_rank"]
                     >= most_visible_observed["visibility_rank"]
                 ):
                     most_visible_observed = completed
-                if valid:
+                if valid and candidate_kind != "probe":
                     if (
                         retained_valid is None
                         or float(completed["score"]) < float(retained_valid["score"])
@@ -2295,25 +2897,150 @@ class SlmFeedbackTask:
                         f"qCMOS bright-dark ratio {score:.5f}; "
                         f"simultaneous 95% upper {confidence_upper:.5f}"
                     )
+                elif candidate_kind == "probe":
+                    context.report_progress(
+                        "SLM probe "
+                        f"{active_probe_requested:g}x requested / "
+                        f"{active_probe_effective:g}x effective measured; "
+                        f"{visibility}/{self._site_count} sites observable"
+                    )
                 else:
                     context.report_progress(
                         f"Candidate {candidate_number}: {visibility}/"
                         f"{self._site_count} site fits valid; applying only "
-                        "history-supported site updates"
+                        "observable-site updates"
                     )
-                continue_feedback = candidate_number < self._candidate_capacity
-                if continue_feedback:
-                    previous_weights[observable_valid] = current_control_weights[
-                        observable_valid
+                if starts_probe_episode:
+                    probe_baseline_candidate = completed
+                elif candidate_kind == "probe":
+                    assert active_probe_requested is not None
+                    assert active_probe_effective is not None
+                    probe_measurements.append((
+                        active_probe_effective,
+                        np.array(contrast, copy=True),
+                        np.array(error, copy=True),
+                        np.array(observable_valid, copy=True),
+                    ))
+                if candidate_kind != "probe":
+                    previous_weights[fit_valid] = current_control_weights[
+                        fit_valid
                     ]
-                    previous_contrast[observable_valid] = contrast[observable_valid]
-                    previous_dark_mean[fit_valid] = np.asarray(
-                        fitted["dark_mean"], dtype=float
-                    )[fit_valid]
-                    previous_dark_standard_error[fit_valid] = np.asarray(
-                        fitted["dark_standard_error"], dtype=float
-                    )[fit_valid]
-                    if np.array_equal(proposed_target, current_target):
+                    previous_contrast[fit_valid] = contrast[fit_valid]
+                continue_feedback = True
+                next_target: np.ndarray | None = None
+                next_kind = "ordinary"
+                next_probe_requested: float | None = None
+                next_probe_effective: float | None = None
+                next_probe_site_factors: np.ndarray | None = None
+                if starts_probe_episode:
+                    if pending_probes:
+                        (
+                            next_target,
+                            next_probe_requested,
+                            next_probe_effective,
+                            next_probe_site_factors,
+                        ) = take_probe()
+                        next_kind = "probe"
+                    else:
+                        stalled = True
+                        continue_feedback = False
+                        history[-1]["next_phase_changed"] = False
+                        termination_reason = (
+                            "relative SLM probe has no non-probe power reservoir"
+                        )
+                        forced_terminal_candidate = probe_baseline_candidate
+                elif candidate_kind == "probe":
+                    if pending_probes:
+                        (
+                            next_target,
+                            next_probe_requested,
+                            next_probe_effective,
+                            next_probe_site_factors,
+                        ) = take_probe()
+                        next_kind = "probe"
+                    else:
+                        assert probe_baseline_target is not None
+                        (
+                            _diagnostic_target,
+                            selected_factors,
+                            selected_decisions,
+                            probe_observed_factors,
+                        ) = _selected_probe_target(
+                            probe_baseline_target,
+                            probe_sites,
+                            probe_baseline_contrast,
+                            probe_baseline_valid,
+                            probe_measurements,
+                            self._rows,
+                            self._columns,
+                            feedback_gain=self.feedback_gain,
+                            maximum_weight_change=self.maximum_weight_change,
+                        )
+                        probe_direction_log_step[probe_sites] = 0.0
+                        probe_selected_factors[probe_sites] = selected_factors[
+                            probe_sites
+                        ]
+                        probe_decisions[probe_sites] = selected_decisions[probe_sites]
+                        probe_direction_log_step[probe_sites] = np.log(
+                            probe_selected_factors[probe_sites]
+                        )
+                        probe_direction_sign[probe_sites] = np.sign(
+                            np.log(probe_observed_factors[probe_sites])
+                        )
+                        baseline_control = _control_weights(
+                            probe_baseline_target[self._rows, self._columns]
+                        )
+                        directed_probe = probe_sites & (
+                            probe_direction_sign != 0.0
+                        )
+                        probe_single_bound[directed_probe] = baseline_control[
+                            directed_probe
+                        ]
+                        combined_directed_step = np.array(
+                            probe_baseline_directed_step, copy=True
+                        )
+                        combined_directed_step[probe_sites] = (
+                            probe_direction_log_step[probe_sites]
+                        )
+                        combined_target, *_formal_details = _updated_target(
+                            probe_baseline_target,
+                            probe_baseline_contrast,
+                            probe_baseline_error,
+                            probe_baseline_valid,
+                            self._rows,
+                            self._columns,
+                            reference_valid=probe_baseline_reference_valid,
+                            previous_weights=probe_baseline_previous_weights,
+                            previous_contrast=probe_baseline_previous_contrast,
+                            feedback_gain=self.feedback_gain,
+                            maximum_weight_change=self.maximum_weight_change,
+                            directed_log_step=combined_directed_step,
+                            control_boundary=(
+                                probe_baseline_control_boundary
+                            ),
+                            control_direction=(
+                                probe_baseline_control_direction
+                            ),
+                        )
+                        if np.array_equal(
+                            combined_target, probe_baseline_target
+                        ):
+                            stalled = True
+                            continue_feedback = False
+                            history[-1]["next_phase_changed"] = False
+                            termination_reason = (
+                                "two-sided SLM probes supplied no observable "
+                                "direction; baseline restored"
+                            )
+                            forced_terminal_candidate = probe_baseline_candidate
+                        else:
+                            next_target = combined_target
+                            next_kind = "probe_combined"
+                else:
+                    if ordinary_updates >= self.max_updates:
+                        continue_feedback = False
+                        history[-1]["next_phase_changed"] = None
+                    elif np.array_equal(proposed_target, current_target):
                         stalled = True
                         continue_feedback = False
                         history[-1]["next_phase_changed"] = False
@@ -2322,42 +3049,71 @@ class SlmFeedbackTask:
                             "actionable update"
                         )
                     else:
-                        try:
-                            next_pattern, solver_metadata = solve_phase(
-                                proposed_target,
-                                pupil_amplitude=self._pupil_amplitude,
-                                initial_phase=current_pattern,
-                                objective_kind="spots",
-                                iterations=None,
-                                stop_requested=context.cancel_requested,
-                                spot_optimizer_state=spot_optimizer_state,
-                            )
-                        except BaseException:
-                            history[-1]["next_phase_changed"] = None
-                            self._save_candidate_checkpoint(
-                                context,
-                                paths,
-                                candidate=candidate_number,
-                                samples=samples,
-                                measurement=history[-1],
-                                solver=candidate_solver,
-                            )
-                            raise
-                        next_phase = self._science_phase(next_pattern)
-                        if np.array_equal(next_phase, applied):
-                            stalled = True
-                            continue_feedback = False
-                            history[-1]["next_phase_changed"] = False
-                            termination_reason = (
-                                "the target correction produced no different SLM phase; "
-                                "no second shot batch was taken"
-                            )
-                        else:
-                            history[-1]["next_phase_changed"] = True
-                            current_target = proposed_target
-                            current_pattern = next_pattern
-                            current_phase = next_phase
-                else:
+                        next_target = proposed_target
+                        next_kind = "ordinary"
+                        ordinary_updates += 1
+                if continue_feedback:
+                    assert next_target is not None
+                    if next_kind == "probe":
+                        context.report_progress(
+                            "Solving SLM probe "
+                            f"{next_probe_requested:g}x requested / "
+                            f"{next_probe_effective:g}x effective for "
+                            f"{int(np.count_nonzero(probe_sites))} sites"
+                        )
+                    try:
+                        probe_solve = next_kind in {"probe", "probe_combined"}
+                        solve_state = (
+                            deepcopy(probe_baseline_optimizer_state or {})
+                            if probe_solve else spot_optimizer_state
+                        )
+                        next_pattern, solver_metadata = solve_phase(
+                            next_target,
+                            pupil_amplitude=self._pupil_amplitude,
+                            initial_phase=(
+                                probe_baseline_pattern
+                                if probe_solve else current_pattern
+                            ),
+                            objective_kind="spots",
+                            iterations=None,
+                            stop_requested=context.cancel_requested,
+                            spot_optimizer_state=solve_state,
+                        )
+                    except BaseException:
+                        history[-1]["next_phase_changed"] = None
+                        self._save_candidate_checkpoint(
+                            context,
+                            paths,
+                            candidate=candidate_number,
+                            samples=samples,
+                            measurement=history[-1],
+                            solver=candidate_solver,
+                        )
+                        raise
+                    next_phase = self._science_phase(next_pattern)
+                    if np.array_equal(next_phase, applied):
+                        stalled = True
+                        continue_feedback = False
+                        history[-1]["next_phase_changed"] = False
+                        termination_reason = (
+                            "the requested SLM probe/update produced no different "
+                            "phase; no unchanged-phase shot batch was taken"
+                        )
+                        if next_kind == "probe":
+                            forced_terminal_candidate = probe_baseline_candidate
+                    else:
+                        if next_kind == "probe_combined":
+                            spot_optimizer_state.clear()
+                            spot_optimizer_state.update(solve_state)
+                        history[-1]["next_phase_changed"] = True
+                        current_target = next_target
+                        current_pattern = next_pattern
+                        current_phase = next_phase
+                        candidate_kind = next_kind
+                        active_probe_requested = next_probe_requested
+                        active_probe_effective = next_probe_effective
+                        active_probe_site_factors = next_probe_site_factors
+                elif "next_phase_changed" not in history[-1]:
                     history[-1]["next_phase_changed"] = None
                 self._save_candidate_checkpoint(
                     context,
@@ -2369,7 +3125,11 @@ class SlmFeedbackTask:
                 )
                 if not continue_feedback:
                     break
-            selected = retained_valid or most_visible_observed
+            selected = (
+                forced_terminal_candidate
+                or retained_valid
+                or most_visible_observed
+            )
             if selected is None:
                 raise RuntimeError("qCMOS feedback produced no completed candidate")
             status = "stalled" if stalled else "completed"
@@ -2379,6 +3139,13 @@ class SlmFeedbackTask:
                 "selected_candidate": int(selected["candidate"]),
                 "shots_per_candidate": self.shots,
                 "candidates_measured": len(history),
+                "ordinary_updates_completed": ordinary_updates,
+                "probe_candidates_measured": sum(
+                    item["candidate_kind"] == "probe" for item in history
+                ),
+                "probe_sites": [
+                    int(value) for value in np.flatnonzero(probe_sites)
+                ],
             }
             context.seal_terminal()
             return self._finish_candidate(
@@ -2480,10 +3247,14 @@ class SlmFeedbackTask:
             raise
 
 __all__ = [
+    "CAMERA_MEAN_OUTPUT",
     "CANDIDATE_PHASE_OUTPUT",
     "OBSERVABLE_UNIFORMITY_HISTORY_OUTPUT",
     "READOUT_FRAME_COORDINATE",
+    "SITE_MAP_OVERLAY_OUTPUT",
+    "SITE_SIGNAL_HISTORY_OUTPUT",
     "SLM_PHASE_ARTIFACT_CONTRACT",
     "SlmFeedbackTask",
+    "TARGET_SHARE_HISTORY_OUTPUT",
     "UNIFORMITY_HISTORY_OUTPUT",
 ]

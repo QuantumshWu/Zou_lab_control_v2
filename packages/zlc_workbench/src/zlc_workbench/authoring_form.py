@@ -37,6 +37,7 @@ _FIELD_KINDS = {
     "text": "text",
     "bool": "bool",
     "choice": "choice",
+    "numeric_tuple": "text",
     #: A pair is two integers, edited as the text "y, x".  It stays one field
     #: because it is one fact -- a frame shape with a half-edited width is not a
     #: state worth being able to reach.
@@ -164,9 +165,10 @@ def _project_field(field: AuthoringField) -> FormFieldProps:
         choices=tuple(
             FormChoice(choice.label, choice.value) for choice in field.choices
         ),
-        description=(
-            "two integers as y, x" if str(field.value_type) == "pair" else ""
-        ),
+        description={
+            "pair": "two integers as y, x",
+            "numeric_tuple": "comma-separated finite numbers",
+        }.get(str(field.value_type), ""),
         path_mode="dir" if str(field.value_type) == "folder" else "file",
         enabled_when=field.enabled_when,
     )

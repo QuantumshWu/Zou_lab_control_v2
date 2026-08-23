@@ -28,6 +28,7 @@ from zlc_plot.fit import (
 )
 from zlc_plot.raster import RasterBuffer, RasterPlotHost
 from zlc_plot.rendering import MatplotlibRenderer
+from zlc_plot._axis_transform import canvas_physical_size
 from zlc_plot.selectors import NumericRange, SelectorState
 from zlc_plot.ui import ControlKind
 
@@ -946,3 +947,176 @@ def test_dense_curve_hands_display_resolution_polyline_to_the_artist() -> None:
         assert drawn.size < n / 10
     finally:
         host.close(timeout=30)
+
+
+def test_curve_series_inspector_is_stable_sticky_and_redraw_bounded(
+    monkeypatch, tmp_path,
+) -> None:
+    candidate = np.tile(np.arange(7.0), 2)
+    site = np.repeat((17.0, 23.0), 7)
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns({"candidate": candidate, "site": site}),
+        dtype=np.float64,
+        generation="series-inspector",
+    )
+    values = np.concatenate((1.0 + np.arange(7.0), 11.0 + np.arange(7.0)))[None]
+    session = PlotSession(
+        DatasetSnapshot(schema, values, 0),
+        CurvePlot(AxisRef.point("candidate"), group=AxisRef.point("site")),
+    )
+    try:
+        renderer = session._renderer
+        axes = renderer.primary_axes
+        width, height = canvas_physical_size(renderer.figure.canvas)
+
+        def pointer(action, x, y, *, button=None, key=None):
+            px, py = axes.transData.transform((x, y))
+            transform = next(item for item in session._raster_axes_snapshot()
+                             if item.role == "main")
+            return session._raster_pointer_event(
+                action, px / width, 1.0 - py / height,
+                button=button, key=key, axes_snapshot=transform,
+            )
+
+        lines = renderer._artists["curve"]
+        colors = {line.get_label(): line.get_color() for line in lines}
+        generation = renderer.raster_generation
+        hovered = pointer("move", 2.0, 3.0)
+        assert hovered.publish_front
+        assert renderer.raster_generation == generation + 1
+        assert sorted(line.get_alpha() for line in lines) == [0.18, 1.0]
+        annotation = next(item for item in renderer._series_annotations.values()
+                          if item.get_visible())
+        assert "site=17" in annotation.get_text()
+
+        generation = renderer.raster_generation
+        assert not pointer("move", 4.0, 5.0).publish_front
+        assert renderer.raster_generation == generation
+
+        pointer("press", 2.0, 3.0, button=1)
+        pointer("release", 2.0, 3.0, button=1)
+        assert session.selectors == ()
+        locked = renderer._series_locked[1]
+        pointer("move", 2.0, 13.0)
+        assert renderer._series_locked[1] == locked
+
+        pointer("press", 2.0, 3.0, button=1)
+        pointer("release", 2.0, 3.0, button=1)
+        assert renderer._series_locked is None and session.selectors == ()
+        pointer("move", 2.0, 3.0)
+        pointer("press", 2.0, 3.0, button=1)
+        pointer("release", 2.0, 3.0, button=1)
+        pointer("press", 2.0, 7.0, button=1)
+        pointer("release", 2.0, 7.0, button=1)
+        assert renderer._series_locked is None and session.selectors == ()
+
+        pointer("move", 2.0, 3.0)
+        pointer("press", 2.0, 3.0, button=1)
+        pointer("release", 2.0, 3.0, button=1)
+        pointer("key", 0.0, 0.0, key="escape")
+        assert renderer._series_locked is None
+
+        observed = []
+        pointer("move", 2.0, 3.0)
+        pointer("press", 2.0, 3.0, button=1)
+        pointer("release", 2.0, 3.0, button=1)
+        monkeypatch.setattr(
+            renderer.figure, "savefig",
+            lambda *_args, **_kwargs: observed.append(tuple(line.get_alpha() for line in lines)),
+        )
+        session.save(tmp_path / "neutral.png")
+        assert observed == [(0.8, 0.8)]
+        assert renderer._series_locked is not None
+
+        session.update_data(DatasetSnapshot(schema, values + 0.25, 1))
+        assert {line.get_label(): line.get_color() for line in lines} == colors
+    finally:
+        session.close()
+
+
+def test_curve_series_picker_never_uses_raw_dense_line_on_deep_zoom() -> None:
+    count = 200_000
+    x = np.linspace(0.0, 1.0, count)
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns({"x": x}),
+        dtype=np.float64,
+        generation="series-inspector-dense",
+    )
+    session = PlotSession(
+        DatasetSnapshot(schema, np.sin(x)[None], 0),
+        CurvePlot(AxisRef.point("x")),
+    )
+    try:
+        renderer = session._renderer
+        axes = renderer.primary_axes
+        line = renderer._series_lines[id(axes)][0][0]
+        renderer._set_xlim(axes, 0.5, 0.5005)
+        assert np.asarray(line.get_xdata()).size == count
+        px, py = axes.transData.transform((0.50025, np.sin(0.50025)))
+        start = time.perf_counter()
+        assert renderer._series_hit(axes, px, py, 10.0) is not None
+        assert time.perf_counter() - start < 0.25
+    finally:
+        session.close()
+
+
+def test_locked_curve_wheel_steps_canonical_series_without_zoom() -> None:
+    candidate = np.tile(np.arange(7.0), 2)
+    site = np.repeat((17.0, 23.0), 7)
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns({"candidate": candidate, "site": site}),
+        dtype=np.float64,
+        generation="series-wheel",
+    )
+    values = np.concatenate((1.0 + np.arange(7.0), 11.0 + np.arange(7.0)))[None]
+    session = PlotSession(
+        DatasetSnapshot(schema, values, 0),
+        CurvePlot(AxisRef.point("candidate"), group=AxisRef.point("site")),
+    )
+    try:
+        renderer = session._renderer
+        axes = renderer.primary_axes
+        width, height = canvas_physical_size(renderer.figure.canvas)
+
+        def event(action, x, y, *, button=None, step=0.0):
+            px, py = axes.transData.transform((x, y))
+            transform = next(item for item in session._raster_axes_snapshot()
+                             if item.role == "main")
+            return session._raster_pointer_event(
+                action, px / width, 1.0 - py / height,
+                button=button, step=step, axes_snapshot=transform,
+            )
+
+        event("move", 2.0, 13.0)
+        event("press", 2.0, 13.0, button=1)
+        event("release", 2.0, 13.0, button=1)
+        assert "site=23" in renderer._series_locked[2]
+        original_xlim = tuple(axes.get_xlim())
+
+        changed = event("scroll", 2.0, 13.0, step=1.0)
+        assert changed.publish_front
+        assert "site=17" in renderer._series_locked[2]
+        assert tuple(axes.get_xlim()) == original_xlim
+
+        generation = renderer.raster_generation
+        clamped = event("scroll", 2.0, 3.0, step=1.0)
+        assert not clamped.publish_front
+        assert renderer.raster_generation == generation
+        assert tuple(axes.get_xlim()) == original_xlim
+
+        event("scroll", 2.0, 3.0, step=-1.0)
+        assert "site=23" in renderer._series_locked[2]
+        assert tuple(axes.get_xlim()) == original_xlim
+        event("scroll", 2.0, 13.0, step=1.0)
+        assert "site=17" in renderer._series_locked[2]
+
+        event("press", 2.0, 3.0, button=1)
+        event("release", 2.0, 3.0, button=1)
+        assert renderer._series_locked is None
+        event("scroll", 2.0, 3.0, step=1.0)
+        assert tuple(axes.get_xlim()) != original_xlim
+    finally:
+        session.close()

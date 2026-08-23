@@ -572,7 +572,7 @@ def _qt5_plot_widget_class() -> type[Any]:
             if enabled:
                 self.setFocusPolicy(QtCore.Qt.StrongFocus)
             else:
-                self._cancel_active_interaction()
+                self._cancel_active_interaction(force=True)
                 self.clearFocus()
                 self.setFocusPolicy(QtCore.Qt.NoFocus)
 
@@ -1073,6 +1073,12 @@ def _qt5_plot_widget_class() -> type[Any]:
                 self._gesture_kind = candidate.kind
             if state.publish_front and operation_front is not None:
                 self._install_front(operation_front)
+            if (
+                action in {"move", "leave"}
+                and self._pointer_button is None
+                and self._gesture_front is None
+            ):
+                return
             if candidate is None or role is None:
                 if action in {"release", "cancel", "key"} or not active_pan:
                     self._clear_interaction()
@@ -1153,7 +1159,7 @@ def _qt5_plot_widget_class() -> type[Any]:
 
         def mouseMoveEvent(self, event: object) -> None:
             button = self._pointer_button
-            if self._closed or button is None:
+            if self._closed:
                 super().mouseMoveEvent(event)
                 return
             self._submit_pointer(
@@ -1162,6 +1168,11 @@ def _qt5_plot_widget_class() -> type[Any]:
                 button=button,
             )
             event.accept()
+
+        def leaveEvent(self, event: object) -> None:
+            if not self._closed and self._pointer_button is None:
+                self._submit_pointer("leave")
+            super().leaveEvent(event)
 
         def mouseReleaseEvent(self, event: object) -> None:
             button = self._button_number(event.button())
@@ -1216,14 +1227,14 @@ def _qt5_plot_widget_class() -> type[Any]:
             self._pointer_button = None
             self.update()
 
-        def _cancel_active_interaction(self) -> None:
+        def _cancel_active_interaction(self, *, force: bool = False) -> None:
             active = (
                 self._pointer_button is not None
                 or self._gesture_front is not None
                 or self._candidate is not None
             )
             self._clear_interaction()
-            if active:
+            if active or force:
                 self._track(
                     self._host._pointer_event(
                         "cancel",

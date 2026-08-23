@@ -62,6 +62,7 @@ from .outputs import (
     CAPTURE_PREVIEW_DECLARATION,
     capture_preview_output,
     cycle_snapshot,
+    site_map_image_overlay,
     _image_axis_specs,
     _snapshot,
 )
@@ -656,7 +657,6 @@ def _save_report_images(
         HistogramPlot,
         ImageFrame,
         ImagePlot,
-        ImagePointOverlay,
         PlotLabels,
         PointStatus,
         save_figure_artifact,
@@ -729,20 +729,10 @@ def _save_report_images(
         generation=generation,
         revision=revision,
     )
-    # The site map itself stays in the crop's own indices -- that is what the
-    # readout slices boxes out of -- so the points are moved onto the picture
-    # here, at the one place both are published together.
-    overlay = ImagePointOverlay(
-        revision,
-        tuple(
-            (
-                float(origin_yx[1] + binning_yx[1] * float(centre[0])),
-                float(origin_yx[0] + binning_yx[0] * float(centre[1])),
-            )
-            for centre in site_map.centers_xy
-        ),
-        point_ids=site_map.site_ids,
-        labels=tuple(str(index + 1) for index in range(site_map.n_sites)),
+    overlay = site_map_image_overlay(
+        site_map_snapshot,
+        site_map,
+        revision=revision,
         static_statuses=tuple(
             PointStatus.UNKNOWN if valid else PointStatus.INVALID
             for valid in site_map.valid_sites

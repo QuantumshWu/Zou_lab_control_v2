@@ -35,6 +35,7 @@ from zlc_atom.nodes.calibration import (
     ReadoutModelKind,
     SiteMap,
     TrapCalibration,
+    site_map_image_overlay,
 )
 from zlc_atom.nodes.camera_measurement.measurement import (
     CAMERA_FRAMES_OUTPUT,
@@ -138,11 +139,24 @@ def test_site_geometry_uses_sensor_axes_after_nonzero_roi_and_binning() -> None:
         working_point=point,
         value_unit=point.count_unit,
     )
+    site_map = SiteMap(
+        ("site-1",),
+        np.asarray(((1.5, 2.0),)),
+        np.asarray((True,)),
+        np.asarray((1.0,)),
+    )
+    overlay = site_map_image_overlay(frame, site_map, revision=3)
+    assert overlay.revision == 3
+    assert overlay.point_ids == ("site-1",)
+    assert overlay.labels == ("1",)
+    assert overlay.static_statuses is None
+    assert overlay.coordinates.tolist() == [[24.5, 14.0]]
+
     geometry = image_point_overlay_geometry(
         frame,
-        np.asarray(((1.5, 2.0),)),
-        ("site-1",),
-        status_axis=AxisSpec(AxisId("site"), "site", SITE, 1, (1,)),
+        site_map.centers_xy,
+        site_map.site_ids,
+        status_axis=site_map.site_axis,
         coordinates_are_indices=True,
     )
     assert geometry["coordinate_frame"] == "sensor_pixel_xy"
