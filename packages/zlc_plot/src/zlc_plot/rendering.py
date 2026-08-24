@@ -802,6 +802,10 @@ class MatplotlibRenderer:
             int, tuple[Any, Any, np.ndarray, np.ndarray, bool]
         ] = {}
         self._series_lines: dict[int, tuple[tuple[Any, object, str], ...]] = {}
+        #: Error-bar artists BY SERIES, parallel to _series_lines: the bars
+        #: are part of the series, so focus dims and raises them with their
+        #: line instead of leaving them behind at full strength.
+        self._series_bars: dict[int, dict[object, tuple[Any, ...]]] = {}
         self._series_indices: dict[int, dict[object, int]] = {}
         self._series_hover: tuple[int, object, str, float, float] | None = None
         self._series_locked: tuple[int, object, str, float, float] | None = None
@@ -1032,6 +1036,7 @@ class MatplotlibRenderer:
         self._artists.clear()
         self._line_sources.clear()
         self._series_lines.clear(); self._series_indices.clear(); self._series_annotations.clear()
+        self._series_bars.clear()
         self._series_hover = self._series_locked = self._series_press = None
         self._boundary_chrome_cache.clear()
         self._boundary_chrome_signature = None
@@ -2045,15 +2050,14 @@ class MatplotlibRenderer:
         extremes = np.array([np.inf, -np.inf, np.inf, -np.inf])
         series_lines: list[tuple[Any, object, str]] = []
         cycle = self.style.palette.line_cycle
-        band_key = f"{key}:uncertainty"
-        bands: list[Any] = self._artists.setdefault(band_key, [])
-        # A PolyCollection has no data-mutation API worth trusting across
-        # revisions; the band is rebuilt per update.  Uncertainty panels are
-        # scan-point sized, never the million-point envelope path.
-        for artist in bands:
-            if artist is not None:
+        # Bars are rebuilt per update (uncertainty panels are scan-point
+        # sized, never the million-point envelope path) and kept BY SERIES,
+        # so focus can move them with their line.
+        stale_bars = self._series_bars.pop(id(axes), {})
+        for artists in stale_bars.values():
+            for artist in artists:
                 artist.remove()
-        bands.clear()
+        bars_by_series: dict[object, tuple[Any, ...]] = {}
         for index, item in enumerate(series):
             colour = cycle[_series_slot(item.identity, len(cycle))]
             # NaNs preserve invalid runs as gaps instead of joining neighbours.
@@ -2102,7 +2106,7 @@ class MatplotlibRenderer:
                         zorder=lines[index].get_zorder() - 0.1,
                     )
                     _marker, caplines, barlinecols = container.lines
-                    bands.extend((*caplines, *barlinecols))
+                    bars_by_series[item.identity] = (*caplines, *barlinecols)
                     # Keep the artists on the axes; drop only the
                     # container bookkeeping so revisions do not accumulate.
                     if container in axes.containers:
@@ -2133,6 +2137,8 @@ class MatplotlibRenderer:
                     ),
                 )
         self._series_lines[id(axes)] = tuple(series_lines)
+        if bars_by_series:
+            self._series_bars[id(axes)] = bars_by_series
         self._series_indices[id(axes)] = {
             identity: index for index, (_line, identity, _label) in enumerate(series_lines)
         }
@@ -2266,7 +2272,9 @@ class MatplotlibRenderer:
         active = locked or self._series_hover
         identity = None if active is None else active[1]
         focus_line = None
+        bar_alpha = self.style.render.uncertainty_bar_alpha
         for axis_id, entries in self._series_lines.items():
+            axis_bars = self._series_bars.get(axis_id, {})
             for line, series_id, _label in entries:
                 focused = identity is not None and series_id == identity
                 if locked is not None:
@@ -2287,6 +2295,31 @@ class MatplotlibRenderer:
                     line.set_linewidth(self.style.artists.curve.linewidth)
                     line.set_alpha(self.style.artists.curve.alpha)
                     line.set_zorder(2.0)
+                # The bars are part of the series: alpha, weight and depth
+                # all move with their line -- dimming to near-nothing behind
+                # a locked focus, thickening with a focused line, and always
+                # sitting just under it.
+                bar_linewidth = self.style.render.uncertainty_bar_linewidth
+                if locked is not None:
+                    series_bar_alpha = bar_alpha if focused else 0.06
+                    series_bar_width = bar_linewidth * (1.6 if focused else 1.0)
+                elif active is not None:
+                    series_bar_alpha = (
+                        min(1.0, bar_alpha * 1.4) if focused else bar_alpha
+                    )
+                    series_bar_width = bar_linewidth * (1.3 if focused else 1.0)
+                else:
+                    series_bar_alpha = bar_alpha
+                    series_bar_width = bar_linewidth
+                for artist in axis_bars.get(series_id, ()):
+                    artist.set_alpha(series_bar_alpha)
+                    artist.set_zorder(line.get_zorder() - 0.1)
+                    if hasattr(artist, "set_markeredgewidth"):
+                        # A capline is a marker-only Line2D: its visible
+                        # weight is the marker edge.
+                        artist.set_markeredgewidth(series_bar_width)
+                    else:
+                        artist.set_linewidth(series_bar_width)
                 if line.get_marker() == "_":
                     line.set_markeredgewidth(line.get_linewidth())
                 if focused and active is not None and axis_id == active[0]:
