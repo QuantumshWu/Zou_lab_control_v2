@@ -158,6 +158,7 @@ _CONFIGURATION_STATE_NAMES = (
     "_spec", "_parameter_schema", "_projection", "_image_overlay",
     "_viewport", "_focused_facet_index", "_facet_focus_index", "_accepted_fit",
     "_classifier_results", "_classifier_overlays", "_classifier_thresholds",
+    "_classifier_gaussian_components",
     "_history", "_layout_revision", "_size", "_fit_context_generation",
     "_fit_request_generation", "_fit_batch_revision", "_fit_cancel",
     "_live_fit_cancel", "_live_fit_request", "_live_fit_future",
@@ -486,6 +487,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         self._classifier_results: tuple[FitResult | None, ...] = ()
         self._classifier_overlays = ()
         self._classifier_thresholds: tuple[float | None, ...] = ()
+        self._classifier_gaussian_components: tuple[
+            Mapping[str, float] | None, ...
+        ] = ()
         self._analysis_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix=_ANALYSIS_THREAD_PREFIX,
@@ -1343,6 +1347,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._classifier_results,
                 self._classifier_overlays,
                 self._classifier_thresholds,
+                self._classifier_gaussian_components,
                 self._focused_facet_index,
                 self._facet_focus_index,
                 self._viewport,
@@ -1383,6 +1388,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     self._classifier_results,
                     self._classifier_overlays,
                     self._classifier_thresholds,
+                    self._classifier_gaussian_components,
                     self._focused_facet_index,
                     self._facet_focus_index,
                     self._viewport,
@@ -1430,6 +1436,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._classifier_results = presentation.previous_classifier_results
                 self._classifier_overlays = presentation.previous_classifier_overlays
                 self._classifier_thresholds = presentation.previous_classifier_thresholds
+                self._classifier_gaussian_components = (
+                    presentation.previous_classifier_gaussian_components
+                )
                 self._focused_facet_index = (
                     presentation.previous_focused_facet_index
                 )
@@ -2085,6 +2094,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     self._classifier_results,
                     self._classifier_overlays,
                     self._classifier_thresholds,
+                    self._classifier_gaussian_components,
                     self._fit_context_generation,
                     self._layout_revision,
                     self._size,
@@ -2185,6 +2195,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         self._classifier_results,
                         self._classifier_overlays,
                         self._classifier_thresholds,
+                        self._classifier_gaussian_components,
                         self._fit_context_generation,
                         self._layout_revision,
                         self._size,
@@ -2214,6 +2225,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         self._classifier_results,
                         self._classifier_overlays,
                         self._classifier_thresholds,
+                        self._classifier_gaussian_components,
                         self._fit_context_generation,
                         self._layout_revision,
                         self._size,
@@ -2398,6 +2410,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     self._classifier_results,
                     self._classifier_overlays,
                     self._classifier_thresholds,
+                    self._classifier_gaussian_components,
                     self._history,
                     self._layout_revision,
                     self._size,
@@ -2457,6 +2470,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         self._classifier_results,
                         self._classifier_overlays,
                         self._classifier_thresholds,
+                        self._classifier_gaussian_components,
                         self._history,
                         self._layout_revision,
                         self._size,

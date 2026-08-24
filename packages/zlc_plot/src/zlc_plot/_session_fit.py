@@ -1124,6 +1124,105 @@ class FitSessionMixin:
             and self.display_state.values.get("threshold_classifier", False)
         )
 
+    def _authored_classifier_result(
+        self,
+        model: FitModelSpec,
+        selection: FitSelection,
+        components: Mapping[str, float],
+    ) -> FitResult:
+        """Present a caller-owned Gaussian pair without independently refitting it."""
+
+        left_mean = float(components["left_mean"])
+        right_mean = float(components["right_mean"])
+        left_sigma = float(components["left_sigma"])
+        right_sigma = float(components["right_sigma"])
+        left_weight = float(components["left_weight"])
+        right_weight = float(components["right_weight"])
+        x = np.asarray(selection.coordinates[0], dtype=float).reshape(-1)
+        observed = np.asarray(selection.observations, dtype=float).reshape(-1)
+        base = (
+            left_weight
+            / left_sigma
+            * np.exp(-0.5 * ((x - left_mean) / left_sigma) ** 2)
+            + right_weight
+            / right_sigma
+            * np.exp(-0.5 * ((x - right_mean) / right_sigma) ** 2)
+        )
+        denominator = float(np.dot(base, base))
+        scale = (
+            max(0.0, float(np.dot(base, observed)) / denominator)
+            if denominator > 0.0
+            else 0.0
+        )
+        values = {
+            "center": 0.5 * (left_mean + right_mean),
+            "center_splitting": right_mean - left_mean,
+            "left_amplitude": scale * left_weight / left_sigma,
+            "left_sigma": left_sigma,
+            "right_amplitude": scale * right_weight / right_sigma,
+            "right_sigma": right_sigma,
+        }
+        parameters = np.asarray(
+            [values[name] for name in model.parameter_names], dtype=float
+        )
+        fitted = model.evaluate(selection.coordinates, parameters).reshape(-1)
+        residuals = observed - fitted
+        count = len(parameters)
+        result = FitResult(
+            model=model,
+            parameter_values=parameters,
+            standard_errors=np.full(count, np.nan, dtype=float),
+            covariance=np.full((count, count), np.nan, dtype=float),
+            fitted_values=fitted,
+            residuals=residuals,
+            selected_indices=selection.selected_indices,
+            source_revision=selection.data_revision,
+            success=True,
+            message="authored Gaussian components",
+            reduced_chi_square=float(
+                np.dot(residuals, residuals) / max(observed.size - count, 1)
+            ),
+            covariance_valid=False,
+        )
+        return result.with_parameter_units(
+            self._projected._fit_parameter_units(model)
+        )
+
+    def _apply_authored_classifier_components(
+        self,
+        model: FitModelSpec,
+        results: Sequence[FitResult | None],
+        overlays: Sequence[FitOverlay],
+    ) -> tuple[tuple[FitResult | None, ...], tuple[FitOverlay, ...]]:
+        components = self._classifier_gaussian_components
+        if len(components) != len(results):
+            components = (None,) * len(results)
+            self._classifier_gaussian_components = components
+        selected_results = list(results)
+        selected_overlays = list(overlays)
+        facet_grid = isinstance(self._spec, FacetGridPlot)
+        for index, authored in enumerate(components):
+            if authored is None:
+                continue
+            if not authored:
+                selected_results[index] = None
+                selected_overlays[index] = FitOverlay(
+                    facet_index=index if facet_grid else None
+                )
+                continue
+            selection = self._projected.fit_selection(
+                model,
+                facet_index=index if facet_grid else None,
+            )
+            result = self._authored_classifier_result(
+                model, selection, authored
+            )
+            selected_results[index] = result
+            selected_overlays[index] = self._projected._make_fit_overlay(
+                result, selection
+            )
+        return tuple(selected_results), tuple(selected_overlays)
+
     def _refresh_threshold_classifier(self) -> None:
         """Solve the Distribution classifier without touching accepted fit state.
 
@@ -1137,6 +1236,7 @@ class FitSessionMixin:
             self._classifier_results = ()
             self._classifier_overlays = ()
             self._classifier_thresholds = ()
+            self._classifier_gaussian_components = ()
             try:
                 self._selector_controller.remove(SelectorKind.THRESHOLD)
             except KeyError:
@@ -1179,8 +1279,11 @@ class FitSessionMixin:
             results = (result,)
             overlays = (projection._make_fit_overlay(result, selection),)
         self._remember_classifier_warm_starts(model, results)
-        self._classifier_results = tuple(results)
-        self._classifier_overlays = tuple(overlays)
+        results, overlays = self._apply_authored_classifier_components(
+            model, results, overlays
+        )
+        self._classifier_results = results
+        self._classifier_overlays = overlays
         # ``_classifier_thresholds`` holds what somebody CHOSE, and nothing
         # else; the fit's own optimum is derived from the results above
         # whenever it is needed.  They shared this one slot, so every new
@@ -1340,6 +1443,9 @@ class FitSessionMixin:
                 )
             expected[identity] = index
         normalized: list[float | None] = [None] * len(self._classifier_results)
+        components: list[Mapping[str, float] | None] = [
+            None
+        ] * len(self._classifier_results)
         for target in selected:
             identity = _classifier_threshold_key(target)
             index = expected.get(identity)
@@ -1348,7 +1454,36 @@ class FitSessionMixin:
                     "classifier threshold target does not match a current distribution"
                 )
             normalized[index] = float(target["value"])
+            if "gaussian_components" in target:
+                gaussian = target["gaussian_components"]
+                components[index] = (
+                    MappingProxyType({})
+                    if gaussian is None
+                    else MappingProxyType(dict(gaussian))
+                )
+        previous_components = self._classifier_gaussian_components
         self._classifier_thresholds = tuple(normalized)
+        self._classifier_gaussian_components = tuple(components)
+        if any(
+            current is None and previous is not None
+            for current, previous in zip(
+                self._classifier_gaussian_components,
+                previous_components
+                if len(previous_components) == len(components)
+                else (None,) * len(components),
+                strict=True,
+            )
+        ):
+            self._refresh_threshold_classifier()
+        else:
+            model = self._resolve_fit_model("bimodal_gaussian")
+            results, overlays = self._apply_authored_classifier_components(
+                model,
+                self._classifier_results,
+                self._classifier_overlays,
+            )
+            self._classifier_results = results
+            self._classifier_overlays = overlays
         try:
             self._selector_controller.remove(SelectorKind.THRESHOLD)
         except KeyError:
@@ -1356,15 +1491,25 @@ class FitSessionMixin:
 
     def _classifier_threshold_targets_state(self) -> tuple[Mapping[str, object], ...]:
         facet_grid = isinstance(self._spec, FacetGridPlot)
-        return normalize_classifier_threshold_targets(
-            tuple(
+        targets: list[Mapping[str, object]] = []
+        for index, value in enumerate(self._classifier_thresholds):
+            if value is None:
+                continue
+            target = dict(
                 self._classifier_threshold_target_for_index(
                     index if facet_grid else None,
                     value,
                 )
-                for index, value in enumerate(self._classifier_thresholds)
-                if value is not None
             )
+            if index < len(self._classifier_gaussian_components):
+                gaussian = self._classifier_gaussian_components[index]
+                if gaussian is not None:
+                    target["gaussian_components"] = (
+                        None if not gaussian else dict(gaussian)
+                    )
+            targets.append(target)
+        return normalize_classifier_threshold_targets(
+            tuple(targets)
         )
 
     def _schedule_fit_completion(

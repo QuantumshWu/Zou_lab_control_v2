@@ -39,12 +39,12 @@ MANIFEST = FIXTURES / "main_readout_oracle.json"
 
 MODEL_NAMES = ("box", "psf", "uniform_psf")
 
-#: Every model must agree with the occupancy that produced the frames at least
-#: this often, and no site may fall below the second floor.  Measured on this
-#: run: 0.919 / 0.925 / 0.928 overall, and 0.833 for the worst site of any
-#: model.  The floors sit below those because a readout is allowed to improve.
-AGREEMENT_FLOOR = 0.90
-SITE_FIDELITY_FLOOR = 0.80
+#: Gaussian calibration is deliberately blind to the true labels.  On this
+#: short, overlapping 60-shot run the unsupervised population fit measures
+#: 0.869 / 0.908 / 0.908 agreement and 0.780 at the worst site; the labels are
+#: used below only to evaluate those answers.
+AGREEMENT_FLOOR = 0.85
+SITE_FIDELITY_FLOOR = 0.75
 
 
 def _run() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -130,27 +130,10 @@ def test_every_model_recovers_the_occupancy_that_produced_the_frames() -> None:
         assert worst >= SITE_FIDELITY_FLOOR, (name, worst)
 
 
-def test_a_threshold_separates_the_two_populations_it_was_fitted_to() -> None:
-    """A site's threshold lies between its dark and bright means, and sorts."""
+def test_a_threshold_is_the_weighted_crossing_of_the_unlabelled_fit() -> None:
+    """Gaussian calibration fits values only; labels evaluate its result."""
 
-    result, truth = _calibration()
-    signals = np.asarray(result.report["reference_label_signals"], dtype=float)
-    for site in range(truth.shape[1]):
-        fit = fit_bimodal(signals[:, :, site].reshape(-1))
-        assert fit.ok and fit.bright_above
-        assert fit.dark_mean < fit.threshold < fit.bright_mean
-        assert fit.dark_sigma > 0.0 and fit.bright_sigma > 0.0
-        assert 0.0 <= fit.fidelity <= 1.0
-        dark_log_density = (
-            -np.log(fit.dark_sigma)
-            - 0.5 * ((fit.threshold - fit.dark_mean) / fit.dark_sigma) ** 2
-        )
-        bright_log_density = (
-            -np.log(fit.bright_sigma)
-            - 0.5 * ((fit.threshold - fit.bright_mean) / fit.bright_sigma) ** 2
-        )
-        assert dark_log_density == pytest.approx(bright_log_density, abs=1e-10)
-
+    result, _truth = _calibration()
     for model in result.calibration.models:
         report = result.report["models"][model.kind.value]
         assert model.threshold_method == "gaussian"
@@ -158,6 +141,76 @@ def test_a_threshold_separates_the_two_populations_it_was_fitted_to() -> None:
         np.testing.assert_allclose(
             model.thresholds, report["gaussian_thresholds"]
         )
+        for site, threshold in enumerate(model.thresholds):
+            dark_mean = float(report["gaussian_dark_mean"][site])
+            dark_sigma = float(report["gaussian_dark_sigma"][site])
+            dark_weight = float(report["gaussian_dark_weight"][site])
+            bright_mean = float(report["gaussian_bright_mean"][site])
+            bright_sigma = float(report["gaussian_bright_sigma"][site])
+            bright_weight = float(report["gaussian_bright_weight"][site])
+            assert dark_mean < threshold < bright_mean
+            dark_log_curve = (
+                np.log(dark_weight)
+                - np.log(dark_sigma)
+                - 0.5 * ((threshold - dark_mean) / dark_sigma) ** 2
+            )
+            bright_log_curve = (
+                np.log(bright_weight)
+                - np.log(bright_sigma)
+                - 0.5 * ((threshold - bright_mean) / bright_sigma) ** 2
+            )
+            assert dark_log_curve == pytest.approx(bright_log_curve, abs=1e-10)
+
+    # A visibly narrower bright population is allowed, and two remote tail
+    # samples do not make the fitter replace it with one broad component.
+    rng = np.random.default_rng(91)
+    narrow_bright = fit_bimodal(
+        np.concatenate(
+            (
+                rng.normal(0.0, 1.0, 100),
+                rng.normal(5.0, 0.35, 100),
+                [-4.5, 8.5],
+            )
+        )
+    )
+    assert narrow_bright.ok
+    assert narrow_bright.bright_sigma < narrow_bright.dark_sigma
+    assert narrow_bright.dark_mean == pytest.approx(0.0, abs=0.4)
+    assert narrow_bright.bright_mean == pytest.approx(5.0, abs=0.2)
+
+    # Changing truth labels cannot move a Gaussian model or threshold.  It can
+    # only change the empirical evaluation of that already chosen threshold.
+    samples = np.concatenate(
+        (rng.normal(0.0, 0.5, 80), rng.normal(4.0, 0.8, 120))
+    )[:, np.newaxis]
+    labels_a = np.arange(samples.shape[0])[:, np.newaxis] >= 80
+    labels_b = ~labels_a
+    fitted = []
+    for labels in (labels_a, labels_b):
+        fitted.append(
+            _fit_readout_model(
+                kind=ReadoutModelKind.BOX,
+                site_map=SiteMap(
+                    ("site_0000",), [[0.0, 0.0]], [True], [1.0]
+                ),
+                short_signals=samples,
+                labels_occupied=labels,
+                labels_valid=np.ones(samples.shape, dtype=bool),
+                threshold_method="gaussian",
+                model_parameters={"integration_half_width": 0, "reducer": "mean"},
+            )
+        )
+    for field in (
+        "gaussian_thresholds",
+        "gaussian_dark_mean",
+        "gaussian_dark_sigma",
+        "gaussian_dark_weight",
+        "gaussian_bright_mean",
+        "gaussian_bright_sigma",
+        "gaussian_bright_weight",
+    ):
+        np.testing.assert_allclose(fitted[0][1][field], fitted[1][1][field])
+    assert fitted[0][1]["site_fidelity"][0] != fitted[1][1]["site_fidelity"][0]
 
     empirical, _truth = _calibration("empirical")
     for model in empirical.calibration.models:

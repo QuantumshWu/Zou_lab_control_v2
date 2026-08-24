@@ -421,6 +421,38 @@ def test_nothing_is_written_unless_the_operator_asks(tmp_path: Path) -> None:
         [item["value"] for item in box_recipe["classifier_thresholds"]],
         box_model.thresholds[box_model.usable_sites],
     )
+    box_report = result.report["models"]["box"]
+    for target, site in zip(
+        box_recipe["classifier_thresholds"],
+        np.flatnonzero(box_model.usable_sites),
+        strict=True,
+    ):
+        expected = np.asarray(
+            [
+                box_report["gaussian_dark_mean"][site],
+                box_report["gaussian_dark_sigma"][site],
+                box_report["gaussian_dark_weight"][site],
+                box_report["gaussian_bright_mean"][site],
+                box_report["gaussian_bright_sigma"][site],
+                box_report["gaussian_bright_weight"][site],
+            ],
+            dtype=float,
+        )
+        components = target["gaussian_components"]
+        if np.isfinite(expected).all():
+            np.testing.assert_allclose(
+                [
+                    components["left_mean"],
+                    components["left_sigma"],
+                    components["left_weight"],
+                    components["right_mean"],
+                    components["right_sigma"],
+                    components["right_weight"],
+                ],
+                expected,
+            )
+        else:
+            assert components is None
 
     actual_info, actual_arrays = read_archive(figures / "actual_fidelity.npz")
     actual_figure, _actual_recipe = read_figure_plot(

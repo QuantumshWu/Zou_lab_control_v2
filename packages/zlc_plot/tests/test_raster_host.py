@@ -505,11 +505,12 @@ def test_threshold_classifier_is_independent_and_covers_every_facet() -> None:
             display=False,
         ).result(timeout=10).value.value == moved.value.value
 
+        weighted_crossing = 1.0 + 0.5 * float(np.log(0.7 / 0.3))
         configured = host.configure(
             parameters={"threshold_classifier": True},
             classifier_thresholds=(
                 {
-                    "value": -0.25,
+                    "value": weighted_crossing,
                     "scope": (
                         {
                             "domain": "point_coordinate",
@@ -518,6 +519,14 @@ def test_threshold_classifier_is_independent_and_covers_every_facet() -> None:
                         },
                     ),
                     "repeat_index": None,
+                    "gaussian_components": {
+                        "left_mean": 0.0,
+                        "left_sigma": 1.0,
+                        "left_weight": 0.7,
+                        "right_mean": 2.0,
+                        "right_sigma": 1.0,
+                        "right_weight": 0.3,
+                    },
                 },
                 {
                     "value": 0.75,
@@ -529,6 +538,7 @@ def test_threshold_classifier_is_independent_and_covers_every_facet() -> None:
                         },
                     ),
                     "repeat_index": None,
+                    "gaussian_components": None,
                 },
             ),
         ).result(timeout=10)
@@ -536,7 +546,24 @@ def test_threshold_classifier_is_independent_and_covers_every_facet() -> None:
         assert host.selector_state(
             SelectorKind.THRESHOLD,
             display=False,
-        ).result(timeout=10).value.value == -0.25
+        ).result(timeout=10).value.value == weighted_crossing
+        session = host._require_session()
+        first = session._classifier_results[0]
+        assert first is not None
+        values = first.parameters
+        left_area = values["left_amplitude"] * values["left_sigma"]
+        right_area = values["right_amplitude"] * values["right_sigma"]
+        assert left_area / (left_area + right_area) == pytest.approx(0.7)
+        left_curve = values["left_amplitude"] * np.exp(
+            -0.5
+            * ((weighted_crossing - 0.0) / values["left_sigma"]) ** 2
+        )
+        right_curve = values["right_amplitude"] * np.exp(
+            -0.5
+            * ((weighted_crossing - 2.0) / values["right_sigma"]) ** 2
+        )
+        assert left_curve == pytest.approx(right_curve)
+        assert session._classifier_results[1] is None
     finally:
         host.close(timeout=10)
 

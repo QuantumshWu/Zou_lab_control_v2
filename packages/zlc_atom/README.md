@@ -139,13 +139,17 @@ cannot move a threshold by index. Camera sample archives stream through the
 single public `zlc_data.write_figure_archive()` encoder into an atomic file;
 they do not materialize whole-archive bytes or import Workbench PanelState.
 
-Threshold authoring defaults to Gaussian: all labelled dark/bright shots
-define two Gaussian components and their equal-prior crossing is solved
-analytically; only a site whose Gaussian fit fails falls back to the empirical
-balanced-fidelity cut. Explicit Empirical mode uses that cut for every site.
-Histogram lines always show the final threshold stored in Calibration. Two
-separate Curve artifacts report actual fidelity on all Calibration data at that
-final threshold and theoretical Gaussian fidelity at the analytic Gaussian
+Threshold authoring defaults to Gaussian. Each site fits one unlabelled
+two-Gaussian mixture to every finite short-shot value; the low/high components
+are ordered by mean, and the analytic threshold is the relevant intersection
+of their population-weighted curves. Reference truth labels do not enter that
+fit, its weights, or its threshold. An invalid fit/crossing falls back to the
+empirical cut that maximises overall correctness over every valid labelled
+sample; explicit Empirical mode uses that cut for every site. Histogram lines
+always show the final threshold stored in Calibration, while Gaussian curves
+reuse the exact Calibration components rather than refitting the bins. Two
+separate Curve artifacts report overall actual fidelity at the final threshold
+and fitted-population-weighted theoretical Gaussian fidelity at the analytic
 threshold.
 
 The optional detected-site review is a Calibration Task boundary, not part of
