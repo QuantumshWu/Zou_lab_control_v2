@@ -1,0 +1,159 @@
+{
+  "results": [
+    {
+      "case": "curve_2M",
+      "points": 2040000,
+      "first_render_ms": 242.0,
+      "update_data": {
+        "n": 8,
+        "median_ms": 10.53,
+        "p90_ms": 10.9,
+        "best_ms": 10.24
+      }
+    },
+    {
+      "case": "curve_20M",
+      "points": 20400000,
+      "first_render_ms": 158.8,
+      "update_data": {
+        "n": 8,
+        "median_ms": 68.42,
+        "p90_ms": 73.79,
+        "best_ms": 64.68
+      }
+    },
+    {
+      "case": "hist_2M",
+      "points": 2040000,
+      "first_render_ms": 127.7,
+      "update_data": {
+        "n": 8,
+        "median_ms": 47.12,
+        "p90_ms": 53.44,
+        "best_ms": 42.96
+      }
+    },
+    {
+      "case": "image_heatmap_2M",
+      "points": 2040000,
+      "first_render_ms": 138.7,
+      "update_data": {
+        "n": 8,
+        "median_ms": 24.34,
+        "p90_ms": 28.97,
+        "best_ms": 21.67
+      }
+    },
+    {
+      "case": "image_camera_4M",
+      "points": 4194304,
+      "first_render_ms": 210.6,
+      "update_data": {
+        "n": 8,
+        "median_ms": 30.85,
+        "p90_ms": 31.95,
+        "best_ms": 29.48
+      }
+    },
+    {
+      "case": "rolling_2M",
+      "points": 2040000,
+      "first_render_ms": 306.9,
+      "update_data": {
+        "n": 8,
+        "median_ms": 33.74,
+        "p90_ms": 34.97,
+        "best_ms": 29.75
+      }
+    },
+    {
+      "case": "facet_frame3_2M",
+      "points": 2040000,
+      "first_render_ms": 131.6,
+      "update_data": {
+        "n": 8,
+        "median_ms": 15.05,
+        "p90_ms": 17.4,
+        "best_ms": 13.88
+      }
+    },
+    {
+      "case": "facet_scan10_2M",
+      "points": 2040000,
+      "first_render_ms": 344.4,
+      "update_data": {
+        "n": 8,
+        "median_ms": 21.72,
+        "p90_ms": 22.71,
+        "best_ms": 19.46
+      }
+    },
+    {
+      "case": "facet64_curve_2M",
+      "points": 2048000,
+      "first_render_ms": 826.5,
+      "update_data": {
+        "n": 8,
+        "median_ms": 75.12,
+        "p90_ms": 82.59,
+        "best_ms": 65.74
+      }
+    },
+    {
+      "case": "facet10_image_2M",
+      "points": 2040000,
+      "first_render_ms": 395.1,
+      "update_data": {
+        "n": 8,
+        "median_ms": 43.93,
+        "p90_ms": 48.65,
+        "best_ms": 38.48
+      }
+    },
+    {
+      "case": "facet64_image_2M",
+      "points": 2048000,
+      "first_render_ms": 1464.2,
+      "update_data": {
+        "n": 8,
+        "median_ms": 516.93,
+        "p90_ms": 528.2,
+        "best_ms": 485.46
+      }
+    },
+    {
+      "case": "fit_curve_2M",
+      "points": 2040000,
+      "first_render_ms": 66.7,
+      "update_data": {
+        "n": 8,
+        "median_ms": 10.33,
+        "p90_ms": 12.74,
+        "best_ms": 8.85
+      },
+      "fit_solve": {
+        "n": 4,
+        "median_ms": 4.44,
+        "p90_ms": 4.5,
+        "best_ms": 4.34
+      }
+    },
+    {
+      "case": "fit_facet10_2M",
+      "points": 2040000,
+      "first_render_ms": 310.2,
+      "update_data": {
+        "n": 8,
+        "median_ms": 21.95,
+        "p90_ms": 24.74,
+        "best_ms": 20.87
+      },
+      "fit_solve": {
+        "n": 4,
+        "median_ms": 115.06,
+        "p90_ms": 137.97,
+        "best_ms": 66.85
+      }
+    }
+  ]
+}

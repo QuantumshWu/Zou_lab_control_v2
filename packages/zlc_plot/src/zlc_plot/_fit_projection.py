@@ -35,6 +35,7 @@ from .data_view import (
     QuantityArray,
     RollingSample,
     aligned_histogram_edges,
+    _finite_probe,
     _sem_from_moments,
 )
 from .fit import (
@@ -175,6 +176,18 @@ def _moments_of(values: np.ndarray | None) -> tuple[float, float, float] | None:
     if values is None:
         return None
     flat = np.asarray(values, dtype=float).reshape(-1)
+    if not flat.size:
+        return (0.0, 0.0, 0.0)
+    # Sum first: a finite total proves the pool holds no NaN/inf, and the
+    # hole-free pool then takes BLAS ``dot`` for its square sum -- one
+    # fused multithreaded pass, no 16 MB ``square`` temporary, no
+    # isfinite scan.  Any non-finite value (in the data, or overflowing
+    # the dot) drops to the masked path below.
+    total = float(np.sum(flat, dtype=np.float64))
+    if math.isfinite(total):
+        squares = float(np.dot(flat, flat))
+        if math.isfinite(squares):
+            return (float(flat.size), total, squares)
     # Masked sums, never a gather: copying the finite subset of a
     # camera-sized pool cost more than the three moments themselves.
     finite = np.isfinite(flat)
@@ -921,17 +934,20 @@ class FitProjection:
                 dtype=canonical.dtype if has_values else float,
             )
         else:
-            if valid is None:
-                flat = np.asarray(canonical, dtype=float).reshape(-1)
-                edge_values = flat[np.isfinite(flat)]
-            else:
-                flat = np.asarray(canonical).reshape(-1)
-                finite = np.asarray(valid).reshape(-1) & np.isfinite(flat)
-                edge_values = np.asarray(flat[finite], dtype=float)
-            has_values = bool(edge_values.size)
+            # Masked extrema and a bounded probe, never a full finite
+            # gather: the copy of a two-million-value pool cost more per
+            # revision than the whole binning it fed.
+            flat = np.asarray(canonical).reshape(-1)
+            finite = np.isfinite(flat)
+            if valid is not None:
+                finite &= np.asarray(valid, dtype=bool).reshape(-1)
+            has_values = bool(np.any(finite))
             if has_values:
-                data_low = float(np.min(edge_values))
-                data_high = float(np.max(edge_values))
+                data_low = float(np.min(flat, where=finite, initial=np.inf))
+                data_high = float(
+                    np.max(flat, where=finite, initial=-np.inf)
+                )
+            edge_values = _finite_probe(flat, finite)
         previous = self._histogram_projection
         mode = str(state["relim_mode"])
         retain_domain = (

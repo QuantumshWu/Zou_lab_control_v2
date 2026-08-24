@@ -512,9 +512,18 @@ class DataView:
         if value_canonical.dtype.kind in "biu":
             valid = snapshot_validity(snapshot)
         else:
-            valid = snapshot_validity(snapshot) & np.isfinite(
-                value_canonical
-            )
+            validity = snapshot_validity(snapshot)
+            finite = np.isfinite(value_canonical)
+            if bool(finite.all()):
+                # All-finite floats keep the snapshot's validity plane --
+                # usually the stride-0 all-true broadcast, which the
+                # reductions recognise in O(1) instead of scanning a
+                # 20-megabyte merged mask.
+                valid = validity
+            elif _stride_zero_all_true(validity):
+                valid = finite
+            else:
+                valid = validity & finite
         self._snapshot = snapshot
         self._schema = schema
         self._axis_display_units = overrides
@@ -827,6 +836,13 @@ class DataView:
         """
 
         cell = spec.cell
+        row_domains = (AxisDomain.POINT_COORDINATE, AxisDomain.POINT_DIMENSION)
+        if (
+            isinstance(cell, ImagePlot)
+            and cell.x.domain in row_domains
+            and cell.y.domain in row_domains
+        ):
+            return self._factored_facet_images(spec, cell)
         if not isinstance(cell, CurvePlot):
             return None
         cell_groups = () if cell.group is None else (cell.group,)
@@ -929,6 +945,91 @@ class DataView:
                 group_by=cell_groups,
                 series=series,
             )
+            facet_value = facet_domain.values[facet_index]
+            cells.append(
+                FacetCell(
+                    facet_index=len(cells),
+                    facet_value_canonical=facet_value.canonical,
+                    facet_value_display=facet_value.display,
+                    label=facet_value.label,
+                    payload=payload,
+                )
+            )
+        return FacetData(
+            revision=self._samples.revision,
+            generation=self._samples.generation,
+            spec=spec,
+            cells=tuple(cells),
+        )
+
+    def _factored_facet_images(
+        self,
+        spec: FacetGridPlot,
+        cell: ImagePlot,
+    ) -> FacetData | None:
+        """Every heatmap cell of a lattice facet from ONE pass over the data.
+
+        A facet of scan heatmaps is the heatmap computation with one more
+        key: over a DATA/repeat axis the facet is a kept tensor dimension
+        and each cell is a column of the folded plane; over a scan
+        dimension the facet joins the combined row key and each cell is a
+        row window, compressed to its own used axis sets exactly as the
+        generic per-cell domains are.  The oracle tests hold every cell
+        pixel for pixel to the generic facet.
+        """
+
+        row_facet = spec.facet.domain in (
+            AxisDomain.POINT_COORDINATE,
+            AxisDomain.POINT_DIMENSION,
+        )
+        if row_facet:
+            planes = self._factored_planes(
+                (spec.facet, cell.y, cell.x), (), cell.reduction, False
+            )
+        elif spec.facet.domain in (AxisDomain.DATA, AxisDomain.REPEAT):
+            planes = self._factored_planes(
+                (cell.y, cell.x), (spec.facet,), cell.reduction, False
+            )
+        else:
+            return None
+        if planes is None:
+            return None
+        if row_facet:
+            facet_domain, y_domain, x_domain = planes.row_domains
+            facet_size, ny, nx = planes.row_sizes
+        else:
+            facet_domain = planes.group_domains[0]
+            facet_size = planes.group_sizes[0]
+            y_domain, x_domain = planes.row_domains
+            ny, nx = planes.row_sizes
+        cells: list[FacetCell] = []
+        for facet_index in range(facet_size):
+            if row_facet:
+                window = slice(
+                    facet_index * ny * nx, (facet_index + 1) * ny * nx
+                )
+                presence = planes.row_presence[window].reshape(ny, nx)
+                if not bool(presence.any()):
+                    continue
+                payload = self._image_from_planes(
+                    cell.x,
+                    cell.y,
+                    x_domain,
+                    y_domain,
+                    planes.y_plane[window].reshape(ny, nx),
+                    planes.counts_plane[window].reshape(ny, nx),
+                    used_y=presence.any(axis=1),
+                    used_x=presence.any(axis=0),
+                )
+            else:
+                payload = self._image_from_planes(
+                    cell.x,
+                    cell.y,
+                    x_domain,
+                    y_domain,
+                    planes.y_plane[:, facet_index].reshape(ny, nx),
+                    planes.counts_plane[:, facet_index].reshape(ny, nx),
+                )
             facet_value = facet_domain.values[facet_index]
             cells.append(
                 FacetCell(
@@ -1073,35 +1174,72 @@ class DataView:
         )
         # Sums accumulate in float64 exactly as the generic kernel's
         # bincount does, so a uint8 camera frame cannot wrap either way.
+        # A hole-free mask (the common live case) takes the plain kernels:
+        # masked reductions cost half again as much, and the masked
+        # square-sum's 160 MB temporary costs 7x the einsum that replaces
+        # it -- einsum reduces v*v in one fused pass with no temporary.
         as_double = values.astype(np.float64, copy=False)
-        counts_pg = np.sum(usable, axis=reduce_axes, dtype=np.int64)
-        if aggregation in (Reduction.MEAN, Reduction.SUM):
-            moments_pg = np.sum(
-                as_double,
-                axis=reduce_axes,
-                where=usable,
-                dtype=np.float64,
+        all_valid = _stride_zero_all_true(usable) or bool(usable.all())
+        if all_valid:
+            reduced = 1
+            for axis in reduce_axes:
+                reduced *= int(shape[axis])
+            kept_shape = tuple(
+                int(shape[axis])
+                for axis in range(values.ndim)
+                if axis == 1 or axis in kept_dims
             )
+            counts_pg = np.full(kept_shape, reduced, dtype=np.int64)
+        else:
+            counts_pg = np.sum(usable, axis=reduce_axes, dtype=np.int64)
+        if aggregation in (Reduction.MEAN, Reduction.SUM):
+            if all_valid:
+                moments_pg = np.sum(
+                    as_double, axis=reduce_axes, dtype=np.float64
+                )
+            else:
+                moments_pg = np.sum(
+                    as_double,
+                    axis=reduce_axes,
+                    where=usable,
+                    dtype=np.float64,
+                )
         else:
             ufunc = np.min if aggregation is Reduction.MIN else np.max
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", category=RuntimeWarning)
-                moments_pg = ufunc(
-                    as_double,
-                    axis=reduce_axes,
-                    where=usable,
-                    initial=(
-                        np.inf if aggregation is Reduction.MIN else -np.inf
-                    ),
-                )
+                if all_valid:
+                    moments_pg = ufunc(as_double, axis=reduce_axes)
+                else:
+                    moments_pg = ufunc(
+                        as_double,
+                        axis=reduce_axes,
+                        where=usable,
+                        initial=(
+                            np.inf
+                            if aggregation is Reduction.MIN
+                            else -np.inf
+                        ),
+                    )
         squares_pg = None
         if uncertainty:
-            squares_pg = np.sum(
-                np.square(as_double),
-                axis=reduce_axes,
-                where=usable,
-                dtype=np.float64,
-            )
+            if all_valid:
+                letters = "abcdefghijklmnopqrstuvwxyz"[: values.ndim]
+                output = "".join(
+                    letters[axis]
+                    for axis in range(values.ndim)
+                    if axis == 1 or axis in kept_dims
+                )
+                squares_pg = np.einsum(
+                    f"{letters},{letters}->{output}", as_double, as_double
+                )
+            else:
+                squares_pg = np.sum(
+                    np.square(as_double),
+                    axis=reduce_axes,
+                    where=usable,
+                    dtype=np.float64,
+                )
 
         # The reductions keep the surviving dims in ORIGINAL tensor order
         # (the repeat dim precedes the rows dim when it is grouped); the
@@ -1545,9 +1683,51 @@ class DataView:
         if planes is None:
             return None
         y_domain, x_domain = planes.row_domains
-        ny, nx = planes.row_sizes
-        z = planes.y_plane.reshape(ny, nx)
-        counts = planes.counts_plane.reshape(ny, nx)
+        return self._image_from_planes(
+            x,
+            y,
+            x_domain,
+            y_domain,
+            planes.y_plane.reshape(planes.row_sizes),
+            planes.counts_plane.reshape(planes.row_sizes),
+        )
+
+    def _image_from_planes(
+        self,
+        x: AxisRef,
+        y: AxisRef,
+        x_domain: "_Domain",
+        y_domain: "_Domain",
+        z: NDArray[np.float64],
+        counts: NDArray[np.int64],
+        *,
+        used_y: NDArray[np.bool_] | None = None,
+        used_x: NDArray[np.bool_] | None = None,
+    ) -> ImageData:
+        """One (ny, nx) folded plane spoken as ImageData.
+
+        ``used_y``/``used_x`` compress the mesh to a cell's own used set,
+        the way the generic path's per-cell domains do: the domain values
+        are value-sorted, so restricting them to the present subset keeps
+        the generic order exactly.
+        """
+
+        x_canonical = np.asarray(x_domain.canonical)
+        x_display = np.asarray(x_domain.display)
+        y_canonical = np.asarray(y_domain.canonical)
+        y_display = np.asarray(y_domain.display)
+        if used_x is not None and not bool(used_x.all()):
+            x_canonical = x_canonical[used_x]
+            x_display = x_display[used_x]
+            z = z[:, used_x]
+            counts = counts[:, used_x]
+        if used_y is not None and not bool(used_y.all()):
+            y_canonical = y_canonical[used_y]
+            y_display = y_display[used_y]
+            z = z[used_y]
+            counts = counts[used_y]
+        z = np.ascontiguousarray(z)
+        counts = np.ascontiguousarray(counts)
         z_display = self._samples.value.canonical_unit.convert_value_to(
             z, self._samples.value.display_unit
         )
@@ -1560,15 +1740,15 @@ class DataView:
             x_ref=x,
             y_ref=y,
             x=QuantityArray(
-                x_domain.canonical,
-                x_domain.display,
+                x_canonical,
+                x_display,
                 x_coordinate.canonical_unit,
                 x_coordinate.display_unit,
                 x_coordinate.label,
             ),
             y=QuantityArray(
-                y_domain.canonical,
-                y_domain.display,
+                y_canonical,
+                y_display,
                 y_coordinate.canonical_unit,
                 y_coordinate.display_unit,
                 y_coordinate.label,
@@ -1771,21 +1951,33 @@ class DataView:
             value = _reduce_scalar(pooled, aggregation)
             sem = None
             if uncertainty:
-                # Masked mean of squares, never a gather of the finite
-                # subset: the copy cost more than the moment.
-                finite = np.isfinite(pooled)
-                count = int(np.count_nonzero(finite))
-                with np.errstate(invalid="ignore", divide="ignore"):
-                    mean_square = (
-                        np.sum(
-                            np.square(pooled),
-                            where=finite,
-                            dtype=np.float64,
+                # Sum first: a finite total proves a hole-free pool, whose
+                # square sum is one BLAS dot -- no isfinite scan, no
+                # ``square`` temporary.  Masked sums otherwise, never a
+                # gather of the finite subset: the copy cost more than
+                # the moment.
+                count = None
+                if pooled.size and math.isfinite(
+                    float(np.sum(pooled, dtype=np.float64))
+                ):
+                    squares = float(np.dot(pooled.reshape(-1), pooled.reshape(-1)))
+                    if math.isfinite(squares):
+                        count = int(pooled.size)
+                        mean_square = squares / count
+                if count is None:
+                    finite = np.isfinite(pooled)
+                    count = int(np.count_nonzero(finite))
+                    with np.errstate(invalid="ignore", divide="ignore"):
+                        mean_square = (
+                            np.sum(
+                                np.square(pooled),
+                                where=finite,
+                                dtype=np.float64,
+                            )
+                            / count
+                            if count
+                            else np.nan
                         )
-                        / count
-                        if count
-                        else np.nan
-                    )
                 sem = _sem_from_moments(
                     np.asarray([value], dtype=np.float64),
                     np.asarray([mean_square], dtype=np.float64),
@@ -1995,6 +2187,13 @@ class DataView:
         bins: int | Sequence[float],
         positions: NDArray[np.int64],
     ) -> HistogramData:
+        if positions is self._positions_cache:
+            # The whole revision: bin values + mask directly, no gather.
+            return self._histogram_from_values(
+                bins,
+                self._samples.value.canonical,
+                valid=self._samples.valid_mask,
+            )
         flat_valid = self._samples.valid_mask.reshape(-1)
         flat_values = self._samples.value.canonical.reshape(-1)
         return self._histogram_from_values(
@@ -2034,11 +2233,10 @@ class DataView:
         )
         if counts is None:
             source = np.asarray(values)
-            selected = (
-                source.reshape(-1)
-                if valid is None
-                else source[np.asarray(valid, dtype=np.bool_)].reshape(-1)
-            )
+            if valid is None or bool(np.all(valid)):
+                selected = source.reshape(-1)
+            else:
+                selected = source[np.asarray(valid, dtype=np.bool_)].reshape(-1)
             counts, edges = np.histogram(selected, bins=canonical_bins)
         else:
             edges = canonical_bins
@@ -2798,6 +2996,42 @@ def _uniform_integer_counts(
         if stop > start:
             counts[index] = np.sum(frequency[start:stop], dtype=np.int64)
     return counts
+
+
+def _stride_zero_all_true(mask: NDArray[np.bool_]) -> bool:
+    """True for a stride-0 broadcast plane that is constant True."""
+
+    if mask.size == 0:
+        return False
+    if any(stride != 0 for stride in mask.strides):
+        return False
+    return bool(mask.flat[0])
+
+
+def _finite_probe(
+    flat: NDArray[Any],
+    finite: NDArray[np.bool_],
+    limit: int = 65536,
+) -> NDArray[np.float64]:
+    """The first ``limit`` finite values, without gathering the whole pool.
+
+    Exactly ``flat[finite][:limit]`` -- block-scanned so a pool whose head
+    is finite (every real pool) stops after one block.
+    """
+
+    collected: list[NDArray[np.float64]] = []
+    total = 0
+    for start in range(0, int(flat.size), limit):
+        block = flat[start : start + limit][finite[start : start + limit]]
+        if block.size:
+            take = block[: limit - total]
+            collected.append(np.asarray(take, dtype=np.float64))
+            total += int(take.size)
+        if total >= limit:
+            break
+    if not collected:
+        return np.empty(0, dtype=np.float64)
+    return np.concatenate(collected)
 
 
 def _reduce_scalar(values: NDArray[Any], aggregation: Reduction) -> float:

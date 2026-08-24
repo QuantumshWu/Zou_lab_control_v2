@@ -57,7 +57,18 @@ class SnapshotFeed:
 
     def __init__(self, schema: DatasetSchema, buffers: list[np.ndarray]):
         self.schema = schema
-        self._buffers = buffers
+        # Bytes-backed immutable buffers, like a real producer's blocks:
+        # zlc_data then adopts them without its ownership copy, so
+        # feed.next() costs microseconds instead of a 16 MB memcpy that
+        # would sit on the submitting (GUI) thread in every live test.
+        adopted = []
+        for buffer in buffers:
+            flat = np.frombuffer(
+                buffer.tobytes(order="C"), dtype=buffer.dtype
+            ).reshape(buffer.shape)
+            flat.setflags(write=False)
+            adopted.append(flat)
+        self._buffers = adopted
         self._revision = 0
 
     @property

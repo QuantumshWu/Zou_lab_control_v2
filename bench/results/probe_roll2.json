@@ -1,0 +1,15 @@
+{
+  "results": [
+    {
+      "case": "rolling_2M",
+      "points": 2040000,
+      "first_render_ms": 465.4,
+      "update_data": {
+        "n": 8,
+        "median_ms": 18.23,
+        "p90_ms": 18.95,
+        "best_ms": 17.13
+      }
+    }
+  ]
+}

@@ -45,7 +45,7 @@ def catalog() -> tuple[Case, ...]:
             "curve_2M",
             lattice_2m,
             lambda: CurvePlot(AxisRef.point("ax")),
-            ("hover_series", "click_series", "drag_main", "wheel_main"),
+            ("hover_series", "click_series", "drag_main", "pan_drag", "wheel_main"),
         ),
         Case(
             "curve_20M",
@@ -57,7 +57,7 @@ def catalog() -> tuple[Case, ...]:
             "hist_2M",
             lattice_2m,
             lambda: HistogramPlot(),
-            ("drag_main", "wheel_main"),
+            ("drag_main", "drag_threshold", "wheel_main"),
         ),
         Case(
             "image_heatmap_2M",
@@ -65,13 +65,13 @@ def catalog() -> tuple[Case, ...]:
             lambda: ImagePlot(
                 AxisRef.point_dimension("ax"), AxisRef.point_dimension("ay")
             ),
-            ("drag_main", "drag_colorbar", "click_main", "wheel_main"),
+            ("drag_main", "drag_clim", "drag_threshold", "click_main", "pan_drag", "wheel_main"),
         ),
         Case(
             "image_camera_4M",
             camera_feed,
             lambda: ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
-            ("drag_main", "drag_colorbar", "click_main", "wheel_main"),
+            ("drag_main", "drag_clim", "click_main", "pan_drag", "wheel_main"),
             notes="2048x2048 uint16 dense camera frame",
         ),
         Case(
