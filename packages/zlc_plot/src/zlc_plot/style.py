@@ -781,7 +781,7 @@ def build_plot_style() -> PlotStyleConfig:
             alpha=0.8,
             marker=None,
         ),
-        curve_marker_size_pt=2.0,
+        curve_marker_size_pt=6.0,
         histogram_fill_alpha=0.4,
         threshold_line=LineToken(palette.threshold, 1.9, alpha=0.95, zorder=5.0),
         classifier_threshold_line=LineToken(

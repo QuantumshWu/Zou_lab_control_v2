@@ -558,6 +558,54 @@ def _envelope_decimated(
     )
 
 
+def _isolated_curve_mask(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Valid curve vertices with no valid neighbour on either side."""
+
+    finite = np.isfinite(x) & np.isfinite(y)
+    connected = np.zeros(finite.shape, dtype=bool)
+    if finite.size > 1:
+        adjacent = finite[:-1] & finite[1:]
+        connected[:-1] |= adjacent
+        connected[1:] |= adjacent
+    return finite & ~connected
+
+
+def _bounded_isolated_curve_points(
+    x: np.ndarray,
+    y: np.ndarray,
+    window: tuple[float, float],
+    columns: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Visible singleton glyphs, bounded to two per display column."""
+
+    low, high = sorted(map(float, window))
+    start = max(0, int(np.searchsorted(x, low, side="left")) - 1)
+    stop = min(x.size, int(np.searchsorted(x, high, side="right")) + 1)
+    visible_x = x[start:stop]
+    visible_y = y[start:stop]
+    isolated = _isolated_curve_mask(visible_x, visible_y)
+    if not bool(np.any(isolated)):
+        return np.asarray([], dtype=float), np.asarray([], dtype=float)
+    isolated &= (visible_x >= low) & (visible_x <= high)
+    isolated_x = visible_x[isolated]
+    isolated_y = visible_y[isolated]
+    if isolated_x.size <= 2 * columns or not high > low:
+        return isolated_x, isolated_y
+
+    bins = np.floor((isolated_x - low) * columns / (high - low)).astype(np.int64)
+    np.clip(bins, 0, columns - 1, out=bins)
+    starts = np.flatnonzero(np.concatenate(([True], bins[1:] != bins[:-1])))
+    occupied = bins[starts]
+    minimum = np.minimum.reduceat(isolated_y, starts)
+    maximum = np.maximum.reduceat(isolated_y, starts)
+    centers = low + (occupied.astype(float) + 0.5) * (high - low) / columns
+    bounded_x = np.repeat(centers, 2)
+    bounded_y = np.column_stack((minimum, maximum)).reshape(-1)
+    keep = np.ones(bounded_y.shape, dtype=bool)
+    keep[1::2] = maximum != minimum
+    return bounded_x[keep], bounded_y[keep]
+
+
 def _facet_cell_title(cell: Any, fallback: int) -> str:
     """Use the projected facet identity with a compact numeric coordinate."""
 
@@ -727,7 +775,7 @@ class MatplotlibRenderer:
         #: future redraw read this one source truth.  Artist retirement and
         #: relayout retire the matching entry in the same owner.
         self._line_sources: dict[
-            int, tuple[Any, Any, np.ndarray, np.ndarray]
+            int, tuple[Any, Any, np.ndarray, np.ndarray, bool]
         ] = {}
         self._series_lines: dict[int, tuple[tuple[Any, object, str], ...]] = {}
         self._series_indices: dict[int, dict[object, int]] = {}
@@ -1148,11 +1196,15 @@ class MatplotlibRenderer:
         line: Any,
         x: np.ndarray,
         y: np.ndarray,
+        *,
+        isolated_glyphs: bool = False,
     ) -> None:
         """Hand a polyline to its artist, enveloped when denser than pixels."""
 
-        self._line_sources[id(line)] = (line, axes, x, y)
-        self._set_enveloped_line(axes, line, x, y)
+        self._line_sources[id(line)] = (line, axes, x, y, isolated_glyphs)
+        self._set_enveloped_line(
+            axes, line, x, y, isolated_glyphs=isolated_glyphs
+        )
 
     def _set_enveloped_line(
         self,
@@ -1160,6 +1212,8 @@ class MatplotlibRenderer:
         line: Any,
         x: np.ndarray,
         y: np.ndarray,
+        *,
+        isolated_glyphs: bool,
     ) -> None:
         columns = int(
             min(
@@ -1173,18 +1227,53 @@ class MatplotlibRenderer:
             if x.size >= columns * _ENVELOPE_MIN_POINTS_PER_COLUMN
             else None
         )
-        if enveloped is None:
-            line.set_data(x, y)
+        drawn_x, drawn_y = (x, y) if enveloped is None else enveloped
+        if isolated_glyphs:
+            point_x, point_y = _bounded_isolated_curve_points(
+                x, y, window, columns
+            )
         else:
-            line.set_data(*enveloped)
+            point_x = point_y = np.asarray([], dtype=float)
+        if point_x.size:
+            extra_x = np.empty(point_x.size * 2, dtype=float)
+            extra_y = np.empty(point_y.size * 2, dtype=float)
+            extra_x[0::2] = np.nan
+            extra_y[0::2] = np.nan
+            extra_x[1::2] = point_x
+            extra_y[1::2] = point_y
+            marker_start = drawn_x.size + 1
+            line.set_data(
+                np.concatenate((drawn_x, extra_x)),
+                np.concatenate((drawn_y, extra_y)),
+            )
+            line.set_marker("_")
+            line.set_markersize(self.style.artists.curve_marker_size_pt)
+            line.set_markeredgewidth(line.get_linewidth())
+            line.set_markevery(
+                np.arange(marker_start, marker_start + extra_x.size, 2)
+            )
+        else:
+            line.set_data(drawn_x, drawn_y)
+            marker = self.style.artists.curve.marker
+            line.set_marker("None" if marker is None else marker)
+            line.set_markersize(self.style.artists.curve_marker_size_pt)
+            line.set_markevery(None)
 
     def _refresh_enveloped_lines(self, axis: Any) -> None:
-        for line_id, (line, owner, x, y) in tuple(self._line_sources.items()):
+        for line_id, (line, owner, x, y, isolated_glyphs) in tuple(
+            self._line_sources.items()
+        ):
             attached = getattr(line, "axes", None)
             if attached is None:
                 del self._line_sources[line_id]
             elif owner is axis and attached is axis:
-                self._set_enveloped_line(axis, line, x, y)
+                self._set_enveloped_line(
+                    axis,
+                    line,
+                    x,
+                    y,
+                    isolated_glyphs=isolated_glyphs,
+                )
 
     def _set_xlim(self, axis: Any, low: float, high: float) -> None:
         previous = np.asarray(axis.get_xlim(), dtype=float)
@@ -1898,6 +1987,7 @@ class MatplotlibRenderer:
             y_label=y_label,
             limits=limits,
             paint_labels=paint_labels,
+            isolated_glyphs=True,
         )
 
     def _mutate_series_artists(
@@ -1911,6 +2001,7 @@ class MatplotlibRenderer:
         y_label: str,
         limits: tuple[tuple[float, float], tuple[float, float]] | None = None,
         paint_labels: bool = True,
+        isolated_glyphs: bool = False,
     ) -> None:
         lines = self._ensure_lines(axes, len(series), key)
         # Limits need only the valid extremes, and min/max are indifferent to
@@ -1923,7 +2014,13 @@ class MatplotlibRenderer:
         for index, item in enumerate(series):
             # NaNs preserve invalid runs as gaps instead of joining neighbours.
             plotted_y = np.where(item.valid, item.y, np.nan)
-            self._apply_line_data(axes, lines[index], item.x, plotted_y)
+            self._apply_line_data(
+                axes,
+                lines[index],
+                item.x,
+                plotted_y,
+                isolated_glyphs=isolated_glyphs,
+            )
             lines[index].set_color(cycle[_series_slot(item.identity, len(cycle))])
             lines[index].set_linewidth(self.style.artists.curve.linewidth)
             lines[index].set_alpha(self.style.artists.curve.alpha)
@@ -1999,16 +2096,20 @@ class MatplotlibRenderer:
         for line, identity, label in entries:
             if not line.get_visible():
                 continue
-            x = np.asarray(line.get_xdata(), dtype=float).reshape(-1)
-            y = np.asarray(line.get_ydata(), dtype=float).reshape(-1)
+            registered = self._line_sources.get(id(line))
+            isolated_glyphs = False
+            if registered is not None and registered[0] is line:
+                _line, _owner, raw_x, raw_y, isolated_glyphs = registered
+                x = np.asarray(raw_x, dtype=float).reshape(-1)
+                y = np.asarray(raw_y, dtype=float).reshape(-1)
+            else:
+                x = np.asarray(line.get_xdata(), dtype=float).reshape(-1)
+                y = np.asarray(line.get_ydata(), dtype=float).reshape(-1)
             if x.size > _ENVELOPE_MAX_COLUMNS * 4:
-                registered = self._line_sources.get(id(line))
-                if registered is not None and registered[0] is line:
-                    _line, _owner, x, y = registered
-                    low, high = sorted(map(float, axes.get_xlim()))
-                    start = max(0, int(np.searchsorted(x, low)) - 1)
-                    stop = min(x.size, int(np.searchsorted(x, high, side="right")) + 1)
-                    x, y = x[start:stop], y[start:stop]
+                low, high = sorted(map(float, axes.get_xlim()))
+                start = max(0, int(np.searchsorted(x, low)) - 1)
+                stop = min(x.size, int(np.searchsorted(x, high, side="right")) + 1)
+                x, y = x[start:stop], y[start:stop]
             finite = np.isfinite(x) & np.isfinite(y)
             if not np.any(finite):
                 continue
@@ -2036,12 +2137,27 @@ class MatplotlibRenderer:
                            float(y[source] + t[local] * (y[source + 1] - y[source])))
                     if identity == current:
                         return hit
-            elif finite.sum() == 1:
-                source = int(np.flatnonzero(finite)[0])
-                distance = float(np.sum((pixels[source] - point) ** 2))
-                if distance <= best:
-                    best = distance
-                    hit = (id(axes), identity, label, float(x[source]), float(y[source]))
+            singleton = (
+                _isolated_curve_mask(x, y)
+                if isolated_glyphs
+                else finite if not starts.size and finite.sum() == 1
+                else np.zeros(finite.shape, dtype=bool)
+            )
+            if bool(np.any(singleton)):
+                sources = np.flatnonzero(singleton)
+                delta = pixels[sources] - point
+                distance = np.einsum("ij,ij->i", delta, delta)
+                local = int(np.argmin(distance))
+                if float(distance[local]) <= best:
+                    source = int(sources[local])
+                    best = float(distance[local])
+                    hit = (
+                        id(axes),
+                        identity,
+                        label,
+                        float(x[source]),
+                        float(y[source]),
+                    )
                     if identity == current:
                         return hit
         return hit
@@ -2072,6 +2188,8 @@ class MatplotlibRenderer:
                     line.set_linewidth(self.style.artists.curve.linewidth)
                     line.set_alpha(self.style.artists.curve.alpha)
                     line.set_zorder(2.0)
+                if line.get_marker() == "_":
+                    line.set_markeredgewidth(line.get_linewidth())
                 if focused and active is not None and axis_id == active[0]:
                     focus_line = line
         for annotation in self._series_annotations.values():
@@ -4409,7 +4527,7 @@ class MatplotlibRenderer:
         for line in active_lines:
             registered = self._line_sources.get(id(line))
             if registered is not None and registered[0] is line:
-                _line, _axis, raw_x, raw_y = registered
+                _line, _axis, raw_x, raw_y, _isolated_glyphs = registered
                 x = np.asarray(raw_x, dtype=float).reshape(-1)
                 y = np.asarray(raw_y, dtype=float).reshape(-1)
             else:

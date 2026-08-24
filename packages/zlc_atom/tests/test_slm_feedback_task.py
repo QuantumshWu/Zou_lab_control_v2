@@ -369,9 +369,6 @@ def _fitted_result(
         "threshold": 10.0 + 0.5 * values,
         "fidelity": np.full(sites, 0.999),
         "bic_gain": np.full(sites, 100.0),
-        "bic_gain_even": np.full(sites, 100.0),
-        "bic_gain_odd": np.full(sites, 100.0),
-        "bic_stable": np.array(fit_valid, copy=True),
         "single_mean": np.full(sites, 10.0),
         "single_sigma": np.full(sites, 0.1),
         "valid": fit_valid,
@@ -647,14 +644,8 @@ def test_single_population_classification_and_baseline_relative_probe_selection(
     assert fitted["valid"].tolist() == [True, False]
     assert fitted["single_population"].tolist() == [False, True]
     assert fitted["invalid"].tolist() == [False, False]
-    assert fitted["bic_stable"].tolist() == [True, False]
-    assert np.all(
-        np.asarray((
-            fitted["bic_gain"][0],
-            fitted["bic_gain_even"][0],
-            fitted["bic_gain_odd"][0],
-        )) > 0.0
-    )
+    assert fitted["bic_gain"][0] > 0.0
+    assert fitted["bic_gain"][1] < 0.0
     assert fitted["contrast"][0] == pytest.approx(22.0, rel=0.04)
     assert np.isnan(fitted["contrast"][1])
     assert np.isnan(fitted["standard_error"][1])

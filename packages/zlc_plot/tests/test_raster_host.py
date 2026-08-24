@@ -1041,6 +1041,30 @@ def test_curve_series_inspector_is_stable_sticky_and_redraw_bounded(
 
         session.update_data(DatasetSnapshot(schema, values + 0.25, 1))
         assert {line.get_label(): line.get_color() for line in lines} == colors
+
+        pointer("key", 0.0, 0.0, key="escape")
+        validity = np.ones(values.shape, dtype=bool)
+        validity[0, :7] = False
+        validity[0, 2] = True
+        session.update_data(
+            DatasetSnapshot(
+                schema,
+                values + 0.25,
+                2,
+                validity=validity,
+            )
+        )
+        isolated = next(line for line in lines if "site=17" in line.get_label())
+        connected = next(line for line in lines if "site=23" in line.get_label())
+        assert isolated.get_marker() == "_"
+        assert np.asarray(isolated.get_markevery()).size == 1
+        assert connected.get_marker() in (None, "None", "")
+        assert pointer("move", 2.0, 3.25).publish_front
+        assert "site=17" in renderer._series_hover[2]
+        pointer("press", 2.0, 3.25, button=1)
+        pointer("release", 2.0, 3.25, button=1)
+        assert "site=17" in renderer._series_locked[2]
+        assert isolated.get_markeredgewidth() == pytest.approx(2.0 * base_width)
     finally:
         session.close()
 

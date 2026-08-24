@@ -158,7 +158,7 @@ Node new chunk
 - ROI/binning坐标只由一个transform owner处理。
 - Selector Off时plot不消费任何pointer gesture：不画selector、不zoom/pan，也不响应双击facet focus；普通滚轮继续滚外层board。
 - Selector On时，FacetGrid overview只响应双击进入cell，不得在overview开始area selector；进入具体cell后，selector才按该cell的canonical projection工作。
-- Grouped Curve hover只轻微加粗命中的line，其他lines保持正常alpha；click lock才加粗并压暗其余lines。Series文字固定在对应axes内部右上角、无背景框，locked文字以`* `开头；locked时滚轮按Group axis顺序切换line，未锁定时滚轮仍缩放viewport。
+- Curve的invalid位置切断line且绝不跨洞连接；standalone Curve与FacetGrid Curve cell中，每段仅一个valid点时用同series颜色/alpha/linewidth的短横线glyph显示，不建立scatter或第二series，Rolling行为不变。Grouped Curve hover只轻微加粗命中的line/孤点glyph，其他lines保持正常alpha；click lock才加粗并压暗其余lines。Series文字固定在对应axes内部右上角、无背景框，locked文字以`* `开头；locked时滚轮按Group axis顺序切换line，未锁定时滚轮仍缩放viewport。
 
 ## 6. UI与Lifecycle
 
@@ -246,7 +246,7 @@ Node new chunk
 - Feedback mode是leaf-owned显式字段；当前唯一mode为`qcmos_bright_dark`。Pulse由operator显式选择；camera exposure是独立、可见、可编辑的authored字段，默认`0.1 s`。Task不从Pulse或Calibration猜exposure，也不自动判断Pulse/exposure的科学一致性。
 - 当前mode复用canonical Camera Measurement `repeat=N`，每cycle严格一张camera frame；同一逐帧publication经mean reduction实时显示，Feedback只把完整registered Target SiteMap写入该次camera run geometry，不发布第二份camera数据或三帧reference判据。
 - Calibration只提供Target→camera注册所需的site centers、BOX半宽/积分方式和frame坐标几何；Feedback不读取其dark/bright/threshold、exposure、photoelectron mode、camera identity或readout working-point provenance。实际camera requested/actual exposure、effective unit与conversion进入本run metadata；saturation只由本次actual raw integer maximum转换到本次effective unit判断。
-- 每个site使用本candidate唯一一批authored shots的raw BOX值选择单高斯或双高斯；full/even/odd三份BIC证据一致支持双峰时，`bright_mean-dark_mean`才是observable；单峰没有伪造contrast，数值失败为invalid。
+- 每个site仅使用本candidate完整一批authored shots的raw BOX值选择单高斯或双高斯；完整batch的受约束双高斯数值有效、满足基本分量/间距条件且full-data ΔBIC>0时，`bright_mean-dark_mean`才是observable；拟合正常但不满足为single，数值/采集失败为invalid。
 - Controller保存每site的归一化Target share、正式double历史、probe方向与single/observable边界。没有可用正式double历史的single才使用用户`probe_factors`做两侧诊断；已有方向或bracket的single沿历史继续。只有正式double更新使用以用户`feedback_gain`为初值的adaptive scalar：共同double sites连续两次显著改善后乘1.25，显著变差后乘0.5，不确定性内保持；probe/single始终使用authored gain。全部share变化受`maximum_weight_change`限制，invalid保持实际份额；Diagnostic probe不进入adaptive/formal history、best candidate或反馈指标。
 - mode、Pulse、exposure或任一控制参数变化时丢弃prior response state；用户要求的dark增幅若在固定总功率下不可行，静默缩到本轮最大可行值。
 - 默认每candidate为100 shots、12次formal update；每个phase严格一批shots，下一批前必须确认不同phase。`probe_combined`是正式update并计入上限，0.5/2等diagnostic probe candidates不计；因此两组probe且上限15时最多测量`1+15+4=20`个candidates。正常运行完成全部authored updates后选择全site ratio最低的candidate；没有内置ratio停止阈值。Stop保留最佳已测candidate，置信区间只作记录，不触发额外采集。

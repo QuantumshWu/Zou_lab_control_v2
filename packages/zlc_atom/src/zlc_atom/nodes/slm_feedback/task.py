@@ -318,9 +318,6 @@ def _fit_contrasts(samples: object) -> dict[str, np.ndarray]:
     threshold = np.full(sites, np.nan, dtype=float)
     fidelity = np.full(sites, np.nan, dtype=float)
     bic_gain = np.full(sites, np.nan, dtype=float)
-    bic_gain_even = np.full(sites, np.nan, dtype=float)
-    bic_gain_odd = np.full(sites, np.nan, dtype=float)
-    bic_stable = np.zeros(sites, dtype=bool)
     single_mean = np.full(sites, np.nan, dtype=float)
     single_sigma = np.full(sites, np.nan, dtype=float)
     separated = np.zeros(sites, dtype=bool)
@@ -336,8 +333,6 @@ def _fit_contrasts(samples: object) -> dict[str, np.ndarray]:
         single_mean[site] = one_mean
         single_sigma[site] = one_sigma
         fit = fit_bimodal(column, min_component_fraction=0.01)
-        fit_even = fit_bimodal(column[0::2], min_component_fraction=0.01)
-        fit_odd = fit_bimodal(column[1::2], min_component_fraction=0.01)
         dark_mean[site] = fit.dark_mean
         dark_sigma[site] = fit.dark_sigma
         bright_mean[site] = fit.bright_mean
@@ -368,25 +363,15 @@ def _fit_contrasts(samples: object) -> dict[str, np.ndarray]:
             )
         )
         bic_gain[site] = _bic_gain(column, fit)
-        bic_gain_even[site] = _bic_gain(column[0::2], fit_even)
-        bic_gain_odd[site] = _bic_gain(column[1::2], fit_odd)
         finite_pair = bool(
             estimate > 0.0
             and np.isfinite(sem)
             and sem >= 0.0
             and np.isfinite(bic_gain[site])
-            and np.isfinite(bic_gain_even[site])
-            and np.isfinite(bic_gain_odd[site])
         )
         if not finite_pair:
             continue
-        bic_stable[site] = bool(
-            fit.ok
-            and bic_gain[site] > 0.0
-            and bic_gain_even[site] > 0.0
-            and bic_gain_odd[site] > 0.0
-        )
-        if bic_stable[site]:
+        if fit.ok and bic_gain[site] > 0.0:
             contrast[site], error[site] = estimate, sem
             separated[site] = True
         else:
@@ -403,9 +388,6 @@ def _fit_contrasts(samples: object) -> dict[str, np.ndarray]:
         "threshold": threshold,
         "fidelity": fidelity,
         "bic_gain": bic_gain,
-        "bic_gain_even": bic_gain_even,
-        "bic_gain_odd": bic_gain_odd,
-        "bic_stable": bic_stable,
         "single_mean": single_mean,
         "single_sigma": single_sigma,
         "valid": separated,
@@ -486,9 +468,6 @@ _CANDIDATE_VECTOR_FIELDS = (
     "bright_fraction",
     "fit_fidelity",
     "bic_gain",
-    "bic_gain_even",
-    "bic_gain_odd",
-    "bic_stable",
     "fit_valid",
     "observable_valid",
     "single_population",
@@ -1668,7 +1647,6 @@ class SlmFeedbackTask:
             "observable_valid",
             "single_population",
             "fit_invalid",
-            "bic_stable",
         }
         for name in _CANDIDATE_VECTOR_FIELDS:
             values = measurement[name]
@@ -3025,9 +3003,6 @@ class SlmFeedbackTask:
                     "bright_fraction": _json_floats(fitted["bright_fraction"]),
                     "fit_fidelity": _json_floats(fitted["fidelity"]),
                     "bic_gain": _json_floats(fitted["bic_gain"]),
-                    "bic_gain_even": _json_floats(fitted["bic_gain_even"]),
-                    "bic_gain_odd": _json_floats(fitted["bic_gain_odd"]),
-                    "bic_stable": [bool(value) for value in fitted["bic_stable"]],
                     "fit_valid": [bool(value) for value in fit_valid],
                     "observable_valid": [
                         bool(value) for value in observable_valid
