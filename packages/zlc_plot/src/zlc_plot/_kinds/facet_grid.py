@@ -24,7 +24,12 @@ def build_payload(projection: Any, view: Any, state: Any) -> None:
     spec = projection._spec
     cell = spec.cell
     bins = projection._histogram_bins(view, state) if isinstance(cell, HistogramPlot) else None
-    projection._payload = view.facet(spec, bins=bins)
+    uncertainty = bool(
+        isinstance(cell, CurvePlot)
+        and state["uncertainty"]
+        and cell.reduction is Reduction.MEAN
+    )
+    projection._payload = view.facet(spec, bins=bins, uncertainty=uncertainty)
 
 
 def admits(schema: Any) -> bool:

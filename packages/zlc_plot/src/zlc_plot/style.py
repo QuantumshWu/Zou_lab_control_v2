@@ -561,6 +561,9 @@ class RenderPolicyConfig:
     colormap_low_fraction: float = 0.0
     colormap_high_fraction: float = 0.95
     side_distribution_fill_alpha: float = 1.0
+    #: The standard-error band behind a MEAN curve: filled in the line's own
+    #: colour, faint enough that overlapping grouped bands stay readable.
+    uncertainty_band_alpha: float = 0.22
     rolling_distribution_min_bins: int = 3
     image_distribution_min_bins: int = 8
     distribution_max_bins: int = 50

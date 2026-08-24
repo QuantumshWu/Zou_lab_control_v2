@@ -1230,6 +1230,7 @@ class FitEngine:
         coordinates: Sequence[np.ndarray] | RegularImageFitInput,
         observations: np.ndarray | None = None,
         *,
+        observation_sigma: np.ndarray | None = None,
         selected_indices: np.ndarray | None = None,
         data_revision: int = 0,
         initial: Mapping[str, float] | Sequence[float] | None = None,
@@ -1247,6 +1248,10 @@ class FitEngine:
                 raise TypeError(
                     "observations belong inside RegularImageFitInput and must not "
                     "also be passed separately"
+                )
+            if observation_sigma is not None:
+                raise TypeError(
+                    "regular-image fitting has no per-point sigma channel"
                 )
             if selected_indices is not None:
                 raise TypeError(
@@ -1276,6 +1281,16 @@ class FitEngine:
         values = np.asarray(observations, dtype=np.float64).reshape(-1)
         if any(item.shape != values.shape for item in coords):
             raise ValueError("coordinates and observations must have equal flattened shape")
+        sigma = None
+        if observation_sigma is not None:
+            sigma = np.asarray(observation_sigma, dtype=np.float64).reshape(-1)
+            if sigma.shape != values.shape:
+                raise ValueError("observation_sigma must match observations")
+            if spec.targets == (FitTarget.HISTOGRAM,):
+                raise ValueError(
+                    "histogram targets weight themselves by counts; an external "
+                    "sigma has no meaning there"
+                )
         if selected_indices is None:
             indices = np.arange(values.size, dtype=np.int64)
         else:
@@ -1289,6 +1304,8 @@ class FitEngine:
             coords = tuple(item[finite] for item in coords)
             values = values[finite]
             indices = indices[finite]
+            if sigma is not None:
+                sigma = sigma[finite]
         if values.size <= len(spec.parameters):
             raise ValueError("fit requires more finite observations than parameters")
         if _DOMAIN_ANCHORED in spec.capabilities:
@@ -1296,7 +1313,23 @@ class FitEngine:
         counted_observations = spec.targets == (FitTarget.HISTOGRAM,)
         solver_coords, solver_values = coords, values
         weight_roots: np.ndarray | None = None
-        if (
+        binned_statistics = False
+        if sigma is not None:
+            # Known per-point uncertainty weights the residuals by 1/sigma.
+            # A non-positive or non-finite sigma cannot weight anything, and
+            # the boolean-rate endpoints (p in {0,1}) legitimately report a
+            # zero sample spread: those points take the strongest honest
+            # weight -- the smallest positive sigma present.  With no
+            # positive sigma at all the data is spreadless and the fit is
+            # the ordinary unweighted one.
+            usable_sigma = sigma[np.isfinite(sigma) & (sigma > 0.0)]
+            if usable_sigma.size:
+                floor = float(np.min(usable_sigma))
+                bounded = np.where(
+                    np.isfinite(sigma) & (sigma > 0.0), sigma, floor
+                )
+                weight_roots = 1.0 / bounded
+        elif (
             not counted_observations
             and spec.independent_arity == 1
             and opts.max_exact_points is not None
@@ -1307,6 +1340,7 @@ class FitEngine:
             )
             if compressed is not None:
                 solver_coords, solver_values, weight_roots = compressed
+                binned_statistics = True
         default_bounds = (
             spec.bounds_initializer(solver_coords, solver_values)
             if spec.bounds_initializer is not None
@@ -1478,10 +1512,15 @@ class FitEngine:
             raise RuntimeError("winning fit evaluation is non-finite")
         residuals = values - fitted
         degrees = max(values.size - solved.x.size, 1)
-        if weight_roots is not None:
+        if binned_statistics:
             # The solver minimised the binned statistics; the reported quality
             # is the full data's, from the evaluation above.
             _rss = float(np.dot(residuals, residuals))
+        elif weight_roots is not None:
+            # Sigma-weighted: the quality IS the chi-square, so the reduced
+            # value and the parameter covariance carry the per-point sigmas.
+            weighted = residuals * weight_roots
+            _rss = float(np.dot(weighted, weighted))
         reduced = float(_rss / degrees)
         covariance, covariance_valid = _covariance(solved.jac, reduced)
         errors = (

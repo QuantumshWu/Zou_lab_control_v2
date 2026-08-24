@@ -1097,6 +1097,7 @@ class FitSessionMixin:
                 model,
                 selection.coordinates,
                 selection.observations,
+                observation_sigma=selection.observation_sigma,
                 selected_indices=selection.selected_indices,
                 data_revision=selection.data_revision,
                 initial=initial,

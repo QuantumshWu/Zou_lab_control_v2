@@ -64,6 +64,7 @@ def curve(
     *,
     group: AxisRef | str | None = None,
     reduction: Reduction = Reduction.MEAN,
+    uncertainty: bool | None = None,
     labels: PlotLabels | None = None,
     size: str | None = None,
     parameters: Mapping[str, object] | None = None,
@@ -71,6 +72,9 @@ def curve(
 ) -> PlotSession:
     """Create a Curve session; text axes mean explicit PointTable columns."""
 
+    values = _with_parameter_alias(
+        parameters, "uncertainty", uncertainty, alias="uncertainty"
+    )
     return PlotSession(
         data,
         CurvePlot(
@@ -80,7 +84,7 @@ def curve(
             labels or PlotLabels(),
         ),
         size=size,
-        parameters=parameters,
+        parameters=values,
         **session_options,
     )
 
@@ -136,6 +140,7 @@ def rolling(
     *,
     group: AxisRef | str | None = None,
     reduction: Reduction = Reduction.MEAN,
+    cumulative: bool | None = None,
     side_distribution: bool | None = None,
     window: int | None = None,
     labels: PlotLabels | None = None,
@@ -150,6 +155,9 @@ def rolling(
         alias="side_distribution",
     )
     values = _with_parameter_alias(values, "window", window, alias="window")
+    values = _with_parameter_alias(
+        values, "cumulative", cumulative, alias="cumulative"
+    )
     return PlotSession(
         data,
         RollingPlot(

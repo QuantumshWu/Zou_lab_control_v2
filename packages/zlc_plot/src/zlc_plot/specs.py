@@ -71,6 +71,14 @@ _ROLLING_DISTRIBUTION_BIN_EFFECTS = (
     | RenderEffect.AXIS_TRANSFORM
     | RenderEffect.CHROME
 )
+#: Flipping the band re-projects the payload (sem appears), moves the y
+#: range (the band must fit), and re-selects any fit (sigma weighting).
+_UNCERTAINTY_EFFECTS = (
+    RenderEffect.PAYLOAD_PROJECTION
+    | RenderEffect.BASE_GEOMETRY
+    | RenderEffect.FIT_SELECTION
+)
+
 _ROLLING_WINDOW_EFFECTS = (
     RenderEffect.PAYLOAD_PROJECTION
     | RenderEffect.BASE_GEOMETRY
@@ -701,6 +709,20 @@ def _parameter_schema_for_context(
         entries.append(_unit_parameter("value_display_unit"))
     if semantic_kind in {PlotKind.CURVE, PlotKind.ROLLING}:
         entries.extend(_curve_parameters())
+    if semantic_kind is PlotKind.CURVE:
+        # A display choice, not a data declaration: the operator flips the
+        # band on a live panel and the projection computes the MEAN's
+        # standard error on demand.  On a non-MEAN reduction the statistic
+        # does not exist and the switch is inert.
+        entries.append(
+            ParameterSpec(
+                "uncertainty",
+                bool,
+                _UNCERTAINTY_EFFECTS,
+                default=False,
+                label="Uncertainty band",
+            )
+        )
     if semantic_kind is PlotKind.HISTOGRAM:
         entries.extend(_histogram_parameters())
         # One shot by default: a distribution of what was just measured.  A
@@ -725,6 +747,16 @@ def _parameter_schema_for_context(
                     RenderEffect.LAYOUT,
                     default=True,
                     label="Side distribution",
+                ),
+                # The running mean of every shot so far, drawn with its
+                # running standard error as the band: the live "rate
+                # converging shot by shot" view.  Inert on non-MEAN.
+                ParameterSpec(
+                    "cumulative",
+                    bool,
+                    _UNCERTAINTY_EFFECTS,
+                    default=False,
+                    label="Cumulative mean",
                 ),
             )
         )

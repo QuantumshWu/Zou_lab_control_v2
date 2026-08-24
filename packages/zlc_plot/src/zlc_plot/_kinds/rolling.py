@@ -33,6 +33,9 @@ def build_payload(projection: Any, view: Any, state: Any) -> None:
     projection._payload = projection._rolling_payload(
         projection._rolling_history_cache,
         window=int(state["window"]),
+        cumulative=(
+            bool(state["cumulative"]) and spec.reduction is Reduction.MEAN
+        ),
     )
 
 
