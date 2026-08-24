@@ -47,6 +47,7 @@ from zlc_runtime import (
     DatasetCoverage,
     DatasetOutputDeclaration,
     LiveDatasetOutput,
+    MonitorCoverage,
     SignalValue,
 )
 
@@ -239,8 +240,17 @@ class FrameSurvivalProcessor:
             coverage = DatasetCoverage(cycles, cycles)
             origin = (0, 0)
         else:
+            # A monitor source counts ITS geometry (cycles x frames); this
+            # output is one row per cycle, and the runtime checks the ledger
+            # against the snapshot actually published.
             canonical = None
-            coverage = signal_value.coverage
+            cycles = survival.block.schema.repeat_axis.size
+            monitor = signal_value.coverage
+            coverage = MonitorCoverage(
+                min(cycles, monitor.written_cells // frames),
+                cycles,
+                retain_at_terminal=monitor.retain_at_terminal,
+            )
             origin = None
         return {
             SURVIVAL_OUTPUTS[0].name: LiveDatasetOutput(

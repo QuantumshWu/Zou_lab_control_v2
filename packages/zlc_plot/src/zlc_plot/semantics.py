@@ -477,17 +477,27 @@ def _scope_coordinates(
         # The point-row ordinal is an addressing scheme, not a declared axis.
         size = schema.point_table.row_count
         values: tuple[float, ...] = tuple(float(index) for index in range(size))
+        labels: tuple[str, ...] | None = None
     elif axis.coordinates is None:
         values = tuple(
             float(axis.index_origin + index) for index in range(axis.size)
         )
+        labels = axis.coordinate_labels
     else:
         values = tuple(float(value) for value in axis.coordinates)
-    choices = (
-        ()
-        if len(values) < 2 or len(values) > SCOPE_CHOICE_LIMIT
-        else tuple((value, f"{value:g}") for value in dict.fromkeys(values))
-    )
+        labels = axis.coordinate_labels
+    if len(values) < 2 or len(values) > SCOPE_CHOICE_LIMIT:
+        choices: tuple[SemanticChoice, ...] = ()
+    else:
+        # A labelled axis pins by the name the operator reads everywhere
+        # else -- "0-1", "box" -- not by its bare numeric identity.
+        first_labels: dict[float, str] = {}
+        for index, value in enumerate(values):
+            if value not in first_labels:
+                first_labels[value] = (
+                    labels[index] if labels is not None else f"{value:g}"
+                )
+        choices = tuple(first_labels.items())
     if (
         ref.domain is AxisDomain.POINT_COORDINATE
         and ref.axis_id == PRIMARY_INDEX_AXIS_ID.value

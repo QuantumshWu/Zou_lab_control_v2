@@ -273,3 +273,27 @@ def test_plot_mean_projection_gives_pooled_rate_and_binomial_band() -> None:
             float(series.sem[entry]), binomial, rtol=1e-12
         )
         assert int(series.counts[entry]) == count
+
+
+def test_monitor_source_translates_coverage_to_own_geometry() -> None:
+    """The real-bench failure: a camera-monitor chain hands MonitorCoverage
+    counted in (cycles x frames); the published ledger must count THIS
+    output's geometry (one row per cycle) or the runtime refuses it."""
+
+    from zlc_runtime import MonitorCoverage
+
+    occupied = np.zeros((4, 3, 2), dtype=bool)
+    snapshot = _occupied_snapshot(occupied)
+    outputs = FrameSurvivalProcessor().evaluate(
+        SignalValue(
+            "@logic/occupancy/occupied",
+            snapshot,
+            MonitorCoverage(4 * 3, 4 * 3),
+        )
+    )
+    survival = outputs["survival"]
+    assert isinstance(survival.coverage, MonitorCoverage)
+    assert survival.coverage.total_cells == 4  # cycles x one point row
+    assert survival.coverage.written_cells == 4
+    # The constructor itself validates ledger-vs-geometry, so constructing
+    # the LiveDatasetOutput above IS the regression proof.
