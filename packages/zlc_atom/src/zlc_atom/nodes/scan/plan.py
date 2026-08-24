@@ -30,7 +30,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from zlc_pulse import PulseSequence, api_parameter_columns_for
+from dataclasses import replace
+
+from zlc_pulse import (
+    PulseSequence,
+    api_parameter_columns_for,
+    scan_columns_for,
+)
 from zlc_pulse.codec import parse_pulse_tree_json, sequence_from_document_tree
 
 from zlc_atom.authoring import TunableField
@@ -94,17 +100,9 @@ def scan_axis_id(label: str) -> str:
     return f"scan.{label}"
 
 
-def scan_ports_for(sequence: PulseSequence) -> tuple[ScanPort, ...]:
-    """Every port this pulse offers, from its own declarations.
-
-    The hard limits come from the same projection the pulse editor's scan page
-    uses, so a plan cannot promise a value the board would refuse.
-    """
-
-    if not isinstance(sequence, PulseSequence):
-        raise TypeError("sequence must be PulseSequence")
+def _ports_from_columns(columns) -> tuple[ScanPort, ...]:
     ports = []
-    for column in api_parameter_columns_for(sequence):
+    for column in columns:
         lo = float(column.limit_lo if column.limit_lo is not None else column.lo)
         hi = float(column.limit_hi if column.limit_hi is not None else column.hi)
         # The port's unit becomes the dataset axis's unit, and an axis unit is
@@ -124,6 +122,34 @@ def scan_ports_for(sequence: PulseSequence) -> tuple[ScanPort, ...]:
             )
         )
     return tuple(ports)
+
+
+def scan_ports_for(sequence: PulseSequence) -> tuple[ScanPort, ...]:
+    """Every API-parameter port this pulse offers -- the STEPPED vocabulary.
+
+    A stepped scan re-resolves the template per point through its API
+    surface, so what it can vary is what the pulse exports as an API
+    parameter.  The hard limits come from the same projection the pulse
+    editor's scan page uses, so a plan cannot promise a value the board
+    would refuse.
+    """
+
+    if not isinstance(sequence, PulseSequence):
+        raise TypeError("sequence must be PulseSequence")
+    return _ports_from_columns(api_parameter_columns_for(sequence))
+
+
+def hardware_scan_ports_for(sequence: PulseSequence) -> tuple[ScanPort, ...]:
+    """Every hardware-slot port this pulse offers -- the SEAMLESS vocabulary.
+
+    A seamless scan is the BOARD advancing its own slot table, so what it
+    can vary is exactly the scan slots the template's author placed, in
+    slot order.
+    """
+
+    if not isinstance(sequence, PulseSequence):
+        raise TypeError("sequence must be PulseSequence")
+    return _ports_from_columns(scan_columns_for(sequence))
 
 
 def scan_ports_for_devices(tunables: Mapping | None) -> tuple[ScanPort, ...]:
@@ -265,33 +291,113 @@ def bind_plan(
     return tuple(bound)
 
 
-def load_scan_template(path: str | Path) -> PulseSequence:
-    """One workspace pulse file, admitted only if it offers something to scan."""
-
+def _template_sequence(path: str | Path) -> PulseSequence:
     source = Path(path).expanduser().resolve()
-    sequence = sequence_from_document_tree(
+    return sequence_from_document_tree(
         parse_pulse_tree_json(source.read_text(encoding="utf-8"))
     )
+
+
+def slots_from_plan(
+    sequence: PulseSequence,
+    ports: Sequence[ScanPort],
+) -> PulseSequence:
+    """Compile an API-driven template's planned parameters into slots.
+
+    An API-surface caller (temperature's release scan) authors WHAT varies
+    through API parameters; the board still needs slots.  This is that one
+    compilation step: each planned parameter becomes a slot, every other
+    API parameter stays for the caller to resolve.  A seamless TEMPLATE
+    never takes this path -- its author placed the slots directly.
+    """
+
+    from zlc_pulse import PulseSlot
+
+    slots = []
+    scanned = []
+    for port in ports:
+        parameter_id = port.port[len(PULSE_PARAM_FAMILY):]
+        parameter = next(
+            value
+            for value in sequence.api_parameters
+            if value.parameter_id == parameter_id
+        )
+        slots.append(
+            PulseSlot(
+                parameter.field_ref.kind,
+                parameter.field_ref,
+                sequence.field_unit(parameter.field_ref),
+                slot_id=parameter_id,
+            )
+        )
+        scanned.append(parameter_id)
+    return replace(
+        sequence,
+        slots=tuple(slots),
+        api_parameters=tuple(
+            value
+            for value in sequence.api_parameters
+            if value.parameter_id not in set(scanned)
+        ),
+    )
+
+
+def load_stepped_template(path: str | Path) -> PulseSequence:
+    """A stepped/API-driven template: API parameters vary, no slots.
+
+    The plan is the only thing that says what varies; a template carrying
+    hardware slots would be a second voice.
+    """
+
+    sequence = _template_sequence(path)
     if not sequence.api_parameters:
         raise ValueError(
-            "a scan template declares API parameters; this pulse declares none, "
-            "so it offers nothing to scan"
+            "a stepped scan template declares API parameters; this pulse "
+            "declares none, so it offers nothing to scan"
         )
     if sequence.slots:
         raise ValueError(
-            "a scan template cannot carry hardware scan slots; the plan is the "
-            "only thing that says what varies"
+            "a stepped scan template cannot carry hardware scan slots; the "
+            "plan is the only thing that says what varies"
         )
     return sequence
 
 
-#: The pulse template both scan nodes select from the workspace's ``pulses``.
-SCAN_PULSE_RESOURCE = WorkspaceResourceSpec(
+def load_seamless_template(path: str | Path) -> PulseSequence:
+    """A seamless/board-driven template: its hardware scan slots ARE the axes.
+
+    The template's author placed the slots in the pulse editor; the plan
+    supplies the values every slot plays.  API parameters may also be
+    declared -- they bake to their authored values before the table plays.
+    """
+
+    sequence = _template_sequence(path)
+    if not sequence.slots:
+        raise ValueError(
+            "a seamless scan template declares hardware scan slots; this "
+            "pulse declares none.  Place the slots in the pulse editor -- "
+            "the board plays exactly what the template scans"
+        )
+    return sequence
+
+
+#: The stepped/API-driven template, selected from the workspace's ``pulses``.
+STEPPED_PULSE_RESOURCE = WorkspaceResourceSpec(
     "pulse_template",
     SCAN_PULSE_CONTRACT,
     "pulses",
     (".json",),
-    load_scan_template,
+    load_stepped_template,
+    argument_name="pulse_resource",
+)
+
+#: The seamless/board-driven template, selected from the same folder.
+SEAMLESS_PULSE_RESOURCE = WorkspaceResourceSpec(
+    "pulse_template",
+    SCAN_PULSE_CONTRACT,
+    "pulses",
+    (".json",),
+    load_seamless_template,
     argument_name="pulse_resource",
 )
 
@@ -384,12 +490,16 @@ __all__ = [
     "SCAN_PLAN_SELECTIONS",
     "PULSE_PARAM_FAMILY",
     "SCAN_PULSE_CONTRACT",
-    "SCAN_PULSE_RESOURCE",
+    "SEAMLESS_PULSE_RESOURCE",
+    "STEPPED_PULSE_RESOURCE",
     "ScanAxis",
     "ScanPlan",
     "ScanPort",
     "bind_plan",
-    "load_scan_template",
+    "hardware_scan_ports_for",
+    "load_seamless_template",
+    "load_stepped_template",
+    "slots_from_plan",
     "plan_from_authored",
     "scan_ports_for",
     "scan_ports_for_devices",

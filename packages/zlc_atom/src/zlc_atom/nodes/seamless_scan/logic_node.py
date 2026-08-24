@@ -30,12 +30,12 @@ from zlc_atom.nodes.scan import (
     DEVICE_PARAM_FAMILY,
     SCAN_OUTPUT,
     SCAN_PULSE_CONTRACT,
-    SCAN_PULSE_RESOURCE,
+    SEAMLESS_PULSE_RESOURCE,
     PublishedSignalSource,
     SeamlessScanMeasurement,
     bind_plan,
+    hardware_scan_ports_for,
     plan_from_authored,
-    scan_ports_for,
 )
 
 
@@ -51,7 +51,7 @@ SEAMLESS_SCAN_SCHEMA = AuthoringSchema(
             "pulse_template",
             "resource",
             "Pulse template",
-            "mot_field_template.json",
+            "",
             required=True,
         ),
         AuthoringField(
@@ -119,7 +119,7 @@ def _build(
                 "one fired scan table; a device port is moved by the host, so "
                 "this plan belongs to the stepped_scan node"
             )
-    ports = bind_plan(parsed, scan_ports_for(sequence))
+    ports = bind_plan(parsed, hardware_scan_ports_for(sequence))
     publication = signal_plane.latest_publication(source_signal)
     if publication is None or not signal_plane.is_generation_live(source_signal):
         raise ValueError(
@@ -143,8 +143,11 @@ def _build(
 def _editor_factory(parent=None):
     from zlc_atom.nodes.scan.editor import scan_plan_editor_factory
 
-    # No device ports: this node would refuse one, so its form never offers it.
-    return scan_plan_editor_factory(parent, device_ports=False)
+    # No device ports, and the axes are the template's own hardware slots:
+    # the board plays exactly what the template scans.
+    return scan_plan_editor_factory(
+        parent, device_ports=False, hardware_slots=True
+    )
 
 
 LOGIC_NODE = LogicNodeDescriptor(
@@ -165,7 +168,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     # what to sweep next, in the axes the picture is drawn in.
     selection_mappings=SCAN_PLAN_SELECTIONS,
     ui_contributions=(_editor_factory,),
-    workspace_resources=(SCAN_PULSE_RESOURCE,),
+    workspace_resources=(SEAMLESS_PULSE_RESOURCE,),
 )
 
 

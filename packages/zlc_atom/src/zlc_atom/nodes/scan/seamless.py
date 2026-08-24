@@ -33,7 +33,6 @@ from dataclasses import replace
 import numpy as np
 from zlc_pulse import (
     PulseSequence,
-    PulseSlot,
     compile_sequence,
     resolve_api_parameters,
     scan_columns_for,
@@ -83,48 +82,51 @@ class SeamlessScanMeasurement:
         return (SCAN_OUTPUT,)
 
     def _streamed_sequence(self, board: object) -> tuple[PulseSequence, tuple]:
-        """The template with the plan's axes turned into hardware slots."""
+        """The template's OWN slots, checked against the plan that fills them.
 
-        slots: list[PulseSlot] = []
-        scanned: list[str] = []
-        for port in self.ports:
-            parameter_id = port.port[len(PULSE_PARAM_FAMILY):]
-            parameter = next(
-                value
-                for value in self.sequence.api_parameters
-                if value.parameter_id == parameter_id
+        A seamless template carries its hardware scan slots -- the author
+        placed them in the pulse editor -- and the plan supplies the values
+        every slot plays.  The plan must cover every slot exactly: a slot
+        with no axis has no values to play, and an axis naming no slot was
+        already refused when the plan was bound.
+        """
+
+        slot_ids = tuple(slot.slot_id for slot in self.sequence.slots)
+        planned = tuple(
+            port.port[len(PULSE_PARAM_FAMILY):] for port in self.ports
+        )
+        missing = tuple(
+            slot_id for slot_id in slot_ids if slot_id not in set(planned)
+        )
+        if missing:
+            raise ValueError(
+                "every hardware slot plays every point, so each needs a plan "
+                f"axis; {', '.join(repr(name) for name in missing)} have none"
             )
-            slots.append(
-                PulseSlot(
-                    parameter.field_ref.kind,
-                    parameter.field_ref,
-                    self.sequence.field_unit(parameter.field_ref),
-                    slot_id=parameter_id,
-                )
-            )
-            scanned.append(parameter_id)
         num_slots = int(board.geometry.num_slots)
-        if len(slots) > num_slots:
+        if len(slot_ids) > num_slots:
             raise ValueError(
                 f"the board advances at most {num_slots} slots per cycle; "
-                f"this plan streams {len(slots)} axes"
+                f"this template scans {len(slot_ids)} slots"
             )
-        streamed = replace(
-            self.sequence,
-            slots=tuple(slots),
-            api_parameters=tuple(
-                value
-                for value in self.sequence.api_parameters
-                if value.parameter_id not in set(scanned)
-            ),
-        )
-        # Every parameter the plan does not scan bakes to its authored
-        # value; the compiler refuses unresolved API parameters.
-        streamed = resolve_api_parameters(streamed)
+        # Any API parameters bake to their authored values; the compiler
+        # refuses unresolved ones.
+        streamed = resolve_api_parameters(self.sequence)
         columns = scan_columns_for(streamed)
-        if tuple(column.name for column in columns) != tuple(scanned):
-            raise RuntimeError("scan table columns drifted from the plan axes")
         return streamed, columns
+
+    def _slot_ordered_rows(
+        self, rows: Sequence[Sequence[float]], columns
+    ) -> tuple[tuple[float, ...], ...]:
+        """Plan rows re-ordered from axis order into the table's slot order."""
+
+        planned = tuple(
+            port.port[len(PULSE_PARAM_FAMILY):] for port in self.ports
+        )
+        order = tuple(planned.index(column.name) for column in columns)
+        return tuple(
+            tuple(float(row[index]) for index in order) for row in rows
+        )
 
     def _wire_table(self, rows: Sequence[Sequence[float]], columns) -> np.ndarray:
         """The played table: every plan row, ``shots_per_point`` times over."""
@@ -167,7 +169,7 @@ class SeamlessScanMeasurement:
         self.source.open(context, cycles=cycles)
         try:
             streamed, columns = self._streamed_sequence(board)
-            wire = self._wire_table(rows, columns)
+            wire = self._wire_table(self._slot_ordered_rows(rows, columns), columns)
             program = compile_sequence(streamed, board.geometry, board.clock_hz)
             self.source.validate(program, wire, cycles=cycles)
             self.sequencer.load(program, source=streamed, rows=wire)

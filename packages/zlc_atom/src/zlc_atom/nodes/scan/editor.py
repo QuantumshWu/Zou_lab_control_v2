@@ -32,7 +32,13 @@ from zlc_ui.fluent import (
     FluentSpinBox,
 )
 
-from .plan import ScanAxis, ScanPlan, scan_ports_for, scan_ports_for_devices
+from .plan import (
+    ScanAxis,
+    ScanPlan,
+    hardware_scan_ports_for,
+    scan_ports_for,
+    scan_ports_for_devices,
+)
 
 
 def _uniform(values: tuple[float, ...]) -> bool:
@@ -149,10 +155,12 @@ class ScanPlanEditor(QtWidgets.QWidget):
         parent=None,
         *,
         device_ports: bool = True,
+        hardware_slots: bool = False,
         only_port: str | None = None,
     ) -> None:
         super().__init__(parent)
         self._device_ports = bool(device_ports)
+        self._hardware_slots = bool(hardware_slots)
         # A node whose measurement IS about one knob -- release-recapture is a
         # statement about t_off and nothing else -- offers that knob and no
         # way to add a second.  The row is always there, so the form opens on
@@ -194,9 +202,18 @@ class ScanPlanEditor(QtWidgets.QWidget):
         # host is there to move them.
         extras = projection.get("bench_extras") or {}
         tunables = extras.get("tunable_devices") if isinstance(extras, Mapping) else None
-        ports = (
-            scan_ports_for(sequence) if sequence is not None else ()
-        ) + (scan_ports_for_devices(tunables) if self._device_ports else ())
+        template_ports = (
+            (
+                hardware_scan_ports_for(sequence)
+                if self._hardware_slots
+                else scan_ports_for(sequence)
+            )
+            if sequence is not None
+            else ()
+        )
+        ports = template_ports + (
+            scan_ports_for_devices(tunables) if self._device_ports else ()
+        )
         if self._only_port is not None:
             ports = tuple(port for port in ports if port.port == self._only_port)
         values = projection.get("form_values") or {}
@@ -295,5 +312,11 @@ def scan_plan_editor_factory(
     *,
     device_ports: bool = True,
     only_port: str | None = None,
+    hardware_slots: bool = False,
 ) -> ScanPlanEditor:
-    return ScanPlanEditor(parent, device_ports=device_ports, only_port=only_port)
+    return ScanPlanEditor(
+        parent,
+        device_ports=device_ports,
+        only_port=only_port,
+        hardware_slots=hardware_slots,
+    )

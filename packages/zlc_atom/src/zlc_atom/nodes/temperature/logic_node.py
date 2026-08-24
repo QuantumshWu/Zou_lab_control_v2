@@ -39,7 +39,7 @@ from zlc_atom.nodes.scan import (
     PULSE_PARAM_FAMILY,
     SCAN_OUTPUT,
     SCAN_PULSE_CONTRACT,
-    SCAN_PULSE_RESOURCE,
+    STEPPED_PULSE_RESOURCE,
     plan_from_authored,
 )
 
@@ -226,7 +226,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     ),
     build=_build,
     ui_contributions=(_editor_factory,),
-    workspace_resources=(SCAN_PULSE_RESOURCE,),
+    workspace_resources=(STEPPED_PULSE_RESOURCE,),
 )
 
 

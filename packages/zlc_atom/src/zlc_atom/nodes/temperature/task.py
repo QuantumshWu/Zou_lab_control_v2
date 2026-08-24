@@ -65,6 +65,7 @@ from zlc_atom.nodes.scan import (
     SeamlessScanMeasurement,
     bind_plan,
     scan_ports_for,
+    slots_from_plan,
 )
 
 
@@ -145,6 +146,11 @@ class TemperatureTask:
         # no release, or a release time outside what the board can play, is
         # refused here, by name, before anything is armed.
         ports = bind_plan(plan, scan_ports_for(sequence))
+        # The release scan authors WHAT varies through the template's API
+        # surface; the board plays slots, so the planned parameter is
+        # compiled into one here -- the explicit API-driven step a seamless
+        # TEMPLATE never takes (its author places the slots directly).
+        sequence = slots_from_plan(sequence, ports)
         self._devices = {"camera": str(camera_key), "sequencer": str(sequencer_key)}
         self._calibration = calibration
         self._calibration_path = Path(calibration_path).expanduser().resolve()

@@ -26,7 +26,7 @@ from zlc_atom.nodes.scan import (
     SCAN_PLAN_SELECTIONS,
     SCAN_OUTPUT,
     SCAN_PULSE_CONTRACT,
-    SCAN_PULSE_RESOURCE,
+    STEPPED_PULSE_RESOURCE,
     PublishedSignalSource,
     bind_plan,
     plan_from_authored,
@@ -189,7 +189,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     # what to sweep next, in the axes the picture is drawn in.
     selection_mappings=SCAN_PLAN_SELECTIONS,
     ui_contributions=(_editor_factory,),
-    workspace_resources=(SCAN_PULSE_RESOURCE,),
+    workspace_resources=(STEPPED_PULSE_RESOURCE,),
 )
 
 

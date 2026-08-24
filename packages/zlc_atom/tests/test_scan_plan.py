@@ -21,7 +21,7 @@ from zlc_atom.nodes.scan import (
     ScanAxis,
     ScanPlan,
     bind_plan,
-    load_scan_template,
+    load_stepped_template,
     scan_ports_for,
     scan_ports_for_devices,
 )
@@ -61,7 +61,7 @@ def test_scan_accepts_the_complete_document_saved_by_the_pulse_editor(
     path = tmp_path / "scan.json"
     path.write_text(json.dumps(tree), encoding="utf-8")
 
-    assert load_scan_template(path).name == tree["name"]
+    assert load_stepped_template(path).name == tree["name"]
 
 
 def test_plan_rows_nest_outer_first_and_round_trip() -> None:

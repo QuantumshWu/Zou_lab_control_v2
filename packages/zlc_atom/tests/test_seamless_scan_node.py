@@ -39,6 +39,8 @@ from zlc_atom.nodes.scan import (
     SCAN_OUTPUT,
     ScanAxis,
     ScanPlan,
+    scan_ports_for,
+    slots_from_plan,
 )
 from zlc_atom.nodes.seamless_scan import SEAMLESS_SCAN_SCHEMA
 
@@ -61,8 +63,25 @@ def _scan_host(node: object, plane: SignalDataPlane) -> NodeHost:
     )
 
 
-def _template_sequence():
-    return sequence_from_tree(json.loads(scan_pulse_template_bytes().decode("utf-8")))
+def _template_sequence(*scanned: str):
+    """The fixture template with its planned parameters compiled to slots.
+
+    A seamless template CARRIES its hardware scan slots; the shared fixture
+    authors API parameters, so each test names what it scans and this
+    compiles exactly those into the slots the template would have carried.
+    """
+
+    raw = sequence_from_tree(
+        json.loads(scan_pulse_template_bytes().decode("utf-8"))
+    )
+    names = set(scanned) or {"da_bias_x"}
+    ports = tuple(
+        port
+        for port in scan_ports_for(raw)
+        if port.port[len(PULSE_PARAM_FAMILY):] in names
+    )
+    assert len(ports) == len(names), (names, [p.port for p in ports])
+    return slots_from_plan(raw, ports)
 
 
 def _pulse_resource(name: str, sequence):
@@ -338,7 +357,18 @@ def test_the_board_advanced_scan_recovers_the_planted_trap_loss() -> None:
             sequencer=sequencer,
             signal_plane=plane,
             source_signal=frames_signal,
-            pulse_resource=_pulse_resource("temperature_template.json", sequence),
+            pulse_resource=_pulse_resource(
+                "temperature_template.json",
+                # The node's contract: the template CARRIES its scan slot.
+                slots_from_plan(
+                    sequence,
+                    tuple(
+                        port
+                        for port in scan_ports_for(sequence)
+                        if port.port == PULSE_PARAM_FAMILY + "t_off"
+                    ),
+                ),
+            ),
             plan=plan.to_tree(),
             shots_per_point=shots,
             settle_seconds=0.05,
