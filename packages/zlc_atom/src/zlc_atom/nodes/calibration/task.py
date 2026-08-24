@@ -893,23 +893,50 @@ def _save_report_images(
             )[:, np.newaxis, :],
         )
         site_ref = AxisRef.data("calibration.site")
-        thresholds = tuple(
-            {
-                "value": float(value),
-                "scope": (
-                    {
-                        "domain": site_ref.domain.value,
-                        "axis_id": site_ref.axis_id,
-                        "coordinate": site_axis.coordinate_at(index),
-                    },
-                ),
-                "repeat_index": None,
-            }
-            for index, (value, valid) in enumerate(
-                zip(model.thresholds, site_valid, strict=True)
+        gaussian_fields = tuple(
+            np.asarray(model_report[name], dtype=float)
+            for name in (
+                "gaussian_dark_mean",
+                "gaussian_dark_sigma",
+                "gaussian_dark_weight",
+                "gaussian_bright_mean",
+                "gaussian_bright_sigma",
+                "gaussian_bright_weight",
             )
-            if valid
         )
+        thresholds = []
+        for index, (value, valid) in enumerate(
+            zip(model.thresholds, site_valid, strict=True)
+        ):
+            if not valid:
+                continue
+            component_values = tuple(field[index] for field in gaussian_fields)
+            components = (
+                {
+                    "left_mean": float(component_values[0]),
+                    "left_sigma": float(component_values[1]),
+                    "left_weight": float(component_values[2]),
+                    "right_mean": float(component_values[3]),
+                    "right_sigma": float(component_values[4]),
+                    "right_weight": float(component_values[5]),
+                }
+                if np.isfinite(component_values).all()
+                else None
+            )
+            thresholds.append(
+                {
+                    "value": float(value),
+                    "scope": (
+                        {
+                            "domain": site_ref.domain.value,
+                            "axis_id": site_ref.axis_id,
+                            "coordinate": site_axis.coordinate_at(index),
+                        },
+                    ),
+                    "repeat_index": None,
+                    "gaussian_components": components,
+                }
+            )
         title = f"{model.kind.value.replace('_', ' ')} readout"
         save(
             model.kind.value,
@@ -920,7 +947,7 @@ def _save_report_images(
                 labels=PlotLabels(title=title),
             ),
             parameters={"threshold_classifier": True},
-            classifier_thresholds=thresholds,
+            classifier_thresholds=tuple(thresholds),
         )
 
     psf_model = calibration.select_model(ReadoutModelKind.PER_SITE_PSF)

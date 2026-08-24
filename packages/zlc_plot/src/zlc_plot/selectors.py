@@ -123,8 +123,45 @@ class SelectorState:
             object.__setattr__(self, "value", float(self.value))
 
 
-_THRESHOLD_TARGET_FIELDS = {"value", "scope", "repeat_index"}
+_THRESHOLD_TARGET_REQUIRED_FIELDS = {"value", "scope", "repeat_index"}
+_THRESHOLD_TARGET_OPTIONAL_FIELDS = {"gaussian_components"}
 _THRESHOLD_SCOPE_FIELDS = {"domain", "axis_id", "coordinate"}
+_GAUSSIAN_COMPONENT_FIELDS = {
+    "left_mean",
+    "left_sigma",
+    "left_weight",
+    "right_mean",
+    "right_sigma",
+    "right_weight",
+}
+
+
+def _gaussian_components(value: object) -> Mapping[str, float] | None:
+    """Copy one exact population-weighted Gaussian pair for presentation."""
+
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or set(value) != _GAUSSIAN_COMPONENT_FIELDS:
+        raise ValueError("classifier Gaussian component fields differ")
+    selected: dict[str, float] = {}
+    for name in _GAUSSIAN_COMPONENT_FIELDS:
+        item = value[name]
+        if isinstance(item, bool) or not isinstance(item, Real):
+            raise TypeError("classifier Gaussian components must be finite numbers")
+        number = float(item)
+        if not math.isfinite(number):
+            raise ValueError("classifier Gaussian components must be finite numbers")
+        selected[name] = number
+    if selected["right_mean"] <= selected["left_mean"]:
+        raise ValueError("classifier Gaussian means must be strictly ordered")
+    if min(selected["left_sigma"], selected["right_sigma"]) <= 0.0:
+        raise ValueError("classifier Gaussian sigmas must be positive")
+    if min(selected["left_weight"], selected["right_weight"]) <= 0.0:
+        raise ValueError("classifier Gaussian weights must be positive")
+    total = selected["left_weight"] + selected["right_weight"]
+    selected["left_weight"] /= total
+    selected["right_weight"] /= total
+    return MappingProxyType(selected)
 
 
 def _threshold_coordinate(value: object) -> int | float | str:
@@ -175,7 +212,13 @@ def normalize_classifier_threshold_targets(
     for target in targets:
         if not isinstance(target, Mapping):
             raise TypeError("each classifier threshold target must be an object")
-        if set(target) != _THRESHOLD_TARGET_FIELDS:
+        fields = set(target)
+        if (
+            not _THRESHOLD_TARGET_REQUIRED_FIELDS <= fields
+            or fields
+            - _THRESHOLD_TARGET_REQUIRED_FIELDS
+            - _THRESHOLD_TARGET_OPTIONAL_FIELDS
+        ):
             raise ValueError("classifier threshold target fields differ")
         value = target["value"]
         if isinstance(value, bool) or not isinstance(value, Real):
@@ -225,11 +268,16 @@ def normalize_classifier_threshold_targets(
             minimum=0,
             optional=True,
         )
-        record = MappingProxyType({
+        record_values: dict[str, object] = {
             "value": threshold,
             "scope": tuple(normalized_scope),
             "repeat_index": repeat_index,
-        })
+        }
+        if "gaussian_components" in target:
+            record_values["gaussian_components"] = _gaussian_components(
+                target["gaussian_components"]
+            )
+        record = MappingProxyType(record_values)
         identity = _classifier_threshold_key(record)
         if identity in identities:
             raise ValueError("classifier threshold targets repeat a coordinate")

@@ -973,17 +973,19 @@ def _bimodal_classifier_metrics(
             1.0 + math.erf((value - mean) / (sigma * math.sqrt(2.0)))
         )
 
-    def error(value: float) -> float:
-        return 0.5 * (
-            1.0 - cdf(value, left_mean, left_sigma)
-            + cdf(value, right_mean, right_sigma)
-        )
-
     left_area = float(values["left_amplitude"]) * left_sigma
     right_area = float(values["right_amplitude"]) * right_sigma
     total_area = left_area + right_area
+    if not math.isfinite(total_area) or total_area <= 0.0:
+        return (None, float("nan"), float("nan"), float("nan"))
     left_weight = left_area / total_area
     right_weight = 1.0 - left_weight
+
+    def error(value: float) -> float:
+        return (
+            left_weight * (1.0 - cdf(value, left_mean, left_sigma))
+            + right_weight * cdf(value, right_mean, right_sigma)
+        )
     if threshold is None:
         # The fitted curve's own total is the shot count, whatever the bins
         # are: the model IS counts per bin.
@@ -1013,7 +1015,7 @@ def _bimodal_classifier_metrics(
         threshold,
         left_fraction,
         1.0 - left_fraction,
-        0.5 * (left_correct + right_correct),
+        left_weight * left_correct + right_weight * right_correct,
     )
 
 

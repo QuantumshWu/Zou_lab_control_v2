@@ -151,6 +151,9 @@ class _ProjectionPresentation:
     previous_classifier_results: tuple["FitResult | None", ...]
     previous_classifier_overlays: tuple[FitOverlay, ...]
     previous_classifier_thresholds: tuple[float | None, ...]
+    previous_classifier_gaussian_components: tuple[
+        Mapping[str, float] | None, ...
+    ]
     previous_focused_facet_index: int | None
     previous_facet_focus_index: int | None
     previous_viewport: RectangleRange | None

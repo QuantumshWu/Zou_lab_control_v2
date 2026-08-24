@@ -1975,14 +1975,13 @@ def _empirical_threshold(
             [values[-1] + 0.5 * float(values[-1] - values[-2])],
         ]
     )
-    dark_below = np.searchsorted(np.sort(dark_values), cuts, side="left") / dark_values.size
-    bright_below = (
-        np.searchsorted(np.sort(bright_values), cuts, side="left") / bright_values.size
-    )
+    dark_below = np.searchsorted(np.sort(dark_values), cuts, side="left")
+    bright_below = np.searchsorted(np.sort(bright_values), cuts, side="left")
+    total = dark_values.size + bright_values.size
     if bright_above:
-        fidelity = 0.5 * (dark_below + (1.0 - bright_below))
+        fidelity = (dark_below + bright_values.size - bright_below) / total
     else:
-        fidelity = 0.5 * ((1.0 - dark_below) + bright_below)
+        fidelity = (dark_values.size - dark_below + bright_below) / total
     best_value = float(np.max(fidelity))
     best = np.flatnonzero(np.isclose(fidelity, best_value, rtol=0.0, atol=1e-12))
     margin = np.zeros(cuts.shape, dtype=float)
@@ -2014,6 +2013,12 @@ def _fit_readout_model(
     predictions = np.zeros_like(short_signals, dtype=bool)
     site_gaussian_fidelity = np.full(len(centers), np.nan, dtype=float)
     gaussian_thresholds = np.full(len(centers), np.nan, dtype=float)
+    gaussian_dark_means = np.full(len(centers), np.nan, dtype=float)
+    gaussian_dark_sigmas = np.full(len(centers), np.nan, dtype=float)
+    gaussian_bright_means = np.full(len(centers), np.nan, dtype=float)
+    gaussian_bright_sigmas = np.full(len(centers), np.nan, dtype=float)
+    gaussian_dark_weights = np.full(len(centers), np.nan, dtype=float)
+    gaussian_bright_weights = np.full(len(centers), np.nan, dtype=float)
     dark_means = np.full(len(centers), np.nan, dtype=float)
     bright_means = np.full(len(centers), np.nan, dtype=float)
     dark_sample_count = np.zeros(len(centers), dtype=np.int64)
@@ -2032,67 +2037,82 @@ def _fit_readout_model(
         # and make later visibility harder, never manufacture a response.
         dark_reference = dark if dark.size >= 2 else short_signals[finite, site]
         if dark_reference.size >= 2:
-            dark_means[site] = float(np.mean(dark_reference))
             dark_sample_count[site] = dark_reference.size
             dark_sample_variance[site] = float(np.var(dark_reference, ddof=1))
-        if dark.size and bright_values.size:
-            dark_mean, bright_mean = float(np.mean(dark)), float(np.mean(bright_values))
-            dark_means[site], bright_means[site] = dark_mean, bright_mean
-            gaussian_threshold = float("nan")
-            if dark.size >= 2 and bright_values.size >= 2:
-                dark_sigma = float(np.std(dark, ddof=1))
-                bright_sigma = float(np.std(bright_values, ddof=1))
-                candidate, bright_above = optimal_gaussian_threshold(
-                    dark_mean,
-                    dark_sigma,
-                    bright_mean,
-                    bright_sigma,
-                )
-                if (
-                    bright_above
-                    and np.isfinite(candidate)
-                    and dark_mean < candidate < bright_mean
-                ):
-                    gaussian_threshold = candidate
-                    gaussian_thresholds[site] = candidate
-                    site_gaussian_fidelity[site] = gaussian_fidelity(
-                        dark_mean,
-                        dark_sigma,
-                        bright_mean,
-                        bright_sigma,
-                        candidate,
-                        True,
-                    )[2]
-            empirical_threshold = _empirical_threshold(
+        gaussian_threshold = float("nan")
+        mixture = fit_bimodal(short_signals[finite, site])
+        if mixture.ok and mixture.bright_above:
+            dark_weight = 1.0 - float(mixture.bright_fraction)
+            bright_weight = float(mixture.bright_fraction)
+            candidate, bright_above = optimal_gaussian_threshold(
+                mixture.dark_mean,
+                mixture.dark_sigma,
+                mixture.bright_mean,
+                mixture.bright_sigma,
+                dark_weight,
+                bright_weight,
+            )
+            if (
+                bright_above
+                and np.isfinite(candidate)
+                and mixture.dark_mean < candidate < mixture.bright_mean
+            ):
+                gaussian_threshold = candidate
+                gaussian_thresholds[site] = candidate
+                gaussian_dark_means[site] = mixture.dark_mean
+                gaussian_dark_sigmas[site] = mixture.dark_sigma
+                gaussian_bright_means[site] = mixture.bright_mean
+                gaussian_bright_sigmas[site] = mixture.bright_sigma
+                gaussian_dark_weights[site] = dark_weight
+                gaussian_bright_weights[site] = bright_weight
+                site_gaussian_fidelity[site] = gaussian_fidelity(
+                    mixture.dark_mean,
+                    mixture.dark_sigma,
+                    mixture.bright_mean,
+                    mixture.bright_sigma,
+                    candidate,
+                    True,
+                    dark_weight,
+                    bright_weight,
+                )[2]
+        empirical_threshold = (
+            _empirical_threshold(
                 dark,
                 bright_values,
                 bright_above=True,
             )
-            threshold = (
-                empirical_threshold
-                if threshold_method == "empirical"
-                or not np.isfinite(gaussian_threshold)
-                else gaussian_threshold
-            )
+            if dark.size and bright_values.size
+            else float("nan")
+        )
+        threshold = (
+            empirical_threshold
+            if threshold_method == "empirical"
+            or not np.isfinite(gaussian_threshold)
+            else gaussian_threshold
+        )
+        if np.isfinite(threshold):
             thresholds[site] = threshold
+            if np.isfinite(gaussian_threshold) and threshold_method == "gaussian":
+                dark_means[site] = gaussian_dark_means[site]
+                bright_means[site] = gaussian_bright_means[site]
+            elif dark.size and bright_values.size:
+                dark_means[site] = float(np.mean(dark))
+                bright_means[site] = float(np.mean(bright_values))
             short_values = short_signals[:, site]
             predictions[:, site] = classify_threshold(
                 short_values,
                 np.full(short_values.shape, threshold, dtype=float),
                 bright_above=True,
             )
-    # One confusion, computed once, reported whole.  The loop used to compute
-    # its own balanced figure and have it thrown away by this call, while the
-    # dark and bright halves it also computed -- under a different validity
-    # mask -- were kept.  So the reported balanced fidelity was not the mean of
-    # the reported halves.
+    # Labels enter only here (and the empirical path above): they evaluate the
+    # final operating point but never determine a Gaussian fit or its threshold.
     confusion = per_site_fidelity(
         short_signals,
         labels_occupied,
         thresholds,
         valid_mask=labels_valid,
     )
-    site_fidelity = confusion.balanced
+    site_fidelity = confusion.overall
     usable_sites = (
         site_map.valid_sites
         & np.isfinite(thresholds)
@@ -2118,6 +2138,12 @@ def _fit_readout_model(
         "short_signals": short_signals,
         "thresholds": thresholds,
         "gaussian_thresholds": gaussian_thresholds,
+        "gaussian_dark_mean": gaussian_dark_means,
+        "gaussian_dark_sigma": gaussian_dark_sigmas,
+        "gaussian_bright_mean": gaussian_bright_means,
+        "gaussian_bright_sigma": gaussian_bright_sigmas,
+        "gaussian_dark_weight": gaussian_dark_weights,
+        "gaussian_bright_weight": gaussian_bright_weights,
         "predictions": predictions,
         "site_usable": usable_sites,
         "site_fidelity": site_fidelity,

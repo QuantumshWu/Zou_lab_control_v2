@@ -20,6 +20,12 @@ _SIGMA_FLOOR = 1e-12
 #: "state" from collapsing onto a handful of samples.
 _MAX_WIDTH_RATIO = 5.0
 
+# A weak, symmetric prior keeps a finite sample's tail from winning merely by
+# making one component several times narrower than the other.  It does not
+# prescribe which state is wider, and raw likelihood dominates it as the shot
+# count grows.  sigma=0.5 in log(width ratio) corresponds to a factor 1.65.
+_LOG_WIDTH_RATIO_PRIOR_SIGMA = 0.5
+
 
 def _erf_array(values: np.ndarray) -> np.ndarray:
     """Evaluate :func:`math.erf` over an array without a SciPy dependency."""
@@ -60,6 +66,8 @@ def _threshold_error(
     bright_mean: float,
     bright_sigma: float,
     bright_above: bool,
+    dark_weight: float,
+    bright_weight: float,
 ) -> float:
     if bright_above:
         dark_error = 1.0 - float(normal_cdf(threshold, dark_mean, dark_sigma))
@@ -67,7 +75,7 @@ def _threshold_error(
     else:
         dark_error = float(normal_cdf(threshold, dark_mean, dark_sigma))
         bright_error = 1.0 - float(normal_cdf(threshold, bright_mean, bright_sigma))
-    return 0.5 * (dark_error + bright_error)
+    return dark_weight * dark_error + bright_weight * bright_error
 
 
 def optimal_gaussian_threshold(
@@ -75,26 +83,41 @@ def optimal_gaussian_threshold(
     dark_sigma: float,
     bright_mean: float,
     bright_sigma: float,
+    dark_weight: float = 0.5,
+    bright_weight: float = 0.5,
 ) -> tuple[float, bool]:
-    """Return the analytic equal-prior crossing between two Gaussians."""
+    """Return the relevant Bayes crossing for two weighted Gaussians."""
 
     dark_mean = float(dark_mean)
     bright_mean = float(bright_mean)
     dark_sigma = abs(float(dark_sigma))
     bright_sigma = abs(float(bright_sigma))
+    dark_weight = float(dark_weight)
+    bright_weight = float(bright_weight)
     bright_above = bright_mean >= dark_mean
     if not all(
         isfinite(value)
         for value in (dark_mean, dark_sigma, bright_mean, bright_sigma)
     ) or min(dark_sigma, bright_sigma) <= 0.0:
         return float("nan"), bright_above
+    if (
+        not isfinite(dark_weight)
+        or not isfinite(bright_weight)
+        or min(dark_weight, bright_weight) <= 0.0
+    ):
+        return float("nan"), bright_above
+    weight_sum = dark_weight + bright_weight
+    dark_weight /= weight_sum
+    bright_weight /= weight_sum
 
     if bright_above:
         low_mean, low_sigma = dark_mean, dark_sigma
         high_mean, high_sigma = bright_mean, bright_sigma
+        low_weight, high_weight = dark_weight, bright_weight
     else:
         low_mean, low_sigma = bright_mean, bright_sigma
         high_mean, high_sigma = dark_mean, dark_sigma
+        low_weight, high_weight = bright_weight, dark_weight
     separation = high_mean - low_mean
     if separation <= 0.0:
         return float("nan"), bright_above
@@ -112,6 +135,7 @@ def optimal_gaussian_threshold(
     c = (
         0.125 * (low_inverse_variance - high_inverse_variance)
         - log(high_width / low_width)
+        - log(low_weight / high_weight)
     )
     scale = max(abs(a), abs(b), abs(c), 1.0)
     roots: tuple[float, ...]
@@ -139,6 +163,8 @@ def optimal_gaussian_threshold(
             bright_mean,
             bright_sigma,
             bright_above,
+            dark_weight,
+            bright_weight,
         ),
     )
     return float(threshold), bright_above
@@ -151,19 +177,36 @@ def gaussian_fidelity(
     bright_sigma: float,
     threshold: float,
     bright_above: bool = True,
+    dark_weight: float = 0.5,
+    bright_weight: float = 0.5,
 ) -> tuple[float, float, float]:
-    """Return dark, bright, and balanced classification fidelity."""
+    """Return dark, bright, and weighted classification fidelity."""
 
-    values = (dark_mean, dark_sigma, bright_mean, bright_sigma, threshold)
+    values = (
+        dark_mean,
+        dark_sigma,
+        bright_mean,
+        bright_sigma,
+        threshold,
+        dark_weight,
+        bright_weight,
+    )
     if not np.isfinite(values).all():
         return float("nan"), float("nan"), float("nan")
+    dark_weight = float(dark_weight)
+    bright_weight = float(bright_weight)
+    if min(dark_weight, bright_weight) <= 0.0:
+        return float("nan"), float("nan"), float("nan")
+    total = dark_weight + bright_weight
+    dark_weight /= total
+    bright_weight /= total
     if bright_above:
         dark = float(normal_cdf(threshold, dark_mean, dark_sigma))
         bright = 1.0 - float(normal_cdf(threshold, bright_mean, bright_sigma))
     else:
         dark = 1.0 - float(normal_cdf(threshold, dark_mean, dark_sigma))
         bright = float(normal_cdf(threshold, bright_mean, bright_sigma))
-    return dark, bright, 0.5 * (dark + bright)
+    return dark, bright, dark_weight * dark + bright_weight * bright
 
 
 def _exact_otsu_threshold(values: np.ndarray, min_fraction: float = 0.02) -> float:
@@ -214,12 +257,9 @@ def _em_two_state(
     weight has a floor; a state cannot be infinitely sharp, so each width has
     one (without it, one component walks onto a single sample, its width goes
     to zero and its likelihood to infinity -- the classic way an unconstrained
-    mixture "wins" while explaining nothing).  And the bright state cannot be
-    narrower than the dark one: it is the dark state plus the photons of an
-    atom, whose shot noise only adds variance.  Left free, that constraint is
-    the one that inverts on marginal data -- a wide "bright" component slides
-    over the whole sample and a narrow "dark" one sits on the peak, which is
-    the overlapping pair that a bimodal histogram came back as.
+    mixture "wins" while explaining nothing).  Neither population is forced
+    wider: real technical noise can make either conditional distribution the
+    narrower one.  Only their width ratio is bounded symmetrically.
     """
 
     likelihood = -np.inf
@@ -240,30 +280,21 @@ def _em_two_state(
             responsibility * (values[:, None] - means[None, :]) ** 2
         ).sum(axis=0) / counts
         sigmas = np.maximum(np.sqrt(np.maximum(variances, 0.0)), sigma_min)
-        dark, bright = (0, 1) if means[0] <= means[1] else (1, 0)
-        if sigmas[dark] > sigmas[bright]:
-            # At the boundary of "the bright state is at least as wide", the
-            # likelihood is maximised by the two widths being equal, and the
-            # common width is the pooled one.
-            pooled = sqrt(
-                float(
-                    (counts[0] * sigmas[0] ** 2 + counts[1] * sigmas[1] ** 2)
-                    / max(counts.sum(), np.finfo(float).tiny)
-                )
-            )
-            sigmas = np.array([max(pooled, sigma_min), max(pooled, sigma_min)])
-        else:
-            # ...and no wider than the dark state by more than a readout can
-            # make it.  Both states are the same sum of the same pixels; the
-            # bright one differs by the shot noise of one atom's photons, a
-            # factor of a few at the very most.  Unbounded, the likelihood of
-            # a Gaussian mixture has no maximum at all -- a component can
-            # shrink onto two neighbouring samples, and its density, and the
-            # likelihood, run away to infinity.  Searching from several starts
-            # finds those spikes reliably, so the search has to be told that a
-            # state of the readout is not one of them.
-            sigmas[dark] = max(sigmas[dark], sigmas[bright] / _MAX_WIDTH_RATIO)
-        current = float(np.sum(np.log(total)))
+        narrow = int(np.argmin(sigmas))
+        wide = 1 - narrow
+        sigmas[narrow] = max(
+            sigmas[narrow], sigmas[wide] / _MAX_WIDTH_RATIO
+        )
+        updated_scaled = (values[:, None] - means[None, :]) / sigmas[None, :]
+        updated_total = np.sum(
+            weights[None, :]
+            * np.exp(-0.5 * updated_scaled**2)
+            / (sigmas[None, :] * sqrt(2.0 * pi)),
+            axis=1,
+        )
+        if not np.all(np.isfinite(updated_total)) or np.any(updated_total <= 0.0):
+            return means, sigmas, weights, -np.inf
+        current = float(np.sum(np.log(updated_total)))
         if abs(current - likelihood) <= tolerance * max(1.0, abs(current)):
             likelihood = current
             break
@@ -320,14 +351,13 @@ def fit_bimodal(values: object, *, min_component_fraction: float = 0.01) -> Bimo
     on a site asked to see the two states, and "the peaks are close" is an
     answer about the data, not a reason to show nothing.
 
-    Which two Gaussians is decided by likelihood over several starting points.
-    One start -- an Otsu cut and the moments of its two halves -- is a good
-    guess only when the cut lands between the peaks; when it lands inside the
-    dark state, EM slides from there into the local maximum next to it and
-    stays, which is how a visibly bimodal histogram came back fitted by two
-    overlapping bells with an obviously better pair available.  Starting from
-    cuts all across the sample and keeping the most likely result costs a few
-    milliseconds and removes that failure entirely.
+    Cuts across the sample provide both hard-partition moment candidates and
+    EM-refined candidates.  A weak symmetric prior on their width ratio keeps
+    a handful of tail samples from winning solely through an extremely narrow
+    Gaussian, while enough real shots still dominate that prior.  This also
+    permits a genuinely narrower bright peak; neither component owns the wide
+    side.  A winner pinned to the artificial width-ratio boundary is reported
+    descriptively but is not a valid two-population classifier.
     """
 
     samples = np.asarray(values, dtype=float).reshape(-1)
@@ -349,20 +379,62 @@ def fit_bimodal(values: object, *, min_component_fraction: float = 0.01) -> Bimo
         for value in np.quantile(samples, (0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9))
     )
 
-    best: tuple[float, np.ndarray, np.ndarray, np.ndarray] | None = None
+    best: tuple[
+        bool,
+        float,
+        float,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+    ] | None = None
     for split in starts:
         start = _split_start(
             samples, split, sigma_min=sigma_min, weight_min=weight_min
         )
         if start is None:
             continue
-        means, sigmas, weights, likelihood = _em_two_state(
-            samples, *start, sigma_min=sigma_min, weight_min=weight_min
+        start_means, start_sigmas, start_weights = (
+            np.array(value, copy=True) for value in start
         )
-        if not isfinite(likelihood):
-            continue
-        if best is None or likelihood > best[0]:
-            best = (likelihood, means, sigmas, weights)
+        narrow = int(np.argmin(start_sigmas))
+        wide = 1 - narrow
+        start_sigmas[narrow] = max(
+            start_sigmas[narrow],
+            start_sigmas[wide] / _MAX_WIDTH_RATIO,
+        )
+        refined_means, refined_sigmas, refined_weights, _likelihood = (
+            _em_two_state(
+                samples,
+                *(np.array(value, copy=True) for value in start),
+                sigma_min=sigma_min,
+                weight_min=weight_min,
+            )
+        )
+        for means, sigmas, weights in (
+            (start_means, start_sigmas, start_weights),
+            (refined_means, refined_sigmas, refined_weights),
+        ):
+            scaled = (samples[:, None] - means[None, :]) / sigmas[None, :]
+            total = np.sum(
+                weights[None, :]
+                * np.exp(-0.5 * scaled**2)
+                / (sigmas[None, :] * sqrt(2.0 * pi)),
+                axis=1,
+            )
+            likelihood = (
+                float(np.sum(np.log(total)))
+                if np.all(np.isfinite(total)) and np.all(total > 0.0)
+                else -np.inf
+            )
+            if not isfinite(likelihood):
+                continue
+            ratio = float(np.max(sigmas) / max(np.min(sigmas), _SIGMA_FLOOR))
+            interior = ratio < _MAX_WIDTH_RATIO * (1.0 - 1e-9)
+            score = likelihood - 0.5 * (
+                log(ratio) / _LOG_WIDTH_RATIO_PRIOR_SIGMA
+            ) ** 2
+            if best is None or (interior, score) > (best[0], best[1]):
+                best = (interior, score, likelihood, means, sigmas, weights)
 
     if best is None:
         split = _exact_otsu_threshold(samples)
@@ -371,13 +443,15 @@ def fit_bimodal(values: object, *, min_component_fraction: float = 0.01) -> Bimo
         bright_mean = float(np.mean(high)) if high.size else dark_mean + spread
         width = max(0.5 * spread, sigma_min)
         best = (
+            False,
+            float("nan"),
             float("nan"),
             np.array([dark_mean, bright_mean]),
             np.array([width, width]),
             np.array([0.5, 0.5]),
         )
 
-    _likelihood, means, sigmas, weights = best
+    _interior, _score, _likelihood, means, sigmas, weights = best
     order = np.argsort(means)
     dark, bright = int(order[0]), int(order[1])
     dark_mean, dark_sigma = float(means[dark]), float(sigmas[dark])
@@ -400,6 +474,8 @@ def fit_bimodal(values: object, *, min_component_fraction: float = 0.01) -> Bimo
         np.isfinite(threshold)
         and separation > 0.5
         and minimum <= fraction <= 1.0 - minimum
+        and max(dark_sigma, bright_sigma)
+        < _MAX_WIDTH_RATIO * min(dark_sigma, bright_sigma) * (1.0 - 1e-9)
     )
     return BimodalFit(
         threshold,
@@ -423,14 +499,7 @@ def per_site_fidelity(
     *,
     valid_mask: object | None = None,
 ) -> "PerSiteConfusion":
-    """Return the actual confusion, per site, as all three of its numbers.
-
-    Balanced, dark and bright together, because they are one measurement.  The
-    caller used to compute the dark and bright halves with a second
-    implementation that applied a different validity mask, so the reported
-    balanced fidelity was not the mean of the reported halves -- two answers to
-    one question, on the number a readout is judged by.
-    """
+    """Return overall accuracy and both class-conditional accuracies per site."""
 
     values = np.asarray(signals, dtype=float)
     truth = np.asarray(labels, dtype=bool)
@@ -444,7 +513,7 @@ def per_site_fidelity(
         if measured.shape != values.shape:
             raise ValueError("valid_mask must match signals shape")
         valid &= measured
-    balanced = np.full(values.shape[1], np.nan, dtype="<f8")
+    overall = np.full(values.shape[1], np.nan, dtype="<f8")
     dark_out = np.full(values.shape[1], np.nan, dtype="<f8")
     bright_out = np.full(values.shape[1], np.nan, dtype="<f8")
     evaluated = np.zeros(values.shape[1], dtype=int)
@@ -455,21 +524,21 @@ def per_site_fidelity(
             continue
         actual = truth[selected, site]
         predicted = prediction[selected, site]
+        overall[site] = float(np.count_nonzero(predicted == actual)) / len(actual)
         dark = int(np.count_nonzero(~actual))
         bright = int(np.count_nonzero(actual))
-        if not dark or not bright:
-            continue
-        dark_out[site] = float(np.count_nonzero(~predicted & ~actual)) / dark
-        bright_out[site] = float(np.count_nonzero(predicted & actual)) / bright
-        balanced[site] = 0.5 * (dark_out[site] + bright_out[site])
-    return PerSiteConfusion(balanced, dark_out, bright_out, evaluated)
+        if dark:
+            dark_out[site] = float(np.count_nonzero(~predicted & ~actual)) / dark
+        if bright:
+            bright_out[site] = float(np.count_nonzero(predicted & actual)) / bright
+    return PerSiteConfusion(overall, dark_out, bright_out, evaluated)
 
 
 @dataclass(frozen=True)
 class PerSiteConfusion:
-    """One measured confusion per site: balanced and its two class halves."""
+    """One measured confusion per site: overall and its two class conditionals."""
 
-    balanced: np.ndarray
+    overall: np.ndarray
     dark: np.ndarray
     bright: np.ndarray
     #: How many labelled shots each site was evaluated on.
