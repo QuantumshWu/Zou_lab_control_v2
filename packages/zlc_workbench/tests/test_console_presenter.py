@@ -4176,8 +4176,7 @@ def test_bound_rolling_panel_offers_the_uncertainty_switch(
         and bool(binding.parameter_surface.get("display")),
     )
     names = {
-        str(getattr(entry, "name", entry)) 
-        for entry in binding.parameter_surface["display"]
+        str(entry["key"]) for entry in binding.parameter_surface["display"]
     }
     assert "uncertainty" in names, sorted(names)
     assert "cumulative" in names, sorted(names)
