@@ -229,6 +229,11 @@ class FitSelection:
     coordinates: tuple[np.ndarray, ...]
     observations: np.ndarray
     selected_indices: np.ndarray | None
+    #: Per-observation standard error in the same canonical unit as the
+    #: observations, aligned with them, or None when the projection carries
+    #: no uncertainty.  Present sigma means the fit weights by it -- the
+    #: uncertainty request is one switch for the band AND the weighting.
+    observation_sigma: np.ndarray | None = None
     facet_index: int | None = None
     selector_kind: SelectorKind | None = None
     regular_image: RegularImageFitInput | None = None
@@ -1194,12 +1199,18 @@ class FitProjection:
             source.x,
             model.coordinate_relations[0],
         )
+        sem = getattr(source, "sem", None)
         return FitSelection(
             data_revision=self.data_revision,
             scope=scope,
             coordinates=(coordinates,),
             observations=y_canonical[valid],
             selected_indices=indices,
+            observation_sigma=(
+                None
+                if sem is None
+                else np.asarray(sem, dtype=np.float64).reshape(-1)[valid]
+            ),
             facet_index=facet_index,
             selector_kind=None if active is None else active.kind,
             _authority=authority,
