@@ -211,7 +211,7 @@ class HostBench:
 
     def _main_axis(self):
         front = self.front()
-        for role in ("main", "curve", "image", "histogram", "rolling"):
+        for role in ("main", "curve", "image", "histogram", "history", "rolling"):
             found = axis_by_role(front, role)
             if found is not None:
                 return found
@@ -229,13 +229,15 @@ class HostBench:
             candidate = axis_center(axis)
         off = _inside(axis, 0.04, 0.06)
         probes = [candidate] + [
+            _inside(axis, 0.5, fy / 40.0) for fy in range(2, 39)
+        ] + [
             _inside(axis, fx, fy)
             for fy in (0.5, 0.35, 0.65, 0.2, 0.8)
-            for fx in (0.5, 0.3, 0.7)
+            for fx in (0.3, 0.7)
         ]
         for position in probes:
             self.pointer.move(*position)
-            got = self.presented.wait_next(self.app, 1.0)
+            got = self.presented.wait_next(self.app, 0.3)
             if got is not None:
                 self.pointer.move(*off)
                 self.presented.wait_next(self.app, 1.0)

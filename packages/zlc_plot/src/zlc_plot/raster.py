@@ -69,14 +69,23 @@ def _axis_at_normalized(
     x: float,
     y: float,
 ) -> AxisTransform | None:
-    """Resolve the current front's axis under a normalized pointer."""
+    """Resolve the current front's axis under a normalized pointer.
 
+    With half a pixel of tolerance: a guide painted exactly ON an axes
+    boundary -- the autoscaled colour-limit high guide sits at the
+    distribution rail's top edge -- must be grabbable, and an exact
+    bounds test lost it to one ulp of the transform arithmetic.
+    """
+
+    width, height = front.logical_size
+    half_x = 0.5 / max(1, int(width))
+    half_y = 0.5 / max(1, int(height))
     return next(
         (
             axis
             for axis in front.interaction.axes
-            if axis.bounds[0] <= x <= axis.bounds[2]
-            and axis.bounds[1] <= y <= axis.bounds[3]
+            if axis.bounds[0] - half_x <= x <= axis.bounds[2] + half_x
+            and axis.bounds[1] - half_y <= y <= axis.bounds[3] + half_y
         ),
         None,
     )

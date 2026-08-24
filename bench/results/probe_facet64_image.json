@@ -1,0 +1,15 @@
+{
+  "results": [
+    {
+      "case": "facet64_image_2M",
+      "points": 2048000,
+      "first_render_ms": 810.0,
+      "update_data": {
+        "n": 8,
+        "median_ms": 36.12,
+        "p90_ms": 37.58,
+        "best_ms": 34.88
+      }
+    }
+  ]
+}

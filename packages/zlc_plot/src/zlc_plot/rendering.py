@@ -176,6 +176,13 @@ def _data_limits(values: np.ndarray) -> tuple[float, float] | None:
     return float(np.min(finite)), float(np.max(finite))
 
 
+def _scalar_close(left: float, right: float) -> bool:
+    """The same closeness np.allclose(rtol=1e-12, atol=1e-15) answers,
+    without the per-call array wrapping."""
+
+    return abs(left - right) <= 1e-15 + 1e-12 * abs(right)
+
+
 def _relim_retains(mode: str) -> bool:
     """Whether an autoscaled axis may keep the limits it already shows.
 
@@ -1312,17 +1319,24 @@ class MatplotlibRenderer:
                 )
 
     def _set_xlim(self, axis: Any, low: float, high: float) -> None:
-        previous = np.asarray(axis.get_xlim(), dtype=float)
-        wanted = np.asarray((low, high), dtype=float)
-        if not np.allclose(previous, wanted, rtol=1e-12, atol=1e-15):
+        # Scalar closeness: np.allclose costs ~25 us of array wrapping per
+        # call, and a 64-cell grid asks this question hundreds of times a
+        # frame.
+        previous_low, previous_high = axis.get_xlim()
+        if not (
+            _scalar_close(float(previous_low), float(low))
+            and _scalar_close(float(previous_high), float(high))
+        ):
             axis.set_xlim(float(low), float(high))
             self._mark_axes_chrome_dirty(axis)
             self._refresh_enveloped_lines(axis)
 
     def _set_ylim(self, axis: Any, low: float, high: float) -> None:
-        previous = np.asarray(axis.get_ylim(), dtype=float)
-        wanted = np.asarray((low, high), dtype=float)
-        if not np.allclose(previous, wanted, rtol=1e-12, atol=1e-15):
+        previous_low, previous_high = axis.get_ylim()
+        if not (
+            _scalar_close(float(previous_low), float(low))
+            and _scalar_close(float(previous_high), float(high))
+        ):
             axis.set_ylim(float(low), float(high))
             self._mark_axes_chrome_dirty(axis)
 
@@ -2891,12 +2905,26 @@ class MatplotlibRenderer:
             axes.set_aspect(wanted_aspect, adjustable="box")
         # Equal aspect changes the actual drawable box.  Resolve that box
         # before choosing a source reduction so one prepared sample maps to at
-        # roughly one physical output pixel at the current DPR.
-        axes.apply_aspect()
-        display_pixel_shape = (
-            max(1, round(float(axes.bbox.width))),
-            max(1, round(float(axes.bbox.height))),
+        # roughly one physical output pixel at the current DPR.  The resolve
+        # is a pure function of (aspect, limits, position); a 64-cell grid
+        # re-asked it per cell per frame with none of them changed.
+        aspect_signature = (
+            wanted_aspect,
+            tuple(map(float, x_limits)),
+            tuple(map(float, y_limits)),
+            tuple(axes.get_position(original=True).bounds),
         )
+        aspect_key = f"{key}:aspect_box"
+        aspect_cached = self._artists.get(aspect_key)
+        if aspect_cached is not None and aspect_cached[0] == aspect_signature:
+            display_pixel_shape = aspect_cached[1]
+        else:
+            axes.apply_aspect()
+            display_pixel_shape = (
+                max(1, round(float(axes.bbox.width))),
+                max(1, round(float(axes.bbox.height))),
+            )
+            self._artists[aspect_key] = (aspect_signature, display_pixel_shape)
         store_key = f"{key}:front_store"
         store = self._artists.get(store_key)
         if not isinstance(store, ImageFrontStore):
@@ -2977,27 +3005,31 @@ class MatplotlibRenderer:
                 # ``set_data`` copies the front; skip it when the artist
                 # already holds this exact composed object (cache hit).
                 image.set_data(shown)
-                image.set_extent(prepared.extent)
+                extent_key = f"{key}:applied_extent"
+                if self._artists.get(extent_key) != prepared.extent:
+                    # ``set_extent`` rebuilds transforms and re-autoscales;
+                    # a live feed re-sets the same extent per revision.
+                    image.set_extent(prepared.extent)
+                    self._artists[extent_key] = prepared.extent
                 self._artists[applied_key] = shown
             # The artist's cmap/clim stay authoritative in both modes: RGBA
             # rendering ignores them, but selector handles, rail guides and
             # pointer snapshots all read the painted limits off the artist.
             if previous_mapping is None or previous_mapping[0] != cmap_name:
                 image.set_cmap(cmap)
-            if (
-                color_limits is not None
-                and (
+            if color_limits is not None:
+                applied_low, applied_high = image.get_clim()
+                if (
                     previous_mapping is None
                     or previous_mapping[1] != color_limits
-                    or not np.allclose(
-                        np.asarray(image.get_clim(), dtype=float),
-                        np.asarray(color_limits, dtype=float),
-                        rtol=1.0e-12,
-                        atol=1.0e-15,
+                    or not (
+                        _scalar_close(float(applied_low), float(color_limits[0]))
+                        and _scalar_close(
+                            float(applied_high), float(color_limits[1])
+                        )
                     )
-                )
-            ):
-                image.set_clim(*color_limits)
+                ):
+                    image.set_clim(*color_limits)
         self._artists[mapping_key] = mapping_state
         # ``imshow``/``set_extent`` may autoscale a new artist.  Reassert the
         # transaction's final transform after mutating the front.

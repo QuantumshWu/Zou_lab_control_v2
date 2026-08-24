@@ -65,7 +65,7 @@ def catalog() -> tuple[Case, ...]:
             lambda: ImagePlot(
                 AxisRef.point_dimension("ax"), AxisRef.point_dimension("ay")
             ),
-            ("drag_main", "drag_clim", "drag_threshold", "click_main", "pan_drag", "wheel_main"),
+            ("drag_main", "drag_clim", "click_main", "pan_drag", "wheel_main"),
         ),
         Case(
             "image_camera_4M",
