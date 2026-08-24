@@ -94,6 +94,10 @@ def _encode_plot_spec(spec: object) -> dict[str, object]:
             "cell": _encode_plot_spec(spec.cell),
         }
     common["reduction"] = spec.reduction.value
+    if isinstance(spec, CurvePlot):
+        common["uncertainty"] = bool(spec.uncertainty)
+    if isinstance(spec, RollingPlot):
+        common["cumulative"] = bool(spec.cumulative)
     if isinstance(spec, (CurvePlot, RollingPlot)):
         common["group"] = _axis_document(spec.group)
     if isinstance(spec, (CurvePlot, ImagePlot)):
@@ -128,6 +132,17 @@ def _decode_plot_spec(value: object) -> object:
         **base,
         "reduction": Reduction(value.get("reduction")),
     }
+    if kind is PlotKind.CURVE:
+        # Archives written before the band existed lack the key entirely:
+        # absent means the concept was off, and the strict key-set check
+        # below still refuses genuinely foreign fields.
+        value = {"uncertainty": False, **value}
+        expected.add("uncertainty")
+        arguments["uncertainty"] = bool(value["uncertainty"])
+    if kind is PlotKind.ROLLING:
+        value = {"cumulative": False, **value}
+        expected.add("cumulative")
+        arguments["cumulative"] = bool(value["cumulative"])
     if kind in {PlotKind.CURVE, PlotKind.ROLLING}:
         expected.add("group")
         arguments["group"] = _axis(value.get("group"), "plot group")
