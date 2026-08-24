@@ -163,3 +163,118 @@ def test_the_public_curve_entry_uses_the_lattice_path(monkeypatch) -> None:
     monkeypatch.setattr(DataView, "_factored_curve", spy)
     view.curve(AxisRef.point("ax"), group_by=(AxisRef.data("site"),))
     assert calls == [True]
+
+
+@pytest.mark.parametrize("holes", [0.0, 0.3, 0.995])
+@pytest.mark.parametrize("dtype", [np.float64, np.uint8])
+@pytest.mark.parametrize(
+    "aggregation",
+    (Reduction.MEAN, Reduction.SUM, Reduction.MIN, Reduction.MAX),
+)
+def test_factored_image_matches_the_generic_path(
+    aggregation, dtype, holes
+) -> None:
+    """The heatmap twin: pixel for pixel against the generic aggregation."""
+
+    view = DataView(_snapshot(dtype=dtype, holes=holes, seed=17))
+    x, y = AxisRef.point("ax"), AxisRef.point("ay")
+    fast = view._factored_image(x, y, aggregation)
+    assert fast is not None, "the heatmap twin refused its own configuration"
+    slow = view._image_from_positions(
+        x, y, view._all_positions(), aggregation
+    )
+    np.testing.assert_array_equal(
+        np.asarray(fast.x.canonical), np.asarray(slow.x.canonical)
+    )
+    np.testing.assert_array_equal(
+        np.asarray(fast.y.canonical), np.asarray(slow.y.canonical)
+    )
+    np.testing.assert_array_equal(fast.valid, slow.valid)
+    np.testing.assert_allclose(
+        np.asarray(fast.z.canonical),
+        np.asarray(slow.z.canonical),
+        equal_nan=True,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+
+def test_factored_image_fall_throughs() -> None:
+    view = DataView(_snapshot(seed=21))
+    x, y = AxisRef.point("ax"), AxisRef.point("ay")
+    assert view._factored_image(x, y, Reduction.FIRST) is None
+    assert (
+        view._factored_image(
+            AxisRef.data("frame"), AxisRef.data("site"), Reduction.MEAN
+        )
+        is None
+    ), "two data axes belong to the dense image path"
+
+
+@pytest.mark.parametrize("holes", [0.0, 0.3])
+@pytest.mark.parametrize("uncertainty", [False, True])
+def test_factored_facet_matches_the_generic_path(holes, uncertainty) -> None:
+    """A lattice facet grid, cell for cell against the generic per-cell run."""
+
+    from zlc_plot import CurvePlot, FacetGridPlot
+
+    view = DataView(_snapshot(holes=holes, seed=29))
+    for facet, group in (
+        (AxisRef.data("frame"), None),
+        (AxisRef.data("frame"), AxisRef.data("site")),
+        (AxisRef.repeat(), AxisRef.data("site")),
+    ):
+        spec = FacetGridPlot(
+            facet, CurvePlot(AxisRef.point("ax"), group=group)
+        )
+        fast = view._factored_facet(spec, uncertainty)
+        assert fast is not None, (facet, group)
+        slow = view._facet_from_positions(
+            spec, None, view._all_positions(), uncertainty
+        )
+        assert len(fast.cells) == len(slow.cells)
+        for ours, theirs in zip(fast.cells, slow.cells):
+            assert ours.label == theirs.label
+            assert ours.facet_index == theirs.facet_index
+            _assert_same(ours.payload, theirs.payload)
+
+
+def test_factored_facet_fall_throughs() -> None:
+    from zlc_plot import CurvePlot, FacetGridPlot, HistogramPlot
+
+    view = DataView(_snapshot(seed=31))
+    assert (
+        view._factored_facet(
+            FacetGridPlot(AxisRef.data("frame"), HistogramPlot()), False
+        )
+        is None
+    ), "histogram cells bin by value and keep their own paths"
+
+
+@pytest.mark.parametrize("holes", [0.0, 0.3])
+@pytest.mark.parametrize("uncertainty", [False, True])
+def test_factored_row_facet_matches_the_generic_path(
+    holes, uncertainty
+) -> None:
+    """Cells over a SCAN dimension: the combined row-key fold, cell for
+    cell against the generic per-cell run -- including each cell's own
+    used-set x domain."""
+
+    from zlc_plot import CurvePlot, FacetGridPlot
+
+    view = DataView(_snapshot(holes=holes, seed=37))
+    for group in (None, AxisRef.data("site")):
+        spec = FacetGridPlot(
+            AxisRef.point_dimension("ax"),
+            CurvePlot(AxisRef.point("ay"), group=group),
+        )
+        fast = view._factored_facet(spec, uncertainty)
+        assert fast is not None, group
+        slow = view._facet_from_positions(
+            spec, None, view._all_positions(), uncertainty
+        )
+        assert len(fast.cells) == len(slow.cells)
+        for ours, theirs in zip(fast.cells, slow.cells):
+            assert ours.label == theirs.label
+            assert ours.facet_index == theirs.facet_index
+            _assert_same(ours.payload, theirs.payload)

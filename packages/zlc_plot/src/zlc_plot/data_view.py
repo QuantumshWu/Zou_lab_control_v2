@@ -381,6 +381,22 @@ class FacetData:
         object.__setattr__(self, "source_revisions", revisions)
 
 
+@dataclass(frozen=True)
+class _FactoredPlanes:
+    """The folded lattice moments a curve or a facet grid assembles from."""
+
+    x_quantity: "QuantityArray"
+    x_labels: tuple[str, ...] | None
+    row_domains: tuple
+    row_sizes: tuple[int, ...]
+    row_presence: NDArray[np.bool_]
+    group_domains: tuple
+    group_sizes: tuple[int, ...]
+    y_plane: NDArray[np.float64]
+    counts_plane: NDArray[np.int64]
+    sem_plane: NDArray[np.float64] | None
+
+
 @dataclass(frozen=True, slots=True)
 class _ResolvedAxis:
     coordinate: CoordinateArray
@@ -762,18 +778,188 @@ class DataView:
         squares) reduce through plain masked axis-reductions in one pass
         over the data, and only a (rows x series)-sized residue is left to
         fold by x-coordinate -- thousands of entries where the generic
-        path built codes, gathers and buckets for millions.  Measured on
-        (20)x(1000)x(3)x(34): the whole projection drops from the generic
-        path's tens of milliseconds to the memory-bandwidth floor.
+        path built codes, gathers and buckets for millions.
 
         Coverage: x determined by the point ROW (a scan column or topology
-        dimension) with a declared finite domain; groups over declared
-        DATA axes or the repeat axis.  Everything else -- FIRST (whose
-        result depends on the exact sample order the pre-reduction
-        destroys), complex values (np.sum(where=) rejects them), point-
-        domain groups, undeclared domains -- keeps the generic path, whose
-        outputs this path must match series for series (the oracle tests
-        hold both to that).
+        dimension); groups over DATA axes or the repeat axis.  Everything
+        else -- FIRST (whose result depends on the exact sample order the
+        pre-reduction destroys), complex values (np.sum(where=) rejects
+        them), point-domain groups, undeclared shapes -- keeps the generic
+        path, whose outputs this path must match series for series (the
+        oracle tests hold both to that).
+        """
+
+        planes = self._factored_planes((x,), groups, aggregation, uncertainty)
+        if planes is None:
+            return None
+        series = self._series_from_planes(
+            planes,
+            planes.group_domains,
+            planes.group_sizes,
+            planes.y_plane,
+            planes.counts_plane,
+            planes.sem_plane,
+        )
+        return CurveData(
+            revision=self._samples.revision,
+            generation=self._samples.generation,
+            x_ref=x,
+            group_by=groups,
+            series=series,
+        )
+
+    def _factored_facet(
+        self,
+        spec: FacetGridPlot,
+        uncertainty: bool,
+    ) -> FacetData | None:
+        """Every curve cell of a lattice facet from ONE pass over the data.
+
+        A facet over a DATA axis (or the repeat axis) is just one more kept
+        dimension: prepending it to the cell's own groups makes the whole
+        grid one factored-curve computation, and each cell is a column
+        slice of the result -- where the generic path re-ran the full
+        per-sample aggregation once PER CELL.  A facet over a point-domain
+        axis or a non-curve cell keeps its existing paths.  Cell for cell
+        the output must match the generic facet (the oracle tests hold
+        both to that); for a tensor facet every cell shares the global
+        row set, so the per-cell x domains agree by construction.
+        """
+
+        cell = spec.cell
+        if not isinstance(cell, CurvePlot):
+            return None
+        cell_groups = () if cell.group is None else (cell.group,)
+        row_facet = spec.facet.domain in (
+            AxisDomain.POINT_COORDINATE,
+            AxisDomain.POINT_DIMENSION,
+        )
+        if row_facet:
+            planes = self._factored_planes(
+                (spec.facet, cell.x),
+                cell_groups,
+                cell.reduction,
+                uncertainty,
+            )
+        elif spec.facet.domain in (AxisDomain.DATA, AxisDomain.REPEAT):
+            planes = self._factored_planes(
+                (cell.x,),
+                (spec.facet, *cell_groups),
+                cell.reduction,
+                uncertainty,
+            )
+        else:
+            return None
+        if planes is None:
+            return None
+        if row_facet:
+            facet_domain = planes.row_domains[0]
+            facet_size, nx = planes.row_sizes
+            cell_domains = planes.group_domains
+            cell_sizes = planes.group_sizes
+        else:
+            facet_domain = planes.group_domains[0]
+            facet_size = planes.group_sizes[0]
+            cell_domains = planes.group_domains[1:]
+            cell_sizes = planes.group_sizes[1:]
+        cell_combos = 1
+        for size in cell_sizes:
+            cell_combos *= size
+        cells: list[FacetCell] = []
+        for facet_index in range(facet_size):
+            if row_facet:
+                # A cell over a scan dimension owns only the x coordinates
+                # that co-occur with its facet value among the rows -- the
+                # generic path's per-cell used-set, read off the presence
+                # plane instead of re-deriving codes per cell.
+                rows_window = slice(facet_index * nx, (facet_index + 1) * nx)
+                used = planes.row_presence[rows_window]
+                if not bool(used.any()):
+                    continue
+                x_quantity = QuantityArray(
+                    np.asarray(planes.x_quantity.canonical)[used],
+                    np.asarray(planes.x_quantity.display)[used],
+                    planes.x_quantity.canonical_unit,
+                    planes.x_quantity.display_unit,
+                    planes.x_quantity.label,
+                )
+                x_labels = (
+                    None
+                    if planes.x_labels is None
+                    else tuple(
+                        label
+                        for label, keep in zip(planes.x_labels, used)
+                        if keep
+                    )
+                )
+                series = self._series_from_planes(
+                    planes,
+                    cell_domains,
+                    cell_sizes,
+                    planes.y_plane[rows_window][used],
+                    planes.counts_plane[rows_window][used],
+                    (
+                        None
+                        if planes.sem_plane is None
+                        else planes.sem_plane[rows_window][used]
+                    ),
+                    x_quantity=x_quantity,
+                    x_labels=x_labels,
+                )
+            else:
+                window = slice(
+                    facet_index * cell_combos, (facet_index + 1) * cell_combos
+                )
+                series = self._series_from_planes(
+                    planes,
+                    cell_domains,
+                    cell_sizes,
+                    planes.y_plane[:, window],
+                    planes.counts_plane[:, window],
+                    (
+                        None
+                        if planes.sem_plane is None
+                        else planes.sem_plane[:, window]
+                    ),
+                )
+            payload = CurveData(
+                revision=self._samples.revision,
+                generation=self._samples.generation,
+                x_ref=cell.x,
+                group_by=cell_groups,
+                series=series,
+            )
+            facet_value = facet_domain.values[facet_index]
+            cells.append(
+                FacetCell(
+                    facet_index=len(cells),
+                    facet_value_canonical=facet_value.canonical,
+                    facet_value_display=facet_value.display,
+                    label=facet_value.label,
+                    payload=payload,
+                )
+            )
+        return FacetData(
+            revision=self._samples.revision,
+            generation=self._samples.generation,
+            spec=spec,
+            cells=tuple(cells),
+        )
+
+    def _factored_planes(
+        self,
+        row_refs: tuple[AxisRef, ...],
+        groups: tuple[AxisRef, ...],
+        aggregation: Reduction,
+        uncertainty: bool,
+    ) -> "_FactoredPlanes | None":
+        """The ONE lattice computation behind curves, heatmaps and facets.
+
+        ``row_refs`` are the row-determined axes the fold keys on, outer
+        first: ``(x,)`` for a curve, ``(y, x)`` for a scan heatmap,
+        ``(facet, x)`` for a facet over a scan dimension.  Their combined
+        code is one fold key, so every consumer of a row-shaped bucket
+        rides this single kernel instead of growing its own.
         """
 
         if aggregation not in (
@@ -786,11 +972,16 @@ class DataView:
         values = self._samples.value.canonical
         if values.dtype.kind == "c":
             return None
-        if x.domain not in (
-            AxisDomain.POINT_COORDINATE,
-            AxisDomain.POINT_DIMENSION,
+        if not row_refs or any(
+            ref.domain
+            not in (
+                AxisDomain.POINT_COORDINATE,
+                AxisDomain.POINT_DIMENSION,
+            )
+            for ref in row_refs
         ):
             return None
+        x = row_refs[-1]
         try:
             x_resolved = self._resolve(x)
             group_resolved = tuple(self._resolve(ref) for ref in groups)
@@ -817,10 +1008,35 @@ class DataView:
         # units) to work on arrays the size of the AXIS, not the dataset.
         rows = int(shape[1])
         row_representatives = np.arange(rows, dtype=np.int64) * data_size
-        x_domain = self._domain(x, row_representatives)
-        nx = int(x_domain.canonical.size)
-        if nx == 0:
+        row_domains = tuple(
+            self._domain(ref, row_representatives) for ref in row_refs
+        )
+        row_sizes = tuple(
+            int(domain.canonical.size) for domain in row_domains
+        )
+        if any(size == 0 for size in row_sizes):
             return None
+        combined_row_codes = np.zeros(rows, dtype=np.int64)
+        row_ok = np.ones(rows, dtype=np.bool_)
+        for domain, size in zip(row_domains, row_sizes):
+            codes = np.asarray(domain.codes)
+            row_ok &= codes >= 0
+            combined_row_codes = combined_row_codes * size + np.where(
+                codes >= 0, codes, 0
+            )
+        row_buckets = 1
+        for size in row_sizes:
+            row_buckets *= size
+        x_domain = row_domains[-1]
+        # Which combined row keys EXIST among the rows, validity aside --
+        # the generic path's per-cell x domains are used-sets over
+        # positions, and this is that fact at row scale.
+        row_presence = (
+            np.bincount(
+                combined_row_codes[row_ok], minlength=row_buckets
+            )
+            > 0
+        )
         strides = []
         acc = 1
         for size in reversed(shape):
@@ -901,6 +1117,7 @@ class DataView:
         combos = 1
         for size in group_sizes:
             combos *= size
+
         def code_ordered(plane: NDArray[Any]) -> NDArray[Any]:
             plane = to_groups_order(plane)
             for position, order in enumerate(group_orders):
@@ -912,15 +1129,15 @@ class DataView:
         if squares_pg is not None:
             squares_pg = code_ordered(squares_pg)
 
-        # Fold the residue by x-coordinate with the SAME grouped kernel the
-        # generic path uses, at (rows x series) scale instead of samples.
+        # Fold the residue by the combined row key with the SAME grouped
+        # kernel the generic path uses, at (rows x series) scale instead
+        # of samples.
         fold_codes = np.where(
-            x_domain.codes[:, None] >= 0,
-            x_domain.codes[:, None] * combos + np.arange(combos)[None, :],
+            row_ok[:, None],
+            combined_row_codes[:, None] * combos + np.arange(combos)[None, :],
             -1,
         ).reshape(-1)
-        fold_usable = (counts_pg > 0).reshape(-1)
-        buckets = nx * combos
+        buckets = row_buckets * combos
         counts_fold, _ = _aggregate_by_codes(
             counts_pg.reshape(-1).astype(np.float64),
             np.ones(fold_codes.shape, dtype=np.bool_),
@@ -948,7 +1165,7 @@ class DataView:
         else:
             y_flat, _ = _aggregate_by_codes(
                 moments_pg.reshape(-1),
-                fold_usable,
+                (counts_pg > 0).reshape(-1),
                 fold_codes,
                 buckets,
                 aggregation,
@@ -970,21 +1187,49 @@ class DataView:
                 np.asarray(y_flat, np.float64), mean_sq, counts
             )
 
-        y_plane = np.asarray(y_flat, np.float64).reshape(nx, combos)
-        counts_plane = counts.reshape(nx, combos)
-        sem_plane = (
-            None if sem_flat is None else sem_flat.reshape(nx, combos)
-        )
         x_canonical = np.asarray(x_domain.canonical)
-        x_display = np.asarray(x_domain.display)
-        x_quantity = QuantityArray(
-            x_canonical,
-            x_display,
-            x_resolved.coordinate.canonical_unit,
-            x_resolved.coordinate.display_unit,
-            x_resolved.coordinate.label,
+        return _FactoredPlanes(
+            x_quantity=QuantityArray(
+                x_canonical,
+                np.asarray(x_domain.display),
+                x_resolved.coordinate.canonical_unit,
+                x_resolved.coordinate.display_unit,
+                x_resolved.coordinate.label,
+            ),
+            x_labels=_axis_coordinate_labels(x_resolved, x_canonical),
+            row_domains=row_domains,
+            row_sizes=row_sizes,
+            row_presence=row_presence,
+            group_domains=tuple(group_domains),
+            group_sizes=group_sizes,
+            y_plane=np.asarray(y_flat, np.float64).reshape(row_buckets, combos),
+            counts_plane=counts.reshape(row_buckets, combos),
+            sem_plane=(
+                None
+                if sem_flat is None
+                else sem_flat.reshape(row_buckets, combos)
+            ),
         )
-        x_labels = _axis_coordinate_labels(x_resolved, x_canonical)
+
+    def _series_from_planes(
+        self,
+        planes: "_FactoredPlanes",
+        group_domains: tuple,
+        group_sizes: tuple[int, ...],
+        y_plane: NDArray[np.float64],
+        counts_plane: NDArray[np.int64],
+        sem_plane: NDArray[np.float64] | None,
+        x_quantity: "QuantityArray | None" = None,
+        x_labels: tuple[str, ...] | None = None,
+    ) -> tuple[CurveSeries, ...]:
+        """Column slices of the folded planes, one CurveSeries each."""
+
+        if x_quantity is None:
+            x_quantity = planes.x_quantity
+            x_labels = planes.x_labels
+        combos = 1
+        for size in group_sizes:
+            combos *= size
         value = self._samples.value
         series: list[CurveSeries] = []
         for flat_index in range(combos):
@@ -1021,13 +1266,7 @@ class DataView:
                     label=label,
                 )
             )
-        return CurveData(
-            revision=self._samples.revision,
-            generation=self._samples.generation,
-            x_ref=x,
-            group_by=groups,
-            series=tuple(series),
-        )
+        return tuple(series)
 
     def _curve_from_positions(
         self,
@@ -1152,6 +1391,9 @@ class DataView:
         dense = self._dense_data_image(x, y, aggregation)
         if dense is not None:
             return dense
+        factored = self._factored_image(x, y, aggregation)
+        if factored is not None:
+            return factored
         positions = self._all_positions()
         return self._image_from_positions(x, y, positions, aggregation)
 
@@ -1283,6 +1525,62 @@ class DataView:
                 self._samples.value.label,
             ),
             valid=valid,
+        )
+
+    def _factored_image(
+        self,
+        x: AxisRef,
+        y: AxisRef,
+        aggregation: Reduction,
+    ) -> ImageData | None:
+        """The scan-heatmap assembly over the one lattice core.
+
+        A heatmap's buckets are the combined (y, x) row key, so the whole
+        computation IS ``_factored_planes((y, x), ())``; this method only
+        reshapes the folded plane into the mesh and speaks ImageData.
+        The oracle tests hold it pixel for pixel to the generic path.
+        """
+
+        planes = self._factored_planes((y, x), (), aggregation, False)
+        if planes is None:
+            return None
+        y_domain, x_domain = planes.row_domains
+        ny, nx = planes.row_sizes
+        z = planes.y_plane.reshape(ny, nx)
+        counts = planes.counts_plane.reshape(ny, nx)
+        z_display = self._samples.value.canonical_unit.convert_value_to(
+            z, self._samples.value.display_unit
+        )
+        z.setflags(write=False)
+        x_coordinate = self._resolve(x).coordinate
+        y_coordinate = self._resolve(y).coordinate
+        return ImageData(
+            revision=self._samples.revision,
+            generation=self._samples.generation,
+            x_ref=x,
+            y_ref=y,
+            x=QuantityArray(
+                x_domain.canonical,
+                x_domain.display,
+                x_coordinate.canonical_unit,
+                x_coordinate.display_unit,
+                x_coordinate.label,
+            ),
+            y=QuantityArray(
+                y_domain.canonical,
+                y_domain.display,
+                y_coordinate.canonical_unit,
+                y_coordinate.display_unit,
+                y_coordinate.label,
+            ),
+            z=QuantityArray(
+                z,
+                z_display,
+                self._samples.value.canonical_unit,
+                self._samples.value.display_unit,
+                self._samples.value.label,
+            ),
+            valid=(counts > 0) & np.isfinite(z),
         )
 
     def _image_from_positions(
@@ -1850,6 +2148,9 @@ class DataView:
         dense = self._dense_facet(spec, shared_bins, uncertainty)
         if dense is not None:
             return dense
+        factored = self._factored_facet(spec, uncertainty)
+        if factored is not None:
+            return factored
         return self._facet_from_positions(
             spec,
             shared_bins,
