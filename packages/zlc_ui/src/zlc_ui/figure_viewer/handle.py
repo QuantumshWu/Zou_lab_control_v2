@@ -27,23 +27,27 @@ class FigureViewerHandle(QtCore.QObject):
 
     # -- what the operator asks for --------------------------------------
     path_committed = QtCore.pyqtSignal(str)
-    dataset_picked = QtCore.pyqtSignal(str)
+    add_panel_requested = QtCore.pyqtSignal(str)
+    panel_state_changed = QtCore.pyqtSignal(str, object)
+    panel_remove_requested = QtCore.pyqtSignal(str)
+    panel_edit_requested = QtCore.pyqtSignal(str)
+    panel_order_committed = QtCore.pyqtSignal(tuple)
+    panel_editor_closed = QtCore.pyqtSignal(str)
     save_image_requested = QtCore.pyqtSignal()
-    #: The figure is a PANEL now: its size and its title are decisions about
-    #: this figure, asked on the card where every other one already is.
-    figure_size_picked = QtCore.pyqtSignal(str)
-    figure_edit_requested = QtCore.pyqtSignal()
 
     def __init__(self, window: Any, view: FigureViewerView) -> None:
         super().__init__()
         self._window = window
         self._view = view
         view.path_committed.connect(self.path_committed)
-        view.dataset_picked.connect(self.dataset_picked)
+        view.add_panel_requested.connect(self.add_panel_requested)
+        view.panel_state_changed.connect(self.panel_state_changed)
+        view.panel_remove_requested.connect(self.panel_remove_requested)
+        view.panel_edit_requested.connect(self.panel_edit_requested)
+        view.panel_order_committed.connect(self.panel_order_committed)
+        view.panel_editor_closed.connect(self.panel_editor_closed)
         view.save_image_requested.connect(self.save_image_requested)
         view.close_requested.connect(self.close_requested)
-        view.figure_card.size_picked.connect(self.figure_size_picked)
-        view.figure_card.edit_requested.connect(self.figure_edit_requested)
         if window is not None and hasattr(window, "closed"):
             window.closed.connect(self.closed)
 
@@ -98,33 +102,57 @@ class FigureViewerHandle(QtCore.QObject):
     def set_lineage_tree(self, tree: object) -> None:
         self._view.set_lineage_tree(tree)
 
-    def set_datasets(self, datasets: tuple[tuple[str, str], ...], current: str = "") -> None:
-        self._view.set_datasets(datasets, current)
-
     def set_panel_sizes(self, sizes: object, default_size: str) -> None:
-        self._view.figure_card.set_size_choices(sizes, default_size)
+        self._view.set_panel_sizes(sizes, default_size)
 
-    def run_host_dialog(self, opener, host, *, title: str):
-        """Run a dialog the DRAWING package owns, centred on this window."""
+    def set_panel_kinds(self, kinds: object) -> None:
+        self._view.set_panel_kinds(kinds)
 
-        return opener(host, self._view, title=str(title))
+    def set_grid_cell_kinds(self, kinds: object) -> None:
+        self._view.set_grid_cell_kinds(kinds)
 
-    def set_figure_size(self, size: str) -> None:
-        self._view.set_figure_size(size)
+    def add_panel(self, panel_id: str, title: str) -> None:
+        self._view.add_panel(panel_id, title)
 
-    def set_figure_title(self, title: str) -> None:
-        self._view.set_figure_title(title)
+    def remove_panel(self, panel_id: str) -> None:
+        self._view.remove_panel(panel_id)
 
-    def show_figure(self, host: Any | None) -> None:
-        """Draw what this host is holding, or clear the page when None.
+    def set_panel_order(self, order: object) -> None:
+        self._view.set_panel_order(order)
 
-        The host makes its own widget.  A callable that turned one into the
-        other used to be injected from outside, which put the composition root
-        back in the business of constructing Qt objects -- one level of
-        indirection away from doing it by hand, and no further from the wall.
-        """
+    def set_panel_datasets(
+        self,
+        panel_id: str,
+        datasets: tuple[tuple[str, str], ...],
+        current: str = "",
+    ) -> None:
+        self._view.set_panel_datasets(panel_id, datasets, current)
 
-        self._view.set_figure_surface(None if host is None else host.qt_widget())
+    def set_panel_projection(
+        self, panel_id: str, state: object, surface: object
+    ) -> None:
+        self._view.set_panel_projection(panel_id, state, surface)
+
+    def set_panel_status(
+        self, panel_id: str, text: str, *, error: bool = False
+    ) -> None:
+        self._view.set_panel_status(panel_id, text, error=error)
+
+    def show_panel(self, panel_id: str, host: Any | None) -> None:
+        self._view.set_panel_surface(
+            panel_id, None if host is None else host.qt_widget()
+        )
+
+    def open_panel_editor(
+        self, panel_id: str, editor: Any, *, title: str
+    ) -> None:
+        self._view.open_panel_editor(panel_id, editor, title)
+
+    def close_panel_editor(self, panel_id: str) -> bool:
+        return self._view.close_panel_editor(panel_id)
+
+    def update_panel_editor(self, panel_id: str, projection: object) -> bool:
+        return self._view.update_panel_editor(panel_id, projection)
 
 
 __all__ = ["FigureViewerHandle"]

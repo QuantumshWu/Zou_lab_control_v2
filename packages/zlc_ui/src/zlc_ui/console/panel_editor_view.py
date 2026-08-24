@@ -153,6 +153,7 @@ class PanelEditorView(QtWidgets.QWidget):
             body_layout.addWidget(group)
 
         snapshot_group = FluentGroupBox("Frozen snapshot")
+        self.snapshot_group = snapshot_group
         snapshot_layout = QtWidgets.QVBoxLayout(snapshot_group)
         snapshot_layout.setContentsMargins(margin, margin, margin, margin)
         self.surface_holder = FluentFrame(bordered=False)
@@ -176,6 +177,7 @@ class PanelEditorView(QtWidgets.QWidget):
         body_layout.addWidget(snapshot_group)
 
         interaction_group = FluentGroupBox("Interaction")
+        self.interaction_group = interaction_group
         interaction_layout = QtWidgets.QVBoxLayout(interaction_group)
         interaction_layout.setContentsMargins(margin, margin, margin, margin)
         self.interaction_note = FluentLabel(
@@ -212,6 +214,7 @@ class PanelEditorView(QtWidgets.QWidget):
         body_layout.addWidget(self.producer_group)
 
         save_group = FluentGroupBox("Save figure")
+        self.save_group = save_group
         save_layout = QtWidgets.QVBoxLayout(save_group)
         save_layout.setContentsMargins(margin, margin, margin, margin)
         save_layout.setSpacing(scaled_px(8, minimum=5))
@@ -303,7 +306,7 @@ class PanelEditorView(QtWidgets.QWidget):
                 "Overlay",
                 default=state["overlay_signal"],
             ))
-        fields.extend([
+        fields.append(
             FormFieldProps(
                 "size",
                 "choice",
@@ -312,25 +315,31 @@ class PanelEditorView(QtWidgets.QWidget):
                 choices=self._size_choices(
                     incoming.get("size_choices"), state["size"]
                 ),
-            ),
-            interval_form_field(
+            )
+        )
+        live = bool(incoming.get("live", True))
+        self.snapshot_group.setVisible(live)
+        self.interaction_group.setVisible(live)
+        self.producer_group.setVisible(live)
+        self.save_group.setVisible(live)
+        if live:
+            fields.append(interval_form_field(
                 incoming.get("interval_choices"),
                 state["interval_ms"],
-            ),
-        ])
+            ))
         values: dict[str, object] = {
             "title": state["title"],
             "signal": state["signal"],
             "size": state["size"],
-            "interval_ms": state["interval_ms"],
         }
+        if live:
+            values["interval_ms"] = state["interval_ms"]
         if draws_image_surfaces(state):
             values["overlay_signal"] = state["overlay_signal"]
         surface = incoming.get("parameter_surface")
         self._science_locked = bool(
             isinstance(surface, Mapping) and surface.get("science_locked")
         )
-        self.panel_form.refresh()
         self.panel_form.reconcile(FormSpec(tuple(fields)), values)
         self.panel_form.refresh()
         self.panel_form.widget_for("signal").setEnabled(bool(self._signal_groups))

@@ -11,17 +11,20 @@ from PyQt5 import QtCore, QtWidgets
 from .fluent import (
     FluentFrame,
     FluentPathEdit,
+    FluentReadoutEdit,
     FluentReadoutMultiline,
     FluentScrollArea,
     FluentSectionLabel,
     FluentSettingRow,
     FluentStatusStrip,
     FluentTabWidget,
+    apply_fluent_scrollbars,
+    fluent_font_size,
     scaled_px,
     setting_label_width,
     window_pad,
 )
-from .style import CARD_PAD
+from .style import ACCENT, CARD_PAD, DIVIDER, FONT, SURFACE, TEXT
 
 
 InfoRow = tuple[str, object]
@@ -48,16 +51,20 @@ class InfoPane(QtWidgets.QWidget):
         path_caption: str = "Choose a path",
         file_filter: str = "All files (*)",
         initial_status: str = "",
+        tree_tabs: Iterable[str] = (),
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.setStyleSheet("background: transparent;")
 
-        # The declared names set the pane's resting split (they are the
-        # formal keys).  The labels actually shown then widen it if they need
-        # more: a settings label that clips is a name an operator has to guess.
+        # The declared names set the pane's one stable split.  Archive labels
+        # are content, not geometry authority: loading another file must not
+        # move the divider or resize the top-level window.
         self._declared_labels = tuple(str(name) for name in label_names)
         self._label_width = setting_label_width(self._declared_labels)
+        self._tree_tab_titles = frozenset(str(title) for title in tree_tabs)
+        self._tree_tabs: dict[str, QtWidgets.QTreeWidget] = {}
+        self._fixed_pane_width: int | None = None
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(window_pad(1), 0, window_pad(1), 0)
@@ -105,7 +112,10 @@ class InfoPane(QtWidgets.QWidget):
         scrolled to be seen is one an operator does not know exists.
         """
 
-        label_pane_width = self._label_width + scaled_px(320, minimum=240)
+        if self._fixed_pane_width is not None:
+            self.setFixedWidth(self._fixed_pane_width)
+            return
+        label_pane_width = self._label_width + scaled_px(280, minimum=220)
         bar = self.info_tabs.tabBar()
         # The bar caps its own tab widths when they overflow, so its laid-out
         # widths are the ones it already settled for.  Sizing to those would
@@ -120,7 +130,8 @@ class InfoPane(QtWidgets.QWidget):
         corner_width = 0 if corner is None else corner.sizeHint().width()
         margins = self.layout().contentsMargins()
         needed = tabs_width + corner_width + margins.left() + margins.right()
-        self.setFixedWidth(max(label_pane_width, needed))
+        self._fixed_pane_width = max(label_pane_width, needed)
+        self.setFixedWidth(self._fixed_pane_width)
 
     @QtCore.pyqtSlot()
     def _commit_path_draft(self) -> None:
@@ -136,19 +147,18 @@ class InfoPane(QtWidgets.QWidget):
         titles = [title for title, _rows in normalized]
         if len(set(titles)) != len(titles):
             raise ValueError("info tab titles must be unique")
-        self._label_width = setting_label_width(
-            self._declared_labels
-            + tuple(label for _title, rows in normalized for label, _value in rows)
-        )
-
         while self.info_tabs.count():
             widget = self.info_tabs.widget(0)
             self.info_tabs.removeTab(0)
             if widget is not None:
                 widget.deleteLater()
         self._tab_layouts.clear()
+        self._tree_tabs.clear()
         for title, rows in normalized:
-            self._add_rows_tab(title, rows)
+            if title in self._tree_tab_titles:
+                self._add_tree_tab(title)
+            else:
+                self._add_rows_tab(title, rows)
         self._apply_pane_width()
 
     def _add_rows_tab(self, title: str, rows: tuple[InfoRow, ...]) -> None:
@@ -168,7 +178,12 @@ class InfoPane(QtWidgets.QWidget):
 
     def _fill_rows(self, layout: QtWidgets.QVBoxLayout, rows: tuple[InfoRow, ...]) -> None:
         for key, value in rows:
-            field = FluentReadoutMultiline(self._readout_text(value))
+            text = self._readout_text(value)
+            field = (
+                FluentReadoutMultiline(text)
+                if "\n" in text
+                else FluentReadoutEdit(text)
+            )
             field.setSizePolicy(
                 QtWidgets.QSizePolicy.Ignored,
                 QtWidgets.QSizePolicy.Fixed,
@@ -180,6 +195,52 @@ class InfoPane(QtWidgets.QWidget):
                     label_width=self._label_width,
                 )
             )
+
+    def _add_tree_tab(self, title: str) -> None:
+        tree = QtWidgets.QTreeWidget()
+        tree.setHeaderHidden(True)
+        tree.setRootIsDecorated(True)
+        tree.setUniformRowHeights(True)
+        tree.setIndentation(scaled_px(18, minimum=14))
+        tree.setStyleSheet(
+            f"QTreeWidget {{ background: {SURFACE}; color: {TEXT}; "
+            f"border: none; font: {fluent_font_size()}pt '{FONT}'; }}"
+            f"QTreeWidget::item {{ padding: {scaled_px(3, minimum=2)}px; }}"
+            f"QTreeWidget::item:selected {{ background: {ACCENT}; color: white; }}"
+            f"QTreeWidget {{ border-top: 1px solid {DIVIDER}; }}"
+        )
+        apply_fluent_scrollbars(tree)
+        self.info_tabs.add_permanent_tab(tree, title)
+        self._tree_tabs[title] = tree
+
+    def set_tree(self, title: str, branches: object) -> None:
+        """Replace one real expandable tree from plain `(label, children)` data."""
+
+        key = str(title)
+        try:
+            tree = self._tree_tabs[key]
+        except KeyError as error:
+            raise KeyError(f"info pane has no tree tab {key!r}") from error
+        if not isinstance(branches, tuple):
+            raise TypeError("info tree branches must be a tuple")
+        tree.clear()
+
+        def add(parent: QtWidgets.QTreeWidgetItem | None, values: tuple) -> None:
+            for branch in values:
+                if not isinstance(branch, tuple) or len(branch) != 2:
+                    raise ValueError("info tree branch must contain label and children")
+                label, children = branch
+                if not isinstance(label, str) or not isinstance(children, tuple):
+                    raise TypeError("info tree branch label/children are malformed")
+                item = QtWidgets.QTreeWidgetItem((label,))
+                if parent is None:
+                    tree.addTopLevelItem(item)
+                else:
+                    parent.addChild(item)
+                add(item, children)
+                item.setExpanded(True)
+
+        add(None, branches)
 
     def set_status(self, text: str) -> None:
         self.status.show_message(str(text))

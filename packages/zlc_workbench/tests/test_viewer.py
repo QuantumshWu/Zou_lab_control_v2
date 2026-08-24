@@ -86,26 +86,72 @@ class _ViewerView:
 
     def __init__(self) -> None:
         self.path_committed = _Signal()
-        self.dataset_picked = _Signal()
+        self.add_panel_requested = _Signal()
+        self.panel_state_changed = _Signal()
+        self.panel_remove_requested = _Signal()
+        self.panel_edit_requested = _Signal()
+        self.panel_order_committed = _Signal()
+        self.panel_editor_closed = _Signal()
         self.save_image_requested = _Signal()
         self.close_requested = _Signal()
-        self.figure_size_picked = _Signal()
-        self.figure_edit_requested = _Signal()
-        self.datasets: tuple = ()
-        self.current_dataset = ""
         self.tabs: tuple = ()
         self.lineage: tuple = ()
         self.surface = None
         self.title = ""
         self.size = ""
-        self.figure_title = ""
         self.path = ""
         self.status: list[tuple[str, bool]] = []
         self.panel_sizes: tuple[str, ...] = ()
+        self.panel_kinds: tuple = ()
+        self.grid_cell_kinds: tuple = ()
+        self.panels: dict[str, dict] = {}
+        self.editors: dict[str, object] = {}
 
     def set_panel_sizes(self, sizes, default_size) -> None:
         self.panel_sizes = tuple(str(value) for value in sizes)
         self.panel_default_size = str(default_size)
+
+    def set_panel_kinds(self, kinds) -> None:
+        self.panel_kinds = tuple(kinds)
+
+    def set_grid_cell_kinds(self, kinds) -> None:
+        self.grid_cell_kinds = tuple(kinds)
+
+    def add_panel(self, panel_id, title) -> None:
+        self.panels[str(panel_id)] = {"title": str(title)}
+
+    def remove_panel(self, panel_id) -> None:
+        self.panels.pop(str(panel_id), None)
+
+    def set_panel_order(self, order) -> None:
+        self.panel_order = tuple(order)
+
+    def set_panel_datasets(self, panel_id, datasets, current="") -> None:
+        self.panels[str(panel_id)].update(
+            datasets=tuple(datasets), current=str(current)
+        )
+
+    def set_panel_projection(self, panel_id, state, surface) -> None:
+        self.panels[str(panel_id)].update(state=state, surface=surface)
+
+    def set_panel_status(self, panel_id, text, *, error=False) -> None:
+        self.panels[str(panel_id)]["status"] = (str(text), bool(error))
+
+    def show_panel(self, panel_id, host) -> None:
+        self.panels[str(panel_id)]["host"] = host
+        self.surface = host
+
+    def open_panel_editor(self, panel_id, editor, *, title) -> None:
+        self.editors[str(panel_id)] = editor
+
+    def close_panel_editor(self, panel_id) -> bool:
+        return self.editors.pop(str(panel_id), None) is not None
+
+    def update_panel_editor(self, panel_id, projection) -> bool:
+        if str(panel_id) not in self.editors:
+            return False
+        self.editors[str(panel_id)] = projection
+        return True
 
     def set_info(self, tabs) -> None:
         self.tabs = tuple(tabs)
@@ -113,28 +159,11 @@ class _ViewerView:
     def set_lineage_tree(self, tree) -> None:
         self.lineage = tuple(tree)
 
-    def set_figure_size(self, size: str) -> None:
-        self.size = str(size)
-
-    def set_figure_title(self, title: str) -> None:
-        self.figure_title = str(title)
-
-    def run_host_dialog(self, opener, host, *, title: str):
-        return opener(host, None, title=title)
-
-    def show_figure(self, host) -> None:
-        # The host, not its widget: this side of the wall never holds one.
-        self.surface = host
-
     def set_title(self, text: str) -> None:
         self.title = str(text)
 
     def set_path(self, path: str) -> None:
         self.path = str(path)
-
-    def set_datasets(self, datasets, current: str = "") -> None:
-        self.datasets = tuple(datasets)
-        self.current_dataset = str(current)
 
     def set_status(self, text: str, *, error: bool = False) -> None:
         self.status.append((str(text), bool(error)))
@@ -151,7 +180,17 @@ def _wait_until(predicate, *, timeout: float = 10.0) -> None:
     assert predicate(), "timed out waiting for the FigureViewer owner turn"
 
 
-def _presenter(view, *, make_host, edit_figure=None) -> FigureViewerPresenter:
+def _display_description(plot_input, recipe):
+    import zlc_plot
+
+    probe = zlc_plot.open_figure_host(plot_input, recipe)
+    try:
+        return probe.describe_display().result().value
+    finally:
+        probe.close(timeout=10)
+
+
+def _presenter(view, *, make_host) -> FigureViewerPresenter:
     from zlc_workbench.board import attach_qt_worker
     from zlc_ui.qt import ensure_qt_app
 
@@ -163,7 +202,6 @@ def _presenter(view, *, make_host, edit_figure=None) -> FigureViewerPresenter:
         run_off_thread=run_off_thread,
         close_worker=close_worker,
         request_close=lambda: None,
-        edit_figure=edit_figure,
     )
 
 
@@ -184,6 +222,10 @@ def _built_presenter(view) -> FigureViewerPresenter:
 
 def _close_presenter(presenter: FigureViewerPresenter) -> None:
     _wait_until(presenter.close)
+
+
+def _active_record(presenter: FigureViewerPresenter) -> dict[str, object]:
+    return presenter.panels[presenter._active_panel_id]
 
 
 def _formal_viewer_window(saved, monkeypatch, host_factory):
@@ -328,13 +370,35 @@ def test_opening_shows_the_figure_and_its_record(presenter, saved) -> None:
     assert presenter.view.status[-1] == ("showing data", False)
     assert presenter.view.lineage
 
-    presenter.resize_figure("4x4")
+    panel_id = presenter._active_panel_id
+    presenter.resize_panel(panel_id, "4x4")
     _wait_until(lambda: not presenter._busy)
-    assert presenter._host.logical_size is not None
-    seen = []
-    presenter._edit_figure = lambda host, title: seen.append((host, title))
-    presenter.view.figure_edit_requested.emit()
-    assert seen and seen[0][0] is presenter._host
+    assert _active_record(presenter)["host"].logical_size is not None
+    presenter.view.panel_edit_requested.emit(panel_id)
+    editor = presenter.view.editors[panel_id]
+    assert editor["state"]["signal"] == "data"
+    assert editor["live"] is False
+    boolean = next(
+        field
+        for field in presenter.panels[panel_id]["surface"]["display"]
+        if field["kind"] == "boolean"
+    )
+    presenter.view.panel_state_changed.emit(
+        panel_id,
+        {"display": {boolean["key"]: not boolean["value"]}},
+    )
+    _wait_until(lambda: not presenter._busy)
+    assert presenter.panels[panel_id]["state"].display[boolean["key"]] is not boolean["value"]
+    assert presenter.view.editors[panel_id]["state"]["display"][boolean["key"]] is not boolean["value"]
+
+    presenter.view.add_panel_requested.emit("curve")
+    _wait_until(lambda: not presenter._busy)
+    assert len(presenter.panels) == 2
+    added = presenter._active_panel_id
+    assert presenter.panels[added]["recipe"]["spec"].kind.value == "curve"
+    presenter.view.panel_remove_requested.emit(added)
+    _wait_until(lambda: not presenter._busy)
+    assert tuple(presenter.panels) == (panel_id,)
 
 
 def test_a_file_that_cannot_be_read_is_answered_not_raised(presenter, tmp_path) -> None:
@@ -360,9 +424,13 @@ def test_candidate_mount_is_atomic_and_old_host_retires_after_swap(saved) -> Non
     hosts: list[object] = []
 
     class Host:
-        def __init__(self) -> None:
+        def __init__(self, description) -> None:
             self.closed = False
             self.surface_at_close = None
+            self.description = description
+
+        def describe_display(self):
+            return SimpleNamespace(value=self.description)
 
         @staticmethod
         def configure(**_kwargs) -> None:
@@ -372,8 +440,8 @@ def test_candidate_mount_is_atomic_and_old_host_retires_after_swap(saved) -> Non
             self.surface_at_close = view.surface
             self.closed = True
 
-    def make_host(_snapshot, _name, _state):
-        host = Host()
+    def make_host(plot_input, _name, recipe):
+        host = Host(_display_description(plot_input, recipe))
         hosts.append(host)
         return host
 
@@ -381,31 +449,33 @@ def test_candidate_mount_is_atomic_and_old_host_retires_after_swap(saved) -> Non
     try:
         presenter.open(str(path))
         _wait_until(lambda: not presenter._busy)
-        first = presenter._host
+        first = _active_record(presenter)["host"]
         assert first is hosts[0]
 
         presenter.open(str(second_path))
         _wait_until(lambda: not presenter._busy)
-        second = presenter._host
+        second = _active_record(presenter)["host"]
         _wait_until(lambda: first.closed)
         assert second is hosts[1]
         assert first.surface_at_close is second
-        original_show = view.show_figure
+        original_show = view.show_panel
 
-        def reject_candidate(host) -> None:
+        def reject_candidate(panel_id, host) -> None:
             if host is not None and host is not second:
                 raise RuntimeError("mount refused")
-            original_show(host)
+            original_show(panel_id, host)
 
-        view.show_figure = reject_candidate
+        view.show_panel = reject_candidate
         presenter.open(str(rejected_path))
         _wait_until(lambda: not presenter._busy)
         rejected = hosts[2]
         _wait_until(lambda: rejected.closed)
 
         assert presenter.path == second_path.resolve()
-        assert presenter._host is second
+        assert _active_record(presenter)["host"] is second
         assert view.surface is second
+        assert view.path == str(second_path.resolve())
+        assert view.title == "run.png"
         assert second.closed is False
         assert "mount refused" in view.status[-1][0]
     finally:
@@ -417,16 +487,22 @@ def test_formal_window_slow_failed_open_keeps_turning_and_retains_the_last_figur
     monkeypatch,
 ) -> None:
     import zlc_workbench.viewer as viewer_module
+    from zlc_plot import read_figure_plot
+
+    path, _snapshot = saved
+    info, arrays = read_archive(path)
+    plot_input, recipe = read_figure_plot(info, arrays, "data")
+    description = _display_description(plot_input, recipe)
 
     def host_factory(_application, _QtCore, QtWidgets):
         surface = QtWidgets.QLabel("last accepted figure")
         return SimpleNamespace(
             configure=lambda **_kwargs: None,
+            describe_display=lambda: SimpleNamespace(value=description),
             qt_widget=lambda: surface,
             close=lambda: None,
         )
 
-    path, _snapshot = saved
     _application, _QtCore, window, owner_turns, timer = _formal_viewer_window(
         saved, monkeypatch, host_factory
     )
@@ -435,7 +511,7 @@ def test_formal_window_slow_failed_open_keeps_turning_and_retains_the_last_figur
         accepted = (
             window.presenter.path,
             window.presenter.description,
-            window.presenter._host,
+            _active_record(window.presenter)["host"],
         )
         original_read = viewer_module.read_archive
 
@@ -457,7 +533,7 @@ def test_formal_window_slow_failed_open_keeps_turning_and_retains_the_last_figur
         assert (
             window.presenter.path,
             window.presenter.description,
-            window.presenter._host,
+            _active_record(window.presenter)["host"],
         ) == accepted
     finally:
         timer.stop()
@@ -622,7 +698,7 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         assert "data.overlay.status" in payload.files
 
     class _RestoredHost:
-        def __init__(self) -> None:
+        def __init__(self, description) -> None:
             self.display = {}
             self.size = ""
             self.fitted = None
@@ -630,6 +706,10 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
             self.viewport = None
             self.thresholds = ()
             self.configure_calls = 0
+            self.description = description
+
+        def describe_display(self):
+            return SimpleNamespace(value=self.description)
 
         def configure(
             self,
@@ -670,7 +750,7 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
             label=label,
             recipe=recipe,
         )
-        host = _RestoredHost()
+        host = _RestoredHost(_display_description(plot_input, recipe))
         seen["host"] = host
         return host
 
@@ -695,8 +775,8 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         assert seen["recipe"]["parameters"]["show_colorbar"] is False
         assert seen["recipe"]["fit"]["model"] == "anisotropic_gaussian_center"
         assert seen["recipe"]["size"] == "4x4"
-        assert view.size == "4x4"
-        assert presenter.recipe == seen["recipe"]
+        assert next(iter(view.panels.values()))["state"].size == "4x4"
+        assert _active_record(presenter)["recipe"] == seen["recipe"]
     finally:
         _close_presenter(presenter)
 
@@ -706,12 +786,14 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         real_presenter.open(str(written.archive))
         _wait_until(lambda: not real_presenter._busy)
         assert real_presenter.description is not None
-        assert real_presenter._host is not None, real_view.status
-        assert real_presenter.recipe["spec"].kind.value == "image"
-        real_presenter._host.wait_for_front(timeout=5.0)
-        assert real_presenter._host._session._renderer.primary_axes.get_title() == ""
+        host = _active_record(real_presenter)["host"]
+        recipe = _active_record(real_presenter)["recipe"]
+        assert host is not None, real_view.status
+        assert recipe["spec"].kind.value == "image"
+        host.wait_for_front(timeout=5.0)
+        assert host._session._renderer.primary_axes.get_title() == ""
         # And the authored appearance really is on the built host.
-        described = real_presenter._host.describe_display().result().value
+        described = host.describe_display().result().value
         assert described.display_state.values["show_colorbar"] is False
     finally:
         _close_presenter(real_presenter)
@@ -784,7 +866,7 @@ def test_panel_save_thresholds_and_viewport_reopen_in_canonical_units(tmp_path) 
         presenter.open(str(written.archive))
         _wait_until(lambda: not presenter._busy)
         assert presenter.description is not None, view.status
-        host = presenter._host
+        host = _active_record(presenter)["host"]
         assert host is not None
         # Had the Viewer treated archived canonical values as display values,
         # these would be 0.001 V and 0.002 V after its mV projection.

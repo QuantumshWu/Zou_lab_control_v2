@@ -387,7 +387,7 @@ assert {
 } <= form_keys
 card._open_settings()
 app.processEvents()
-assert not card._settings_form.widget_for('kind').isEnabled()
+assert 'kind' not in card._settings_form.spec.keys
 assert card._settings_form.widget_for('cell_kind').isEnabled()
 reconciles = []
 original_reconcile = card._settings_form.reconcile

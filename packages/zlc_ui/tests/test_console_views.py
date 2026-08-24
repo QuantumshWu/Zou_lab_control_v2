@@ -1121,8 +1121,7 @@ handle.set_panel_signal_choices(
     overlay_current='@logic/occ/site_overlay',
 )
 handle.set_panel_projection('panel-1', state, surface)
-assert card._settings_form.read_all()['kind'] == 'image'
-assert not card._settings_form.widget_for('kind').isEnabled()
+assert 'kind' not in card._settings_form.read_all()
 assert card._settings_form.read_all()['display__show_colorbar'] is True
 assert card._settings_form.read_all()['display__colormap'] == 'viridis'
 assert card._settings_form.read_all()['display__title'] is None
@@ -1179,7 +1178,7 @@ projection = {
     'interval_choices': (100, 200, 400, 800),
     'parameter_surface': surface,
     'save_directory': save_directory,
-    'kind_read_only': True, 'frozen_signal': '@logic/cm/frames',
+    'frozen_signal': '@logic/cm/frames',
     'frozen_publication': object(), 'frozen_snapshot': object(),
     'stale': False, 'producer_node_id': 'cm', 'producer_logic': producer,
 }
@@ -1915,7 +1914,7 @@ try:
                 'interval_choices': (100, 200, 400, 800),
                 'size_choices': ('1x2', '2x2', '1x4'),
                 'parameter_surface': surface, 'save_directory': '.',
-                'kind_read_only': True, 'frozen_signal': state['signal'],
+                'frozen_signal': state['signal'],
                 'frozen_publication': None, 'frozen_snapshot': None,
                 'stale': False, 'producer_node_id': '',
                 'producer_logic': None,

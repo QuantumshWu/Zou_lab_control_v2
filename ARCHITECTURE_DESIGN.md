@@ -59,7 +59,7 @@
 - 未知metadata类型拒绝，不自动字符串化。
 - Figure只使用稳定`zlc.figure`格式，无数字版本；reader只接受当前完整grammar，其它root或缺失字段均loud拒绝。
 - Figure NPZ是可重绘的数据真相，包含typed Dataset、exact PlotSpec、完整normalized parameters、overlay、viewport和exact causal lineage graph；PNG只是同stem preview。
-- FigureViewer按保存的recipe恢复typed plot input，并和TaskConsole使用同一个Plot host/configure路径；不得按array shape重新猜plot kind。Lineage以root、event nodes和direct parent IDs保存，并投影成树。
+- FigureViewer按保存的recipe恢复typed plot input，并和TaskConsole使用同一个Plot host/configure路径；不得按array shape重新猜plot kind。一个immutable archive可在同一Monitor board增加多个共享`PanelCardView`，默认panel恢复exact recipe，operator新增的其它plot kind只从同一typed Dataset schema重新compose。每个panel的Setting、可关闭Edit tab、size/signal/cell kind/display/fit均复用TaskConsole现有owner；saved/static Edit不显示live cadence、producer、snapshot refresh或第二套Save controls。Lineage以root、event nodes和direct parent IDs保存，并投影成可展开的真实树。
 - Dataset/Figure encoder只写caller-owned binary IO；路径原子发布唯一属于`zlc_durable`。
 
 ### 3.3 Durable paths
@@ -93,7 +93,7 @@ Node new chunk
 - Incremental placement沿repeat与point rows；多维scan/grid通过point table与grid topology表达。一个cell payload原子完整发布，不新增cell-internal tile/slice streaming contract。
 - Canonical display materialization只在实际display consumer到期时合并/cache，并在Qt owner thread之外执行；不得让producer每commit强制复制full prefix，也不得因Panel存在与否改变采集结果。
 - Live Panel、Panel Edit/Refresh/Save、selector、fit input和overlay必须从同一accepted canonical presentation snapshot投影；无法唯一对齐即拒绝。
-- Panel的title shape与Setting semantic都只能读取同一publication的canonical current Dataset，不得读取最后event chunk冒充完整signal。title结构固定为`(repeat) × (point/scan geometry) × (cell payload)`三组；例如Survival field scan显示`(20) × (10×10×10) × (3×35)`。GridTopology已命名scan axes时不得再暴露flattened `point` ordinal；多维FacetGrid默认facet最外层真实scan axis，其余轴保持可编辑的Reduced。即使当前projection因FacetGrid 64-cell上限等原因拒绝，错误只标记不可用的presentation/fit，完整canonical scan-axis fate仍必须留在Setting中供operator修复。live publication未改变PanelState或authoring字段域时不得reconcile Setting form；固定Plot kind从widget创建起即read-only，不允许enabled/disabled闪烁。
+- Panel的title shape与Setting semantic都只能读取同一publication的canonical current Dataset，不得读取最后event chunk冒充完整signal。title结构固定为`(repeat) × (point/scan geometry) × (cell payload)`三组；例如Survival field scan显示`(20) × (10×10×10) × (3×35)`。GridTopology已命名scan axes时不得再暴露flattened `point` ordinal；多维FacetGrid默认facet最外层真实scan axis，其余轴保持可编辑的Reduced。即使当前projection因FacetGrid 64-cell上限等原因拒绝，错误只标记不可用的presentation/fit，完整canonical scan-axis fate仍必须留在Setting中供operator修复。live publication未改变PanelState或authoring字段域时不得reconcile Setting form；Plot kind是Add Panel时确定的panel identity，不进入Setting通用表单，FacetGrid仅暴露可变的Cell kind。
 - Occupancy的SITE是每个`(repeat, point)` cell内原子完整的data axis；overlay不得另存site history。Occupancy只发布通用bool/numeric status signal，点是否可读由该Dataset自身validity表达；XY geometry与adapter contract由`zlc_plot`中立层拥有，Workbench只按contract路由signal且不得import Occupancy。只有scope/facet唯一选中一个cell时才能显示离散状态；对多个cells做reduce/pool时不得私自发明共识状态，未定义则显示UNKNOWN/隐藏。
 - UI freeze只读取已提交状态，不调用plugin materializer。
 - Stop/Final不受Panel、freeze或Processor订阅影响。
@@ -180,7 +180,7 @@ Node new chunk
 - Timeout显示真实错误但不冻结UI；未确认前不能显示Safe。
 - Form reconcile必须按当前schema重建dependency graph。
 - PanelState decoder只接受当前完整grammar；owner wake和产品Figure save各只有一个实现。
-- FigureViewer与TaskConsole必须复用同一个`PanelCardView` frame owner、panel preset尺寸、title band、Setting按钮和body padding；Viewer只以saved/immutable状态隐藏无意义的remove动作。Viewer右栏的global action bar固定自身高度，Panel在其下方top-align，不能把剩余窗口高度塞进action bar或让同一2x2 card漂到中部；card title读取当前archive dataset的operator label。
+- FigureViewer与TaskConsole必须复用同一个`PanelCardView` frame owner、Monitor board、panel preset尺寸、title band、Setting按钮和body padding；Viewer右栏是白色Fluent work surface，global action bar固定自身高度，Panel在其下方top-align，不能把剩余窗口高度塞进action bar或让同一2x2 card漂到中部；card title读取当前archive dataset的operator label。左侧InfoPane宽度在window创建时一次确定，任何archive label/value不得改变window split；无换行的readout使用单行read-only control，只有真实多行值使用multiline；Flow使用带展开indicator的树控件而不是ASCII伪树。
 
 ## 7. Pulse、Camera、Remote与FPGA
 

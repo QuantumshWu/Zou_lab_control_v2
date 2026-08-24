@@ -1165,6 +1165,13 @@ class FluentParameterForm(QtWidgets.QWidget):
                     widget = self._widgets[field.key]
                     handler = new_handlers[field.key]
                     _reconfigure_widget(old_field, field, widget)
+                    if field.kind == "keyed_choice":
+                        # Its legal keys come from the live runtime context,
+                        # not FormSpec.  Put the new choice domain into the
+                        # retained tree before writing the owner's new key;
+                        # doing this afterwards silently cleared a signal that
+                        # only existed in the incoming domain.
+                        handler.refresh(field, widget, self._runtime)
                     selected = (
                         field.key in self._auto_switches
                         and incoming[field.key] is None

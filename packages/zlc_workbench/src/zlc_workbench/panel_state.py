@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any
 
@@ -19,8 +19,139 @@ __all__ = [
     "PanelFrozenData",
     "PanelState",
     "draws_image_surfaces",
+    "panel_state_from_description",
+    "panel_surface_from_description",
     "project_panel_state",
 ]
+
+
+def _semantic_entries(description: object) -> tuple[dict[str, object], ...]:
+    return tuple(
+        {
+            "key": str(field.name),
+            "label": str(field.label),
+            "kind": "choice",
+            "value": field.value,
+            "allow_none": not bool(field.required),
+            "choices": tuple(
+                (str(label), value) for value, label in tuple(field.choices)
+            ),
+            "minimum": None,
+            "maximum": None,
+            "step": None,
+        }
+        for field in tuple(description.fields)
+        if str(field.name) != "kind"
+    )
+
+
+def panel_surface_from_description(
+    state: "PanelState",
+    display_description: object,
+    semantic_description: object,
+    models: object,
+) -> dict[str, object]:
+    """Project one resolved plot description for Setting and Edit consumers."""
+
+    from zlc_plot.ui import parameter_controls
+
+    controls = parameter_controls(
+        display_description.parameter_schema,
+        display_description.display_state.values,
+        choice_overrides=display_description.parameter_choices,
+    )
+    display = tuple(
+        {
+            "key": str(control.name),
+            "label": str(control.label),
+            "kind": str(getattr(control.kind, "value", control.kind)),
+            "value": control.value,
+            "allow_none": bool(control.allow_none),
+            "choices": tuple(
+                (str(label), value)
+                if bool(getattr(control, "semantic", False))
+                else (str(value).replace("_", " ").title(), value)
+                for value, label in (
+                    tuple(control.choices)
+                    if bool(getattr(control, "semantic", False))
+                    else tuple((value, value) for value in control.choices)
+                )
+            ),
+            "minimum": control.minimum,
+            "maximum": control.maximum,
+            "step": control.step,
+            "automatic": bool(control.automatic),
+            "unavailable_reason": str(control.unavailable_reason),
+        }
+        for control in controls
+    )
+    resolved_models = tuple(models)
+    current_model = state.fit.get("model")
+    model_choices = [
+        (str(model.display_name), str(model.model_id))
+        for model in resolved_models
+    ]
+    if current_model is not None and not any(
+        current_model == value for _label, value in model_choices
+    ):
+        model_choices.insert(0, (str(current_model), current_model))
+    fit = (
+        {
+            "key": "model",
+            "label": "Fit model",
+            "kind": "choice",
+            "value": current_model,
+            "allow_none": True,
+            "choices": tuple(model_choices),
+            "minimum": None,
+            "maximum": None,
+            "step": None,
+        },
+    ) if resolved_models or current_model is not None else ()
+    fit_outputs: list[tuple[str, str]] = []
+    for model in resolved_models:
+        if str(model.model_id) != str(current_model):
+            continue
+        for parameter in tuple(model.parameters):
+            name = str(parameter.name)
+            label = str(
+                getattr(parameter, "display_label", None)
+                or name.replace("_", " ").title()
+            )
+            fit_outputs.extend(((name, label), (f"{name}_err", f"{label} error")))
+        break
+    return {
+        "semantic": _semantic_entries(semantic_description),
+        "display": display,
+        "fit": fit,
+        "semantic_unavailable": "",
+        "display_unavailable": "",
+        "fit_unavailable": "",
+        "fit_outputs": tuple(fit_outputs),
+        "semantic_provisional": False,
+    }
+
+
+def panel_state_from_description(
+    state: "PanelState",
+    surface: Mapping[str, object],
+) -> "PanelState":
+    """Keep the exact zlc_plot-accepted values in the shared PanelState."""
+
+    semantic_values = {
+        str(entry["key"]): entry.get("value")
+        for entry in tuple(surface.get("semantic", ()))
+    }
+    semantic = {
+        name: semantic_values.get(name, value)
+        for name, value in state.semantic.items()
+    }
+    display = dict(state.display)
+    display.update({
+        str(entry["key"]): entry.get("value")
+        for entry in tuple(surface.get("display", ()))
+    })
+    return replace(state, semantic=semantic, display=display)
 
 
 def _state_value(value: Any) -> Any:

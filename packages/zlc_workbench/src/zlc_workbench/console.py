@@ -29,7 +29,7 @@ from zlc_plot import (
 )
 from zlc_plot.primitives import ImageFrame, ImagePointOverlay, PointStatus
 from zlc_plot.specs import validate_authored_display
-from zlc_plot.ui import parameter_controls, parameter_controls_for_kind
+from zlc_plot.ui import parameter_controls_for_kind
 from zlc_runtime import (
     IndexedHistoryLease,
     OperatorInputRequest,
@@ -77,7 +77,10 @@ from .panel_catalog import (
 from .panel_state import (
     PanelFrozenData,
     PanelState,
+    _semantic_entries,
     draws_image_surfaces,
+    panel_state_from_description,
+    panel_surface_from_description,
 )
 from .presentation import PlotPanelPort
 from .selection import (
@@ -2091,28 +2094,6 @@ class ConsolePresenter:
             fit_unavailable=data_reason,
         )
 
-    @staticmethod
-    def _semantic_entries(semantic_description: object) -> tuple:
-        """The one projection of semantic fields into editor rows."""
-
-        return tuple(
-            {
-                "key": str(field.name),
-                "label": str(field.label),
-                "kind": "choice",
-                "value": field.value,
-                "allow_none": not bool(field.required),
-                "choices": tuple(
-                    (str(label), value) for value, label in tuple(field.choices)
-                ),
-                "minimum": None,
-                "maximum": None,
-                "step": None,
-            }
-            for field in tuple(semantic_description.fields)
-            if str(field.name) != "kind"
-        )
-
     def _schema_projected_parameters(
         self,
         binding: PanelBinding,
@@ -2166,7 +2147,7 @@ class ConsolePresenter:
         return self._parameter_surface(
             controls,
             state,
-            semantic=self._semantic_entries(description),
+            semantic=_semantic_entries(description),
             fit_unavailable=str(reason),
             semantic_provisional=True,
         )
@@ -2234,54 +2215,11 @@ class ConsolePresenter:
         models: Sequence[object],
     ) -> Mapping[str, object]:
         """Project already-resolved plot metadata without another host wait."""
-
-        display_controls = parameter_controls(
-            display_description.parameter_schema,
-            display_description.display_state.values,
-            choice_overrides=display_description.parameter_choices,
-        )
-        semantic_entries = self._semantic_entries(semantic_description)
-        models = tuple(models)
-        current_model = state.fit.get("model")
-        model_choices = [
-            (str(getattr(model, "display_name")), str(getattr(model, "model_id")))
-            for model in models
-        ]
-        if current_model is not None and not any(
-            current_model == value for _label, value in model_choices
-        ):
-            model_choices.insert(0, (str(current_model), current_model))
-        fit_entries = (
-            {
-                "key": "model",
-                "label": "Fit model",
-                "kind": "choice",
-                "value": current_model,
-                "allow_none": True,
-                "choices": tuple(model_choices),
-                "minimum": None,
-                "maximum": None,
-                "step": None,
-            },
-        ) if models or current_model is not None else ()
-        fit_outputs: list[tuple[str, str]] = []
-        for model in models:
-            if str(getattr(model, "model_id")) != str(current_model):
-                continue
-            for parameter in tuple(getattr(model, "parameters")):
-                name = str(getattr(parameter, "name"))
-                label = str(
-                    getattr(parameter, "display_label", None)
-                    or name.replace("_", " ").title()
-                )
-                fit_outputs.extend(((name, label), (f"{name}_err", f"{label} error")))
-            break
-        return self._parameter_surface(
-            display_controls,
+        return panel_surface_from_description(
             state,
-            semantic=semantic_entries,
-            fit=fit_entries,
-            fit_outputs=fit_outputs,
+            display_description,
+            semantic_description,
+            models,
         )
 
     @staticmethod
@@ -2290,27 +2228,7 @@ class ConsolePresenter:
         surface: Mapping[str, object],
     ) -> PanelState:
         """Keep the exact zlc_plot-accepted configuration in PanelState."""
-
-        described = {
-            str(entry["key"]): entry.get("value")
-            for entry in tuple(surface.get("semantic", ()))
-        }
-        resolved = {
-            name: described.get(name, value)
-            for name, value in state.semantic.items()
-        }
-        described_display = {
-            str(entry["key"]): entry.get("value")
-            for entry in tuple(surface.get("display", ()))
-        }
-        # Overlay onto the record instead of replacing it, exactly as the
-        # semantic branch above does.  Replacing it deleted every name the
-        # current vocabulary does not declare, so an authored colormap did
-        # not survive image -> curve -> image: the panel came back with the
-        # default and the operator's choice was gone for good.
-        display = dict(state.display)
-        display.update(described_display)
-        return replace(state, semantic=resolved, display=display)
+        return panel_state_from_description(state, surface)
 
     def _settle_panel_hosts(self) -> None:
         """Project metadata and selectors only after each initial render finished."""
@@ -2460,7 +2378,6 @@ class ConsolePresenter:
                     else binding.display_publication
                 ),
             ),
-            "kind_read_only": True,
             "frozen_signal": None if frozen is None else frozen.signal,
             "frozen_publication": None if frozen is None else frozen.publication,
             "frozen_snapshot": None if frozen is None else frozen.snapshot,

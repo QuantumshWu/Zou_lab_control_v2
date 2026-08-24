@@ -776,15 +776,7 @@ class PanelCardView(FluentGroupBox):
     def _form_spec(self) -> FormSpec:
         state = self._state_projection
         current_signal = str(state.get("signal") or "")
-        fields: list[FormFieldProps] = [
-            FormFieldProps(
-                "kind",
-                "text",
-                "Plot kind",
-                default=str(state.get("kind") or "automatic"),
-                unavailable_reason="Plot kind is fixed for this panel.",
-            ),
-        ]
+        fields: list[FormFieldProps] = []
         if state.get("kind") == "facet_grid" and self._cell_kind_choices:
             # A grid's cell kind is a panel PARAMETER, not a second plot
             # kind: empty means the data decides, a name is the operator's
@@ -882,7 +874,6 @@ class PanelCardView(FluentGroupBox):
     def _form_values(self) -> dict[str, object]:
         signal = str(self._state_projection.get("signal") or "") or None
         values: dict[str, object] = {
-            "kind": str(self._state_projection.get("kind") or "automatic"),
             "title": str(self._state_projection.get("title") or "Panel"),
             "signal": signal,
             "size": str(self._state_projection.get("size") or self._default_size),
@@ -1103,7 +1094,6 @@ class PanelCardView(FluentGroupBox):
             return
         name = str(key)
         if name in {
-            "kind",
             "semantic_unavailable",
             "display_unavailable",
             "fit_unavailable",

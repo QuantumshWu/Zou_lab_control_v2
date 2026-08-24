@@ -21,8 +21,14 @@ def _run_qt_smoke(code: str) -> None:
         else os.pathsep.join((str(REPO_ROOT), str(SRC)))
     )
     environment["QT_QPA_PLATFORM"] = "offscreen"
+    verified = """
+import zou_lab_control
+import zlc_ui
+print(zou_lab_control.__file__)
+print(zlc_ui.__file__)
+""" + code
     completed = subprocess.run(
-        [sys.executable, "-c", code],
+        [sys.executable, "-c", verified],
         cwd=ROOT,
         env=environment,
         capture_output=True,
@@ -178,6 +184,7 @@ pane = InfoPane(
     tabs=(('Summary', (('Name', 'demo'),)), ('Raw', (('Payload', '{}'),))),
 )
 assert pane.info_tabs.count() == 2
-assert pane._tab_layouts['Raw'].itemAt(0).widget().findChild(QtWidgets.QPlainTextEdit).toPlainText() == '{}'
+row = pane._tab_layouts['Raw'].itemAt(0).widget()
+assert row.findChild(QtWidgets.QLineEdit).text() == '{}'
 """
     )

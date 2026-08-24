@@ -56,11 +56,6 @@ def build(
         run_off_thread=run_off_thread,
         close_worker=close_worker,
         request_close=request_close,
-        # The plot's own controls belong to the plotting package; the window
-        # parents the dialog, and this only says which plot and what to call it.
-        edit_figure=lambda host, title: view.run_host_dialog(
-            plot.edit_plot_display, host, title=f"{title} display"
-        ),
     )
 
 
