@@ -156,6 +156,15 @@ final continuously numbered SiteMap and runs every downstream model once. The
 candidate/excluded/final identity mapping is saved in the report and summary,
 with a `site_review` Figure/PNG pair.
 
+Site discovery itself is the union of two measured facts: spatially filtered
+changes between genuinely neighbouring reference frames, and the spatially
+filtered complete reference average. A single clear transition can therefore
+retain a low-loading site, while the average retains steady/high-loading sites.
+Both routes respect the authored detection-sigma floor and family-wise image
+size; candidate identity comes from average-image local maxima. There is no
+even/odd split, split-half veto, absolute per-frame sighting path, or global
+saddle suppression.
+
 Logic Nodes commit `zlc-data` role-axis event chunks, so repeat, site, and
 readout-event meaning is carried by `DatasetSchema` rather than inferred from
 array shape. Runtime owns their accumulated current/partial/final

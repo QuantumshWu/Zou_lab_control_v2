@@ -1185,89 +1185,6 @@ def _background_scatter(
     )
 
 
-def _seen_in_both_halves(
-    half_hits: Sequence[np.ndarray],
-    half_response: Sequence[np.ndarray],
-    half_frames: Sequence[int],
-    *,
-    source_footprint: int,
-) -> np.ndarray:
-    """Where both halves of the run agree that something is there.
-
-    Each half is judged on its own terms -- its own background level and
-    scatter -- and a place has to stand clear of them in both.  The bar per
-    half is deliberately low: half a run is half the evidence, and the point
-    is not to detect the trap twice over but to refuse the coincidence that
-    happened once.
-
-    A run that cannot be halved -- one frame, or an already-averaged picture
-    handed in as one -- carries no evidence about repetition either way, so
-    this says nothing about it rather than refusing everything.  What admits
-    a site there is the thresholds alone, which is all such a picture can
-    support.
-    """
-
-    from scipy import ndimage
-
-    agreed = np.ones(np.asarray(half_hits[0]).shape, dtype=bool)
-    if min(int(count) for count in half_frames) < 1:
-        return agreed
-    for hits_half, response_half, frames in zip(
-        half_hits, half_response, half_frames
-    ):
-        average_half = np.asarray(response_half, dtype=float) / float(frames)
-        level, scatter, _sources = _background_scatter(
-            average_half, source_footprint
-        )
-        z_half = (average_half - level) / scatter
-        # Either kind of evidence, at half strength: a sighting in this half,
-        # or a place that stands three sigma clear of this half's background.
-        agreed &= (np.asarray(hits_half) > 0) | (z_half >= _HALF_RUN_SIGMA)
-    return agreed
-
-
-#: How far clear of its own background half a run must put a place, when that
-#: half saw no single-shot sighting of it.
-_HALF_RUN_SIGMA = 3.0
-
-
-def _one_hill(
-    evidence: np.ndarray,
-    first: tuple[int, int],
-    second: tuple[int, int],
-    *,
-    saddle_fraction: float,
-) -> bool:
-    """Whether two peaks are two bumps on ONE hill rather than two hills.
-
-    Distance cannot answer this.  A lattice four pixels apart and one nine
-    pixels apart are both perfectly resolvable, while a single wide spot can
-    carry two integer maxima three pixels apart -- so any exclusion radius
-    chosen for one is wrong for the other, and every radius this detector has
-    had was wrong for something (four sigma merged real traps six pixels
-    apart; two pixels left duplicates on one spot).
-
-    What separates two traps is the VALLEY between them.  Walk the segment
-    joining the two peaks and take the lowest evidence on it: two distinct
-    traps have background between them, so the walk drops most of the way to
-    nothing, while two maxima on one spot never leave the spot and the walk
-    barely dips.  This is the persistence criterion, and it needs no length
-    scale at all -- which is why it holds for any spacing and any spot width.
-    """
-
-    (row_a, column_a), (row_b, column_b) = first, second
-    peak = min(float(evidence[row_a, column_a]), float(evidence[row_b, column_b]))
-    if peak <= 0.0:
-        return True
-    steps = max(3, int(np.ceil(np.hypot(row_b - row_a, column_b - column_a))) * 2)
-    rows = np.linspace(row_a, row_b, steps)
-    columns = np.linspace(column_a, column_b, steps)
-    walk = ndimage.map_coordinates(
-        evidence, np.vstack((rows, columns)), order=1, mode="nearest"
-    )
-    return float(np.min(walk)) >= saddle_fraction * peak
-
-
 def _refine_center_subpixel(image: np.ndarray, x: float, y: float, half: int = 2) -> tuple[float, float]:
     """Where the spot centred on this peak actually is, or the peak itself.
 
@@ -1383,23 +1300,14 @@ def _stable_site_order(centers_xy: np.ndarray, row_tolerance: float) -> np.ndarr
     )
 
 
-#: How far the evidence must fall between two peaks for them to be two traps.
-#: A Gaussian pair resolvable at all dips below half its peaks between them --
-#: that is what "resolvable" means -- so half is the threshold that admits
-#: exactly the pairs an eye would call two spots.
-_SADDLE_FRACTION = 0.5
-
-
 @dataclass(frozen=True, slots=True)
 class _RunEvidence:
     """Everything one pass over the frames can say, before it means anything."""
 
-    hits: np.ndarray
-    lit_response: np.ndarray
+    change_hits: np.ndarray
+    max_change_z: np.ndarray
     total_response: np.ndarray
-    half_hits: list
-    half_response: list
-    half_frames: list
+    transitions: int
     background_sigma: float
 
 
@@ -1412,24 +1320,22 @@ def _accumulate_run(
     """Read the run once, keeping every quantity a later step could want.
 
     One pass, because it is one pass: a run of two thousand large frames is
-    not walked again for the sake of tidiness.  What it keeps is where an atom
-    was SEEN, the light on the shots where it was, the light on every shot,
-    and all of that again for each interleaved half of the run.
+    not walked again for the sake of tidiness.  What it keeps is where two
+    neighbouring frames changed, how large those changes were, and the light
+    on every frame for the independent average-image path.
     """
 
     from scipy import ndimage
 
 
     background_sigma = max(4.0 * spot_sigma, spot_sigma + 2.0)
-    hits = np.zeros(stack.shape[1:], dtype=np.int64)
-    lit_response = np.zeros(stack.shape[1:], dtype=float)
-    #: Every shot added up, lit or not: what a trap too dim to clear the
-    #: per-shot cut still writes into the picture.
+    change_hits = np.zeros(stack.shape[1:], dtype=np.int64)
+    max_change_z = np.zeros(stack.shape[1:], dtype=float)
+    #: Every frame added up: a highly loaded site may hardly change between
+    #: neighbours, but it remains bright in the complete average.
     total_response = np.zeros(stack.shape[1:], dtype=float)
-    #: The same two quantities over each interleaved half of the run.
-    half_hits = [np.zeros(stack.shape[1:], dtype=np.int64) for _ in range(2)]
-    half_response = [np.zeros(stack.shape[1:], dtype=float) for _ in range(2)]
-    half_frames = [0, 0]
+    transitions = 0
+    previous_response: np.ndarray | None = None
     # Frames are filtered many at a time, in blocks sized by memory rather than
     # by frame count: one SciPy call over a block costs a fraction of one call
     # per frame, and filtering makes two more copies of whatever it is given,
@@ -1443,45 +1349,45 @@ def _accumulate_run(
         ) - ndimage.gaussian_filter(
             frames, sigma=(0.0, background_sigma, background_sigma)
         )
-        # Each frame is judged against its own noise: an exposure that came out
-        # dim, or a run whose background drifted, changes what "bright" means
-        # in that frame and in no other.
-        # The noise of a frame is read from its lower half, where sites are
-        # not: the median distance below the median.  That is the quarter
-        # quantile of the whole frame, which is one call per block rather than
-        # a masked median per frame.
-        baseline, lower_quartile = np.quantile(
-            response, (0.5, 0.25), axis=(1, 2), keepdims=True
-        )
-        noise = 1.4826 * (baseline - lower_quartile)
+        baseline = np.median(response, axis=(1, 2), keepdims=True)
+        response = response - baseline
+        total_response += np.sum(response, axis=0)
+
+        # A low-loading site can appear on one frame only.  Its evidence is
+        # therefore the spatially shaped CHANGE between neighbouring frames,
+        # not whether either absolute frame cleared a global brightness bar.
+        # Keep the previous block's last response so a block boundary cannot
+        # silently remove one physical transition.
+        changes = np.diff(response, axis=0)
+        if previous_response is not None:
+            changes = np.concatenate(
+                (response[:1] - previous_response[np.newaxis, ...], changes),
+                axis=0,
+            )
+        previous_response = np.array(response[-1], copy=True)
+        if not changes.shape[0]:
+            continue
+        change_baseline = np.median(changes, axis=(1, 2), keepdims=True)
+        magnitude = np.abs(changes - change_baseline)
+        noise = 1.4826 * np.median(magnitude, axis=(1, 2), keepdims=True)
         noise = np.maximum(
             noise,
             np.finfo(float).eps
-            * np.maximum(1.0, np.max(np.abs(response), axis=(1, 2), keepdims=True)),
+            * np.maximum(1.0, np.max(magnitude, axis=(1, 2), keepdims=True)),
         )
-        lit = response >= baseline + detection_sigma * noise
-        hits += np.count_nonzero(lit, axis=0)
-        lit_response += np.sum(np.where(lit, response - baseline, 0.0), axis=0)
-        total_response += np.sum(response - baseline, axis=0)
-        # The run, also kept as two interleaved halves.  A trap is in both of
-        # them; a noise peak is in one.  Interleaved rather than split in the
-        # middle so a drift over the run cannot land in one half alone.
-        odd = (start + np.arange(frames.shape[0])) % 2 == 1
-        for half, mask in ((0, ~odd), (1, odd)):
-            if not mask.any():
-                continue
-            half_hits[half] += np.count_nonzero(lit[mask], axis=0)
-            half_response[half] += np.sum(
-                (response - baseline)[mask], axis=0
-            )
-            half_frames[half] += int(np.count_nonzero(mask))
+        standardized = magnitude / noise
+        changed = standardized >= detection_sigma
+        change_hits += np.count_nonzero(changed, axis=0)
+        max_change_z = np.maximum(
+            max_change_z,
+            np.max(standardized, axis=0),
+        )
+        transitions += int(changes.shape[0])
     return _RunEvidence(
-        hits,
-        lit_response,
+        change_hits,
+        max_change_z,
         total_response,
-        half_hits,
-        half_response,
-        half_frames,
+        transitions,
         background_sigma,
     )
 
@@ -1490,13 +1396,9 @@ def _accumulate_run(
 class _Admission:
     """How high a place must stand, in each of the two statistics."""
 
-    shots: int
-    pixels: int
     average: np.ndarray
-    source_footprint: int
-    sources: np.ndarray
-    false_rate: float
     required: int
+    single_change_cut: float
     average_z: np.ndarray
     average_cut: float
 
@@ -1517,22 +1419,22 @@ def _admission_thresholds(
     from scipy.special import erfc, erfcinv
     from scipy.stats import binom
 
-    hits = evidence.hits
+    hits = evidence.change_hits
     total_response = evidence.total_response
     background_sigma = evidence.background_sigma
 
-
-    shots = int(stack.shape[0])
+    frames = int(stack.shape[0])
+    transitions = int(evidence.transitions)
     pixels = int(hits.size)
 
     # The second admission: the run's average, judged the same way.  Its
     # noise is read the same robust way, and the significance a place must
-    # reach is set by the same rule the sighting count uses -- an image of
+    # reach is set by the same rule the change count uses -- an image of
     # pure background must not be expected to produce even half a site
     # anywhere in it.  Averaging is what makes this sensitive to a trap whose
-    # single shots are unremarkable: N shots of a persistent signal add up as
-    # N while their noise adds up as sqrt(N).
-    average = total_response / float(shots)
+    # individual frames are unremarkable: N frames of a persistent signal add
+    # up as N while their noise adds up as sqrt(N).
+    average = total_response / float(frames)
     # The average's noise, measured on the average itself.  Photon noise over
     # the root of the frame count is what a perfect sensor would leave; fixed
     # pattern, warm pixels and background structure survive averaging
@@ -1546,46 +1448,63 @@ def _admission_thresholds(
     )
     background = ~sources
 
-    # How often noise alone clears the per-frame cut: counted where the
-    # sources are not.  A band-passed frame's pixels are correlated, so its
-    # robust scatter understates the real spread and the Gaussian tail of the
-    # requested sigma understates this rate; that tail stays as a floor, so a
-    # quiet stretch of background cannot license a lower bar than the physics.
+    # How often noise alone clears the neighbouring-frame change cut, counted
+    # where the sources are not.  A band-passed difference's pixels are
+    # correlated, so its robust scatter and a Gaussian tail alone can both
+    # understate the observed rate; the larger measured/theoretical value is
+    # the floor, so a quiet stretch cannot license an easier count bar.
     background_pixels = int(np.count_nonzero(background))
     observed_rate = (
-        float(np.sum(hits[background])) / float(shots * background_pixels)
-        if background_pixels
+        float(np.sum(hits[background]))
+        / float(transitions * background_pixels)
+        if transitions and background_pixels
         else 0.0
     )
     false_rate = max(
         observed_rate,
-        float(0.5 * erfc(detection_sigma / sqrt(2.0))),
+        # Frame differences are judged by absolute magnitude, so the Gaussian
+        # floor is the corresponding two-sided tail.
+        float(erfc(detection_sigma / sqrt(2.0))),
         1e-12,
     )
     expected_false_sites = 0.5
     required = 1
-    for count in range(1, shots + 1):
-        if pixels * float(binom.sf(count - 1, shots, false_rate)) < expected_false_sites:
+    for count in range(1, transitions + 1):
+        if (
+            pixels * float(binom.sf(count - 1, transitions, false_rate))
+            < expected_false_sites
+        ):
             required = count
             break
     else:
-        required = shots
+        required = max(1, transitions)
+    single_change_cut = (
+        float("inf")
+        if not transitions
+        else max(
+            detection_sigma,
+            float(
+                sqrt(2.0)
+                * erfcinv(expected_false_sites / float(pixels * transitions))
+            ),
+        )
+    )
 
     average_z = (average - average_baseline) / average_noise
-    # How high a place must stand in the average: the per-pixel Gaussian tail
-    # for an image of this many pixels.  A floor rather than a guarantee --
-    # the map is band-passed, so its local maxima come from a heavier
-    # distribution than any single pixel of it.  False positives are refused
-    # by reproducibility across the run's two halves, below.
-    average_cut = float(sqrt(2.0) * erfcinv(1.0 / pixels))
+    # How high a place must stand in the average: never below the operator's
+    # authored detection sigma, and raised further when this image's number of
+    # pixels requires a stricter family-wise Gaussian bar.  This prevents the
+    # average path from silently admitting ~4-sigma weak ghosts when the
+    # operator authored detection_sigma=6.  Candidate admission still requires
+    # a spatial local maximum.
+    average_cut = max(
+        detection_sigma,
+        float(sqrt(2.0) * erfcinv(1.0 / pixels)),
+    )
     return _Admission(
-        shots,
-        pixels,
         average,
-        source_footprint,
-        sources,
-        false_rate,
         required,
+        single_change_cut,
         average_z,
         average_cut,
     )
@@ -1599,53 +1518,32 @@ def _candidate_peaks(
     peak_window: int,
     measurement_radius: int,
 ) -> tuple[list, np.ndarray]:
-    """Every place that both admissions offer and both halves of the run keep.
+    """Every place admitted by frame-change or average-image evidence.
 
-    Returns the candidates strongest first, and the sighting significance the
-    published quality is read from.
+    Returns the candidates strongest first, and the temporal-change
+    significance the published quality is read from.
     """
 
     from scipy import ndimage
 
-    hits = evidence.hits
-    lit_response = evidence.lit_response
-    half_hits = evidence.half_hits
-    half_response = evidence.half_response
-    half_frames = evidence.half_frames
-    shots = admission.shots
+    hits = evidence.change_hits
+    max_change_z = evidence.max_change_z
     average = admission.average
     average_z = admission.average_z
     average_cut = admission.average_cut
     required = admission.required
-    false_rate = admission.false_rate
-    source_footprint = admission.source_footprint
+    single_change_cut = admission.single_change_cut
 
-
-    conditional = lit_response / np.maximum(hits, 1)
-    # A candidate must be a peak of BOTH maps, over the same distance.
-    #
-    # The count alone is not enough: in every frame where two neighbouring
-    # traps are both loaded, the pixels between them are lifted by both, clear
-    # that frame's cut, and collect a sighting.  Those sightings are as real
-    # as any other and they accumulate into a genuine local maximum of the
-    # count, sitting in the gap.  What the gap cannot do is be as bright as
-    # its neighbours WHEN LIT -- it is their tails, and they are their peaks.
-    # Conditional brightness is also loading-independent, so requiring it
-    # costs a dim trap nothing: a trap loaded a twentieth of the time is just
-    # as bright on the shots where it is loaded.
-    local_maxima = hits == ndimage.maximum_filter(
-        hits, size=peak_window, mode="nearest"
+    # Site identity comes from the complete average's local maxima, even when
+    # the average is too weak to admit the site on its own.  A single loaded
+    # frame still leaves the same Gaussian peak scaled by 1/N.  This prevents
+    # overlapping skirts from becoming extra sites merely because they change
+    # on many pairs.  Temporal evidence may land one raster pixel beside that
+    # maximum, so each average peak reads the strongest 3x3 neighbourhood.
+    nearby_hits = ndimage.maximum_filter(hits, size=3, mode="nearest")
+    nearby_change_z = ndimage.maximum_filter(
+        max_change_z, size=3, mode="nearest"
     )
-    brightest = conditional == ndimage.maximum_filter(
-        conditional, size=peak_window, mode="nearest"
-    )
-    # Adjacent, not identical: noise puts the count's peak and the
-    # brightness's peak on neighbouring pixels of the same spot often enough
-    # that demanding one pixel lost real sites -- measured, two of thirty-eight
-    # on a dense lattice, each with a brightness peak one pixel from its count
-    # peak.  A spot is one place; a gap between two traps is four or more
-    # pixels from either of their peaks and is excluded either way.
-    local_maxima &= ndimage.binary_dilation(brightest, structure=np.ones((3, 3)))
     # A site has to be a place the picture actually shows, and a place that
     # can be MEASURED: within a spot's reach of the border there is no
     # background to compare against -- the filters invent one by extending the
@@ -1657,51 +1555,46 @@ def _candidate_peaks(
     inside = np.zeros(hits.shape, dtype=bool)
     if 2 * margin < min(hits.shape):
         inside[margin:-margin, margin:-margin] = True
-    # A place gets in either way.  The average path needs its own peak test --
-    # a gap between two traps is a maximum of neither map -- and needs no
-    # conditional-brightness check, because a place with no sightings has no
-    # conditional brightness to speak of.
-    spread = sqrt(max(shots * false_rate * (1.0 - false_rate), np.finfo(float).tiny))
-    count_z = (hits - shots * false_rate) / spread
+    # A place gets in either way.  Repeated moderate changes use the measured
+    # binomial bar; a site visible in only one frame uses the family-wise
+    # single-change bar over every pixel and transition.  The average path has
+    # its authored/global sigma bar for steady or highly loaded sites.
     persistent = average == ndimage.maximum_filter(
         average, size=peak_window, mode="nearest"
     )
-    counted = local_maxima & (hits >= required)
-    averaged = persistent & (average_z >= average_cut)
-    # A place is a trap only if BOTH halves of the run show it.  This is the
-    # one test that assumes nothing about a distribution: a trap is in the
-    # first half of the run and in the second; a coincidence is not.
-    repeated = _seen_in_both_halves(
-        half_hits,
-        half_response,
-        half_frames,
-        source_footprint=source_footprint,
+    changed = persistent & (
+        (nearby_hits >= required) | (nearby_change_z >= single_change_cut)
     )
-    candidates = np.argwhere((counted | averaged) & inside & repeated)
+    averaged = persistent & (average_z >= average_cut)
+    candidates = np.argwhere((changed | averaged) & inside)
     ranked = sorted(
         candidates,
         key=lambda item: (
-            -max(float(count_z[tuple(item)]), float(average_z[tuple(item)])),
+            -max(
+                float(nearby_change_z[tuple(item)]),
+                float(average_z[tuple(item)]),
+            ),
             int(item[0]),
             int(item[1]),
         ),
     )
-    return ranked, count_z
+    return ranked, nearby_change_z
 
 
 def _place_candidates(
     ranked: list,
     *,
     average: np.ndarray,
-    average_z: np.ndarray,
     frame_shape: tuple,
     spot_sigma: float,
     measurement_radius: int,
 ) -> tuple[list, list]:
     """Where each admitted place is, and one answer per trap.
 
-    Both questions are settled on the average -- the only map linear in the
-    light -- and neither is settled by a distance.
+    Position is settled on the average, the only map linear in the light.
+    Duplicate temporal/average candidates collapse only when they snap to the
+    same average-image peak; a second significant local maximum remains a
+    second possible site for the operator review.
     """
 
 
@@ -1712,13 +1605,11 @@ def _place_candidates(
     for row, column in ranked:
         # Refined on the AVERAGE, whichever statistic admitted the place.
         # Loading scales a spot; it does not move it, so the map that uses
-        # every photon is the one that says where the trap is.  (Conditional
-        # brightness -- the light on the shots where a pixel was lit -- is a
-        # biased picture of the shape: a skirt pixel is counted only on the
-        # shots where it happened to be brightest.)
+        # every photon is the one that says where the trap is.  Conditional
+        # change magnitude is deliberately only an admission statistic.
         # Starting from the average's OWN maximum: admission says a trap is
         # here, and where it is is answered on one map from end to end.  A
-        # sighting count saturates, so its argmax can sit a pixel off the
+        # change count saturates, so its argmax can sit a pixel off the
         # light, and a fit windowed there sees a lopsided, truncated spot.
         row, column = _brightest_within(average, int(row), int(column))
         centre = _refine_center_subpixel(
@@ -1732,17 +1623,11 @@ def _place_candidates(
         ):
             dropped_at_border += 1
             continue
-        if all(
-            not _one_hill(
-                average_z,
-                (int(row), int(column)),
-                other_peak,
-                saddle_fraction=_SADDLE_FRACTION,
-            )
-            for other_peak in selected
-        ):
-            selected.append((int(row), int(column)))
-            centers_list.append(centre)
+        peak = (int(row), int(column))
+        if peak in selected:
+            continue
+        selected.append(peak)
+        centers_list.append(centre)
     if not selected:
         raise ValueError(
             "calibration frames contain no detectable sites"
@@ -1760,7 +1645,7 @@ def detect_sites(
     frames: object,
     *,
     spot_sigma: float = 1.0,
-    detection_sigma: float = 4.0,
+    detection_sigma: float = 6.0,
     measurement_radius: int = 0,
 ) -> SiteMap:
     """Find the traps in a run of frames, and say where each one is.
@@ -1768,26 +1653,21 @@ def detect_sites(
     A trap announces itself in two independent ways, and a lattice contains
     both kinds at once, so the detector admits either:
 
-    * IN ONE SHOT.  A loaded shot is unmistakable against that frame's own
-      noise, so each frame becomes a map of where an atom was seen and the
-      maps are added up.  This is what finds a trap that loads rarely: a
-      hundred sightings and eight are the same evidence, differing only in
-      loading, and eight is far more than a run's noise puts at one pixel.
-    * IN THE AVERAGE.  A trap too dim for any single shot to clear the cut
-      leaves no sightings at all, however often it loads, and is still plain
-      in the average of the run.
+    * BETWEEN NEIGHBOURING FRAMES.  Loading or unloading makes one spatially
+      shaped difference peak.  A site that loaded on only one frame therefore
+      remains a possible site even when its complete average is weak.  The
+      change threshold is measured on each difference image's own background.
+    * IN THE AVERAGE.  A site whose changes remain below threshold, or a highly
+      loaded site that hardly changes between neighbours, can still be plain
+      in the complete average.
 
-    Neither alone is enough: an average-only cut holds the well-loaded traps
-    and loses the rare ones; a sightings-only cut holds the bright ones and
-    loses the dim ones.
-
-    Every threshold either admission uses is measured on this run's own
-    background rather than assumed from a distribution, and a place is
-    admitted only if BOTH interleaved halves of the run show it -- a trap is
-    in the first half and in the second, and a coincidence is not.
+    Neither alone is enough: an average-only cut loses rare loading events;
+    a difference-only cut loses sites whose state barely changes.  Both paths
+    use thresholds measured from this run rather than an arbitrary frame
+    partition or an assumed fixed noise level.
 
     ``spot_sigma`` is the optics: how wide one trap's image is.
-    ``detection_sigma`` is how sure a single sighting must be.
+    ``detection_sigma`` is how sure one neighbouring-frame change must be.
     ``measurement_radius`` is the box the readout will later ask for round
     each site, which a published site must be able to carry.
     """
@@ -1805,10 +1685,9 @@ def detect_sites(
         raise ValueError("spot_sigma must be positive and finite")
     if detection_sigma <= 0 or not np.isfinite(detection_sigma):
         raise ValueError("detection_sigma must be positive and finite")
-    # The scale over which a spot is ONE peak: its full width at half
-    # maximum, 2.355 sigma, rounded up to an odd pixel count.  The only length
-    # in the detector -- whether two peaks are two traps is decided by the
-    # light between them, not by a distance.
+    # The scale over which one spot contributes one local maximum: its full
+    # width at half maximum, 2.355 sigma, rounded up to an odd pixel count.
+    # Distinct maxima outside each other's half-window remain distinct sites.
     peak_window = max(3, 2 * int(np.ceil(1.1775 * spot_sigma)) + 1)
     # How near in y two sites must be to be READ as one row of the array.
     # Ordering only: it decides the order site ids are handed out in, never
@@ -1821,7 +1700,7 @@ def detect_sites(
     admission = _admission_thresholds(
         stack, evidence, detection_sigma=detection_sigma
     )
-    ranked, count_z = _candidate_peaks(
+    ranked, change_z = _candidate_peaks(
         evidence,
         admission,
         spot_sigma=spot_sigma,
@@ -1831,8 +1710,7 @@ def detect_sites(
     selected, centers_list = _place_candidates(
         ranked,
         average=admission.average,
-        average_z=admission.average_z,
-        frame_shape=evidence.hits.shape,
+        frame_shape=evidence.change_hits.shape,
         spot_sigma=spot_sigma,
         measurement_radius=int(measurement_radius),
     )
@@ -1840,11 +1718,11 @@ def detect_sites(
 
     centers = np.asarray(centers_list, dtype="<f8")
     # How far a site stands out of the noise, in its own sigmas -- by whichever
-    # evidence admitted it.  Reporting only the count would call a trap that is
-    # certain in the average a marginal one.
+    # evidence admitted it.  Reporting only temporal change would call a trap
+    # that is certain in the average a marginal one.
     quality = np.asarray(
         [
-            max(float(count_z[row, column]), float(average_z[row, column]))
+            max(float(change_z[row, column]), float(average_z[row, column]))
             for row, column in selected
         ],
         dtype="<f8",

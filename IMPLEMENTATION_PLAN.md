@@ -62,6 +62,7 @@
 - Calibration：每run一个folder，final Calibration JSON、summary JSON/text、精选报告Figure
   NPZ与PNG。默认不保存全部raw frames。
 - Calibration threshold method默认Gaussian、可显式选Empirical。Gaussian模式对全部labeled dark/bright short-shot数据解析求equal-prior threshold并只在fit失败site回退全部数据的empirical；Empirical模式全部使用empirical。Histogram线是最终classifier threshold；`actual_fidelity`用该最终threshold评估全部真实Calibration数据，`gaussian_fidelity`用同一批数据的Gaussian理论threshold积分拟合分布。
+- Calibration SiteMap detector使用真实相邻frame difference＋完整average两条证据并集。difference逐transition按自身背景噪声标准化；重复中等变化使用run-measured binomial bar，单次明显变化使用pixel×transition family-wise bar；steady/high-loading由average保留。两条路径都不能低于authored `detection_sigma`，candidate identity只来自average local maxima。旧even/odd half state、split veto、absolute per-frame sighting与global saddle owner全部删除。
 - Calibration新增默认关闭的`Review detected sites`。开启时capture与detect各执行一次，候选SiteMap通过`calibration/review` companion signal同时进入Monitor和modal point review；operator可单点、列表或框选排除零到多个ghost sites，确认后最终SiteMap重新连续编号并只运行一次全部下游分析。review使用`FluentDialogWindow`和完整Fluent control family；`zlc_ui`拥有view，`zlc_plot`只拥有Image point gesture/overlay，Workbench组合。candidate/excluded/final映射进入Calibration report与summary，`site_review.npz/png`保存候选和排除结果；取消等同Stop。Runtime的唯一operator request/response lifecycle为未来人工Scan axis保留复用边界，但当前没有Scan consumer或UI。
 - Temperature：final JSON、summary和生存率Figure NPZ/PNG。
 - SLM Feedback：保存输入摘要、stable site table和逐candidate精选BOX samples、fit、weights、
@@ -110,6 +111,7 @@
   最近一次pre-adaptive controller实测为6个probe candidate、22个总candidate、最佳34/35与ratio 1.1337。
 - Calibration analytic/empirical threshold当前证据：已知真值与Gaussian/Empirical/fallback/tie路径`7 passed`；report artifact直接链`1 passed`；正式Runtime与Workbench virtual chain`2 passed`。Figure archive已逐元素核对最终Histogram threshold、全部数据actual fidelity与Gaussian theoretical fidelity。
 - Calibration site review当前聚焦证据：Runtime精确operator request/response与Stop、saved-frame完整review链及全descriptor virtual Calibration保持通过。正式`zlc task_console --template virtual`science路径以8 samples检测24 sites，排除`site_0000`后最终Calibration为23 sites、terminal移除全部自动preview；`site_review.npz`42,208 bytes、PNG 145,791 bytes，FigureViewer current reader成功重开。Fluent修正后，TaskConsoleHandle实际parent-modal路径返回精确excluded identity；`zlc_ui.capture_window`先拒绝被内容撑大的1152×780窗口，修正scroll/plot size policy后取得精确1152×653 shared-screen capture，Fluent title/body边界为32/32，35-site状态为`35/1/34`并显示3个selected sites。
+- SiteMap detector真实red为8帧50%-loading site在0/2/4/6出现：旧实现full-average `702.04σ`仍被split veto漏掉；新实现记录7个相邻变化、最大change `355.67σ`，定位误差0.030 pixel且同一35-site阵列全部找回。20个随机seed覆盖698个至少加载一次的sites，漏检0、spurious 0；完整site-detection `7 passed`，saved-frame review＋Workbench vertical chain `2 passed`。
 - 后续adaptive gain/formal-update accounting与Curve hover/lock切分运行6个直接聚焦用例，结果`6 passed`；未重新运行100-shot验收。
 - 紧凑Science Context当前证据：SLM Editor完整文件`22 passed`；strict Context与Feedback candidate/Stop/failure边界`10 passed`；最终三条直接边界`3 passed`。X15213全尺寸体积、Pattern/composite逐元素roundtrip和8-bit phase-code roundtrip均来自当前worktree；未运行100-shot。
 - 固定nearest清理运行standalone/facet artist、Workbench parameter surface及Fluent Setting/Edit四个聚焦用例，结果`4 passed`。
@@ -142,8 +144,8 @@
 
 ### 3.3 Calibration detected-site review增量残余审计
 
-- 相对父commit `d755641`冻结为31 files：production 17 files `+1219/-18`（净+1201），
-  tests 6 files `+201/-5`（净+196），active docs 8 files `+75/-3`（净+72）。新增production集中在Runtime operator-input lifecycle、
+- 相对父commit `4c0071b`冻结为32 files：production 17 files `+1373/-294`（净+1079），
+  tests 7 files `+277/-47`（净+230），active docs 8 files `+89/-3`（净+86）。新增production集中在Runtime operator-input lifecycle、
   Calibration science/report、Plot point surface、Fluent point-review view/dialog和Workbench组合，
   来自用户明确批准的通用Task人工输入边界与完整Fluent交互，不是compatibility或第二套Task framework。
 - Consumer graph只有五个owner且无重复：NodeHost唯一保存request/response/Stop；Calibration唯一
@@ -154,15 +156,17 @@
 - Material positive production全部KEEP：Calibration `task.py/outputs.py`拥有science flow与typed
   preview/report；Runtime `host.py`拥有精确阻塞/Stop；Plot `point_review.py`是唯一Image gesture
   surface；UI `point_review_view.py`与`FluentDialogWindow`是唯一Fluent view/modal；Workbench
-  `console.py`与composition只路由request/publication/view。`_SiteReviewPublisher`只是
+  `console.py`与composition只路由request/publication/view。Calibration detector在
+  `calibration.py`净删115行，只保留相邻difference＋average两条证据。`_SiteReviewPublisher`只是
   SignalDataPlane要求的短期companion identity，不保存第二份science或history。
-- 新增三个直接测试均KEEP且不重复：Runtime同一Host覆盖精确response、stale拒绝、跨run identity
+- 新增四个直接测试均KEEP且不重复：Runtime同一Host覆盖精确response、stale拒绝、跨run identity
   与Stop；UI真实FluentDialogWindow覆盖全部Fluent control family和excluded result；Calibration
-  saved-frame真实NodeHost/SignalPlane覆盖剔除、最终SiteMap、summary和Figure。原Plot raw-QDialog
-  test已删除而非保留两套；Architecture、Guard A与Workbench view double只合并现有contract断言。
-- 已删除早先尝试的主Task independent sibling-output方向；`dataset_output.py`、`plane.py`和
-  `test_signal_plane.py`最终零diff；production无`review_image_points`、raw `QDialog/QListWidget/
-  QPushButton/QLineEdit`或Plot→UI反向依赖。无旧API/alias、无第二个review owner、无Scan
+  saved-frame真实NodeHost/SignalPlane覆盖剔除、最终SiteMap、summary和Figure；Site detection覆盖
+  single-frame、50%-loading、steady、dim、dense、border与pure-background。Plot层不保留平行dialog
+  test；Architecture、Guard A与Workbench view double只合并现有contract断言。
+- `dataset_output.py`、`plane.py`和`test_signal_plane.py`最终零diff；production无raw Qt review
+  controls或Plot→UI反向依赖；detector无偶奇/half state、absolute-frame sighting或全局saddle owner。
+  无旧API/alias、无第二个review owner、无Scan
   compatibility、无conflict marker、`git diff --check`为0。唯一明确延后项是未来Scan
   manual-value request的domain字段和业务UI，当前Calibration不包含它们。
 

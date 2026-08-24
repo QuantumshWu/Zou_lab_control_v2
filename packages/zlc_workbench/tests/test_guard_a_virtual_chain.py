@@ -218,7 +218,13 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         observable_sites = int(
             np.count_nonzero(installation.world._site_loading_probabilities() > 0.0)
         )
-        assert first_calibration.calibration.n_sites == observable_sites
+        # Detection is deliberately a possible-site superset: one clear
+        # neighbouring-frame change must survive even when the complete
+        # average is weak, and optional site review is where diffraction
+        # ghosts are removed.  Hidden SimulationWorld loading truth is not an
+        # input the real Calibration owns, so this vertical contract may not
+        # require exact equality with it and thereby reintroduce false negatives.
+        assert first_calibration.calibration.n_sites >= observable_sites
         assert all_sites - observable_sites >= int(np.ceil(0.10 * all_sites))
         assert tuple(
             (output.name, output.contract_id)
