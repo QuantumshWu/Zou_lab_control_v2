@@ -51,7 +51,7 @@ def _calibration_request() -> CalibrationRequest:
         readout_slot=2,
         reference_after_slot=3,
         default_model_kind=ReadoutModelKind.BOX,
-        threshold_method="empirical",
+        threshold_method="gaussian",
         box_half_width=1,
         box_reducer="mean",
         psf_half_width=3,
@@ -108,8 +108,9 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
         figure_directory = task_result.artifact_path.parents[1] / "figures"
         report_images = tuple(sorted(figure_directory.glob("*.png")))
         assert tuple(path.name for path in report_images) == (
+            "actual_fidelity.png",
             "box.png",
-            "fidelity.png",
+            "gaussian_fidelity.png",
             "psf.png",
             "psf_kernels.png",
             "site_map.png",

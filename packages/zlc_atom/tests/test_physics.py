@@ -82,7 +82,7 @@ def test_trap_calibration_single_dispatch_supports_box(tmp_path: Path) -> None:
     assert payload["format"] == TrapCalibration.FORMAT
     loaded = TrapCalibration.load(target)
     assert loaded.frame_contract.binning_yx == (2, 2)
-    assert loaded.select_model().threshold_method == "empirical"
+    assert loaded.select_model().threshold_method == "gaussian"
     np.testing.assert_allclose(loaded.select_model().dark_mean, [1.0])
     np.testing.assert_allclose(loaded.select_model().bright_mean, [9.0])
     np.testing.assert_array_equal(loaded.select_model().dark_sample_count, [8])

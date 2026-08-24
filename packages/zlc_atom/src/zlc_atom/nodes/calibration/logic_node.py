@@ -120,10 +120,10 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             "threshold_method",
             "choice",
             "Threshold method",
-            "empirical",
+            "gaussian",
             choices=(
-                AuthoringChoice("empirical", "Empirical"),
                 AuthoringChoice("gaussian", "Gaussian"),
+                AuthoringChoice("empirical", "Empirical"),
             ),
         ),
         AuthoringField(

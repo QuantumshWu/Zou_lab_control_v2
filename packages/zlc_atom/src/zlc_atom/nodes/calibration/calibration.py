@@ -641,7 +641,7 @@ class ReadoutModel:
     kind: ReadoutModelKind = ReadoutModelKind.BOX
     integration_half_width: int = 1
     reducer: str | None = "mean"
-    threshold_method: str = "empirical"
+    threshold_method: str = "gaussian"
     psf_weights: np.ndarray | None = None
     psf_boxes: np.ndarray | None = None
     background: str | None = None
@@ -1886,7 +1886,6 @@ def _measure_readout_weights(
     centers_xy: np.ndarray,
     labels_occupied: np.ndarray,
     labels_valid: np.ndarray,
-    train: np.ndarray,
     *,
     radius: int,
     padding: int,
@@ -1901,15 +1900,14 @@ def _measure_readout_weights(
     the picture cancels -- and weighting each pixel by it is the matched
     filter, which is the best any linear readout can do against white noise.
 
-    Measured on the LONG frames, where an atom is unmistakable and there are
-    two per cycle, and on the TRAIN half of the run only, so the fidelity
-    reported on the held-out half is a statement about a readout that never
-    saw those shots.
+    Measured on every valid LONG frame, where an atom is unmistakable and there
+    are two per cycle.  The same complete Calibration run owns the measured
+    readout weights, the threshold and the reported fidelity.
 
     What this replaces was a shape ASSUMED rather than measured: a Gaussian
     fitted to the reference AVERAGE -- loaded and empty shots together, over
     a pedestal, with the neighbours' skirts in it -- smoothed, clipped at
-    zero, and normalised.  Measured on the bench's own 35-trap run, held out:
+    zero, and normalised.  Measured on the bench's own 35-trap run:
     6.46 separations for the box, 7.27 for that kernel, 7.53 for this one.
 
     There is also no per-shot background subtraction here, and that is not an
@@ -1928,7 +1926,7 @@ def _measure_readout_weights(
     centers = np.asarray(centers_xy, dtype=float).reshape(-1, 2)
     frames = references.reshape(-1, *references.shape[2:])
     per_cycle = int(references.shape[1])
-    picked = np.asarray(train, dtype=bool) & np.asarray(labels_valid, dtype=bool)
+    picked = np.asarray(labels_valid, dtype=bool)
     occupied = np.asarray(labels_occupied, dtype=bool)
 
     outer = radius + padding
@@ -2066,7 +2064,6 @@ def _empirical_threshold(
     bright: object,
     *,
     bright_above: bool,
-    tie_target: float,
 ) -> float:
     """The cut that classifies THIS run's labelled shots best.
 
@@ -2074,8 +2071,9 @@ def _empirical_threshold(
     values are the short ones a runtime readout will actually see.  So the
     best cut is a fact about the data in hand, found by trying every place a
     cut can go -- between one observed value and the next -- and keeping the
-    one that classifies the labelled shots best, with ties settled towards the
-    fitted Gaussian crossing.
+    one that classifies the labelled shots best.  If several cuts are equally
+    good, the widest empty interval wins; any remaining tie is resolved towards
+    the midpoint of the empirical dark and bright medians.
 
     Every place a cut can go, rather than every histogram bin edge: a cut is
     not a bin, and rounding it to the display's binning moved the operating
@@ -2109,67 +2107,47 @@ def _empirical_threshold(
         fidelity = 0.5 * ((1.0 - dark_below) + bright_below)
     best_value = float(np.max(fidelity))
     best = np.flatnonzero(np.isclose(fidelity, best_value, rtol=0.0, atol=1e-12))
-    index = int(best[np.argmin(np.abs(cuts[best] - float(tie_target)))])
+    margin = np.zeros(cuts.shape, dtype=float)
+    margin[1:-1] = 0.5 * (values[1:] - values[:-1])
+    widest = float(np.max(margin[best]))
+    robust = best[np.isclose(margin[best], widest, rtol=0.0, atol=1e-12)]
+    center = 0.5 * (
+        float(np.median(dark_values)) + float(np.median(bright_values))
+    )
+    index = int(robust[np.argmin(np.abs(cuts[robust] - center))])
     return float(cuts[index])
 
-def _seeded_train_test(occupied: np.ndarray, valid: np.ndarray, *, train_fraction: float = 0.9, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
-    fraction = float(train_fraction)
-    if not 0.0 < fraction < 1.0:
-        raise ValueError("train_fraction must be in (0, 1)")
-    occupied = np.asarray(occupied, dtype=bool)
-    valid = np.asarray(valid, dtype=bool)
-    if occupied.shape != valid.shape or occupied.ndim != 2:
-        raise ValueError("occupied and valid labels must share a (groups, sites) shape")
-    train = np.zeros_like(valid)
-    test = np.zeros_like(valid)
-    rng = np.random.default_rng(int(seed))
-    for site in range(occupied.shape[1]):
-        for state in (False, True):
-            indices = np.where(valid[:, site] & (occupied[:, site] == state))[0]
-            if not indices.size:
-                continue
-            permutation = rng.permutation(indices)
-            train_count = int(round(fraction * indices.size))
-            train_count = min(max(train_count, 1), indices.size - 1) if indices.size >= 2 else 1
-            train[permutation[:train_count], site] = True
-            if train_count < indices.size:
-                test[permutation[train_count:], site] = True
-    return train, test
 
-
-def _train_readout_model(
+def _fit_readout_model(
     *,
     kind: ReadoutModelKind,
     site_map: SiteMap,
     short_signals: np.ndarray,
     labels_occupied: np.ndarray,
     labels_valid: np.ndarray,
-    train: np.ndarray,
-    test: np.ndarray,
     threshold_method: str,
     model_parameters: Mapping[str, Any],
     diagnostics: Mapping[str, Any] | None = None,
 ) -> tuple[ReadoutModel, dict[str, Any]]:
-    """Train one feature model against the shared labels and split."""
+    """Fit one feature model and evaluate it on the complete labelled run."""
 
     centers = site_map.centers_xy
     thresholds = np.full(len(centers), np.nan, dtype=float)
     predictions = np.zeros_like(short_signals, dtype=bool)
-    site_model_fidelity = np.full(len(centers), np.nan, dtype=float)
+    site_gaussian_fidelity = np.full(len(centers), np.nan, dtype=float)
     gaussian_thresholds = np.full(len(centers), np.nan, dtype=float)
     dark_means = np.full(len(centers), np.nan, dtype=float)
     bright_means = np.full(len(centers), np.nan, dtype=float)
     dark_sample_count = np.zeros(len(centers), dtype=np.int64)
     dark_sample_variance = np.full(len(centers), np.nan, dtype=float)
-    n_train_dark = np.zeros(len(centers), dtype=int)
-    n_train_bright = np.zeros(len(centers), dtype=int)
+    n_dark = np.zeros(len(centers), dtype=int)
+    n_bright = np.zeros(len(centers), dtype=int)
     for site in range(len(centers)):
         finite = np.isfinite(short_signals[:, site])
-        train_mask = train[:, site] & labels_valid[:, site] & finite
-        test_mask = test[:, site] & labels_valid[:, site] & finite
-        dark = short_signals[train_mask & ~labels_occupied[:, site], site]
-        bright_values = short_signals[train_mask & labels_occupied[:, site], site]
-        n_train_dark[site], n_train_bright[site] = dark.size, bright_values.size
+        measured = labels_valid[:, site] & finite
+        dark = short_signals[measured & ~labels_occupied[:, site], site]
+        bright_values = short_signals[measured & labels_occupied[:, site], site]
+        n_dark[site], n_bright[site] = dark.size, bright_values.size
         # A registered-but-never-bright site still owns a real camera box.
         # With no occupied label, every finite sample is a conservative dark
         # reference: any undetected fluorescence can only raise this baseline
@@ -2179,35 +2157,45 @@ def _train_readout_model(
             dark_means[site] = float(np.mean(dark_reference))
             dark_sample_count[site] = dark_reference.size
             dark_sample_variance[site] = float(np.var(dark_reference, ddof=1))
-        if dark.size >= 2 and bright_values.size >= 2:
+        if dark.size and bright_values.size:
             dark_mean, bright_mean = float(np.mean(dark)), float(np.mean(bright_values))
             dark_means[site], bright_means[site] = dark_mean, bright_mean
-            dark_sigma = max(float(np.std(dark, ddof=1)), 1e-12)
-            bright_sigma = max(float(np.std(bright_values, ddof=1)), 1e-12)
-            gaussian_threshold, bright_above = optimal_gaussian_threshold(dark_mean, dark_sigma, bright_mean, bright_sigma)
-            if not bright_above:
-                # An atom scatters photons: bright is above dark, and a site
-                # whose training data says otherwise has not been calibrated,
-                # it has been fitted to noise.  Carrying the direction per site
-                # let this loop classify one way while per_site_fidelity and
-                # every later TrapCalibration.detect() classified the other --
-                # three answers to "is this site bright?" on the number a
-                # readout is judged by.  Refusing the site is one answer.
-                n_train_dark[site] = n_train_bright[site] = 0
-                continue
-            gaussian_thresholds[site] = gaussian_threshold
-            if threshold_method == "gaussian":
-                threshold = gaussian_threshold
-            else:
-                threshold = _empirical_threshold(
-                    dark,
-                    bright_values,
-                    bright_above=True,
-                    tie_target=gaussian_threshold,
+            gaussian_threshold = float("nan")
+            if dark.size >= 2 and bright_values.size >= 2:
+                dark_sigma = float(np.std(dark, ddof=1))
+                bright_sigma = float(np.std(bright_values, ddof=1))
+                candidate, bright_above = optimal_gaussian_threshold(
+                    dark_mean,
+                    dark_sigma,
+                    bright_mean,
+                    bright_sigma,
                 )
-                if not np.isfinite(threshold):
-                    threshold = gaussian_threshold
-            site_model_fidelity[site] = gaussian_fidelity(dark_mean, dark_sigma, bright_mean, bright_sigma, threshold, True)[2]
+                if (
+                    bright_above
+                    and np.isfinite(candidate)
+                    and dark_mean < candidate < bright_mean
+                ):
+                    gaussian_threshold = candidate
+                    gaussian_thresholds[site] = candidate
+                    site_gaussian_fidelity[site] = gaussian_fidelity(
+                        dark_mean,
+                        dark_sigma,
+                        bright_mean,
+                        bright_sigma,
+                        candidate,
+                        True,
+                    )[2]
+            empirical_threshold = _empirical_threshold(
+                dark,
+                bright_values,
+                bright_above=True,
+            )
+            threshold = (
+                empirical_threshold
+                if threshold_method == "empirical"
+                or not np.isfinite(gaussian_threshold)
+                else gaussian_threshold
+            )
             thresholds[site] = threshold
             short_values = short_signals[:, site]
             predictions[:, site] = classify_threshold(
@@ -2224,11 +2212,16 @@ def _train_readout_model(
         short_signals,
         labels_occupied,
         thresholds,
-        test_mask=test,
         valid_mask=labels_valid,
     )
     site_fidelity = confusion.balanced
-    usable_sites = site_map.valid_sites & np.isfinite(thresholds)
+    usable_sites = (
+        site_map.valid_sites
+        & np.isfinite(thresholds)
+        & np.isfinite(dark_means)
+        & np.isfinite(bright_means)
+        & (bright_means > dark_means)
+    )
     readout_model = ReadoutModel(
         site_map.site_ids,
         thresholds,
@@ -2252,10 +2245,15 @@ def _train_readout_model(
         "site_fidelity": site_fidelity,
         "site_fidelity_dark": confusion.dark,
         "site_fidelity_bright": confusion.bright,
-        "site_model_fidelity": site_model_fidelity,
-        "site_n_test": confusion.tested,
-        "site_n_train_dark": n_train_dark,
-        "site_n_train_bright": n_train_bright,
+        "site_gaussian_fidelity": site_gaussian_fidelity,
+        "threshold_fallback": (
+            (threshold_method == "gaussian")
+            & np.isfinite(thresholds)
+            & ~np.isfinite(gaussian_thresholds)
+        ),
+        "site_n_actual": confusion.evaluated,
+        "site_n_dark": n_dark,
+        "site_n_bright": n_bright,
     }
     report.update(dict(diagnostics or {}))
     return readout_model, report
@@ -2556,17 +2554,15 @@ def calibrate(
     *,
     frame_contract: FrameContract,
     default_model_kind: ReadoutModelKind = ReadoutModelKind.BOX,
-    threshold_method: str = "empirical",
+    threshold_method: str = "gaussian",
     box_half_width: int = 1,
     box_reducer: str = "mean",
     psf_half_width: int = 3,
     psf_padding: int = 3,
     detection_spot_sigma: float = 1.0,
     detection_sigma: float = 6.0,
-    train_fraction: float = 0.9,
-    split_seed: int = 0,
 ) -> CalibrationResult:
-    """Discover sites once and train all readout models from one capture."""
+    """Discover sites and fit all readout models from one complete capture."""
 
     if not isinstance(default_model_kind, ReadoutModelKind):
         raise TypeError("default_model_kind must be ReadoutModelKind")
@@ -2643,19 +2639,12 @@ def calibrate(
     )
     labels_occupied = all_bright & labels_valid
     labels_dark = all_dark & labels_valid
-    train, test = _seeded_train_test(
-        labels_occupied,
-        labels_valid,
-        train_fraction=train_fraction,
-        seed=split_seed,
-    )
 
     spots = _measure_readout_weights(
         references,
         centers,
         labels_occupied,
         labels_valid,
-        train,
         radius=psf_half_width,
         padding=psf_padding,
         fallback_sigma=detection_spot_sigma,
@@ -2747,14 +2736,12 @@ def calibrate(
         short_signals = np.asarray(
             [extractor(frame) for frame in shorts], dtype=float
         )
-        model, model_report = _train_readout_model(
+        model, model_report = _fit_readout_model(
             kind=kind,
             site_map=site_map,
             short_signals=short_signals,
             labels_occupied=labels_occupied,
             labels_valid=labels_valid,
-            train=train,
-            test=test,
             threshold_method=threshold_method,
             model_parameters=parameters,
             diagnostics=diagnostics,
@@ -2765,17 +2752,17 @@ def calibrate(
     calibration_report = {
         "models": {
             model.kind.value: {
-                "site_n_test": [
+                "site_n_actual": [
                     int(value)
-                    for value in model_reports[model.kind.value]["site_n_test"]
+                    for value in model_reports[model.kind.value]["site_n_actual"]
                 ],
-                "site_n_train_dark": [
+                "site_n_dark": [
                     int(value)
-                    for value in model_reports[model.kind.value]["site_n_train_dark"]
+                    for value in model_reports[model.kind.value]["site_n_dark"]
                 ],
-                "site_n_train_bright": [
+                "site_n_bright": [
                     int(value)
-                    for value in model_reports[model.kind.value]["site_n_train_bright"]
+                    for value in model_reports[model.kind.value]["site_n_bright"]
                 ],
             }
             for model in models
@@ -2798,8 +2785,6 @@ def calibrate(
         "labels_occupied": labels_occupied,
         "labels_dark": labels_dark,
         "labels_valid": labels_valid,
-        "split_train": train,
-        "split_test": test,
         "fits": fits,
         "reference_fit_threshold": np.asarray([fit.threshold for fit in fits]),
         "reference_fit_fidelity": np.asarray([fit.fidelity for fit in fits]),

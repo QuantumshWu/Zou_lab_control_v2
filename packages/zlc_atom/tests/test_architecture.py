@@ -179,7 +179,7 @@ def _calibration_request(*, repeats: int = 30) -> CalibrationRequest:
         readout_slot=2,
         reference_after_slot=3,
         default_model_kind=ReadoutModelKind.BOX,
-        threshold_method="empirical",
+        threshold_method="gaussian",
         box_half_width=1,
         box_reducer="mean",
         psf_half_width=3,
@@ -470,8 +470,9 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             )
         )
         assert report_images == (
+            "actual_fidelity.png",
             "box.png",
-            "fidelity.png",
+            "gaussian_fidelity.png",
             "psf.png",
             "psf_kernels.png",
             "site_map.png",
@@ -590,6 +591,9 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert descriptors["calibration"].authoring_schema.project_values({})[
             "repeats"
         ] == 200
+        assert descriptors["calibration"].authoring_schema.project_values({})[
+            "threshold_method"
+        ] == "gaussian"
         with pytest.raises(ValueError, match="cannot exceed"):
             descriptors["calibration"].authoring_schema.project_values(
                 {

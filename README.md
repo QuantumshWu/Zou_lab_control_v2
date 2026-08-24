@@ -102,6 +102,14 @@ artifacts, terminal status and failure. Tasks save only curated domain outputs;
 Runtime does not dump all live data or intermediate shots. Calibration,
 Temperature and SLM Feedback use this same lifecycle.
 
+Calibration defaults to an analytic equal-prior Gaussian threshold fitted from
+all labelled dark/bright shots; an individual failed Gaussian fit falls
+back to the empirical balanced-fidelity threshold, while explicitly selecting
+Empirical uses it for every site. Histogram threshold lines always show the
+final deployed classifier. Separate report Curves show actual fidelity on all
+Calibration data at that final threshold and Gaussian-model fidelity at the
+analytic threshold.
+
 ### Camera and qCMOS
 
 Camera Measurement owns its exposure, ROI, frames-per-cycle and repeat; Pulse

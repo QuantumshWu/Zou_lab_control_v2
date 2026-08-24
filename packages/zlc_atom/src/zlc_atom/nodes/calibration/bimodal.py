@@ -8,7 +8,7 @@ It intentionally has no device, runtime, plotting, or GUI imports.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import erf, isfinite, pi, sqrt
+from math import erf, isfinite, log, pi, sqrt
 
 import numpy as np
 
@@ -76,34 +76,71 @@ def optimal_gaussian_threshold(
     bright_mean: float,
     bright_sigma: float,
 ) -> tuple[float, bool]:
-    """Find the equal-prior threshold between two Gaussian components."""
+    """Return the analytic equal-prior crossing between two Gaussians."""
 
     dark_mean = float(dark_mean)
     bright_mean = float(bright_mean)
-    dark_sigma = max(abs(float(dark_sigma)), _SIGMA_FLOOR)
-    bright_sigma = max(abs(float(bright_sigma)), _SIGMA_FLOOR)
+    dark_sigma = abs(float(dark_sigma))
+    bright_sigma = abs(float(bright_sigma))
     bright_above = bright_mean >= dark_mean
-    lower, upper = sorted((dark_mean, bright_mean))
-    if not all(isfinite(value) for value in (lower, upper, dark_sigma, bright_sigma)):
-        return 0.5 * (dark_mean + bright_mean), bright_above
-    if upper <= lower:
-        return 0.5 * (lower + upper), bright_above
+    if not all(
+        isfinite(value)
+        for value in (dark_mean, dark_sigma, bright_mean, bright_sigma)
+    ) or min(dark_sigma, bright_sigma) <= 0.0:
+        return float("nan"), bright_above
 
-    from scipy.optimize import minimize_scalar
+    if bright_above:
+        low_mean, low_sigma = dark_mean, dark_sigma
+        high_mean, high_sigma = bright_mean, bright_sigma
+    else:
+        low_mean, low_sigma = bright_mean, bright_sigma
+        high_mean, high_sigma = dark_mean, dark_sigma
+    separation = high_mean - low_mean
+    if separation <= 0.0:
+        return float("nan"), bright_above
 
-    result = minimize_scalar(
-        lambda threshold: _threshold_error(
-            threshold,
+    # In x=(threshold-midpoint)/separation coordinates the component means
+    # are exactly -1/2 and +1/2.  Equating their log densities gives one
+    # linear or quadratic equation without the large count-scale offsets of
+    # the raw camera values.
+    low_width = max(low_sigma / separation, _SIGMA_FLOOR)
+    high_width = max(high_sigma / separation, _SIGMA_FLOOR)
+    low_inverse_variance = 1.0 / (low_width * low_width)
+    high_inverse_variance = 1.0 / (high_width * high_width)
+    a = 0.5 * (low_inverse_variance - high_inverse_variance)
+    b = 0.5 * (low_inverse_variance + high_inverse_variance)
+    c = (
+        0.125 * (low_inverse_variance - high_inverse_variance)
+        - log(high_width / low_width)
+    )
+    scale = max(abs(a), abs(b), abs(c), 1.0)
+    roots: tuple[float, ...]
+    if abs(a) <= np.finfo(float).eps * scale:
+        roots = () if b == 0.0 else (-c / b,)
+    else:
+        discriminant = b * b - 4.0 * a * c
+        if discriminant < 0.0:
+            return float("nan"), bright_above
+        root = sqrt(max(discriminant, 0.0))
+        roots = ((-b - root) / (2.0 * a), (-b + root) / (2.0 * a))
+    candidates = tuple(
+        0.5 * (low_mean + high_mean) + value * separation
+        for value in roots
+        if isfinite(value) and -0.5 <= value <= 0.5
+    )
+    if not candidates:
+        return float("nan"), bright_above
+    threshold = min(
+        candidates,
+        key=lambda value: _threshold_error(
+            value,
             dark_mean,
             dark_sigma,
             bright_mean,
             bright_sigma,
             bright_above,
         ),
-        bounds=(lower, upper),
-        method="bounded",
     )
-    threshold = result.x if result.success else 0.5 * (lower + upper)
     return float(threshold), bright_above
 
 
@@ -360,7 +397,9 @@ def fit_bimodal(values: object, *, min_component_fraction: float = 0.01) -> Bimo
     # enough, for a shot to be assigned to one of them.  Every number above is
     # returned either way.
     separated = bool(
-        separation > 0.5 and minimum <= fraction <= 1.0 - minimum
+        np.isfinite(threshold)
+        and separation > 0.5
+        and minimum <= fraction <= 1.0 - minimum
     )
     return BimodalFit(
         threshold,
@@ -382,10 +421,9 @@ def per_site_fidelity(
     labels: object,
     thresholds: object,
     *,
-    test_mask: object | None = None,
     valid_mask: object | None = None,
 ) -> "PerSiteConfusion":
-    """Return the held-out confusion, per site, as all three of its numbers.
+    """Return the actual confusion, per site, as all three of its numbers.
 
     Balanced, dark and bright together, because they are one measurement.  The
     caller used to compute the dark and bright halves with a second
@@ -401,11 +439,6 @@ def per_site_fidelity(
         raise ValueError("signals/labels must be (shots, sites) and thresholds must be (sites,)")
     prediction = values > boundary[None, :]
     valid = np.isfinite(values) & np.isfinite(boundary)[None, :]
-    if test_mask is not None:
-        test = np.asarray(test_mask, dtype=bool)
-        if test.shape != values.shape:
-            raise ValueError("test_mask must match signals shape")
-        valid &= test
     if valid_mask is not None:
         measured = np.asarray(valid_mask, dtype=bool)
         if measured.shape != values.shape:
@@ -414,10 +447,10 @@ def per_site_fidelity(
     balanced = np.full(values.shape[1], np.nan, dtype="<f8")
     dark_out = np.full(values.shape[1], np.nan, dtype="<f8")
     bright_out = np.full(values.shape[1], np.nan, dtype="<f8")
-    tested = np.zeros(values.shape[1], dtype=int)
+    evaluated = np.zeros(values.shape[1], dtype=int)
     for site in range(values.shape[1]):
         selected = valid[:, site]
-        tested[site] = int(np.count_nonzero(selected))
+        evaluated[site] = int(np.count_nonzero(selected))
         if not np.any(selected):
             continue
         actual = truth[selected, site]
@@ -429,18 +462,18 @@ def per_site_fidelity(
         dark_out[site] = float(np.count_nonzero(~predicted & ~actual)) / dark
         bright_out[site] = float(np.count_nonzero(predicted & actual)) / bright
         balanced[site] = 0.5 * (dark_out[site] + bright_out[site])
-    return PerSiteConfusion(balanced, dark_out, bright_out, tested)
+    return PerSiteConfusion(balanced, dark_out, bright_out, evaluated)
 
 
 @dataclass(frozen=True)
 class PerSiteConfusion:
-    """One held-out confusion per site: the balanced figure and its two halves."""
+    """One measured confusion per site: balanced and its two class halves."""
 
     balanced: np.ndarray
     dark: np.ndarray
     bright: np.ndarray
-    #: How many held-out shots each site was judged on.
-    tested: np.ndarray
+    #: How many labelled shots each site was evaluated on.
+    evaluated: np.ndarray
 
 
 __all__ = [

@@ -39,7 +39,7 @@ def _calibration_request(*, repeats: int = 30) -> CalibrationRequest:
         readout_slot=2,
         reference_after_slot=3,
         default_model_kind=ReadoutModelKind.BOX,
-        threshold_method="empirical",
+        threshold_method="gaussian",
         box_half_width=1,
         box_reducer="mean",
         psf_half_width=3,
@@ -410,7 +410,7 @@ def test_virtual_installation_runs_measurement_occupancy_and_same_shot_front(
         assert set(artifact["report"]) == {"models", "run_record"}
         assert all(
             set(model_report)
-            == {"site_n_test", "site_n_train_dark", "site_n_train_bright"}
+            == {"site_n_actual", "site_n_dark", "site_n_bright"}
             for model_report in artifact["report"]["models"].values()
         )
         all_sites = len(installation.world.geometry.site_centers_xy)

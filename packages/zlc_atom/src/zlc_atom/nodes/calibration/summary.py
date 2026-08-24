@@ -130,8 +130,17 @@ def readout_summary(
         bright_right = np.asarray(model_report["site_fidelity_bright"], dtype=float)
         entry: dict[str, Any] = {
             "usable_sites": int(np.count_nonzero(usable)),
-            "held_out_shots": int(np.sum(model_report["site_n_test"])),
+            "evaluated_shots": int(np.sum(model_report["site_n_actual"])),
             "fidelity": _numbers(model_report["site_fidelity"], usable),
+            "gaussian_fidelity": _numbers(
+                model_report["site_gaussian_fidelity"], usable
+            ),
+            "empirical_fallback_sites": int(
+                np.count_nonzero(
+                    usable
+                    & np.asarray(model_report["threshold_fallback"], dtype=bool)
+                )
+            ),
             # What the fidelity is made of: a dark shot called bright, and a
             # bright shot called dark, are different failures with different
             # causes -- stray light against loss during the readout.
@@ -145,9 +154,9 @@ def readout_summary(
             "threshold": _numbers(model.thresholds, usable),
             "dark_level": _numbers(model.dark_mean, usable),
             "bright_level": _numbers(model.bright_mean, usable),
-            "training_shots": {
-                "dark": _numbers(model_report["site_n_train_dark"], usable),
-                "bright": _numbers(model_report["site_n_train_bright"], usable),
+            "labelled_shots": {
+                "dark": _numbers(model_report["site_n_dark"], usable),
+                "bright": _numbers(model_report["site_n_bright"], usable),
             },
         }
         if model.kind is ReadoutModelKind.BOX:
@@ -227,6 +236,8 @@ def summary_lines(summary: Mapping[str, Any]) -> tuple[str, ...]:
         lines.append(
             f"{mark} {name:11s} fidelity {_percent(entry['fidelity']['mean'])} "
             f"(worst site {_percent(entry['fidelity']['min'])}), "
+            f"Gaussian {_percent(entry['gaussian_fidelity']['mean'])}, "
+            f"fallback {entry['empirical_fallback_sites']}, "
             f"dark->bright {_percent(entry['error_rate']['dark_called_bright']['mean'])}, "
             f"bright->dark {_percent(entry['error_rate']['bright_called_dark']['mean'])}, "
             f"separation {_value(entry['separation']['median'])}"

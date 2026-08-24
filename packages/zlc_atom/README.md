@@ -139,6 +139,15 @@ cannot move a threshold by index. Camera sample archives stream through the
 single public `zlc_data.write_figure_archive()` encoder into an atomic file;
 they do not materialize whole-archive bytes or import Workbench PanelState.
 
+Threshold authoring defaults to Gaussian: all labelled dark/bright shots
+define two Gaussian components and their equal-prior crossing is solved
+analytically; only a site whose Gaussian fit fails falls back to the empirical
+balanced-fidelity cut. Explicit Empirical mode uses that cut for every site.
+Histogram lines always show the final threshold stored in Calibration. Two
+separate Curve artifacts report actual fidelity on all Calibration data at that
+final threshold and theoretical Gaussian fidelity at the analytic Gaussian
+threshold.
+
 Logic Nodes commit `zlc-data` role-axis event chunks, so repeat, site, and
 readout-event meaning is carried by `DatasetSchema` rather than inferred from
 array shape. Runtime owns their accumulated current/partial/final

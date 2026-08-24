@@ -266,6 +266,7 @@ Node new chunk
 - 允许不改变外部行为的dependency解耦、明确corruption修复和内存优化。
 - Calibration只产生与SLM无关的camera/readout artifact，UI和Task都不接受Science Context。SLM Feedback在同时拿到Calibration与Context后做Target X/Y→camera X/Y直接正向注册，并为未观测site生成predicted BOX；不枚举翻转、旋转或轴交换。
 - BOX model仍为Calibration/Occupancy持久化自己的readout事实；Feedback只取BOX geometry。未观测Target site由注册产生predicted BOX，并与实测site一起接受本次run的双高斯估计，不伪造Calibration dark/bright样本。
+- Calibration threshold method保留operator选择并默认`gaussian`：每个site/readout model用reference标签分开的全部有效dark/bright short-shot数据拟合两个Gaussian，解析求equal-prior density crossing；Gaussian参数或解析根无效时该site才使用全部数据的empirical balanced-fidelity threshold。operator显式选择`empirical`时所有site直接用全部数据的empirical threshold。Histogram竖线始终是最终写入Calibration并由`detect()`使用的threshold。报告分别保存两张Curve：最终threshold在全部真实Calibration数据上的actual fidelity，以及解析Gaussian threshold对同一批数据拟合出的分布积分得到的theoretical fidelity；fit失败site没有theoretical值。
 - Calibration只使用稳定`format="zlc.calibration.readout"`，无数字版本；reader只接受当前完整grammar，alternate root或缺失统计均loud拒绝。
 - Calibration run保存final JSON、summary JSON/text及精选报告图；每张报告图都有可由FigureViewer重开的typed Figure NPZ，PNG仅为preview。默认不保存全部raw frames；operator显式请求时才保存采样数据。
 - Temperature使用同一TaskRun lifecycle，保存final JSON、summary和生存率typed Figure/PNG，不建立第二套run管理。

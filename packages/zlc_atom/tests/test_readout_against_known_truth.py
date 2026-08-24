@@ -19,10 +19,14 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from zlc_atom.nodes.calibration.calibration import (
     FrameContract,
     ReadoutModelKind,
+    SiteMap,
+    _empirical_threshold,
+    _fit_readout_model,
     calibrate,
     detect_sites,
     fit_bimodal,
@@ -52,12 +56,13 @@ def _run() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         )
 
 
-def _calibration():
+def _calibration(threshold_method: str = "gaussian"):
     reference, short, truth = _run()
     result = calibrate(
         reference,
         short,
         frame_contract=FrameContract((34, 40), exposure_seconds=0.005),
+        threshold_method=threshold_method,
         box_half_width=1,
         psf_half_width=3,
         psf_padding=3,
@@ -136,6 +141,51 @@ def test_a_threshold_separates_the_two_populations_it_was_fitted_to() -> None:
         assert fit.dark_mean < fit.threshold < fit.bright_mean
         assert fit.dark_sigma > 0.0 and fit.bright_sigma > 0.0
         assert 0.0 <= fit.fidelity <= 1.0
+        dark_log_density = (
+            -np.log(fit.dark_sigma)
+            - 0.5 * ((fit.threshold - fit.dark_mean) / fit.dark_sigma) ** 2
+        )
+        bright_log_density = (
+            -np.log(fit.bright_sigma)
+            - 0.5 * ((fit.threshold - fit.bright_mean) / fit.bright_sigma) ** 2
+        )
+        assert dark_log_density == pytest.approx(bright_log_density, abs=1e-10)
+
+    for model in result.calibration.models:
+        report = result.report["models"][model.kind.value]
+        assert model.threshold_method == "gaussian"
+        assert not np.any(report["threshold_fallback"])
+        np.testing.assert_allclose(
+            model.thresholds, report["gaussian_thresholds"]
+        )
+
+    empirical, _truth = _calibration("empirical")
+    for model in empirical.calibration.models:
+        report = empirical.report["models"][model.kind.value]
+        assert model.threshold_method == "empirical"
+        assert not np.any(report["threshold_fallback"])
+        assert np.all(np.isfinite(report["site_gaussian_fidelity"]))
+        assert np.any(
+            ~np.isclose(model.thresholds, report["gaussian_thresholds"])
+        )
+
+    fallback_model, fallback_report = _fit_readout_model(
+        kind=ReadoutModelKind.BOX,
+        site_map=SiteMap(("site_0000",), [[0.0, 0.0]], [True], [1.0]),
+        short_signals=np.asarray([[0.0], [10.0]]),
+        labels_occupied=np.asarray([[False], [True]]),
+        labels_valid=np.ones((2, 1), dtype=bool),
+        threshold_method="gaussian",
+        model_parameters={"integration_half_width": 0, "reducer": "mean"},
+    )
+    np.testing.assert_allclose(fallback_model.thresholds, [5.0])
+    np.testing.assert_array_equal(fallback_report["threshold_fallback"], [True])
+    np.testing.assert_allclose(fallback_report["site_fidelity"], [1.0])
+    assert np.isnan(fallback_report["site_gaussian_fidelity"][0])
+    assert _empirical_threshold(
+        [0.0, 10.0], [0.0, 10.0], bright_above=True
+    ) == 5.0
+
 
 
 def test_a_psf_kernel_is_the_spot_it_was_measured_from() -> None:
@@ -179,7 +229,7 @@ def test_weighting_beats_a_box_when_the_spot_is_wider_than_the_box() -> None:
     outside it and discounts the pixels that carry more noise than signal.  So
     the two can only differ when the spot is wider than the box -- on a run
     whose spots fit inside a 3x3 there is nothing left to gather, and the
-    comparison measures the test split rather than the readout.
+    comparison has no physical readout difference to measure.
 
     Here the box holds a little over half the light.  Measured on the bench's
     own 35-trap run, where the same is true: 0.9986 per-site fidelity for the

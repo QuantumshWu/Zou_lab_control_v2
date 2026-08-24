@@ -771,47 +771,54 @@ def _save_report_images(
         len(model_names),
         coordinate_labels=tuple(name.replace("_", " ") for name in model_names),
     )
-    fidelity_values = np.stack(
-        [
-            np.asarray(model_reports[name]["site_fidelity"], dtype="<f8")
-            for name in model_names
-        ],
-        axis=-1,
-    )[np.newaxis, ...]
-    fidelity_valid = np.stack(
-        [
-            site_map.valid_sites
-            & model.usable_sites
-            & np.isfinite(fidelity_values[0, :, index])
-            for index, model in enumerate(calibration.models)
-        ],
-        axis=-1,
-    )[np.newaxis, ...]
-    # Nothing was scanned to make this: one number per (site, model) out of one
-    # capture.  Both are cell axes, the point axis is empty, and per-site
-    # usability now rides the axis it actually varies over.
-    fidelity_snapshot = _snapshot(
-        fidelity_values,
-        signal="readout_fidelity",
-        roles=(SITE, COMPONENT),
-        axis_specs={SITE: site_axis, COMPONENT: model_axis},
-        generation=generation,
-        revision=revision,
-        validity_axis_ids=(site_axis_id, model_axis.axis_id),
-        validity_mask=fidelity_valid[:, np.newaxis, ...],
-    )
-    save(
-        "fidelity",
-        fidelity_snapshot,
-        CurvePlot(
-            AxisRef.data("calibration.site"),
-            group=AxisRef.data("calibration.model"),
-            labels=PlotLabels(
-                title="Held-out fidelity by readout model",
-                x="Site",
-                y="Fidelity",
+    def save_fidelity_curve(stem: str, field: str, title: str) -> None:
+        values = np.stack(
+            [
+                np.asarray(model_reports[name][field], dtype="<f8")
+                for name in model_names
+            ],
+            axis=-1,
+        )[np.newaxis, ...]
+        valid = np.stack(
+            [
+                site_map.valid_sites
+                & model.usable_sites
+                & np.isfinite(values[0, :, index])
+                for index, model in enumerate(calibration.models)
+            ],
+            axis=-1,
+        )[np.newaxis, ...]
+        # Nothing was scanned to make this: one number per (site, model) out
+        # of one capture.  Both are cell axes and the point axis is empty.
+        snapshot = _snapshot(
+            values,
+            signal=stem,
+            roles=(SITE, COMPONENT),
+            axis_specs={SITE: site_axis, COMPONENT: model_axis},
+            generation=generation,
+            revision=revision,
+            validity_axis_ids=(site_axis_id, model_axis.axis_id),
+            validity_mask=valid[:, np.newaxis, ...],
+        )
+        save(
+            stem,
+            snapshot,
+            CurvePlot(
+                AxisRef.data("calibration.site"),
+                group=AxisRef.data("calibration.model"),
+                labels=PlotLabels(title=title, x="Site", y="Fidelity"),
             ),
-        ),
+        )
+
+    save_fidelity_curve(
+        "actual_fidelity",
+        "site_fidelity",
+        "Actual fidelity by readout model",
+    )
+    save_fidelity_curve(
+        "gaussian_fidelity",
+        "site_gaussian_fidelity",
+        "Gaussian-model fidelity by readout model",
     )
 
     for model in calibration.models:

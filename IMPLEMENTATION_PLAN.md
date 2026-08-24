@@ -61,6 +61,7 @@
 
 - Calibration：每run一个folder，final Calibration JSON、summary JSON/text、精选报告Figure
   NPZ与PNG。默认不保存全部raw frames。
+- Calibration threshold method默认Gaussian、可显式选Empirical。Gaussian模式对全部labeled dark/bright short-shot数据解析求equal-prior threshold并只在fit失败site回退全部数据的empirical；Empirical模式全部使用empirical。Histogram线是最终classifier threshold；`actual_fidelity`用该最终threshold评估全部真实Calibration数据，`gaussian_fidelity`用同一批数据的Gaussian理论threshold积分拟合分布。
 - Temperature：final JSON、summary和生存率Figure NPZ/PNG。
 - SLM Feedback：保存输入摘要、stable site table和逐candidate精选BOX samples、fit、weights、
   actions、metrics、phase-change fact与command receipt；不保存raw camera frames。每个
@@ -103,9 +104,10 @@
   build/program与resource estimate从任意工作目录都加载当前checkout的bootstrap和八层。
   `install_requirements.bat`显式清除source injection并验证installed distribution；同一新wheel
   的isolated install仍从site-packages加载bootstrap与Pulse server。该边界不改变science/runtime。
-- Calibration六张report Figure都经FigureViewer current reader重开；SLM Feedback六张Figure
+- Calibration七张report Figure都经FigureViewer current reader重开；SLM Feedback六张Figure
   均经formal `zlc figure_viewer --check`读取。上述证据属于此前冻结tree；本次Feedback/Curve
   最近一次pre-adaptive controller实测为6个probe candidate、22个总candidate、最佳34/35与ratio 1.1337。
+- Calibration analytic/empirical threshold当前证据：已知真值与Gaussian/Empirical/fallback/tie路径`7 passed`；report artifact直接链`1 passed`；正式Runtime与Workbench virtual chain`2 passed`。Figure archive已逐元素核对最终Histogram threshold、全部数据actual fidelity与Gaussian theoretical fidelity。
 - 后续adaptive gain/formal-update accounting与Curve hover/lock切分运行6个直接聚焦用例，结果`6 passed`；未重新运行100-shot验收。
 - 紧凑Science Context当前证据：SLM Editor完整文件`22 passed`；strict Context与Feedback candidate/Stop/failure边界`10 passed`；最终三条直接边界`3 passed`。X15213全尺寸体积、Pattern/composite逐元素roundtrip和8-bit phase-code roundtrip均来自当前worktree；未运行100-shot。
 - 固定nearest清理运行standalone/facet artist、Workbench parameter surface及Fluent Setting/Edit四个聚焦用例，结果`4 passed`。

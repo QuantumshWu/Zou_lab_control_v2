@@ -335,6 +335,45 @@ def test_nothing_is_written_unless_the_operator_asks(tmp_path: Path) -> None:
         assert snapshot.block.values.size
         assert recipe["spec"].kind.value in {"curve", "image", "facet_grid"}
 
+    box_info, box_arrays = read_archive(figures / "box.npz")
+    _box_figure, box_recipe = read_figure_plot(box_info, box_arrays, "data")
+    box_model = next(
+        model for model in result.calibration.models if model.kind.value == "box"
+    )
+    np.testing.assert_allclose(
+        [item["value"] for item in box_recipe["classifier_thresholds"]],
+        box_model.thresholds[box_model.usable_sites],
+    )
+
+    actual_info, actual_arrays = read_archive(figures / "actual_fidelity.npz")
+    actual_figure, _actual_recipe = read_figure_plot(
+        actual_info, actual_arrays, "data"
+    )
+    gaussian_info, gaussian_arrays = read_archive(
+        figures / "gaussian_fidelity.npz"
+    )
+    gaussian_figure, _gaussian_recipe = read_figure_plot(
+        gaussian_info, gaussian_arrays, "data"
+    )
+    model_names = tuple(model.kind.value for model in result.calibration.models)
+    expected_actual = np.stack(
+        [result.report["models"][name]["site_fidelity"] for name in model_names],
+        axis=-1,
+    )
+    expected_gaussian = np.stack(
+        [
+            result.report["models"][name]["site_gaussian_fidelity"]
+            for name in model_names
+        ],
+        axis=-1,
+    )
+    np.testing.assert_allclose(
+        actual_figure.block.values[0, 0], expected_actual, equal_nan=True
+    )
+    np.testing.assert_allclose(
+        gaussian_figure.block.values[0, 0], expected_gaussian, equal_nan=True
+    )
+
     site_info, site_arrays = read_archive(figures / "site_map.npz")
     site_figure, _site_recipe = read_figure_plot(site_info, site_arrays, "data")
     assert isinstance(site_figure, ImageFrame)
