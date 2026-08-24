@@ -3605,6 +3605,12 @@ class FluentDialogWindow(FluentWindow):
         if not 0 < ratio <= 1:
             raise ValueError("window_ratio must be between 0 and 1")
         super().__init__(widget=widget, title=str(title), parent=parent)
+        # FramelessWindow is a QWidget.  With a parent and no explicit window
+        # type Qt turns it into an ordinary child widget: its title bar cannot
+        # move a top-level window and WindowModal is ignored.  Qt.Window keeps
+        # the parent as transient/modal owner without replacing Fluent's
+        # frameless chrome with a native platform dialog title bar.
+        self.setWindowFlag(QtCore.Qt.Window, True)
         self.setWindowModality(
             QtCore.Qt.WindowModal if parent is not None else QtCore.Qt.ApplicationModal
         )

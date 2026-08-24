@@ -59,9 +59,13 @@ from zlc_ui.qt import ensure_qt_app
 from zlc_ui.console import PointReviewView
 from zlc_ui.fluent import (
     FluentButton, FluentCheckBox, FluentDialogWindow, FluentFrame,
-    FluentLineEdit, FluentScrollArea,
+    FluentLineEdit, FluentScrollArea, FluentWindow,
 )
 app = ensure_qt_app(['zlc-ui-tests'])
+parent = FluentWindow(
+    widget=QtWidgets.QWidget(), title='TaskConsole parent probe'
+)
+parent.show()
 surface = QtWidgets.QWidget()
 view = PointReviewView(
     surface,
@@ -82,8 +86,16 @@ for button in (
 view.select_points(('site-b',))
 view.exclude_selected_button.click()
 assert view.excluded_ids == ('site-b',)
-QtCore.QTimer.singleShot(0, view.confirm_button.click)
-assert view.exec_(None, title='Review detected sites') == FluentDialogWindow.Accepted
+def verify_real_dialog_and_accept():
+    dialog = view.window()
+    assert isinstance(dialog, FluentDialogWindow), type(dialog)
+    assert dialog is not parent
+    assert dialog.isWindow()
+    assert QtWidgets.QApplication.activeModalWidget() is dialog
+    view.confirm_button.click()
+QtCore.QTimer.singleShot(0, verify_real_dialog_and_accept)
+assert view.exec_(parent, title='Review detected sites') == FluentDialogWindow.Accepted
+parent.close()
 """
     )
 
