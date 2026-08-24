@@ -90,14 +90,21 @@ class FrameSurvivalProcessor:
             )
         cell_axes = schema.cell_schema.data_axes
         if len(cell_axes) != 1:
+            # The most natural wrong pick: occupancy's frame_judged output
+            # (the judged EVIDENCE frames, cells = y, x pixels) instead of
+            # its verdicts.  Say which signal is the right one.
             raise ValueError(
-                "frame survival consumes per-site occupancy (one cell axis), "
-                f"not {len(cell_axes)} cell axes"
+                "frame survival consumes the per-site verdicts -- select the "
+                "occupancy processor's 'occupied' signal.  This source has "
+                f"{len(cell_axes)} cell axes and looks like camera frames "
+                "(occupancy's 'frame_judged' is the judged evidence, not the "
+                "judgement)"
             )
         if schema.cell_schema.dtype != np.dtype("?"):
             raise ValueError(
-                "frame survival consumes boolean occupancy, not "
-                f"{schema.cell_schema.dtype}"
+                "frame survival consumes boolean verdicts -- select the "
+                "occupancy processor's 'occupied' signal, not "
+                f"'counts' ({schema.cell_schema.dtype})"
             )
         frames = schema.point_table.row_count
         if frames < 2:

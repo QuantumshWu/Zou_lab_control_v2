@@ -155,8 +155,36 @@ def test_single_frame_and_wrong_shapes_are_refused() -> None:
         np.zeros((3, 2, 2)),
         0,
     )
-    with pytest.raises(ValueError, match="boolean"):
+    with pytest.raises(ValueError, match="occupied"):
         processor._pair(float_snapshot)
+
+
+def test_connecting_judged_frames_names_the_right_signal() -> None:
+    """The natural wrong pick -- frame_judged -- must say what to select."""
+
+    from zlc_data import SPATIAL_X, SPATIAL_Y
+
+    frames = _occupied_snapshot(np.zeros((2, 2, 3), dtype=bool))
+    schema = frames.block.schema
+    pixel_schema = DatasetSchema(
+        schema.repeat_axis,
+        schema.point_table,
+        None,
+        ValueSchema(
+            (
+                AxisSpec(AxisId("cam.y"), "y", SPATIAL_Y, 4),
+                AxisSpec(AxisId("cam.x"), "x", SPATIAL_X, 5),
+            ),
+            ValidityContract.components(AxisId("cam.y")),
+            np.dtype("<u2"),
+            "1",
+        ),
+    )
+    pixels = owned_snapshot_from_arrays(
+        pixel_schema, np.zeros((2, 2, 4, 5), dtype=np.uint16), 0
+    )
+    with pytest.raises(ValueError, match="occupied.*frame_judged|frame_judged"):
+        FrameSurvivalProcessor()._pair(pixels)
 
 
 def test_evaluate_translates_exact_coverage_by_whole_cycles() -> None:
