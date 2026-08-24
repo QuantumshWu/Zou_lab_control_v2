@@ -15,7 +15,7 @@ from .dataset_output import (
 )
 from .owner_mailbox import RunOwnerMailbox
 from .plane import SignalDataPlane, SignalPublication, SignalValue
-from .streams import FollowTap, StreamEndedEarly
+from .streams import FollowTap, SourceFailed, SourceGenerationEnded, StreamEndedEarly
 from .task_run import TaskArtifact, TaskRun
 
 
@@ -1005,7 +1005,13 @@ class NodeHost:
         self._progress = None
 
     def _finish_frozen_processor_failure(self, error: BaseException) -> None:
-        if isinstance(error, _StartSuppressed) or self.cancel_requested:
+        if (
+            isinstance(
+                error,
+                (_StartSuppressed, SourceGenerationEnded, SourceFailed),
+            )
+            or self.cancel_requested
+        ):
             self._finish_frozen_processor_cancelled()
             return
         self._retire_plane_state()
@@ -1047,8 +1053,15 @@ class NodeHost:
             owner.mark_owner_reaped()
             self._active = False
             self._terminal = True
-            self._phase = "failed"
-            self._error = f"{type(error).__name__}: {error}"
+            if isinstance(error, SourceGenerationEnded):
+                # The source moved on between the caller's snapshot and the
+                # bind: a lifecycle race, ended as CANCELLED so a standing
+                # follow may complete against the next generation.
+                self._phase = "cancelled"
+                self._error = None
+            else:
+                self._phase = "failed"
+                self._error = f"{type(error).__name__}: {error}"
             self._retire_plane_state()
             raise
 
@@ -1075,8 +1088,11 @@ class NodeHost:
                     if self._stop_event.is_set():
                         raise _StartSuppressed()
                     if last_publication is None:
-                        raise RuntimeError(
-                            "Follow Processor source ended without a publishable result"
+                        # Nothing arrived before the source ended: there is
+                        # no result, and no fault either -- the run under
+                        # this follower stopped before publishing.
+                        raise SourceGenerationEnded(
+                            "the source ended before it published"
                         )
                     self._data_plane.seal_processor(self)
                     self._request_owner_wake()
@@ -1135,7 +1151,18 @@ class NodeHost:
         self._progress = None
 
     def _finish_follow_processor_failure(self, error: BaseException) -> None:
-        if isinstance(error, _StartSuppressed) or self.cancel_requested:
+        if (
+            isinstance(
+                error,
+                (_StartSuppressed, SourceGenerationEnded, SourceFailed),
+            )
+            or self.cancel_requested
+        ):
+            # A source that ended, moved on, or itself failed under a
+            # standing follower is the SOURCE's lifecycle, not this node's
+            # failure -- its own card carries its own error.  The host ends
+            # CANCELLED, which is the state an automatic re-follow
+            # restarts from.
             self._finish_follow_processor_cancelled()
             return
         tap = self._follow_tap

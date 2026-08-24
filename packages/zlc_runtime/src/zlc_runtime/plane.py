@@ -57,6 +57,7 @@ from .streams import (
     EventRef,
     FollowTap,
     SourceFailed,
+    SourceGenerationEnded,
     StreamEndedEarly,
     StreamId,
 )
@@ -1626,7 +1627,12 @@ class SignalDataPlane:
             if (
                 state is None
                 or state.retired
-                or state.terminal
+            ):
+                raise SourceGenerationEnded(
+                    "the processor's generation was retired before its commit"
+                )
+            if (
+                state.terminal
                 or state.sealing
                 or state.node is not node
                 or state.kind != kind
@@ -2142,22 +2148,38 @@ class SignalDataPlane:
         owner_id = _node_instance_id(node)
         with self._lock:
             state = self._states.get(owner_id)
+            if state is None:
+                # The retirement cascade DROPS the derived closure's states;
+                # a running follower reaching its seal after that is the
+                # source's lifecycle, not a misuse.
+                raise SourceGenerationEnded(
+                    "the processor's generation was retired before it sealed"
+                )
+            if state.kind != "processor" or state.node is not node:
+                raise RuntimeError("Processor generation is not committed")
+            if state.retired:
+                # Retired mid-run means the bench moved on underneath this
+                # follower -- a restart superseded its whole derived
+                # closure.  That is the source's lifecycle, not this
+                # processor's failure.
+                raise SourceGenerationEnded(
+                    "the processor's generation was retired before it sealed"
+                )
             if (
-                state is None
-                or state.retired
-                or state.kind != "processor"
-                or state.node is not node
-                or state.source_owner_id is None
+                state.source_owner_id is None
                 or state.exact_outputs is None
                 or state.publication is None
             ):
                 raise RuntimeError("Processor generation is not committed")
             source = self._states.get(state.source_owner_id)
+            if source is None:
+                raise RuntimeError("Processor source has not reached its exact terminal")
+            if source.retired or source.generation != state.source_generation:
+                raise SourceGenerationEnded(
+                    "the processor's source generation ended before the seal"
+                )
             if (
-                source is None
-                or source.retired
-                or not source.terminal
-                or source.generation != state.source_generation
+                not source.terminal
                 or source.publication is None
                 or source.publication.event_ref.sequence
                 != state.last_parent_sequence
@@ -2305,7 +2327,9 @@ class SignalDataPlane:
             if state is None or state.publication is None:
                 raise LookupError(f"signal {name!r} has no current publication")
             if state.retired or state.terminal:
-                raise RuntimeError(f"signal {name!r} generation is not live")
+                raise SourceGenerationEnded(
+                    f"signal {name!r} generation is not live"
+                )
             return state.publication, self._follow_tap_locked(
                 state,
                 name,
@@ -2538,11 +2562,13 @@ class SignalDataPlane:
                 source_state is None
                 or source_state.publication is not source_publication
             ):
-                raise RuntimeError(
+                raise SourceGenerationEnded(
                     "Follow Processor source is not the exact current publication"
                 )
             if source_state.terminal:
-                raise RuntimeError("Follow Processor source generation is not live")
+                raise SourceGenerationEnded(
+                    "Follow Processor source generation is not live"
+                )
             tap = self._follow_tap_locked(
                 source_state,
                 source_name,

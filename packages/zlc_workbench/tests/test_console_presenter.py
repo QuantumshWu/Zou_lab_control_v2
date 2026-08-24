@@ -4154,13 +4154,8 @@ def test_restored_live_selector_answers_displayed_shot_before_plane_latest(
         monitor.close()
 
 
-def test_a_started_processor_follows_its_source_across_absence_and_stop(
-    presenter, session, tmp_path
-) -> None:
-    """Start a processor before its camera exists: the Start is accepted as
-    a standing follow, the poll beat activates it the moment the source
-    publishes, and the operator's own Stop is the one thing that ends the
-    following."""
+def _follow_calibration_artifact(session, tmp_path):
+    """A one-site calibration matched to the virtual camera's frames."""
 
     from zlc_atom.nodes.calibration import (
         FrameContract,
@@ -4194,7 +4189,18 @@ def test_a_started_processor_follows_its_source_across_absence_and_stop(
         ReadoutModelKind.BOX,
         FrameContract((height, width)),
     )
-    artifact = calibration.save(tmp_path / "follow-calibration.json")
+    return calibration.save(tmp_path / "follow-calibration.json")
+
+
+def test_a_started_processor_follows_its_source_across_absence_and_stop(
+    presenter, session, tmp_path
+) -> None:
+    """Start a processor before its camera exists: the Start is accepted as
+    a standing follow, the poll beat activates it the moment the source
+    publishes, and the operator's own Stop is the one thing that ends the
+    following."""
+
+    artifact = _follow_calibration_artifact(session, tmp_path)
 
     from zlc_workbench.logic import stable_signal_key
 
@@ -4254,6 +4260,97 @@ def test_a_started_processor_follows_its_source_across_absence_and_stop(
         presenter.beat()
     assert binding.host is stopped_host
     assert not binding.following
+
+
+def test_a_following_processor_survives_its_camera_stop_and_restart(
+    presenter, session, tmp_path
+) -> None:
+    """Stop the camera, On Pulse again: the processor restarts BY ITSELF.
+
+    The promise of the standing follow is exactly this sequence.  It used
+    to break in two places: the source's death mid-follow ended the
+    processor host as FAILED ("generation retired", "not committed"), and
+    the follower read any failure as the operator's to fix -- following
+    cleared, processor parked until a manual restart.  A source that ends
+    or moves on under a follower is its lifecycle, not the processor's
+    failure: the host ends cancelled, the follow survives, and the beat
+    after the camera's next start completes it."""
+
+    artifact = _follow_calibration_artifact(session, tmp_path)
+
+    from zlc_workbench.logic import stable_signal_key
+
+    occupancy_id = presenter.add_logic("occupancy", open_editor=False)
+    live_signal = stable_signal_key("cm-live", "frames")
+    assert presenter.update_logic_draft(
+        occupancy_id,
+        source_signal=live_signal,
+        artifact_inputs={"calibration_path": str(artifact)},
+    )
+    camera_id = presenter.add_logic(
+        "camera_measurement",
+        node_id="cm-live",
+        values={
+            "exposure_seconds": 0.002,
+            "repeat": 0,
+            "frames_per_cycle": 1,
+        },
+        device_keys={"camera": "camera"},
+        open_editor=False,
+    )
+    session.load_pulse(PULSE_NAME)
+    assert presenter.start_logic(camera_id)
+    assert presenter.start_logic(occupancy_id)
+    binding = presenter.logic[occupancy_id]
+
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        session.fire(shots=1)
+        presenter.beat()
+        if binding.host is not None and binding.host.running:
+            break
+        time.sleep(0.005)
+    assert binding.host is not None and binding.host.running
+    assert binding.following
+
+    # The operator stops the CAMERA -- not the processor.
+    assert presenter.stop_logic(camera_id)
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        presenter.beat()
+        if binding.host is None or not binding.host.running:
+            break
+        time.sleep(0.005)
+    assert binding.host is None or not binding.host.running
+    # The source's death is its lifecycle, not this processor's failure,
+    # and the follow is still standing.
+    if binding.host is not None:
+        assert binding.host.observation.phase != "failed", (
+            binding.host.observation.error
+        )
+    assert binding.following, (
+        "the camera stop ended the follow the operator never cancelled"
+    )
+
+    # On Pulse: the camera starts a new generation; the processor follows
+    # with no operator action at all.
+    assert presenter.start_logic(camera_id)
+    restarted = None
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        session.fire(shots=1)
+        presenter.beat()
+        restarted = binding.host
+        if restarted is not None and restarted.running:
+            break
+        time.sleep(0.005)
+    assert restarted is not None and restarted.running, (
+        f"the processor never refollowed: phase="
+        f"{None if binding.host is None else binding.host.observation.phase} "
+        f"error={None if binding.host is None else binding.host.observation.error} "
+        f"following={binding.following}"
+    )
+    assert binding.following
 
 
 def test_bound_rolling_panel_offers_the_uncertainty_switch(

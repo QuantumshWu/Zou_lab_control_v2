@@ -66,6 +66,19 @@ class SourceFailed(StreamError):
     pass
 
 
+class SourceGenerationEnded(RuntimeError):
+    """The followed source's generation ended or was replaced under a follower.
+
+    Not a defect of the follower: the bench stopped or restarted the
+    producer beneath a standing derivation.  Typed so a host can end
+    CANCELLED on it -- the state an automatic re-follow restarts from --
+    while a true failure stays failed for the operator to read.  A
+    RuntimeError subclass, so every existing broad handler still catches
+    it.
+    """
+
+
+
 class FollowTap(Generic[PayloadT]):
     """Lossless ordered delivery of source payloads without another identity."""
 

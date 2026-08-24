@@ -4538,7 +4538,20 @@ class ConsolePresenter:
                 # answered it, and re-running forever would spin.
                 continue
             if not self.start_logic(binding.node_id):
-                binding.following = False
+                # A start the source's own lifecycle refused -- it ended or
+                # moved on between this beat's gate and the bind, which the
+                # host reports by ending CANCELLED -- is the exact race
+                # this follower exists for: keep following and let a later
+                # beat complete it.  A start refused with the source alive
+                # and the host not cancelled is structural, and the
+                # operator's to read.
+                host = binding.host
+                lifecycle = (
+                    host is not None
+                    and host.observation.phase == "cancelled"
+                )
+                if not lifecycle and plane.is_generation_live(signal):
+                    binding.following = False
 
     def stop_logic(self, node_id: str) -> bool:
         binding = self.logic.get(str(node_id))
