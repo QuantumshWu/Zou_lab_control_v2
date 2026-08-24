@@ -624,8 +624,16 @@ def _normalize_limit_transition(
     return normalized
 
 
-def _validate_limit_state(values: Mapping[str, object]) -> None:
-    mode = values["relim_mode"]
+def _validate_authored_conflicts(values: Mapping[str, object]) -> None:
+    """The display states no host could EVER accept.
+
+    A stored appearance may be INCOMPLETE -- fixed limits materialize on
+    the next configure -- but never contradictory: an inverted pair or a
+    non-positive log floor fails every future host start, so these are the
+    rules a WRITE must already answer to, not only a running session.
+    """
+
+    mode = values.get("relim_mode")
     for low_name, high_name in _LIMIT_PARAMETER_PAIRS:
         if low_name not in values or high_name not in values:
             continue
@@ -633,10 +641,6 @@ def _validate_limit_state(values: Mapping[str, object]) -> None:
         high = values[high_name]
         if low is not None and high is not None and float(low) >= float(high):
             raise ValueError(f"{low_name} must be smaller than {high_name}")
-        if mode == RelimMode.FIXED.value and (low is None or high is None):
-            raise ValueError(
-                f"fixed relim_mode requires {low_name} and {high_name}"
-            )
     if (
         values.get("log_y") is True
         and mode == RelimMode.FIXED.value
@@ -644,6 +648,54 @@ def _validate_limit_state(values: Mapping[str, object]) -> None:
         and float(values["y_min"]) <= 0.0
     ):
         raise ValueError("log count limits require a positive y_min")
+    if (
+        values.get("threshold_classifier") is True
+        and values.get("cumulative") is True
+    ):
+        raise ValueError("threshold classifier requires a non-cumulative histogram")
+
+
+def _validate_limit_state(values: Mapping[str, object]) -> None:
+    _validate_authored_conflicts(values)
+    mode = values["relim_mode"]
+    for low_name, high_name in _LIMIT_PARAMETER_PAIRS:
+        if low_name not in values or high_name not in values:
+            continue
+        if mode == RelimMode.FIXED.value and (
+            values[low_name] is None or values[high_name] is None
+        ):
+            raise ValueError(
+                f"fixed relim_mode requires {low_name} and {high_name}"
+            )
+
+
+def validate_authored_display(
+    kind: "PlotKind | str",
+    values: Mapping[str, object],
+    *,
+    style: "PlotStyleConfig",
+    facet_cell_kind: "PlotKind | str | None" = None,
+) -> None:
+    """Refuse an authored display state no host could ever accept.
+
+    Panel state stores appearance; a host applies it at START.  Storing a
+    contradictory state therefore wedges every surface whose start applies
+    it -- including the editor whose form is the one tool that could repair
+    it.  Incomplete states pass (fixed limits materialize on the next
+    configure); contradictory ones raise with the schema's own sentence.
+    A facet grid whose cell kind is not authored yet has no display
+    contract, so there is nothing to refuse against.
+    """
+
+    resolved = PlotKind(kind)
+    if resolved is PlotKind.FACET_GRID and facet_cell_kind is None:
+        return
+    schema = parameter_schema_for_kind(
+        resolved, style=style, facet_cell_kind=facet_cell_kind
+    )
+    state = dict(schema.initial_values(None))
+    state.update(schema.prepare_updates(schema.declared_subset(values)))
+    _validate_authored_conflicts(state)
 
 
 @dataclass(frozen=True, slots=True)
@@ -787,11 +839,8 @@ def _parameter_schema_for_context(
     def validate_state(values: Mapping[str, object]) -> None:
         if has_limits:
             _validate_limit_state(values)
-        if (
-            values.get("threshold_classifier") is True
-            and values.get("cumulative") is True
-        ):
-            raise ValueError("threshold classifier requires a non-cumulative histogram")
+        else:
+            _validate_authored_conflicts(values)
 
     return ParameterSchema(
         entries,

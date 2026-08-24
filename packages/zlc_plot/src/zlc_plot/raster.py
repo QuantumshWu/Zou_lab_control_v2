@@ -483,6 +483,20 @@ class RasterPlotHost:
             raise TypeError("session must be PlotSession")
         return cls(lambda: session, close_session=close_session)
 
+    @property
+    def startup_failure(self) -> Exception | None:
+        """Why this host never started, or None while it lives (or starts).
+
+        A host that failed startup is PERMANENTLY unusable: every later
+        call raises the same reason.  Its owner needs that as a readable
+        fact -- a dead surface is retired and REMADE from repaired state,
+        never reconfigured -- instead of learning it by catching the same
+        exception on every call forever.
+        """
+
+        with self._condition:
+            return self._startup_error
+
     def _unusable(self) -> RuntimeError:
         """Why this host will not take work -- the REASON, not the symptom.
 

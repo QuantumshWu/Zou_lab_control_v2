@@ -28,6 +28,7 @@ from zlc_plot import (
     image_point_overlay_from_signal,
 )
 from zlc_plot.primitives import ImageFrame, ImagePointOverlay, PointStatus
+from zlc_plot.specs import validate_authored_display
 from zlc_plot.ui import parameter_controls, parameter_controls_for_kind
 from zlc_runtime import IndexedHistoryLease, selection_output_catalog
 from zlc_ui import FormFieldProps, FormSpec
@@ -1542,12 +1543,18 @@ class ConsolePresenter:
                 try:
                     self._replace_panel_editor_host(binding)
                 except Exception as error:
+                    # A refused plot surface is a STATE of the editor, not a
+                    # reason for it to close: the parameter form it carries
+                    # is the one tool that can repair what the host refused
+                    # (a stored y_min above y_max locked the operator out of
+                    # the very field that would fix it).  The editor stays
+                    # open, the refusal is reported, and every accepted
+                    # state change offers the mount again.
                     self._report(
-                        f"cannot open {binding.state.title} plot editor: "
+                        f"cannot mount {binding.state.title} plot editor: "
                         f"{_error_text(error)}",
                         severity="error",
                     )
-                    return False
         if callable(focused):
             focused(panel_id)
         if not callable(opened) and not callable(focused):
@@ -1661,6 +1668,26 @@ class ConsolePresenter:
             if name in changes:
                 values.update(dict(changes[name]))
             merged[name] = values
+        if "display" in changes:
+            # What no host could ever accept must never be STORED: an
+            # inverted limit pair used to pass through here, fail the host
+            # at its next start, and lock the operator out of every surface
+            # that could repair it.  The appearance bag keeps other kinds'
+            # vocabulary; the contract judges this kind's own subset, and
+            # an INCOMPLETE state still passes -- fixed limits materialize
+            # on the next configure.
+            try:
+                validate_authored_display(
+                    current.kind,
+                    merged["display"],
+                    style=DEFAULTS.style,
+                    facet_cell_kind=merged["cell_kind"] or None,
+                )
+            except (TypeError, ValueError, KeyError) as error:
+                self._report(
+                    f"{panel_id}: {_error_text(error)}", severity="error"
+                )
+                return False
         try:
             candidate = replace(current, **merged)
         except Exception as error:
@@ -1713,6 +1740,10 @@ class ConsolePresenter:
                 # control that looks live and does nothing.
                 or candidate.cell_kind != current.cell_kind
                 or binding.port is None
+                # A host that failed STARTUP is permanently unusable, and
+                # reconfiguring it re-raises the same reason forever.  The
+                # accepted state change -- the repair -- rebuilds instead.
+                or getattr(binding.host, "startup_failure", None) is not None
             )
         )
         if candidate == current and not needs_mount:
@@ -1818,6 +1849,7 @@ class ConsolePresenter:
             if binding.host is None or binding.port is None:
                 binding.state = candidate
                 binding.parameter_surface = self._unbound_panel_parameters(candidate)
+                self._remount_panel_editor(binding)
                 self._publish_panel_state(binding)
                 self._refresh_console_projection()
                 return True
@@ -1854,7 +1886,11 @@ class ConsolePresenter:
                     display_updates=changes.get("display", _UNCHANGED),
                     present=True,
                 )
-                if binding.editor_host is not None:
+                if (
+                    binding.editor_host is not None
+                    and getattr(binding.editor_host, "startup_failure", None)
+                    is None
+                ):
                     binding.editor_configuration = self._match_host_to_panel(
                         binding,
                         binding.editor_host,
@@ -1864,6 +1900,7 @@ class ConsolePresenter:
                         display_updates=changes.get("display", _UNCHANGED),
                     )
             binding.state = candidate
+            self._remount_panel_editor(binding)
 
         self._publish_panel_state(binding)
         self._refresh_console_projection()
@@ -2446,6 +2483,33 @@ class ConsolePresenter:
         self._refresh_console_projection()
         return True
 
+    def _remount_panel_editor(self, binding: PanelBinding) -> None:
+        """Offer Edit's plot surface to an editor open without one.
+
+        An Edit whose host refused to start stays OPEN -- its form is the
+        tool that repairs the state the host refused -- so every accepted
+        state change offers the mount again, and a failure is a report,
+        never a closed window.
+        """
+
+        if not binding.editor_open:
+            return
+        if (
+            binding.editor_host is not None
+            and getattr(binding.editor_host, "startup_failure", None) is None
+        ):
+            return
+        if binding.frozen_data is None or binding.frozen_stale:
+            return
+        try:
+            self._replace_panel_editor_host(binding)
+        except Exception as error:
+            self._report(
+                f"cannot mount {binding.state.title} plot editor: "
+                f"{_error_text(error)}",
+                severity="error",
+            )
+
     def _replace_panel_editor_host(self, binding: PanelBinding) -> object:
         """Mount a new independent host for Edit's exact frozen plot input."""
 
@@ -2623,7 +2687,14 @@ class ConsolePresenter:
                     binding.editor_configuration = update(shown_input)
                     self._refresh_panel_editor_selection(binding)
                 else:
-                    self._replace_panel_editor_host(binding)
+                    try:
+                        self._replace_panel_editor_host(binding)
+                    except Exception as error:
+                        self._report(
+                            f"cannot mount {binding.state.title} plot "
+                            f"editor: {_error_text(error)}",
+                            severity="error",
+                        )
             self.refresh_panel_editor(panel_id)
             return True
         # A newer exact publication exists.  The board tick only submits its

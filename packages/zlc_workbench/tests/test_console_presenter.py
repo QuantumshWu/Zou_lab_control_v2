@@ -1119,6 +1119,102 @@ def test_an_invalid_overlay_choice_is_rejected_without_mutating_the_panel(
     )
 
 
+def test_a_contradictory_display_state_is_refused_at_the_write(
+    presenter, session
+) -> None:
+    """What no host could ever accept must never be STORED.
+
+    An inverted limit pair used to pass through update_panel_state, fail
+    the host at its next start, and lock the operator out of every surface
+    that could repair it.  It is refused at the write with the contract's
+    own sentence -- while an INCOMPLETE state still passes, because fixed
+    limits materialize on the next configure.
+    """
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(
+        node.signal_key("frames"), snapshot, kind="image"
+    )
+    _settle_panel_hosts(presenter, lambda: binding.host is not None)
+    before = binding.state
+
+    assert presenter.update_panel_state(
+        binding.panel_id,
+        {"display": {"relim_mode": "fixed", "color_min": 5.0, "color_max": 1.0}},
+    ) is False
+    assert binding.state is before, "a refused write must store nothing"
+    assert any(
+        "must be smaller" in text
+        for severity, text in presenter.view.status
+        if severity == "error"
+    )
+
+    # Incomplete is not contradictory: the mode alone is a legal write.
+    assert presenter.update_panel_state(
+        binding.panel_id, {"display": {"relim_mode": "fixed"}}
+    ) is True
+
+
+def test_a_wedged_display_state_cannot_lock_the_editor_that_repairs_it(
+    presenter, session
+) -> None:
+    """A refused plot surface is a STATE of the editor, not a closed window.
+
+    A stored contradictory pair (a legacy board, a state written before the
+    write-time contract) makes the Edit host fail at start.  The editor
+    still OPENS -- its parameter form is the one tool that can repair the
+    state the host refused -- the refusal is reported, and the accepted
+    repair mounts the surface without reopening anything.
+    """
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(
+        node.signal_key("frames"), snapshot, kind="image"
+    )
+    assert presenter.edit_panel(binding.panel_id) is True
+    _settle_panel_hosts(
+        presenter, lambda: binding.editor_selections is not None
+    )
+    presenter.close_panel_editor(binding.panel_id)
+    binding.state = replace(
+        binding.state,
+        display={
+            **binding.state.display,
+            "relim_mode": "fixed",
+            "color_min": 5.0,
+            "color_max": 1.0,
+        },
+    )
+
+    assert presenter.edit_panel(binding.panel_id) is True, (
+        "a dead plot surface closed the editor whose form repairs it"
+    )
+    assert binding.editor_open is True
+    # The mount may refuse synchronously (no host) or die on its worker (a
+    # host whose startup_failure is the reason); either way the editor is
+    # open and surface-less in substance.
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.editor_host is None
+        or binding.editor_host.startup_failure is not None,
+    )
+    assert any(
+        "must be smaller" in text
+        for severity, text in presenter.view.status
+        if severity == "error"
+    )
+
+    assert presenter.update_panel_state(
+        binding.panel_id,
+        {"display": {"color_min": 0.0, "color_max": 10.0}},
+    ) is True
+    assert binding.editor_host is not None, (
+        "the accepted repair must mount Edit's plot surface"
+    )
+    described = _operation_value(binding.editor_host.describe_display())
+    assert described.display_state.values["color_min"] == 0.0
+
+
 def test_plot_materialized_fixed_limits_become_the_panel_state(
     presenter, session
 ) -> None:
