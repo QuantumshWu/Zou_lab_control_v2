@@ -74,11 +74,33 @@ class _PreparedSeries:
     valid: np.ndarray
     label: str
     identity: tuple[tuple[str, str | None, str], ...]
+    #: (low, high) display-unit bounds of the standard-error band, or None.
+    #: Bounds, not sigma: converting y+/-sem keeps affine display units
+    #: honest where converting a difference would not be.
+    band: tuple[np.ndarray, np.ndarray] | None = None
 
 
 def _display_array(value: Any) -> np.ndarray:
     raw = getattr(value, "display", value)
     return np.asarray(raw)
+
+
+def _series_band(item: Any) -> tuple[np.ndarray, np.ndarray] | None:
+    """Display-unit y+/-sem bounds of one projected series, if it has sem."""
+
+    sem = getattr(item, "sem", None)
+    if sem is None:
+        return None
+    quantity = item.y
+    canonical = np.asarray(quantity.canonical, dtype=float).reshape(-1)
+    spread = np.asarray(sem, dtype=float).reshape(-1)
+    unit = quantity.canonical_unit
+    low = unit.convert_value_to(canonical - spread, quantity.display_unit)
+    high = unit.convert_value_to(canonical + spread, quantity.display_unit)
+    return (
+        np.asarray(low, dtype=float).reshape(-1),
+        np.asarray(high, dtype=float).reshape(-1),
+    )
 
 
 def _valid_array(value: Any, shape: tuple[int, ...]) -> np.ndarray:
@@ -1845,7 +1867,16 @@ class MatplotlibRenderer:
             if label is None:
                 group_key = getattr(item, "group_key", ())
                 label = ", ".join(str(value) for value in group_key) if group_key else ""
-            prepared.append(_PreparedSeries(x, y, valid, str(label), _series_identity(item)))
+            prepared.append(
+                _PreparedSeries(
+                    x,
+                    y,
+                    valid,
+                    str(label),
+                    _series_identity(item),
+                    band=_series_band(item),
+                )
+            )
         return tuple(prepared)
 
     def _ensure_lines(self, axes: Any, count: int, key: str) -> list[Any]:
@@ -1920,16 +1951,48 @@ class MatplotlibRenderer:
         extremes = np.array([np.inf, -np.inf, np.inf, -np.inf])
         series_lines: list[tuple[Any, object, str]] = []
         cycle = self.style.palette.line_cycle
+        band_key = f"{key}:uncertainty"
+        bands: list[Any] = self._artists.setdefault(band_key, [])
+        # A PolyCollection has no data-mutation API worth trusting across
+        # revisions; the band is rebuilt per update.  Uncertainty panels are
+        # scan-point sized, never the million-point envelope path.
+        for artist in bands:
+            if artist is not None:
+                artist.remove()
+        bands.clear()
         for index, item in enumerate(series):
+            colour = cycle[_series_slot(item.identity, len(cycle))]
             # NaNs preserve invalid runs as gaps instead of joining neighbours.
             plotted_y = np.where(item.valid, item.y, np.nan)
             self._apply_line_data(axes, lines[index], item.x, plotted_y)
-            lines[index].set_color(cycle[_series_slot(item.identity, len(cycle))])
+            lines[index].set_color(colour)
             lines[index].set_linewidth(self.style.artists.curve.linewidth)
             lines[index].set_alpha(self.style.artists.curve.alpha)
             if lines[index].get_label() != item.label:
                 lines[index].set_label(item.label)
             series_lines.append((lines[index], item.identity, item.label))
+            band_low = band_high = None
+            if item.band is not None:
+                band_low, band_high = item.band
+                band_where = (
+                    item.valid
+                    & np.isfinite(band_low)
+                    & np.isfinite(band_high)
+                )
+                if bool(np.any(band_where)):
+                    bands.append(
+                        axes.fill_between(
+                            item.x,
+                            band_low,
+                            band_high,
+                            where=band_where,
+                            interpolate=False,
+                            color=colour,
+                            alpha=self.style.render.uncertainty_band_alpha,
+                            linewidth=0.0,
+                            zorder=lines[index].get_zorder() - 0.1,
+                        )
+                    )
             if limits is None and bool(np.any(item.valid)):
                 extremes[0] = min(
                     extremes[0],
@@ -1939,13 +2002,21 @@ class MatplotlibRenderer:
                     extremes[1],
                     float(np.max(item.x, where=item.valid, initial=-np.inf)),
                 )
+                low_source = item.y if band_low is None else np.where(
+                    np.isfinite(band_low), band_low, item.y
+                )
+                high_source = item.y if band_high is None else np.where(
+                    np.isfinite(band_high), band_high, item.y
+                )
                 extremes[2] = min(
                     extremes[2],
-                    float(np.min(item.y, where=item.valid, initial=np.inf)),
+                    float(np.min(low_source, where=item.valid, initial=np.inf)),
                 )
                 extremes[3] = max(
                     extremes[3],
-                    float(np.max(item.y, where=item.valid, initial=-np.inf)),
+                    float(
+                        np.max(high_source, where=item.valid, initial=-np.inf)
+                    ),
                 )
         self._series_lines[id(axes)] = tuple(series_lines)
         self._series_indices[id(axes)] = {

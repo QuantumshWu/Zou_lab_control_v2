@@ -21,6 +21,7 @@ def build_payload(projection: Any, view: Any, _state: Any) -> None:
         spec.x,
         group_by=group,
         aggregation=spec.reduction,
+        uncertainty=spec.uncertainty,
     )
 
 
@@ -80,7 +81,7 @@ HANDLER = KindHandler(
     "series",
     render,
     build_payload,
-    ("kind", "x", "group", "reduction"),
+    ("kind", "x", "group", "reduction", "uncertainty"),
     admits,
     default_spec,
     label_roles,

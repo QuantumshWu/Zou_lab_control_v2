@@ -189,6 +189,9 @@ class CurvePlot:
     x: AxisRef
     group: AxisRef | None = None
     reduction: Reduction = Reduction.MEAN
+    #: Draw the standard error of every MEAN point as a band, and weight
+    #: any fit on this panel by it.  One switch, one meaning.
+    uncertainty: bool = False
     labels: PlotLabels = field(default_factory=PlotLabels)
     scope: tuple[ScopeTerm, ...] = ()
     kind: ClassVar[PlotKind] = PlotKind.CURVE
@@ -202,6 +205,12 @@ class CurvePlot:
             raise ValueError("CurvePlot.group must differ from x")
         if not isinstance(self.reduction, Reduction):
             raise TypeError("CurvePlot.reduction must be Reduction")
+        if not isinstance(self.uncertainty, bool):
+            raise TypeError("CurvePlot.uncertainty must be bool")
+        if self.uncertainty and self.reduction is not Reduction.MEAN:
+            raise ValueError(
+                "uncertainty is defined for Reduction.MEAN only"
+            )
         if not isinstance(self.labels, PlotLabels):
             raise TypeError("CurvePlot.labels must be PlotLabels")
         object.__setattr__(self, "scope", _validated_scope(self.scope))

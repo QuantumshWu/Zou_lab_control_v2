@@ -158,7 +158,11 @@ def cell_within_one_cell(schema: Any, facet: Any, cell: Any) -> Any | None:
             # owns it now) or the very axis it just started walking.
             group = cell.group if cell.group not in (facet, x) else None
             return CurvePlot(
-                x, group=group, reduction=cell.reduction, labels=cell.labels
+                x,
+                group=group,
+                reduction=cell.reduction,
+                uncertainty=cell.uncertainty,
+                labels=cell.labels,
             )
     if facet in (
         getattr(cell, "x", None),

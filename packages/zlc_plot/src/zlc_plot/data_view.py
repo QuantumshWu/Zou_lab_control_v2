@@ -1480,6 +1480,7 @@ class DataView:
                     cell_positions,
                     () if cell.group is None else (cell.group,),
                     cell.reduction,
+                    cell.uncertainty,
                 )
             elif isinstance(cell, ImagePlot):
                 payload = self._image_from_positions(
@@ -1610,7 +1611,12 @@ class DataView:
                 cell_valid = valid_mask[:, selected]
             if isinstance(cell, CurvePlot):
                 payload: FacetPayload = self._dense_curve_data(
-                    cell.x, x_resolved, cell_values, cell_valid, cell.reduction
+                    cell.x,
+                    x_resolved,
+                    cell_values,
+                    cell_valid,
+                    cell.reduction,
+                    cell.uncertainty,
                 )
             elif isinstance(cell, ImagePlot):
                 payload = self._dense_image_data(
