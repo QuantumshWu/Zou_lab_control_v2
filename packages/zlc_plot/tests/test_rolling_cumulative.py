@@ -181,10 +181,18 @@ def test_plain_rolling_uncertainty_is_each_shot_pooled_error() -> None:
 
 
 def test_structure_groups_split_categorical_cell_axes() -> None:
-    """(cycles) x (3) x (33), never (3 x 33): a pair axis is not a picture."""
+    """Three brackets: (repeat) x (points) x (data).
+
+    A pair axis is not a picture -- (cycles) x (3) x (33), never (3 x 33)
+    -- and a READOUT_EVENT cell axis is a fact about WHEN within one
+    point, so it joins the points bracket after the scan dimensions:
+    (20) x (10x10x10x3) x (34), never (20) x (10x10x10) x (3) x (34).
+    """
 
     from zlc_data import (
         COMPONENT,
+        GridTopology,
+        READOUT_EVENT,
         SITE,
         AxisId,
         AxisSpec,
@@ -221,6 +229,31 @@ def test_structure_groups_split_categorical_cell_axes() -> None:
     assert tuple(tuple(name for name, _size in group) for group in groups) == (
         ("cycle",),
         ("pair",),
+        ("site",),
+    )
+
+    scanned = Schema(
+        AxisSpec(AxisId("cycle"), "cycle", REPEAT, 20),
+        PointTable(8, ()),
+        GridTopology(
+            (AxisId("ax"), AxisId("ay"), AxisId("az")),
+            ((0.0, 1.0), (0.0, 1.0), (0.0, 1.0)),
+            tuple((i % 2, (i // 2) % 2, i // 4) for i in range(8)),
+        ),
+        ValueSchema(
+            (
+                AxisSpec(AxisId("cm.frame"), "frame", READOUT_EVENT, 3),
+                AxisSpec(AxisId("occ.site"), "site", SITE, 34),
+            ),
+            ValidityContract.components(AxisId("occ.site")),
+            np.dtype("<f8"),
+            "1",
+        ),
+    )
+    groups = schema_structure(scanned)
+    assert tuple(tuple(name for name, _size in group) for group in groups) == (
+        ("cycle",),
+        ("ax", "ay", "az", "frame"),
         ("site",),
     )
 
