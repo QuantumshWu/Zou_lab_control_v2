@@ -344,6 +344,9 @@ def test_live_monitor_chain_camera_occupancy_survival() -> None:
     def _await(predicate, message, seconds=10.0):
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
+            # freeze() drains the latest-processor lane -- the pump the
+            # workbench runs; a test drives it explicitly.
+            plane.freeze()
             for running in hosts:
                 running.poll()
             found = predicate()
@@ -470,6 +473,66 @@ def test_live_monitor_chain_camera_occupancy_survival() -> None:
         assert pair_axis.coordinate_labels == ("0-1", "0-2", "1-2")
         coverage = survival_value.coverage
         assert coverage.total_cells == cycles
+
+        # The declared source-index history is what lets a rolling panel
+        # replay every retained shot when its projection changes: lease it,
+        # fire another cycle, and the survival dataset must carry one
+        # primary-indexed row per shot.
+        from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
+
+        survival_key = survival_host.signal_key("survival")
+        assert plane.supports_indexed_history(survival_key)
+        lease = plane.acquire_indexed_history(survival_key, 16)
+        try:
+            sequencer.fire()
+            sequencer.wait_done(1.0)
+
+            def _indexed():
+                publication = plane.latest_publication(survival_key)
+                if publication is None:
+                    return None
+                snapshot = plane.current_dataset(survival_key, publication)
+                columns = snapshot.block.schema.point_table.columns
+                has_index = any(
+                    column.coordinate_id == PRIMARY_INDEX_AXIS_ID
+                    for column in columns
+                )
+                rows = snapshot.block.schema.point_table.row_count
+                return snapshot if has_index and rows >= 2 else None
+
+            def _diagnose():
+                publication = plane.latest_publication(survival_key)
+                if publication is None:
+                    return "no publication"
+                snapshot = plane.current_dataset(survival_key, publication)
+                columns = tuple(
+                    str(column.coordinate_id)
+                    for column in snapshot.block.schema.point_table.columns
+                )
+                def _seq(name):
+                    pub = plane.latest_publication(name)
+                    return None if pub is None else pub.event_ref.sequence
+
+                return (
+                    f"seq={publication.event_ref.sequence} "
+                    f"rows={snapshot.block.schema.point_table.row_count} "
+                    f"columns={columns} "
+                    f"chain: frames={_seq(frames_key)} "
+                    f"occupied={_seq(occupied_key)} "
+                    f"survival={_seq(survival_key)} "
+                    f"camera_armed={camera.capture_state()}"
+                )
+
+            try:
+                indexed = _await(
+                    _indexed,
+                    "leased survival never grew a primary-indexed history",
+                )
+            except AssertionError as error:
+                raise AssertionError(f"{error}; state: {_diagnose()}") from None
+            assert indexed.block.schema.point_table.row_count >= 2
+        finally:
+            lease.close()
     finally:
         for running in hosts:
             try:

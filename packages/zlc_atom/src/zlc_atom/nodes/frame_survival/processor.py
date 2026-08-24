@@ -52,7 +52,14 @@ from zlc_runtime import (
 )
 
 SURVIVAL_OUTPUTS = (
-    DatasetOutputDeclaration("survival", "frame_survival.survival"),
+    # index_by_source: a rolling panel needs one cell per parent cycle, so
+    # the plane may retain a bounded per-shot history once a panel leases
+    # it -- that history is what lets a scope or reduction change replay
+    # every retained shot under the new projection instead of freezing old
+    # points in their old meaning.
+    DatasetOutputDeclaration(
+        "survival", "frame_survival.survival", index_by_source=True
+    ),
 )
 
 

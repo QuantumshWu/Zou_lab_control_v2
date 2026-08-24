@@ -32,13 +32,17 @@ from zlc_atom.nodes.calibration import ReadoutModelKind, TrapCalibration
 from zlc_atom.nodes.calibration.calibration import classify_threshold
 
 # Exact delivery means every camera cycle is classified; it does not change a
-# live Monitor's public geometry into history.  All three siblings therefore
-# retain the latest complete cycle, just like their camera parent.  Runtime's
-# source-index history is an explicit declaration used by fit/selection outputs,
-# not an implicit property of being a Processor.
+# live Monitor's public geometry into history.  The site-sized verdicts and
+# counts DECLARE source-index history -- a rolling occupation-rate panel
+# needs one cell per parent cycle, and the plane retains that bounded
+# history only while a panel leases it -- while the judged frames stay
+# latest-only like their camera parent: retaining full frames per shot is a
+# memory decision no panel has asked for.
 OCCUPANCY_OUTPUTS = (
-    DatasetOutputDeclaration("counts", "occupancy.counts"),
-    DatasetOutputDeclaration("occupied", IMAGE_POINT_OVERLAY_CONTRACT),
+    DatasetOutputDeclaration("counts", "occupancy.counts", index_by_source=True),
+    DatasetOutputDeclaration(
+        "occupied", IMAGE_POINT_OVERLAY_CONTRACT, index_by_source=True
+    ),
     DatasetOutputDeclaration("frame_judged", "occupancy.frame_judged"),
 )
 
