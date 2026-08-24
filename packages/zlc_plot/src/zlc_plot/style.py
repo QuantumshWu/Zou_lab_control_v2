@@ -561,9 +561,13 @@ class RenderPolicyConfig:
     colormap_low_fraction: float = 0.0
     colormap_high_fraction: float = 0.95
     side_distribution_fill_alpha: float = 1.0
-    #: The standard-error band behind a MEAN curve: filled in the line's own
-    #: colour, faint enough that overlapping grouped bands stay readable.
-    uncertainty_band_alpha: float = 0.22
+    #: The per-point standard-error bar on a MEAN trace: drawn in the
+    #: line's own colour, slightly translucent so overlapping grouped bars
+    #: stay readable.  A bar per data point, never an interpolated band --
+    #: categorical points have nothing between them to fill.
+    uncertainty_bar_alpha: float = 0.75
+    uncertainty_bar_linewidth: float = 1.1
+    uncertainty_bar_capsize_pt: float = 2.4
     rolling_distribution_min_bins: int = 3
     image_distribution_min_bins: int = 8
     distribution_max_bins: int = 50

@@ -2080,19 +2080,33 @@ class MatplotlibRenderer:
                     & np.isfinite(band_high)
                 )
                 if bool(np.any(band_where)):
-                    bands.append(
-                        axes.fill_between(
-                            item.x,
-                            band_low,
-                            band_high,
-                            where=band_where,
-                            interpolate=False,
-                            color=colour,
-                            alpha=self.style.render.uncertainty_band_alpha,
-                            linewidth=0.0,
-                            zorder=lines[index].get_zorder() - 0.1,
-                        )
+                    policy = self.style.render
+                    x_marked = item.x[band_where]
+                    y_marked = item.y[band_where]
+                    container = axes.errorbar(
+                        x_marked,
+                        y_marked,
+                        # Asymmetric on purpose: the bounds were converted
+                        # to display units, and an affine display unit
+                        # makes the two arms differ.
+                        yerr=(
+                            y_marked - band_low[band_where],
+                            band_high[band_where] - y_marked,
+                        ),
+                        fmt="none",
+                        ecolor=colour,
+                        alpha=policy.uncertainty_bar_alpha,
+                        elinewidth=policy.uncertainty_bar_linewidth,
+                        capsize=policy.uncertainty_bar_capsize_pt,
+                        capthick=policy.uncertainty_bar_linewidth,
+                        zorder=lines[index].get_zorder() - 0.1,
                     )
+                    _marker, caplines, barlinecols = container.lines
+                    bands.extend((*caplines, *barlinecols))
+                    # Keep the artists on the axes; drop only the
+                    # container bookkeeping so revisions do not accumulate.
+                    if container in axes.containers:
+                        axes.containers.remove(container)
             if limits is None and bool(np.any(item.valid)):
                 extremes[0] = min(
                     extremes[0],

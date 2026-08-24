@@ -4158,3 +4158,26 @@ def test_a_started_processor_follows_its_source_across_absence_and_stop(
         presenter.beat()
     assert binding.host is stopped_host
     assert not binding.following
+
+
+def test_bound_rolling_panel_offers_the_uncertainty_switch(
+    presenter, session
+) -> None:
+    """The display contract of a live rolling panel carries the band and
+    cumulative switches -- the vocabulary the operator flips on the bench."""
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(
+        node.signal_key("frames"), snapshot, kind="rolling"
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: not binding.parameter_surface.get("display_unavailable", "")
+        and bool(binding.parameter_surface.get("display")),
+    )
+    names = {
+        str(getattr(entry, "name", entry)) 
+        for entry in binding.parameter_surface["display"]
+    }
+    assert "uncertainty" in names, sorted(names)
+    assert "cumulative" in names, sorted(names)

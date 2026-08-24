@@ -7,7 +7,7 @@ import matplotlib
 matplotlib.use("Agg", force=True)
 
 import numpy as np
-from matplotlib.collections import PolyCollection
+from matplotlib.collections import LineCollection
 
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
 from zlc_plot import AxisRef, CurvePlot, PlotLabels, PlotSession
@@ -34,7 +34,7 @@ def _bands(session: PlotSession) -> list[PolyCollection]:
         artist
         for axes in session._renderer.figure.axes
         for artist in axes.collections
-        if isinstance(artist, PolyCollection)
+        if isinstance(artist, LineCollection)
     ]
 
 
@@ -47,7 +47,7 @@ def test_uncertainty_curve_draws_a_band_and_covers_it_in_ylim() -> None:
     try:
         session._renderer.draw()
         bands = _bands(session)
-        assert bands, "uncertainty=True must draw a band"
+        assert bands, "uncertainty=True must draw error bars"
         axes = session._renderer.figure.axes[0]
         payload = session._projection._payload
         series = payload.series[0]

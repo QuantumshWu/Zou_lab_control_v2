@@ -11,7 +11,7 @@ import matplotlib
 matplotlib.use("Agg", force=True)
 
 import numpy as np
-from matplotlib.collections import PolyCollection
+from matplotlib.collections import LineCollection
 
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
 from zlc_plot import AxisRef, PlotSession, RollingPlot
@@ -115,9 +115,9 @@ def test_cumulative_band_renders(tmp_path) -> None:
             artist
             for axes in session._renderer.figure.axes
             for artist in axes.collections
-            if isinstance(artist, PolyCollection)
+            if isinstance(artist, LineCollection)
         ]
-        assert bands, "cumulative rolling must draw its running-sem band"
+        assert bands, "cumulative rolling must draw its running-sem bars"
     finally:
         session.close()
 
@@ -173,9 +173,9 @@ def test_plain_rolling_uncertainty_is_each_shot_pooled_error() -> None:
             artist
             for axes in session._renderer.figure.axes
             for artist in axes.collections
-            if isinstance(artist, PolyCollection)
+            if isinstance(artist, LineCollection)
         ]
-        assert bands, "plain rolling with uncertainty must draw the band"
+        assert bands, "plain rolling with uncertainty must draw the bars"
     finally:
         session.close()
 
