@@ -4445,7 +4445,7 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
         LiveDatasetOutput,
     )
 
-    dimensions = (5, 5, 3)  # 75 point cells: a real >64 refusal.
+    dimensions = (65, 2, 2)  # A real scan axis exceeds the 64-cell cap.
     names = ("field.x", "field.y", "field.z")
     cells = tuple(np.ndindex(*dimensions))
     repeat_id = AxisId("survival.repeat")
@@ -4505,7 +4505,7 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     expected = schema_structure(canonical)
     assert expected == (
         (("repeat", 2),),
-        (("scan.field.x", 5), ("scan.field.y", 5), ("scan.field.z", 3)),
+        (("scan.field.x", 65), ("scan.field.y", 2), ("scan.field.z", 2)),
         (("pair", 3), ("site", 5)),
     )
 
@@ -4534,6 +4534,7 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     surface = refused.parameter_surface
     fates = {str(entry["label"]) for entry in surface["semantic"]}
     assert {"field.x", "field.y", "field.z"} <= fates
+    assert "point" not in fates
     assert "exceeds the fixed layout" in surface["fit_unavailable"]
     assert presenter.view.panel_parameter_surfaces[
         refused.panel_id

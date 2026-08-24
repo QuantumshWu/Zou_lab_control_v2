@@ -337,7 +337,7 @@ snapshot = DatasetSnapshot(schema, np.arange(4.0).reshape(1, 4), revision=0)
 host = RasterPlotHost.from_plot(snapshot, CurvePlot(AxisRef.point('x')), size='2x2')
 card, widget = mounted_card(host)
 projection = {
-    'signal': '@logic/cm/frames', 'kind': 'curve', 'cell_kind': '', 'size': '2x2',
+    'signal': '@logic/cm/frames', 'kind': 'facet_grid', 'cell_kind': 'image', 'size': '2x2',
     'interval_ms': 100, 'title': '@logic/cm/frames', 'semantic': {}, 'display': {},
     'fit': {}, 'overlay_signal': '',
 }
@@ -359,6 +359,7 @@ surface = {
     ),
 }
 card.set_interval_choices((100,), 100)
+card.set_cell_kind_choices(('curve', 'image', 'histogram'))
 card.set_panel_projection(dict(projection), dict(surface))
 app.processEvents()
 
@@ -384,6 +385,29 @@ assert {
     'semantic__fate:field.z',
     'fit_unavailable',
 } <= form_keys
+card._open_settings()
+app.processEvents()
+assert not card._settings_form.widget_for('kind').isEnabled()
+assert card._settings_form.widget_for('cell_kind').isEnabled()
+reconciles = []
+original_reconcile = card._settings_form.reconcile
+def counted_reconcile(*args, **kwargs):
+    reconciles.append(1)
+    return original_reconcile(*args, **kwargs)
+card._settings_form.reconcile = counted_reconcile
+# A live publication repeats the same authoring contract: no form rebuild,
+# and a title-only metadata change is equally cheap.
+card.set_panel_projection(dict(projection), dict(surface))
+card.set_panel_projection(
+    dict(projection), {**surface, 'data_scope': (('field.x', 2.0),)}
+)
+assert reconciles == []
+changed_semantic = tuple(dict(field) for field in surface['semantic'])
+changed_semantic[0]['value'] = 'facet'
+card.set_panel_projection(
+    dict(projection), {**surface, 'semantic': changed_semantic}
+)
+assert reconciles == [1]
 long_name = '@logic/' + 'a-very-long-node-name/' * 6 + 'frames'
 card.set_panel_projection({**projection, 'title': long_name}, dict(surface))
 app.processEvents()

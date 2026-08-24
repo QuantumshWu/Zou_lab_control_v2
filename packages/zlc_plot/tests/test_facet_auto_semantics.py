@@ -133,15 +133,16 @@ def test_frame_cells_facet_the_scan_and_leave_repeats_to_the_reduction() -> None
     # The degenerate "a" is invisible: the LIVE dimension facets the frames.
     assert spec.facet == AxisRef.point_dimension("b")
 
-    # A grid has ONE facet axis, so a two-dimensional scan of frames facets
-    # its points: every (a, b) gets its own cell instead of one of them
-    # being averaged into the other.
+    # A grid has ONE facet axis, so a multidimensional scan defaults to its
+    # outermost real axis.  The flattened row ordinal is not a fourth axis;
+    # the remaining dimensions stay explicit in the fate table and reduce
+    # until the operator assigns them differently.
     frames_scanned_twice = _scan_schema(
         {"a": 2, "b": 3}, repeats=4, data_axes=_frame_axes()
     )
     spec = facet_default(frames_scanned_twice)
     assert isinstance(spec, FacetGridPlot)
-    assert spec.facet == AxisRef.point_rows()
+    assert spec.facet == AxisRef.point_dimension("a")
     assert isinstance(spec.cell, ImagePlot)
 
     # With nothing else live, repeat is still history rather than an automatic

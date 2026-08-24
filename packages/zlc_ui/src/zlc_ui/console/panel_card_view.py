@@ -415,7 +415,12 @@ class PanelCardView(FluentGroupBox):
             )
         return incoming
 
-    def _apply_panel_state(self, incoming: Mapping[str, object]) -> None:
+    def _apply_panel_state(
+        self,
+        incoming: Mapping[str, object],
+        *,
+        rebuild_form: bool = True,
+    ) -> None:
         previous_size = str(self._state_projection.get("size") or "")
         self._state_projection = dict(incoming)
         self._base_title = incoming["title"] or "Panel"
@@ -430,7 +435,8 @@ class PanelCardView(FluentGroupBox):
                 self.size_combo.setCurrentIndex(size_index)
         if incoming["size"] != previous_size:
             self._apply_card_size(str(incoming["size"]))
-        self._rebuild_settings_form()
+        if rebuild_form:
+            self._rebuild_settings_form()
 
     @property
     def panel_size(self) -> str:
@@ -450,8 +456,27 @@ class PanelCardView(FluentGroupBox):
         """Replace state and plot metadata before reconciling the form once."""
 
         incoming = self._validated_panel_state(state)
-        self._parameter_surface = dict(surface) if isinstance(surface, Mapping) else {}
-        self._apply_panel_state(incoming)
+        projected = dict(surface) if isinstance(surface, Mapping) else {}
+        state_changed = incoming != self._state_projection
+        form_keys = (
+            "semantic",
+            "display",
+            "fit",
+            "semantic_unavailable",
+            "display_unavailable",
+            "fit_unavailable",
+            "science_locked",
+            "paints_images",
+        )
+        form_changed = any(
+            projected.get(key) != self._parameter_surface.get(key)
+            for key in form_keys
+        )
+        self._parameter_surface = projected
+        self._apply_panel_state(
+            incoming,
+            rebuild_form=state_changed or form_changed,
+        )
 
     def _band_fragments(self) -> tuple[tuple, tuple]:
         """The strip's two lines as coloured fragments: sizes, then names.
@@ -757,6 +782,7 @@ class PanelCardView(FluentGroupBox):
                 "text",
                 "Plot kind",
                 default=str(state.get("kind") or "automatic"),
+                unavailable_reason="Plot kind is fixed for this panel.",
             ),
         ]
         if state.get("kind") == "facet_grid" and self._cell_kind_choices:
@@ -896,29 +922,31 @@ class PanelCardView(FluentGroupBox):
             spec = self._form_spec()
             self._settings_form.reconcile(spec, self._form_values())
             self._settings_form.refresh()
-            science_locked = bool(self._parameter_surface.get("science_locked"))
-            self._settings_form.widget_for("signal").setEnabled(
-                bool(self._groups) and not science_locked
-            )
-            self._settings_form.widget_for("kind").setEnabled(False)
-            for key in ("overlay_signal", "cell_kind"):
-                if key in self._settings_form.spec.keys:
-                    self._settings_form.widget_for(key).setEnabled(
-                        not science_locked
-                    )
-            if science_locked:
-                for field in parameter_fields(
-                    self._parameter_surface,
-                    "semantic",
-                ):
-                    key = f"semantic__{field['key']}"
-                    if key in self._settings_form.spec.keys:
-                        self._settings_form.widget_for(key).setEnabled(False)
-            for section in ("semantic", "display", "fit"):
-                key = f"{section}_unavailable"
-                if key in self._settings_form.spec.keys:
-                    self._settings_form.widget_for(key).setEnabled(False)
+            self._apply_settings_enabled_state()
             self._sync_settings_body_size()
+
+    def _apply_settings_enabled_state(self) -> None:
+        """Apply standing edit policy without one-frame enabled flicker."""
+
+        form = self._settings_form
+        if form is None:
+            return
+        science_locked = bool(self._parameter_surface.get("science_locked"))
+        form.widget_for("signal").setEnabled(
+            bool(self._groups) and not science_locked
+        )
+        for key in ("overlay_signal", "cell_kind"):
+            if key in form.spec.keys:
+                form.widget_for(key).setEnabled(not science_locked)
+        if science_locked:
+            for field in parameter_fields(self._parameter_surface, "semantic"):
+                key = f"semantic__{field['key']}"
+                if key in form.spec.keys:
+                    form.widget_for(key).setEnabled(False)
+        for section in ("semantic", "display", "fit"):
+            key = f"{section}_unavailable"
+            if key in form.spec.keys:
+                form.widget_for(key).setEnabled(False)
 
     def _sync_settings_body_size(self) -> None:
         body = self._settings_body
@@ -997,15 +1025,8 @@ class PanelCardView(FluentGroupBox):
                 runtime=self._signal_runtime,
                 parent=body,
             )
-            self._settings_form.widget_for("signal").setEnabled(bool(self._groups))
             self._settings_form.changed.connect(self._setting_changed)
-            self._settings_form.widget_for("kind").setEnabled(False)
-            if "cell_kind" in self._settings_form.spec.keys:
-                self._settings_form.widget_for("cell_kind").setEnabled(False)
-            for section in ("semantic", "display", "fit"):
-                key = f"{section}_unavailable"
-                if key in self._settings_form.spec.keys:
-                    self._settings_form.widget_for(key).setEnabled(False)
+            self._apply_settings_enabled_state()
             body_layout.addWidget(self._settings_form)
             buttons = QtWidgets.QHBoxLayout()
             buttons.setContentsMargins(0, 0, 0, 0)

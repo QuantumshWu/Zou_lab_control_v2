@@ -87,13 +87,16 @@ def _facet_axis(schema: Any, cell: Any) -> AxisRef | None:
     grid has exactly one facet axis and the two must not claim the same
     thing.  A curve cell walks a scan dimension itself, so the grid faces
     the dimension outside it; an image cell consumes the data axes, leaving
-    every scan point free to have its own cell.
+    the declared scan dimensions as facet candidates.
 
-    Frames of a cycle and points of a scan are different measurements and
-    get a cell each.  Repeats are the same measurement again, so the default
-    reduction keeps pooling them; only an explicitly authored specification
-    may make repeat a facet.  ``None`` means the cell already consumes every
-    non-repeat axis and there is no honest automatic FacetGrid layout.
+    Frames of an unscanned cycle use their real point coordinate and get a
+    cell each.  A multidimensional scan cannot be represented by one hidden
+    flattened axis: its outermost real dimension is the default facet and its
+    other dimensions remain reducible/reassignable in Setting.  Repeats are
+    the same measurement again, so the default reduction keeps pooling them;
+    only an explicitly authored specification may make repeat a facet.
+    ``None`` means the cell already consumes every non-repeat axis and there
+    is no honest automatic FacetGrid layout.
     """
 
     live = live_grid_dimensions(schema)
@@ -121,13 +124,15 @@ def _facet_axis(schema: Any, cell: Any) -> AxisRef | None:
         return None
     if point_axis is not None:
         return point_axis
-    if len(live) == 1:
+    if live:
+        # A FacetGrid owns exactly one facet role.  A multidimensional scan
+        # therefore defaults to its outermost REAL dimension and reduces the
+        # others; the Setting table lets the operator reassign them.  The
+        # flattened point-row ordinal is not another scientific axis.  Using
+        # it here created a phantom ``point`` fate, turned a 10x10x10 scan into
+        # 1000 cells, and left ``scope:point`` behind when the operator tried
+        # to reduce it.
         return AxisRef.point_dimension(live[0])
-    if len(live) >= 2:
-        # One facet axis, two or more scanned dimensions: every point
-        # measured gets its cell rather than one dimension being folded
-        # into the other.
-        return AxisRef.point_rows()
     return None
 
 
@@ -175,7 +180,7 @@ def cell_within_one_cell(schema: Any, facet: Any, cell: Any) -> Any | None:
 
 
 def default_spec(schema: Any) -> FacetGridPlot | None:
-    """One cell per thing measured, showing the densest structure it holds.
+    """One cell per value of one real facet axis, showing dense cell data.
 
     Two questions, asked separately because they are separate: WHAT varies
     from cell to cell (see :func:`_facet_axis`), and what one cell shows.
