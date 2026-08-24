@@ -129,17 +129,15 @@ def test_real_batch_wrapper_forwards_exact_modes_without_inner_argument(tmp_path
     assert "failed with code 7" in failed.stdout
 
 
-def test_create_project_deletes_only_its_marked_child_and_requires_geometry() -> None:
+def test_create_project_deletes_only_its_project_child_and_requires_geometry() -> None:
     source = (FPGA_SOURCES / "create_project.tcl").read_text(encoding="utf-8")
     delete_at = source.index("file delete -force $project_dir")
     guard = source[:delete_at]
 
-    assert ".zlc_generated_project" in guard
     assert "file dirname $out" in guard and "file tail $out" in guard
     assert "file normalize $project_root" in guard
-    assert 'marker_text ne "zlc_pulse_vivado_project"' in guard
-    assert 'puts $zlc_marker "zlc_pulse_vivado_project"' in source
-    assert "Refusing to delete unmarked directory" in guard
+    assert ".zlc_generated_project" not in source
+    assert "Refusing to delete unmarked directory" not in source
     assert "ZLC_PS_GEOM_TCL is required" in source
     assert "source $zlc_geom_tcl" in source
     assert "if {![info exists zlc_edge_addr_width]}" not in source

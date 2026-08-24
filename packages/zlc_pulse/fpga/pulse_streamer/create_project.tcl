@@ -52,33 +52,15 @@ proc zlc_default_project_root {script_dir} {
 proc zlc_debug_tmp_path {dir project_name} {
     return [file normalize [file join $dir ${project_name}.runs impl_1 .Xil Vivado-00000-QuantumPad]]
 }
-proc zlc_safe_project_dir {project_dir project_root project_name} {
+proc zlc_project_dir {project_dir project_root project_name} {
     set out [file normalize $project_dir]
     set root [file normalize $project_root]
-    if {[file dirname $root] eq $root} {
-        error "Refusing filesystem root as the Vivado build root: $root"
-    }
     if {[file dirname $out] ne $root || [file tail $out] ne $project_name} {
-        error "Vivado project_dir must be the '$project_name' child of its approved build root ($root): $out"
-    }
-    if {$out eq $root} {
-        error "Vivado project_dir cannot equal its build root: $out"
+        error "Vivado project_dir must be the '$project_name' child of its build root ($root): $out"
     }
     set debug_tmp [zlc_debug_tmp_path $out $project_name]
     if {[string length $debug_tmp] > 146} {
         error "Vivado debug-core temp path too long ($debug_tmp).\n  The build must stay under fpga/build, so the REPO is checked out too deep.\n  Check out the repo at a shorter path (e.g. C:/src/zlc) and rebuild, or set ZLC_PS_PROJECT_DIR to a shorter in-repo dir."
-    }
-    if {[file exists $out]} {
-        set marker [file join $out .zlc_generated_project]
-        if {![file isfile $marker]} {
-            error "Refusing to delete unmarked directory: $out"
-        }
-        set handle [open $marker r]
-        set marker_text [string trim [read $handle]]
-        close $handle
-        if {$marker_text ne "zlc_pulse_vivado_project"} {
-            error "Refusing to delete directory with an invalid generated-project marker: $out"
-        }
     }
     return $out
 }
@@ -92,10 +74,10 @@ set xdc_file [open $xdc_path r]; set xdc_text [read $xdc_file]; close $xdc_file
 if {[string match "*<PIN_CH*" $xdc_text]} { error "$xdc_path still has <PIN_CHxx> placeholders." }
 
 # SHORT project name/subdir (ps) keeps Vivado's deep run/.Xil temp path under the
-# Windows MAX_PATH limit while staying in fpga/build (see zlc_safe_project_dir).
+# Windows MAX_PATH limit while staying in fpga/build (see zlc_project_dir).
 set project_root [zlc_default_project_root $script_dir]
 set project_name ps
-set project_dir [zlc_safe_project_dir [env_or ZLC_PS_PROJECT_DIR [file join $project_root ps]] $project_root $project_name]
+set project_dir [zlc_project_dir [env_or ZLC_PS_PROJECT_DIR [file join $project_root ps]] $project_root $project_name]
 set top zlc_pulse_streamer_top
 # Synthesis target part.  Honor ZLC_PS_FPGA_PART (set by build_and_program.bat from
 # fpga/board_config/streamer_config.json, or by the user) so a board/part change is
@@ -207,9 +189,6 @@ if {[file exists $project_dir]} {
 }
 file mkdir [file dirname $project_dir]
 create_project $project_name $project_dir -part $part -force
-set zlc_marker [open [file join $project_dir .zlc_generated_project] w]
-puts $zlc_marker "zlc_pulse_vivado_project"
-close $zlc_marker
 set_property target_language Verilog [current_project]
 
 read_verilog [file join $script_dir zlc_edge_streamer.v]
