@@ -268,6 +268,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         # artifact above is the terminal truth.
         preview_signal = calibration_host.signal_key("capture_preview")
         assert preview_signal not in plane.freeze().signals
+        assert "@logic/calibration/review/site_review" not in plane.freeze().signals
         calibration_host.start(
             run_root=tmp_path,
             input_summary=calibration_node.request.to_dict(),

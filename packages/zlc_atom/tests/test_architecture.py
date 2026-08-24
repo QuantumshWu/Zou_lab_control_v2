@@ -546,7 +546,10 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert tuple(
             (preview.output.name, preview.plot_kind)
             for preview in descriptors["calibration"].node_previews
-        ) == (("capture_preview", "facet_grid"),)
+        ) == (
+            ("capture_preview", "facet_grid"),
+            ("site_review", "image"),
+        )
         # A preview is not a Task privilege: an ordinary measurement names the
         # output an operator came to watch in exactly the same words -- and
         # names how to draw it, which for a camera is what it was asked to
@@ -583,6 +586,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
             "frame_source",
             "saved_frames_path",
             "save_frames",
+            "review_detected_sites",
             # And whether the camera is read in photoelectrons: the
             # conversion is configured on the camera, so the choice is a
             # run's, not the analysis's.
@@ -594,6 +598,9 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         assert descriptors["calibration"].authoring_schema.project_values({})[
             "threshold_method"
         ] == "gaussian"
+        assert descriptors["calibration"].authoring_schema.project_values({})[
+            "review_detected_sites"
+        ] is False
         with pytest.raises(ValueError, match="cannot exceed"):
             descriptors["calibration"].authoring_schema.project_values(
                 {

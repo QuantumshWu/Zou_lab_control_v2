@@ -276,6 +276,11 @@ surface仍pool多个repeat/point cells时显示UNKNOWN，不发明跨cells共识
 site vector也会被拒绝。点环尺寸和状态颜色由package style统一解析，不属于可变
 显示参数。
 
+需要operator校对一组稳定point identities时，`review_image_points(...)`
+直接复用现有Image host与`ImagePointOverlay`。它提供单点切换、列表搜索、
+框选后批量exclude/restore，并只返回被排除的point IDs；不复制image数据、
+不创建第二套overlay geometry或plugin-specific绘图路径。
+
 同一 shot 的 image 与动态坐标/状态必须作为一个 `ImageFrame` 发布；frame revision 只来自 snapshot，不建立第二个 frame 时钟。data 与 overlay 作为同一 frame 提交；live fit随后只针对该当前 revision运行。overlay 自身仍保持单调 revision；清空点层使用 `ImagePointOverlay.empty(revision)`。如果 frame 在后台准备期间点层被独立更新，旧 frame 的 CAS 会失败，而不是覆盖较新的点层：
 
 ```python

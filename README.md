@@ -110,6 +110,13 @@ final deployed classifier. Separate report Curves show actual fidelity on all
 Calibration data at that final threshold and Gaussian-model fidelity at the
 analytic threshold.
 
+Calibration can optionally pause once after site detection for operator review.
+TaskConsole shows the detected SiteMap over the reference average; the operator
+may exclude unwanted diffraction/ghost sites by point, list, or rectangle and
+then continue. Capture and detection are not repeated, all downstream models
+are fit once from the retained SiteMap, and the run saves the reviewed map as a
+data-backed Figure plus PNG alongside the ordinary report.
+
 ### Camera and qCMOS
 
 Camera Measurement owns its exposure, ROI, frames-per-cycle and repeat; Pulse

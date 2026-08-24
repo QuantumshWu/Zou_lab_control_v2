@@ -172,6 +172,8 @@ class LogicBinding:
     #: an operator types afterwards is a draft for the next run, and a draft
     #: mid-edit is not even a valid request.
     preview_specs: tuple = ()
+    #: Request already projected into a modal, preventing nested event-loop duplicates.
+    operator_request_id: str = ""
 
 
 def stable_signal_key(node_id: str, output_name: str) -> str:

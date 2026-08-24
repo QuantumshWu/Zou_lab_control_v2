@@ -30,7 +30,11 @@ from zlc_plot import (
 from zlc_plot.primitives import ImageFrame, ImagePointOverlay, PointStatus
 from zlc_plot.specs import validate_authored_display
 from zlc_plot.ui import parameter_controls, parameter_controls_for_kind
-from zlc_runtime import IndexedHistoryLease, selection_output_catalog
+from zlc_runtime import (
+    IndexedHistoryLease,
+    OperatorInputRequest,
+    selection_output_catalog,
+)
 from zlc_ui import FormFieldProps, FormSpec
 
 from .board import LiveBoard
@@ -278,6 +282,8 @@ class ConsolePresenter:
         request_close: Callable[[], None] | None = None,
         run_off_thread: Callable[..., None] | None = None,
         close_worker: Callable[[], bool] | None = None,
+        review_points: Callable[[Any, ImagePointOverlay, OperatorInputRequest], object]
+        | None = None,
     ) -> None:
         if request_close is not None and not callable(request_close):
             raise TypeError("request_close must be callable or None")
@@ -285,6 +291,8 @@ class ConsolePresenter:
             raise TypeError("run_off_thread must be callable or None")
         if close_worker is not None and not callable(close_worker):
             raise TypeError("close_worker must be callable or None")
+        if review_points is not None and not callable(review_points):
+            raise TypeError("review_points must be callable or None")
         self.session = session
         self.view = view
         self._make_host = make_host
@@ -297,6 +305,7 @@ class ConsolePresenter:
         self._request_close = request_close
         self._run_off_thread = _run_inline if run_off_thread is None else run_off_thread
         self._close_worker = (lambda: True) if close_worker is None else close_worker
+        self._review_points = review_points
         self.logic: dict[str, LogicBinding] = {}
         self.catalog = LogicCatalog()
         # Task identity is a command-admission projection only.  Its lifecycle,
@@ -4124,6 +4133,89 @@ class ConsolePresenter:
         for panel_id in tracked:
             self._remove_panel_now(panel_id)
 
+    def _operator_point_review(
+        self, binding: LogicBinding, request: OperatorInputRequest
+    ) -> None:
+        host = binding.host
+        if host is None:
+            return
+        output_name = str(request.payload.get("output_name", "")).strip()
+        producer = str(request.payload.get("producer", "")).strip()
+        owner = binding.node_id if not producer else f"{binding.node_id}/{producer}"
+        signal = stable_signal_key(owner, output_name)
+        front = self.session.signal_plane.freeze()
+        publication = front.publication(signal)
+        value = front.value(signal)
+        if publication is None or value is None:
+            raise RuntimeError("operator point review has no published image")
+        snapshot = self._presentation_snapshot(
+            signal, value, publication, primary_window=1
+        )
+        geometry = publication.run_record.get(
+            IMAGE_POINT_OVERLAY_GEOMETRY_RECORD
+        )
+        if not isinstance(geometry, Mapping):
+            raise RuntimeError("operator point review image has no point geometry")
+        point_ids = tuple(str(value) for value in geometry["point_ids"])
+        requested_ids = tuple(
+            str(value) for value in request.payload.get("point_ids", ())
+        )
+        if requested_ids != point_ids:
+            raise RuntimeError("operator point review identities differ from the image")
+        overlay = ImagePointOverlay(
+            revision=1,
+            coordinates=geometry["coordinates_xy"],
+            point_ids=point_ids,
+            labels=tuple(str(value) for value in geometry["labels"]),
+            static_statuses=tuple(PointStatus.UNKNOWN for _ in point_ids),
+        )
+        state = PanelState(
+            signal=signal,
+            kind=PlotKind.IMAGE.value,
+            cell_kind="",
+            size="4x4",
+            interval_ms=self._default_interval_ms,
+            title=request.title,
+        )
+        review_host = self._make_host(ImageFrame(snapshot, overlay), state)
+        try:
+            reviewer = self._review_points
+            if reviewer is None:
+                raise RuntimeError("TaskConsole has no point-review UI")
+            excluded = reviewer(review_host, overlay, request)
+            if excluded is None:
+                host.cancel("operator cancelled site review")
+            else:
+                host.submit_operator_input(
+                    request.request_id,
+                    {"excluded_point_ids": tuple(str(value) for value in excluded)},
+                )
+        finally:
+            self._retire_plot_host(review_host)
+
+    def _handle_operator_request(self, binding: LogicBinding) -> None:
+        host = binding.host
+        request = None if host is None else host.operator_request
+        if request is None:
+            binding.operator_request_id = ""
+            return
+        if binding.operator_request_id == request.request_id:
+            return
+        binding.operator_request_id = request.request_id
+        try:
+            if request.kind != "point-selection":
+                raise RuntimeError(
+                    f"TaskConsole does not support operator request {request.kind!r}"
+                )
+            self._operator_point_review(binding, request)
+        except BaseException as error:
+            if host is not None and host.running:
+                host.cancel(f"operator input failed: {_error_text(error)}")
+            self._report(
+                f"{binding.node_id}: operator input failed: {_error_text(error)}",
+                severity="error",
+            )
+
     def _finish_task_takeover(
         self,
         binding: LogicBinding,
@@ -4744,6 +4836,7 @@ class ConsolePresenter:
                 if not self._closing:
                     self._capture_artifact_results(binding)
                     self._ensure_node_previews(binding)
+                    self._handle_operator_request(binding)
                 if not binding.host.running and binding.lease is not None:
                     binding.lease.release()
                     binding.lease = None

@@ -55,6 +55,13 @@ the Task can complete. Stop and failure keep the directory and every registered
 file. A Task may explicitly accept Stop before its irreversible terminal work;
 any later exception is still a failure.
 
+A hosted Task may expose one active `OperatorInputRequest` through `NodeHost`
+and wait in its worker without polling. The response names that exact request;
+stale or duplicate responses are rejected, and Stop wakes the worker and
+cancels the wait. Runtime owns only this toolkit-neutral lifecycle—the
+Workbench chooses the UI for each request kind and plugin science remains in
+the Task.
+
 The installed product is the repository-root ZLC distribution; this directory
 is an internal dependency layer. Target invariants and current implementation
 status are recorded in the root Architecture and Implementation Plan.

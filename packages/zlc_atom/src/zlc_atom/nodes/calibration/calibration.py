@@ -2561,6 +2561,7 @@ def calibrate(
     psf_padding: int = 3,
     detection_spot_sigma: float = 1.0,
     detection_sigma: float = 6.0,
+    site_map_filter: Callable[[SiteMap, np.ndarray], SiteMap] | None = None,
 ) -> CalibrationResult:
     """Discover sites and fit all readout models from one complete capture."""
 
@@ -2579,6 +2580,8 @@ def calibrate(
     box_reducer = str(box_reducer).lower()
     if box_reducer not in {"mean", "sum", "median", "max"}:
         raise ValueError("box_reducer must be mean, sum, median, or max")
+    if site_map_filter is not None and not callable(site_map_filter):
+        raise TypeError("site_map_filter must be callable or None")
 
     references = _coerce_reference_stack(reference_frames, frame_contract)
     shorts = _coerce_short_stack(short_frames, frame_contract)
@@ -2599,6 +2602,10 @@ def calibrate(
         # cannot carry all of them is not a site THIS calibration can use.
         measurement_radius=measurement_radius,
     )
+    if site_map_filter is not None:
+        site_map = site_map_filter(site_map, reference_average)
+        if not isinstance(site_map, SiteMap) or not site_map.n_sites:
+            raise ValueError("site_map_filter must retain a non-empty SiteMap")
     centers = site_map.centers_xy
 
     box_extractor: Callable[[np.ndarray], np.ndarray] = lambda frame: extract_box_signals(

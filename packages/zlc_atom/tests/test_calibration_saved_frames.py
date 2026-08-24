@@ -13,7 +13,10 @@ import pytest
 
 from zlc_atom.install import create_installation
 from zlc_atom.devices.camera.contract import CameraFrameRecord, CameraWorkingPoint
-from zlc_atom.nodes.calibration.outputs import CAPTURE_PREVIEW_DECLARATION
+from zlc_atom.nodes.calibration.outputs import (
+    CAPTURE_PREVIEW_DECLARATION,
+    SITE_REVIEW_DECLARATION,
+)
 from zlc_atom.nodes.calibration.logic_node import LOGIC_NODE as CALIBRATION_LOGIC_NODE
 from zlc_atom.nodes.calibration.task import (
     FRAMES_FROM_FOLDER,
@@ -241,6 +244,80 @@ def test_a_replay_publishes_what_the_node_declares(tmp_path: Path) -> None:
     finally:
         if host is not None:
             host.shutdown()
+        plane.close()
+
+
+def test_site_review_filters_once_then_runs_the_complete_analysis(tmp_path: Path) -> None:
+    acquired_request = replace(_calibration_request(repeats=8), save_frames=True)
+    acquired = _task(acquired_request).run(tmp_path)
+    folder = acquired.artifact_path.parents[1] / "figures"
+    request = replace(
+        acquired_request,
+        save_frames=False,
+        frame_source=FRAMES_FROM_FOLDER,
+        saved_frames_path=str(folder),
+        review_detected_sites=True,
+    )
+    plane = SignalDataPlane()
+    task = _task(request)
+    task.signal_plane = plane
+    wake = Event()
+    host = NodeHost(
+        task,
+        plane,
+        wake.set,
+        instance_id="calibration-review",
+        kind="task",
+        dataset_output_declarations=CALIBRATION_LOGIC_NODE.outputs,
+        required_artifacts={
+            "artifact_path": CALIBRATION_LOGIC_NODE.artifact_outputs[0].contract_id
+        },
+        task_name=CALIBRATION_LOGIC_NODE.api_name,
+    )
+    try:
+        host.start(run_root=tmp_path, input_summary=request.to_dict())
+        deadline = time.monotonic() + 60.0
+        while (
+            host.operator_request is None
+            and not host.terminal
+            and time.monotonic() < deadline
+        ):
+            host.poll()
+            wake.wait(0.01)
+            wake.clear()
+        review = host.operator_request
+        assert review is not None and review.kind == "point-selection", host.observation
+        point_ids = tuple(review.payload["point_ids"])
+        assert len(point_ids) > 1
+        publication = plane.latest_publication(
+            f"@logic/{host.instance_id}/review/{SITE_REVIEW_DECLARATION.name}"
+        )
+        assert publication is not None
+        excluded = point_ids[-1:]
+        host.submit_operator_input(
+            review.request_id, {"excluded_point_ids": excluded}
+        )
+        while not host.terminal and time.monotonic() < deadline:
+            host.poll()
+            wake.wait(0.01)
+            wake.clear()
+        assert host.observation.phase == "done", host.observation
+        result = host.final_result
+        assert isinstance(result, CalibrationRunResult)
+        assert result.calibration.site_map.n_sites == len(point_ids) - 1
+        assert result.summary["site_review"] == {
+            "detected_sites": len(point_ids),
+            "excluded_site_ids": excluded,
+            "retained_sites": len(point_ids) - 1,
+        }
+        run_root = result.artifact_path.parents[1]
+        assert (run_root / "figures" / "site_review.npz").is_file()
+        assert (run_root / "figures" / "site_review.png").is_file()
+    finally:
+        if host.running:
+            host.cancel("test cleanup")
+            host.poll()
+        host.shutdown()
         plane.close()
 
 

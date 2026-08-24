@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -53,6 +53,7 @@ from .calibration import (
     CalibrationResult,
     FrameContract,
     ReadoutModelKind,
+    SiteMap,
     TrapCalibration,
     calibrate,
 )
@@ -60,9 +61,11 @@ from .bimodal import BimodalFit
 from .summary import readout_summary, summary_lines
 from .outputs import (
     CAPTURE_PREVIEW_DECLARATION,
+    SITE_REVIEW_DECLARATION,
     capture_preview_output,
     cycle_snapshot,
     site_map_image_overlay,
+    site_review_output,
     _image_axis_specs,
     _snapshot,
 )
@@ -148,6 +151,8 @@ class CalibrationRequest:
     photoelectrons: bool = True
     #: Whether every acquired sample is written to disk as it arrives.
     save_frames: bool = False
+    #: Pause after detection so the operator can remove optical ghost sites.
+    review_detected_sites: bool = False
     #: Where the frames come from: the camera, or a folder of saved samples.
     frame_source: str = FRAMES_FROM_CAMERA
     #: That folder, when they come from one.
@@ -235,6 +240,9 @@ class CalibrationRequest:
         object.__setattr__(self, "detection_sigma", detection_sigma)
         object.__setattr__(self, "photoelectrons", bool(self.photoelectrons))
         object.__setattr__(self, "save_frames", bool(self.save_frames))
+        object.__setattr__(
+            self, "review_detected_sites", bool(self.review_detected_sites)
+        )
         object.__setattr__(self, "frame_source", frame_source)
         object.__setattr__(self, "saved_frames_path", saved_frames_path)
 
@@ -259,6 +267,7 @@ class CalibrationRequest:
             "detection_sigma": self.detection_sigma,
             PHOTOELECTRONS: self.photoelectrons,
             "save_frames": self.save_frames,
+            "review_detected_sites": self.review_detected_sites,
             "frame_source": self.frame_source,
             "saved_frames_path": self.saved_frames_path,
         }
@@ -754,6 +763,43 @@ def _save_report_images(
         ),
     )
 
+    review = result.report.get("site_review")
+    if isinstance(review, Mapping):
+        candidate_ids = tuple(str(value) for value in review["candidate_site_ids"])
+        candidate = SiteMap(
+            candidate_ids,
+            np.asarray(review["candidate_centers_xy"], dtype=float),
+            np.asarray(review["candidate_valid_sites"], dtype=bool),
+            np.asarray(review["candidate_quality"], dtype=float),
+            str(review["coordinate_frame"]),
+            None,
+        )
+        excluded = {str(value) for value in review["excluded_site_ids"]}
+        review_overlay = site_map_image_overlay(
+            site_map_snapshot,
+            candidate,
+            revision=revision,
+            static_statuses=tuple(
+                PointStatus.INVALID
+                if site_id in excluded
+                else PointStatus.UNKNOWN
+                for site_id in candidate.site_ids
+            ),
+        )
+        save(
+            "site_review",
+            ImageFrame(site_map_snapshot, review_overlay),
+            ImagePlot(
+                AxisRef.data("calibration.image.x"),
+                AxisRef.data("calibration.image.y"),
+                labels=PlotLabels(
+                    title="Reviewed detected sites",
+                    x="x (pixel)",
+                    y="y (pixel)",
+                ),
+            ),
+        )
+
     # ONE declaration of site identity, owned by the SiteMap that measured it.
     # A site array is one image resampled onto the trap lattice: cell data, not
     # a scan.  This replaces both a TEXT site point column (unplottable) and the
@@ -1007,6 +1053,39 @@ def _sequencer_snapshot(sequencer: object) -> dict[str, object]:
     }
 
 
+class _SiteReviewPublisher:
+    """One short-lived companion producer for the operator review image."""
+
+    dataset_output_declarations = (SITE_REVIEW_DECLARATION,)
+
+    def __init__(self, signal_plane: object, instance_id: str) -> None:
+        self.signal_plane = signal_plane
+        self.instance_id = str(instance_id)
+        self._active = False
+
+    def signal_key(self, name: str) -> str:
+        if str(name) != SITE_REVIEW_DECLARATION.name:
+            raise KeyError(name)
+        return f"@logic/{self.instance_id}/{name}"
+
+    def begin(self) -> object:
+        generation = self.signal_plane.begin_generation(self)
+        self._active = True
+        return generation
+
+    def publish(self, output: object) -> None:
+        if not self._active:
+            raise RuntimeError("site review publisher is not active")
+        self.signal_plane.commit_live(
+            self, {SITE_REVIEW_DECLARATION.name: output}
+        )
+
+    def close(self) -> None:
+        if self._active:
+            self.signal_plane.retire(self)
+            self._active = False
+
+
 class CalibrationTask:
     """Drive one protocol, publish its preview, and save its result and plots."""
 
@@ -1041,6 +1120,7 @@ class CalibrationTask:
         self.signal_plane = signal_plane
         self._actual_working_point: CameraWorkingPoint | None = None
         self._result: CalibrationRunResult | None = None
+        self._site_review_record: dict[str, object] | None = None
 
     @property
     def request(self) -> CalibrationRequest:
@@ -1461,7 +1541,10 @@ class CalibrationTask:
         self,
         capture: CalibrationCapture,
         contract: FrameContract,
+        context: object | None,
+        run_record: Mapping[str, object],
     ) -> CalibrationResult:
+        site_map_filter = self._site_map_filter(context, contract, run_record)
         return calibrate(
             capture.reference,
             capture.short,
@@ -1474,7 +1557,142 @@ class CalibrationTask:
             psf_padding=self.request.psf_padding,
             detection_spot_sigma=self.request.detection_spot_sigma,
             detection_sigma=self.request.detection_sigma,
+            site_map_filter=site_map_filter,
         )
+
+    def _site_map_filter(
+        self,
+        context: object | None,
+        contract: FrameContract,
+        run_record: Mapping[str, object],
+    ) -> Callable[[SiteMap, np.ndarray], SiteMap] | None:
+        if not self.request.review_detected_sites:
+            return None
+        if context is None or not callable(
+            getattr(context, "request_operator_input", None)
+        ):
+            raise RuntimeError(
+                "review_detected_sites requires a hosted operator-input owner"
+            )
+
+        def review(candidate: SiteMap, reference_average: np.ndarray) -> SiteMap:
+            roi = contract.roi_xywh
+            origin_yx = (
+                (0, 0) if roi is None else (int(roi[1]), int(roi[0]))
+            )
+            request_record = run_record.get("request")
+            actual_devices = run_record.get("actual_devices")
+            camera_record = (
+                actual_devices.get(self.request.camera_key, {})
+                if isinstance(actual_devices, Mapping)
+                else {}
+            )
+            photoelectrons = bool(
+                request_record.get(PHOTOELECTRONS, False)
+                if isinstance(request_record, Mapping)
+                else False
+            )
+            value_unit = (
+                None
+                if photoelectrons or not isinstance(camera_record, Mapping)
+                else camera_record.get("count_unit")
+            )
+            publisher = _SiteReviewPublisher(
+                self.signal_plane, f"{context.instance_id}/review"
+            )
+            generation = publisher.begin()
+            try:
+                output = site_review_output(
+                    reference_average,
+                    candidate,
+                    origin_yx=origin_yx,
+                    binning_yx=contract.binning_yx,
+                    generation=generation,
+                    revision=1,
+                    run_record=run_record,
+                    value_unit=None if value_unit is None else str(value_unit),
+                )
+                publisher.publish(output)
+                context.report_progress(
+                    f"Waiting for review of {candidate.n_sites} detected sites"
+                )
+                response = context.request_operator_input(
+                    "point-selection",
+                    title="Review detected calibration sites",
+                    message=(
+                        "Exclude high-order diffraction or other unwanted sites, "
+                        "then continue with the retained SiteMap."
+                    ),
+                    payload={
+                        "producer": "review",
+                        "output_name": SITE_REVIEW_DECLARATION.name,
+                        "point_ids": candidate.site_ids,
+                        "confirm_label": "Continue calibration",
+                    },
+                )
+            finally:
+                publisher.close()
+            raw_excluded = response.get("excluded_point_ids", ())
+            if isinstance(raw_excluded, (str, bytes)):
+                raise TypeError("excluded_point_ids must be a sequence")
+            excluded = tuple(str(value) for value in raw_excluded)
+            if len(set(excluded)) != len(excluded):
+                raise ValueError("excluded site ids must be unique")
+            unknown = set(excluded) - set(candidate.site_ids)
+            if unknown:
+                raise ValueError(
+                    f"operator excluded unknown site ids {sorted(unknown)!r}"
+                )
+            excluded_set = set(excluded)
+            keep = np.asarray(
+                [site_id not in excluded_set for site_id in candidate.site_ids],
+                dtype=bool,
+            )
+            if not np.any(keep):
+                raise ValueError("site review must retain at least one site")
+            kept_indices = np.flatnonzero(keep)
+            final_ids = tuple(
+                f"site_{index:04d}" for index in range(len(kept_indices))
+            )
+            retained_candidate_ids = tuple(
+                candidate.site_ids[index] for index in kept_indices
+            )
+            final = SiteMap(
+                final_ids,
+                np.asarray(candidate.centers_xy)[kept_indices],
+                np.asarray(candidate.valid_sites)[kept_indices],
+                np.asarray(candidate.quality)[kept_indices],
+                candidate.coordinate_frame,
+                None,
+            )
+            self._site_review_record = {
+                "candidate_site_ids": list(candidate.site_ids),
+                "candidate_centers_xy": np.asarray(
+                    candidate.centers_xy, dtype=float
+                ).tolist(),
+                "candidate_quality": np.asarray(
+                    candidate.quality, dtype=float
+                ).tolist(),
+                "candidate_valid_sites": np.asarray(
+                    candidate.valid_sites, dtype=bool
+                ).tolist(),
+                "coordinate_frame": str(
+                    getattr(
+                        candidate.coordinate_frame,
+                        "value",
+                        candidate.coordinate_frame,
+                    )
+                ),
+                "excluded_site_ids": list(excluded),
+                "retained_candidate_site_ids": list(retained_candidate_ids),
+                "final_site_ids": list(final_ids),
+            }
+            context.report_progress(
+                f"Accepted {final.n_sites} of {candidate.n_sites} detected sites"
+            )
+            return final
+
+        return review
 
     def _run(
         self,
@@ -1485,6 +1703,11 @@ class CalibrationTask:
         self._result = None
         self._partial_cycles_completed = 0
         self._partial_result: CalibrationRunResult | None = None
+        self._site_review_record = None
+        if self.request.review_detected_sites and context is None:
+            raise RuntimeError(
+                "review_detected_sites requires a hosted TaskConsole run"
+            )
         try:
             # TaskRun names the run's own folder BEFORE anything is acquired, so
             # the frames can be written into it as they arrive rather than
@@ -1547,9 +1770,19 @@ class CalibrationTask:
                 writer.render()
             if context is not None:
                 context.report_progress("Analysing calibration")
-            analysis = self._analyse(capture, contract)
+            analysis = self._analyse(capture, contract, context, run_record)
+            if self._site_review_record is not None:
+                analysis = CalibrationResult(
+                    analysis.calibration,
+                    {
+                        **dict(analysis.report),
+                        "site_review": dict(self._site_review_record),
+                    },
+                )
             artifact_report = dict(analysis.calibration.report)
             artifact_report["run_record"] = run_record
+            if self._site_review_record is not None:
+                artifact_report["site_review"] = dict(self._site_review_record)
             calibration = TrapCalibration(
                 analysis.calibration.site_map,
                 analysis.calibration.models,
@@ -1571,6 +1804,20 @@ class CalibrationTask:
                 role="final",
                 contract_id=TrapCalibration.CONTRACT_ID,
             )
+            summary = readout_summary(analysis, run_chain=(run_record,))
+            if self._site_review_record is not None:
+                summary = {
+                    **summary,
+                    "site_review": {
+                        "detected_sites": len(
+                            self._site_review_record["candidate_site_ids"]
+                        ),
+                        "excluded_site_ids": list(
+                            self._site_review_record["excluded_site_ids"]
+                        ),
+                        "retained_sites": calibration.n_sites,
+                    },
+                }
             result = CalibrationRunResult(
                 artifact_path,
                 calibration,
@@ -1578,7 +1825,7 @@ class CalibrationTask:
                 capture,
                 pulse_facts,
                 run_record,
-                readout_summary(analysis, run_chain=(run_record,)),
+                summary,
             )
             self._partial_result = result
             if context is not None:

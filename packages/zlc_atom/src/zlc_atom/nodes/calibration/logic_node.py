@@ -21,7 +21,7 @@ from zlc_pulse import PulseSequence
 
 from .artifact import CALIBRATION_ARTIFACT_CODEC
 from .calibration import ReadoutModelKind
-from .outputs import CAPTURE_PREVIEW_DECLARATION
+from .outputs import CAPTURE_PREVIEW_DECLARATION, SITE_REVIEW_DECLARATION
 from .pulse import load_calibration_pulse_template
 from .task import (
     FRAMES_FROM_CAMERA,
@@ -203,6 +203,12 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             False,
             enabled_when=("frame_source", (FRAMES_FROM_CAMERA,)),
         ),
+        AuthoringField(
+            "review_detected_sites",
+            "bool",
+            "Review detected sites",
+            False,
+        ),
         photoelectron_switch(enabled_when=("frame_source", (FRAMES_FROM_CAMERA,))),
     ),
     validator=_validate_calibration,
@@ -251,6 +257,7 @@ def _build(
             detection_spot_sigma=float(authored["detection_spot_sigma"]),
             detection_sigma=float(authored["detection_sigma"]),
             save_frames=bool(authored["save_frames"]),
+            review_detected_sites=bool(authored["review_detected_sites"]),
             photoelectrons=bool(authored[PHOTOELECTRONS]),
             frame_source=str(authored["frame_source"]),
             saved_frames_path=str(authored["saved_frames_path"]),
@@ -273,6 +280,7 @@ LOGIC_NODE = LogicNodeDescriptor(
     # and this is physics.
     node_previews=(
         NodePreviewSpec(CAPTURE_PREVIEW_DECLARATION, "facet_grid"),
+        NodePreviewSpec(SITE_REVIEW_DECLARATION, "image", producer="review"),
     ),
     artifact_outputs=(
         ArtifactOutputSpec("artifact_path", CALIBRATION_ARTIFACT_CODEC.contract_id),

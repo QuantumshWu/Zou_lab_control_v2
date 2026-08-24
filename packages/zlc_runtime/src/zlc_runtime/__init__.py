@@ -26,7 +26,7 @@ from .selection_bridge import (
     SelectionState,
     selection_output_catalog,
 )
-from .host import NodeHost
+from .host import NodeHost, OperatorInputRequest
 from .task_run import TaskArtifact, TaskRun
 
 __all__ = (
@@ -44,6 +44,7 @@ __all__ = (
     "SignalPublication",
     "SignalDescription",
     "NodeHost",
+    "OperatorInputRequest",
     "TaskArtifact",
     "TaskRun",
     "SelectionBridge",

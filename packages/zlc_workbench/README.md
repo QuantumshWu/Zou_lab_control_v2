@@ -47,6 +47,13 @@ Task's own outputs. At Task terminal, auto-preview panels whose Monitor signals
 retire are removed, while a retained Runtime camera dataset and the durable
 Task artifact keep their respective data and product truth.
 
+If a hosted Task publishes one active Runtime operator-input request,
+TaskConsole opens the request-kind interaction only after its referenced
+publication exists. Calibration's point-selection request uses the same image
+host and stable point identities as its companion Monitor preview; cancelling
+the dialog is Task Stop, while confirmation answers only that exact request.
+Workbench does not interpret which sites are scientifically valid.
+
 Finite exact signals have one presentation identity independent of Panel
 semantics: Logic shape, live Panel, Edit/Refresh/Save, selector, fit and overlay
 all use the accepted canonical full Dataset for that publication. Event chunks

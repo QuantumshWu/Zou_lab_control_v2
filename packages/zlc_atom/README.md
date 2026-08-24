@@ -148,6 +148,14 @@ separate Curve artifacts report actual fidelity on all Calibration data at that
 final threshold and theoretical Gaussian fidelity at the analytic Gaussian
 threshold.
 
+The optional detected-site review is a Calibration Task boundary, not part of
+the headless fitting mathematics. After capture and one detection pass, the
+Task publishes the candidate SiteMap over the reference average and waits for
+the operator to exclude zero or more unwanted sites. It then constructs the
+final continuously numbered SiteMap and runs every downstream model once. The
+candidate/excluded/final identity mapping is saved in the report and summary,
+with a `site_review` Figure/PNG pair.
+
 Logic Nodes commit `zlc-data` role-axis event chunks, so repeat, site, and
 readout-event meaning is carried by `DatasetSchema` rather than inferred from
 array shape. Runtime owns their accumulated current/partial/final
@@ -217,9 +225,11 @@ grid rows, columns, or site count. Feedback later combines that ordinary
 Calibration with its selected Science Context and directly maps positive Target
 X/Y to camera X/Y; flips, rotations and axis exchange are not considered.
 Missing weak sites become predicted boxes, so a regular symmetric grid needs
-no artificial fiducial. While hosted Calibration publishes
-only the current `capture_preview` for Monitor. When the loop finishes it
-computes one result, writes one plain JSON, and passes that same result to
+no artificial fiducial. Hosted Calibration always publishes the current
+`capture_preview`; when detected-site review is enabled it additionally uses a
+short-lived `review/site_review` companion preview while the operator chooses
+candidate sites. When the loop finishes it computes one result, writes one
+plain JSON, and passes that same result to
 `zlc_plot` for data-backed report Figures. Every important plot has a
 FigureViewer-readable NPZ and a same-stem PNG preview. Workbench neither
 reconstructs the science nor owns those files, and no calibration object/report

@@ -39,6 +39,9 @@ if TYPE_CHECKING:
 CAPTURE_PREVIEW_DECLARATION = DatasetOutputDeclaration(
     "capture_preview", "calibration.capture-preview"
 )
+SITE_REVIEW_DECLARATION = DatasetOutputDeclaration(
+    "site_review", "calibration.site-review"
+)
 
 #: One calibration acquisition fires three camera windows -- long, readout,
 #: long -- and they are three POINTS of the cycle, not three looks at the same
@@ -326,9 +329,69 @@ def capture_preview_output(
     )
 
 
+def site_review_output(
+    image: object,
+    site_map: "SiteMap",
+    *,
+    origin_yx: tuple[int, int],
+    binning_yx: tuple[int, int],
+    generation: object,
+    revision: int,
+    run_record: Mapping[str, object],
+    value_unit: str | None,
+) -> LiveDatasetOutput:
+    """Publish one detected candidate SiteMap over its reference average."""
+
+    values = np.asarray(image)
+    if values.ndim != 2:
+        raise ValueError("site review image must be two-dimensional")
+    snapshot = _snapshot(
+        values[np.newaxis, ...],
+        signal=SITE_REVIEW_DECLARATION.name,
+        roles=(SPATIAL_Y, SPATIAL_X),
+        axis_specs=_image_axis_specs(
+            tuple(values.shape),
+            "sensor_pixel_xy",
+            origin_yx=origin_yx,
+            binning_yx=binning_yx,
+        ),
+        value_unit=value_unit,
+        generation=generation,
+        revision=revision,
+    )
+    from zlc_plot import (
+        IMAGE_POINT_OVERLAY_GEOMETRY_RECORD,
+        image_point_overlay_geometry,
+    )
+
+    site_axis = site_map.site_axis
+    labels = tuple(
+        str(site_axis.coordinate_at(index)) for index in range(site_map.n_sites)
+    )
+    geometry = image_point_overlay_geometry(
+        snapshot,
+        site_map.centers_xy,
+        site_map.site_ids,
+        status_axis=site_axis,
+        labels=labels,
+        coordinates_are_indices=True,
+    )
+    return LiveDatasetOutput(
+        SITE_REVIEW_DECLARATION,
+        snapshot,
+        MonitorCoverage(1, 1),
+        {
+            **dict(run_record),
+            IMAGE_POINT_OVERLAY_GEOMETRY_RECORD: geometry,
+        },
+    )
+
+
 __all__ = [
     "CAPTURE_PREVIEW_DECLARATION",
+    "SITE_REVIEW_DECLARATION",
     "capture_preview_output",
     "cycle_snapshot",
+    "site_review_output",
     "site_map_image_overlay",
 ]

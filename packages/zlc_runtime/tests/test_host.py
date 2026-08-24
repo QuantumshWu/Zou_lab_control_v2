@@ -191,6 +191,63 @@ def test_measurement_commits_live_then_runtime_seals_and_clears_progress() -> No
         plane.close()
 
 
+def test_task_operator_input_is_exactly_answered_or_stopped(tmp_path: Path) -> None:
+    declaration = DatasetOutputDeclaration("review", "test.operator-review")
+    wake = Event()
+    plane = SignalDataPlane()
+
+    class Node:
+        def execute(self, context):
+            context.report_progress("waiting for operator")
+            context.commit_live({"review": _monitor_output(declaration, 1)})
+            return dict(
+                context.request_operator_input(
+                    "manual-value",
+                    title="Set the device",
+                    message="Enter the observed value",
+                    payload={"field": "voltage"},
+                )
+            )
+
+    def waiting(host: NodeHost) -> object:
+        deadline = time.monotonic() + 3.0
+        while host.operator_request is None and time.monotonic() < deadline:
+            wake.wait(0.01)
+            wake.clear()
+        request = host.operator_request
+        assert request is not None
+        return request
+
+    host = _host(
+        Node(),
+        plane,
+        wake,
+        instance_id="interactive-task",
+        kind="task",
+        outputs=(declaration,),
+    )
+    try:
+        host.start(run_root=tmp_path, input_summary={})
+        request = waiting(host)
+        assert request.kind == "manual-value"
+        assert request.payload == {"field": "voltage"}
+        with pytest.raises(RuntimeError, match="does not match"):
+            host.submit_operator_input("stale", {"value": 3.0})
+        host.submit_operator_input(request.request_id, {"value": 3.0})
+        assert _wait(host, wake).phase == "done"
+        assert host.final_result == {"value": 3.0}
+        assert host.operator_request is None
+        host.start(run_root=tmp_path, input_summary={})
+        next_request = waiting(host)
+        assert next_request.request_id != request.request_id
+        host.cancel("operator stopped the review")
+        assert _wait(host, wake).phase == "cancelled"
+        assert host.operator_request is None
+    finally:
+        host.shutdown()
+        plane.close()
+
+
 def test_finite_commits_do_not_materialize_the_canonical_dataset(
     monkeypatch,
 ) -> None:

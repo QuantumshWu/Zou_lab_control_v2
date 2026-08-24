@@ -153,6 +153,25 @@ def build_console(session, *, window_ratio=None, request_close=None):
         )
 
     run_save, close_save_worker = attach_qt_worker("zlc-panel-save")
+
+    def _review_points(host, overlay, request):
+        def opener(review_host, parent, *, title):
+            return plot.review_image_points(
+                review_host,
+                overlay,
+                parent,
+                title=title,
+                message=request.message,
+                confirm_label=str(
+                    request.payload.get("confirm_label", "Continue")
+                ),
+                initial_excluded=tuple(
+                    request.payload.get("initial_excluded", ())
+                ),
+            )
+
+        return view.run_host_dialog(opener, host, title=request.title)
+
     try:
         presenter = ConsolePresenter(
             session,
@@ -163,6 +182,7 @@ def build_console(session, *, window_ratio=None, request_close=None):
             request_close=view.close_later if request_close is None else request_close,
             run_off_thread=run_save,
             close_worker=close_save_worker,
+            review_points=_review_points,
         )
     except BaseException:
         close_save_worker()

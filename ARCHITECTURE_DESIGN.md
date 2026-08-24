@@ -113,6 +113,7 @@ Node new chunk
 - Descriptor outputs、runtime declarations和preview references只有一份typed vocabulary。
 - Concrete Logic Node不得要求Workbench识别其模块、output spelling或domain helper；通用显示/overlay/selection能力由中立层contract表达，Workbench只路由contract。
 - 通用discovery test必须走真实NodeHost、SignalDataPlane和preview contract。
+- Hosted Task需要人工决定时，只能通过NodeHost同时公开一个带唯一request identity的operator-input request并在worker内等待；Workbench按request kind提供交互，response必须精确匹配当前request。Stop唤醒并取消等待，不使用轮询、第二条Task lifecycle或plugin-specific Workbench状态。未来人工Scan axis复用这个lifecycle，但其业务与UI不属于Calibration实现。
 
 ### 4.4 TaskRun与durable artifacts
 
@@ -263,6 +264,7 @@ Node new chunk
 ## 9. Calibration、Scan与Simulation
 
 - Calibration保持既有科学流程、当前artifact和三帧preview。
+- Calibration可由operator显式开启detected-site review：采集与site detection都只执行一次；检测完成后由同一run的短期companion producer发布reference average与candidate SiteMap，TaskConsole允许单点或框选排除高阶衍射/ghost site。确认后只用保留站点构造最终SiteMap并执行一次全部下游拟合；不重新采集、不重新检测、不二次确认。最终报告同时保存candidate/excluded/final identity映射和可由FigureViewer重开的`site_review` Figure/PNG；不开启时外部行为与artifact集合不变。
 - 允许不改变外部行为的dependency解耦、明确corruption修复和内存优化。
 - Calibration只产生与SLM无关的camera/readout artifact，UI和Task都不接受Science Context。SLM Feedback在同时拿到Calibration与Context后做Target X/Y→camera X/Y直接正向注册，并为未观测site生成predicted BOX；不枚举翻转、旋转或轴交换。
 - BOX model仍为Calibration/Occupancy持久化自己的readout事实；Feedback只取BOX geometry。未观测Target site由注册产生predicted BOX，并与实测site一起接受本次run的双高斯估计，不伪造Calibration dark/bright样本。

@@ -229,6 +229,13 @@ def summary_lines(summary: Mapping[str, Any]) -> tuple[str, ...]:
         f"{summary['run']['sites']} sites over {summary['run']['samples']} samples, "
         f"loading {_percent(summary['run']['loading_rate']['median'])}"
     ]
+    review = summary.get("site_review")
+    if isinstance(review, Mapping):
+        lines.append(
+            f"site review retained {int(review['retained_sites'])}/"
+            f"{int(review['detected_sites'])}; excluded "
+            f"{', '.join(str(value) for value in review['excluded_site_ids']) or 'none'}"
+        )
     for name, entry in summary["models"].items():
         # A leading space is not allowed here: these lines are also reported
         # as node progress, and a progress message is canonical text.

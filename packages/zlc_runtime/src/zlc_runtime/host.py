@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 import threading
+from types import MappingProxyType
 
 from zlc_data import OwnedSnapshot, canonical_text
 
@@ -23,6 +24,7 @@ __all__ = [
     "LogicNodeObservation",
     "NodeExecutionContext",
     "NodeHost",
+    "OperatorInputRequest",
     "NodeProgress",
     "TaskArtifact",
     "TaskRun",
@@ -65,6 +67,37 @@ class NodeProgress:
         if self.current is None:
             return self.message
         return f"{self.message} {self.current}/{self.total}"
+
+
+@dataclass(frozen=True, slots=True)
+class OperatorInputRequest:
+    """One active worker request for an operator-authored response."""
+
+    request_id: str
+    kind: str
+    title: str
+    message: str
+    payload: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "request_id", canonical_text(self.request_id, "operator request id")
+        )
+        object.__setattr__(
+            self, "kind", canonical_text(self.kind, "operator request kind")
+        )
+        object.__setattr__(
+            self, "title", canonical_text(self.title, "operator request title")
+        )
+        object.__setattr__(
+            self, "message", canonical_text(self.message, "operator request message")
+        )
+        if not isinstance(self.payload, Mapping):
+            raise TypeError("operator request payload must be a mapping")
+        payload = dict(self.payload)
+        if any(not isinstance(key, str) or not key.strip() for key in payload):
+            raise TypeError("operator request payload keys must be non-empty text")
+        object.__setattr__(self, "payload", MappingProxyType(payload))
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +202,23 @@ class NodeExecutionContext:
         """Replace this run's current progress fact and wake its owner."""
 
         self._host._report_progress(NodeProgress(message, current, total))
+
+    def request_operator_input(
+        self,
+        kind: str,
+        *,
+        title: str,
+        message: str,
+        payload: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        """Wait for one exact operator response or the run's Stop."""
+
+        return self._host._request_operator_input(
+            kind,
+            title=title,
+            message=message,
+            payload=payload,
+        )
 
     @property
     def run_directory(self) -> Path:
@@ -343,6 +393,10 @@ class NodeHost:
         self._follow_tap: FollowTap[SignalPublication] | None = None
         self._task_run: TaskRun | None = None
         self._partial_exit_writer: Callable[[str, BaseException], None] | None = None
+        self._operator_condition = threading.Condition()
+        self._operator_request: OperatorInputRequest | None = None
+        self._operator_response: Mapping[str, object] | object = _UNRESOLVED
+        self._operator_sequence = 0
 
     @property
     def dataset_output_declarations(self) -> tuple[DatasetOutputDeclaration, ...]:
@@ -459,6 +513,8 @@ class NodeHost:
                 return
             self._stop_reason = reason
             self._stop_event.set()
+        with self._operator_condition:
+            self._operator_condition.notify_all()
         self._phase = "stopping"
         if self._task_run is not None:
             try:
@@ -534,6 +590,76 @@ class NodeHost:
         self._terminal_source = None
         self._follow_tap = None
         self._task_run = None
+        with self._operator_condition:
+            self._operator_request = None
+            self._operator_response = _UNRESOLVED
+
+    @property
+    def operator_request(self) -> OperatorInputRequest | None:
+        """The exact request currently blocking this worker, if any."""
+
+        with self._operator_condition:
+            return self._operator_request
+
+    def submit_operator_input(
+        self, request_id: str, response: Mapping[str, object]
+    ) -> None:
+        """Answer the current request once; stale dialogs fail closed."""
+
+        request_key = canonical_text(request_id, "operator request id")
+        if not isinstance(response, Mapping):
+            raise TypeError("operator response must be a mapping")
+        values = dict(response)
+        if any(not isinstance(key, str) or not key.strip() for key in values):
+            raise TypeError("operator response keys must be non-empty text")
+        with self._operator_condition:
+            current = self._operator_request
+            if current is None or current.request_id != request_key:
+                raise RuntimeError("operator response does not match the active request")
+            if self._operator_response is not _UNRESOLVED:
+                raise RuntimeError("operator request was already answered")
+            self._operator_response = MappingProxyType(values)
+            self._operator_condition.notify_all()
+
+    def _request_operator_input(
+        self,
+        kind: str,
+        *,
+        title: str,
+        message: str,
+        payload: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        if self._mode != "worker" or not self._active:
+            raise RuntimeError("only an active worker can request operator input")
+        with self._operator_condition:
+            if self._operator_request is not None:
+                raise RuntimeError("worker already has an active operator request")
+            self._operator_sequence += 1
+            request = OperatorInputRequest(
+                f"{self.instance_id}:{self._operator_sequence}",
+                kind,
+                title,
+                message,
+                payload,
+            )
+            self._operator_request = request
+            self._operator_response = _UNRESOLVED
+            self._request_owner_wake()
+            try:
+                while (
+                    self._operator_response is _UNRESOLVED
+                    and not self._stop_event.is_set()
+                ):
+                    self._operator_condition.wait()
+                if self._stop_event.is_set():
+                    raise InterruptedError("operator input was cancelled")
+                response = self._operator_response
+                assert isinstance(response, Mapping)
+                return MappingProxyType(dict(response))
+            finally:
+                self._operator_request = None
+                self._operator_response = _UNRESOLVED
+                self._request_owner_wake()
 
     def _start_worker(self) -> None:
         assert self._owner is not None

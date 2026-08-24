@@ -14,10 +14,74 @@ from zlc_plot import (
     AxisRef,
     CurvePlot,
     FacetGridPlot,
+    ImageFrame,
+    ImagePlot,
+    ImagePointOverlay,
+    PointStatus,
     Qt5PlotWidget,
     ensure_qt5_application,
+    review_image_points,
 )
 from zlc_plot.raster import RasterPlotHost
+
+
+@pytest.mark.gui
+def test_point_review_returns_the_final_excluded_identities() -> None:
+    try:
+        app = ensure_qt5_application([])
+        from PyQt5 import QtCore, QtWidgets
+    except Exception as error:  # pragma: no cover - environment-dependent
+        pytest.skip(f"Qt5 offscreen unavailable: {error}")
+
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns({"sample": (0.0,)}),
+        data_axes=(Axis.create("y", size=8), Axis.create("x", size=10)),
+        dtype=np.float64,
+        generation="point-review-test",
+    )
+    snapshot = DatasetSnapshot(
+        schema, np.arange(80, dtype=float).reshape(1, 1, 8, 10), 0
+    )
+    overlay = ImagePointOverlay(
+        1,
+        np.asarray(((2.0, 2.0), (7.0, 5.0))),
+        point_ids=("site-a", "site-b"),
+        labels=("1", "2"),
+        static_statuses=(PointStatus.UNKNOWN, PointStatus.UNKNOWN),
+    )
+    host = RasterPlotHost.from_plot(
+        ImageFrame(snapshot, overlay),
+        ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
+        size="2x2",
+    )
+    try:
+        def answer() -> None:
+            dialog = next(
+                widget
+                for widget in app.topLevelWidgets()
+                if isinstance(widget, QtWidgets.QDialog)
+                and widget.windowTitle() == "Review sites"
+            )
+            points = dialog.findChild(QtWidgets.QListWidget)
+            assert points is not None
+            points.item(1).setCheckState(QtCore.Qt.Unchecked)
+            button = next(
+                item
+                for item in dialog.findChildren(QtWidgets.QPushButton)
+                if item.text() == "Continue"
+            )
+            button.click()
+
+        QtCore.QTimer.singleShot(100, answer)
+        assert review_image_points(
+            host,
+            overlay,
+            title="Review sites",
+            confirm_label="Continue",
+        ) == ("site-b",)
+    finally:
+        host.close(timeout=10)
 
 
 @pytest.mark.gui
