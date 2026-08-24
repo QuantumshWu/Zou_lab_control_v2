@@ -104,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
             if arguments.path is None:
                 print("figure viewer ready: no archive given")
                 return 0
-            from ..archive import read_archive
+            from zlc_data.figure_archive import read_archive
             from ..viewer import describe_archive
 
             description = describe_archive(*read_archive(arguments.path))

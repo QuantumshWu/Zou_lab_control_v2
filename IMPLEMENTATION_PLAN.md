@@ -65,8 +65,9 @@
   actions、metrics、phase-change fact与command receipt；不保存raw camera frames。每个
   `candidates/candidate-XXXX.npz`都是可加载/续跑的Science Context，final仍只有唯一selected Context。
 - Feedback报告固定包含uniformity history、site signal evolution、weight evolution、selected
-  site histograms、initial/selected camera mean和initial/selected phase；每张均为Figure NPZ
-  primary加PNG preview。normal或Stop只产生一个final Science Context。
+  site histograms、initial/selected camera mean和initial/selected phase；每个完整candidate另存
+  `candidate_site_fits/candidate-XXXX` Figure NPZ与PNG，使用真正的Histogram cell和Figure API
+  的per-site bimodal Gaussian fit，不加入Monitor preview。normal或Stop只产生一个final Science Context。
 - Feedback Monitor固定自动打开四张图：canonical Camera Measurement逐帧publication经mean reduction得到的带编号site map实时图、observable
   uniformity、site signal evolution和Target share evolution；phase保留为信号和最终Figure但不自动开panel。
 - Feedback每site只在完整shot batch上做受约束双高斯与full-data ΔBIC判定。formal-double gain从authored `feedback_gain`起步，连续两次显著改善乘1.25、显著变差乘0.5、不确定性内保持；diagnostic probe/single不参与adaptive。`probe_combined`计入`maximum feedback updates`，diagnostic candidates不计。
@@ -157,3 +158,13 @@
 - FPGA board：最终bitstream program/flash及外部DAC/TTL电气时序/波形。
 
 这些步骤只按对应runbook由实验机operator显式执行。
+
+## 6. 明确延后的GridPlot扩展
+
+- 当前FacetGrid单surface仍以最大`8×8=64`个真实Matplotlib Axes为上限，不直接提高。
+- 数百cells的后续方案是把Dataset全部`total_cell_count`与单页最多64个
+  `visible_cell_count`分开；renderer只创建/复用当前页Axes，不先创建全部Axes再隐藏。
+- 分页使用global cell/site identity，hover、selector、fit overlay、focus及跨页滚轮导航都不得
+  把page-local index冒充global index；TaskConsole与FigureViewer复用同一机制。
+- typed Figure仍保存全部cells；页面只是显示状态。导出提供当前页、全部分页PNG或多页PDF，
+  不生成一个包含数百微小Axes的单张巨图。

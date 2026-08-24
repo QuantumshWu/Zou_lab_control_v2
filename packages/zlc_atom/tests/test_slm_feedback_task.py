@@ -8,8 +8,9 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from zlc_data.figure_archive import read_archive
 from zlc_pulse import PulseSequence
-from zlc_plot import Reduction
+from zlc_plot import FacetGridPlot, HistogramPlot, Reduction, read_figure_plot
 from zlc_runtime import NodeHost, SignalDataPlane
 
 from zlc_atom.devices.camera import CameraWorkingPoint
@@ -2635,7 +2636,7 @@ def test_failure_after_a_completed_candidate_saves_figures_and_context(
         SlmFeedbackTask,
         "_measure",
         lambda self, pulse, context, iteration: (
-            np.zeros((self.shots, 35)),
+            _mixture_samples(np.linspace(1.0, 2.0, 35), self.shots),
             (),
             (),
             np.zeros(
@@ -2658,6 +2659,7 @@ def test_failure_after_a_completed_candidate_saves_figures_and_context(
         sequencer=SimpleNamespace(describe=lambda: object()),
         plane=plane,
         target=_grid_target(slm.shape_yx),
+        shots=100,
         updates=2,
     )
     host = _task_host(task, plane, wake)
@@ -2670,6 +2672,27 @@ def test_failure_after_a_completed_candidate_saves_figures_and_context(
         assert run_root is not None
         assert len(tuple((run_root / "figures").glob("*.npz"))) == 6
         assert len(tuple((run_root / "figures").glob("*.png"))) == 6
+        candidate_figures = run_root / "figures" / "candidate_site_fits"
+        assert [path.name for path in candidate_figures.glob("*.npz")] == [
+            "candidate-0001.npz"
+        ]
+        assert [path.name for path in candidate_figures.glob("*.png")] == [
+            "candidate-0001.png"
+        ]
+        info, arrays = read_archive(candidate_figures / "candidate-0001.npz")
+        _plot_input, recipe = read_figure_plot(info, arrays, "data")
+        assert isinstance(recipe["spec"], FacetGridPlot)
+        assert isinstance(recipe["spec"].cell, HistogramPlot)
+        assert recipe["fit"] == {
+            "model": "bimodal_gaussian",
+            "fit_all_facets": True,
+        }
+        run = json.loads((run_root / "run.json").read_text(encoding="utf-8"))
+        artifact_roles = {
+            item["name"]: item["role"] for item in run["artifacts"]
+        }
+        assert artifact_roles["candidate_0001_site_fits_figure"] == "figure"
+        assert artifact_roles["candidate_0001_site_fits_image"] == "figure"
         candidate = run_root / "candidates" / "candidate-0001.npz"
         loaded = load_science_context(candidate)
         assert loaded["pattern_metadata"]["status"] == "checkpoint"
@@ -2772,6 +2795,12 @@ def test_stop_after_terminal_commit_keeps_host_success_and_artifact(
         }
         assert len(tuple((run_root / "figures").glob("*.npz"))) == 6
         assert len(tuple((run_root / "figures").glob("*.png"))) == 6
+        candidate_figures = run_root / "figures" / "candidate_site_fits"
+        assert [path.name for path in candidate_figures.glob("*.npz")] == [
+            "candidate-0001.npz",
+            "candidate-0002.npz",
+            "candidate-0003.npz",
+        ]
         summary = json.loads((run_root / "summary.json").read_text(encoding="utf-8"))
         assert summary["initial_observable_uniformity_ratio"] is not None
         assert summary["selected_observable_uniformity_ratio"] is not None

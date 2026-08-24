@@ -1719,7 +1719,11 @@ class SlmFeedbackTask:
         spec: object,
         parameters: Mapping[str, object] | None = None,
         size: str = "4x4",
+        artifact_name: str | None = None,
+        image_role: str = "preview",
+        fit: Mapping[str, object] | None = None,
     ) -> tuple[Path, Path]:
+        registered_name = str(name if artifact_name is None else artifact_name)
         base = paths["figures"] / f"{name}.png"
         try:
             image, archive = save_figure_artifact(
@@ -1728,6 +1732,7 @@ class SlmFeedbackTask:
                 spec=spec,
                 parameters={} if parameters is None else parameters,
                 size=size,
+                fit=fit,
                 source={
                     "task": self.instance_id,
                     "calibration_path": str(self.calibration_path),
@@ -1738,14 +1743,98 @@ class SlmFeedbackTask:
             archive = base.with_suffix(".npz")
             if archive.is_file():
                 context.register_artifact(
-                    f"{name}_figure", archive, role="figure", contract_id="zlc.figure"
+                    f"{registered_name}_figure",
+                    archive,
+                    role="figure",
+                    contract_id="zlc.figure",
                 )
             raise
         context.register_artifact(
-            f"{name}_figure", archive, role="figure", contract_id="zlc.figure"
+            f"{registered_name}_figure",
+            archive,
+            role="figure",
+            contract_id="zlc.figure",
         )
-        context.register_artifact(f"{name}_preview", image, role="preview")
+        image_suffix = "preview" if image_role == "preview" else "image"
+        context.register_artifact(
+            f"{registered_name}_{image_suffix}", image, role=image_role
+        )
         return image, archive
+
+    def _candidate_fit_figure(
+        self,
+        measurement: Mapping[str, object],
+        samples: np.ndarray,
+        *,
+        generation: str,
+    ) -> tuple[object, FacetGridPlot]:
+        """One candidate's true per-site Histogram Figure input."""
+
+        values = np.asarray(samples, dtype=float)
+        if values.ndim != 2 or values.shape[1] != self._site_count:
+            raise ValueError("candidate histogram samples have the wrong shape")
+        candidate = int(measurement["iteration"])
+        shot_axis = AxisSpec(
+            AxisId("slm_feedback.shot"),
+            "shot",
+            COMPONENT,
+            values.shape[0],
+        )
+        site_axis = self._registered_site_map.site_axis
+        snapshot = snapshot_from_array(
+            values.T[None],
+            producer=self.instance_id,
+            signal=f"candidate_{candidate:04d}_site_histogram_figure",
+            roles=(SITE, COMPONENT),
+            axis_specs={
+                SITE: site_axis,
+                COMPONENT: shot_axis,
+            },
+            generation=generation,
+            revision=candidate,
+            validity=np.isfinite(values.T)[None],
+        )
+        kind = str(measurement.get("candidate_kind", "candidate"))
+        return snapshot, FacetGridPlot(
+            AxisRef.data(str(site_axis.axis_id)),
+            HistogramPlot(
+                labels=PlotLabels(
+                    title=f"Candidate {candidate} ({kind}) site histograms and fits",
+                    x="box signal",
+                    y="shots",
+                ),
+            ),
+        )
+
+    def _save_candidate_fit_figures(
+        self,
+        context: object,
+        paths: Mapping[str, Path],
+        reports: list[tuple[Mapping[str, object], np.ndarray]],
+        *,
+        generation: str,
+    ) -> None:
+        for measurement, samples in reports:
+            candidate = int(measurement["iteration"])
+            snapshot, spec = self._candidate_fit_figure(
+                measurement,
+                samples,
+                generation=generation,
+            )
+            self._save_figure(
+                context,
+                paths,
+                f"candidate_site_fits/candidate-{candidate:04d}",
+                artifact_name=f"candidate_{candidate:04d}_site_fits",
+                snapshot=snapshot,
+                spec=spec,
+                parameters={
+                    "bin_count": min(60, max(10, samples.shape[0] // 2))
+                },
+                size="8x8",
+                image_role="figure",
+                fit={"model": "bimodal_gaussian", "fit_all_facets": True},
+            )
 
     def _save_figures(
         self,
@@ -1756,11 +1845,18 @@ class SlmFeedbackTask:
         selected: Mapping[str, object],
         initial_phase: np.ndarray,
         initial_mean_frame: np.ndarray,
+        candidate_reports: list[tuple[Mapping[str, object], np.ndarray]],
     ) -> None:
         count = len(history)
         if count < 1:
             return
         generation = str(getattr(context.generation, "value", context.generation))
+        self._save_candidate_fit_figures(
+            context,
+            paths,
+            candidate_reports,
+            generation=generation,
+        )
         candidate_id = AxisId("slm_feedback.candidate")
         candidate_column = PointColumn(
             candidate_id,
@@ -2242,6 +2338,7 @@ class SlmFeedbackTask:
         paths: Mapping[str, Path],
         initial_phase: np.ndarray,
         initial_mean_frame: np.ndarray | None,
+        candidate_reports: list[tuple[Mapping[str, object], np.ndarray]],
         status: str,
         republish: bool,
     ) -> dict[str, object]:
@@ -2275,6 +2372,7 @@ class SlmFeedbackTask:
                 selected=candidate,
                 initial_phase=initial_phase,
                 initial_mean_frame=initial_mean_frame,
+                candidate_reports=candidate_reports,
             )
         artifact_path = paths["final"] / "science-context.npz"
         metadata = self._candidate_metadata(
@@ -2358,6 +2456,7 @@ class SlmFeedbackTask:
         selected: Mapping[str, object] | None,
         initial_phase: np.ndarray,
         initial_mean_frame: np.ndarray | None,
+        candidate_reports: list[tuple[Mapping[str, object], np.ndarray]],
         error: BaseException,
     ) -> None:
         """Save the report supported by completed data without masking failure."""
@@ -2378,6 +2477,7 @@ class SlmFeedbackTask:
                 selected=selected,
                 initial_phase=initial_phase,
                 initial_mean_frame=initial_mean_frame,
+                candidate_reports=candidate_reports,
             )
         except BaseException as figure_error:
             error.add_note(
@@ -2390,6 +2490,9 @@ class SlmFeedbackTask:
         incoming_pattern = self._pattern_phase
         paths = self._prepare_artifacts(context)
         history: list[dict[str, object]] = []
+        candidate_reports: list[
+            tuple[Mapping[str, object], np.ndarray]
+        ] = []
         retained_valid: dict[str, object] | None = None
         most_visible_observed: dict[str, object] | None = None
         last_completed_candidate: dict[str, object] | None = None
@@ -2408,6 +2511,7 @@ class SlmFeedbackTask:
                 ),
                 initial_phase=incoming,
                 initial_mean_frame=initial_mean_frame,
+                candidate_reports=candidate_reports,
                 error=error,
             )
         )
@@ -3070,6 +3174,7 @@ class SlmFeedbackTask:
                     "samples": np.array(samples, copy=True),
                     "mean_frame": np.array(mean_frame, copy=True),
                 }
+                candidate_reports.append((history[-1], np.asarray(samples)))
                 last_completed_candidate = completed
                 completed["visibility_rank"] = (
                     visibility,
@@ -3359,6 +3464,7 @@ class SlmFeedbackTask:
                 paths=paths,
                 initial_phase=incoming,
                 initial_mean_frame=initial_mean_frame,
+                candidate_reports=candidate_reports,
                 status=status,
                 republish=True,
             )
@@ -3391,6 +3497,7 @@ class SlmFeedbackTask:
                         paths=paths,
                         initial_phase=incoming,
                         initial_mean_frame=initial_mean_frame,
+                        candidate_reports=candidate_reports,
                         status="stopped",
                         republish=True,
                     )
