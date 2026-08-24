@@ -23,7 +23,7 @@
 // SAFETY: a whole WRITE frame is BUFFERED (<= FRAME_WORDS words) and its CRC
 // verified BEFORE any u_we fires, so a corrupt frame commits NOTHING.  Bounds,
 // bad CRC/opcode, framing faults and truncated-frame timeout release arbitration,
-// pulse u_error for sticky top-level STATUS.ERROR, and return a non-OK reply once
+// pulse u_error for sticky top-level STATUS.LINK_ERROR, and return a non-OK reply once
 // a sequence byte is known.  The automated tb_uart_pipeline bench exercises the
 // normal pipeline plus these failure paths; real baud-lock/wiring remain rig work.
 //
@@ -49,7 +49,7 @@ module zlc_uart_bridge #(
     output reg  [31:0]                u_wdata,
     output reg                        u_we,       // 1-clk commit pulse
     output reg                        u_active,   // level: high from a frame's OP byte to frame done
-    output reg                        u_error,    // protocol fault pulse; top latches STATUS.ERROR
+    output reg                        u_error,    // protocol fault pulse; top latches non-fatal STATUS.LINK_ERROR
     // CTRL-region read tap (STATUS/CURSOR/LAYOUT_ID)
     output reg  [5:0]  u_rd_word,
     input  wire [31:0] u_rd_data

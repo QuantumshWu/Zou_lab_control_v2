@@ -244,6 +244,62 @@ def test_a_replay_publishes_what_the_node_declares(tmp_path: Path) -> None:
         plane.close()
 
 
+def test_failed_calibration_analysis_saves_partial_capture_figure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    request = replace(_calibration_request(repeats=3), save_frames=True)
+    acquired = _task(request).run(tmp_path)
+    folder = acquired.artifact_path.parents[1] / "figures"
+    task = _task(
+        replace(
+            request,
+            save_frames=False,
+            frame_source=FRAMES_FROM_FOLDER,
+            saved_frames_path=str(folder),
+        )
+    )
+    monkeypatch.setattr(
+        task,
+        "_analyse",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("calibration analysis failed")
+        ),
+    )
+    plane = SignalDataPlane()
+    task.signal_plane = plane
+    host = NodeHost(
+        task,
+        plane,
+        Event().set,
+        instance_id="calibration-partial",
+        kind="task",
+        dataset_output_declarations=CALIBRATION_LOGIC_NODE.outputs,
+        required_artifacts={
+            "artifact_path": CALIBRATION_LOGIC_NODE.artifact_outputs[0].contract_id
+        },
+        task_name=CALIBRATION_LOGIC_NODE.api_name,
+    )
+    try:
+        host.start(run_root=tmp_path, input_summary=request.to_dict())
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline and not host.observation.terminal:
+            host.poll()
+            time.sleep(0.01)
+        assert host.observation.phase == "failed"
+        run_root = host.run_directory
+        assert run_root is not None
+        assert (run_root / "figures" / "partial_capture.npz").is_file()
+        assert (run_root / "figures" / "partial_capture.png").is_file()
+        summary = json.loads(
+            (run_root / "partial-summary.json").read_text(encoding="utf-8")
+        )
+        assert summary["cycles_completed"] == 3
+        assert summary["status"] == "failed"
+    finally:
+        host.shutdown()
+        plane.close()
+
+
 def test_nothing_is_written_unless_the_operator_asks(tmp_path: Path) -> None:
     task = _task(_calibration_request(repeats=8))
     assert list(tmp_path.iterdir()) == []

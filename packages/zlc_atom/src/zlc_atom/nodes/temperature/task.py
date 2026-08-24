@@ -354,8 +354,81 @@ class TemperatureTask:
             "curve": dict(curve),
         }
 
+    def _save_partial_report(
+        self,
+        context: object,
+        status: str,
+        error: BaseException,
+    ) -> None:
+        if self._written < 1:
+            return
+        survival = context.current_dataset(SURVIVAL_OUTPUT.name)
+        curve = self._curve(survival)
+        summary = {
+            "format": "zlc.temperature.summary",
+            "status": str(status),
+            "error": f"{type(error).__name__}: {error}",
+            "exposure_seconds": self._exposure_seconds,
+            "points_completed": self._written,
+            "points_total": self._repeats * len(self._t_off),
+            "curve": curve,
+        }
+        summary_path = write_readable_json(
+            context.run_directory / "partial-summary.json", summary
+        )
+        context.register_artifact(
+            "temperature_partial_summary", summary_path, role="summary"
+        )
+        from zlc_plot import AxisRef, CurvePlot, PlotLabels, save_figure_artifact
+
+        figure_base = context.run_directory / "figures" / "survival"
+        try:
+            preview_path, figure_path = save_figure_artifact(
+                figure_base,
+                plot_input=survival,
+                spec=CurvePlot(
+                    AxisRef.point("temperature.t_off"),
+                    labels=PlotLabels(
+                        title="Partial release-recapture survival",
+                        x="Trap-off time",
+                        y="Survival",
+                    ),
+                ),
+                parameters={},
+                size="4x4",
+                source={
+                    "task": self.instance_id,
+                    "signal": SURVIVAL_OUTPUT.name,
+                    "status": str(status),
+                },
+            )
+        except BaseException:
+            figure_path = figure_base.with_suffix(".npz")
+            if figure_path.is_file():
+                context.register_artifact(
+                    "survival_figure",
+                    figure_path,
+                    role="figure",
+                    contract_id=FIGURE_SCHEMA,
+                )
+            raise
+        context.register_artifact(
+            "survival_figure",
+            figure_path,
+            role="figure",
+            contract_id=FIGURE_SCHEMA,
+        )
+        context.register_artifact(
+            "survival_preview", preview_path, role="preview"
+        )
+
     def execute(self, context: object) -> dict[str, object]:
         self._written = 0
+        context.register_partial_exit_writer(
+            lambda status, error: self._save_partial_report(
+                context, status, error
+            )
+        )
         self._scan.acquire(context, on_point=self._judge)
         context.report_progress("Reading survival")
         survival = context.current_dataset(SURVIVAL_OUTPUT.name)

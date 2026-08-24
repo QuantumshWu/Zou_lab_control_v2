@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import threading
 from threading import Event
 import time
 
@@ -362,6 +363,17 @@ def test_task_failure_keeps_registered_process_artifacts_and_error(
 
     class Node:
         def execute(self, context):
+            def save_partial(status, error):
+                assert status == "failed"
+                assert str(error) == "fit exploded"
+                assert threading.current_thread().name.startswith("node-feedback")
+                report = context.run_directory / "partial-figure.npz"
+                report.write_bytes(b"partial figure")
+                context.register_artifact(
+                    "partial_figure", report, role="figure"
+                )
+
+            context.register_partial_exit_writer(save_partial)
             process = context.run_directory / "process"
             process.mkdir()
             checkpoint = process / "candidate.json"
@@ -393,7 +405,11 @@ def test_task_failure_keeps_registered_process_artifacts_and_error(
         assert document["status"]["state"] == "failed"
         assert document["error"]["type"].endswith("ValueError")
         assert document["error"]["message"] == "fit exploded"
-        assert document["artifacts"][0]["role"] == "checkpoint"
+        assert {item["role"] for item in document["artifacts"]} == {
+            "checkpoint",
+            "figure",
+        }
+        assert (host.run_directory / "partial-figure.npz").is_file()
     finally:
         host.shutdown()
         plane.close()
@@ -406,6 +422,15 @@ def test_task_stop_keeps_run_and_process_artifact(tmp_path: Path) -> None:
 
     class Node:
         def execute(self, context):
+            def save_partial(status, _error):
+                assert status == "stopped"
+                report = context.run_directory / "stop-report.npz"
+                report.write_bytes(b"stopped report")
+                context.register_artifact(
+                    "stop_report", report, role="figure"
+                )
+
+            context.register_partial_exit_writer(save_partial)
             checkpoint = context.run_directory / "partial.json"
             checkpoint.write_text("{}", encoding="utf-8")
             context.register_artifact("partial", checkpoint, role="process")
@@ -431,6 +456,10 @@ def test_task_stop_keeps_run_and_process_artifact(tmp_path: Path) -> None:
         assert document["status"]["state"] == "stopped"
         assert document["status"]["stop_reason"] == "operator Stop"
         assert document["error"] is None
+        assert {item["name"] for item in document["artifacts"]} == {
+            "partial",
+            "stop_report",
+        }
     finally:
         host.shutdown()
         plane.close()

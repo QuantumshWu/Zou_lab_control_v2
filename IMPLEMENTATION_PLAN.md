@@ -62,8 +62,8 @@
   NPZ与PNG。默认不保存全部raw frames。
 - Temperature：final JSON、summary和生存率Figure NPZ/PNG。
 - SLM Feedback：保存输入摘要、stable site table和逐candidate精选BOX samples、fit、weights、
-  actions、metrics、phase-change fact与command receipt；完整phase只进入initial/selected Figure
-  和唯一final Science Context，不保存raw camera frames，不重复完整candidate Context。
+  actions、metrics、phase-change fact与command receipt；不保存raw camera frames。每个
+  `candidates/candidate-XXXX.npz`都是可加载/续跑的Science Context，final仍只有唯一selected Context。
 - Feedback报告固定包含uniformity history、site signal evolution、weight evolution、selected
   site histograms、initial/selected camera mean和initial/selected phase；每张均为Figure NPZ
   primary加PNG preview。normal或Stop只产生一个final Science Context。
@@ -107,6 +107,9 @@
 - 固定nearest清理运行standalone/facet artist、Workbench parameter surface及Fluent Setting/Edit四个聚焦用例，结果`4 passed`。
 - Device Control当前回归：Workbench完整`425 passed`；Runtime完整加Figure grammar `112 passed`；adapter/camera/scan受影响组`53 passed`；Device Control Qt、风险revision、refresh close guard、in-flight latest-only和demo直接证据均通过。Atom完整回归同时暴露并修复Temperature sibling event record、Feedback输出声明和三条terminal/Stop残余；100-shot virtual Feedback仍为既有`34/35`上限，未用放宽断言冒充通过。
 - FigureViewer/TaskConsole Panel parity已用同一current 2x2 Curve在两个真实窗口经Windows capture逐轮对照：两者card均为612×494逻辑像素、同一约50px title band与同一body frame；Viewer的dataset action bar改为固定高度，card从中部漂移改为紧随bar top-align，title从占位`figure`改为archive dataset label。zlc_ui完整回归`86 passed`，Viewer/Panel/Workbench contract聚焦`62 passed`。
+- 长Task partial artifacts：Runtime在worker failure/Stop边界调用domain writer；Feedback普通异常从最后完成candidate生成6组Figure后rollback，Temperature从已提交survival保存partial curve/Figure，Calibration从最新完整三帧cycle保存partial capture（分析完成则保存完整报告）。`run.json`只索引这些已完成文件，不再是失败run唯一内容。
+- Feedback的`candidates/candidate-XXXX.npz`现为标准Science Context；operator可在既有Science Context输入中手动选择它作为新run起点。过程数组移至`data/measurements/measurement-XXXX.npz`。新run从candidate 1开始并使用本次authored update预算；没有resume输入、自动旧run查找、续编号或旧run预算继承。
+- Pulse STATUS ABI当前为LOADED/RUNNING/DONE/ENGINE_ERROR/UNDERFLOW/LINK_ERROR；UART fault不再置engine ERROR，observer failure不再伪装成board error，Remote日志使用ERROR/DONE真实事件名并写status/cursor双读、observer exception与FIRE总elapsed。该ABI令layout fingerprint更新为`0x5A55DF95`，实验板必须重build/program。
 - 第一次installed software尝试曾在重负载下出现一次本地SLM测试TCP connect timeout；
   同一wheel的精确case随后连续5/5通过，第二次完整installed software lane通过，因此没有
   用该不可复现事件改动产品remote timeout或server逻辑。

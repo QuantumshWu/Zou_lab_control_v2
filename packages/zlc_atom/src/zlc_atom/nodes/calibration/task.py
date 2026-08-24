@@ -1254,6 +1254,7 @@ class CalibrationTask:
                     )
                 cycle = (records[0], records[1], records[2])
                 cycles.append(cycle)
+                self._partial_cycles_completed = len(cycles)
                 if frames_folder is not None:
                     if writer is None:
                         writer = SampleWriter(
@@ -1398,6 +1399,7 @@ class CalibrationTask:
                 context.commit_live(
                     {CAPTURE_PREVIEW_DECLARATION.name: output}
                 )
+                self._partial_cycles_completed = index + 1
                 context.report_progress(
                     "Reading saved frames",
                     current=index + 1,
@@ -1474,6 +1476,8 @@ class CalibrationTask:
     ) -> CalibrationRunResult:
         self._actual_working_point = None
         self._result = None
+        self._partial_cycles_completed = 0
+        self._partial_result: CalibrationRunResult | None = None
         try:
             # TaskRun names the run's own folder BEFORE anything is acquired, so
             # the frames can be written into it as they arrive rather than
@@ -1491,6 +1495,15 @@ class CalibrationTask:
             )
             final_root = run_folder / "final"
             artifact_path = final_root / "calibration.json"
+            if context is not None:
+                context.register_partial_exit_writer(
+                    lambda status, error: self._save_partial_report(
+                        context,
+                        run_folder,
+                        status=status,
+                        error=error,
+                    )
+                )
             writer: SampleWriter | None = None
             if self.request.frame_source == FRAMES_FROM_FOLDER:
                 if context is not None:
@@ -1560,6 +1573,7 @@ class CalibrationTask:
                 run_record,
                 readout_summary(analysis, run_chain=(run_record,)),
             )
+            self._partial_result = result
             if context is not None:
                 context.report_progress("Saving calibration report")
             _save_report(result, artifact_context)
@@ -1579,6 +1593,83 @@ class CalibrationTask:
         except BaseException:
             self._safe()
             raise
+
+    def _save_partial_report(
+        self,
+        context: object,
+        run_folder: Path,
+        *,
+        status: str,
+        error: BaseException,
+    ) -> None:
+        result = self._partial_result
+        if result is not None:
+            _save_report(result, context)
+            return
+        if self._partial_cycles_completed < 1:
+            return
+        snapshot = context.current_dataset(CAPTURE_PREVIEW_DECLARATION.name)
+        summary_path = write_readable_json(
+            run_folder / "partial-summary.json",
+            {
+                "format": "zlc.calibration.partial-summary",
+                "status": str(status),
+                "cycles_completed": self._partial_cycles_completed,
+                "cycles_requested": self.request.repeats,
+                "error": f"{type(error).__name__}: {error}",
+            },
+        )
+        context.register_artifact(
+            "calibration_partial_summary", summary_path, role="summary"
+        )
+        from zlc_plot import (
+            AxisRef,
+            FacetGridPlot,
+            ImagePlot,
+            PlotLabels,
+            save_figure_artifact,
+        )
+
+        base = run_folder / "figures" / "partial_capture"
+        try:
+            preview_path, figure_path = save_figure_artifact(
+                base,
+                plot_input=snapshot,
+                spec=FacetGridPlot(
+                    AxisRef.point("calibration.capture_preview.frame"),
+                    ImagePlot(
+                        AxisRef.data("calibration.image.x"),
+                        AxisRef.data("calibration.image.y"),
+                    ),
+                    labels=PlotLabels(title="Partial calibration capture"),
+                ),
+                parameters={},
+                size="4x4",
+                source={
+                    "task": "calibration",
+                    "status": str(status),
+                    "cycles_completed": self._partial_cycles_completed,
+                },
+            )
+        except BaseException:
+            figure_path = base.with_suffix(".npz")
+            if figure_path.is_file():
+                context.register_artifact(
+                    "partial_capture_figure",
+                    figure_path,
+                    role="figure",
+                    contract_id=FIGURE_SCHEMA,
+                )
+            raise
+        context.register_artifact(
+            "partial_capture_figure",
+            figure_path,
+            role="figure",
+            contract_id=FIGURE_SCHEMA,
+        )
+        context.register_artifact(
+            "partial_capture_preview", preview_path, role="preview"
+        )
 
     def run(self, run_root: str | Path) -> CalibrationRunResult:
         task_run = TaskRun.create(

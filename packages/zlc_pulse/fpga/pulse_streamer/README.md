@@ -96,7 +96,7 @@ over `axi_bram_ctrl`. The mailbox words (see `zlc_pulse.wire.CtrlWords`):
 
 ```text
 COMMAND     host -> top   rising-edge LOAD(1) / FIRE(2) / RESET(4) / SAFE(8)
-STATUS      top -> host   LOADED(1) / RUNNING(2) / DONE(4) / ERROR(8) / UNDERFLOW(16)
+STATUS      top -> host   LOADED(1) / RUNNING(2) / DONE(4) / ENGINE_ERROR(8) / UNDERFLOW(16) / LINK_ERROR(32)
 PROG_COUNT                number of edge rows
 SCAN_COUNT                TOTAL scan points N (independent of bank-local window depth)
 SCAN_ENABLE / REPEAT_FOREVER

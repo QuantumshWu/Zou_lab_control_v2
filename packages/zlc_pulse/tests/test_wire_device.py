@@ -20,7 +20,7 @@ from zlc_pulse import (
 )
 from zlc_pulse.compile import TargetBusDelay
 from zlc_pulse.model import OutputDelay, PulseFieldRef
-from zlc_pulse.device import PulseStreamer
+from zlc_pulse.device import DoneReport, PulseStreamer
 from zlc_pulse.transport import MemoryRegisterTransport
 from zlc_pulse.wire import (
     CMD_FIRE,
@@ -29,6 +29,7 @@ from zlc_pulse.wire import (
     CtrlWords,
     STATUS_DONE,
     STATUS_ERROR,
+    STATUS_LINK_ERROR,
     STATUS_LOADED,
     STATUS_RUNNING,
     build_fingerprint,
@@ -81,7 +82,7 @@ def test_build_fingerprint_covers_each_geometry_field_except_host_cap() -> None:
 
 
 def test_default_geometry_is_pinned_to_deployed_word63() -> None:
-    assert build_fingerprint(StreamerParams()) == 0x5AFC7CFB
+    assert build_fingerprint(StreamerParams()) == 0x5A55DF95
 
 
 def test_host_rejects_affine_geometry_beyond_the_shipped_four_dsp_lanes() -> None:
@@ -753,7 +754,25 @@ def test_observer_refill_failure_becomes_terminal_error() -> None:
     assert report is not None
     assert report.status == STATUS_ERROR
     assert report.status_reads == (STATUS_ERROR, STATUS_ERROR)
+    assert report.observer_error == "RuntimeError: synthetic scan refill failure"
+    assert report.fault == (
+        "pulse observer failed: RuntimeError: synthetic scan refill failure"
+    )
     assert streamer.snapshot()["firing"] is False
+
+
+def test_recovered_link_error_is_visible_but_not_an_engine_fault() -> None:
+    report = DoneReport(
+        STATUS_DONE | STATUS_LINK_ERROR,
+        12,
+        False,
+        1.5,
+        (STATUS_DONE | STATUS_LINK_ERROR,) * 2,
+        (12, 12),
+    )
+    assert report.link_error is True
+    assert report.fault == ""
+    assert report.elapsed_seconds == pytest.approx(1.5)
 
 
 def test_pack_scan_rows_only_targets_the_requested_bank_chunk() -> None:

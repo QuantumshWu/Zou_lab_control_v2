@@ -1003,13 +1003,17 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                     result = self.streamer.wait_done(0.0)
                     if result is not None:
                         _server_log(
-                            "DONE",
+                            "ERROR" if result.fault else "DONE",
                             client=client,
                             detail=_log_fields(
                                 status=f"0x{result.status:02X}",
                                 cursor=result.cursor,
                                 underflow=result.underflow,
-                                tail_ms=f"{result.tail_elapsed * 1e3:.3f}",
+                                link_error=result.link_error,
+                                elapsed_ms=f"{result.elapsed_seconds * 1e3:.3f}",
+                                status_reads=result.status_reads,
+                                cursor_reads=result.cursor_reads,
+                                observer_error=result.observer_error or None,
                             ),
                         )
                     else:

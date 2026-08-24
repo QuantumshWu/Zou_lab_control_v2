@@ -177,11 +177,13 @@ module tb_safe_gate;
     force dut.eng_reset = 1'b1;
     repeat(3) begin @(posedge clk); expect_safe; @(negedge clk); expect_safe; end
 
-    // Decoder faults are not only wire replies: the top latches a loud STATUS.ERROR.
+    // Decoder faults remain visible without poisoning the pulse engine: a
+    // recovered UART retry latches LINK_ERROR, never ENGINE_ERROR.
     force dut.u_protocol_error = 1'b1;
     @(posedge clk); #1; release dut.u_protocol_error;
     repeat(3) @(posedge clk);
-    if (!dut.ctrl_reg[2][3]) $fatal(1,"UART protocol fault was not sticky in STATUS.ERROR");
+    if (!dut.ctrl_reg[2][5] || dut.ctrl_reg[2][3])
+      $fatal(1,"UART protocol fault was not isolated in STATUS.LINK_ERROR");
     $display("TOP-SAFE-PIN-GATE-OK");
     $finish;
   end

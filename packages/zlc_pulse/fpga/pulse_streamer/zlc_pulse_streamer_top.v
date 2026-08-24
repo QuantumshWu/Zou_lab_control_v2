@@ -126,7 +126,7 @@ module zlc_pulse_streamer_top #(
 
     // CTRL regfile word offsets (== host.image.CtrlWords).
     localparam integer C_COMMAND = 1;   // bit0 LOAD bit1 FIRE bit2 RESET bit3 SAFE
-    localparam integer C_STATUS = 2;    // bit0 LOADED bit1 RUNNING bit2 DONE bit3 ERROR bit4 UNDERFLOW
+    localparam integer C_STATUS = 2;    // bit0 LOADED bit1 RUNNING bit2 DONE bit3 ENGINE_ERROR bit4 UNDERFLOW bit5 LINK_ERROR
     localparam integer C_PROG_COUNT = 3;
     localparam integer C_SCAN_COUNT = 4;
     localparam integer C_SCAN_ENABLE = 5;
@@ -402,11 +402,12 @@ module zlc_pulse_streamer_top #(
     // straight from the dense CTRL words (no image to copy).  Bus rows are 7 words = [start_tick,
     // stop_tick, sc_lo, sc_hi, ec_lo, ec_hi, flags] (host.image).  Rising-edge-detected commands.
     localparam CMD_LOAD = 4'b0001, CMD_FIRE = 4'b0010, CMD_RESET = 4'b0100, CMD_SAFE = 4'b1000;
-    // STATUS bit map MUST match host.image: LOADED=1 RUNNING=2 DONE=4 ERROR=8
-    // UNDERFLOW=16.  Underflow is bit4 (NOT bit3) so a transient
+    // STATUS bit map MUST match host.image: LOADED=1 RUNNING=2 DONE=4
+    // ENGINE_ERROR=8 UNDERFLOW=16 LINK_ERROR=32.  Underflow is bit4 (NOT bit3) so a transient
     // streaming STALL is never confused with the host's fatal ERROR bit.
     localparam [4:0] ST_LOADED = 5'd1, ST_RUNNING = 5'd2, ST_DONE = 5'd4,
                      ST_ERROR = 5'd8, ST_UNDERFLOW = 5'd16;
+    localparam [5:0] ST_LINK_ERROR = 6'd32;
     localparam integer CNT_W = BUS_SEG_ADDR_WIDTH + 1;
 
     reg protocol_error = 1'b0;
@@ -536,14 +537,15 @@ module zlc_pulse_streamer_top #(
         // cycle, while still tracking done/underflow on the quiescent run cycles.
         if ((lstate == L_IDLE) && (cmd_edge == 4'b0) && status_running) begin
             ldr_status_we <= 1'b1;
-            ldr_status_val <= {27'b0, ((zlc_done ? 5'b0 : ST_RUNNING)
-                              | (zlc_done ? ST_DONE : 5'b0)
-                              | ((zlc_overflow || protocol_error) ? ST_ERROR : 5'b0)
-                              | (zlc_underflow ? ST_UNDERFLOW : 5'b0))};
+            ldr_status_val <= {26'b0, ((zlc_done ? 6'b0 : {1'b0, ST_RUNNING})
+                              | (zlc_done ? {1'b0, ST_DONE} : 6'b0)
+                              | (zlc_overflow ? {1'b0, ST_ERROR} : 6'b0)
+                              | (zlc_underflow ? {1'b0, ST_UNDERFLOW} : 6'b0)
+                              | (protocol_error ? ST_LINK_ERROR : 6'b0))};
             if (zlc_done) status_running <= 1'b0;   // DONE latched; stop re-asserting STATUS
         end else if ((lstate == L_IDLE) && (cmd_edge == 4'b0) && protocol_error) begin
             ldr_status_we <= 1'b1;
-            ldr_status_val <= ctrl_reg[C_STATUS] | ST_ERROR;
+            ldr_status_val <= ctrl_reg[C_STATUS] | ST_LINK_ERROR;
         end
     end
 

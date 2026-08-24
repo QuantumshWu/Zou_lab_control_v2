@@ -119,7 +119,8 @@ acceptance must use the following order and retain one receipt:
    then open the server and record `describe()` geometry, clock, and lane count.
 5. With instruments disconnected or otherwise made safe, verify reset/SAFE pin
    levels and clock gates, one finite pulse with delayed DAC tail, DONE only
-   after physical drain, and loud sticky underflow/overflow/protocol errors.
+   after physical drain, loud sticky underflow/engine-overflow, and a separate
+   non-fatal UART LINK_ERROR diagnostic for recovered CRC/framing faults.
 6. Verify UART truncated/invalid frames, client disconnect, failed SAFE, and
    second-client takeover all leave no owner until a stable physical SAFE.
 7. Flash only as a separate, explicitly requested action after all volatile

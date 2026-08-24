@@ -26,6 +26,11 @@ They constrain implementation method; product and architecture truth remain in
 - **每次设计和修复前先读权威。** 每个 agent/sub-agent 在修改前必须先读取
   `ARCHITECTURE_DESIGN.md` 和 `IMPLEMENTATION_PLAN.md` 的相关完整章节；所有
   分派任务必须原样携带本节约束。对话摘要、旧测试和既有复杂代码都不能覆盖它。
+- **严格限制新增测试。** 只有当测试对象是用户明确要求的行为，或用户明确报告的
+  error/bug/problem，并且该路径确实复杂、容易实现错误或回归时，才允许新增测试。
+  其余修改一律不得以“覆盖率”“预防以后出错”或验证内部实现为由新增测试；优先
+  合并进现有直接用例，禁止堆砌重复用例、庞大fixture和只会增加维护、调试时间的
+  测试。若不满足上述条件，直接完成最小实现，不写新测试。
 
 以上约束适用于本仓库此后的每一次任务和上下文恢复，除非用户本人明确修改。
 
@@ -67,8 +72,12 @@ They constrain implementation method; product and architecture truth remain in
 6. Do not write defensive code for hypothetical misuse. Enforce only a real
    product, physical, persistence, concurrency, or public-contract invariant
    demonstrated by an existing consumer or a reproducible failure.
-7. Tests must exercise the production path. Do not create a second production
-   abstraction merely to make a test convenient, and do not turn every edge
+7. Tests must exercise the production path. A new test is permitted only for a
+   user-explicit behavior or a user-reported error/bug/problem whose path is
+   genuinely complex and regression-prone. Otherwise add no test. Prefer
+   extending one existing direct case; do not create a second production
+   abstraction merely to make a test convenient, duplicate coverage, grow
+   large fixtures, test internal implementation details, or turn every edge
    case into a new guard framework.
 
 ## Mandatory stop conditions

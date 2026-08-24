@@ -196,6 +196,14 @@ class NodeExecutionContext:
             contract_id=contract_id,
         )
 
+    def register_partial_exit_writer(
+        self,
+        writer: Callable[[str, BaseException], None],
+    ) -> None:
+        """Install the Task's one domain-owned stopped/failed artifact writer."""
+
+        self._host._register_partial_exit_writer(writer)
+
 class NodeHost:
     """Host one worker or source-bound processor with one lifecycle surface."""
 
@@ -334,6 +342,7 @@ class NodeHost:
         self._terminal_source: SignalValue | None = None
         self._follow_tap: FollowTap[SignalPublication] | None = None
         self._task_run: TaskRun | None = None
+        self._partial_exit_writer: Callable[[str, BaseException], None] | None = None
 
     @property
     def dataset_output_declarations(self) -> tuple[DatasetOutputDeclaration, ...]:
@@ -411,6 +420,7 @@ class NodeHost:
             raise RuntimeError("previous node generation still has pending work")
         self._retire_plane_state()
         self._reset_generation()
+        self._partial_exit_writer = None
         if self._mode == "processor":
             if run_root is not None or input_summary is not None:
                 raise ValueError("only a Task start accepts run metadata")
@@ -557,7 +567,19 @@ class NodeHost:
             execute = getattr(self._node, "execute", None)
             if not callable(execute):
                 raise TypeError("worker must provide execute(ctx)")
-            return execute(self._execution_context)
+            result = execute(self._execution_context)
+            if self._stop_event.is_set() and not self._worker_stop_accepted:
+                self._run_partial_exit_writer(
+                    "stopped",
+                    RuntimeError(self._stop_reason or "Task stopped"),
+                )
+            return result
+        except BaseException as error:
+            self._run_partial_exit_writer(
+                "stopped" if self._stop_event.is_set() else "failed",
+                error,
+            )
+            raise
         finally:
             with self._start_lock:
                 self._worker_stop_sealed = True
@@ -763,6 +785,36 @@ class NodeHost:
             role=role,
             contract_id=contract_id,
         )
+
+    def _register_partial_exit_writer(
+        self,
+        writer: Callable[[str, BaseException], None],
+    ) -> None:
+        if self._kind != "task" or self._task_run is None or not self._active:
+            raise RuntimeError(
+                "only an active hosted Task can register a partial exit writer"
+            )
+        if not callable(writer):
+            raise TypeError("partial exit writer must be callable")
+        if self._partial_exit_writer is not None:
+            raise RuntimeError("Task already registered its partial exit writer")
+        self._partial_exit_writer = writer
+
+    def _run_partial_exit_writer(
+        self,
+        status: str,
+        error: BaseException,
+    ) -> None:
+        writer, self._partial_exit_writer = self._partial_exit_writer, None
+        if writer is None:
+            return
+        try:
+            writer(str(status), error)
+        except BaseException as artifact_error:
+            error.add_note(
+                "Task partial artifacts could not be saved: "
+                f"{type(artifact_error).__name__}: {artifact_error}"
+            )
 
     def _mark_task_run_failed(self, error: BaseException) -> None:
         run = self._task_run

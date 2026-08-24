@@ -127,6 +127,7 @@ class _Context:
         self.progress: list[tuple] = []
         self.commits: list[dict[str, object]] = []
         self.artifacts: dict[str, tuple[Path, str, str]] = {}
+        self.partial_exit_writer = None
 
     def cancel_requested(self) -> bool:
         return self.cancelled
@@ -158,9 +159,13 @@ class _Context:
         self.artifacts[str(name)] = (selected, str(role), str(contract_id))
         return SimpleNamespace(path=selected)
 
+    def register_partial_exit_writer(self, writer) -> None:
+        assert self.partial_exit_writer is None
+        self.partial_exit_writer = writer
+
 
 def _wait_host(host: NodeHost, wake: Event):
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + 15.0
     while not host.terminal and time.monotonic() < deadline:
         host.poll()
         wake.wait(0.01)
@@ -313,7 +318,7 @@ def _load_candidate(path: str | Path) -> tuple[np.ndarray, dict[str, object]]:
 def _load_history(path: str | Path) -> list[dict[str, object]]:
     root = Path(path).resolve().parent.parent
     history: list[dict[str, object]] = []
-    for checkpoint in sorted((root / "data" / "candidates").glob("candidate-*.npz")):
+    for checkpoint in sorted((root / "data" / "measurements").glob("measurement-*.npz")):
         with np.load(checkpoint, allow_pickle=False) as archive:
             metadata = json.loads(str(np.asarray(archive["metadata"]).item()))
             for name in archive.files:
@@ -2346,7 +2351,7 @@ def test_virtual_feedback_recovers_missing_sites_and_retains_best_candidate(
         ]
         assert incomplete_messages
         root = Path(result["artifact_path"]).parent.parent
-        artifacts = tuple((root / "data" / "candidates").glob("candidate-*.npz"))
+        artifacts = tuple((root / "data" / "measurements").glob("measurement-*.npz"))
         assert len(artifacts) == len(history)
         assert len(tuple((root / "figures").glob("*.npz"))) == 6
         assert len(tuple((root / "figures").glob("*.png"))) == 6
@@ -2606,12 +2611,85 @@ def test_stop_during_failed_first_checkpoint_retains_measured_candidate(
         assert host.final_result["feedback_status"] == "stopped"
         np.testing.assert_array_equal(slm.last_commanded_phase, incoming)
         run_root = Path(host.final_result["artifact_path"]).parent.parent
-        assert not tuple((run_root / "data" / "candidates").glob("candidate-*.npz"))
+        assert not tuple((run_root / "data" / "measurements").glob("measurement-*.npz"))
         assert (run_root / "summary.json").is_file()
     finally:
         release_save.set()
         if not host.terminal:
             _wait_host(host, wake)
+        host.shutdown()
+        plane.close()
+
+
+def test_failure_after_a_completed_candidate_saves_figures_and_context(
+    tmp_path: Path, monkeypatch
+) -> None:
+    slm = _Slm((17, 23), incoming=0.125)
+    incoming = np.array(slm.last_commanded_phase, copy=True)
+    plane = SignalDataPlane()
+    wake = Event()
+    monkeypatch.setattr(
+        feedback_module,
+        "resolve_pulse",
+        lambda *args, **kwargs: SimpleNamespace(program=object()),
+    )
+    monkeypatch.setattr(
+        feedback_module,
+        "_fit_contrasts",
+        lambda samples, **_kwargs: _fitted_result(
+            np.linspace(1.0, 2.0, 35)
+        ),
+    )
+    monkeypatch.setattr(
+        SlmFeedbackTask,
+        "_measure",
+        lambda self, pulse, context, iteration: (
+            np.zeros((self.shots, 35)),
+            (),
+            (),
+            np.zeros(
+                self.calibration.frame_contract.image_shape,
+                dtype=np.float32,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        feedback_module,
+        "solve_phase",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            OSError("candidate solve failed")
+        ),
+    )
+    task = _task(
+        tmp_path,
+        slm=slm,
+        camera=object(),
+        sequencer=SimpleNamespace(describe=lambda: object()),
+        plane=plane,
+        target=_grid_target(slm.shape_yx),
+        updates=2,
+    )
+    host = _task_host(task, plane, wake)
+    try:
+        host.start(run_root=tmp_path, input_summary={})
+        observation = _wait_host(host, wake)
+        assert observation.phase == "failed"
+        assert "candidate solve failed" in (observation.error or "")
+        run_root = host.run_directory
+        assert run_root is not None
+        assert len(tuple((run_root / "figures").glob("*.npz"))) == 6
+        assert len(tuple((run_root / "figures").glob("*.png"))) == 6
+        candidate = run_root / "candidates" / "candidate-0001.npz"
+        loaded = load_science_context(candidate)
+        assert loaded["pattern_metadata"]["status"] == "checkpoint"
+        assert loaded["pattern_metadata"]["candidate"] == 1
+        summary = json.loads(
+            (run_root / "summary.json").read_text(encoding="utf-8")
+        )
+        assert summary["status"] == "failed"
+        assert summary["selected_candidate"] == 1
+        np.testing.assert_array_equal(slm.last_commanded_phase, incoming)
+    finally:
         host.shutdown()
         plane.close()
 
@@ -2787,9 +2865,9 @@ def test_terminal_save_failure_restores_incoming_and_fails_host(
         np.testing.assert_array_equal(slm.last_commanded_phase, incoming)
         run_root = host.run_directory
         assert run_root is not None
-        artifacts = tuple((run_root / "data" / "candidates").glob("candidate-*.npz"))
+        artifacts = tuple((run_root / "data" / "measurements").glob("measurement-*.npz"))
         assert len(artifacts) == 3
-        assert artifacts[-1].name == "candidate-0003.npz"
+        assert artifacts[-1].name == "measurement-0003.npz"
         assert not (run_root / "final" / "science-context.npz").exists()
         summary = json.loads((run_root / "summary.json").read_text(encoding="utf-8"))
         assert summary["status"] == "failed"
@@ -2849,8 +2927,8 @@ def test_invalid_site_holds_weight_and_never_retries_the_same_phase(
             for left, right in zip(measured_phases, measured_phases[1:])
         )
         artifacts = tuple(
-            (Path(result["artifact_path"]).parent.parent / "data" / "candidates").glob(
-                "candidate-*.npz"
+            (Path(result["artifact_path"]).parent.parent / "data" / "measurements").glob(
+                "measurement-*.npz"
             )
         )
         assert len(artifacts) == len(measured_phases)
@@ -2922,7 +3000,7 @@ def test_stop_before_first_candidate_accepts_incoming_as_formal_artifact(
         assert not np.any(history.snapshot.expanded_validity())
         assert not slm.commands
         root = Path(result["artifact_path"]).parent.parent
-        assert not tuple((root / "data" / "candidates").glob("candidate-*.npz"))
+        assert not tuple((root / "data" / "measurements").glob("measurement-*.npz"))
         assert Path(result["artifact_path"]) == root / "final" / "science-context.npz"
     finally:
         plane.close()

@@ -222,7 +222,8 @@ def test_public_done_waits_for_the_physical_tail_and_errors_are_sticky() -> None
     playback_end = engine.index("else if (draining) begin", playback_start)
     assert "underflow <= 1'b0" not in engine[playback_start:playback_end]
     assert "overflow <= 1'b1" in engine
-    assert "(zlc_overflow || protocol_error) ? ST_ERROR" in top
+    assert "zlc_overflow ? {1'b0, ST_ERROR}" in top
+    assert "protocol_error ? ST_LINK_ERROR" in top
     assert "bank_ready[0] && bank_chunk0 == 0" in engine
 
 

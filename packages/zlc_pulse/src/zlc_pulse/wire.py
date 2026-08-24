@@ -18,7 +18,7 @@ __all__ = [
     "pack_program", "unpack_program", "scan_bank_words", "region_bases",
     "check_rtl_assumptions",
     "CMD_LOAD", "CMD_FIRE", "CMD_RESET", "CMD_SAFE",
-    "STATUS_LOADED", "STATUS_RUNNING", "STATUS_DONE", "STATUS_ERROR", "STATUS_UNDERFLOW",
+    "STATUS_LOADED", "STATUS_RUNNING", "STATUS_DONE", "STATUS_ERROR", "STATUS_UNDERFLOW", "STATUS_LINK_ERROR",
     "REGISTER_LAYOUT_ID", "LAYOUT_STRUCT_VERSION", "build_fingerprint",
     "DEFAULT_CONFIG_PATH", "load_streamer_config", "params_from_config", "default_params",
     "FROZEN_CLOCK_HZ", "FROZEN_SLOT_MUL_WIDTH", "default_clock_hz",
@@ -26,7 +26,7 @@ __all__ = [
 
 # CTRL word 63 is the single host/bitstream geometry handshake.  The RTL carries
 # the precomputed value; host packing and generated headers call this function.
-LAYOUT_STRUCT_VERSION = 3   # Included in the word-63 compatibility fingerprint.
+LAYOUT_STRUCT_VERSION = 4   # Included in the word-63 compatibility fingerprint.
 
 # Only host-side validation caps are excluded; all other geometry fields are hashed.
 _FINGERPRINT_HOST_ONLY = frozenset({"ttl_delay_max_ticks"})
@@ -77,10 +77,11 @@ STATUS_RUNNING = 1 << 1
 STATUS_DONE = 1 << 2
 STATUS_ERROR = 1 << 3
 STATUS_UNDERFLOW = 1 << 4
+STATUS_LINK_ERROR = 1 << 5
 
 class CtrlWords:
     COMMAND = 1            # host -> top: LOAD/FIRE/RESET/SAFE (rising-edge)
-    STATUS = 2            # top -> host: LOADED/RUNNING/DONE/ERROR/UNDERFLOW
+    STATUS = 2            # top -> host: LOADED/RUNNING/DONE/ERROR/UNDERFLOW/LINK_ERROR
     PROG_COUNT = 3        # number of edges
     SCAN_COUNT = 4        # total scan points N; may exceed the two-bank window
     SCAN_ENABLE = 5

@@ -72,6 +72,7 @@ from zlc_atom.nodes.scan.source import wait_for_board
 
 
 SLM_PHASE_ARTIFACT_CONTRACT = SCIENCE_CONTEXT_ARTIFACT_CONTRACT
+_FEEDBACK_MEASUREMENT_CHECKPOINT_CONTRACT = "zlc.slm.feedback-measurement"
 CANDIDATE_PHASE_OUTPUT = DatasetOutputDeclaration(
     "candidate_phase", "slm-feedback.candidate-phase"
 )
@@ -1217,6 +1218,11 @@ class SlmFeedbackTask:
         receipt = dict(self.slm.last_command_receipt)
         if receipt.get("outcome") not in {"known-old", "known-new"}:
             raise RuntimeError("SLM candidate command outcome is unknown")
+        pattern_metadata = _plain_json(
+            {**self._pattern_metadata, **dict(metadata)}
+        )
+        if not isinstance(pattern_metadata, Mapping):
+            raise TypeError("SLM candidate metadata must remain a mapping")
         return save_science_context(
             path,
             phase,
@@ -1229,7 +1235,7 @@ class SlmFeedbackTask:
             pupil=self._pupil,
             system_correction=self._system_correction,
             command_receipt=receipt,
-            pattern_metadata={**self._pattern_metadata, **dict(metadata)},
+            pattern_metadata=pattern_metadata,
             operator_metadata=self._operator_metadata,
         )
 
@@ -1606,11 +1612,18 @@ class SlmFeedbackTask:
         paths = {
             "root": root,
             "data": root / "data",
-            "candidates": root / "data" / "candidates",
+            "measurements": root / "data" / "measurements",
+            "candidate_contexts": root / "candidates",
             "figures": root / "figures",
             "final": root / "final",
         }
-        for name in ("data", "candidates", "figures", "final"):
+        for name in (
+            "data",
+            "measurements",
+            "candidate_contexts",
+            "figures",
+            "final",
+        ):
             paths[name].mkdir(parents=True, exist_ok=True)
         site_path = _write_npz(
             paths["data"] / "sites.npz",
@@ -1642,6 +1655,10 @@ class SlmFeedbackTask:
         samples: np.ndarray,
         measurement: Mapping[str, object],
         solver: Mapping[str, object] | None,
+        phase: np.ndarray,
+        pattern: np.ndarray,
+        target: np.ndarray,
+        history: list[dict[str, object]],
     ) -> Path:
         arrays: dict[str, object] = {
             "box_samples": np.asarray(samples, dtype="<f8"),
@@ -1671,20 +1688,48 @@ class SlmFeedbackTask:
         }
         metadata.update(
             {
-                "format": "zlc.slm.feedback-candidate",
+                "format": _FEEDBACK_MEASUREMENT_CHECKPOINT_CONTRACT,
                 "solver": None if solver is None else dict(solver),
                 "slm_command_receipt": dict(self.slm.last_command_receipt),
             }
         )
-        path = _write_npz(
-            paths["candidates"] / f"candidate-{int(candidate):04d}.npz",
+        data_path = _write_npz(
+            paths["measurements"] / f"measurement-{int(candidate):04d}.npz",
             arrays=arrays,
             metadata=metadata,
         )
         context.register_artifact(
-            f"candidate_{int(candidate):04d}", path, role="checkpoint"
+            f"measurement_{int(candidate):04d}",
+            data_path,
+            role="checkpoint",
         )
-        return path
+        candidate_metadata = self._candidate_metadata(
+            candidate=int(candidate),
+            status="checkpoint",
+            history=history,
+            solver=solver,
+        )
+        candidate_metadata.update(
+            {
+                "measurement_checkpoint": str(
+                    data_path.relative_to(paths["root"]).as_posix()
+                ),
+            }
+        )
+        context_path = self._save_candidate(
+            paths["candidate_contexts"] / f"candidate-{int(candidate):04d}.npz",
+            phase,
+            pattern,
+            target,
+            candidate_metadata,
+        )
+        context.register_artifact(
+            f"candidate_{int(candidate):04d}",
+            context_path,
+            role="checkpoint",
+            contract_id=SLM_PHASE_ARTIFACT_CONTRACT,
+        )
+        return context_path
 
     def _save_figure(
         self,
@@ -2326,6 +2371,42 @@ class SlmFeedbackTask:
             "actual_exposure_seconds": self._actual_exposure_seconds,
         }
 
+    def _save_failure_figures(
+        self,
+        context: object,
+        paths: Mapping[str, Path],
+        *,
+        history: list[dict[str, object]],
+        selected: Mapping[str, object] | None,
+        initial_phase: np.ndarray,
+        initial_mean_frame: np.ndarray | None,
+        error: BaseException,
+    ) -> None:
+        """Save the report supported by completed data without masking failure."""
+
+        if (
+            not history
+            or selected is None
+            or selected.get("samples") is None
+            or selected.get("mean_frame") is None
+            or initial_mean_frame is None
+        ):
+            return
+        try:
+            self._save_figures(
+                context,
+                paths,
+                history=history,
+                selected=selected,
+                initial_phase=initial_phase,
+                initial_mean_frame=initial_mean_frame,
+            )
+        except BaseException as figure_error:
+            error.add_note(
+                "Feedback partial figures could not be saved: "
+                f"{type(figure_error).__name__}: {figure_error}"
+            )
+
     def execute(self, context: object) -> dict[str, object]:
         incoming = self._incoming_phase
         incoming_pattern = self._pattern_phase
@@ -2333,9 +2414,25 @@ class SlmFeedbackTask:
         history: list[dict[str, object]] = []
         retained_valid: dict[str, object] | None = None
         most_visible_observed: dict[str, object] | None = None
+        last_completed_candidate: dict[str, object] | None = None
         initial_mean_frame: np.ndarray | None = None
         stalled = False
         termination_reason = "all authored feedback updates completed"
+        context.register_partial_exit_writer(
+            lambda _status, error: self._save_failure_figures(
+                context,
+                paths,
+                history=history,
+                selected=(
+                    retained_valid
+                    or most_visible_observed
+                    or last_completed_candidate
+                ),
+                initial_phase=incoming,
+                initial_mean_frame=initial_mean_frame,
+                error=error,
+            )
+        )
         try:
             _check_cancelled(context)
             # Science Context is the requested starting CONTENT, not proof of
@@ -2974,7 +3071,10 @@ class SlmFeedbackTask:
                     "minimum_visibility_confidence": visibility_margin,
                 })
                 history[-1]["checkpoint_path"] = (
-                    f"data/candidates/candidate-{candidate_number:04d}.npz"
+                    f"candidates/candidate-{candidate_number:04d}.npz"
+                )
+                history[-1]["measurement_checkpoint_path"] = (
+                    f"data/measurements/measurement-{candidate_number:04d}.npz"
                 )
                 self._publish_candidate(
                     context,
@@ -2995,6 +3095,7 @@ class SlmFeedbackTask:
                     "samples": np.array(samples, copy=True),
                     "mean_frame": np.array(mean_frame, copy=True),
                 }
+                last_completed_candidate = completed
                 completed["visibility_rank"] = (
                     visibility,
                     -int(np.count_nonzero(fit_invalid)),
@@ -3208,6 +3309,10 @@ class SlmFeedbackTask:
                             samples=samples,
                             measurement=history[-1],
                             solver=candidate_solver,
+                            phase=np.asarray(completed["phase"]),
+                            pattern=np.asarray(completed["pattern_phase"]),
+                            target=np.asarray(completed["target"]),
+                            history=history,
                         )
                         raise
                     next_phase = self._science_phase(next_pattern)
@@ -3242,6 +3347,10 @@ class SlmFeedbackTask:
                     samples=samples,
                     measurement=history[-1],
                     solver=candidate_solver,
+                    phase=np.asarray(completed["phase"]),
+                    pattern=np.asarray(completed["pattern_phase"]),
+                    target=np.asarray(completed["target"]),
+                    history=history,
                 )
                 if not continue_feedback:
                     break
@@ -3311,14 +3420,12 @@ class SlmFeedbackTask:
                         republish=True,
                     )
                 except BaseException as stop_error:
-                    try:
-                        self._apply_exact(incoming)
-                    except BaseException as restore_error:
-                        raise RuntimeError(
-                            "SLM feedback Stop failed and the incoming phase "
-                            "could not be restored"
-                        ) from restore_error
-                    raise stop_error
+                    error = stop_error
+            failure_selected = (
+                retained_valid
+                or most_visible_observed
+                or last_completed_candidate
+            )
             try:
                 self._apply_exact(incoming)
             except BaseException as restore_error:
@@ -3328,7 +3435,11 @@ class SlmFeedbackTask:
                         paths,
                         status="failed",
                         history=history,
-                        selected_candidate=None,
+                        selected_candidate=(
+                            None
+                            if failure_selected is None
+                            else int(failure_selected["candidate"])
+                        ),
                         error=error,
                         rollback={
                             "status": "failed",
@@ -3352,7 +3463,11 @@ class SlmFeedbackTask:
                     paths,
                     status="failed",
                     history=history,
-                    selected_candidate=None,
+                    selected_candidate=(
+                        None
+                        if failure_selected is None
+                        else int(failure_selected["candidate"])
+                    ),
                     error=error,
                     rollback={
                         "status": "restored",

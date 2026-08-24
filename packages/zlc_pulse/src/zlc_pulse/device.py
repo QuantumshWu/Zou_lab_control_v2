@@ -23,6 +23,7 @@ from .wire import (
     CtrlWords,
     STATUS_DONE,
     STATUS_ERROR,
+    STATUS_LINK_ERROR,
     STATUS_LOADED,
     STATUS_RUNNING,
     STATUS_UNDERFLOW,
@@ -64,17 +65,19 @@ class DoneReport:
     status: int
     cursor: int | None
     underflow: bool
-    tail_elapsed: float
+    elapsed_seconds: float
     status_reads: tuple[int, int] = ()
     cursor_reads: tuple[int, int] = ()
+    observer_error: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "status", int(self.status))
         object.__setattr__(self, "cursor", None if self.cursor is None else int(self.cursor))
         object.__setattr__(self, "underflow", bool(self.underflow))
-        object.__setattr__(self, "tail_elapsed", float(self.tail_elapsed))
+        object.__setattr__(self, "elapsed_seconds", float(self.elapsed_seconds))
         object.__setattr__(self, "status_reads", tuple(int(value) for value in self.status_reads))
         object.__setattr__(self, "cursor_reads", tuple(int(value) for value in self.cursor_reads))
+        object.__setattr__(self, "observer_error", str(self.observer_error))
 
 
     @property
@@ -91,11 +94,17 @@ class DoneReport:
         from .wire import STATUS_ERROR, STATUS_UNDERFLOW
 
         reasons = []
-        if self.status & STATUS_ERROR:
+        if self.observer_error:
+            reasons.append(f"pulse observer failed: {self.observer_error}")
+        elif self.status & STATUS_ERROR:
             reasons.append("the board reported an error")
         if self.status & STATUS_UNDERFLOW or self.underflow:
             reasons.append("the scan bank underran")
         return "; ".join(reasons)
+
+    @property
+    def link_error(self) -> bool:
+        return bool(self.status & STATUS_LINK_ERROR)
 
     @property
     def status_first(self) -> int | None:
@@ -277,6 +286,7 @@ class PulseStreamer:
         self._underflow = False
         self._terminal_status_reads: tuple[int, int] = ()
         self._terminal_cursor_reads: tuple[int, int] = ()
+        self._observer_error = ""
         self._worker: threading.Thread | None = None
         self._fire_gate: threading.Event | None = None
         self._stop = threading.Event()
@@ -397,6 +407,7 @@ class PulseStreamer:
             self._underflow = False
             self._terminal_status_reads = ()
             self._terminal_cursor_reads = ()
+            self._observer_error = ""
             self._applied = AppliedState(
                 program=prog,
                 source=source,
@@ -456,6 +467,7 @@ class PulseStreamer:
             self._cursor_value = 0
             self._terminal_status_reads = ()
             self._terminal_cursor_reads = ()
+            self._observer_error = ""
             self._terminal_status = STATUS_RUNNING
             self._fire_started = time.monotonic()
             self._clear_safe_readback_locked()
@@ -502,9 +514,10 @@ class PulseStreamer:
             status=status_reads[-1],
             cursor=cursor_reads[-1],
             underflow=bool(status_reads[-1] & STATUS_UNDERFLOW) or self._underflow,
-            tail_elapsed=max(0.0, time.monotonic() - self._fire_started),
+            elapsed_seconds=max(0.0, time.monotonic() - self._fire_started),
             status_reads=status_reads,
             cursor_reads=cursor_reads,
+            observer_error=self._observer_error,
         )
         with self._lock:
             self._firing = False
@@ -583,10 +596,10 @@ class PulseStreamer:
                 try:
                     status = self._read(CtrlWords.STATUS, stop=self._stop)
                     cursor = self._read(CtrlWords.CURSOR, stop=self._stop)
-                except Exception:
+                except Exception as error:
                     if self._stop.is_set():
                         return
-                    self._record_observer_failure()
+                    self._record_observer_failure(error)
                     self._done.set()
                     return
                 with self._lock:
@@ -604,16 +617,17 @@ class PulseStreamer:
                     self._refill(cursor)
                 if self._stop.wait(self._observer_interval):
                     return
-        except Exception:
+        except Exception as error:
             if not self._stop.is_set():
-                self._record_observer_failure()
+                self._record_observer_failure(error)
                 self._done.set()
-    def _record_observer_failure(self) -> None:
+    def _record_observer_failure(self, error: BaseException) -> None:
         with self._lock:
             cursor = self._cursor_value or 0
             self._terminal_status_reads = (STATUS_ERROR, STATUS_ERROR)
             self._terminal_cursor_reads = (cursor, cursor)
             self._terminal_status = STATUS_ERROR
+            self._observer_error = f"{type(error).__name__}: {error}"
     def _finish_observation(self, first_status: int, first_cursor: int) -> None:
         try:
             second_status = self._read(CtrlWords.STATUS, stop=self._stop)
