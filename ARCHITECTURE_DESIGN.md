@@ -235,7 +235,7 @@ Node new chunk
 ### 8.2 Context与artifacts
 
 - Target使用稳定`zlc.slm.target` strict格式保存intensity和objective，只是Editor authoring import/export artifact，不是run consumer的第二Target truth。
-- Science Context使用稳定`zlc.slm.science-context` strict格式保存run的唯一frozen Target、numeric pupil、Pattern/base、operator wavefront和system correction引用；Editor Load是一次atomic adopt。Reader只接受当前完整Context，其它root或缺失字段均loud拒绝。
+- Science Context使用稳定`zlc.slm.science-context` strict格式，以无损压缩NPZ保存run的唯一frozen Target、numeric pupil、Pattern/base、operator wavefront和system correction引用；Editor Load是一次atomic adopt。Reader只接受当前完整Context，其它root或缺失字段均loud拒绝。
 - Command receipt保存USB/profile/wavelength/orientation/correction/outcome。
 - `SystemCorrectionArtifact`明确区分pupil phase map与target response map；不得把per-geometry site weights冒充通用wavefront correction。
 

@@ -15,6 +15,8 @@
 - Reader只接受当前完整grammar；现有workspace不转换，文件可直接不受当前reader支持。
 - 产品bootstrap为`zou_lab_control`；根`pyproject.toml`仍是唯一distribution manifest，
   八个`zlc_*`目录只是同一distribution的依赖边界。
+- Science Context统一writer使用无损压缩NPZ；X15213代表数据实测26.088→16.804 MiB，
+  保存0.025→0.732 s、完整读取0.029→0.128 s，数组逐元素不变。
 - Hosted Task只在NodeHost worker真正Start时分配run directory，并在任何不可逆工作前
   原子建立`run.json`。进度、artifact registration、Stop、failure和terminal result都写回
   同一个lifecycle truth。

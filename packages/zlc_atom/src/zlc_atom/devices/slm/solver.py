@@ -1679,7 +1679,7 @@ def save_science_context(
     encoded = _metadata_json(metadata)
     return atomic_write_file(
         path,
-        lambda stream: np.savez(
+        lambda stream: np.savez_compressed(
             stream,
             phase=science,
             pattern_phase=pattern,
