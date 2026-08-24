@@ -97,9 +97,10 @@
 - Installed `gui_offscreen: PASS`，包含UI、Plot Qt、SLM Editor、FigureViewer、Workbench
   presenter/device/Pulse Editor以及每个TaskConsole case的独立进程生命周期。
 - Installed `virtual_vertical: PASS (9 passed)`；`notebook_offline: PASS`。
-- Checkout bootstrap follow-up：从系统临时目录运行`bin\run_server.bat --help`成功，八层路径
-  全部来自当前checkout；同一新wheel的isolated install从site-packages加载bootstrap与Pulse
-  server成功。该follow-up只改变launcher/bootstrap，不改变science/runtime实现。
+- Checkout bootstrap由共享Python resolver统一拥有；Experiment/Server/Viewer、FPGA
+  build/program与resource estimate从任意工作目录都加载当前checkout的bootstrap和八层。
+  `install_requirements.bat`显式清除source injection并验证installed distribution；同一新wheel
+  的isolated install仍从site-packages加载bootstrap与Pulse server。该边界不改变science/runtime。
 - Calibration六张report Figure都经FigureViewer current reader重开；SLM Feedback六张Figure
   均经formal `zlc figure_viewer --check`读取。上述证据属于此前冻结tree；本次Feedback/Curve
   最近一次pre-adaptive controller实测为6个probe candidate、22个总candidate、最佳34/35与ratio 1.1337。

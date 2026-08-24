@@ -125,8 +125,30 @@ if /I not "%ZLC_PY_EXT%"==".bat" set "ZLC_PY_CMD="%ZLC_PY_PATH%""
 
 :zlc_python_found
 call :zlc_python_conda_activate
+call :zlc_python_product_environment "%~3"
 echo ZLC Python: %ZLC_PY_PATH%
 set "ZLC_TOOL_REPO_ROOT="
+exit /b 0
+
+:zlc_python_product_environment
+rem Every human-facing command launched from a checkout must import THAT
+rem checkout, independently of the caller's working directory.  Keeping this
+rem beside interpreter resolution makes Python selection and product selection
+rem one decision for _launch, FPGA build/program, and resource estimation.
+rem The installer is the sole exception: /installed clears source injection so
+rem its final check proves the installed distribution rather than the checkout.
+if /I "%~1"=="/installed" (
+  set "PYTHONPATH="
+  set "ZLC_CHECKOUT_PRODUCT_ROOT="
+  exit /b 0
+)
+if defined ZLC_CHECKOUT_PRODUCT_ROOT if /I "%ZLC_CHECKOUT_PRODUCT_ROOT%"=="%ZLC_TOOL_REPO_ROOT%" exit /b 0
+if defined PYTHONPATH (
+  set "PYTHONPATH=%ZLC_TOOL_REPO_ROOT%;%PYTHONPATH%"
+) else (
+  set "PYTHONPATH=%ZLC_TOOL_REPO_ROOT%"
+)
+set "ZLC_CHECKOUT_PRODUCT_ROOT=%ZLC_TOOL_REPO_ROOT%"
 exit /b 0
 
 :zlc_find_vivado

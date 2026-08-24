@@ -226,17 +226,17 @@ echo ZLC FINAL XDC: !ZLC_SELECTED_XDC!
 exit /b 0
 
 :zlc_require_product
-rem Hardware projection must come from the one installed distribution. Running
-rem from a neutral directory prevents this checkout's bootstrap or a neighboring
-rem standalone layer from masking a missing or stale product install.
+rem The shared Python resolver has already selected this checkout's one product
+rem bootstrap.  Running from a neutral directory proves the command does not
+rem accidentally depend on CD and cannot pick a neighboring checkout.
 pushd "%TEMP%"
 %ZLC_PY_CMD% -m zou_lab_control check
 set "ZLC_PRODUCT_STATUS=!ERRORLEVEL!"
 popd
 if not "!ZLC_PRODUCT_STATUS!"=="0" (
-  echo ERROR: the selected Python does not own one valid zou-lab-control product.
-  echo        Run bin\install_requirements.bat, or set ZLC_PY_CMD to the
-  echo        interpreter where the root product is installed.
+  echo ERROR: the selected Python cannot load this checkout's complete zou-lab-control product.
+  echo        Run bin\install_requirements.bat to install its dependencies, or set
+  echo        ZLC_PY_CMD to the interpreter where those dependencies are installed.
   exit /b !ZLC_PRODUCT_STATUS!
 )
 exit /b 0

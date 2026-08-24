@@ -12,11 +12,16 @@ LAUNCHER = ROOT.parents[1] / "bin" / "run_server.bat"
 SHARED_LAUNCHER = ROOT.parents[1] / "bin" / "_launch.bat"
 BUILD_LAUNCHER = ROOT.parents[1] / "bin" / "build_and_program.bat"
 ESTIMATE_LAUNCHER = ROOT.parents[1] / "bin" / "estimate_resources.bat"
+INSTALL_LAUNCHER = ROOT.parents[1] / "bin" / "install_requirements.bat"
+TOOLS_RESOLVER = ROOT / "fpga" / "_resolve_tools.bat"
 FPGA_SOURCES = ROOT / "fpga" / "pulse_streamer"
 
 
 def _fake_python(path: Path) -> Path:
-    path.write_text("@echo off\necho FAKE_ARGS=%*\nexit /b 0\n", encoding="utf-8")
+    path.write_text(
+        "@echo off\necho FAKE_ARGS=%*\necho FAKE_PYTHONPATH=%PYTHONPATH%\nexit /b 0\n",
+        encoding="utf-8",
+    )
     return path
 
 
@@ -63,8 +68,19 @@ def test_real_batch_wrapper_forwards_exact_modes_without_inner_argument(tmp_path
     no_args = _run_batch(cwd=ROOT, python_path=fake)
     assert "-m zou_lab_control pulse_server" in no_args.stdout
     shared = SHARED_LAUNCHER.read_text(encoding="utf-8")
-    assert 'set "PYTHONPATH=%ZLC_HOME%;%PYTHONPATH%"' in shared
-    assert 'set "PYTHONPATH=%ZLC_HOME%"' in shared
+    resolver = TOOLS_RESOLVER.read_text(encoding="utf-8")
+    assert 'set "PYTHONPATH=%ZLC_TOOL_REPO_ROOT%;%PYTHONPATH%"' in resolver
+    assert 'set "PYTHONPATH=%ZLC_TOOL_REPO_ROOT%"' in resolver
+    assert "PYTHONPATH=" not in shared
+    assert str(ROOT.parents[1]) in no_args.stdout.split("FAKE_PYTHONPATH=", 1)[1]
+    installer = INSTALL_LAUNCHER.read_text(encoding="utf-8")
+    assert "/installed" in installer
+    assert installer.rfind(
+        'pushd "%TEMP%"', 0, installer.index("-m zou_lab_control check")
+    ) >= 0
+    assert '_resolve_tools.bat" python "%ZLC_HOME%"' in BUILD_LAUNCHER.read_text(
+        encoding="utf-8"
+    )
     assert "--host \"127.0.0.1\" --port \"18861\"" in no_args.stdout
     jtag = _run_batch("--backend", "jtag-axi", cwd=ROOT, python_path=fake)
     assert "--backend jtag-axi" in jtag.stdout

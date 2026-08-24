@@ -280,8 +280,9 @@ Node new chunk
 ## 10. Deployment、Evidence与Docs
 
 - 一个可安装`zou-lab-control` distribution，bootstrap package为`zou_lab_control`；内部八层不独立发wheel或维护版本。
-- Checkout launcher通过同一个bootstrap运行当前tree；installed wheel在checkout外从
-  distribution metadata解析同一组commands/layers，不保留第二入口名。
+- 所有checkout launcher（包括FPGA build/program与resource estimate）通过同一个Python
+  环境owner激活当前tree的bootstrap；安装器是唯一installed-only路径。installed wheel在
+  checkout外从distribution metadata解析同一组commands/layers，不保留第二入口名。
 - 根`pyproject.toml`是唯一product manifest，`constraints.txt`是唯一resolved dependency surface，`zlc`是唯一console entry并从manifest加载commands/layers/evidence。
 - Wheel必须包含bootstrap、八层、Calibration/Scan templates、SLM profile、Plot font及完整有效FPGA RTL/XDC/Tcl assets；installed environment check按distribution RECORD验证归属。
 - 正式evidence lanes：software、gui_offscreen、virtual_vertical、notebook_offline、real_screen和hardware runbooks。

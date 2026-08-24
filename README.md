@@ -17,10 +17,11 @@ zlc check
 
 On a fresh Windows machine, run `bin\install_requirements.bat` once to install
 the constrained dependencies and root product. Afterwards the launchers can be
-double-clicked directly. A checkout launcher always activates that checkout's
-`zou_lab_control` bootstrap and eight `packages/*/src` roots, so pulling source
-changes does not require reinstalling the package merely to expose a renamed or
-new module. A release wheel uses the same constraint surface:
+double-clicked directly. Every checkout command, including FPGA build/program
+and resource estimation, resolves Python and activates that checkout's
+`zou_lab_control` bootstrap through one shared owner. Pulling source changes
+therefore does not require reinstalling the package merely to expose a renamed
+or new module. A release wheel uses the same constraint surface:
 
 ```powershell
 python -m pip install -c constraints.txt "zou_lab_control-2.0.0-py3-none-any.whl[dev]"
@@ -46,9 +47,10 @@ zlc check             installed-product provenance check
 zlc evidence          formal evidence lanes
 ```
 
-The Windows files in `bin\` are thin shortcuts. They resolve Python, select one
-manifest command, and forward the original argument vector once; they do not
-modify `PYTHONPATH` or rebuild arguments.
+The Windows files in `bin\` are thin shortcuts. Their shared Python resolver
+anchors imports to the current checkout, then they select one manifest command
+and forward the original argument vector once. `install_requirements.bat` is
+the sole installed-only mode, so its final check cannot be masked by source.
 
 ```text
 bin\experiment.bat             Device Manager Init -> Task Console
@@ -56,7 +58,7 @@ bin\pulse_editor.bat           Pulse Editor
 bin\figure_viewer.bat          Figure Viewer
 bin\run_server.bat             pulse server only; never builds/programs FPGA
 bin\slm_server.bat             sole SLM server owner; DVI default
-bin\estimate_resources.bat     installed geometry/resource estimate
+bin\estimate_resources.bat     current checkout geometry/resource estimate
 bin\build_and_program.bat      build if needed, then program volatile FPGA;
                                build-only/flash remain explicit modes
 ```

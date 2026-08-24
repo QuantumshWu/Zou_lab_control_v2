@@ -17,15 +17,6 @@ if errorlevel 1 (
   exit /b 1
 )
 
-rem A human launching this checkout runs this checkout.  The bootstrap adds
-rem its eight packages/*/src roots; preserving CD keeps workspace discovery
-rem anchored at the operator's experiment folder.
-if defined PYTHONPATH (
-  set "PYTHONPATH=%ZLC_HOME%;%PYTHONPATH%"
-) else (
-  set "PYTHONPATH=%ZLC_HOME%"
-)
-
 echo.
 echo ============================================================
 echo ZLC - %ZLC_COMMAND%

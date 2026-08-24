@@ -3,7 +3,7 @@ rem Install one editable root distribution under the single constraints file.
 setlocal EnableExtensions DisableDelayedExpansion
 
 for %%I in ("%~dp0..") do set "ZLC_HOME=%%~fI"
-call "%ZLC_HOME%\packages\zlc_pulse\fpga\_resolve_tools.bat" python "%ZLC_HOME%"
+call "%ZLC_HOME%\packages\zlc_pulse\fpga\_resolve_tools.bat" python "%ZLC_HOME%" /installed
 if errorlevel 1 (
   echo Nothing can be installed until this machine has Python.
   if "%ZLC_NO_PAUSE%"=="" pause
@@ -27,8 +27,10 @@ if not "%ZLC_STATUS%"=="0" goto zlc_failed
 %ZLC_PY_CMD% -m pip check
 set "ZLC_STATUS=%ERRORLEVEL%"
 if not "%ZLC_STATUS%"=="0" goto zlc_failed
+pushd "%TEMP%"
 %ZLC_PY_CMD% -m zou_lab_control check
 set "ZLC_STATUS=%ERRORLEVEL%"
+popd
 if not "%ZLC_STATUS%"=="0" goto zlc_failed
 echo.
 echo Installed. Run bin\experiment.bat from the experiment workspace.
