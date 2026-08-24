@@ -632,9 +632,6 @@ def _selected_probe_target(
     measurements: list[tuple[float, np.ndarray, np.ndarray, np.ndarray]],
     rows: np.ndarray,
     columns: np.ndarray,
-    *,
-    feedback_gain: float,
-    maximum_weight_change: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     probe = np.asarray(probe_sites, dtype=bool)
     values = np.asarray(baseline_contrast, dtype=float)
@@ -680,14 +677,7 @@ def _selected_probe_target(
             selected[site] = chosen[3]
             side = "lower" if chosen[0] else "upper"
             decisions[site] = f"probe_choose_{side}_{'closest' if len(sides) == 2 else 'only'}"
-    gain = float(feedback_gain)
-    limit = float(maximum_weight_change)
-    cap = np.log1p(limit)
-    requested_log = np.log(selected[probe])
     observed_factors = np.array(selected, copy=True)
-    selected[probe] = np.exp(
-        np.sign(requested_log) * np.minimum(gain * np.abs(requested_log), cap)
-    )
     updated, effective = _relative_probe_target(
         target, selected, probe, rows, columns
     )
@@ -2607,6 +2597,7 @@ class SlmFeedbackTask:
             previous_formal_valid: np.ndarray | None = None
             probe_sites = np.zeros(self._site_count, dtype=bool)
             probe_episode_used = np.zeros(self._site_count, dtype=bool)
+            probe_adoption_pending = np.zeros(self._site_count, dtype=bool)
             probe_baseline_target: np.ndarray | None = None
             probe_baseline_pattern: np.ndarray | None = None
             probe_baseline_optimizer_state: dict[str, object] | None = None
@@ -2810,6 +2801,24 @@ class SlmFeedbackTask:
                         observable_valid,
                         acquisition_invalid,
                     )
+                    contradicted_probe = (
+                        unobservable_single
+                        & (candidate_kind == "probe_combined")
+                        & (
+                            probe_adoption_pending
+                            | probe_baseline_reference_valid
+                        )
+                    )
+                    probe_adoption_pending[fit_valid | acquisition_invalid] = False
+                    if np.any(contradicted_probe):
+                        probe_episode_used[contradicted_probe] = False
+                        probe_adoption_pending[contradicted_probe] = False
+                        probe_selected_factors[contradicted_probe] = 1.0
+                        probe_direction_log_step[contradicted_probe] = 0.0
+                        probe_direction_sign[contradicted_probe] = 0.0
+                        probe_single_bound[contradicted_probe] = np.nan
+                        probe_observable_bound[contradicted_probe] = np.nan
+                        probe_control_boundary[contradicted_probe] = np.nan
                     has_double_history = (
                         unobservable_single
                         & np.isfinite(previous_weights)
@@ -2878,30 +2887,7 @@ class SlmFeedbackTask:
                         current_control_weights[has_double_history]
                         / previous_weights[has_double_history]
                     ))
-                    stored_probe_step = np.log(probe_selected_factors)
-                    has_probe_direction = (
-                        np.isfinite(stored_probe_step)
-                        & (stored_probe_step != 0.0)
-                    )
-                    reuse_probe_direction = (
-                        unobservable_single
-                        & has_probe_direction
-                        & (
-                            ~bracket_recovery
-                            | (
-                                has_double_history
-                                & (relative_move < 0.02)
-                            )
-                        )
-                    )
-                    probe_direction_log_step[reuse_probe_direction] = np.clip(
-                        stored_probe_step[reuse_probe_direction],
-                        -np.log1p(self.maximum_weight_change),
-                        np.log1p(self.maximum_weight_change),
-                    )
-                    probe_direction_sign[reuse_probe_direction] = np.sign(
-                        stored_probe_step[reuse_probe_direction]
-                    )
+                    has_probe_direction = probe_direction_sign != 0.0
                     recovery_probe = (
                         has_double_history
                         & ~_crossed_bracket
@@ -2919,6 +2905,7 @@ class SlmFeedbackTask:
                         (
                             (needs_probe_sites & ~has_probe_direction)
                             | recovery_probe
+                            | contradicted_probe
                         )
                         & ~probe_episode_used
                         & (formal_updates < self.max_updates)
@@ -2937,6 +2924,7 @@ class SlmFeedbackTask:
                     pending_probes.clear()
                     probe_measurements.clear()
                     probe_selected_factors[probe_sites] = 1.0
+                    probe_adoption_pending[probe_sites] = False
                     probe_decisions[probe_sites] = "not_probed"
                     probe_baseline_candidate = None
                     probe_baseline_target = np.array(
@@ -3261,7 +3249,7 @@ class SlmFeedbackTask:
                     else:
                         assert probe_baseline_target is not None
                         (
-                            _diagnostic_target,
+                            selected_probe_target,
                             selected_factors,
                             selected_decisions,
                             probe_observed_factors,
@@ -3273,19 +3261,17 @@ class SlmFeedbackTask:
                             probe_measurements,
                             self._rows,
                             self._columns,
-                            feedback_gain=self.feedback_gain,
-                            maximum_weight_change=self.maximum_weight_change,
                         )
                         probe_direction_log_step[probe_sites] = 0.0
                         probe_selected_factors[probe_sites] = selected_factors[
                             probe_sites
                         ]
                         probe_decisions[probe_sites] = selected_decisions[probe_sites]
-                        probe_direction_log_step[probe_sites] = np.log(
-                            probe_selected_factors[probe_sites]
-                        )
                         probe_direction_sign[probe_sites] = np.sign(
                             np.log(probe_observed_factors[probe_sites])
+                        )
+                        probe_adoption_pending[probe_sites] = (
+                            probe_selected_factors[probe_sites] != 1.0
                         )
                         baseline_control = _control_weights(
                             probe_baseline_target[self._rows, self._columns]
@@ -3299,11 +3285,9 @@ class SlmFeedbackTask:
                         combined_directed_step = np.array(
                             probe_baseline_directed_step, copy=True
                         )
-                        combined_directed_step[probe_sites] = (
-                            probe_direction_log_step[probe_sites]
-                        )
+                        combined_directed_step[probe_sites] = 0.0
                         combined_target, *_formal_details = _updated_target(
-                            probe_baseline_target,
+                            selected_probe_target,
                             probe_baseline_contrast,
                             probe_baseline_error,
                             probe_baseline_valid,
@@ -3321,6 +3305,16 @@ class SlmFeedbackTask:
                             control_direction=(
                                 probe_baseline_control_direction
                             ),
+                        )
+                        combined_control = _control_weights(
+                            combined_target[self._rows, self._columns]
+                        )
+                        probe_selected_factors[probe_sites] = (
+                            combined_control[probe_sites]
+                            / baseline_control[probe_sites]
+                        )
+                        probe_adoption_pending[probe_sites] &= (
+                            probe_selected_factors[probe_sites] != 1.0
                         )
                         if np.array_equal(
                             combined_target, probe_baseline_target

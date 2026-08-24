@@ -72,7 +72,7 @@
   的per-site bimodal Gaussian fit，不加入Monitor preview。normal或Stop只产生一个final Science Context。
 - Feedback Monitor固定自动打开四张图：canonical Camera Measurement逐帧publication经mean reduction得到的带编号site map实时图、observable
   uniformity、site signal evolution和Target share evolution；phase保留为信号和最终Figure但不自动开panel。
-- Feedback每site只在完整shot batch上做受约束双高斯与full-data ΔBIC判定。formal-double gain从authored `feedback_gain`起步，连续两次显著改善乘1.25、显著变差乘0.5、不确定性内保持；diagnostic probe/single不参与adaptive。`probe_combined`计入`maximum feedback updates`，diagnostic candidates不计。
+- Feedback每site只在完整shot batch上做受约束双高斯与full-data ΔBIC判定。winning probe effective share由`probe_combined`直接采用，普通gain/max-change不再缩小它；其余double共同补偿总功率并保留内部相对修正。direct-adopted site仍single或补偿后原double变single时，才从新baseline re-probe这些矛盾site；两侧无double且baseline未变不重复。formal-double gain从authored `feedback_gain`起步，连续两次显著改善乘1.25、显著变差乘0.5、不确定性内保持；diagnostic probe/single不参与adaptive。`probe_combined`计入`maximum feedback updates`，diagnostic candidates不计。
 - Grouped Curve hover与lock已分离：hover仅轻微加粗，lock才压暗其它lines；无框标签固定axes右上角，lock加`* `并接管滚轮逐series移动。standalone/Facet Curve的孤立valid点使用同一Line2D的短横线glyph并共享hover/lock；invalid仍断线，Rolling不改变。
 - ImagePlot与FacetGrid image cell不再暴露interpolation参数；schema/style/Panel Setting/Edit均删除该字段，renderer唯一固定值为`nearest`。
 - Feedback failure记录last complete candidate与rollback receipt；Stop只从完整测量candidate

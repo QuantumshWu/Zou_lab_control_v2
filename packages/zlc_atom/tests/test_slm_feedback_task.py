@@ -715,11 +715,9 @@ def test_single_population_classification_and_baseline_relative_probe_selection(
         ],
         rows,
         columns,
-        feedback_gain=0.25,
-        maximum_weight_change=0.5,
     )
     np.testing.assert_allclose(
-        selected[:4], (0.5**0.25, 2.0**0.25, 0.5**0.25, 1.0)
+        selected[:4], (0.5, 2.0, 0.5, 1.0)
     )
     np.testing.assert_allclose(observed_factors[:4], (0.5, 2.0, 0.5, 1.0))
     assert decisions[:4].tolist() == [
@@ -1745,10 +1743,17 @@ def test_single_population_sites_probe_both_sides_then_measure_combined_target(
             solved_targets[1][rows[[17, 18]], columns[[17, 18]]] / baseline[[17, 18]],
             (2.0, 2.0),
         )
-        directed = np.zeros(35)
-        directed[[17, 18]] = np.log((0.5**0.25, 2.0**0.25))
-        expected, *_details = _updated_target(
+        requested = np.ones(35)
+        requested[[17, 18]] = (0.5, 2.0)
+        selected_target, _effective = _relative_probe_target(
             target,
+            requested,
+            single,
+            rows,
+            columns,
+        )
+        expected, *_details = _updated_target(
+            selected_target,
             baseline_values,
             np.zeros(35),
             valid,
@@ -1759,7 +1764,7 @@ def test_single_population_sites_probe_both_sides_then_measure_combined_target(
             previous_contrast=np.full(35, np.nan),
             feedback_gain=0.25,
             maximum_weight_change=0.5,
-            directed_log_step=directed,
+            directed_log_step=np.zeros(35),
         )
         np.testing.assert_allclose(solved_targets[2], expected)
         history = _load_history(result["artifact_path"])
@@ -1782,9 +1787,14 @@ def test_single_population_sites_probe_both_sides_then_measure_combined_target(
             history[3]["probe_selected_formal_factor"], dtype=float
         )
         assert np.all(np.isnan(selected_formal[~single]))
-        np.testing.assert_allclose(
-            selected_formal[single], (0.5**0.25, 2.0**0.25)
+        expected_factors = (
+            _control_weights(expected[rows, columns])
+            / _control_weights(target[rows, columns])
         )
+        np.testing.assert_allclose(
+            selected_formal[single], expected_factors[single]
+        )
+        assert selected_formal[17] < 1.0 < selected_formal[18]
         assert history[3]["probe_decision"][17] == "probe_choose_lower_only"
         assert history[3]["probe_decision"][18] == "probe_choose_upper_only"
         assert history[0]["decision"][17] == "hold_for_probe"
@@ -1957,11 +1967,13 @@ def test_probe_combined_counts_as_formal_update_and_reuses_episode_baseline(
             single_fit(),
             _fitted_result(np.ones(35)),
             _fitted_result(
-                np.where(combined_valid, 1.0, np.nan),
+                np.where(combined_valid, formal_double_contrast, np.nan),
                 valid=combined_valid,
                 single_population=combined_single,
             ),
                 _fitted_result(formal_double_contrast),
+                after_double_single_fit(),
+                after_double_single_fit(),
                 after_double_single_fit(),
                 after_double_single_fit(),
                 after_double_single_fit(),
@@ -2009,16 +2021,22 @@ def test_probe_combined_counts_as_formal_update_and_reuses_episode_baseline(
                 initial_phase, np.full(target.shape, 0.4, dtype=np.float32)
             )
             assert state == {"marker": 3}
+        for initial_phase, state in solve_inputs[6:9]:
+            np.testing.assert_array_equal(
+                initial_phase, np.full(target.shape, 0.7, dtype=np.float32)
+            )
+            assert state == {"marker": 6}
         history = _load_history(result["artifact_path"])
         assert [item["candidate_kind"] for item in history] == [
             "baseline", "probe", "probe", "probe_combined",
-            "probe", "probe", "probe_combined", "ordinary",
+            "probe", "probe", "probe_combined",
+            "probe", "probe", "probe_combined",
         ]
         assert [item["formal_updates_applied"] for item in history] == [
-            0, 0, 0, 1, 1, 1, 2, 3
+            0, 0, 0, 1, 1, 1, 2, 2, 2, 3
         ]
-        assert sum(item["candidate_kind"] == "probe" for item in history) == 4
-        assert len(history) == 1 + task.max_updates + 4
+        assert sum(item["candidate_kind"] == "probe" for item in history) == 6
+        assert len(history) == 1 + task.max_updates * 3
     finally:
         plane.close()
 
