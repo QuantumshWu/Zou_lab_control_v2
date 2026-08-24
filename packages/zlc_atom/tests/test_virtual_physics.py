@@ -22,6 +22,8 @@ from zlc_atom.devices.simulation import (
 )
 from zlc_atom.devices.slm import canonical_phase
 from zlc_atom.devices.slm.solver import (
+    compose_science_phase,
+    freeze_pattern_phase,
     imported_target,
     load_science_context,
     load_target,
@@ -32,6 +34,8 @@ from zlc_atom.devices.slm.solver import (
     preset_text,
     save_science_context,
     save_target,
+    science_operator_wavefront,
+    science_pupil_fields,
     solve_phase,
     validate_target,
 )
@@ -2702,14 +2706,20 @@ def test_science_context_roundtrip_freezes_layers_pupil_receipt_and_correction(
     target = preset_grid(shape, (2, 3))
     yy, xx = np.ogrid[: shape[0], : shape[1]]
     pattern = canonical_phase(np.broadcast_to(0.1 + xx / 5.0, shape), shape)
-    wavefront = canonical_phase(np.broadcast_to(-0.2 + yy / 7.0, shape), shape)
-    phase = canonical_phase(
-        pattern.astype(np.float64) + wavefront.astype(np.float64), shape
-    )
-    amplitude = np.exp(-((xx - 4.5) ** 2 + (yy - 3.5) ** 2) / 12.0).astype(
-        np.float32
-    )
-    support = np.broadcast_to(amplitude > 0.25, shape).copy()
+    frozen_pattern = freeze_pattern_phase(pattern, shape)
+    pupil = {
+        "enabled": True,
+        "center_xy": [4.5, 3.5],
+        "diameter_xy": [7.0, 6.0],
+    }
+    operator_metadata = {
+        "enabled": True,
+        "carrier_waves_xy": [1.0, -0.5],
+        "zernike_noll_waves_rms": {"defocus": 0.125},
+    }
+    support, amplitude = science_pupil_fields(shape, pupil)
+    wavefront = science_operator_wavefront(shape, pupil, operator_metadata)
+    phase = compose_science_phase(frozen_pattern, wavefront)
     receipt = {
         "transport": "usb",
         "identity": "hamamatsu-x15213:usb:LSH0804382",
@@ -2744,22 +2754,14 @@ def test_science_context_roundtrip_freezes_layers_pupil_receipt_and_correction(
     }
     path = save_science_context(
         tmp_path / "context.npz",
-        phase,
-        pattern_phase=pattern,
-        operator_wavefront=wavefront,
-        pupil_amplitude=amplitude,
-        pupil_support=support,
+        pattern,
         target_intensity=target,
         objective_kind="spots",
-        pupil={
-            "enabled": True,
-            "center_xy": [4.5, 3.5],
-            "diameter_xy": [7.0, 6.0],
-        },
+        pupil=pupil,
         system_correction=correction,
         command_receipt=receipt,
         pattern_metadata={"method": "wgs-kim", "iterations": 80},
-        operator_metadata={"carrier_waves_xy": [1.0, -0.5]},
+        operator_metadata=operator_metadata,
     )
     context = load_science_context(path)
     assert slm_solver.SCIENCE_CONTEXT_ARTIFACT_CONTRACT == (
@@ -2767,15 +2769,15 @@ def test_science_context_roundtrip_freezes_layers_pupil_receipt_and_correction(
     )
     with np.load(path, allow_pickle=False) as archive:
         assert set(archive.files) == {
-            "phase", "pattern_phase", "operator_wavefront", "pupil_amplitude",
-            "pupil_support", "target_intensity", "metadata",
+            "pattern_phase_delta", "target_intensity", "metadata",
         }
+        assert archive["pattern_phase_delta"].dtype == np.dtype("<u2")
         assert json.loads(str(archive["metadata"].item()))["format"] == (
             "zlc.slm.science-context"
         )
     for key, expected in (
         ("phase", phase),
-        ("pattern_phase", pattern),
+        ("pattern_phase", frozen_pattern),
         ("operator_wavefront", wavefront),
         ("pupil_amplitude", amplitude),
         ("pupil_support", support),
@@ -2817,18 +2819,10 @@ def test_science_context_roundtrip_freezes_layers_pupil_receipt_and_correction(
 
     save_science_context(
         tmp_path / "response-context.npz",
-        phase,
-        pattern_phase=pattern,
-        operator_wavefront=wavefront,
-        pupil_amplitude=amplitude,
-        pupil_support=support,
+        pattern,
         target_intensity=target,
         objective_kind="spots",
-        pupil={
-            "enabled": True,
-            "center_xy": [4.5, 3.5],
-            "diameter_xy": [7.0, 6.0],
-        },
+        pupil=pupil,
         system_correction={
             **correction,
             "kind": "target_response_map",
@@ -2843,23 +2837,19 @@ def test_science_context_roundtrip_freezes_layers_pupil_receipt_and_correction(
             "wavelength_nm": None,
         },
         pattern_metadata={},
-        operator_metadata={},
+        operator_metadata={
+            "enabled": False,
+            "carrier_waves_xy": [0.0, 0.0],
+            "zernike_noll_waves_rms": {},
+        },
     )
     with pytest.raises(ValueError, match="pupil_phase_map or target_response_map"):
         save_science_context(
             tmp_path / "ambiguous.npz",
-            phase,
-            pattern_phase=pattern,
-            operator_wavefront=wavefront,
-            pupil_amplitude=amplitude,
-            pupil_support=support,
+            pattern,
             target_intensity=target,
             objective_kind="spots",
-            pupil={
-                "enabled": True,
-                "center_xy": [4.5, 3.5],
-                "diameter_xy": [7.0, 6.0],
-            },
+            pupil=pupil,
             system_correction={
                 **correction,
                 "kind": "both",
@@ -2867,5 +2857,9 @@ def test_science_context_roundtrip_freezes_layers_pupil_receipt_and_correction(
             },
             command_receipt=receipt,
             pattern_metadata={},
-            operator_metadata={},
+            operator_metadata={
+                "enabled": False,
+                "carrier_waves_xy": [0.0, 0.0],
+                "zernike_noll_waves_rms": {},
+            },
         )

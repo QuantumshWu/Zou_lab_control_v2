@@ -46,6 +46,8 @@ from zlc_atom.data import snapshot_from_array
 from zlc_atom.devices.slm import SlmAdapter, canonical_phase
 from zlc_atom.devices.slm.solver import (
     SCIENCE_CONTEXT_ARTIFACT_CONTRACT,
+    compose_science_phase,
+    freeze_pattern_phase,
     save_science_context,
     solve_phase,
     validate_target,
@@ -970,24 +972,21 @@ class SlmFeedbackTask:
         frozen_target = validate_target(context_target)
         if frozen_target.shape != slm.shape_yx:
             raise ValueError("Science Context Target shape differs from the selected SLM")
-        incoming = canonical_phase(science_context.get("phase"), slm.shape_yx)
-        pattern = canonical_phase(
+        pattern = freeze_pattern_phase(
             science_context.get("pattern_phase"), slm.shape_yx
         )
         operator = canonical_phase(
             science_context.get("operator_wavefront"), slm.shape_yx
         )
+        incoming = compose_science_phase(pattern, operator)
         pupil = np.asarray(science_context.get("pupil_amplitude"), dtype=np.float32)
-        support = np.asarray(science_context.get("pupil_support"))
         if (
             pupil.shape != slm.shape_yx
             or not np.all(np.isfinite(pupil))
             or np.any(pupil < 0.0)
             or not np.any(pupil > 0.0)
-            or support.shape != slm.shape_yx
-            or support.dtype != np.dtype(bool)
         ):
-            raise ValueError("Science Context has invalid pupil arrays")
+            raise ValueError("Science Context has an invalid pupil")
         receipt = science_context.get("command_receipt")
         if not isinstance(receipt, Mapping):
             raise TypeError("Science Context command receipt must be a mapping")
@@ -1020,8 +1019,6 @@ class SlmFeedbackTask:
         self._operator_wavefront = operator
         self._pupil_amplitude = np.array(pupil, copy=True)
         self._pupil_amplitude.setflags(write=False)
-        self._pupil_support = np.array(support, copy=True)
-        self._pupil_support.setflags(write=False)
         self._pupil = dict(science_context.get("pupil", {}))
         self._system_correction = science_context.get("system_correction")
         incoming_pattern_metadata = dict(
@@ -1169,17 +1166,9 @@ class SlmFeedbackTask:
             "solver": None if solver is None else dict(solver),
         }
 
-    def _science_phase(self, pattern: object) -> np.ndarray:
-        return canonical_phase(
-            canonical_phase(pattern, self.slm.shape_yx).astype(float)
-            + self._operator_wavefront.astype(float),
-            self.slm.shape_yx,
-        )
-
     def _save_candidate(
         self,
         path: str | Path,
-        phase: object,
         pattern: object,
         target: object,
         metadata: Mapping[str, object],
@@ -1194,11 +1183,7 @@ class SlmFeedbackTask:
             raise TypeError("SLM candidate metadata must remain a mapping")
         return save_science_context(
             path,
-            phase,
-            pattern_phase=pattern,
-            operator_wavefront=self._operator_wavefront,
-            pupil_amplitude=self._pupil_amplitude,
-            pupil_support=self._pupil_support,
+            pattern,
             target_intensity=target,
             objective_kind="spots",
             pupil=self._pupil,
@@ -1686,7 +1671,6 @@ class SlmFeedbackTask:
         )
         context_path = self._save_candidate(
             paths["candidate_contexts"] / f"candidate-{int(candidate):04d}.npz",
-            phase,
             pattern,
             target,
             candidate_metadata,
@@ -2385,7 +2369,6 @@ class SlmFeedbackTask:
         )
         self._save_candidate(
             artifact_path,
-            applied,
             candidate["pattern_phase"],
             candidate["target"],
             metadata,
@@ -3374,6 +3357,9 @@ class SlmFeedbackTask:
                             stop_requested=context.cancel_requested,
                             spot_optimizer_state=solve_state,
                         )
+                        next_pattern = freeze_pattern_phase(
+                            next_pattern, self.slm.shape_yx
+                        )
                     except BaseException:
                         history[-1]["next_phase_changed"] = None
                         self._save_candidate_checkpoint(
@@ -3389,7 +3375,9 @@ class SlmFeedbackTask:
                             history=history,
                         )
                         raise
-                    next_phase = self._science_phase(next_pattern)
+                    next_phase = compose_science_phase(
+                        next_pattern, self._operator_wavefront
+                    )
                     if np.array_equal(next_phase, applied):
                         stalled = True
                         continue_feedback = False

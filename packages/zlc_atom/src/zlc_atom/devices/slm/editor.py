@@ -25,9 +25,11 @@ from zlc_ui.fluent import (
 from zlc_atom.data import snapshot_from_array
 from .device import SlmAdapter, canonical_phase
 from .solver import (
+    compose_science_phase, freeze_pattern_phase,
     imported_target, load_science_context, load_target, preset_checkerboard,
     preset_flat_top, preset_gaussian, preset_grid, preset_text,
-    save_science_context, save_target, solve_phase, validate_target,
+    save_science_context, save_target, science_operator_wavefront,
+    science_pupil_fields, solve_phase, validate_target,
 )
 
 
@@ -119,12 +121,23 @@ class SlmEditorControl(QtCore.QObject):
         self._pupil_center_xy = (0.5 * (width - 1), 0.5 * (height - 1))
         default_diameter = 0.70 * height
         self._pupil_diameter_xy = (default_diameter, default_diameter)
-        self._pupil_support, self._pupil_amplitude = self._pupil_arrays(
-            self._pupil_center_xy, self._pupil_diameter_xy, enabled=True
+        initial_pupil = {
+            "enabled": True,
+            "center_xy": list(self._pupil_center_xy),
+            "diameter_xy": list(self._pupil_diameter_xy),
+        }
+        self._pupil_support, self._pupil_amplitude = science_pupil_fields(
+            self.shape, initial_pupil
         )
         self._pupil_applied_description = self._pupil_description(True)
-        self._wavefront_phase = canonical_phase(
-            np.zeros(self.shape, dtype=np.float32), self.shape
+        self._wavefront_phase = science_operator_wavefront(
+            self.shape,
+            initial_pupil,
+            {
+                "enabled": False,
+                "carrier_waves_xy": [0.0, 0.0],
+                "zernike_noll_waves_rms": {},
+            },
         )
         self._request_revision = self._target_revision = self._phase_revision = 0
         self._phase_request_revision: int | None = None
@@ -495,19 +508,23 @@ class SlmEditorControl(QtCore.QObject):
         self._pupil_popup, self._pupil_body = popup, body
         self._pupil_anchor = anchor
 
-    def _pupil_arrays(self, center_xy: tuple[float, float],
-                      diameter_xy: tuple[float, float], *, enabled: bool
-                      ) -> tuple[np.ndarray, np.ndarray]:
-        yy, xx = np.ogrid[:self.shape[0], :self.shape[1]]
-        cx, cy = center_xy
-        dx, dy = diameter_xy
-        scaled = ((xx - cx) / (dx / 2.0)) ** 2 + ((yy - cy) / (dy / 2.0)) ** 2
-        support = np.asarray(scaled <= 1.0, dtype=bool)
-        if enabled:
-            amplitude = np.exp(-scaled).astype(np.float32)
-        else:
-            amplitude = np.ones(self.shape, dtype=np.float32)
-        return support, amplitude
+    def _pupil_settings(self) -> dict[str, object]:
+        return {
+            "enabled": self._pupil_enabled.isChecked(),
+            "center_xy": list(self._pupil_center_xy),
+            "diameter_xy": list(self._pupil_diameter_xy),
+        }
+
+    def _operator_settings(self) -> dict[str, object]:
+        return {
+            "enabled": self._zernike_enabled.isChecked(),
+            "carrier_waves_xy": [
+                self._carrier_x.value(), self._carrier_y.value(),
+            ],
+            "zernike_noll_waves_rms": {
+                key: spin.value() for key, spin in self._zernike.items()
+            },
+        }
 
     def _pupil_description(self, enabled: bool) -> str:
         if not enabled:
@@ -529,12 +546,15 @@ class SlmEditorControl(QtCore.QObject):
         self._resolve_pupil(bool(enabled))
 
     def _resolve_pupil(self, enabled: bool) -> None:
-        support, amplitude = self._pupil_arrays(
-            self._pupil_center_xy, self._pupil_diameter_xy, enabled=enabled
+        self._pupil_support, self._pupil_amplitude = science_pupil_fields(
+            self.shape,
+            {
+                "enabled": bool(enabled),
+                "center_xy": list(self._pupil_center_xy),
+                "diameter_xy": list(self._pupil_diameter_xy),
+            },
         )
         self._spot_optimizer_state = None
-        self._pupil_support = support
-        self._pupil_amplitude = amplitude
         self._pupil_applied_description = self._pupil_description(enabled)
         self._pupil_status.setText(self._pupil_applied_description)
         self._request_revision += 1
@@ -681,56 +701,21 @@ class SlmEditorControl(QtCore.QObject):
             )
 
     def _compose_phase(self) -> None:
-        height, width = self.shape
-        full_y, full_x = np.ogrid[
-            -1.0:1.0:height * 1j, -1.0:1.0:width * 1j
-        ]
-        phase = np.zeros(self.shape, dtype=np.float64)
-        coefficients = {key: self._zernike[key].value() for key, *_ in _ZERNIKE}
-        if self._zernike_enabled.isChecked():
-            phase += np.pi * (
-                self._carrier_x.value() * full_x
-                + self._carrier_y.value() * full_y
-            )
-            if any(coefficients.values()):
-                yy, xx = np.ogrid[:height, :width]
-                center_x, center_y = self._pupil_center_xy
-                diameter_x, diameter_y = self._pupil_diameter_xy
-                zx = (xx - center_x) / (diameter_x / 2.0)
-                zy = (yy - center_y) / (diameter_y / 2.0)
-                r2 = zx * zx + zy * zy
-                support = self._pupil_support
-                modes = {
-                    "defocus": lambda: np.sqrt(3.0) * (2.0 * r2 - 1.0),
-                    "astig_oblique": lambda: 2.0 * np.sqrt(6.0) * zx * zy,
-                    "astig_vertical": lambda: np.sqrt(6.0) * (zx * zx - zy * zy),
-                    "coma_y": lambda: np.sqrt(8.0) * zy * (3.0 * r2 - 2.0),
-                    "coma_x": lambda: np.sqrt(8.0) * zx * (3.0 * r2 - 2.0),
-                    "trefoil_y": lambda: np.sqrt(8.0) * zy * (3.0 * zx * zx - zy * zy),
-                    "trefoil_x": lambda: np.sqrt(8.0) * zx * (zx * zx - 3.0 * zy * zy),
-                    "spherical": lambda: np.sqrt(5.0) * (6.0 * r2 * r2 - 6.0 * r2 + 1.0),
-                }
-                for key, coefficient in coefficients.items():
-                    if not coefficient:
-                        continue
-                    values = modes[key]()
-                    phase[support] += (
-                        2.0 * np.pi * coefficient
-                        * np.broadcast_to(values, self.shape)[support]
-                    )
-        self._wavefront_phase = canonical_phase(phase, self.shape)
-        phase += self._pattern_phase
-        self._phase = canonical_phase(phase, self.shape)
+        operator = self._operator_settings()
+        self._wavefront_phase = science_operator_wavefront(
+            self.shape, self._pupil_settings(), operator
+        )
+        self._phase = compose_science_phase(
+            self._pattern_phase, self._wavefront_phase
+        )
         self._phase_metadata = {
             "source": "composite",
             "hardware_correction": "excluded",
             "pattern": dict(self._pattern_metadata),
             "input_pupil": self._pupil_applied_description,
-            "carrier_waves_xy": [
-                self._carrier_x.value(), self._carrier_y.value(),
-            ],
-            "zernike_enabled": self._zernike_enabled.isChecked(),
-            "zernike_noll_waves_rms": coefficients,
+            "carrier_waves_xy": operator["carrier_waves_xy"],
+            "zernike_enabled": operator["enabled"],
+            "zernike_noll_waves_rms": operator["zernike_noll_waves_rms"],
         }
         self._show_phase()
         self._show_wavefront()
@@ -772,7 +757,7 @@ class SlmEditorControl(QtCore.QObject):
     def set_phase(self, values: object, metadata: object = None) -> None:
         self._request_revision += 1
         self._pending = None
-        self._phase = canonical_phase(values, self.shape)
+        self._phase = freeze_pattern_phase(values, self.shape)
         self._spot_optimizer_state = None
         self._pattern_phase = self._phase
         self._phase_request_revision = self._request_revision
@@ -926,7 +911,7 @@ class SlmEditorControl(QtCore.QObject):
                 self._status.setText(str(error))
         else:
             if revision == self._request_revision and not self._closed:
-                self._pattern_phase = canonical_phase(phase, self.shape)
+                self._pattern_phase = freeze_pattern_phase(phase, self.shape)
                 self._pattern_metadata = dict(metadata)
                 self._spot_optimizer_state = (
                     None if optimizer_state is None else dict(optimizer_state)
@@ -1093,26 +1078,15 @@ class SlmEditorControl(QtCore.QObject):
         if self._phase_request_revision != self._request_revision:
             raise RuntimeError("wait for the latest target solve before saving context")
         return partial(
-            save_science_context, path, np.array(self._phase, copy=True),
-            pattern_phase=np.array(self._pattern_phase, copy=True),
-            operator_wavefront=np.array(self._wavefront_phase, copy=True),
-            pupil_amplitude=np.array(self._pupil_amplitude, copy=True),
-            pupil_support=np.array(self._pupil_support, copy=True),
+            save_science_context, path,
+            np.array(self._pattern_phase, copy=True),
             target_intensity=np.array(self._target, copy=True),
             objective_kind=self._objective_kind,
-            pupil={"enabled": self._pupil_enabled.isChecked(),
-                   "center_xy": list(self._pupil_center_xy),
-                   "diameter_xy": list(self._pupil_diameter_xy)},
+            pupil=self._pupil_settings(),
             system_correction=deepcopy(self._system_correction),
             command_receipt=deepcopy(self._context_command_receipt),
             pattern_metadata=deepcopy(self._pattern_metadata),
-            operator_metadata={
-                "enabled": self._zernike_enabled.isChecked(),
-                "carrier_waves_xy": [self._carrier_x.value(), self._carrier_y.value()],
-                "zernike_noll_waves_rms": {
-                    key: spin.value() for key, spin in self._zernike.items()
-                },
-            },
+            operator_metadata=self._operator_settings(),
         )
 
     def send(self) -> bool:

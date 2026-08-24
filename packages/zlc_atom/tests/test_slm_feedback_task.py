@@ -17,7 +17,15 @@ from zlc_atom.devices.camera import CameraWorkingPoint
 from zlc_atom.devices.simulation import SimulationWorld, SimulationWorldConfig
 from zlc_atom.devices.simulation.camera import VirtualCamera, VirtualCameraConfig
 from zlc_atom.devices.slm import canonical_phase
-from zlc_atom.devices.slm.solver import load_science_context, preset_grid, solve_phase
+from zlc_atom.devices.slm.solver import (
+    compose_science_phase,
+    freeze_pattern_phase,
+    load_science_context,
+    preset_grid,
+    science_operator_wavefront,
+    science_pupil_fields,
+    solve_phase,
+)
 from zlc_atom.install import create_installation
 from zlc_atom.nodes import discover_logic_nodes
 from zlc_atom.nodes.calibration import (
@@ -273,41 +281,44 @@ def _science_context(
     *,
     target: np.ndarray,
     pattern: np.ndarray | None = None,
-    wavefront: np.ndarray | None = None,
-    pupil: np.ndarray | None = None,
+    pupil_settings: dict[str, object] | None = None,
+    operator_settings: dict[str, object] | None = None,
 ) -> dict[str, object]:
     incoming = np.asarray(slm.last_commanded_phase)
-    pattern_phase = incoming if pattern is None else canonical_phase(pattern, slm.shape_yx)
-    operator = (
-        np.zeros(slm.shape_yx, dtype=np.float32)
-        if wavefront is None
-        else canonical_phase(wavefront, slm.shape_yx)
+    pattern_phase = freeze_pattern_phase(
+        incoming if pattern is None else pattern, slm.shape_yx
     )
-    phase = canonical_phase(pattern_phase.astype(float) + operator.astype(float), slm.shape_yx)
-    if pattern is None and wavefront is None:
-        phase = slm.last_commanded_phase
-    amplitude = (
-        np.ones(slm.shape_yx, dtype=np.float32)
-        if pupil is None
-        else np.asarray(pupil, dtype=np.float32)
+    pupil = pupil_settings or {
+        "enabled": False,
+        "center_xy": [
+            (slm.shape_yx[1] - 1) / 2,
+            (slm.shape_yx[0] - 1) / 2,
+        ],
+        "diameter_xy": [float(slm.shape_yx[1]), float(slm.shape_yx[0])],
+    }
+    operator_metadata = operator_settings or {
+        "enabled": False,
+        "carrier_waves_xy": [0.0, 0.0],
+        "zernike_noll_waves_rms": {},
+    }
+    support, amplitude = science_pupil_fields(slm.shape_yx, pupil)
+    operator = science_operator_wavefront(
+        slm.shape_yx, pupil, operator_metadata
     )
+    phase = compose_science_phase(pattern_phase, operator)
     return {
         "phase": phase,
         "pattern_phase": pattern_phase,
         "operator_wavefront": operator,
         "pupil_amplitude": amplitude,
-        "pupil_support": amplitude > 0.0,
+        "pupil_support": support,
         "target_intensity": np.array(target, copy=True),
         "objective_kind": "spots",
-        "pupil": {
-            "enabled": True,
-            "center_xy": [(slm.shape_yx[1] - 1) / 2, (slm.shape_yx[0] - 1) / 2],
-            "diameter_xy": [float(slm.shape_yx[1]), float(slm.shape_yx[0])],
-        },
+        "pupil": pupil,
         "system_correction": None,
         "command_receipt": slm.last_command_receipt,
         "pattern_metadata": {},
-        "operator_metadata": {},
+        "operator_metadata": operator_metadata,
     }
 
 
@@ -900,20 +911,26 @@ def test_feedback_applies_science_context_then_measures_before_solving_update(
     slm = _Slm(shape)
     yy, xx = np.ogrid[: shape[0], : shape[1]]
     pattern = canonical_phase(np.broadcast_to(0.2 + xx / 31.0, shape), shape)
-    wavefront = canonical_phase(np.broadcast_to(0.1 + yy / 29.0, shape), shape)
-    pupil = np.asarray(
-        np.exp(-((xx - 11.0) ** 2 + (yy - 8.0) ** 2) / 80.0),
-        dtype=np.float32,
-    )
-    incoming = canonical_phase(pattern.astype(float) + wavefront.astype(float), shape)
     frozen_target = _grid_target(shape)
     science_context = _science_context(
         slm,
         target=frozen_target,
         pattern=pattern,
-        wavefront=wavefront,
-        pupil=pupil,
+        pupil_settings={
+            "enabled": True,
+            "center_xy": [11.0, 8.0],
+            "diameter_xy": [float(np.sqrt(320.0)), float(np.sqrt(320.0))],
+        },
+        operator_settings={
+            "enabled": True,
+            "carrier_waves_xy": [0.0, 0.25],
+            "zernike_noll_waves_rms": {"defocus": 0.03},
+        },
     )
+    pattern = np.asarray(science_context["pattern_phase"])
+    wavefront = np.asarray(science_context["operator_wavefront"])
+    pupil = np.asarray(science_context["pupil_amplitude"])
+    incoming = np.asarray(science_context["phase"])
     science_context = {
         **science_context,
         "command_receipt": {
@@ -925,6 +942,7 @@ def test_feedback_applies_science_context_then_measures_before_solving_update(
     slm.apply_phase(external)
     command_count = len(slm.commands)
     solved_pattern = canonical_phase(pattern.astype(float) + 0.05, shape)
+    frozen_solved_pattern = freeze_pattern_phase(solved_pattern, shape)
     first_contrast = np.concatenate(([2.0], np.ones(34)))
     expected_target, *_details = _updated_target(
         frozen_target,
@@ -1014,9 +1032,11 @@ def test_feedback_applies_science_context_then_measures_before_solving_update(
         result = task.execute(_Context(tmp_path))
         artifact = load_science_context(result["artifact_path"])
         expected = canonical_phase(
-            solved_pattern.astype(float) + wavefront.astype(float), shape
+            frozen_solved_pattern.astype(float) + wavefront.astype(float), shape
         )
-        np.testing.assert_array_equal(artifact["pattern_phase"], solved_pattern)
+        np.testing.assert_array_equal(
+            artifact["pattern_phase"], frozen_solved_pattern
+        )
         np.testing.assert_array_equal(artifact["operator_wavefront"], wavefront)
         np.testing.assert_array_equal(artifact["pupil_amplitude"], pupil)
         np.testing.assert_allclose(artifact["target_intensity"], expected_target)
@@ -2379,8 +2399,12 @@ def test_completed_run_selects_best_candidate_without_extra_shots(
     plane = SignalDataPlane()
     phases = iter(
         [
-            np.full(slm.shape_yx, 0.25, dtype=np.float32),
-            np.full(slm.shape_yx, 0.75, dtype=np.float32),
+            freeze_pattern_phase(
+                np.full(slm.shape_yx, 0.25, dtype=np.float32), slm.shape_yx
+            ),
+            freeze_pattern_phase(
+                np.full(slm.shape_yx, 0.75, dtype=np.float32), slm.shape_yx
+            ),
         ]
     )
     fit_results = iter(
@@ -2432,7 +2456,12 @@ def test_completed_run_selects_best_candidate_without_extra_shots(
         result = task.execute(_Context(tmp_path))
         saved, metadata = _load_candidate(result["artifact_path"])
         np.testing.assert_array_equal(saved, slm.last_commanded_phase)
-        np.testing.assert_array_equal(saved, np.full(slm.shape_yx, 0.75, np.float32))
+        np.testing.assert_array_equal(
+            saved,
+            freeze_pattern_phase(
+                np.full(slm.shape_yx, 0.75, np.float32), slm.shape_yx
+            ),
+        )
         assert metadata["measurement"]["uniformity_ratio"] <= 1.10
         assert requested_shots == [10, 10, 10]
         assert resolved_api_values == [{}]
@@ -2447,10 +2476,12 @@ def test_valid_site_history_changes_the_next_target_correction(
     tmp_path: Path, monkeypatch
 ) -> None:
     slm = _Slm((17, 23))
-    incoming = np.array(slm.last_commanded_phase, copy=True)
+    incoming = freeze_pattern_phase(slm.last_commanded_phase, slm.shape_yx)
     plane = SignalDataPlane()
     phases = tuple(
-        np.full(slm.shape_yx, value, dtype=np.float32)
+        freeze_pattern_phase(
+            np.full(slm.shape_yx, value, dtype=np.float32), slm.shape_yx
+        )
         for value in (0.25, 0.50, 0.75)
     )
     phase_results = iter(phases)
@@ -2559,7 +2590,7 @@ def test_stop_during_failed_first_checkpoint_retains_measured_candidate(
     tmp_path: Path, monkeypatch
 ) -> None:
     slm = _Slm((17, 23), incoming=0.125)
-    incoming = np.array(slm.last_commanded_phase, copy=True)
+    incoming = freeze_pattern_phase(slm.last_commanded_phase, slm.shape_yx)
     plane = SignalDataPlane()
     wake = Event()
     save_entered = Event()
@@ -2635,7 +2666,7 @@ def test_failure_after_a_completed_candidate_saves_figures_and_context(
     tmp_path: Path, monkeypatch
 ) -> None:
     slm = _Slm((17, 23), incoming=0.125)
-    incoming = np.array(slm.last_commanded_phase, copy=True)
+    incoming = freeze_pattern_phase(slm.last_commanded_phase, slm.shape_yx)
     plane = SignalDataPlane()
     wake = Event()
     monkeypatch.setattr(
@@ -2730,8 +2761,12 @@ def test_stop_after_terminal_commit_keeps_host_success_and_artifact(
     tmp_path: Path, monkeypatch
 ) -> None:
     slm = _Slm((17, 23), incoming=0.125)
-    first_phase = np.full(slm.shape_yx, 0.5, dtype=np.float32)
-    best = np.full(slm.shape_yx, 0.75, dtype=np.float32)
+    first_phase = freeze_pattern_phase(
+        np.full(slm.shape_yx, 0.5, dtype=np.float32), slm.shape_yx
+    )
+    best = freeze_pattern_phase(
+        np.full(slm.shape_yx, 0.75, dtype=np.float32), slm.shape_yx
+    )
     plane = SignalDataPlane()
     wake = Event()
     save_entered = Event()
@@ -2836,9 +2871,13 @@ def test_terminal_save_failure_restores_incoming_and_fails_host(
     tmp_path: Path, monkeypatch
 ) -> None:
     slm = _Slm((17, 23), incoming=0.125)
-    incoming = np.array(slm.last_commanded_phase, copy=True)
-    first_phase = np.full(slm.shape_yx, 0.5, dtype=np.float32)
-    best = np.full(slm.shape_yx, 0.75, dtype=np.float32)
+    incoming = freeze_pattern_phase(slm.last_commanded_phase, slm.shape_yx)
+    first_phase = freeze_pattern_phase(
+        np.full(slm.shape_yx, 0.5, dtype=np.float32), slm.shape_yx
+    )
+    best = freeze_pattern_phase(
+        np.full(slm.shape_yx, 0.75, dtype=np.float32), slm.shape_yx
+    )
     plane = SignalDataPlane()
     wake = Event()
     monkeypatch.setattr(
@@ -2922,7 +2961,6 @@ def test_invalid_site_holds_weight_and_never_retries_the_same_phase(
     tmp_path: Path, monkeypatch
 ) -> None:
     slm = _Slm((17, 23), incoming=0.125)
-    incoming = np.array(slm.last_commanded_phase, copy=True)
     plane = SignalDataPlane()
     first = _mixture_samples(np.ones(35), 10)
     first[:, 4] = np.nan
@@ -2994,7 +3032,9 @@ def test_stop_before_first_candidate_accepts_incoming_as_formal_artifact(
     tmp_path: Path, monkeypatch
 ) -> None:
     slm = _Slm((17, 23), incoming=0.125)
-    incoming = np.array(slm.last_commanded_phase, copy=True)
+    incoming = freeze_pattern_phase(slm.last_commanded_phase, slm.shape_yx)
+    slm.apply_phase(incoming)
+    slm.commands.clear()
     plane = SignalDataPlane()
     monkeypatch.setattr(
         feedback_module,

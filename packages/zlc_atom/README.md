@@ -48,11 +48,12 @@ exact-spacing Grid, geometrically staggered Checkerboard, Gaussian, Flat Top,
 and English/Chinese Text with both minimum site spacing and atom budget.
 A strict Target JSON stores intensity plus objective only for Editor authoring
 import/export. Run consumers take no separate Target: a strict Science Context
-NPZ is their sole Target truth and freezes it together with Pattern/base phase,
-numeric pupil,
-operator wavefront, typed reusable system-correction reference and command
-receipt. Loading a Context atomically adopts all of those authored facts but
-never writes hardware. Target uses `zlc.slm.target` and Science Context uses
+NPZ is their sole Target truth and stores it with the pre-command 16-bit circular
+Pattern, semantic pupil/operator parameters, typed reusable system-correction
+reference and command receipt. Numeric pupil, operator wavefront and composite
+phase are rebuilt by the shared SLM core formulas. Loading a Context atomically
+adopts the frozen phase without solving and never writes hardware. Target uses
+`zlc.slm.target` and Science Context uses
 `zlc.slm.science-context`; both are stable strict formats with no numeric
 version. Readers accept only the current complete grammar and never fill missing
 fields.
@@ -295,9 +296,10 @@ observable measured candidate when no all-site ratio exists); an applied but
 unmeasured phase is never promoted. A Stop already requested before the initial
 solve makes zero solver calls. A genuine failure restores the Context starting
 phase. The run stores each completed candidate's curated BOX samples, fit,
-weights, actions, metrics, phase-change fact and command receipt. It does not
-repeat full phase rasters or Contexts per candidate; only the initial/selected
-Figure and selected normal/Stop final Science Context carry complete phases.
+weights, actions, metrics, phase-change fact and command receipt. Every completed
+candidate has one compact standalone Science Context containing the Pattern that
+was frozen before its shots; only selected initial/final phases are additionally
+rendered as report Figures.
 
 `candidate_phase` publishes immediately after the SLM confirms each phase and
 before that candidate's shots begin. `uniformity_history` contains only true

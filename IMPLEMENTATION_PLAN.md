@@ -1,6 +1,6 @@
 # ZLC — Current Implementation Checkpoint
 
-更新时间：2026-08-23
+更新时间：2026-08-24
 
 状态：`CURRENT SOFTWARE COMPLETE / RESIDUAL SWEEP COMPLETE`
 
@@ -15,8 +15,7 @@
 - Reader只接受当前完整grammar；现有workspace不转换，文件可直接不受当前reader支持。
 - 产品bootstrap为`zou_lab_control`；根`pyproject.toml`仍是唯一distribution manifest，
   八个`zlc_*`目录只是同一distribution的依赖边界。
-- Science Context统一writer使用无损压缩NPZ；X15213代表数据实测26.088→16.804 MiB，
-  保存0.025→0.732 s、完整读取0.029→0.128 s，数组逐元素不变。
+- Science Context只保存16-bit circular Pattern模差分、Target和语义metadata；pupil/operator/composite均由SLM核心公式重建，Editor/Feedback在Send或shot前先固化Pattern。X15213 1024×1272 5×7同数据实测旧布局12.524→0.227 MiB（-98.19%），保存0.051 s、完整读取0.179 s；固化最大误差4.82e-5 rad，保存前后Pattern、composite phase和8-bit phase code逐元素一致，固化中位15.57 ms。
 - Hosted Task只在NodeHost worker真正Start时分配run directory，并在任何不可逆工作前
   原子建立`run.json`。进度、artifact registration、Stop、failure和terminal result都写回
   同一个lifecycle truth。
@@ -108,6 +107,7 @@
   均经formal `zlc figure_viewer --check`读取。上述证据属于此前冻结tree；本次Feedback/Curve
   最近一次pre-adaptive controller实测为6个probe candidate、22个总candidate、最佳34/35与ratio 1.1337。
 - 后续adaptive gain/formal-update accounting与Curve hover/lock切分运行6个直接聚焦用例，结果`6 passed`；未重新运行100-shot验收。
+- 紧凑Science Context当前证据：SLM Editor完整文件`22 passed`；strict Context与Feedback candidate/Stop/failure边界`10 passed`；最终三条直接边界`3 passed`。X15213全尺寸体积、Pattern/composite逐元素roundtrip和8-bit phase-code roundtrip均来自当前worktree；未运行100-shot。
 - 固定nearest清理运行standalone/facet artist、Workbench parameter surface及Fluent Setting/Edit四个聚焦用例，结果`4 passed`。
 - Device Control当前回归：Workbench完整`425 passed`；Runtime完整加Figure grammar `112 passed`；adapter/camera/scan受影响组`53 passed`；Device Control Qt、风险revision、refresh close guard、in-flight latest-only和demo直接证据均通过。Atom完整回归同时暴露并修复Temperature sibling event record、Feedback输出声明和三条terminal/Stop残余；100-shot virtual Feedback仍为既有`34/35`上限，未用放宽断言冒充通过。
 - FigureViewer/TaskConsole Panel parity已用同一current 2x2 Curve在两个真实窗口经Windows capture逐轮对照：两者card均为612×494逻辑像素、同一约50px title band与同一body frame；Viewer的dataset action bar改为固定高度，card从中部漂移改为紧随bar top-align，title从占位`figure`改为archive dataset label。zlc_ui完整回归`86 passed`，Viewer/Panel/Workbench contract聚焦`62 passed`。

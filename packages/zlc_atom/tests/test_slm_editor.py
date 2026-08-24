@@ -133,7 +133,9 @@ def test_editor_keeps_only_latest_solve_and_clear_does_not_drive_hardware(
         np.testing.assert_array_equal(calls[-1], latest)
         np.testing.assert_array_equal(
             control._phase,
-            canonical_phase(np.full(control.shape, 0.37), control.shape),
+            editor.freeze_pattern_phase(
+                np.full(control.shape, 0.37), control.shape
+            ),
         )
         np.testing.assert_array_equal(device.last_commanded_phase, incoming)
 
@@ -196,9 +198,7 @@ def test_editor_reuses_spot_optimizer_state_only_for_same_support_context(
         control._save_context_operation(phase_path)()
         with np.load(phase_path, allow_pickle=False) as archive:
             assert set(archive.files) == {
-                "phase", "pattern_phase", "operator_wavefront",
-                "pupil_amplitude", "pupil_support", "target_intensity",
-                "metadata",
+                "pattern_phase_delta", "target_intensity", "metadata",
             }
         context = editor.load_science_context(phase_path)
         np.testing.assert_array_equal(context["target_intensity"], same_support)
@@ -295,7 +295,9 @@ def test_editor_discards_nonlatest_spot_optimizer_state(
         assert control._spot_optimizer_state == {"token": "latest"}
         np.testing.assert_array_equal(
             control._pattern_phase,
-            canonical_phase(np.full(control.shape, phases[-1]), control.shape),
+            editor.freeze_pattern_phase(
+                np.full(control.shape, phases[-1]), control.shape
+            ),
         )
     finally:
         release.set()
@@ -342,7 +344,10 @@ def test_send_refuses_a_phase_stale_against_the_latest_target(
         _pump(app, lambda: control.solver_idle)
         assert control.send() is True
         _pump(app, lambda: not control.command_active)
-        np.testing.assert_array_equal(device.last_commanded_phase, latest_phase)
+        np.testing.assert_array_equal(
+            device.last_commanded_phase,
+            editor.freeze_pattern_phase(latest_phase, device.shape_yx),
+        )
     finally:
         release.set()
         _dispose(control, app)
@@ -530,6 +535,7 @@ def test_editor_files_send_busy_and_close_have_exact_phase_lifecycle(
     device = session.installation.device("slm")
     incoming = device.last_commanded_phase
     phase = canonical_phase(np.full(device.shape_yx, 1.25), device.shape_yx)
+    frozen_phase = editor.freeze_pattern_phase(phase, device.shape_yx)
 
     monkeypatch.setattr(
         editor,
@@ -551,7 +557,7 @@ def test_editor_files_send_busy_and_close_have_exact_phase_lifecycle(
         control._save_context_operation(phase_path)()
         assert target_path.is_file() and phase_path.is_file()
         context = editor.load_science_context(phase_path)
-        np.testing.assert_array_equal(context["phase"], phase)
+        np.testing.assert_array_equal(context["phase"], frozen_phase)
         np.testing.assert_array_equal(context["target_intensity"], control._target)
         loaded_target, objective_kind = editor.load_target(target_path)
         np.testing.assert_array_equal(loaded_target, control._target)
@@ -574,7 +580,7 @@ def test_editor_files_send_busy_and_close_have_exact_phase_lifecycle(
         QtTest.QTest.mouseClick(control._send, QtCore.Qt.LeftButton)
         assert control.command_active
         _pump(app, lambda: not control.command_active)
-        np.testing.assert_array_equal(device.last_commanded_phase, phase)
+        np.testing.assert_array_equal(device.last_commanded_phase, frozen_phase)
         session.device_use.assert_idle()
 
         external = canonical_phase(np.full(device.shape_yx, 2.5), device.shape_yx)
@@ -618,7 +624,10 @@ def test_editor_files_send_busy_and_close_have_exact_phase_lifecycle(
         finally:
             adopt_blocker.release()
         QtTest.QTest.mouseClick(control._adopt, QtCore.Qt.LeftButton)
-        np.testing.assert_array_equal(control._phase, external_after_load)
+        np.testing.assert_array_equal(
+            control._phase,
+            editor.freeze_pattern_phase(external_after_load, device.shape_yx),
+        )
         assert "adopted" in control.status_text.lower()
         control.set_phase(phase, {})
 
@@ -697,6 +706,7 @@ def test_pattern_wavefront_compose_and_science_phase_roundtrip(
             control.shape,
         )
         control.set_phase(pattern, {"source": "authored pattern"})
+        pattern = editor.freeze_pattern_phase(pattern, control.shape)
         control._zernike_enabled.setChecked(True)
         control._carrier_x.setValue(1.25)
         control._carrier_y.setValue(-0.5)
@@ -726,7 +736,7 @@ def test_pattern_wavefront_compose_and_science_phase_roundtrip(
         final_path = tmp_path / "science-context.npz"
         control._save_context_operation(final_path)()
         context = editor.load_science_context(final_path)
-        np.testing.assert_array_equal(context["phase"], expected)
+        np.testing.assert_array_equal(context["phase"], control._phase)
         np.testing.assert_array_equal(context["pattern_phase"], pattern)
         np.testing.assert_allclose(
             context["operator_wavefront"], control._wavefront_phase,
@@ -755,7 +765,7 @@ def test_pattern_wavefront_compose_and_science_phase_roundtrip(
             target_updates[-1].block.values.squeeze(), frozen_target
         )
         np.testing.assert_array_equal(control._pattern_phase, pattern)
-        np.testing.assert_array_equal(control._phase, expected)
+        np.testing.assert_array_equal(control._phase, context["phase"])
         assert control._carrier_x.value() == 1.25
         assert control._carrier_y.value() == -0.5
         assert control._zernike["defocus"].value() == 0.125
@@ -1579,11 +1589,16 @@ def test_target_solve_updates_pattern_then_recomposes_without_weakening_stale_se
 
         xx = np.linspace(-1.0, 1.0, control.shape[1])[None, :]
         yy = np.linspace(-1.0, 1.0, control.shape[0])[:, None]
+        frozen_solved_pattern = editor.freeze_pattern_phase(
+            solved_pattern, control.shape
+        )
         expected = canonical_phase(
-            solved_pattern + np.pi * (0.75 * xx + 0.25 * yy),
+            frozen_solved_pattern + np.pi * (0.75 * xx + 0.25 * yy),
             control.shape,
         )
-        np.testing.assert_array_equal(control._pattern_phase, solved_pattern)
+        np.testing.assert_array_equal(
+            control._pattern_phase, frozen_solved_pattern
+        )
         np.testing.assert_allclose(control._phase, expected, rtol=0.0, atol=5e-6)
         assert control._phase_request_revision == control._request_revision
         assert control.send() is True
@@ -1698,6 +1713,7 @@ def test_send_command_keeps_qt_responsive_holds_lease_and_close_retries(
     try:
         assert solve_started.wait(1.0)
         control.set_phase(clicked_phase, {})
+        clicked_phase = editor.freeze_pattern_phase(clicked_phase, device.shape_yx)
         timer.start()
         owner_thread = threading.get_ident()
         began = time.monotonic()

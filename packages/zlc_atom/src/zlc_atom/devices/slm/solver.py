@@ -24,12 +24,8 @@ _TARGET_KEYS = frozenset(
 )
 _SCIENCE_CONTEXT_FORMAT = "zlc.slm.science-context"
 SCIENCE_CONTEXT_ARTIFACT_CONTRACT = _SCIENCE_CONTEXT_FORMAT
-_CONTEXT_ARRAY_KEYS = (
-    "phase", "pattern_phase", "operator_wavefront", "pupil_amplitude",
-    "pupil_support",
-)
 _SCIENCE_CONTEXT_MEMBERS = frozenset(
-    (*_CONTEXT_ARRAY_KEYS, "target_intensity", "metadata")
+    {"pattern_phase_delta", "target_intensity", "metadata"}
 )
 _SCIENCE_CONTEXT_KEYS = frozenset(
     {
@@ -46,6 +42,13 @@ _OBJECTIVE_KINDS = frozenset({"auto", "spots", "image"})
 _SYSTEM_CORRECTION_KINDS = frozenset(
     {"pupil_phase_map", "target_response_map"}
 )
+_OPERATOR_MODES = frozenset(
+    {
+        "defocus", "astig_oblique", "astig_vertical", "coma_y", "coma_x",
+        "trefoil_y", "trefoil_x", "spherical",
+    }
+)
+_PHASE_CODE_COUNT = 1 << 16
 
 def _pair(value: object, name: str) -> tuple[int, int]:
     try:
@@ -1612,33 +1615,214 @@ def _pupil_metadata(value: object) -> dict[str, object]:
     return result
 
 
-def _pupil_array(values: object, shape: tuple[int, int]) -> np.ndarray:
-    array = np.asarray(values)
-    if array.shape != shape or array.dtype.kind not in "iuf":
-        raise ValueError("pupil amplitude must be a numeric matrix matching phase")
-    amplitude = np.asarray(array, dtype="<f4")
-    if not np.all(np.isfinite(amplitude)) or np.any(amplitude < 0.0):
-        raise ValueError("pupil amplitude must be finite and non-negative")
-    return _readonly(amplitude)
+def _operator_metadata(value: object) -> dict[str, object]:
+    result = _json_object(value, "operator metadata")
+    if set(result) != {
+        "enabled", "carrier_waves_xy", "zernike_noll_waves_rms"
+    }:
+        raise ValueError("operator metadata has the wrong fields")
+    carrier = result["carrier_waves_xy"]
+    coefficients = result["zernike_noll_waves_rms"]
+    if (
+        type(result["enabled"]) is not bool
+        or not isinstance(carrier, list)
+        or len(carrier) != 2
+        or any(
+            type(item) not in (int, float)
+            or not np.isfinite(item)
+            or abs(item) > 1000.0
+            for item in carrier
+        )
+        or not isinstance(coefficients, dict)
+        or set(coefficients) - _OPERATOR_MODES
+        or any(
+            type(item) not in (int, float)
+            or not np.isfinite(item)
+            or abs(item) > 1000.0
+            for item in coefficients.values()
+        )
+    ):
+        raise ValueError("operator metadata is invalid")
+    return result
 
 
-def _pupil_mask(values: object, shape: tuple[int, int]) -> np.ndarray:
-    support = np.asarray(values)
-    if support.shape != shape or support.dtype != np.dtype(bool):
-        raise ValueError("pupil support must be a bool matrix matching phase")
-    return np.frombuffer(
+def _phase_codes(values: object, shape_yx: tuple[int, int]) -> np.ndarray:
+    shape = _pair(shape_yx, "shape_yx")
+    source = np.asarray(values)
+    if source.shape != shape or source.dtype.kind not in "iuf":
+        canonical = canonical_phase(values, shape)
+    elif (
+        source.dtype == np.dtype("<f4")
+        and np.all(np.isfinite(source))
+        and np.all(source >= 0.0)
+        and np.all(source < 2.0 * np.pi)
+    ):
+        canonical = source
+    else:
+        canonical = canonical_phase(source, shape)
+    scaled = np.floor(
+        canonical * np.float32(_PHASE_CODE_COUNT / (2.0 * np.pi))
+        + np.float32(0.5)
+    ).astype(np.uint32)
+    return np.asarray(scaled & (_PHASE_CODE_COUNT - 1), dtype="<u2")
+
+
+def freeze_pattern_phase(values: object, shape_yx: tuple[int, int]) -> np.ndarray:
+    """Freeze a logical pattern on a uniform 16-bit circular phase grid."""
+
+    shape = _pair(shape_yx, "shape_yx")
+    codes = _phase_codes(values, shape)
+    return _readonly(
+        codes.astype(np.float32)
+        * np.float32(2.0 * np.pi / _PHASE_CODE_COUNT)
+    )
+
+
+def _encoded_pattern_phase(values: object, shape: tuple[int, int]) -> np.ndarray:
+    codes = _phase_codes(values, shape)
+    delta = np.empty(shape, dtype="<u2")
+    delta[:, 0] = codes[:, 0]
+    np.subtract(codes[:, 1:], codes[:, :-1], out=delta[:, 1:], dtype=np.uint16)
+    return delta
+
+
+def _decoded_pattern_phase(values: object) -> np.ndarray:
+    delta = np.asarray(values)
+    if delta.dtype != np.dtype("<u2") or delta.ndim != 2 or min(delta.shape) < 2:
+        raise ValueError(
+            "science context pattern_phase_delta must be a uint16 matrix"
+        )
+    cumulative = np.add.accumulate(delta, axis=1, dtype=np.uint64)
+    codes = np.asarray(cumulative & (_PHASE_CODE_COUNT - 1), dtype="<u2")
+    return _readonly(
+        codes.astype(np.float32)
+        * np.float32(2.0 * np.pi / _PHASE_CODE_COUNT)
+    )
+
+
+def _pupil_geometry(
+    shape_yx: tuple[int, int], pupil: Mapping[str, object]
+) -> tuple[tuple[int, int], dict[str, object]]:
+    shape = _pair(shape_yx, "shape_yx")
+    pupil_values = _pupil_metadata(pupil)
+    height, width = shape
+    center_x, center_y = pupil_values["center_xy"]
+    diameter_x, diameter_y = pupil_values["diameter_xy"]
+    if not (
+        0.0 <= center_x <= width - 1
+        and 0.0 <= center_y <= height - 1
+        and diameter_x <= 2.0 * width
+        and diameter_y <= 2.0 * height
+    ):
+        raise ValueError("Science Context pupil lies outside SLM limits")
+    return shape, pupil_values
+
+
+def _pupil_coordinates(
+    shape_yx: tuple[int, int], pupil: Mapping[str, object]
+) -> tuple[tuple[int, int], dict[str, object], np.ndarray, np.ndarray, np.ndarray]:
+    shape, pupil_values = _pupil_geometry(shape_yx, pupil)
+    height, width = shape
+    center_x, center_y = pupil_values["center_xy"]
+    diameter_x, diameter_y = pupil_values["diameter_xy"]
+    yy, xx = np.ogrid[:height, :width]
+    zx = (xx - center_x) / (diameter_x / 2.0)
+    zy = (yy - center_y) / (diameter_y / 2.0)
+    radius_squared = zx * zx + zy * zy
+    return shape, pupil_values, zx, zy, radius_squared
+
+
+def science_pupil_fields(
+    shape_yx: tuple[int, int], pupil: Mapping[str, object]
+) -> tuple[np.ndarray, np.ndarray]:
+    """Derive the frozen pupil planes from their semantic parameters."""
+
+    shape, pupil_values, _zx, _zy, radius_squared = _pupil_coordinates(
+        shape_yx, pupil
+    )
+    support = np.asarray(radius_squared <= 1.0, dtype=bool)
+    amplitude = (
+        np.exp(-radius_squared).astype(np.float32)
+        if pupil_values["enabled"]
+        else np.ones(shape, dtype=np.float32)
+    )
+    immutable_support = np.frombuffer(
         np.ascontiguousarray(support).tobytes(), dtype=np.bool_
     ).reshape(shape)
+    return immutable_support, _readonly(amplitude)
+
+
+def science_operator_wavefront(
+    shape_yx: tuple[int, int],
+    pupil: Mapping[str, object],
+    operator_metadata: Mapping[str, object],
+) -> np.ndarray:
+    """Derive the frozen operator plane from pupil and operator parameters."""
+
+    shape, _pupil_values, zx, zy, radius_squared = _pupil_coordinates(
+        shape_yx, pupil
+    )
+    operator = _operator_metadata(operator_metadata)
+    support = np.asarray(radius_squared <= 1.0, dtype=bool)
+    wavefront = np.zeros(shape, dtype=np.float64)
+    if operator["enabled"]:
+        height, width = shape
+        full_y, full_x = np.ogrid[
+            -1.0:1.0:height * 1j, -1.0:1.0:width * 1j
+        ]
+        carrier_x, carrier_y = operator["carrier_waves_xy"]
+        wavefront += np.pi * (carrier_x * full_x + carrier_y * full_y)
+        modes = {
+            "defocus": lambda: np.sqrt(3.0) * (2.0 * radius_squared - 1.0),
+            "astig_oblique": lambda: 2.0 * np.sqrt(6.0) * zx * zy,
+            "astig_vertical": lambda: np.sqrt(6.0) * (zx * zx - zy * zy),
+            "coma_y": lambda: np.sqrt(8.0) * zy * (
+                3.0 * radius_squared - 2.0
+            ),
+            "coma_x": lambda: np.sqrt(8.0) * zx * (
+                3.0 * radius_squared - 2.0
+            ),
+            "trefoil_y": lambda: np.sqrt(8.0) * zy * (
+                3.0 * zx * zx - zy * zy
+            ),
+            "trefoil_x": lambda: np.sqrt(8.0) * zx * (
+                zx * zx - 3.0 * zy * zy
+            ),
+            "spherical": lambda: np.sqrt(5.0) * (
+                6.0 * radius_squared * radius_squared
+                - 6.0 * radius_squared
+                + 1.0
+            ),
+        }
+        for key, coefficient in operator["zernike_noll_waves_rms"].items():
+            if coefficient:
+                values = modes[key]()
+                wavefront[support] += (
+                    2.0 * np.pi * coefficient
+                    * np.broadcast_to(values, shape)[support]
+                )
+    return canonical_phase(wavefront, shape)
+
+
+def compose_science_phase(
+    pattern_phase: object, operator_wavefront: object
+) -> np.ndarray:
+    pattern = np.asarray(pattern_phase)
+    operator = np.asarray(operator_wavefront)
+    if pattern.ndim != 2 or operator.shape != pattern.shape:
+        raise ValueError("Science Context phase layers differ")
+    shape = tuple(pattern.shape)
+    return canonical_phase(
+        canonical_phase(pattern, shape).astype(np.float64)
+        + canonical_phase(operator, shape).astype(np.float64),
+        shape,
+    )
 
 
 def save_science_context(
     path: str | Path,
-    phase: object,
-    *,
     pattern_phase: object,
-    operator_wavefront: object,
-    pupil_amplitude: object,
-    pupil_support: object,
+    *,
     target_intensity: object,
     objective_kind: str,
     pupil: Mapping[str, object],
@@ -1647,23 +1831,11 @@ def save_science_context(
     pattern_metadata: Mapping[str, object],
     operator_metadata: Mapping[str, object],
 ) -> Path:
-    values = np.asarray(phase)
+    values = np.asarray(pattern_phase)
     if values.ndim != 2:
-        raise ValueError("science phase must be a two-dimensional array")
+        raise ValueError("Science Context Pattern must be two-dimensional")
     shape = tuple(values.shape)
-    science = canonical_phase(values, shape)
-    pattern = canonical_phase(pattern_phase, shape)
-    wavefront = canonical_phase(operator_wavefront, shape)
-    composed = canonical_phase(
-        pattern.astype(np.float64) + wavefront.astype(np.float64), shape
-    )
-    circular_error = np.abs(
-        np.angle(np.exp(1j * (science.astype(np.float64) - composed)))
-    )
-    if float(np.max(circular_error)) > 2e-5:
-        raise ValueError("science phase does not equal Pattern plus operator wavefront")
-    amplitude = _pupil_array(pupil_amplitude, shape)
-    support = _pupil_mask(pupil_support, shape)
+    encoded_pattern = _encoded_pattern_phase(values, shape)
     target = validate_target(target_intensity)
     if target.shape != shape:
         raise ValueError("Science Context Target must match the phase shape")
@@ -1674,18 +1846,15 @@ def save_science_context(
         "system_correction": _system_correction(system_correction),
         "command_receipt": _command_receipt(command_receipt),
         "pattern_metadata": _json_object(pattern_metadata, "Pattern metadata"),
-        "operator_metadata": _json_object(operator_metadata, "operator metadata"),
+        "operator_metadata": _operator_metadata(operator_metadata),
     }
+    _pupil_geometry(shape, metadata["pupil"])
     encoded = _metadata_json(metadata)
     return atomic_write_file(
         path,
         lambda stream: np.savez_compressed(
             stream,
-            phase=science,
-            pattern_phase=pattern,
-            operator_wavefront=wavefront,
-            pupil_amplitude=amplitude,
-            pupil_support=support,
+            pattern_phase_delta=encoded_pattern,
             target_intensity=target,
             metadata=np.asarray(encoded),
         ),
@@ -1700,7 +1869,7 @@ def load_science_context(path: str | Path) -> dict[str, object]:
             or set(members) != _SCIENCE_CONTEXT_MEMBERS
         ):
             raise ValueError("science context NPZ has the wrong members")
-        arrays = {key: np.asarray(archive[key]) for key in _CONTEXT_ARRAY_KEYS}
+        encoded_pattern = np.asarray(archive["pattern_phase_delta"])
         target = np.asarray(archive["target_intensity"])
         encoded = np.asarray(archive["metadata"])
         if encoded.shape != () or encoded.dtype.kind != "U":
@@ -1714,36 +1883,13 @@ def load_science_context(path: str | Path) -> dict[str, object]:
         raise ValueError("science context metadata has the wrong fields")
     if metadata["format"] != _SCIENCE_CONTEXT_FORMAT:
         raise ValueError("unsupported science context format")
-    phase = arrays["phase"]
-    if phase.dtype != np.dtype("<f4") or phase.ndim != 2:
-        raise ValueError("science context phase must be a float32 matrix")
-    shape = tuple(phase.shape)
-    for key in ("phase", "pattern_phase", "operator_wavefront"):
-        raw = arrays[key]
-        if raw.dtype != np.dtype("<f4") or raw.shape != shape:
-            raise ValueError(f"science context {key} must be a matching float32 matrix")
-        arrays[key] = canonical_phase(raw, shape)
-        if not np.array_equal(raw, arrays[key]):
-            raise ValueError(f"science context {key} must contain canonical radians")
-    if arrays["pupil_amplitude"].dtype != np.dtype("<f4"):
-        raise ValueError("science context pupil amplitude must be float32")
-    arrays["pupil_amplitude"] = _pupil_array(arrays["pupil_amplitude"], shape)
-    arrays["pupil_support"] = _pupil_mask(arrays["pupil_support"], shape)
+    pattern = _decoded_pattern_phase(encoded_pattern)
+    shape = tuple(pattern.shape)
     if target.dtype != np.dtype("<f4") or target.shape != shape:
         raise ValueError(
             "science context target intensity must be a matching float32 matrix"
         )
     target = validate_target(target)
-    composed = canonical_phase(
-        arrays["pattern_phase"].astype(np.float64)
-        + arrays["operator_wavefront"].astype(np.float64),
-        shape,
-    )
-    circular_error = np.abs(
-        np.angle(np.exp(1j * (arrays["phase"].astype(np.float64) - composed)))
-    )
-    if float(np.max(circular_error)) > 2e-5:
-        raise ValueError("science context phase does not match its frozen layers")
     normalized = {
         "objective_kind": _objective_kind(metadata["objective_kind"]),
         "pupil": _pupil_metadata(metadata["pupil"]),
@@ -1752,8 +1898,19 @@ def load_science_context(path: str | Path) -> dict[str, object]:
         "pattern_metadata": _json_object(
             metadata["pattern_metadata"], "Pattern metadata"
         ),
-        "operator_metadata": _json_object(
-            metadata["operator_metadata"], "operator metadata"
-        ),
+        "operator_metadata": _operator_metadata(metadata["operator_metadata"]),
     }
-    return {**arrays, "target_intensity": target, **normalized}
+    support, amplitude = science_pupil_fields(shape, normalized["pupil"])
+    operator = science_operator_wavefront(
+        shape, normalized["pupil"], normalized["operator_metadata"]
+    )
+    phase = compose_science_phase(pattern, operator)
+    return {
+        "phase": phase,
+        "pattern_phase": pattern,
+        "operator_wavefront": operator,
+        "pupil_amplitude": amplitude,
+        "pupil_support": support,
+        "target_intensity": target,
+        **normalized,
+    }

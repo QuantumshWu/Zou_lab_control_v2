@@ -125,9 +125,12 @@ host and port. The server is the sole DVI/USB output owner. DVI exact-raster is
 the default and does not load the vendor DLL; USB is selected explicitly. The
 trusted-lab-LAN proxy has no TLS/authentication and must not be exposed publicly.
 
-Target stores intensity/objective. Science Context stores the frozen
-Target, numeric pupil, Pattern/base phase, operator wavefront, correction
-reference and command receipt. Loading/saving artifacts never writes hardware;
+Target stores intensity/objective. Science Context stores the frozen Target,
+the pre-command 16-bit circular Pattern, semantic pupil/operator parameters,
+correction reference and command receipt. Numeric pupil, operator wavefront and
+composite phase are rebuilt by the same SLM core formulas rather than duplicated
+as full rasters. Loading a Context adopts that frozen phase without solving and
+never writes hardware;
 only explicit Send or the Feedback task's own confirmed apply establishes a
 known command. Both formats are strict current-only and carry no numeric format
 version; unsupported files are refused.
@@ -145,8 +148,9 @@ validation batch.
 
 Feedback stores a stable site table and curated per-candidate BOX samples,
 fit/classification, weights, actions, metrics, phase-change facts and command
-receipts. It does not save raw camera frames, full per-candidate phase rasters,
-or duplicate a complete Science Context per candidate. Its summary and six important plots cover uniformity, site signals,
+receipts. It does not save raw camera frames; every completed candidate has one
+compact standalone Science Context whose Pattern is exactly the phase frozen
+before that candidate's shots. Its summary and six important plots cover uniformity, site signals,
 weights, selected-site histograms, initial/selected camera means and
 initial/selected phases. Each plot is a `zlc.figure` NPZ plus same-stem PNG;
 normal completion or Stop produces one final Science Context.
