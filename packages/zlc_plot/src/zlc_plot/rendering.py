@@ -226,22 +226,23 @@ def _autoscaled_limits(
     if current is None or not retain:
         return target
     current_low, current_high = map(float, current)
-    if zero_based and low >= 0.0:
-        if (
-            current_low == 0.0
-            and current_high > 0.0
-            and 0.7 * current_high <= high <= current_high
-        ):
-            return current_low, current_high
-        return target
     span = current_high - current_low
     if span <= 0.0:
         return target
+    # Retention is decided against the view ON SCREEN, whatever shape
+    # derived it.  Restoring the zero-anchored shape whenever the data
+    # happened to be non-negative made an axis whose minimum wanders
+    # around zero flip between two limit shapes forever -- and every flip
+    # re-captured all the chrome keyed to the scale.  The zero-anchored
+    # keep-rule applies exactly when the current view IS zero-anchored.
     clips = low < current_low or high > current_high
-    too_empty = (
-        high < current_high - deadband_fraction * span
-        or low > current_low + deadband_fraction * span
-    )
+    if zero_based and low >= 0.0 and current_low == 0.0:
+        too_empty = not (0.7 * current_high <= high) or current_high <= 0.0
+    else:
+        too_empty = (
+            high < current_high - deadband_fraction * span
+            or low > current_low + deadband_fraction * span
+        )
     return target if clips or too_empty else (current_low, current_high)
 
 
@@ -3789,8 +3790,16 @@ class MatplotlibRenderer:
                     axis, self.plan.axes[index].box.matplotlib_bounds()
                 )
                 # ``set_position`` invalidates the axes transform stack even
-                # for an identical box; skip the per-frame no-op.
-                if tuple(axis.get_position().bounds) != tuple(bounds):
+                # for an identical box; skip the per-frame no-op.  The
+                # comparison needs a tolerance: Bbox round-trips width as
+                # (x0+w)-x0, one ulp off the stored fraction, and an exact
+                # compare re-positioned (and now re-captured chrome for)
+                # every cell on every frame.
+                current = tuple(axis.get_position().bounds)
+                if any(
+                    abs(now - wanted) > 1e-12
+                    for now, wanted in zip(current, bounds)
+                ):
                     axis.set_position(bounds)
                     # A moved box invalidates the captured chrome behind it.
                     self._mark_axes_chrome_dirty(axis)
