@@ -2512,7 +2512,8 @@ def test_panel_edit_surface_comes_from_the_current_plot_host(presenter, session)
     )
     _settle_panel_hosts(
         presenter,
-        lambda: not binding.parameter_surface["semantic_unavailable"],
+        lambda: not binding.parameter_surface.get("semantic_provisional")
+        and not binding.parameter_surface["semantic_unavailable"],
     )
 
     surface = binding.parameter_surface
@@ -2612,7 +2613,8 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
     first = presenter.add_panel(signal, snapshot, title="camera", kind="image")
     _settle_panel_hosts(
         presenter,
-        lambda: not first.parameter_surface["semantic_unavailable"],
+        lambda: not first.parameter_surface.get("semantic_provisional")
+        and not first.parameter_surface["semantic_unavailable"],
     )
     # One row per axis, and the row that says an axis is drawn along y is as
     # much of the board as a title is.
@@ -4373,6 +4375,83 @@ def test_bound_rolling_panel_offers_the_uncertainty_switch(
     }
     assert "uncertainty" in names, sorted(names)
     assert "cumulative" in names, sorted(names)
+
+
+def test_the_semantic_form_appears_the_moment_a_signal_connects(
+    presenter, session
+) -> None:
+    """The fate rows are a light schema projection, not a render's reward.
+
+    Deriving them needs only schema + spec, so they are on the surface the
+    moment add_panel or a signal connect holds a snapshot -- BEFORE any
+    host settles, marked provisional until the host's description replaces
+    them with feasibility-filtered choices and fit models.
+    """
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(
+        node.signal_key("frames"), snapshot, kind="image"
+    )
+    # No settle: the rows exist at birth.
+    surface = binding.parameter_surface
+    assert surface["semantic"], "fate rows must not wait for a render"
+    assert surface.get("semantic_provisional") is True
+    assert any(
+        str(entry["key"]).startswith("fate:") for entry in surface["semantic"]
+    )
+    assert surface["data_structure"], "the shape strip speaks at birth too"
+
+    _settle_panel_hosts(
+        presenter,
+        lambda: not binding.parameter_surface.get("semantic_provisional"),
+    )
+    assert binding.parameter_surface["semantic"], (
+        "the described surface keeps the rows"
+    )
+
+
+def test_a_panel_refused_before_its_first_frame_still_offers_its_fates(
+    presenter, session
+) -> None:
+    """The reported wedge: a first projection refused on the facet cap.
+
+    Such a panel has never presented anything -- no display publication,
+    no frozen record -- and the old degrade path silently gave up on it,
+    so the operator saw the cap error and no fate rows to fix it with.
+    The signal it was created against is still on the plane, and its
+    schema is all the semantic form needs.
+    """
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(
+        node.signal_key("frames"), snapshot, kind="image"
+    )
+    # Never presented: exactly the state a first-mount refusal leaves.
+    assert binding.display_publication is None
+    assert binding.frozen_data is None
+
+    class _FailedPort:
+        last_error = ValueError(
+            "FacetGrid needs 180 cells, which exceeds the fixed layout "
+            "facet_max_cells capacity of 100"
+        )
+
+    real_port = binding.port
+    binding.port = _FailedPort()
+    binding.reported_error = None
+    try:
+        presenter._report_panel_errors()
+        surface = binding.parameter_surface
+        assert surface["semantic"], (
+            "a panel refused before its first frame lost its fate rows"
+        )
+        assert any(
+            str(entry["key"]).startswith("fate:")
+            for entry in surface["semantic"]
+        )
+        assert "cells" in surface["fit_unavailable"]
+    finally:
+        binding.port = real_port
 
 
 def test_a_refused_projection_keeps_the_semantic_form_alive(

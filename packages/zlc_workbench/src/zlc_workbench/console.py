@@ -629,6 +629,11 @@ class ConsolePresenter:
             None,
             parameter_surface=self._unbound_panel_parameters(state),
         )
+        projected = self._schema_projected_parameters(
+            binding, initial, self._RESOLVING_REASON
+        )
+        if projected is not None:
+            binding.parameter_surface = projected
         port = self._make_panel_port(binding)
         binding.port = port
         self.panels[panel_id] = binding
@@ -1316,7 +1321,17 @@ class ConsolePresenter:
         binding.bridge = binding.selections = None
         binding.host = host
         binding.initial_presented = False
-        binding.parameter_surface = self._unbound_panel_parameters(binding.state)
+        accepted_value = publication.value(binding.state.signal)
+        binding.parameter_surface = (
+            (
+                None
+                if accepted_value is None
+                else self._schema_projected_parameters(
+                    binding, accepted_value.snapshot, self._RESOLVING_REASON
+                )
+            )
+            or self._unbound_panel_parameters(binding.state)
+        )
         # The detached staging binding already applied and awaited the whole
         # PanelState.  Accept only installs that proven host; configuring it a
         # second time here created extra fronts and could tear cohort accept.
@@ -1820,7 +1835,12 @@ class ConsolePresenter:
             self._release_panel(binding)
             binding.state = candidate
             binding.host = None
-            binding.parameter_surface = self._unbound_panel_parameters(candidate)
+            binding.parameter_surface = (
+                self._schema_projected_parameters(
+                    binding, value.snapshot, self._RESOLVING_REASON
+                )
+                or self._unbound_panel_parameters(candidate)
+            )
             binding.configuration = None
             binding.port = self._make_panel_port(binding)
             binding.initial_presented = False
@@ -1848,7 +1868,17 @@ class ConsolePresenter:
             self._sync_panel_history(binding, candidate)
             if binding.host is None or binding.port is None:
                 binding.state = candidate
-                binding.parameter_surface = self._unbound_panel_parameters(candidate)
+                snapshot = self._panel_snapshot(binding)
+                binding.parameter_surface = (
+                    (
+                        None
+                        if snapshot is None
+                        else self._schema_projected_parameters(
+                            binding, snapshot, self._RESOLVING_REASON
+                        )
+                    )
+                    or self._unbound_panel_parameters(candidate)
+                )
                 self._remount_panel_editor(binding)
                 self._publish_panel_state(binding)
                 self._refresh_console_projection()
@@ -1953,11 +1983,25 @@ class ConsolePresenter:
         "unknown display parameter(s)".
         """
 
-        declared = {str(entry["key"]) for entry in tuple(entries)}
+        rows = {str(entry["key"]): entry for entry in tuple(entries)}
+
+        def legal(entry: Mapping[str, object], value: object) -> bool:
+            # Declared-by-KEY is not enough: both vocabularies may declare
+            # the same fate row while offering different VERBS, and a value
+            # the current vocabulary never offers must not travel either --
+            # that is how a curve cell's 'group' rode the shared axis row
+            # into a histogram cell the moment the row itself was declared.
+            choices = tuple(entry.get("choices") or ())
+            if not choices:
+                return True
+            if value is None:
+                return bool(entry.get("allow_none"))
+            return any(value == choice for _label, choice in choices)
+
         return {
             str(name): value
             for name, value in dict(values).items()
-            if str(name) in declared
+            if str(name) in rows and legal(rows[str(name)], value)
         }
 
     def _parameter_surface(
@@ -1971,6 +2015,7 @@ class ConsolePresenter:
         display_unavailable: str = "",
         fit_unavailable: str = "",
         fit_outputs: Sequence[tuple[str, str]] = (),
+        semantic_provisional: bool = False,
     ) -> Mapping[str, object]:
         """Project one plot-owned display declaration for every panel view."""
 
@@ -1986,6 +2031,11 @@ class ConsolePresenter:
             "display_unavailable": str(display_unavailable),
             "fit_unavailable": str(fit_unavailable),
             "fit_outputs": tuple((str(name), str(label)) for name, label in fit_outputs),
+            # Schema-projected, not yet host-described: the fate rows are
+            # real (they come from schema+spec alone) but choices are not
+            # feasibility-filtered and fit models are absent, so the host's
+            # description still replaces this surface when it arrives.
+            "semantic_provisional": bool(semantic_provisional),
         }
 
     def _unbound_panel_parameters(self, state: PanelState) -> Mapping[str, object]:
@@ -2045,19 +2095,24 @@ class ConsolePresenter:
             if str(field.name) != "kind"
         )
 
-    def _degraded_panel_parameters(
+    def _schema_projected_parameters(
         self,
         binding: PanelBinding,
         snapshot: object,
         reason: str,
     ) -> Mapping[str, object] | None:
-        """The full semantic contract of a panel whose HOST could not mount.
+        """The semantic contract projected from schema + spec alone.
 
-        A refused projection (the facet cell cap, say) is a STATE of the
+        THE light path: describe_semantics needs no render, so the fate
+        rows appear the moment a compatible snapshot is in hand -- at
+        connect, at accept, and on a panel whose HOST could not mount.  A
+        refused projection (the facet cell cap, say) is a STATE of the
         panel, not a reason for it to have no form: the semantic choices --
         the very fates that fix the refusal -- come from the schema and the
         spec alone, so a dead host cannot take them away.  Display controls
-        come from the kind vocabulary; only fit truly needs a live host.
+        come from the kind vocabulary; only fit truly needs a live host,
+        and the host's own description still replaces this surface when it
+        arrives (feasibility-filtered choices, exact values, fit models).
         """
 
         from zlc_plot.semantics import describe_semantics
@@ -2087,10 +2142,20 @@ class ConsolePresenter:
             state,
             semantic=self._semantic_entries(description),
             fit_unavailable=str(reason),
+            semantic_provisional=True,
         )
 
+    #: Why fit is absent on a surface projected before the host settles.
+    _RESOLVING_REASON = "Fit models resolve when the plot surface mounts."
+
     def _panel_snapshot(self, binding: PanelBinding) -> object | None:
-        """The panel's best current dataset, host or no host."""
+        """The panel's best current dataset, host or no host.
+
+        A panel whose FIRST projection was refused has never presented
+        anything -- no display publication, no frozen record -- but the
+        signal it was created against is still on the plane, and its
+        schema is all the semantic form needs.
+        """
 
         publication = binding.display_publication
         if publication is not None:
@@ -2100,6 +2165,12 @@ class ConsolePresenter:
         frozen = binding.frozen_data
         if frozen is not None:
             return frozen.snapshot
+        if binding.state.signal:
+            value = self.session.signal_plane.freeze().value(
+                binding.state.signal
+            )
+            if value is not None:
+                return value.snapshot
         return None
 
     def _degrade_panel_surface(
@@ -2110,7 +2181,7 @@ class ConsolePresenter:
         snapshot = self._panel_snapshot(binding)
         if snapshot is None:
             return
-        surface = self._degraded_panel_parameters(
+        surface = self._schema_projected_parameters(
             binding, snapshot, _error_text(error)
         )
         if surface is None:
@@ -2278,7 +2349,11 @@ class ConsolePresenter:
                     else:
                         assert metadata is not None
                         display, models = metadata
-                        if binding.parameter_surface.get("semantic_unavailable"):
+                        if binding.parameter_surface.get(
+                            "semantic_unavailable"
+                        ) or binding.parameter_surface.get(
+                            "semantic_provisional"
+                        ):
                             surface = self._parameter_surface_from_descriptions(
                                 binding.state,
                                 display,
@@ -2819,7 +2894,10 @@ class ConsolePresenter:
             return snapshot
         if binding.frozen_data is not None:
             return binding.frozen_data.snapshot
-        return None
+        # Before anything has drawn, the band describes the dataset the
+        # panel was created against: the shape strip and the fate rows must
+        # speak about the same schema the semantic form edits.
+        return self._panel_snapshot(binding)
 
     def _panel_data_shape(
         self,
