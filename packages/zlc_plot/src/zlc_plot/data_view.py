@@ -630,6 +630,9 @@ class DataView:
         dense = self._dense_data_curve(x, groups, aggregation, uncertainty)
         if dense is not None:
             return dense
+        factored = self._factored_curve(x, groups, aggregation, uncertainty)
+        if factored is not None:
+            return factored
         positions = self._all_positions()
         return self._curve_from_positions(
             x, positions, groups, aggregation, uncertainty
@@ -741,6 +744,289 @@ class DataView:
             x_ref=x,
             group_by=(),
             series=(series,),
+        )
+
+    def _factored_curve(
+        self,
+        x: AxisRef,
+        groups: tuple[AxisRef, ...],
+        aggregation: Reduction,
+        uncertainty: bool = False,
+    ) -> CurveData | None:
+        """The lattice fast path: moments by tensor axes, then a tiny fold.
+
+        Most bench signals are LARGE OVERALL but factored into many modest
+        axes -- (repeat) x (scan rows) x (frame) x (site) -- and a curve
+        over such a block never needed per-sample bucket codes: every
+        pooled dimension is a tensor axis, so the moments (sums, counts,
+        squares) reduce through plain masked axis-reductions in one pass
+        over the data, and only a (rows x series)-sized residue is left to
+        fold by x-coordinate -- thousands of entries where the generic
+        path built codes, gathers and buckets for millions.  Measured on
+        (20)x(1000)x(3)x(34): the whole projection drops from the generic
+        path's tens of milliseconds to the memory-bandwidth floor.
+
+        Coverage: x determined by the point ROW (a scan column or topology
+        dimension) with a declared finite domain; groups over declared
+        DATA axes or the repeat axis.  Everything else -- FIRST (whose
+        result depends on the exact sample order the pre-reduction
+        destroys), complex values (np.sum(where=) rejects them), point-
+        domain groups, undeclared domains -- keeps the generic path, whose
+        outputs this path must match series for series (the oracle tests
+        hold both to that).
+        """
+
+        if aggregation not in (
+            Reduction.MEAN,
+            Reduction.SUM,
+            Reduction.MIN,
+            Reduction.MAX,
+        ):
+            return None
+        values = self._samples.value.canonical
+        if values.dtype.kind == "c":
+            return None
+        if x.domain not in (
+            AxisDomain.POINT_COORDINATE,
+            AxisDomain.POINT_DIMENSION,
+        ):
+            return None
+        try:
+            x_resolved = self._resolve(x)
+            group_resolved = tuple(self._resolve(ref) for ref in groups)
+        except AxisResolutionError:
+            return None
+        shape = values.shape
+        data_size = 1
+        for size in shape[2:]:
+            data_size *= int(size)
+        kept_dims: list[int] = []
+        for ref, resolved in zip(groups, group_resolved):
+            if ref.domain is AxisDomain.REPEAT:
+                dimension = 0
+            elif ref.domain is AxisDomain.DATA:
+                dimension = int(resolved.dimension)
+            else:
+                return None
+            if dimension in kept_dims:
+                return None
+            kept_dims.append(dimension)
+
+        # One representative element per row / per group coordinate puts
+        # the existing domain machinery (used-set compression, labels,
+        # units) to work on arrays the size of the AXIS, not the dataset.
+        rows = int(shape[1])
+        row_representatives = np.arange(rows, dtype=np.int64) * data_size
+        x_domain = self._domain(x, row_representatives)
+        nx = int(x_domain.canonical.size)
+        if nx == 0:
+            return None
+        strides = []
+        acc = 1
+        for size in reversed(shape):
+            strides.insert(0, acc)
+            acc *= int(size)
+        group_domains = []
+        group_orders = []
+        for ref, resolved, dimension in zip(groups, group_resolved, kept_dims):
+            representatives = np.arange(shape[dimension], dtype=np.int64) * (
+                strides[dimension]
+            )
+            domain = self._domain(ref, representatives)
+            codes = np.asarray(domain.codes)
+            if (
+                domain.canonical.size != shape[dimension]
+                or bool((codes < 0).any())
+            ):
+                # Duplicate or unusable group coordinates would need
+                # per-sample codes again: the generic path's business.
+                return None
+            # The generic path walks series in CODE order (value-sorted for
+            # value-derived domains); the tensor dimension is in INDEX
+            # order.  This tiny permutation is the bridge.
+            order = np.empty(codes.size, dtype=np.int64)
+            order[codes] = np.arange(codes.size, dtype=np.int64)
+            group_domains.append(domain)
+            group_orders.append(order)
+
+        usable = self._samples.valid_mask
+        reduce_axes = tuple(
+            axis
+            for axis in range(values.ndim)
+            if axis != 1 and axis not in kept_dims
+        )
+        # Sums accumulate in float64 exactly as the generic kernel's
+        # bincount does, so a uint8 camera frame cannot wrap either way.
+        as_double = values.astype(np.float64, copy=False)
+        counts_pg = np.sum(usable, axis=reduce_axes, dtype=np.int64)
+        if aggregation in (Reduction.MEAN, Reduction.SUM):
+            moments_pg = np.sum(
+                as_double,
+                axis=reduce_axes,
+                where=usable,
+                dtype=np.float64,
+            )
+        else:
+            ufunc = np.min if aggregation is Reduction.MIN else np.max
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=RuntimeWarning)
+                moments_pg = ufunc(
+                    as_double,
+                    axis=reduce_axes,
+                    where=usable,
+                    initial=(
+                        np.inf if aggregation is Reduction.MIN else -np.inf
+                    ),
+                )
+        squares_pg = None
+        if uncertainty:
+            squares_pg = np.sum(
+                np.square(as_double),
+                axis=reduce_axes,
+                where=usable,
+                dtype=np.float64,
+            )
+
+        # The reductions keep the surviving dims in ORIGINAL tensor order
+        # (the repeat dim precedes the rows dim when it is grouped); the
+        # fold and the series walk both speak (rows, *groups-as-given).
+        remaining = sorted([1, *kept_dims])
+        permutation = [remaining.index(1)] + [
+            remaining.index(dimension) for dimension in kept_dims
+        ]
+        def to_groups_order(plane: NDArray[Any]) -> NDArray[Any]:
+            return np.transpose(plane, permutation)
+
+        group_sizes = tuple(int(shape[d]) for d in kept_dims)
+        combos = 1
+        for size in group_sizes:
+            combos *= size
+        def code_ordered(plane: NDArray[Any]) -> NDArray[Any]:
+            plane = to_groups_order(plane)
+            for position, order in enumerate(group_orders):
+                plane = np.take(plane, order, axis=1 + position)
+            return plane.reshape(rows, combos)
+
+        counts_pg = code_ordered(counts_pg)
+        moments_pg = code_ordered(moments_pg)
+        if squares_pg is not None:
+            squares_pg = code_ordered(squares_pg)
+
+        # Fold the residue by x-coordinate with the SAME grouped kernel the
+        # generic path uses, at (rows x series) scale instead of samples.
+        fold_codes = np.where(
+            x_domain.codes[:, None] >= 0,
+            x_domain.codes[:, None] * combos + np.arange(combos)[None, :],
+            -1,
+        ).reshape(-1)
+        fold_usable = (counts_pg > 0).reshape(-1)
+        buckets = nx * combos
+        counts_fold, _ = _aggregate_by_codes(
+            counts_pg.reshape(-1).astype(np.float64),
+            np.ones(fold_codes.shape, dtype=np.bool_),
+            fold_codes,
+            buckets,
+            Reduction.SUM,
+        )
+        counts = np.nan_to_num(counts_fold, nan=0.0).astype(np.int64)
+        if aggregation in (Reduction.MEAN, Reduction.SUM):
+            sums_fold, _ = _aggregate_by_codes(
+                moments_pg.reshape(-1),
+                np.ones(fold_codes.shape, dtype=np.bool_),
+                fold_codes,
+                buckets,
+                Reduction.SUM,
+            )
+            sums_fold = np.nan_to_num(sums_fold, nan=0.0)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                y_flat = (
+                    sums_fold / counts
+                    if aggregation is Reduction.MEAN
+                    else sums_fold
+                )
+            y_flat = np.where(counts > 0, y_flat, np.nan)
+        else:
+            y_flat, _ = _aggregate_by_codes(
+                moments_pg.reshape(-1),
+                fold_usable,
+                fold_codes,
+                buckets,
+                aggregation,
+            )
+            y_flat = np.where(counts > 0, y_flat, np.nan)
+        sem_flat = None
+        if squares_pg is not None:
+            sq_fold, _ = _aggregate_by_codes(
+                squares_pg.reshape(-1),
+                np.ones(fold_codes.shape, dtype=np.bool_),
+                fold_codes,
+                buckets,
+                Reduction.SUM,
+            )
+            sq_fold = np.nan_to_num(sq_fold, nan=0.0)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                mean_sq = np.where(counts > 0, sq_fold / counts, np.nan)
+            sem_flat = _sem_from_moments(
+                np.asarray(y_flat, np.float64), mean_sq, counts
+            )
+
+        y_plane = np.asarray(y_flat, np.float64).reshape(nx, combos)
+        counts_plane = counts.reshape(nx, combos)
+        sem_plane = (
+            None if sem_flat is None else sem_flat.reshape(nx, combos)
+        )
+        x_canonical = np.asarray(x_domain.canonical)
+        x_display = np.asarray(x_domain.display)
+        x_quantity = QuantityArray(
+            x_canonical,
+            x_display,
+            x_resolved.coordinate.canonical_unit,
+            x_resolved.coordinate.display_unit,
+            x_resolved.coordinate.label,
+        )
+        x_labels = _axis_coordinate_labels(x_resolved, x_canonical)
+        value = self._samples.value
+        series: list[CurveSeries] = []
+        for flat_index in range(combos):
+            key_indices = np.unravel_index(flat_index, group_sizes or (1,))
+            key = tuple(
+                domain.values[int(index)]
+                for domain, index in zip(group_domains, key_indices)
+            )
+            y_column = y_plane[:, flat_index]
+            counts_column = counts_plane[:, flat_index]
+            sem_column = (
+                None if sem_plane is None else sem_plane[:, flat_index]
+            )
+            label = value.label if not key else ", ".join(
+                item.label for item in key
+            )
+            series.append(
+                CurveSeries(
+                    x=x_quantity,
+                    x_labels=x_labels,
+                    y=QuantityArray(
+                        y_column,
+                        value.canonical_unit.convert_value_to(
+                            y_column, value.display_unit
+                        ),
+                        value.canonical_unit,
+                        value.display_unit,
+                        value.label,
+                    ),
+                    valid=(counts_column > 0) & np.isfinite(y_column),
+                    counts=counts_column,
+                    sem=sem_column,
+                    group_key=key,
+                    label=label,
+                )
+            )
+        return CurveData(
+            revision=self._samples.revision,
+            generation=self._samples.generation,
+            x_ref=x,
+            group_by=groups,
+            series=tuple(series),
         )
 
     def _curve_from_positions(
