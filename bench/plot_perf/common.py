@@ -128,8 +128,17 @@ def lattice_feed(
             tuple(cells),
         ),
     )
-    ax_column = columns["ax"]
-    profile = np.exp(-((ax_column - (dims[0] - 1) / 2.0) ** 2) / 4.0)
+    # Gaussian structure along BOTH leading scan dimensions, so a curve
+    # over ax has shape AND a facet's per-cell curves over ay have their
+    # own peaks -- a fit bench against flat noise measures scipy's
+    # iteration ceiling, not the pipeline.
+    profile = np.exp(-((columns["ax"] - (dims[0] - 1) / 2.0) ** 2) / 4.0)
+    if "ay" in columns:
+        profile = profile * (
+            0.4
+            + 0.6
+            * np.exp(-((columns["ay"] - (dims[1] - 1) / 2.0) ** 2) / 3.0)
+        )
     shape = (repeats, rows, frames, sites)
     stack = [
         profile[None, :, None, None] + rng.normal(scale=0.25, size=shape)
