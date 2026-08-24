@@ -17,6 +17,15 @@ host call, which is exactly what does not happen between two cycles of one
 fired table, so such a plan is refused when it is bound -- by name, pointing
 at the node that can run it.
 
+A SHOT IS A BRACKET ITERATION, NOT A TABLE ROW.  A scan point is one row of
+the table: the board loads its slots and plays the pulse once, bracket and
+all.  So ``shots_per_point`` compiles into the pulse's outermost repeat
+bracket -- the hardware loop that plays INSIDE one point -- and the table
+carries exactly the plan's rows.  Repeating rows instead multiplied the
+table by the shot count, which is what pushed long scans past the board's
+two resident banks into streaming refill: the host then fed banks over UART
+against the clock while everything else on the link starved.
+
 THE LOOP LIVES HERE, NOT IN A NODE PACKAGE, BECAUSE IT HAS TWO CONSUMERS.
 ``acquire`` plays the plan and commits each point; Runtime hands back the
 current canonical scan.  A Task that scans for a reason of its own commits its
@@ -32,7 +41,9 @@ from dataclasses import replace
 
 import numpy as np
 from zlc_pulse import (
+    MAXIMUM_REPEAT_COUNT,
     PulseSequence,
+    RepeatRegion,
     compile_sequence,
     resolve_api_parameters,
     scan_columns_for,
@@ -115,6 +126,51 @@ class SeamlessScanMeasurement:
         columns = scan_columns_for(streamed)
         return streamed, columns
 
+    def _shot_bracketed(
+        self, sequence: PulseSequence
+    ) -> tuple[PulseSequence, int]:
+        """``shots_per_point`` compiled into the outermost repeat bracket.
+
+        The board's one hardware loop is the only place a shot can live: a
+        bare pulse gains a whole-sequence bracket counting the shots, and a
+        pulse that already brackets its whole span multiplies its count --
+        every iteration of a whole-sequence bracket is one shot, whoever
+        authored it.  A partial bracket cannot nest inside a second loop,
+        so asking for more than one shot of it is refused.
+
+        Returns the sequence and how many shots one point actually plays.
+        """
+
+        shots = self.shots_per_point
+        repeat = sequence.repeat
+        first = sequence.periods[0].period_id
+        last = sequence.periods[-1].period_id
+        if repeat is None:
+            if shots == 1:
+                return sequence, 1
+            bracketed = replace(
+                sequence, repeat=RepeatRegion(first, last, shots)
+            )
+            return bracketed, shots
+        if repeat.start_period_id != first or repeat.end_period_id != last:
+            if shots == 1:
+                return sequence, 1
+            raise ValueError(
+                "the board plays one hardware loop per point, and this "
+                "template already spends it on a bracket over "
+                f"{repeat.start_period_id!r}..{repeat.end_period_id!r}; "
+                "shots_per_point > 1 needs a whole-sequence bracket or none "
+                "-- author the shot loop in the template, or leave "
+                "shots_per_point at 1"
+            )
+        count = repeat.count * shots
+        if count > MAXIMUM_REPEAT_COUNT:
+            raise ValueError(
+                f"{repeat.count} bracket plays x {shots} shots per point do "
+                "not fit the hardware 32-bit repeat count"
+            )
+        return replace(sequence, repeat=replace(repeat, count=count)), count
+
     def _slot_ordered_rows(
         self, rows: Sequence[Sequence[float]], columns
     ) -> tuple[tuple[float, ...], ...]:
@@ -129,11 +185,9 @@ class SeamlessScanMeasurement:
         )
 
     def _wire_table(self, rows: Sequence[Sequence[float]], columns) -> np.ndarray:
-        """The played table: every plan row, ``shots_per_point`` times over."""
+        """The played table: exactly the plan's rows.  Shots are the bracket."""
 
-        table = np.repeat(
-            np.asarray(rows, dtype=float), self.shots_per_point, axis=0
-        )
+        table = np.asarray(rows, dtype=float)
         return scan_rows_to_wire(validate_scan_table(table, columns), columns)
 
     def acquire(self, context: object, *, on_point: object = None):
@@ -152,8 +206,13 @@ class SeamlessScanMeasurement:
 
         board = self.sequencer.describe()
         rows = self.plan.rows()
-        shots = self.shots_per_point
-        cycles = self.repeats * len(rows) * shots
+        # The board fires one cycle per POINT -- the shots play inside it as
+        # the pulse's own repeat bracket -- while the source hands back one
+        # value per READOUT, of which every bracket iteration produces one.
+        streamed, columns = self._streamed_sequence(board)
+        streamed, shots = self._shot_bracketed(streamed)
+        fired = self.repeats * len(rows)
+        readouts = fired * shots
         run_record = self.run_record()
         writer = ScanDatasetWriter(
             rows,
@@ -166,17 +225,16 @@ class SeamlessScanMeasurement:
         # the first point starts from.
         self.sequencer.safe()
         time.sleep(self.settle_seconds)
-        self.source.open(context, cycles=cycles)
+        self.source.open(context, cycles=readouts)
         try:
-            streamed, columns = self._streamed_sequence(board)
             wire = self._wire_table(self._slot_ordered_rows(rows, columns), columns)
             program = compile_sequence(streamed, board.geometry, board.clock_hz)
-            self.source.validate(program, wire, cycles=cycles)
+            self.source.validate(program, wire, cycles=readouts)
             self.sequencer.load(program, source=streamed, rows=wire)
             self.source.arm()
-            self.sequencer.fire(cycles=cycles)
+            self.sequencer.fire(cycles=fired)
             per_sweep = len(rows) * shots
-            for played in range(cycles):
+            for played in range(readouts):
                 check_cancelled(context)
                 sweep, rest = divmod(played, per_sweep)
                 row_index, shot = divmod(rest, shots)

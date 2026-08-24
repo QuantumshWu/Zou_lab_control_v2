@@ -62,9 +62,10 @@ SEAMLESS_SCAN_SCHEMA = AuthoringSchema(
             required=True,
         ),
         # Repeats and shots both land on the dataset's repeat axis (size
-        # repeats x shots): in-place looks while the board holds a point
-        # versus whole-table sweeps.  Physically different, structurally the
-        # same fact -- the same conditions, again.
+        # repeats x shots): shots play inside one point as the pulse's
+        # outermost repeat bracket; repeats are whole-table sweeps.
+        # Physically different, structurally the same fact -- the same
+        # conditions, again.
         AuthoringField(
             "repeats",
             "int",

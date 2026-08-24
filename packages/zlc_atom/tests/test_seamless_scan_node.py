@@ -1,9 +1,10 @@
 """The seamless scan node: the BOARD advances the points from its scan table.
 
 Two things have to be true and nothing else matters.  The plan must reach the
-board as a scan table whose rows are the plan's rows -- each repeated
-``shots_per_point`` times, swept ``repeats`` times -- and the publications
-that come back must land on the rows that produced them, in played order.
+board as a scan table whose rows are EXACTLY the plan's rows -- shots play
+inside one point as the pulse's outermost repeat bracket, sweeps as extra
+fired cycles over the same table -- and the publications that come back must
+land on the rows that produced them, in played order.
 The first is asserted against the table the board was handed; the second
 twice: once against a source whose every publication is named, and once
 against the virtual world's own physics, where a wrong order would show up as
@@ -22,7 +23,14 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from zlc_pulse import compile_sequence, resolve_api_parameters, sequence_from_tree
+from dataclasses import replace
+
+from zlc_pulse import (
+    RepeatRegion,
+    compile_sequence,
+    resolve_api_parameters,
+    sequence_from_tree,
+)
 from zlc_runtime import NodeHost, SignalDataPlane
 
 from zlc_atom.install import create_installation
@@ -94,13 +102,16 @@ def _scripted_run(
     shots: int,
     repeats: int,
     settle: float,
+    sequence: object | None = None,
+    readouts: int | None = None,
 ) -> tuple[np.ndarray, ScriptedScanBench]:
     """Play the table over a source whose every publication is named.
 
     Returns the kept shots as (visit, plan row) values -- each cell is the
     index of the publication that landed in it -- and the bench that scripted
     them.  One fire hands over every publication the table plays, which is
-    what a board-driven source does.
+    what a board-driven source does.  ``readouts`` is how many that is when a
+    template's own bracket multiplies the shots.
     """
 
     installation = create_installation("virtual")
@@ -112,7 +123,9 @@ def _scripted_run(
         bench = ScriptedScanBench(
             installation.device("sequencer"),
             plane,
-            publications_per_fire=repeats * len(values) * shots,
+            publications_per_fire=(
+                repeats * len(values) * shots if readouts is None else readouts
+            ),
         )
         bench.publish(SCRIPTED_SEED_VALUE)
         plan = ScanPlan((ScanAxis(BIAS_X_PORT, values),))
@@ -120,7 +133,10 @@ def _scripted_run(
             sequencer=bench,
             signal_plane=plane,
             source_signal=bench.signal_name,
-            pulse_resource=_pulse_resource(TEMPLATE_NAME, _template_sequence()),
+            pulse_resource=_pulse_resource(
+                TEMPLATE_NAME,
+                _template_sequence() if sequence is None else sequence,
+            ),
             plan=plan.to_tree(),
             repeats=repeats,
             shots_per_point=shots,
@@ -244,13 +260,14 @@ def test_source_preflight_rejects_before_the_board_is_loaded(monkeypatch) -> Non
         installation.close()
 
 
-def test_the_table_carries_every_row_and_shot_and_the_shots_land_in_order() -> None:
+def test_the_table_is_the_plan_and_the_shots_ride_the_bracket() -> None:
     """One load, one fire: the table IS the plan, and order is the assignment.
 
-    Two points, two shots each, two sweeps: the board is handed one four-row
-    table and one explicit eight-cycle execution, and the publications land
-    on (visit, row) in played order -- red the moment a shot is credited to
-    the point beside it.
+    Two points, two shots each, two sweeps: the board is handed one TWO-row
+    table -- the shots live in the pulse's own repeat bracket, not as
+    repeated rows -- one fired cycle per point per sweep, and the
+    publications land on (visit, row) in played order, red the moment a shot
+    is credited to the point beside it.
     """
 
     kept, bench = _scripted_run(
@@ -266,11 +283,107 @@ def test_the_table_carries_every_row_and_shot_and_the_shots_land_in_order() -> N
 
     assert len(bench.scan_tables) == 1, "the table is written once, not per point"
     table = bench.scan_tables[0]
-    assert len(table) == 4, "one wire row per plan row per shot"
-    assert bench.fired_cycles == [8]
-    first, second, third, fourth = (tuple(row) for row in np.asarray(table))
-    assert first == second and third == fourth, "a shot repeats its row in place"
-    assert first != third, "the two plan points must reach the board apart"
+    assert len(table) == 2, "one wire row per plan row; shots are not rows"
+    first, second = (tuple(row) for row in np.asarray(table))
+    assert first != second, "the two plan points must reach the board apart"
+    assert bench.fired_cycles == [4], "one fired cycle per point per sweep"
+    assert bench.loaded_loop_counts == [2], "the shot count IS the bracket"
+
+
+def test_an_authored_whole_bracket_multiplies_with_the_shots() -> None:
+    """Every iteration of a whole-sequence bracket is one shot.
+
+    The template already plays its whole span twice; the operator asks for
+    two shots on top.  One point is then four bracket iterations -- four
+    readouts -- and the dataset says so: four visits per sweep, in played
+    order, over an unchanged two-row table.
+    """
+
+    template = _template_sequence()
+    template = replace(
+        template,
+        repeat=RepeatRegion(
+            template.periods[0].period_id, template.periods[-1].period_id, 2
+        ),
+    )
+    kept, bench = _scripted_run(
+        values=(-256.0, 256.0),
+        shots=2,
+        repeats=1,
+        settle=0.0,
+        sequence=template,
+        readouts=8,
+    )
+    assert kept.tolist() == [
+        [0.0, 4.0],  # shot 0 = the bracket's first authored play
+        [1.0, 5.0],
+        [2.0, 6.0],
+        [3.0, 7.0],
+    ]
+    assert len(bench.scan_tables[0]) == 2
+    assert bench.fired_cycles == [2]
+    assert bench.loaded_loop_counts == [4], "authored twice x two shots"
+
+
+def test_a_partial_bracket_refuses_more_than_one_shot_and_plays_at_one() -> None:
+    """The board has ONE hardware loop; a partial bracket already spends it.
+
+    Two shots of a partially-bracketed template cannot nest, so the run is
+    refused before the board is touched, in words that name the way out.  At
+    one shot the authored bracket is the author's own business and plays
+    untouched.
+    """
+
+    template = _template_sequence()
+    partial = replace(
+        template,
+        repeat=RepeatRegion(
+            template.periods[0].period_id, template.periods[1].period_id, 2
+        ),
+    )
+
+    installation = create_installation("virtual")
+    plane = SignalDataPlane()
+    descriptors = {value.api_name: value for value in discover_logic_nodes()}
+    bench = None
+    host = None
+    try:
+        bench = ScriptedScanBench(
+            installation.device("sequencer"), plane, publications_per_fire=1
+        )
+        bench.publish(SCRIPTED_SEED_VALUE)
+        node = descriptors["seamless_scan"].instantiate(
+            sequencer=bench,
+            signal_plane=plane,
+            source_signal=bench.signal_name,
+            pulse_resource=_pulse_resource(TEMPLATE_NAME, partial),
+            plan=ScanPlan((ScanAxis(BIAS_X_PORT, (0.0,)),)).to_tree(),
+            repeats=1,
+            shots_per_point=2,
+            settle_seconds=0.0,
+        )
+        host = _scan_host(node, plane)
+        host.start()
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and not host.observation.terminal:
+            host.poll()
+        message = str(host.observation.error)
+        assert "whole-sequence bracket" in message, message
+        assert "shots_per_point" in message, message
+        assert bench.loads == 0, "the board was touched by a refused run"
+    finally:
+        if host is not None:
+            host.shutdown()
+        if bench is not None:
+            bench.close()
+        plane.close()
+        installation.close()
+
+    kept, bench = _scripted_run(
+        values=(0.0,), shots=1, repeats=1, settle=0.0, sequence=partial
+    )
+    assert kept.tolist() == [[0.0]]
+    assert bench.loaded_loop_counts == [2], "one shot leaves the author's bracket"
 
 
 def test_the_authored_settle_time_stops_the_board_before_the_table() -> None:
