@@ -71,6 +71,14 @@ _ROLLING_DISTRIBUTION_BIN_EFFECTS = (
     | RenderEffect.AXIS_TRANSFORM
     | RenderEffect.CHROME
 )
+#: Flipping the band re-projects the payload (sem appears), moves the y
+#: range (the band must fit), and re-selects any fit (sigma weighting).
+_UNCERTAINTY_EFFECTS = (
+    RenderEffect.PAYLOAD_PROJECTION
+    | RenderEffect.BASE_GEOMETRY
+    | RenderEffect.FIT_SELECTION
+)
+
 _ROLLING_WINDOW_EFFECTS = (
     RenderEffect.PAYLOAD_PROJECTION
     | RenderEffect.BASE_GEOMETRY
@@ -189,9 +197,6 @@ class CurvePlot:
     x: AxisRef
     group: AxisRef | None = None
     reduction: Reduction = Reduction.MEAN
-    #: Draw the standard error of every MEAN point as a band, and weight
-    #: any fit on this panel by it.  One switch, one meaning.
-    uncertainty: bool = False
     labels: PlotLabels = field(default_factory=PlotLabels)
     scope: tuple[ScopeTerm, ...] = ()
     kind: ClassVar[PlotKind] = PlotKind.CURVE
@@ -205,12 +210,6 @@ class CurvePlot:
             raise ValueError("CurvePlot.group must differ from x")
         if not isinstance(self.reduction, Reduction):
             raise TypeError("CurvePlot.reduction must be Reduction")
-        if not isinstance(self.uncertainty, bool):
-            raise TypeError("CurvePlot.uncertainty must be bool")
-        if self.uncertainty and self.reduction is not Reduction.MEAN:
-            raise ValueError(
-                "uncertainty is defined for Reduction.MEAN only"
-            )
         if not isinstance(self.labels, PlotLabels):
             raise TypeError("CurvePlot.labels must be PlotLabels")
         object.__setattr__(self, "scope", _validated_scope(self.scope))
@@ -261,11 +260,6 @@ class HistogramPlot:
 class RollingPlot:
     group: AxisRef | None = None
     reduction: Reduction = Reduction.MEAN
-    #: Replace the per-shot trace with the running mean of every shot so
-    #: far, drawn with its running standard error as a band -- the live
-    #: "rate converging shot by shot" view.  MEAN only: the running
-    #: statistic of any other reduction is undefined here.
-    cumulative: bool = False
     labels: PlotLabels = field(default_factory=PlotLabels)
     scope: tuple[ScopeTerm, ...] = ()
     kind: ClassVar[PlotKind] = PlotKind.ROLLING
@@ -275,10 +269,6 @@ class RollingPlot:
             raise TypeError("RollingPlot.group must be AxisRef or None")
         if not isinstance(self.reduction, Reduction):
             raise TypeError("RollingPlot.reduction must be Reduction")
-        if not isinstance(self.cumulative, bool):
-            raise TypeError("RollingPlot.cumulative must be bool")
-        if self.cumulative and self.reduction is not Reduction.MEAN:
-            raise ValueError("cumulative is defined for Reduction.MEAN only")
         if not isinstance(self.labels, PlotLabels):
             raise TypeError("RollingPlot.labels must be PlotLabels")
         object.__setattr__(self, "scope", _validated_scope(self.scope))
@@ -719,6 +709,20 @@ def _parameter_schema_for_context(
         entries.append(_unit_parameter("value_display_unit"))
     if semantic_kind in {PlotKind.CURVE, PlotKind.ROLLING}:
         entries.extend(_curve_parameters())
+    if semantic_kind is PlotKind.CURVE:
+        # A display choice, not a data declaration: the operator flips the
+        # band on a live panel and the projection computes the MEAN's
+        # standard error on demand.  On a non-MEAN reduction the statistic
+        # does not exist and the switch is inert.
+        entries.append(
+            ParameterSpec(
+                "uncertainty",
+                bool,
+                _UNCERTAINTY_EFFECTS,
+                default=False,
+                label="Uncertainty band",
+            )
+        )
     if semantic_kind is PlotKind.HISTOGRAM:
         entries.extend(_histogram_parameters())
         # One shot by default: a distribution of what was just measured.  A
@@ -743,6 +747,16 @@ def _parameter_schema_for_context(
                     RenderEffect.LAYOUT,
                     default=True,
                     label="Side distribution",
+                ),
+                # The running mean of every shot so far, drawn with its
+                # running standard error as the band: the live "rate
+                # converging shot by shot" view.  Inert on non-MEAN.
+                ParameterSpec(
+                    "cumulative",
+                    bool,
+                    _UNCERTAINTY_EFFECTS,
+                    default=False,
+                    label="Cumulative mean",
                 ),
             )
         )

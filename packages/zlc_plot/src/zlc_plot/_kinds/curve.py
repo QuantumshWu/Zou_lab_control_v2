@@ -14,14 +14,18 @@ def render(renderer: Any, payload: Any, state: Any, *, axes: Any, key: str, **po
     renderer._update_curve(axes, payload, state, key, **pooled)
 
 
-def build_payload(projection: Any, view: Any, _state: Any) -> None:
+def build_payload(projection: Any, view: Any, state: Any) -> None:
     spec = projection._spec
     group = () if spec.group is None else (spec.group,)
     projection._payload = view.curve(
         spec.x,
         group_by=group,
         aggregation=spec.reduction,
-        uncertainty=spec.uncertainty,
+        # The band is the operator's display switch; the standard error only
+        # exists for a MEAN, so on any other reduction the switch is inert.
+        uncertainty=(
+            bool(state["uncertainty"]) and spec.reduction is Reduction.MEAN
+        ),
     )
 
 
@@ -81,7 +85,7 @@ HANDLER = KindHandler(
     "series",
     render,
     build_payload,
-    ("kind", "x", "group", "reduction", "uncertainty"),
+    ("kind", "x", "group", "reduction"),
     admits,
     default_spec,
     label_roles,

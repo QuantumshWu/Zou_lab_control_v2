@@ -1432,11 +1432,14 @@ class DataView:
         spec: FacetGridPlot,
         *,
         bins: int | Sequence[float] | None = None,
+        uncertainty: bool = False,
     ) -> FacetData:
         self.validate_facet(spec)
         cell = spec.cell
         if not isinstance(cell, HistogramPlot) and bins is not None:
             raise ValueError("bins are accepted only for Histogram facet cells")
+        if uncertainty and not isinstance(cell, CurvePlot):
+            raise ValueError("uncertainty is accepted only for Curve facet cells")
         shared_bins = bins
         if isinstance(cell, HistogramPlot) and isinstance(bins, bool):
             raise TypeError("histogram bin count must be an integer")
@@ -1453,13 +1456,14 @@ class DataView:
             shared_bins = aligned_histogram_edges(values, int(bins))
         if isinstance(cell, HistogramPlot) and bins is None:
             raise DataViewError("histogram facet cells require explicit bins")
-        dense = self._dense_facet(spec, shared_bins)
+        dense = self._dense_facet(spec, shared_bins, uncertainty)
         if dense is not None:
             return dense
         return self._facet_from_positions(
             spec,
             shared_bins,
             self._all_positions(),
+            uncertainty,
         )
 
     def _facet_from_positions(
@@ -1467,6 +1471,7 @@ class DataView:
         spec: FacetGridPlot,
         shared_bins: int | Sequence[float] | None,
         base_positions: NDArray[np.int64],
+        uncertainty: bool = False,
     ) -> FacetData:
         cell = spec.cell
         cells: list[FacetCell] = []
@@ -1480,7 +1485,7 @@ class DataView:
                     cell_positions,
                     () if cell.group is None else (cell.group,),
                     cell.reduction,
-                    cell.uncertainty,
+                    uncertainty,
                 )
             elif isinstance(cell, ImagePlot):
                 payload = self._image_from_positions(
@@ -1515,6 +1520,7 @@ class DataView:
         self,
         spec: FacetGridPlot,
         shared_bins: int | Sequence[float] | None,
+        uncertainty: bool = False,
     ) -> FacetData | None:
         """Row-sliced twin of the dense projections, one cell at a time.
 
@@ -1616,7 +1622,7 @@ class DataView:
                     cell_values,
                     cell_valid,
                     cell.reduction,
-                    cell.uncertainty,
+                    uncertainty,
                 )
             elif isinstance(cell, ImagePlot):
                 payload = self._dense_image_data(

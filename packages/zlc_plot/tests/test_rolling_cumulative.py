@@ -47,7 +47,8 @@ def test_cumulative_trace_is_the_running_rate_with_binomial_sem() -> None:
     shots = (rng.random((30, sites)) < 0.4).astype(np.float64)
     session = PlotSession(
         _shot(schema, shots[0], 0),
-        RollingPlot(reduction=Reduction.MEAN, cumulative=True),
+        RollingPlot(reduction=Reduction.MEAN),
+        parameters={"cumulative": True},
     )
     try:
         for revision in range(1, len(shots)):
@@ -76,11 +77,13 @@ def test_window_frames_the_view_without_changing_the_numbers() -> None:
     shots = (rng.random((20, sites)) < 0.5).astype(np.float64)
 
     def last_value(window: int | None) -> tuple[float, float]:
-        kwargs = {} if window is None else {"parameters": {"window": window}}
+        values = {"cumulative": True}
+        if window is not None:
+            values["window"] = window
         session = PlotSession(
             _shot(schema, shots[0], 0),
-            RollingPlot(reduction=Reduction.MEAN, cumulative=True),
-            **kwargs,
+            RollingPlot(reduction=Reduction.MEAN),
+            parameters=values,
         )
         try:
             for revision in range(1, len(shots)):
@@ -99,7 +102,8 @@ def test_cumulative_band_renders(tmp_path) -> None:
     rng = np.random.default_rng(3)
     session = PlotSession(
         _shot(schema, (rng.random(sites) < 0.5).astype(np.float64), 0),
-        RollingPlot(reduction=Reduction.MEAN, cumulative=True),
+        RollingPlot(reduction=Reduction.MEAN),
+        parameters={"cumulative": True},
     )
     try:
         for revision in range(1, 12):
@@ -118,6 +122,24 @@ def test_cumulative_band_renders(tmp_path) -> None:
         session.close()
 
 
-def test_cumulative_refuses_non_mean() -> None:
-    with pytest.raises(ValueError, match="MEAN"):
-        RollingPlot(reduction=Reduction.MEDIAN, cumulative=True)
+def test_cumulative_is_inert_on_a_non_mean_reduction() -> None:
+    """The switch is a display parameter; on a MEDIAN trace the running
+    standard error does not exist, so flipping it changes nothing."""
+
+    sites = 4
+    schema = _schema(sites)
+    rng = np.random.default_rng(11)
+    session = PlotSession(
+        _shot(schema, (rng.random(sites) < 0.5).astype(np.float64), 0),
+        RollingPlot(reduction=Reduction.MEDIAN),
+        parameters={"cumulative": True},
+    )
+    try:
+        for revision in range(1, 5):
+            session.update_data(
+                _shot(schema, (rng.random(sites) < 0.5).astype(np.float64), revision)
+            )
+        series = session._projection._payload.series[0]
+        assert series.sem is None
+    finally:
+        session.close()

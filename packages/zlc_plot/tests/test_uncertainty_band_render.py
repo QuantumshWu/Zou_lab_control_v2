@@ -41,11 +41,8 @@ def _bands(session: PlotSession) -> list[PolyCollection]:
 def test_uncertainty_curve_draws_a_band_and_covers_it_in_ylim() -> None:
     session = PlotSession(
         _snapshot(24, 1, 0.2),
-        CurvePlot(
-            AxisRef.point("x"),
-            uncertainty=True,
-            labels=PlotLabels("band", "x", "y"),
-        ),
+        CurvePlot(AxisRef.point("x"), labels=PlotLabels("band", "x", "y")),
+        parameters={"uncertainty": True},
     )
     try:
         session._renderer.draw()
@@ -68,7 +65,8 @@ def test_band_shrinks_as_shots_accumulate() -> None:
     def band_height(repeats: int) -> float:
         session = PlotSession(
             _snapshot(repeats, 1, 0.2),
-            CurvePlot(AxisRef.point("x"), uncertainty=True),
+            CurvePlot(AxisRef.point("x")),
+            parameters={"uncertainty": True},
         )
         try:
             session._renderer.draw()
