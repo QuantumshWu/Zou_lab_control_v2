@@ -4180,3 +4180,45 @@ def test_bound_rolling_panel_offers_the_uncertainty_switch(
     }
     assert "uncertainty" in names, sorted(names)
     assert "cumulative" in names, sorted(names)
+
+
+def test_a_refused_projection_keeps_the_semantic_form_alive(
+    presenter, session
+) -> None:
+    """The facet cell cap (or any mount failure) is a panel STATE: the
+    fate rows that can fix it stay editable instead of the whole form
+    dying with the host."""
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(
+        node.signal_key("frames"), snapshot, kind="image"
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.host is not None
+        and bool(binding.parameter_surface.get("semantic")),
+    )
+
+    # Simulate the port recording a refused projection (the cap raise).
+    class _FailedPort:
+        last_error = ValueError(
+            "FacetGrid needs 180 cells, which exceeds the fixed layout "
+            "facet_max_cells capacity of 100"
+        )
+
+    real_port = binding.port
+    binding.port = _FailedPort()
+    binding.reported_error = None
+    try:
+        presenter._report_panel_errors()
+        surface = binding.parameter_surface
+        # The semantic contract survives the dead host: fate rows present,
+        # only fit is honestly unavailable, and the reason names the cap.
+        assert surface["semantic"], "semantic rows must survive a mount failure"
+        assert any(
+            str(entry["key"]).startswith("fate:")
+            for entry in surface["semantic"]
+        )
+        assert "cells" in surface["fit_unavailable"]
+    finally:
+        binding.port = real_port

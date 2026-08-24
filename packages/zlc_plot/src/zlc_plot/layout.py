@@ -800,7 +800,8 @@ def resolve_surface(
             raise ValueError(
                 f"FacetGrid needs {facet_topology.cell_count} cells, which "
                 f"exceeds the fixed layout facet_max_cells capacity of "
-                f"{layout.facet_max_cells}"
+                f"{layout.facet_max_cells}; pin an axis or change a fate to "
+                "reduce the cells"
             )
         recommended_name = recommended_facet_preset(facet_topology, layout)
         selected_name = recommended_name if preset is None else layout.validate_preset(preset)

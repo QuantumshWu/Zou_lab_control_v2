@@ -1986,21 +1986,11 @@ class ConsolePresenter:
             fit_unavailable=data_reason,
         )
 
-    def _parameter_surface_from_descriptions(
-        self,
-        state: PanelState,
-        display_description: object,
-        semantic_description: object,
-        models: Sequence[object],
-    ) -> Mapping[str, object]:
-        """Project already-resolved plot metadata without another host wait."""
+    @staticmethod
+    def _semantic_entries(semantic_description: object) -> tuple:
+        """The one projection of semantic fields into editor rows."""
 
-        display_controls = parameter_controls(
-            display_description.parameter_schema,
-            display_description.display_state.values,
-            choice_overrides=display_description.parameter_choices,
-        )
-        semantic_entries = tuple(
+        return tuple(
             {
                 "key": str(field.name),
                 "label": str(field.label),
@@ -2017,6 +2007,99 @@ class ConsolePresenter:
             for field in tuple(semantic_description.fields)
             if str(field.name) != "kind"
         )
+
+    def _degraded_panel_parameters(
+        self,
+        binding: PanelBinding,
+        snapshot: object,
+        reason: str,
+    ) -> Mapping[str, object] | None:
+        """The full semantic contract of a panel whose HOST could not mount.
+
+        A refused projection (the facet cell cap, say) is a STATE of the
+        panel, not a reason for it to have no form: the semantic choices --
+        the very fates that fix the refusal -- come from the schema and the
+        spec alone, so a dead host cannot take them away.  Display controls
+        come from the kind vocabulary; only fit truly needs a live host.
+        """
+
+        from zlc_plot.semantics import describe_semantics
+        from zlc_plot.ui import parameter_controls_for_kind
+
+        schema = getattr(getattr(snapshot, "block", None), "schema", None)
+        if schema is None:
+            return None
+        state = binding.state
+        spec = self._spec_for(snapshot, state.kind, state.cell_kind)
+        if spec is None:
+            return None
+        try:
+            description = describe_semantics(schema, spec)
+        except Exception:
+            return None
+        try:
+            controls = parameter_controls_for_kind(
+                state.kind,
+                dict(state.display),
+                facet_cell_kind=state.cell_kind or None,
+            )
+        except (TypeError, ValueError, KeyError):
+            controls = ()
+        return self._parameter_surface(
+            controls,
+            state,
+            semantic=self._semantic_entries(description),
+            fit_unavailable=str(reason),
+        )
+
+    def _panel_snapshot(self, binding: PanelBinding) -> object | None:
+        """The panel's best current dataset, host or no host."""
+
+        publication = binding.display_publication
+        if publication is not None:
+            value = publication.value(binding.state.signal)
+            if value is not None:
+                return value.snapshot
+        frozen = binding.frozen_data
+        if frozen is not None:
+            return frozen.snapshot
+        return None
+
+    def _degrade_panel_surface(
+        self, binding: PanelBinding, error: BaseException
+    ) -> None:
+        """Keep the semantic form alive when a host fails to mount."""
+
+        snapshot = self._panel_snapshot(binding)
+        if snapshot is None:
+            return
+        surface = self._degraded_panel_parameters(
+            binding, snapshot, _error_text(error)
+        )
+        if surface is None:
+            return
+        binding.parameter_surface = surface
+        try:
+            self._publish_panel_state(binding)
+        except Exception:
+            pass
+        self.refresh_panel_editor(binding.panel_id)
+
+    def _parameter_surface_from_descriptions(
+        self,
+        state: PanelState,
+        display_description: object,
+        semantic_description: object,
+        models: Sequence[object],
+    ) -> Mapping[str, object]:
+        """Project already-resolved plot metadata without another host wait."""
+
+        display_controls = parameter_controls(
+            display_description.parameter_schema,
+            display_description.display_state.values,
+            choice_overrides=display_description.parameter_choices,
+        )
+        semantic_entries = self._semantic_entries(semantic_description)
         models = tuple(models)
         current_model = state.fit.get("model")
         model_choices = [
@@ -2107,6 +2190,7 @@ class ConsolePresenter:
                                 f"{binding.panel_id}: {_error_text(error)}",
                                 severity="error",
                             )
+                            self._degrade_panel_surface(binding, error)
                     else:
                         # A configure re-renders on the worker; its exact front
                         # must reach the staged widget or the Setting edit is
@@ -2153,6 +2237,7 @@ class ConsolePresenter:
                                 f"{binding.panel_id}: {_error_text(error)}",
                                 severity="error",
                             )
+                            self._degrade_panel_surface(binding, error)
                     else:
                         assert metadata is not None
                         display, models = metadata
@@ -3650,6 +3735,9 @@ class ConsolePresenter:
             self._report(
                 f"{binding.title}: {_error_text(error)}", severity="error"
             )
+            # A refused projection is a STATE, not a reason to have no form:
+            # the semantic fates that fix it stay editable.
+            self._degrade_panel_surface(binding, error)
             # And on the card itself, which has a status line nothing wrote to.
             # A board-wide line says which panel; the panel says it is the one.
             if panel_id in self.view.panel_ids():
