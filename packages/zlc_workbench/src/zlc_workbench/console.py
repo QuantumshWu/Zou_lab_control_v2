@@ -4342,6 +4342,11 @@ class ConsolePresenter:
     def _follow_processor_sources(self) -> None:
         """Complete standing processor Starts whose source is alive again."""
 
+        if self._active_task() is not None:
+            # A Task owns the bench; deferring the follow to a later beat is
+            # waiting, not giving up -- and start_logic would report the
+            # block on every beat.
+            return
         for binding in tuple(self.logic.values()):
             if (
                 not binding.following
@@ -4351,10 +4356,14 @@ class ConsolePresenter:
                 continue
             host = binding.host
             if host is not None and (
-                host.running or host.observation.phase != "done"
+                host.running
+                or host.observation.phase not in ("done", "cancelled")
             ):
                 # Running follows by itself; a failure is the operator's to
-                # read, not this beat's to retry.
+                # read, not this beat's to retry.  A CANCELLED host whose
+                # following survived was cancelled by something other than
+                # the operator (their Stop clears the flag) -- a device
+                # takeover, say -- and follows again like a finished one.
                 if host.observation.phase == "failed":
                     binding.following = False
                 continue

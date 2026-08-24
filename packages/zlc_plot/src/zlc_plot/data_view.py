@@ -215,6 +215,11 @@ class CurveSeries:
     #: unit) is wrong for a difference-like quantity, so consumers convert
     #: the y±sem BOUNDS, never sem itself.
     sem: NDArray[np.float64] | ArrayLike | None = None
+    #: One display name per plotted x position when the axis declares
+    #: coordinate labels (a pair axis, a model axis), or None for numeric
+    #: axes.  The renderer puts these on the ticks so the axis reads the
+    #: same names the legend, hover and scope already use.
+    x_labels: tuple[str, ...] | None = None
     group_key: tuple[AxisValue, ...] = ()
     label: str = ""
 
@@ -226,6 +231,11 @@ class CurveSeries:
             if sem.shape != valid.shape:
                 raise ValueError("curve sem must match the point shape")
             object.__setattr__(self, "sem", sem)
+        if self.x_labels is not None:
+            labels = tuple(str(item) for item in self.x_labels)
+            if len(labels) != int(valid.shape[0]):
+                raise ValueError("curve x labels must match the point count")
+            object.__setattr__(self, "x_labels", labels)
         if self.x.canonical.ndim != 1 or self.y.canonical.ndim != 1:
             raise ValueError("curve x and y must be one-dimensional")
         if not (
@@ -711,6 +721,7 @@ class DataView:
                 x_resolved.coordinate.display_unit,
                 x_resolved.coordinate.label,
             ),
+            x_labels=_axis_coordinate_labels(x_resolved, x_canonical),
             y=QuantityArray(
                 y,
                 y_display,
@@ -788,6 +799,7 @@ class DataView:
                         x_resolved.coordinate.display_unit,
                         x_resolved.coordinate.label,
                     ),
+                    x_labels=_axis_coordinate_labels(x_resolved, x_canonical),
                     y=QuantityArray(
                         y,
                         y_display,
@@ -2336,6 +2348,32 @@ def _reduce_segments(
             within[low].astype(np.float64) + within[high].astype(np.float64)
         ) / 2.0
     raise AssertionError(f"unsupported reduction: {aggregation!r}")
+
+
+def _axis_coordinate_labels(
+    resolved: "_ResolvedAxis",
+    canonical: NDArray[Any],
+) -> tuple[str, ...] | None:
+    """The declared display name of every plotted coordinate, in plot order.
+
+    None when the axis has no labels; positions whose coordinate is not in
+    the declared domain (never expected, but honest) keep their number.
+    """
+
+    declared = resolved.coordinate_labels
+    if declared is None:
+        return None
+    by_coordinate = dict(
+        zip(
+            map(_python_scalar, np.asarray(resolved.domain_canonical)),
+            declared,
+            strict=True,
+        )
+    )
+    return tuple(
+        by_coordinate.get(_python_scalar(value), f"{value:g}")
+        for value in np.asarray(canonical)
+    )
 
 
 def _sem_from_moments(

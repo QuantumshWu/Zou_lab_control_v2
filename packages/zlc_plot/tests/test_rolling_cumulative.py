@@ -235,3 +235,58 @@ def test_structure_groups_split_categorical_cell_axes() -> None:
         ("cycle",),
         ("y", "x"),
     )
+
+
+def test_labelled_axis_ticks_by_name() -> None:
+    """A pair/model axis ticks by its declared names -- the same names the
+    legend, hover and scope rows use -- never by bare indices."""
+
+    from zlc_data import (
+        COMPONENT,
+        SITE,
+        AxisId,
+        AxisSpec,
+        DatasetSchema as Schema,
+        PointTable,
+        REPEAT,
+        ValidityContract,
+        ValueSchema,
+        owned_snapshot_from_arrays,
+    )
+    from zlc_plot import CurvePlot
+
+    pair = AxisSpec(
+        AxisId("fs.pair"), "pair", COMPONENT, 3,
+        coordinate_labels=("0-1", "0-2", "1-2"),
+    )
+    site = AxisSpec(AxisId("occ.site"), "site", SITE, 5)
+    schema = Schema(
+        AxisSpec(AxisId("cycle"), "cycle", REPEAT, 8),
+        PointTable(1, ()),
+        None,
+        ValueSchema(
+            (pair, site),
+            ValidityContract.components(pair.axis_id, site.axis_id),
+            np.dtype("<f8"),
+            "1",
+        ),
+    )
+    rng = np.random.default_rng(0)
+    snapshot = owned_snapshot_from_arrays(
+        schema, (rng.random((8, 1, 3, 5)) < 0.5).astype("<f8"), 0
+    )
+    session = PlotSession(
+        snapshot,
+        CurvePlot(AxisRef.data("fs.pair")),
+        parameters={"uncertainty": True},
+    )
+    try:
+        session._renderer.draw()
+        axes = session._renderer.figure.axes[0]
+        labels = [tick.get_text() for tick in axes.get_xticklabels()]
+        assert labels == ["0-1", "0-2", "1-2"]
+        series = session._projection._payload.series[0]
+        assert series.x_labels == ("0-1", "0-2", "1-2")
+        assert series.sem is not None
+    finally:
+        session.close()

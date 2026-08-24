@@ -74,6 +74,8 @@ class _PreparedSeries:
     valid: np.ndarray
     label: str
     identity: tuple[tuple[str, str | None, str], ...]
+    #: Display names for the x positions of a labelled categorical axis.
+    x_labels: tuple[str, ...] | None = None
     #: (low, high) display-unit bounds of the standard-error band, or None.
     #: Bounds, not sigma: converting y+/-sem keeps affine display units
     #: honest where converting a difference would not be.
@@ -1963,6 +1965,7 @@ class MatplotlibRenderer:
                     valid,
                     str(label),
                     _series_identity(item),
+                    x_labels=getattr(item, "x_labels", None),
                     band=_series_band(item),
                 )
             )
@@ -2150,6 +2153,17 @@ class MatplotlibRenderer:
             if axes.get_ylabel() != y_label:
                 axes.set_ylabel(y_label)
         apply_smart_ticks(axes, label_pt=self.style.fonts.tick_pt)
+        labelled = next(
+            (item for item in series if item.x_labels is not None), None
+        )
+        if labelled is not None:
+            # A labelled categorical axis ticks BY NAME, one tick per
+            # declared coordinate -- the same names the legend, hover and
+            # scope rows already use.
+            axes.set_xticks(
+                np.asarray(labelled.x, dtype=float),
+                labels=labelled.x_labels,
+            )
         self._apply_series_focus()
 
     def _series_hit(self, axes: Any | None, px: float, py: float, radius: float
