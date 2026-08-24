@@ -200,12 +200,23 @@ class CurveSeries:
     y: QuantityArray
     valid: NDArray[np.bool_] | ArrayLike
     counts: NDArray[np.int64] | ArrayLike
+    #: Standard error of each MEAN-reduced point, in the y CANONICAL unit,
+    #: or None when the projection was not asked for uncertainty.  Stored
+    #: canonical-only on purpose: an affine display conversion (an offset
+    #: unit) is wrong for a difference-like quantity, so consumers convert
+    #: the y±sem BOUNDS, never sem itself.
+    sem: NDArray[np.float64] | ArrayLike | None = None
     group_key: tuple[AxisValue, ...] = ()
     label: str = ""
 
     def __post_init__(self) -> None:
         valid = _readonly(self.valid, dtype=np.bool_)
         counts = _readonly(self.counts, dtype=np.int64)
+        if self.sem is not None:
+            sem = _readonly(self.sem, dtype=np.float64)
+            if sem.shape != valid.shape:
+                raise ValueError("curve sem must match the point shape")
+            object.__setattr__(self, "sem", sem)
         if self.x.canonical.ndim != 1 or self.y.canonical.ndim != 1:
             raise ValueError("curve x and y must be one-dimensional")
         if not (
@@ -581,21 +592,36 @@ class DataView:
         *,
         group_by: Iterable[AxisRef] = (),
         aggregation: Reduction = Reduction.MEAN,
+        uncertainty: bool = False,
     ) -> CurveData:
         groups = tuple(group_by)
         self.validate_curve(x, group_by=groups)
         aggregation = _validate_aggregation(aggregation)
-        dense = self._dense_data_curve(x, groups, aggregation)
+        if uncertainty:
+            # The standard error IS the spread of the samples the MEAN pooled:
+            # for any other reduction the quantity is undefined, and pretending
+            # otherwise would attach a number with no meaning to the plot.
+            if aggregation is not Reduction.MEAN:
+                raise ValueError(
+                    "uncertainty is defined for Reduction.MEAN only, "
+                    f"not {aggregation.value!r}"
+                )
+            if self._samples.value.canonical.dtype.kind == "c":
+                raise ValueError("uncertainty is undefined for complex values")
+        dense = self._dense_data_curve(x, groups, aggregation, uncertainty)
         if dense is not None:
             return dense
         positions = self._all_positions()
-        return self._curve_from_positions(x, positions, groups, aggregation)
+        return self._curve_from_positions(
+            x, positions, groups, aggregation, uncertainty
+        )
 
     def _dense_data_curve(
         self,
         x: AxisRef,
         groups: tuple[AxisRef, ...],
         aggregation: Reduction,
+        uncertainty: bool = False,
     ) -> CurveData | None:
         """Project one declared dense data axis without materializing samples.
 
@@ -630,6 +656,7 @@ class DataView:
             self._samples.value.canonical,
             self._samples.valid_mask,
             aggregation,
+            uncertainty,
         )
 
     def _dense_curve_data(
@@ -639,6 +666,7 @@ class DataView:
         values: NDArray[Any],
         usable: NDArray[np.bool_],
         aggregation: Reduction,
+        uncertainty: bool = False,
     ) -> CurveData:
         """One dense curve out of one (possibly row-sliced) value tensor."""
 
@@ -652,6 +680,16 @@ class DataView:
         )
         y, counts = _masked_leading_reduce(moved, moved_usable, aggregation)
         y = np.asarray(y, dtype=np.float64)
+        sem = None
+        if uncertainty:
+            # The SEM is the SAME reduction run over the squares: no second
+            # kernel, no binomial special case -- for a boolean column the
+            # sample spread sqrt(p(1-p)) IS the binomial spread.
+            squares = np.square(moved.astype(np.float64, copy=False))
+            mean_sq, _sq_counts = _masked_leading_reduce(
+                squares, moved_usable, Reduction.MEAN
+            )
+            sem = _sem_from_moments(y, np.asarray(mean_sq, np.float64), counts)
         valid = (counts > 0) & np.isfinite(y)
         y_display = self._samples.value.canonical_unit.convert_value_to(
             y, self._samples.value.display_unit
@@ -673,6 +711,7 @@ class DataView:
             ),
             valid=valid,
             counts=counts,
+            sem=sem,
             group_key=(),
             label=self._samples.value.label,
         )
@@ -690,6 +729,7 @@ class DataView:
         positions: NDArray[np.int64],
         groups: tuple[AxisRef, ...],
         aggregation: Reduction,
+        uncertainty: bool = False,
     ) -> CurveData:
         series: list[CurveSeries] = []
         flat_values = self._samples.value.canonical.reshape(-1)
@@ -698,13 +738,29 @@ class DataView:
         for key, group_positions in self._groups(groups, positions):
             x_domain = self._domain(x, group_positions)
             usable = flat_valid[group_positions] & (x_domain.codes >= 0)
+            group_values = flat_values[group_positions]
             y, counts = _aggregate_by_codes(
-                flat_values[group_positions],
+                group_values,
                 usable,
                 x_domain.codes,
                 x_domain.size,
                 aggregation,
             )
+            sem = None
+            if uncertainty:
+                # Same kernel over the squares (see _dense_curve_data).
+                mean_sq, _sq_counts = _aggregate_by_codes(
+                    np.square(group_values.astype(np.float64, copy=False)),
+                    usable,
+                    x_domain.codes,
+                    x_domain.size,
+                    Reduction.MEAN,
+                )
+                sem = _sem_from_moments(
+                    np.asarray(y, np.float64),
+                    np.asarray(mean_sq, np.float64),
+                    counts,
+                )
             y_display = self._samples.value.canonical_unit.convert_value_to(
                 y, self._samples.value.display_unit
             )
@@ -732,6 +788,7 @@ class DataView:
                     ),
                     valid=valid,
                     counts=counts,
+                    sem=sem,
                     group_key=key,
                     label=label,
                 )
@@ -2174,6 +2231,26 @@ def _reduce_segments(
             within[low].astype(np.float64) + within[high].astype(np.float64)
         ) / 2.0
     raise AssertionError(f"unsupported reduction: {aggregation!r}")
+
+
+def _sem_from_moments(
+    mean: NDArray[np.float64],
+    mean_of_squares: NDArray[np.float64],
+    counts: NDArray[np.int64],
+) -> NDArray[np.float64]:
+    """Standard error of the mean from (mean, mean-of-squares, n).
+
+    sem^2 = s^2/n with the unbiased sample variance s^2, which collapses to
+    (E[x^2] - mean^2) / (n - 1).  A single-sample bucket has no defined
+    spread and reports NaN, never zero: zero would claim certainty.
+    """
+
+    n = counts.astype(np.float64)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        spread = np.clip(mean_of_squares - np.square(mean), 0.0, None)
+        sem = np.sqrt(spread / (n - 1.0))
+    sem[n < 2.0] = np.nan
+    return sem
 
 
 def _aggregate_by_codes(
