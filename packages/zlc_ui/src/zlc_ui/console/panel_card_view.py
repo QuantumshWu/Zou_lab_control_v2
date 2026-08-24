@@ -52,8 +52,14 @@ from ._panel_projection import (
 
 
 def _coordinate_text(value: object) -> str:
-    """One pinned coordinate, as short as it can be said."""
+    """One pinned coordinate, as short as it can be said.
 
+    The console resolves labelled coordinates to their display text before
+    they arrive here; a bare number still prints as one.
+    """
+
+    if isinstance(value, str):
+        return value
     number = float(value)
     return str(int(number)) if number.is_integer() else f"{number:g}"
 

@@ -2347,7 +2347,8 @@ class MatplotlibRenderer:
         locked = self._series_locked
         if (
             locked is None or axes is None or id(axes) != locked[0]
-            or not locked[1] or not isinstance(self.semantic_spec, CurvePlot)
+            or not locked[1]
+            or not isinstance(self.semantic_spec, (CurvePlot, RollingPlot))
             or (isinstance(self.spec, FacetGridPlot) and self._facet_focus_index is None)
         ):
             return False

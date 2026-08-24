@@ -2689,8 +2689,20 @@ class ConsolePresenter:
         schema = getattr(block, "schema", None)
         if schema is None:
             return {"data_structure": (), "data_scope": ()}
+        def _pinned_text(field: Mapping[str, object]) -> str:
+            # The pin dropdown already labels every coordinate (a labelled
+            # axis pins by name -- "0-1", "box"); the title band reads the
+            # SAME pairs, minus the dropdown's "= " action prefix
+            # (semantics.py offers pins as "= <text>" beside the fate verbs).
+            value = field.get("value")
+            for label, choice_value in tuple(field.get("choices") or ()):
+                if choice_value == value:
+                    return str(label).removeprefix("= ")
+            number = float(value)  # type: ignore[arg-type]
+            return str(int(number)) if number.is_integer() else f"{number:g}"
+
         pinned = tuple(
-            (str(field["label"]), float(field["value"]))
+            (str(field["label"]), _pinned_text(field))
             for field in tuple(surface.get("semantic", ()))
             if str(field.get("key", "")).startswith("fate:")
             and isinstance(field.get("value"), (int, float))

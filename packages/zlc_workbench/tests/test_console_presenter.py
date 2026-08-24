@@ -3902,8 +3902,12 @@ def test_a_panel_says_what_kind_of_data_it_is_drawing(presenter, session) -> Non
         presenter,
         lambda: bool(binding.parameter_surface.get("data_scope")),
     )
+    number = float(pinned)
+    pinned_text = (
+        str(int(number)) if number.is_integer() else f"{number:g}"
+    )
     assert binding.parameter_surface["data_scope"] == (
-        (str(fate["label"]), float(pinned)),
+        (str(fate["label"]), pinned_text),
     )
 
 
