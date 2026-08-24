@@ -180,13 +180,13 @@ def test_plain_rolling_uncertainty_is_each_shot_pooled_error() -> None:
         session.close()
 
 
-def test_structure_groups_split_categorical_cell_axes() -> None:
+def test_structure_keeps_repeat_point_and_cell_brackets() -> None:
     """Three brackets: (repeat) x (points) x (data).
 
-    A pair axis is not a picture -- (cycles) x (3) x (33), never (3 x 33)
-    -- and a READOUT_EVENT cell axis is a fact about WHEN within one
-    point, so it joins the points bracket after the scan dimensions:
-    (20) x (10x10x10x3) x (34), never (20) x (10x10x10) x (3) x (34).
+    Pair and site are both dimensions of one atomic cell payload, so they
+    share the third bracket.  A READOUT_EVENT cell axis is instead a fact
+    about WHEN within one point, so it joins the points bracket after the
+    scan dimensions: (20) x (10x10x10x3) x (34).
     """
 
     from zlc_data import (
@@ -228,8 +228,7 @@ def test_structure_groups_split_categorical_cell_axes() -> None:
     groups = schema_structure(categorical)
     assert tuple(tuple(name for name, _size in group) for group in groups) == (
         ("cycle",),
-        ("pair",),
-        ("site",),
+        ("pair", "site"),
     )
 
     scanned = Schema(

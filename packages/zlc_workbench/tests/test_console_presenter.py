@@ -4420,87 +4420,121 @@ def test_the_semantic_form_appears_the_moment_a_signal_connects(
     )
 
 
-def test_a_panel_refused_before_its_first_frame_still_offers_its_fates(
+def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     presenter, session
 ) -> None:
-    """The reported wedge: a first projection refused on the facet cap.
+    """A display reads the canonical scan, never its final one-point chunk."""
 
-    Such a panel has never presented anything -- no display publication,
-    no frozen record -- and the old degrade path silently gave up on it,
-    so the operator saw the cap error and no fate rows to fix it with.
-    The signal it was created against is still on the plane, and its
-    schema is all the semantic form needs.
-    """
-
-    node, snapshot = _one_shot(session)
-    binding = presenter.add_panel(
-        node.signal_key("frames"), snapshot, kind="image"
+    from zlc_data import (
+        COMPONENT,
+        SITE,
+        AxisId,
+        AxisSpec,
+        DatasetSchema,
+        PointTable,
+        REPEAT,
+        ValidityContract,
+        ValueSchema,
+        owned_snapshot_from_arrays,
     )
-    # Never presented: exactly the state a first-mount refusal leaves.
-    assert binding.display_publication is None
-    assert binding.frozen_data is None
-
-    class _FailedPort:
-        last_error = ValueError(
-            "FacetGrid needs 180 cells, which exceeds the fixed layout "
-            "facet_max_cells capacity of 100"
-        )
-
-    real_port = binding.port
-    binding.port = _FailedPort()
-    binding.reported_error = None
-    try:
-        presenter._report_panel_errors()
-        surface = binding.parameter_surface
-        assert surface["semantic"], (
-            "a panel refused before its first frame lost its fate rows"
-        )
-        assert any(
-            str(entry["key"]).startswith("fate:")
-            for entry in surface["semantic"]
-        )
-        assert "cells" in surface["fit_unavailable"]
-    finally:
-        binding.port = real_port
-
-
-def test_a_refused_projection_keeps_the_semantic_form_alive(
-    presenter, session
-) -> None:
-    """The facet cell cap (or any mount failure) is a panel STATE: the
-    fate rows that can fix it stay editable instead of the whole form
-    dying with the host."""
-
-    node, snapshot = _one_shot(session)
-    binding = presenter.add_panel(
-        node.signal_key("frames"), snapshot, kind="image"
+    from zlc_atom.nodes.scan.dataset import scan_dataset_schema
+    from zlc_plot.semantics import schema_structure
+    from zlc_runtime import (
+        DatasetCoverage,
+        DatasetOutputDeclaration,
+        LiveDatasetOutput,
     )
+
+    dimensions = (5, 5, 3)  # 75 point cells: a real >64 refusal.
+    names = ("field.x", "field.y", "field.z")
+    cells = tuple(np.ndindex(*dimensions))
+    repeat_id = AxisId("survival.repeat")
+    event_repeat = AxisSpec(repeat_id, "repeat", REPEAT, 1, (0,))
+    pair = AxisSpec(
+        AxisId("survival.pair"),
+        "pair",
+        COMPONENT,
+        3,
+        coordinate_labels=("0-1", "0-2", "1-2"),
+    )
+    site = AxisSpec(AxisId("survival.site"), "site", SITE, 5, tuple(range(5)))
+    cell_schema = ValueSchema(
+        (pair, site),
+        ValidityContract.components(pair.axis_id, site.axis_id),
+        np.dtype("<f8"),
+        "1",
+    )
+    event_schema = DatasetSchema(
+        event_repeat, PointTable(1, ()), None, cell_schema
+    )
+    canonical = scan_dataset_schema(
+        event_schema,
+        tuple(tuple(float(value) for value in cell) for cell in cells),
+        tuple((name, "") for name in names),
+        visits=2,
+    )
+    event = owned_snapshot_from_arrays(
+        event_schema,
+        np.ones((1, 1, pair.size, site.size)),
+        1,
+        stream_generation="exact-scan-panel",
+    )
+    declaration = DatasetOutputDeclaration(
+        "survival", "frame_survival.survival"
+    )
+    signal = "scan-survival/survival"
+    node = SimpleNamespace(
+        instance_id="scan-survival",
+        dataset_output_declarations=(declaration,),
+        signal_key=lambda name: f"scan-survival/{name}",
+    )
+    session.signal_plane.reserve(node)
+    session.signal_plane.commit_live(
+        node,
+        {
+            "survival": LiveDatasetOutput(
+                declaration,
+                event,
+                DatasetCoverage(1, canonical.repeat_axis.size * len(cells)),
+                canonical_schema=canonical,
+                cell_origin=(0, 0),
+            )
+        },
+    )
+    publication = session.signal_plane.freeze().publication(signal)
+    expected = schema_structure(canonical)
+    assert expected == (
+        (("repeat", 2),),
+        (("scan.field.x", 5), ("scan.field.y", 5), ("scan.field.z", 3)),
+        (("pair", 3), ("site", 5)),
+    )
+
+    refused = presenter.add_panel(
+        signal,
+        event,
+        title="refused survival",
+        kind="facet_grid",
+        initial_publication=publication,
+    )
+    field_scan = presenter.add_panel(
+        signal,
+        event,
+        title="field scan",
+        kind="curve",
+        initial_publication=publication,
+    )
+    assert refused.parameter_surface["data_structure"] == expected
+    assert field_scan.parameter_surface["data_structure"] == expected
+
     _settle_panel_hosts(
         presenter,
-        lambda: binding.host is not None
-        and bool(binding.parameter_surface.get("semantic")),
+        lambda: getattr(refused.port, "last_error", None) is not None,
     )
-
-    # Simulate the port recording a refused projection (the cap raise).
-    class _FailedPort:
-        last_error = ValueError(
-            "FacetGrid needs 180 cells, which exceeds the fixed layout "
-            "facet_max_cells capacity of 100"
-        )
-
-    real_port = binding.port
-    binding.port = _FailedPort()
-    binding.reported_error = None
-    try:
-        presenter._report_panel_errors()
-        surface = binding.parameter_surface
-        # The semantic contract survives the dead host: fate rows present,
-        # only fit is honestly unavailable, and the reason names the cap.
-        assert surface["semantic"], "semantic rows must survive a mount failure"
-        assert any(
-            str(entry["key"]).startswith("fate:")
-            for entry in surface["semantic"]
-        )
-        assert "cells" in surface["fit_unavailable"]
-    finally:
-        binding.port = real_port
+    presenter._report_panel_errors()
+    surface = refused.parameter_surface
+    fates = {str(entry["label"]) for entry in surface["semantic"]}
+    assert {"field.x", "field.y", "field.z"} <= fates
+    assert "exceeds the fixed layout" in surface["fit_unavailable"]
+    assert presenter.view.panel_parameter_surfaces[
+        refused.panel_id
+    ]["data_structure"] == expected

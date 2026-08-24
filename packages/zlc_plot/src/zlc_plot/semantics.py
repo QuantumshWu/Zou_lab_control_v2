@@ -295,34 +295,24 @@ def schema_structure(schema: DatasetSchema) -> SchemaStructure:
             (str(column.name), int(schema.point_table.row_count))
             for column in schema.point_table.columns
         ]
-    # Three brackets: (repeat) x (points) x (data).  A cell axis carrying a
-    # point-domain EVENT role -- the frame axis a producer declares without
-    # a point column -- is still a fact about WHEN within one point, so it
-    # joins the points bracket after the scan dimensions: (10x10x10x3).
-    # Spatial axes are one picture and stay one bracketed group; a
-    # categorical cell axis (a pair, a model) is its own dimension and gets
-    # its own group -- (pairs) x (sites), never (pairs x sites).
-    from zlc_data import READOUT_EVENT, SPATIAL_X, SPATIAL_Y
+    # Exactly three brackets: (repeat) x (points) x (cell payload).  A cell
+    # axis carrying a point-domain EVENT role -- the frame axis a producer
+    # declares without a point column -- is still a fact about WHEN within one
+    # point, so it joins the points bracket after the scan dimensions.  Every
+    # remaining data axis belongs to the one atomic cell payload: pair x site,
+    # model x site, and spatial-y x spatial-x are all one third bracket.
+    from zlc_data import READOUT_EVENT
 
-    data_groups: list[tuple[tuple[str, int], ...]] = []
-    picture: list[tuple[str, int]] = []
+    data: list[tuple[str, int]] = []
     for axis in schema.cell_schema.data_axes:
         entry = (str(axis.name), int(axis.size))
         if axis.role == READOUT_EVENT:
             points.append(entry)
-            continue
-        if axis.role in (SPATIAL_Y, SPATIAL_X):
-            picture.append(entry)
         else:
-            if picture:
-                data_groups.append(tuple(picture))
-                picture = []
-            data_groups.append((entry,))
-    if picture:
-        data_groups.append(tuple(picture))
+            data.append(entry)
     return tuple(
         group
-        for group in (repeats, tuple(points), *data_groups)
+        for group in (repeats, tuple(points), tuple(data))
         if group
     )
 

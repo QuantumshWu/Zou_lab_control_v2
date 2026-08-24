@@ -342,9 +342,21 @@ projection = {
     'fit': {}, 'overlay_signal': '',
 }
 surface = {
-    'data_structure': ((('repeat', 1),), (('x', 4),)),
-    'data_scope': (('x', 1.0),),
-    'semantic': (), 'display': (), 'fit': (),
+    'data_structure': (
+        (('repeat', 20),),
+        (('field.x', 10), ('field.y', 10), ('field.z', 10)),
+        (('pair', 3), ('site', 35)),
+    ),
+    'data_scope': (),
+    'semantic': tuple({
+        'key': f'fate:{name}', 'label': name, 'kind': 'choice',
+        'value': 'reduce', 'allow_none': False,
+        'choices': (('Reduce', 'reduce'), ('Facet', 'facet')),
+    } for name in ('field.x', 'field.y', 'field.z')),
+    'display': (), 'fit': (),
+    'fit_unavailable': (
+        'FacetGrid needs 1000 cells, which exceeds the fixed layout capacity'
+    ),
 }
 card.set_interval_choices((100,), 100)
 card.set_panel_projection(dict(projection), dict(surface))
@@ -364,8 +376,14 @@ assert card.width() - widget.width() == 2 * tested_module.CARD_PAD
 
 # Two lines, and what they say does not move the rectangle.
 assert '<br>' in card._title_label.text()
-assert '(1)x(4)' in card._title_label.toolTip()
-assert 'x=1' in card._title_label.toolTip()
+assert '(20)x(10x10x10)x(3x35)' in card._title_label.toolTip()
+form_keys = set(card._form_spec().keys)
+assert {
+    'semantic__fate:field.x',
+    'semantic__fate:field.y',
+    'semantic__fate:field.z',
+    'fit_unavailable',
+} <= form_keys
 long_name = '@logic/' + 'a-very-long-node-name/' * 6 + 'frames'
 card.set_panel_projection({**projection, 'title': long_name}, dict(surface))
 app.processEvents()

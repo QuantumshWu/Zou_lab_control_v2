@@ -638,8 +638,14 @@ class ConsolePresenter:
             None,
             parameter_surface=self._unbound_panel_parameters(state),
         )
+        parameter_snapshot = initial
+        if exact_value is not None and publication is not None:
+            parameter_snapshot = (
+                getattr(exact_value, "canonical_schema", None)
+                or exact_value.snapshot.block.schema
+            )
         projected = self._schema_projected_parameters(
-            binding, initial, self._RESOLVING_REASON
+            binding, parameter_snapshot, self._RESOLVING_REASON
         )
         if projected is not None:
             binding.parameter_surface = projected
@@ -1846,7 +1852,10 @@ class ConsolePresenter:
             binding.host = None
             binding.parameter_surface = (
                 self._schema_projected_parameters(
-                    binding, value.snapshot, self._RESOLVING_REASON
+                    binding,
+                    getattr(value, "canonical_schema", None)
+                    or value.snapshot.block.schema,
+                    self._RESOLVING_REASON,
                 )
                 or self._unbound_panel_parameters(candidate)
             )
@@ -1877,13 +1886,13 @@ class ConsolePresenter:
             self._sync_panel_history(binding, candidate)
             if binding.host is None or binding.port is None:
                 binding.state = candidate
-                snapshot = self._panel_snapshot(binding)
+                schema = self._panel_schema(binding)
                 binding.parameter_surface = (
                     (
                         None
-                        if snapshot is None
+                        if schema is None
                         else self._schema_projected_parameters(
-                            binding, snapshot, self._RESOLVING_REASON
+                            binding, schema, self._RESOLVING_REASON
                         )
                     )
                     or self._unbound_panel_parameters(candidate)
@@ -2127,11 +2136,19 @@ class ConsolePresenter:
         from zlc_plot.semantics import describe_semantics
         from zlc_plot.ui import parameter_controls_for_kind
 
-        schema = getattr(getattr(snapshot, "block", None), "schema", None)
+        from zlc_data import DatasetSchema
+
+        schema = (
+            snapshot
+            if isinstance(snapshot, DatasetSchema)
+            else getattr(getattr(snapshot, "block", None), "schema", None)
+        )
         if schema is None:
             return None
         state = binding.state
-        spec = self._spec_for(snapshot, state.kind, state.cell_kind)
+        spec = task_console_fitting_spec(
+            schema, state.kind, state.cell_kind
+        )
         if spec is None:
             return None
         try:
@@ -2157,29 +2174,36 @@ class ConsolePresenter:
     #: Why fit is absent on a surface projected before the host settles.
     _RESOLVING_REASON = "Fit models resolve when the plot surface mounts."
 
-    def _panel_snapshot(self, binding: PanelBinding) -> object | None:
-        """The panel's best current dataset, host or no host.
+    def _panel_schema(self, binding: PanelBinding) -> object | None:
+        """The canonical schema a Panel edits, even before it can draw.
 
-        A panel whose FIRST projection was refused has never presented
-        anything -- no display publication, no frozen record -- but the
-        signal it was created against is still on the plane, and its
-        schema is all the semantic form needs.
+        Exact producers publish one event chunk plus a canonical run schema.
+        Settings and the title need only the latter and must not materialize
+        the full Dataset on the GUI thread merely to list axes.  A Monitor has
+        no canonical extent, so its latest event schema remains the answer.
         """
+
+        def value_schema(value: object) -> object | None:
+            canonical = getattr(value, "canonical_schema", None)
+            snapshot = getattr(value, "snapshot", None)
+            return (
+                canonical
+                if canonical is not None
+                else getattr(getattr(snapshot, "block", None), "schema", None)
+            )
 
         publication = binding.display_publication
         if publication is not None:
-            value = publication.value(binding.state.signal)
-            if value is not None:
-                return value.snapshot
+            schema = value_schema(publication.value(binding.state.signal))
+            if schema is not None:
+                return schema
         frozen = binding.frozen_data
         if frozen is not None:
-            return frozen.snapshot
+            return getattr(frozen.snapshot.block, "schema", None)
         if binding.state.signal:
-            value = self.session.signal_plane.freeze().value(
-                binding.state.signal
-            )
+            value = self.session.signal_plane.freeze().value(binding.state.signal)
             if value is not None:
-                return value.snapshot
+                return value_schema(value)
         return None
 
     def _degrade_panel_surface(
@@ -2187,11 +2211,11 @@ class ConsolePresenter:
     ) -> None:
         """Keep the semantic form alive when a host fails to mount."""
 
-        snapshot = self._panel_snapshot(binding)
-        if snapshot is None:
+        schema = self._panel_schema(binding)
+        if schema is None:
             return
         surface = self._schema_projected_parameters(
-            binding, snapshot, _error_text(error)
+            binding, schema, _error_text(error)
         )
         if surface is None:
             return
@@ -2888,9 +2912,20 @@ class ConsolePresenter:
             return state.kind == PlotKind.IMAGE.value
         snapshot = self._shown_snapshot(binding)
         if snapshot is None:
-            # No data yet: the authored choice is all there is to go on.
-            return state.cell_kind in {"", PlotKind.IMAGE.value}
-        fitting = self._fitting_cell_kind(snapshot, state.kind, state.cell_kind)
+            schema = self._panel_schema(binding)
+            spec = (
+                None
+                if schema is None
+                else task_console_fitting_spec(
+                    schema, state.kind, state.cell_kind
+                )
+            )
+            fitting = getattr(getattr(spec, "cell", None), "kind", None)
+            fitting = str(getattr(fitting, "value", fitting or ""))
+        else:
+            fitting = self._fitting_cell_kind(
+                snapshot, state.kind, state.cell_kind
+            )
         return fitting == PlotKind.IMAGE.value
 
     def _shown_snapshot(self, binding: PanelBinding) -> object | None:
@@ -2903,10 +2938,7 @@ class ConsolePresenter:
             return snapshot
         if binding.frozen_data is not None:
             return binding.frozen_data.snapshot
-        # Before anything has drawn, the band describes the dataset the
-        # panel was created against: the shape strip and the fate rows must
-        # speak about the same schema the semantic form edits.
-        return self._panel_snapshot(binding)
+        return None
 
     def _panel_data_shape(
         self,
@@ -2928,8 +2960,9 @@ class ConsolePresenter:
         from zlc_plot.semantics import schema_structure
 
         snapshot = self._shown_snapshot(binding)
-        block = getattr(snapshot, "block", None)
-        schema = getattr(block, "schema", None)
+        schema = getattr(getattr(snapshot, "block", None), "schema", None)
+        if schema is None:
+            schema = self._panel_schema(binding)
         if schema is None:
             return {"data_structure": (), "data_scope": ()}
         def _pinned_text(field: Mapping[str, object]) -> str:
