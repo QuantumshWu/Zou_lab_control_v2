@@ -806,6 +806,11 @@ class MatplotlibRenderer:
         #: are part of the series, so focus dims and raises them with their
         #: line instead of leaving them behind at full strength.
         self._series_bars: dict[int, dict[object, tuple[Any, ...]]] = {}
+        #: Pixel-space polylines for hover hit tests, per line, keyed by the
+        #: view/canvas signature.  Transforming every point of every series
+        #: on every motion event was the hover lag; the data only changes on
+        #: a series mutation, which clears this.
+        self._series_hit_cache: dict[int, tuple[tuple, tuple]] = {}
         self._series_indices: dict[int, dict[object, int]] = {}
         self._series_hover: tuple[int, object, str, float, float] | None = None
         self._series_locked: tuple[int, object, str, float, float] | None = None
@@ -1037,6 +1042,7 @@ class MatplotlibRenderer:
         self._line_sources.clear()
         self._series_lines.clear(); self._series_indices.clear(); self._series_annotations.clear()
         self._series_bars.clear()
+        self._series_hit_cache.clear()
         self._series_hover = self._series_locked = self._series_press = None
         self._boundary_chrome_cache.clear()
         self._boundary_chrome_signature = None
@@ -1399,6 +1405,13 @@ class MatplotlibRenderer:
 
         for value in self._artists.values():
             add(value)
+        # Error bars are part of their series and their focus alpha moves
+        # per hover: dynamic, or the change sits baked into the cached
+        # background until the next full draw -- the line dimmed instantly
+        # while its bars answered one publication later.
+        for bars in self._series_bars.values():
+            for artists in bars.values():
+                add(artists)
         for values in self._selector_artists.values():
             add(values)
         add(self._fit_artists)
@@ -2043,6 +2056,9 @@ class MatplotlibRenderer:
         isolated_glyphs: bool = False,
     ) -> None:
         lines = self._ensure_lines(axes, len(series), key)
+        # The lines' data is about to change; every cached hover polyline is
+        # of the old data.
+        self._series_hit_cache.clear()
         # Limits need only the valid extremes, and min/max are indifferent to
         # element order: reducing each series in place is the same numbers as
         # gathering and concatenating every valid sample (two full copies of
@@ -2201,25 +2217,42 @@ class MatplotlibRenderer:
         for line, identity, label in entries:
             if not line.get_visible():
                 continue
-            registered = self._line_sources.get(id(line))
-            isolated_glyphs = False
-            if registered is not None and registered[0] is line:
-                _line, _owner, raw_x, raw_y, isolated_glyphs = registered
-                x = np.asarray(raw_x, dtype=float).reshape(-1)
-                y = np.asarray(raw_y, dtype=float).reshape(-1)
+            signature = (
+                tuple(map(float, axes.get_xlim())),
+                tuple(map(float, axes.get_ylim())),
+                int(round(float(self._figure.bbox.width))),
+                int(round(float(self._figure.bbox.height))),
+            )
+            cached = self._series_hit_cache.get(id(line))
+            if cached is not None and cached[0] == signature:
+                x, y, pixels, finite, isolated_glyphs = cached[1]
             else:
-                x = np.asarray(line.get_xdata(), dtype=float).reshape(-1)
-                y = np.asarray(line.get_ydata(), dtype=float).reshape(-1)
-            if x.size > _ENVELOPE_MAX_COLUMNS * 4:
-                low, high = sorted(map(float, axes.get_xlim()))
-                start = max(0, int(np.searchsorted(x, low)) - 1)
-                stop = min(x.size, int(np.searchsorted(x, high, side="right")) + 1)
-                x, y = x[start:stop], y[start:stop]
-            finite = np.isfinite(x) & np.isfinite(y)
+                registered = self._line_sources.get(id(line))
+                isolated_glyphs = False
+                if registered is not None and registered[0] is line:
+                    _line, _owner, raw_x, raw_y, isolated_glyphs = registered
+                    x = np.asarray(raw_x, dtype=float).reshape(-1)
+                    y = np.asarray(raw_y, dtype=float).reshape(-1)
+                else:
+                    x = np.asarray(line.get_xdata(), dtype=float).reshape(-1)
+                    y = np.asarray(line.get_ydata(), dtype=float).reshape(-1)
+                if x.size > _ENVELOPE_MAX_COLUMNS * 4:
+                    low, high = sorted(map(float, axes.get_xlim()))
+                    start = max(0, int(np.searchsorted(x, low)) - 1)
+                    stop = min(x.size, int(np.searchsorted(x, high, side="right")) + 1)
+                    x, y = x[start:stop], y[start:stop]
+                finite = np.isfinite(x) & np.isfinite(y)
+                pixels = np.full((x.size, 2), np.nan)
+                if np.any(finite):
+                    pixels[finite] = axes.transData.transform(
+                        np.column_stack((x[finite], y[finite]))
+                    )
+                self._series_hit_cache[id(line)] = (
+                    signature,
+                    (x, y, pixels, finite, isolated_glyphs),
+                )
             if not np.any(finite):
                 continue
-            pixels = np.full((x.size, 2), np.nan)
-            pixels[finite] = axes.transData.transform(np.column_stack((x[finite], y[finite])))
             adjacent = finite[:-1] & finite[1:]
             starts, ends = pixels[:-1][adjacent], pixels[1:][adjacent]
             if starts.size:

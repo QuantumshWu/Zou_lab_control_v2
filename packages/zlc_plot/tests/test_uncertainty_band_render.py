@@ -141,3 +141,77 @@ def test_focus_dims_the_other_series_bars_with_their_lines() -> None:
             assert all(a.get_alpha() == token for a in artists)
     finally:
         session.close()
+
+
+def test_error_bars_live_in_the_dynamic_layer_with_their_lines() -> None:
+    """Focus changes must land in the SAME composed frame as the line's.
+
+    The compose path repaints only dynamic artists over a cached chrome
+    background; a bar left out of the dynamic set keeps its pre-focus
+    pixels baked into that background, so the line dimmed instantly while
+    the bars answered one full draw later.
+    """
+
+    session = PlotSession(
+        _snapshot(24, 1, 0.2),
+        CurvePlot(AxisRef.point("x"), labels=PlotLabels("band", "x", "y")),
+        parameters={"uncertainty": True},
+    )
+    try:
+        renderer = session._renderer
+        renderer.draw()
+        dynamic = {id(artist) for _key, artist in renderer._dynamic_artists()}
+        bars = [
+            artist
+            for groups in renderer._series_bars.values()
+            for artists in groups.values()
+            for artist in artists
+        ]
+        assert bars, "the uncertainty panel must have bar artists"
+        missing = [a for a in bars if id(a) not in dynamic]
+        assert not missing, (
+            f"{len(missing)} bar artists sit in the cached background"
+        )
+    finally:
+        session.close()
+
+
+def test_hover_hit_tests_reuse_the_transformed_polyline() -> None:
+    """One transform per view, not one per motion event.
+
+    Transforming every point of every series on every mouse move was the
+    hover lag; the pixel polyline only changes with the data, the view or
+    the canvas, so it is cached on that signature and dropped the moment a
+    series mutates.
+    """
+
+    session = PlotSession(
+        _snapshot(24, 1, 0.2),
+        CurvePlot(AxisRef.point("x"), labels=PlotLabels("band", "x", "y")),
+        parameters={"uncertainty": True},
+    )
+    try:
+        renderer = session._renderer
+        renderer.draw()
+        axes = renderer.figure.axes[0]
+        assert not renderer._series_hit_cache
+        first = renderer._series_hit(axes, 100.0, 100.0, 12.0)
+        assert renderer._series_hit_cache, "the first hit test fills the cache"
+        cached_before = {
+            key: id(entry[1]) for key, entry in renderer._series_hit_cache.items()
+        }
+        second = renderer._series_hit(axes, 101.0, 101.0, 12.0)
+        cached_after = {
+            key: id(entry[1]) for key, entry in renderer._series_hit_cache.items()
+        }
+        assert cached_before == cached_after, "a nearby motion recomputed"
+        del first, second
+
+        # New data invalidates: the cache is of the OLD polyline, and the
+        # series mutation clears it before the new lines draw.
+        session.update_data(_snapshot(24, 2, 0.2))
+        assert not renderer._series_hit_cache, (
+            "a series mutation must drop every cached hover polyline"
+        )
+    finally:
+        session.close()
