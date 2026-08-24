@@ -297,3 +297,193 @@ def test_monitor_source_translates_coverage_to_own_geometry() -> None:
     assert survival.coverage.written_cells == 4
     # The constructor itself validates ledger-vs-geometry, so constructing
     # the LiveDatasetOutput above IS the regression proof.
+
+
+def test_live_monitor_chain_camera_occupancy_survival() -> None:
+    """The bench chain that failed on first Start, end to end on product
+    hosts: a live (repeat-zero) camera measurement feeds a hosted occupancy
+    processor feeds a hosted frame-survival processor, all over the real
+    signal plane.  This is the third delivery path -- monitor -- exercised
+    for real instead of by hand-built SignalValues."""
+
+    import time
+    from threading import Event
+
+    from zlc_runtime import NodeHost, SignalDataPlane
+
+    from zlc_atom.install import create_installation
+    from zlc_atom.nodes.calibration import (
+        FrameContract,
+        ReadoutModel,
+        ReadoutModelKind,
+        SiteMap,
+        TrapCalibration,
+    )
+    from zlc_atom.nodes.camera_measurement import (
+        CameraMeasurementNode,
+        CameraMeasurementRequest,
+    )
+    from zlc_atom.nodes.camera_measurement.measurement import (
+        CAMERA_FRAMES_OUTPUT,
+    )
+    from zlc_atom.nodes.occupancy import OccupancyProcessor
+    from zlc_atom.nodes.occupancy.processor import OCCUPANCY_OUTPUTS
+    from zlc_atom.nodes.frame_survival import (
+        SURVIVAL_OUTPUTS,
+        FrameSurvivalProcessor,
+    )
+    from tests.pulse_fixture import (
+        CALIBRATION_FRAMES_PER_CYCLE,
+        build_calibration_pulse,
+    )
+
+    plane = SignalDataPlane()
+    installation = create_installation("virtual")
+    hosts = []
+
+    def _await(predicate, message, seconds=10.0):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            for running in hosts:
+                running.poll()
+            found = predicate()
+            if found is not None:
+                return found
+            time.sleep(0.005)
+        raise AssertionError(message)
+
+    try:
+        camera = installation.capability("camera.adapter")
+        sequencer = installation.device("sequencer")
+        program = build_calibration_pulse(sequencer.describe())
+        sequencer.load(program)
+
+        node = CameraMeasurementNode(
+            camera=camera,
+            request=CameraMeasurementRequest(
+                camera_key="camera",
+                exposure_seconds=0.02,
+                roi_xywh=None,
+                repeat=0,
+                frames_per_cycle=CALIBRATION_FRAMES_PER_CYCLE,
+            ),
+            signal_plane=plane,
+            producer="cm-chain",
+        )
+        camera_host = NodeHost(
+            node,
+            plane,
+            Event().set,
+            instance_id=node.instance_id,
+            kind="measurement",
+            dataset_output_declarations=(CAMERA_FRAMES_OUTPUT,),
+        )
+        hosts.append(camera_host)
+        camera_host.start()
+        _await(
+            lambda: True if camera.capture_state() else None,
+            "camera never armed",
+        )
+        sequencer.fire()
+        sequencer.wait_done(1.0)
+        frames_key = camera_host.signal_key("frames")
+        frames_value = _await(
+            lambda: plane.freeze().value(frames_key),
+            "camera published no live frames",
+        )
+
+        working = node.actual_working_point
+        assert working is not None
+        height, width = np.asarray(
+            frames_value.snapshot.block.values
+        ).shape[-2:]
+        roi_y, roi_x = working.roi_origin_yx
+        roi_height, roi_width = working.roi_shape_yx
+        site_ids = ("site_0000",)
+        calibration = TrapCalibration(
+            SiteMap(
+                site_ids,
+                np.asarray([[width // 2, height // 2]], dtype=float),
+                [True],
+                [1.0],
+            ),
+            (ReadoutModel(site_ids, [0.0], [-1.0], [1.0], [True], [1.0]),),
+            ReadoutModelKind.BOX,
+            FrameContract(
+                (height, width),
+                sensor_shape=working.sensor_shape_yx,
+                roi_xywh=(roi_x, roi_y, roi_width, roi_height),
+                binning_yx=working.binning_yx,
+                exposure_seconds=working.exposure_seconds,
+                camera_id=node.camera_key,
+                readout_mode=working.readout_mode,
+            ),
+        )
+
+        occupancy = OccupancyProcessor(
+            calibration, producer="occ-chain", source_signal=frames_key
+        )
+        occupancy_host = NodeHost(
+            occupancy,
+            plane,
+            Event().set,
+            instance_id=occupancy.instance_id,
+            kind="processor",
+            dataset_output_declarations=OCCUPANCY_OUTPUTS,
+            input_signal=frames_key,
+            input_delivery="latest",
+        )
+        hosts.append(occupancy_host)
+        occupancy_host.start()
+        occupied_key = occupancy_host.signal_key("occupied")
+        _await(
+            lambda: plane.freeze().value(occupied_key),
+            "occupancy published no verdicts",
+        )
+
+        survival_node = FrameSurvivalProcessor(
+            producer="fs-chain", source_signal=occupied_key
+        )
+        survival_host = NodeHost(
+            survival_node,
+            plane,
+            Event().set,
+            instance_id=survival_node.instance_id,
+            kind="processor",
+            dataset_output_declarations=SURVIVAL_OUTPUTS,
+            input_signal=occupied_key,
+            input_delivery="latest",
+        )
+        hosts.append(survival_host)
+        survival_host.start()
+        survival_value = _await(
+            lambda: plane.freeze().value(survival_host.signal_key("survival")),
+            "frame survival published nothing on the live chain",
+        )
+
+        values = np.asarray(survival_value.snapshot.block.values)
+        cycles = values.shape[0]
+        pairs = len(_forward_pairs(CALIBRATION_FRAMES_PER_CYCLE))
+        assert values.shape == (cycles, 1, pairs, 1)
+        schema = survival_value.snapshot.block.schema
+        pair_axis = schema.cell_schema.data_axes[0]
+        assert pair_axis.coordinate_labels == ("0-1", "0-2", "1-2")
+        coverage = survival_value.coverage
+        assert coverage.total_cells == cycles
+    finally:
+        for running in hosts:
+            try:
+                running.cancel("chain test done")
+            except Exception:
+                pass
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not all(
+            running.observation.terminal for running in hosts
+        ):
+            for running in hosts:
+                running.poll()
+            time.sleep(0.005)
+        for running in hosts:
+            running.shutdown()
+        installation.close()
+        plane.close()
