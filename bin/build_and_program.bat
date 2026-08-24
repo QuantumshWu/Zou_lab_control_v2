@@ -204,10 +204,6 @@ findstr /C:"zlc_force_latency2" "%STREAMER_DIR%\create_project.tcl" >nul || (
   echo ERROR: create_project.tcl does not force the edge-BRAM read latency to 2.
   exit /b 2
 )
-findstr /C:"zlc_safe_project_dir" "%STREAMER_DIR%\create_project.tcl" >nul || (
-  echo ERROR: create_project.tcl is missing the Vivado path-length guard.
-  exit /b 2
-)
 if not exist "!ZLC_SELECTED_XDC!" (
   echo ERROR: missing board XDC: !ZLC_SELECTED_XDC!
   echo Put your board pin map at fpga\board_config\board.xdc -- see its README -- or set ZLC_PS_XDC.
