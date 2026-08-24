@@ -264,7 +264,7 @@ def test_replace_spec_policy_keeps_viewport_for_reduction_only_change() -> None:
         viewport = RectangleRange(NumericRange(0.0, 1.0), NumericRange(0.0, 1.0))
         session.set_viewport(viewport.x, viewport.y)
         session.replace_spec(
-            CurvePlot(AxisRef.point("x"), reduction=Reduction.MEDIAN)
+            CurvePlot(AxisRef.point("x"), reduction=Reduction.MIN)
         )
         assert session.viewport == viewport
         assert session.selectors == ()

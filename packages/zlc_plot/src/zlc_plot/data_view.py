@@ -2213,8 +2213,6 @@ def _reduce_scalar(values: NDArray[Any], aggregation: Reduction) -> float:
         return math.nan
     if aggregation is Reduction.MEAN:
         return float(np.mean(values, dtype=np.float64))
-    if aggregation is Reduction.MEDIAN:
-        return float(np.median(values))
     if aggregation is Reduction.SUM:
         return float(np.sum(values, dtype=np.float64))
     if aggregation is Reduction.MIN:
@@ -2285,9 +2283,6 @@ def _masked_leading_reduce(
         warnings.simplefilter("ignore", category=RuntimeWarning)
         if aggregation is Reduction.MEAN:
             result = np.mean(values, axis=0, where=usable)
-        elif aggregation is Reduction.MEDIAN:
-            converted = np.asarray(values, dtype=np.float64)
-            result = np.nanmedian(np.where(usable, converted, np.nan), axis=0)
         elif aggregation is Reduction.SUM:
             result = np.sum(values, axis=0, where=usable, initial=0)
             result = np.where(counts > 0, result, np.nan)
@@ -2306,48 +2301,6 @@ def _masked_leading_reduce(
         else:
             raise AssertionError(f"unsupported reduction: {aggregation!r}")
     return np.asarray(result), counts
-
-
-def _reduce_segments(
-    ordered: NDArray[Any],
-    starts: NDArray[np.int64],
-    stops: NDArray[np.int64],
-    aggregation: Reduction,
-    output_dtype: np.dtype,
-) -> NDArray[Any]:
-    """Reduce every code-sorted segment in one vectorised pass.
-
-    ``reduceat`` over the segment starts is what keeps a camera-sized facet
-    usable: a scan of frames reduces one group PER PIXEL, and looping those
-    2.3 million groups through Python took ~10 s per cell where one ufunc
-    pass takes milliseconds.  Sums accumulate in the output dtype because the
-    values may arrive as uint8, which wraps at 256 under its own arithmetic.
-    """
-
-    if aggregation is Reduction.FIRST:
-        return ordered[starts]
-    if aggregation in (Reduction.SUM, Reduction.MEAN):
-        sums = np.add.reduceat(ordered.astype(output_dtype, copy=False), starts)
-        if aggregation is Reduction.SUM:
-            return sums
-        return sums / (stops - starts)
-    if aggregation is Reduction.MIN:
-        return np.minimum.reduceat(ordered, starts)
-    if aggregation is Reduction.MAX:
-        return np.maximum.reduceat(ordered, starts)
-    if aggregation is Reduction.MEDIAN:
-        # No reduceat for a median: sort values WITHIN each segment (the
-        # segment index is the primary key, so segments stay in place) and
-        # take each segment's middle by position -- still one pass.
-        sizes = stops - starts
-        segment_of = np.repeat(np.arange(starts.size), sizes)
-        within = ordered[np.lexsort((ordered, segment_of))]
-        low = starts + (sizes - 1) // 2
-        high = starts + sizes // 2
-        return (
-            within[low].astype(np.float64) + within[high].astype(np.float64)
-        ) / 2.0
-    raise AssertionError(f"unsupported reduction: {aggregation!r}")
 
 
 def _axis_coordinate_labels(
@@ -2396,6 +2349,30 @@ def _sem_from_moments(
     return sem
 
 
+def _bucket_sums(
+    group: NDArray[Any],
+    codes: NDArray[np.int64],
+    bucket_count: int,
+    output_dtype: np.dtype,
+) -> NDArray[Any]:
+    """Per-bucket sums in one O(N) counting pass -- never a sort.
+
+    ``bincount`` accumulates in float64 whatever the input dtype, so a
+    uint8 camera frame cannot wrap at 256 the way its own arithmetic
+    would; a complex plane is two real passes.
+    """
+
+    if output_dtype == np.complex128:
+        real = np.bincount(codes, weights=group.real, minlength=bucket_count)
+        imag = np.bincount(codes, weights=group.imag, minlength=bucket_count)
+        return real + 1j * imag
+    return np.bincount(
+        codes,
+        weights=group.astype(np.float64, copy=False),
+        minlength=bucket_count,
+    )
+
+
 def _aggregate_by_codes(
     values: NDArray[Any],
     usable: NDArray[np.bool_],
@@ -2403,45 +2380,60 @@ def _aggregate_by_codes(
     bucket_count: int,
     aggregation: Reduction,
 ) -> tuple[NDArray[Any], NDArray[np.int64]]:
+    """Reduce every bucket in O(N) passes; only the extremes sort, by radix.
+
+    The buckets arrive as one small-int code per sample.  SUM/MEAN
+    accumulate straight into their bucket (``bincount``), FIRST is a
+    reversed scatter (the first occurrence is the last write in reversed
+    order) -- sequential passes of ~3-5 ms at 2M samples.  The
+    comparison-based stable argsort that used to stand in front of EVERY
+    reduction was the projection's single largest cost and grew
+    superlinearly once the codes outran the cache: 45-456 ms at 2M before
+    touching a single value.  MIN/MAX genuinely need per-bucket order, so
+    they sort -- but by RADIX: codes narrowed to uint16 take NumPy's O(N)
+    radix path, measured flat at 14-18 ms for any bucket count.  (The
+    ufunc's indexed ``at`` loop was measured with an unexplained 20x
+    buffer-dependent cliff on this platform -- same dtype, flags and
+    content, 3 ms or 60 ms by allocation lineage -- and a projection
+    cannot ride a primitive with moods.)  Per bucket, members are visited
+    in the same original order the sorted path visited them, so the sums
+    are bit-identical.
+    """
+
     output_dtype = np.complex128 if values.dtype.kind == "c" else np.float64
     output = np.full(bucket_count, np.nan, dtype=output_dtype)
     counts = np.zeros(bucket_count, dtype=np.int64)
     positions = np.flatnonzero(usable & (codes >= 0))
     if positions.size:
-        if bucket_count == 1:
-            # One bucket needs no code sort: an ungrouped reduction of a
-            # camera-sized signal (a rolling trace on the frame itself) was
-            # paying a full stable argsort of millions of identical codes.
-            group = values[positions]
-            counts[0] = group.size
-            output[0] = _reduce_segments(
-                group,
-                np.array([0], dtype=np.int64),
-                np.array([group.size], dtype=np.int64),
-                aggregation,
-                output_dtype,
-            )[0]
-        else:
-            selected_codes = codes[positions]
-            counts = np.bincount(selected_codes, minlength=bucket_count)
-            if int(counts.max(initial=0)) <= 1:
-                # At most one member per group: every Reduction is identity,
-                # and the sort below is pure overhead.  This remains the
-                # generic one-member image/grid fallback; regular dense data
-                # axes route through _dense_image_data before reaching it.
-                output[selected_codes] = values[positions].astype(
-                    output_dtype, copy=False
-                )
+        selected_codes = codes[positions]
+        group = values[positions]
+        counts = np.bincount(selected_codes, minlength=bucket_count)
+        filled = counts > 0
+        if aggregation in (Reduction.SUM, Reduction.MEAN):
+            sums = _bucket_sums(
+                group, selected_codes, bucket_count, output_dtype
+            )
+            if aggregation is Reduction.MEAN:
+                output[filled] = sums[filled] / counts[filled]
             else:
-                order = np.argsort(selected_codes, kind="stable")
-                ordered_codes = selected_codes[order]
-                ordered_values = values[positions[order]]
-                boundaries = np.flatnonzero(np.diff(ordered_codes)) + 1
-                starts = np.concatenate(([0], boundaries))
-                stops = np.concatenate((boundaries, [ordered_codes.size]))
-                output[ordered_codes[starts]] = _reduce_segments(
-                    ordered_values, starts, stops, aggregation, output_dtype
-                )
+                output[filled] = sums[filled]
+        elif aggregation is Reduction.FIRST:
+            output[selected_codes[::-1]] = group[::-1]
+        elif aggregation in (Reduction.MIN, Reduction.MAX):
+            ufunc = np.minimum if aggregation is Reduction.MIN else np.maximum
+            narrow = (
+                selected_codes.astype(np.uint16)
+                if bucket_count <= (1 << 16)
+                else selected_codes
+            )
+            order = np.argsort(narrow, kind="stable")
+            ordered_codes = selected_codes[order]
+            ordered = group[order]
+            boundaries = np.flatnonzero(np.diff(ordered_codes)) + 1
+            starts = np.concatenate(([0], boundaries))
+            output[ordered_codes[starts]] = ufunc.reduceat(ordered, starts)
+        else:
+            raise AssertionError(f"unsupported reduction: {aggregation!r}")
     output.setflags(write=False)
     counts.setflags(write=False)
     return output, counts

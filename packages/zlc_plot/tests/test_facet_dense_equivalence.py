@@ -121,7 +121,7 @@ _EDGES = tuple(float(edge) for edge in np.linspace(0.0, 4000.0, 7))
                 ImagePlot(
                     AxisRef.data("sx"),
                     AxisRef.data("sy"),
-                    reduction=Reduction.MEDIAN,
+                    reduction=Reduction.MIN,
                 ),
             ),
             None,

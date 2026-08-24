@@ -41,16 +41,16 @@ def test_curve_collapses_an_unassigned_data_axis_under_the_declared_reduction() 
     assert tuple(series.counts) == (4, 4)
 
 
-def test_curve_median_pools_the_unassigned_axis_too() -> None:
+def test_curve_min_pools_the_unassigned_axis_too() -> None:
     scan = Axis.create("scan", values=[0.0, 1.0])
     snapshot = _snapshot(data_axes=(scan,))
     payload = DataView(snapshot).curve(
-        AxisRef.point("x"), aggregation=Reduction.MEDIAN
+        AxisRef.point("x"), aggregation=Reduction.MIN
     )
     values = np.asarray(snapshot.block.values)
     np.testing.assert_allclose(
         np.asarray(payload.series[0].y.canonical),
-        [np.median(values[:, 0, :]), np.median(values[:, 1, :])],
+        [np.min(values[:, 0, :]), np.min(values[:, 1, :])],
     )
 
 

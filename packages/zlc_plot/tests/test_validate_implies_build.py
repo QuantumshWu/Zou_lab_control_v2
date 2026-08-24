@@ -258,11 +258,11 @@ def test_reduction_is_honoured_when_the_whole_scan_is_pooled() -> None:
     values = np.asarray(snapshot.block.values)
     view = DataView(snapshot)
     mean = view.curve(AxisRef.repeat(), aggregation=Reduction.MEAN)
-    median = view.curve(AxisRef.repeat(), aggregation=Reduction.MEDIAN)
+    smallest = view.curve(AxisRef.repeat(), aggregation=Reduction.MIN)
     np.testing.assert_allclose(
         np.asarray(mean.series[0].y.canonical), values.mean(axis=1).ravel()
     )
     np.testing.assert_allclose(
-        np.asarray(median.series[0].y.canonical),
-        np.median(values.reshape(values.shape[0], -1), axis=1),
+        np.asarray(smallest.series[0].y.canonical),
+        np.min(values.reshape(values.shape[0], -1), axis=1),
     )

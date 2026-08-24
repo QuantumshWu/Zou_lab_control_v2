@@ -1,11 +1,11 @@
 """The one grouped-reduction kernel, checked against a plain per-group loop.
 
-``_aggregate_by_codes`` reduces every projection's groups in vectorised
-passes (a camera-sized facet reduces one group PER PIXEL, so a Python loop
-here once cost ~10 s per cell).  Vectorised means several special branches --
-segment reduceat, the single-member identity path, the one-bucket pool, the
-in-segment median sort -- and each must agree exactly with the obvious
-loop it replaced.
+``_aggregate_by_codes`` reduces every projection's groups in O(N)
+sequential passes and NOTHING in it sorts: SUM/MEAN accumulate through
+``bincount``, FIRST is a reversed scatter, MIN/MAX ride the ufunc's
+indexed ``at`` loop.  Each pass must agree exactly with the obvious
+per-group loop it replaces (a camera-sized facet reduces one group PER
+PIXEL, so the loop itself once cost ~10 s per cell).
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ def _reference(values, usable, codes, bucket_count, reduction):
 
     reduce = {
         Reduction.MEAN: np.mean,
-        Reduction.MEDIAN: np.median,
         Reduction.SUM: np.sum,
         Reduction.MIN: np.min,
         Reduction.MAX: np.max,
@@ -38,17 +37,7 @@ def _reference(values, usable, codes, bucket_count, reduction):
     return output, counts
 
 
-ALL_REDUCTIONS = tuple(
-    reduction
-    for reduction in (
-        Reduction.MEAN,
-        Reduction.MEDIAN,
-        Reduction.SUM,
-        Reduction.MIN,
-        Reduction.MAX,
-        Reduction.FIRST,
-    )
-)
+ALL_REDUCTIONS = tuple(Reduction)
 
 
 @pytest.mark.parametrize("reduction", ALL_REDUCTIONS)

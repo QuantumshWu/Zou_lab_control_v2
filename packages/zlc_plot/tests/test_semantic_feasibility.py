@@ -212,7 +212,7 @@ def test_user_can_reach_a_single_mean_line_on_grouped_data() -> None:
         dtype=np.float64,
         generation="single-line-chain",
     )
-    values = rng.gamma(2.0, 2.0, size=(5, 8, 3))  # skewed: mean != median
+    values = rng.gamma(2.0, 2.0, size=(5, 8, 3))  # spread: mean != min
     snapshot = DatasetSnapshot(schema, values, revision=0)
     spec = CurvePlot(AxisRef.point("scan"), group=AxisRef.data("site"))
     session = PlotSession(snapshot, spec)
@@ -237,11 +237,11 @@ def test_user_can_reach_a_single_mean_line_on_grouped_data() -> None:
 
         current = session._spec
         session.replace_spec(
-            updated_spec(schema, current, "reduction", Reduction.MEDIAN)
+            updated_spec(schema, current, "reduction", Reduction.MIN)
         )
         np.testing.assert_allclose(
             np.asarray(session._payload.series[0].y.canonical),
-            np.median(values, axis=(0, 2)),
+            np.min(values, axis=(0, 2)),
         )
         # The edit is visible, not just accepted.
         assert np.any(session.rgba() != mean_rgba)

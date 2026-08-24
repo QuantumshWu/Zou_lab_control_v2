@@ -151,7 +151,7 @@ def test_replace_spec_keeps_history_for_an_equivalent_rolling_spec() -> None:
         x = np.asarray(session._payload.series[0].x.canonical)
         np.testing.assert_array_equal(x, np.arange(10.0))
 
-        session.replace_spec(RollingPlot(reduction=Reduction.MEDIAN))
+        session.replace_spec(RollingPlot(reduction=Reduction.MIN))
         x = np.asarray(session._payload.series[0].x.canonical)
         np.testing.assert_array_equal(x, np.arange(6.0))
     finally:

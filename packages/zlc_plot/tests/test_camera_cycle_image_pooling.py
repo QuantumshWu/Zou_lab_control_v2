@@ -56,10 +56,9 @@ def _camera_cycle():
     "reduction, pool",
     [
         (Reduction.MEAN, lambda box: box.mean(axis=(0, 1))),
-        (Reduction.MEDIAN, lambda box: np.median(box, axis=(0, 1))),
         (Reduction.MAX, lambda box: box.max(axis=(0, 1))),
     ],
-    ids=["mean", "median", "max"],
+    ids=["mean", "max"],
 )
 def test_a_camera_cycle_draws_as_one_image_with_its_frames_pooled(
     reduction, pool

@@ -51,7 +51,7 @@ def test_x_change_drops_only_the_x_label() -> None:
 def test_reduction_change_keeps_every_label() -> None:
     from zlc_plot.specs import Reduction
 
-    edited = updated_spec(_schema(), _CURVE, "reduction", Reduction.MEDIAN)
+    edited = updated_spec(_schema(), _CURVE, "reduction", Reduction.MIN)
     assert edited.labels == _CURVE.labels
 
 

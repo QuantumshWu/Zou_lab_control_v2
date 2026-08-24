@@ -123,7 +123,7 @@ def test_cumulative_band_renders(tmp_path) -> None:
 
 
 def test_cumulative_is_inert_on_a_non_mean_reduction() -> None:
-    """The switch is a display parameter; on a MEDIAN trace the running
+    """The switch is a display parameter; on a MIN trace the running
     standard error does not exist, so flipping it changes nothing."""
 
     sites = 4
@@ -131,7 +131,7 @@ def test_cumulative_is_inert_on_a_non_mean_reduction() -> None:
     rng = np.random.default_rng(11)
     session = PlotSession(
         _shot(schema, (rng.random(sites) < 0.5).astype(np.float64), 0),
-        RollingPlot(reduction=Reduction.MEDIAN),
+        RollingPlot(reduction=Reduction.MIN),
         parameters={"cumulative": True, "uncertainty": True},
     )
     try:

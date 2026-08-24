@@ -418,7 +418,6 @@ def test_large_ungrouped_rolling_reuses_its_exact_valid_pool(
     expected_pool = np.asarray(snapshot.block.values).reshape(-1)
     reducers = {
         Reduction.MEAN: np.mean,
-        Reduction.MEDIAN: np.median,
         Reduction.SUM: np.sum,
         Reduction.MIN: np.min,
         Reduction.MAX: np.max,

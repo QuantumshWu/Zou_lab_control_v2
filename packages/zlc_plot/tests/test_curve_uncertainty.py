@@ -110,7 +110,7 @@ def test_uncertainty_refuses_non_mean_reductions() -> None:
     with pytest.raises(ValueError, match="Reduction.MEAN only|mean"):
         DataView(snapshot).curve(
             AxisRef.point("x"),
-            aggregation=Reduction.MEDIAN,
+            aggregation=Reduction.MIN,
             uncertainty=True,
         )
 

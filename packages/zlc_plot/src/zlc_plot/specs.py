@@ -94,7 +94,6 @@ class Reduction(str, Enum):
     """How repeated samples that share a plotted coordinate are combined."""
 
     MEAN = "mean"
-    MEDIAN = "median"
     SUM = "sum"
     MIN = "min"
     MAX = "max"
