@@ -734,14 +734,16 @@ class FitProjection:
         *,
         window: int,
         cumulative: bool = False,
+        uncertainty: bool = False,
     ) -> CurveData:
         """Build one history series per optional rolling group.
 
         ``cumulative`` replaces every point with the running mean of all
-        shots up to it, carrying the running standard error as the series
-        sem: the live "rate converging shot by shot" trace.  The window
-        stays purely a DISPLAY frame -- the accumulation always starts at
-        shot zero, so shrinking the view never changes the numbers.
+        shots up to it; ``uncertainty`` draws the band -- the running
+        standard error on a cumulative trace, each shot's own pooled
+        standard error on the plain one.  The window stays purely a
+        DISPLAY frame -- the accumulation always starts at shot zero, so
+        shrinking the view never changes the numbers.
         """
 
         if window <= 0:
@@ -771,10 +773,13 @@ class FitProjection:
             valid = np.zeros(visible_size, dtype=np.bool_)
             sem = None
             if cumulative:
-                canonical_values, sem, valid = _cumulative_trace(
+                canonical_values, running_sem, valid = _cumulative_trace(
                     history, key, start
                 )
+                if uncertainty:
+                    sem = running_sem
             else:
+                point_sem = np.full(visible_size, np.nan, dtype=float)
                 for index, point in enumerate(visible):
                     try:
                         source_index = point.sample.group_keys.index(key)
@@ -785,6 +790,12 @@ class FitProjection:
                             point.sample.values[source_index]
                         )
                         valid[index] = True
+                        if point.sample.sem is not None:
+                            point_sem[index] = float(
+                                point.sample.sem[source_index]
+                            )
+                if uncertainty:
+                    sem = point_sem
             display_values = canonical_unit.convert_value_to(canonical_values, unit)
             x = QuantityArray(
                 x_values,

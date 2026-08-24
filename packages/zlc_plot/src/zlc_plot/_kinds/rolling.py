@@ -24,6 +24,9 @@ def build_payload(projection: Any, view: Any, state: Any) -> None:
     # window is applied inside ``_rolling_payload``.  Persisting the display
     # slice here once made shrinking the window destructive and enlarging it
     # inert, because the truncated cache doubled as the permanent record.
+    uncertainty = (
+        bool(state["uncertainty"]) and spec.reduction is Reduction.MEAN
+    )
     projection._rolling_history_cache = accumulate_history(
         projection,
         view,
@@ -36,6 +39,7 @@ def build_payload(projection: Any, view: Any, state: Any) -> None:
         cumulative=(
             bool(state["cumulative"]) and spec.reduction is Reduction.MEAN
         ),
+        uncertainty=uncertainty,
     )
 
 

@@ -709,11 +709,14 @@ def _parameter_schema_for_context(
         entries.append(_unit_parameter("value_display_unit"))
     if semantic_kind in {PlotKind.CURVE, PlotKind.ROLLING}:
         entries.extend(_curve_parameters())
-    if semantic_kind is PlotKind.CURVE:
+    if semantic_kind in {PlotKind.CURVE, PlotKind.ROLLING}:
         # A display choice, not a data declaration: the operator flips the
         # band on a live panel and the projection computes the MEAN's
-        # standard error on demand.  On a non-MEAN reduction the statistic
-        # does not exist and the switch is inert.
+        # standard error on demand.  On a curve that is the spread of what
+        # each plotted point pooled; on a rolling trace it is each shot's
+        # own pooled spread (or the running error when cumulative).  On a
+        # non-MEAN reduction the statistic does not exist and the switch
+        # is inert.
         entries.append(
             ParameterSpec(
                 "uncertainty",

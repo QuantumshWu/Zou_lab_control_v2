@@ -295,10 +295,27 @@ def schema_structure(schema: DatasetSchema) -> SchemaStructure:
             (str(column.name), int(schema.point_table.row_count))
             for column in schema.point_table.columns
         )
-    data = tuple(
-        (str(axis.name), int(axis.size)) for axis in schema.cell_schema.data_axes
+    # Spatial axes are one picture and stay one bracketed group; a
+    # categorical cell axis (a pair, a model) is its own dimension and gets
+    # its own group -- (pairs) x (sites), never (pairs x sites).
+    from zlc_data import SPATIAL_X, SPATIAL_Y
+
+    data_groups: list[tuple[tuple[str, int], ...]] = []
+    picture: list[tuple[str, int]] = []
+    for axis in schema.cell_schema.data_axes:
+        entry = (str(axis.name), int(axis.size))
+        if axis.role in (SPATIAL_Y, SPATIAL_X):
+            picture.append(entry)
+        else:
+            if picture:
+                data_groups.append(tuple(picture))
+                picture = []
+            data_groups.append((entry,))
+    if picture:
+        data_groups.append(tuple(picture))
+    return tuple(
+        group for group in (repeats, points, *data_groups) if group
     )
-    return tuple(group for group in (repeats, points, data) if group)
 
 
 def schema_summary(schema: DatasetSchema) -> str:

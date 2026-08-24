@@ -180,6 +180,10 @@ class RollingSample:
     values: NDArray[Any] | ArrayLike
     valid: NDArray[np.bool_] | ArrayLike
     group_keys: tuple[tuple[AxisValue, ...], ...] = ()
+    #: Standard error of each MEAN entry over what this shot pooled, or
+    #: None when uncertainty was not requested.  Canonical-only, like the
+    #: curve companion.
+    sem: NDArray[np.float64] | ArrayLike | None = None
 
     def __post_init__(self) -> None:
         values = _readonly(self.values)
@@ -189,6 +193,11 @@ class RollingSample:
         keys = tuple(tuple(item) for item in self.group_keys)
         if len(keys) != values.size:
             raise ValueError("rolling sample group keys must match value count")
+        if self.sem is not None:
+            sem = _readonly(self.sem, dtype=np.float64)
+            if sem.shape != values.shape:
+                raise ValueError("rolling sample sem must match value count")
+            object.__setattr__(self, "sem", sem)
         object.__setattr__(self, "values", values)
         object.__setattr__(self, "valid", valid)
         object.__setattr__(self, "group_keys", keys)
@@ -1150,19 +1159,42 @@ class DataView:
         group: AxisRef | None = None,
         aggregation: Reduction = Reduction.MEAN,
     ) -> RollingSample:
-        """Reduce one source revision to scalar values for rolling history."""
+        """Reduce one source revision to scalar values for rolling history.
+
+        The MEAN's standard error is ALWAYS computed alongside: a rolling
+        sample is cached as history, and whether the operator is showing
+        the band is a display choice that must never decide what the cache
+        contains -- a band flipped on later must reach every retained shot.
+        """
 
         self.validate_rolling(group)
         aggregation = _validate_aggregation(aggregation)
+        uncertainty = aggregation is Reduction.MEAN
         if group is None:
             pooled = self.pooled_values()
             value = _reduce_scalar(pooled, aggregation)
+            sem = None
+            if uncertainty:
+                finite = pooled[np.isfinite(pooled)]
+                sem = _sem_from_moments(
+                    np.asarray([value], dtype=np.float64),
+                    np.asarray(
+                        [
+                            np.mean(np.square(finite))
+                            if finite.size
+                            else np.nan
+                        ],
+                        dtype=np.float64,
+                    ),
+                    np.asarray([finite.size], dtype=np.int64),
+                )
             return RollingSample(
                 revision=self._samples.revision,
                 generation=self._samples.generation,
                 values=np.asarray([value], dtype=np.float64),
                 valid=np.asarray([pooled.size > 0 and np.isfinite(value)]),
                 group_keys=((),),
+                sem=sem,
             )
         positions = self._all_positions()
         flat_values = self._samples.value.canonical.reshape(-1)
@@ -1172,13 +1204,28 @@ class DataView:
         domain_size = len(domain.values)
         keys = tuple((value,) for value in domain.values)
         usable = flat_valid[positions] & (codes >= 0)
+        group_values = flat_values[positions]
         values, counts = _aggregate_by_codes(
-            flat_values[positions],
+            group_values,
             usable,
             codes,
             domain_size,
             aggregation,
         )
+        sem = None
+        if uncertainty:
+            mean_sq, _sq_counts = _aggregate_by_codes(
+                np.square(group_values.astype(np.float64, copy=False)),
+                usable,
+                codes,
+                domain_size,
+                Reduction.MEAN,
+            )
+            sem = _sem_from_moments(
+                np.asarray(values, np.float64),
+                np.asarray(mean_sq, np.float64),
+                counts,
+            )
         valid = (counts > 0) & np.isfinite(values)
         return RollingSample(
             revision=self._samples.revision,
@@ -1186,6 +1233,7 @@ class DataView:
             values=values,
             valid=valid,
             group_keys=keys,
+            sem=sem,
         )
 
     def rolling_history_samples(
@@ -1209,7 +1257,9 @@ class DataView:
             )
         repeats = schema_repeat_count(self._schema)
         if repeats <= 1:
-            return (self.rolling_sample(group=group, aggregation=aggregation),)
+            return (
+                self.rolling_sample(group=group, aggregation=aggregation),
+            )
         self.validate_rolling(group)
         aggregation = _validate_aggregation(aggregation)
         positions = self._all_positions()
@@ -1227,16 +1277,36 @@ class DataView:
         block = flat_values.size // repeats
         repeat_of_position = positions // block
         usable = flat_valid[positions] & (codes >= 0)
+        position_values = flat_values[positions]
+        squared = (
+            np.square(position_values.astype(np.float64, copy=False))
+            if aggregation is Reduction.MEAN
+            else None
+        )
         samples: list[RollingSample] = []
         for repeat in range(repeats):
             in_repeat = repeat_of_position == repeat
             values, counts = _aggregate_by_codes(
-                flat_values[positions],
+                position_values,
                 usable & in_repeat,
                 codes,
                 domain_size,
                 aggregation,
             )
+            sem = None
+            if squared is not None:
+                mean_sq, _sq_counts = _aggregate_by_codes(
+                    squared,
+                    usable & in_repeat,
+                    codes,
+                    domain_size,
+                    Reduction.MEAN,
+                )
+                sem = _sem_from_moments(
+                    np.asarray(values, np.float64),
+                    np.asarray(mean_sq, np.float64),
+                    counts,
+                )
             valid = (counts > 0) & np.isfinite(values)
             samples.append(
                 RollingSample(
@@ -1245,6 +1315,7 @@ class DataView:
                     values=values,
                     valid=valid,
                     group_keys=keys,
+                    sem=sem,
                 )
             )
         return tuple(samples)
@@ -1273,15 +1344,36 @@ class DataView:
             domain_size = len(grouped.values)
             keys = tuple((value,) for value in grouped.values)
         usable = flat_valid[positions] & (codes >= 0)
+        position_values = flat_values[positions]
+        squared = (
+            np.square(position_values.astype(np.float64, copy=False))
+            if aggregation is Reduction.MEAN
+            else None
+        )
         samples: list[RollingSample] = []
         for index, source in enumerate(primary.values):
+            selected = usable & (primary.codes == index)
             values, counts = _aggregate_by_codes(
-                flat_values[positions],
-                usable & (primary.codes == index),
+                position_values,
+                selected,
                 codes,
                 domain_size,
                 aggregation,
             )
+            sem = None
+            if squared is not None:
+                mean_sq, _sq_counts = _aggregate_by_codes(
+                    squared,
+                    selected,
+                    codes,
+                    domain_size,
+                    Reduction.MEAN,
+                )
+                sem = _sem_from_moments(
+                    np.asarray(values, np.float64),
+                    np.asarray(mean_sq, np.float64),
+                    counts,
+                )
             valid = (counts > 0) & np.isfinite(values)
             samples.append(
                 RollingSample(
@@ -1290,6 +1382,7 @@ class DataView:
                     values=values,
                     valid=valid,
                     group_keys=keys,
+                    sem=sem,
                 )
             )
         return tuple(samples)
