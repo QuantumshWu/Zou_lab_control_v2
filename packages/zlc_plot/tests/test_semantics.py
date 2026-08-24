@@ -337,3 +337,62 @@ def test_a_two_dimensional_scan_reports_the_fate_its_panel_applies() -> None:
     assert description.fate(AxisRef.point_rows()) == "facet"
     assert [name.removeprefix('fate:') for _ref, name in description.fate_rows][0] == "repeat"
     assert "fate:coil_x" in [name for _ref, name in description.fate_rows]
+
+
+def test_a_scan_dimension_of_a_long_sweep_still_offers_its_scope() -> None:
+    """A thousand rows, ten coordinates: the pinnable set is the DISTINCT one.
+
+    A grid dimension arrives as one value per scan ROW, and the scope cap
+    used to be judged on that raw list -- so exactly the axes a scope
+    exists for (the scan dimensions of any real sweep) never offered one.
+    """
+
+    from zlc_data import (
+        AxisId,
+        AxisSpec,
+        DatasetSchema as Schema,
+        GridTopology,
+        PointColumn,
+        PointTable as ZPointTable,
+        REPEAT,
+        SCAN_POINT,
+        SITE,
+        ValidityContract,
+        ValueSchema,
+    )
+
+    cells = tuple((i % 10, (i // 10) % 10, i // 100) for i in range(1000))
+    columns = tuple(
+        PointColumn(
+            AxisId(name),
+            name,
+            SCAN_POINT,
+            PointColumn.NUMERIC,
+            tuple(float(cell[position]) for cell in cells),
+        )
+        for position, name in enumerate(("ax", "ay", "az"))
+    )
+    schema = Schema(
+        AxisSpec(AxisId("cycle"), "cycle", REPEAT, 20),
+        ZPointTable(1000, columns),
+        GridTopology(
+            (AxisId("ax"), AxisId("ay"), AxisId("az")),
+            (tuple(float(i) for i in range(10)),) * 3,
+            cells,
+        ),
+        ValueSchema(
+            (AxisSpec(AxisId("occ.site"), "site", SITE, 34),),
+            ValidityContract.components(AxisId("occ.site")),
+            np.dtype("<f8"),
+            "1",
+        ),
+    )
+    description = describe_semantics(schema, CurvePlot(AxisRef.point("ax")))
+    for dimension in ("ay", "az"):
+        field = next(
+            item for item in description.fields if item.name == f"fate:{dimension}"
+        )
+        pins = [label for _value, label in field.choices if str(label).startswith("= ")]
+        assert len(pins) == 10, (
+            f"{dimension} must offer its ten coordinates as scopes, got {pins}"
+        )

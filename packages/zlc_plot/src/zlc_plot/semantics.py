@@ -512,17 +512,23 @@ def _scope_coordinates(
     else:
         values = tuple(float(value) for value in axis.coordinates)
         labels = axis.coordinate_labels
-    if len(values) < 2 or len(values) > SCOPE_CHOICE_LIMIT:
+    # The pinnable coordinates are the DISTINCT ones, judged after the
+    # dedup: a scan dimension lists one value per ROW, so a ten-coordinate
+    # sweep of a thousand rows arrived here as a thousand values and the
+    # size cap refused the very axis a scope exists for.  A labelled axis
+    # pins by the name the operator reads everywhere else -- "0-1", "box"
+    # -- not by its bare numeric identity.
+    first_labels: dict[float, str] = {}
+    for index, value in enumerate(values):
+        if value not in first_labels:
+            if len(first_labels) >= SCOPE_CHOICE_LIMIT + 1:
+                break
+            first_labels[value] = (
+                labels[index] if labels is not None else f"{value:g}"
+            )
+    if len(first_labels) < 2 or len(first_labels) > SCOPE_CHOICE_LIMIT:
         choices: tuple[SemanticChoice, ...] = ()
     else:
-        # A labelled axis pins by the name the operator reads everywhere
-        # else -- "0-1", "box" -- not by its bare numeric identity.
-        first_labels: dict[float, str] = {}
-        for index, value in enumerate(values):
-            if value not in first_labels:
-                first_labels[value] = (
-                    labels[index] if labels is not None else f"{value:g}"
-                )
         choices = tuple(first_labels.items())
     if (
         ref.domain is AxisDomain.POINT_COORDINATE
