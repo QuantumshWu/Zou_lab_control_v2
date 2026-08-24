@@ -115,6 +115,70 @@ class RollingHistoryPoint:
     sample: RollingSample
     shot_index: int
     values: np.ndarray | None = None
+    #: (n, sum, sum of squares) of everything this shot pooled -- three
+    #: floats computed while ``values`` is still in hand, surviving the
+    #: memory budget that releases the samples themselves.  The cumulative
+    #: trace runs on these, so its running mean weights every shot by what
+    #: it actually pooled.
+    pooled_moments: tuple[float, float, float] | None = None
+
+
+def _cumulative_trace(
+    history: tuple[RollingHistoryPoint, ...],
+    key: tuple,
+    start: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Running mean and standard error over the FULL history, then sliced.
+
+    Ungrouped, each shot contributes everything it pooled (its stored
+    moments), so shots pooling different sample counts weigh in correctly.
+    Grouped, each shot contributes its one per-key reduced value -- for a
+    per-site trace that IS the shot's one sample.
+    """
+
+    total = len(history)
+    n = np.zeros(total, dtype=float)
+    sums = np.zeros(total, dtype=float)
+    squares = np.zeros(total, dtype=float)
+    ungrouped = key == ()
+    for index, point in enumerate(history):
+        if ungrouped and point.pooled_moments is not None:
+            n[index], sums[index], squares[index] = point.pooled_moments
+            continue
+        try:
+            source_index = point.sample.group_keys.index(key)
+        except ValueError:
+            continue
+        if bool(point.sample.valid[source_index]):
+            value = float(point.sample.values[source_index])
+            n[index], sums[index], squares[index] = 1.0, value, value * value
+    running_n = np.cumsum(n)
+    running_sum = np.cumsum(sums)
+    running_squares = np.cumsum(squares)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = running_sum / running_n
+        spread = np.clip(
+            running_squares / running_n - np.square(mean), 0.0, None
+        )
+        sem = np.sqrt(spread / (running_n - 1.0))
+    sem[running_n < 2.0] = np.nan
+    valid = (running_n > 0.0) & np.isfinite(mean)
+    mean = np.where(valid, mean, np.nan)
+    return mean[start:], sem[start:], valid[start:]
+
+
+def _moments_of(values: np.ndarray | None) -> tuple[float, float, float] | None:
+    if values is None:
+        return None
+    flat = np.asarray(values, dtype=float).reshape(-1)
+    flat = flat[np.isfinite(flat)]
+    if not flat.size:
+        return (0.0, 0.0, 0.0)
+    return (
+        float(flat.size),
+        float(np.sum(flat)),
+        float(np.dot(flat, flat)),
+    )
 
 
 def accumulate_history(
@@ -141,7 +205,9 @@ def accumulate_history(
         pools = view.pooled_values_by_repeat()
         return _within_value_budget(
             [
-                RollingHistoryPoint(sample, sample.revision, values)
+                RollingHistoryPoint(
+                    sample, sample.revision, values, _moments_of(values)
+                )
                 for sample, values in zip(samples, pools, strict=True)
             ][-RETAINED_HISTORY_LIMIT:]
         )
@@ -152,7 +218,7 @@ def accumulate_history(
         # starts with its seed data instead of a single point.
         pooled = view.pooled_values_by_repeat()
         history.extend(
-            RollingHistoryPoint(sample, shot_index, values)
+            RollingHistoryPoint(sample, shot_index, values, _moments_of(values))
             for shot_index, (sample, values) in enumerate(
                 zip(
                     view.rolling_history_samples(
@@ -165,11 +231,13 @@ def accumulate_history(
             )
         )
     elif history[-1].sample.revision != projection._revision:
+        appended = view.pooled_values()
         history.append(
             RollingHistoryPoint(
                 view.rolling_sample(group=group, aggregation=aggregation),
                 history[-1].shot_index + 1,
-                view.pooled_values(),
+                appended,
+                _moments_of(appended),
             )
         )
     return _within_value_budget(history[-RETAINED_HISTORY_LIMIT:])
@@ -665,8 +733,16 @@ class FitProjection:
         history: tuple[RollingHistoryPoint, ...],
         *,
         window: int,
+        cumulative: bool = False,
     ) -> CurveData:
-        """Build one history series per optional rolling group."""
+        """Build one history series per optional rolling group.
+
+        ``cumulative`` replaces every point with the running mean of all
+        shots up to it, carrying the running standard error as the series
+        sem: the live "rate converging shot by shot" trace.  The window
+        stays purely a DISPLAY frame -- the accumulation always starts at
+        shot zero, so shrinking the view never changes the numbers.
+        """
 
         if window <= 0:
             raise ValueError("rolling window must be positive")
@@ -689,17 +765,26 @@ class FitProjection:
         canonical_unit = self._view.samples.value.canonical_unit
         x_unit = resolve_unit("1", DEFAULT_UNITS)
         series: list[CurveSeries] = []
+        start = len(history) - visible_size
         for key in keys:
             canonical_values = np.full(visible_size, np.nan, dtype=float)
             valid = np.zeros(visible_size, dtype=np.bool_)
-            for index, point in enumerate(visible):
-                try:
-                    source_index = point.sample.group_keys.index(key)
-                except ValueError:
-                    continue
-                if bool(point.sample.valid[source_index]):
-                    canonical_values[index] = float(point.sample.values[source_index])
-                    valid[index] = True
+            sem = None
+            if cumulative:
+                canonical_values, sem, valid = _cumulative_trace(
+                    history, key, start
+                )
+            else:
+                for index, point in enumerate(visible):
+                    try:
+                        source_index = point.sample.group_keys.index(key)
+                    except ValueError:
+                        continue
+                    if bool(point.sample.valid[source_index]):
+                        canonical_values[index] = float(
+                            point.sample.values[source_index]
+                        )
+                        valid[index] = True
             display_values = canonical_unit.convert_value_to(canonical_values, unit)
             x = QuantityArray(
                 x_values,
@@ -724,6 +809,7 @@ class FitProjection:
                     y=y,
                     valid=valid,
                     counts=valid.astype(np.int64),
+                    sem=sem,
                     group_key=key,
                     label=label,
                 )

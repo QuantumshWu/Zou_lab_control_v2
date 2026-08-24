@@ -261,6 +261,11 @@ class HistogramPlot:
 class RollingPlot:
     group: AxisRef | None = None
     reduction: Reduction = Reduction.MEAN
+    #: Replace the per-shot trace with the running mean of every shot so
+    #: far, drawn with its running standard error as a band -- the live
+    #: "rate converging shot by shot" view.  MEAN only: the running
+    #: statistic of any other reduction is undefined here.
+    cumulative: bool = False
     labels: PlotLabels = field(default_factory=PlotLabels)
     scope: tuple[ScopeTerm, ...] = ()
     kind: ClassVar[PlotKind] = PlotKind.ROLLING
@@ -270,6 +275,10 @@ class RollingPlot:
             raise TypeError("RollingPlot.group must be AxisRef or None")
         if not isinstance(self.reduction, Reduction):
             raise TypeError("RollingPlot.reduction must be Reduction")
+        if not isinstance(self.cumulative, bool):
+            raise TypeError("RollingPlot.cumulative must be bool")
+        if self.cumulative and self.reduction is not Reduction.MEAN:
+            raise ValueError("cumulative is defined for Reduction.MEAN only")
         if not isinstance(self.labels, PlotLabels):
             raise TypeError("RollingPlot.labels must be PlotLabels")
         object.__setattr__(self, "scope", _validated_scope(self.scope))

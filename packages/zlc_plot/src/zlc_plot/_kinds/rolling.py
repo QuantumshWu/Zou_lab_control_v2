@@ -33,6 +33,7 @@ def build_payload(projection: Any, view: Any, state: Any) -> None:
     projection._payload = projection._rolling_payload(
         projection._rolling_history_cache,
         window=int(state["window"]),
+        cumulative=spec.cumulative,
     )
 
 
@@ -70,7 +71,7 @@ HANDLER = KindHandler(
     "series",
     render,
     build_payload,
-    ("kind", "group", "reduction"),
+    ("kind", "group", "reduction", "cumulative"),
     admits,
     default_spec,
     label_roles,

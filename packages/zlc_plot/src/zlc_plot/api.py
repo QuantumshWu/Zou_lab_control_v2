@@ -138,6 +138,7 @@ def rolling(
     *,
     group: AxisRef | str | None = None,
     reduction: Reduction = Reduction.MEAN,
+    cumulative: bool = False,
     side_distribution: bool | None = None,
     window: int | None = None,
     labels: PlotLabels | None = None,
@@ -157,6 +158,7 @@ def rolling(
         RollingPlot(
             None if group is None else _axis(group),
             reduction,
+            cumulative,
             labels=labels or PlotLabels(),
         ),
         size=size,

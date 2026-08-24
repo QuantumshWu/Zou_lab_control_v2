@@ -3228,7 +3228,12 @@ class MatplotlibRenderer:
             if label is None:
                 label = ""
             sliced.append(_PreparedSeries(
-                x_values, y_values, valid, str(label), _series_identity(item)
+                x_values,
+                y_values,
+                valid,
+                str(label),
+                _series_identity(item),
+                band=_series_band(item),
             ))
 
         labels = self.spec.labels
