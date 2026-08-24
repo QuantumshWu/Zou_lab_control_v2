@@ -50,9 +50,11 @@ Task artifact keep their respective data and product truth.
 If a hosted Task publishes one active Runtime operator-input request,
 TaskConsole opens the request-kind interaction only after its referenced
 publication exists. Calibration's point-selection request uses the same image
-host and stable point identities as its companion Monitor preview; cancelling
-the dialog is Task Stop, while confirmation answers only that exact request.
-Workbench does not interpret which sites are scientifically valid.
+host and stable point identities as its companion Monitor preview；`zlc_ui`
+提供Fluent modal/view，`zlc_plot`提供point gesture/overlay，Workbench只连接plain
+identities与两个完整owner。Cancelling the dialog is Task Stop, while
+confirmation answers only that exact request. Workbench does not interpret
+which sites are scientifically valid.
 
 Finite exact signals have one presentation identity independent of Panel
 semantics: Logic shape, live Panel, Edit/Refresh/Save, selector, fit and overlay

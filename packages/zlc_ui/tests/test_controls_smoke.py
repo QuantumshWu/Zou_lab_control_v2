@@ -10,11 +10,16 @@ from zlc_ui.board import BoardMetrics, nearest_anchor, pack
 
 ROOT = __import__("pathlib").Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
+REPO_ROOT = ROOT.parents[1]
 
 
 def _run_qt_smoke(code: str) -> None:
     environment = dict(os.environ)
-    environment["PYTHONPATH"] = "" if environment.get("ZLC_TEST_INSTALLED") == "1" else str(SRC)
+    environment["PYTHONPATH"] = (
+        ""
+        if environment.get("ZLC_TEST_INSTALLED") == "1"
+        else os.pathsep.join((str(REPO_ROOT), str(SRC)))
+    )
     environment["QT_QPA_PLATFORM"] = "offscreen"
     completed = subprocess.run(
         [sys.executable, "-c", code],
@@ -40,6 +45,45 @@ assert window_pad() > 0
 assert scaled_px(10) == 10
 assert isinstance(FluentButton('Run'), QtWidgets.QPushButton)
 assert isinstance(FluentLabel('status'), QtWidgets.QLabel)
+"""
+    )
+
+
+def test_point_review_is_one_fluent_view_and_dialog() -> None:
+    _run_qt_smoke(
+        """
+import zou_lab_control
+print(zou_lab_control.__file__)
+from PyQt5 import QtCore, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.console import PointReviewView
+from zlc_ui.fluent import (
+    FluentButton, FluentCheckBox, FluentDialogWindow, FluentFrame,
+    FluentLineEdit, FluentScrollArea,
+)
+app = ensure_qt_app(['zlc-ui-tests'])
+surface = QtWidgets.QWidget()
+view = PointReviewView(
+    surface,
+    (('site-a', '1', 2.0, 3.0), ('site-b', '2', 7.0, 5.0)),
+    message='Exclude unwanted sites.',
+    confirm_label='Continue calibration',
+)
+assert isinstance(view, FluentFrame)
+assert isinstance(view.search, FluentLineEdit)
+assert isinstance(view.point_scroll, FluentScrollArea)
+assert len(view.findChildren(FluentCheckBox)) == 2
+assert not view.findChildren(QtWidgets.QListWidget)
+for button in (
+    view.exclude_selected_button, view.restore_selected_button,
+    view.reset_button, view.stop_button, view.confirm_button,
+):
+    assert isinstance(button, FluentButton), type(button)
+view.select_points(('site-b',))
+view.exclude_selected_button.click()
+assert view.excluded_ids == ('site-b',)
+QtCore.QTimer.singleShot(0, view.confirm_button.click)
+assert view.exec_(None, title='Review detected sites') == FluentDialogWindow.Accepted
 """
     )
 

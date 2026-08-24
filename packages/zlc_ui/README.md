@@ -124,6 +124,9 @@ The package is organized as follows:
   It rejects a pre-existing QApplication without the required Qt5 High-DPI
   attributes instead of silently producing a differently scaled GUI.
 - `zlc_ui.console` — pure task-console views; presentation runtime stays out.
+  `PointReviewView`使用完整Fluent control family围绕caller提供的普通QWidget：
+  `FluentDialogWindow`负责modal Fluent chrome/lifecycle，view负责搜索、site
+  checkbox、scroll、status和actions；它不理解plot、SiteMap或Calibration。
 - `zlc_ui.pulse` — pure pulse schedule, scan, target, preview, and editor-shell
   views driven by frozen plain view models; controller and plot ownership stay
   outside this package. Its Scan/API dot controls emit click intent only;

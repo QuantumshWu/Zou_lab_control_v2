@@ -21,12 +21,13 @@ from typing import Any
 
 from PyQt5 import QtCore
 
-from zlc_ui.fluent import fluent_open_path, fluent_save_path
+from zlc_ui.fluent import FluentDialogWindow, fluent_open_path, fluent_save_path
 
 from .logic_row_view import LogicRowView
 from .logic_editor_view import LogicEditorView
 from .panel_card_view import PanelCardView
 from .panel_editor_view import PanelEditorView
+from .point_review_view import PointReviewView
 from .signal_chooser import choose_signal
 from .task_console_view import TaskConsoleView
 
@@ -254,16 +255,43 @@ class TaskConsoleHandle(QtCore.QObject):
 
         fluent_message(self._view, str(title), str(text), kind="warning")
 
-    def run_host_dialog(self, opener, host, *, title: str):
-        """Run a dialog the DRAWING package owns, centred on this window.
+    def review_points(
+        self,
+        surface,
+        points,
+        *,
+        title: str,
+        message: str = "",
+        confirm_label: str = "Continue",
+        initial_excluded=(),
+    ) -> tuple[str, ...] | None:
+        """Run the complete Fluent point-review view around one plot QWidget."""
 
-        The opener is a function, not a widget: this package may not import
-        the one that draws, and the outside may not hold the widget that
-        would parent its dialog.  So the function crosses inward and is given
-        this window to sit on, and nothing crosses the other way.
-        """
-
-        return opener(host, self._view, title=str(title))
+        try:
+            review = PointReviewView(
+                surface,
+                points,
+                message=str(message),
+                confirm_label=str(confirm_label),
+                initial_excluded=tuple(initial_excluded),
+            )
+        except BaseException:
+            surface.close_adapter()
+            raise
+        surface.toggle_requested.connect(review.toggle_point)
+        surface.selection_requested.connect(review.select_points)
+        review.state_changed.connect(surface.set_state)
+        surface.set_state(review.excluded_ids, review.selected_ids)
+        parent = self._window if self._window is not None else self._view
+        try:
+            result = review.exec_(parent, title=str(title))
+            return (
+                review.excluded_ids
+                if result == FluentDialogWindow.Accepted
+                else None
+            )
+        finally:
+            surface.close_adapter()
 
     # -------------------------------------------------------------- panels
 

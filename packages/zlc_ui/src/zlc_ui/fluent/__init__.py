@@ -28,7 +28,8 @@ for _name in (
     "FluentComboBox", "FluentTreeComboBox", "FluentTabWidget",
     "FluentSwitch", "fluent_switch_width", "fluent_spinbox_stylesheet", "FluentSpinBox", "FluentInputDialog",
     "FluentCodeEdit", "FluentDoubleSpinBox", "FluentCheckBox", "FluentScrollArea",
-    "LinkedScrollPanes", "apply_fluent_scrollbars", "FluentWindow", "bind_body_close", "launch_qt_window", "launch_fluent_window",
+    "LinkedScrollPanes", "apply_fluent_scrollbars", "FluentWindow", "FluentDialogWindow",
+    "bind_body_close", "launch_qt_window", "launch_fluent_window",
     "open_fluent_window",
     "Metrics", "measure_text_width", "ElidedLabel", "FluentStatusStrip",
 ):

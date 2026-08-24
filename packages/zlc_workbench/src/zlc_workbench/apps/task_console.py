@@ -155,22 +155,37 @@ def build_console(session, *, window_ratio=None, request_close=None):
     run_save, close_save_worker = attach_qt_worker("zlc-panel-save")
 
     def _review_points(host, overlay, request):
-        def opener(review_host, parent, *, title):
-            return plot.review_image_points(
-                review_host,
-                overlay,
-                parent,
-                title=title,
-                message=request.message,
-                confirm_label=str(
-                    request.payload.get("confirm_label", "Continue")
-                ),
-                initial_excluded=tuple(
-                    request.payload.get("initial_excluded", ())
-                ),
+        point_ids = tuple(overlay.point_ids or ())
+        labels = tuple(
+            point_id if label is None else str(label)
+            for point_id, label in zip(
+                point_ids,
+                overlay.labels or (None,) * len(point_ids),
+                strict=True,
             )
-
-        return view.run_host_dialog(opener, host, title=request.title)
+        )
+        points = tuple(
+            (point_id, label, float(coordinate[0]), float(coordinate[1]))
+            for point_id, label, coordinate in zip(
+                point_ids,
+                labels,
+                overlay.coordinates,
+                strict=True,
+            )
+        )
+        surface = plot.ImagePointReviewSurface(host, overlay)
+        return view.review_points(
+            surface,
+            points,
+            title=request.title,
+            message=request.message,
+            confirm_label=str(
+                request.payload.get("confirm_label", "Continue")
+            ),
+            initial_excluded=tuple(
+                request.payload.get("initial_excluded", ())
+            ),
+        )
 
     try:
         presenter = ConsolePresenter(

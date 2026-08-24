@@ -3587,6 +3587,76 @@ class FluentWindow(FramelessWindow):
         super().hideEvent(event)
 
 
+class FluentDialogWindow(FluentWindow):
+    """Modal Fluent top-level window with the ordinary accept/reject contract."""
+
+    Accepted = QtWidgets.QDialog.Accepted
+    Rejected = QtWidgets.QDialog.Rejected
+
+    def __init__(
+        self,
+        *,
+        widget: QtWidgets.QWidget,
+        title: str,
+        parent=None,
+        window_ratio: float = WINDOW_SCREEN_FRACTION,
+    ) -> None:
+        ratio = float(window_ratio)
+        if not 0 < ratio <= 1:
+            raise ValueError("window_ratio must be between 0 and 1")
+        super().__init__(widget=widget, title=str(title), parent=parent)
+        self.setWindowModality(
+            QtCore.Qt.WindowModal if parent is not None else QtCore.Qt.ApplicationModal
+        )
+        self._dialog_ratio = ratio
+        self._dialog_result = self.Rejected
+        self._dialog_loop = None
+
+    def result(self) -> int:
+        return int(self._dialog_result)
+
+    def accept(self) -> None:
+        self._dialog_result = self.Accepted
+        self.close()
+
+    def reject(self) -> None:
+        self._dialog_result = self.Rejected
+        self.close()
+
+    def exec_(self) -> int:
+        """Show modally through the same Fluent shell and screen-size policy."""
+
+        if self._dialog_loop is not None:
+            raise RuntimeError("FluentDialogWindow is already executing")
+        self._dialog_result = self.Rejected
+        app = ensure_qt_app()
+        if QtCore.QThread.currentThread() != app.thread():
+            raise RuntimeError("Fluent dialogs must run on the GUI thread")
+        self.resize(screen_fit_window_size(self._dialog_ratio))
+        parent = self.parentWidget()
+        if parent is None:
+            center_window_on_primary_screen(self, app)
+        else:
+            frame = self.frameGeometry()
+            frame.moveCenter(parent.window().frameGeometry().center())
+            self.move(frame.topLeft())
+        retain_window(self)
+        loop = QtCore.QEventLoop(self)
+        self._dialog_loop = loop
+        self.closed.connect(loop.quit)
+        self.show()
+        try:
+            loop.exec_()
+            return self.result()
+        finally:
+            try:
+                self.closed.disconnect(loop.quit)
+            except (RuntimeError, TypeError):
+                pass
+            self._dialog_loop = None
+            release_window(self)
+
+
 def launch_qt_window(
     factory,
     *,

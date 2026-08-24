@@ -263,8 +263,18 @@ class _ConsoleView:
         self.screenshot_path = str(path)
         return str(path)
 
-    def run_host_dialog(self, opener, host, *, title: str):
-        return opener(host, None, title=title)
+    def review_points(
+        self,
+        surface,
+        points,
+        *,
+        title: str,
+        message: str = "",
+        confirm_label: str = "Continue",
+        initial_excluded=(),
+    ):
+        del surface, points, title, message, confirm_label
+        return tuple(initial_excluded)
 
     # -- panels -----------------------------------------------------------
 

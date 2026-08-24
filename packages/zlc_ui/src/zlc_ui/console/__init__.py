@@ -5,6 +5,7 @@ from .logic_row_view import LogicRowView
 from .logic_editor_view import LogicEditorView
 from .panel_card_view import PanelCardView
 from .panel_editor_view import PanelEditorView
+from .point_review_view import PointReviewView
 from .signal_chooser import SignalChooser, choose_signal
 from .handle import TaskConsoleHandle
 from .status_strip import StatusStrip
@@ -16,6 +17,7 @@ __all__ = [
     "LogicEditorView",
     "PanelCardView",
     "PanelEditorView",
+    "PointReviewView",
     "SignalChooser",
     "choose_signal",
     "StatusStrip",
