@@ -73,6 +73,12 @@ class LogicDraftFinalization:
     #: unavailable truthy values remain start issues.
     field_availability: Mapping[str, str]
     issues: tuple[str, ...]
+    #: The named source signal simply is not on the plane (or has not
+    #: published) yet.  For a processor that is not a start issue but a
+    #: standing follow: the console waits and completes the Start when the
+    #: signal appears.  An INCOMPATIBLE source -- present under another
+    #: contract -- stays a hard issue; waiting would never fix it.
+    source_absent: bool = False
 
     def __post_init__(self) -> None:
         for name in (
@@ -144,6 +150,12 @@ class LogicBinding:
     #: Asked to go, and still stopping.  The row stays until it has: a node
     #: taken off screen while it still holds a camera is one nobody can reach.
     removing: bool = False
+    #: A started processor keeps FOLLOWING its source: absent signal means
+    #: wait for it, a source restart means start again.  Only the operator's
+    #: own Stop clears it -- their stop is a decision, a source restart is
+    #: not.  Failures clear it too: silently retrying an error loop is how
+    #: an error gets ignored.
+    following: bool = False
     draft_revision: int = 0
     finalization_key: tuple = ()
     finalization: LogicDraftFinalization | None = None
@@ -367,20 +379,34 @@ def finalize_logic_draft(
     wants_source = dataset_inputs(descriptor)
     source = str(draft.source_signal).strip()
     compatible_sources = tuple(str(value) for value in source_options)
+    source_absent = False
+    processor_kind = getattr(descriptor.kind, "value", None) == "processor"
     if wants_source:
         if not source:
             issues.append("source_signal must be selected")
         elif source not in compatible_sources:
-            contracts = ", ".join(
-                str(spec.contract_id)
-                for spec in wants_source
-                if spec.contract_id is not None
-            ) or "a compatible"
-            issues.append(
-                f"{source!r} is not declared as {contracts} Dataset"
+            declared_elsewhere = any(
+                str(row.name) == source
+                for row in signal_plane.describe_signals()
             )
+            if declared_elsewhere or not processor_kind:
+                contracts = ", ".join(
+                    str(spec.contract_id)
+                    for spec in wants_source
+                    if spec.contract_id is not None
+                ) or "a compatible"
+                issues.append(
+                    f"{source!r} is not declared as {contracts} Dataset"
+                )
+            else:
+                # Nothing on the plane under that name yet: a processor
+                # follows, it does not fail.
+                source_absent = True
         elif signal_plane.latest_publication(source) is None:
-            issues.append(f"{source!r} has not published a Dataset yet")
+            if processor_kind:
+                source_absent = True
+            else:
+                issues.append(f"{source!r} has not published a Dataset yet")
     elif source:
         issues.append(f"{descriptor.api_name} has no Dataset source input")
 
@@ -455,6 +481,7 @@ def finalize_logic_draft(
         resources,
         field_availability,
         tuple(dict.fromkeys(str(issue) for issue in issues if str(issue))),
+        source_absent=source_absent,
     )
 
 

@@ -4056,3 +4056,105 @@ def test_restored_live_selector_answers_displayed_shot_before_plane_latest(
         assert session.signal_plane.latest_publication(signal) is newest
     finally:
         monitor.close()
+
+
+def test_a_started_processor_follows_its_source_across_absence_and_stop(
+    presenter, session, tmp_path
+) -> None:
+    """Start a processor before its camera exists: the Start is accepted as
+    a standing follow, the poll beat activates it the moment the source
+    publishes, and the operator's own Stop is the one thing that ends the
+    following."""
+
+    from zlc_atom.nodes.calibration import (
+        FrameContract,
+        ReadoutModel,
+        ReadoutModelKind,
+        SiteMap,
+        TrapCalibration,
+    )
+
+    # One warm shot only to learn the frame geometry for the calibration.
+    _node, warm = _one_shot(session, producer="warm")
+    height, width = np.asarray(warm.block.values).shape[-2:]
+    site_ids = ("site_0001",)
+    calibration = TrapCalibration(
+        SiteMap(
+            site_ids,
+            np.asarray(((width / 2.0, height / 2.0),)),
+            np.asarray((True,)),
+            np.asarray((1.0,)),
+        ),
+        (
+            ReadoutModel(
+                site_ids,
+                np.asarray((0.0,)),
+                np.zeros(1),
+                np.ones(1),
+                np.asarray((True,)),
+                np.asarray((1.0,)),
+            ),
+        ),
+        ReadoutModelKind.BOX,
+        FrameContract((height, width)),
+    )
+    artifact = calibration.save(tmp_path / "follow-calibration.json")
+
+    from zlc_workbench.logic import stable_signal_key
+
+    occupancy_id = presenter.add_logic("occupancy", open_editor=False)
+    live_signal = stable_signal_key("cm-live", "frames")
+    assert presenter.update_logic_draft(
+        occupancy_id,
+        source_signal=live_signal,
+        artifact_inputs={"calibration_path": str(artifact)},
+    )
+
+    # The source does not exist yet: Start is accepted as an intent.
+    started = presenter.start_logic(occupancy_id)
+    assert started is True, presenter.logic[occupancy_id].draft_error
+    binding = presenter.logic[occupancy_id]
+    assert binding.following
+    assert binding.host is None
+    state, status = presenter._logic_state(binding)
+    assert state == "running"
+    assert "following" in status and live_signal in status
+
+    # The camera arrives; the beat completes the standing Start.
+    camera_id = presenter.add_logic(
+        "camera_measurement",
+        node_id="cm-live",
+        values={
+            "exposure_seconds": 0.002,
+            "repeat": 0,
+            "frames_per_cycle": 1,
+        },
+        device_keys={"camera": "camera"},
+        open_editor=False,
+    )
+    session.load_pulse(PULSE_NAME)
+    assert presenter.start_logic(camera_id)
+
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        session.fire(shots=1)
+        presenter.beat()
+        if binding.host is not None and binding.host.running:
+            break
+        time.sleep(0.005)
+    assert binding.host is not None and binding.host.running
+    assert binding.following
+
+    # The operator's Stop is a decision: the follow ends with it.
+    assert presenter.stop_logic(occupancy_id)
+    assert not binding.following
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.host is None or not binding.host.running,
+    )
+    stopped_host = binding.host
+    for _ in range(3):
+        session.fire(shots=1)
+        presenter.beat()
+    assert binding.host is stopped_host
+    assert not binding.following

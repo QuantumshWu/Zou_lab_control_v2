@@ -4256,6 +4256,21 @@ class ConsolePresenter:
             self._refresh_console_projection()
             self.refresh_logic_editor(binding.node_id)
             return False
+        if self._processor_source_absent(binding, finalization):
+            # A processor is a standing follower, not a one-shot run: with
+            # no source signal yet there is nothing to bind to, so the Start
+            # is accepted as an intent and the poll beat completes it the
+            # moment the source publishes.
+            binding.following = True
+            binding.draft_error = ""
+            self._refresh_console_projection()
+            self.refresh_logic_editor(binding.node_id)
+            self._report(
+                f"{node_id} following {finalization.source_signal}"
+                " (waiting for the signal)",
+                severity="task",
+            )
+            return True
         try:
             candidate = self._build_logic_candidate(binding, finalization)
         except Exception as error:
@@ -4303,14 +4318,65 @@ class ConsolePresenter:
             return True
         activated = self._activate_candidate(binding, candidate)
         if activated:
+            if self._is_processor(binding):
+                binding.following = True
             self._begin_task_takeover(binding)
             self._refresh_console_projection()
         return activated
+
+    @staticmethod
+    def _is_processor(binding: LogicBinding) -> bool:
+        kind = getattr(binding.descriptor, "kind", None)
+        return getattr(kind, "value", kind) == "processor"
+
+    def _processor_source_absent(
+        self, binding: LogicBinding, finalization: object
+    ) -> bool:
+        if not self._is_processor(binding):
+            return False
+        signal = str(getattr(finalization, "source_signal", "") or "")
+        if not signal:
+            return False
+        return self.session.signal_plane.latest_publication(signal) is None
+
+    def _follow_processor_sources(self) -> None:
+        """Complete standing processor Starts whose source is alive again."""
+
+        for binding in tuple(self.logic.values()):
+            if (
+                not binding.following
+                or binding.removing
+                or binding.pending is not None
+            ):
+                continue
+            host = binding.host
+            if host is not None and (
+                host.running or host.observation.phase != "done"
+            ):
+                # Running follows by itself; a failure is the operator's to
+                # read, not this beat's to retry.
+                if host.observation.phase == "failed":
+                    binding.following = False
+                continue
+            finalization = binding.finalization
+            signal = str(getattr(finalization, "source_signal", "") or "")
+            if not signal:
+                continue
+            plane = self.session.signal_plane
+            if plane.latest_publication(signal) is None:
+                continue
+            if not plane.is_generation_live(signal):
+                # The retained tail of a finished run: a frozen pass already
+                # answered it, and re-running forever would spin.
+                continue
+            if not self.start_logic(binding.node_id):
+                binding.following = False
 
     def stop_logic(self, node_id: str) -> bool:
         binding = self.logic.get(str(node_id))
         if binding is None:
             return False
+        binding.following = False
         had_pending = binding.pending is not None
         self._discard_pending(binding)
         host = binding.host
@@ -4435,6 +4501,7 @@ class ConsolePresenter:
             if not candidate.waiting_for:
                 binding.pending = None
                 self._activate_candidate(binding, candidate)
+        self._follow_processor_sources()
         self._sync_task_takeover()
         self._refresh_console_projection()
 
@@ -4480,6 +4547,10 @@ class ConsolePresenter:
             error = binding.draft_error or (issues[0] if issues else "")
             state = "error" if error else "idle"
             status = error or "not started"
+            if binding.following and not error:
+                signal = getattr(binding.finalization, "source_signal", "")
+                state = "running"
+                status = f"following {signal} (waiting for the signal)"
         else:
             observed = host.observation
             if observed.error:
@@ -4492,6 +4563,12 @@ class ConsolePresenter:
                 issues = self._finalize_logic_binding(binding).issues
                 if issues:
                     state, status = "error", issues[0]
+                elif binding.following:
+                    signal = getattr(
+                        binding.finalization, "source_signal", ""
+                    )
+                    state = "running"
+                    status = f"following {signal} (source stopped)"
                 else:
                     state, status = "idle", self._observation_status(observed)
             warnings = tuple(getattr(observed, "warnings", ()))
