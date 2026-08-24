@@ -1,8 +1,9 @@
 """Frame survival: every forward pair, denominator in the validity.
 
 The processor consumes judged occupancy (cycles x frames x sites, bool)
-and publishes one dataset whose point rows are the forward frame pairs.
-The pinned identity is the one the design stands on: a MEAN over the
+and publishes one dataset whose LABELLED pair cell axis carries the
+forward frame pairs ("0-1", "0-2", "1-2"), one identity per pair.  The
+pinned identity is the one the design stands on: a MEAN over the
 published validity equals the pooled survival fraction computed from the
 raw pool -- averaging the dataset IS pooling the data.
 """
@@ -76,20 +77,21 @@ def test_forward_pairs_enumerate_every_combination() -> None:
     )
 
 
-def test_pairing_identity_per_row() -> None:
+def test_pairing_identity_per_entry() -> None:
     rng = np.random.default_rng(3)
     occupied = rng.random((40, 3, 6)) < 0.5
     processor = FrameSurvivalProcessor()
     survival = processor._pair(_occupied_snapshot(occupied))
     values = np.asarray(survival.block.values)
     validity = np.asarray(survival.expanded_validity())
-    for row, (condition, value) in enumerate(_forward_pairs(3)):
+    assert values.shape == (40, 1, 3, 6)  # (cycles, 1 point, pairs, sites)
+    for entry, (condition, value) in enumerate(_forward_pairs(3)):
         eligible = occupied[:, condition, :]
-        np.testing.assert_array_equal(validity[:, row, :], eligible)
+        np.testing.assert_array_equal(validity[:, 0, entry, :], eligible)
         np.testing.assert_array_equal(
-            values[:, row, :][eligible], occupied[:, value, :][eligible]
+            values[:, 0, entry, :][eligible], occupied[:, value, :][eligible]
         )
-        assert np.all(np.isnan(values[:, row, :][~eligible]))
+        assert np.all(np.isnan(values[:, 0, entry, :][~eligible]))
 
 
 def test_unjudgeable_frames_leave_the_denominator() -> None:
@@ -100,7 +102,7 @@ def test_unjudgeable_frames_leave_the_denominator() -> None:
     survival = FrameSurvivalProcessor()._pair(
         _occupied_snapshot(occupied, valid)
     )
-    validity = np.asarray(survival.expanded_validity())[:, 0, :]
+    validity = np.asarray(survival.expanded_validity())[:, 0, 0, :]
     assert not validity[1].any()
     assert not validity[2, 0]
     assert validity[0].all() and validity[3].all()
@@ -114,24 +116,28 @@ def test_mean_over_validity_is_the_pooled_survival() -> None:
     survival = FrameSurvivalProcessor()._pair(_occupied_snapshot(occupied))
     values = np.asarray(survival.block.values)
     validity = np.asarray(survival.expanded_validity())
-    for row, (condition, value) in enumerate(_forward_pairs(3)):
+    for entry, (condition, value) in enumerate(_forward_pairs(3)):
         loaded = occupied[:, condition, :]
         pooled = (occupied[:, value, :] & loaded).sum() / loaded.sum()
-        projected = np.nanmean(values[:, row, :][validity[:, row, :]])
+        projected = np.nanmean(
+            values[:, 0, entry, :][validity[:, 0, entry, :]]
+        )
         np.testing.assert_allclose(projected, pooled, rtol=1e-12)
 
 
-def test_point_columns_name_both_frames() -> None:
+def test_pair_axis_carries_one_label_per_pair() -> None:
     occupied = np.zeros((2, 3, 2), dtype=bool)
     survival = FrameSurvivalProcessor(producer="fs")._pair(
         _occupied_snapshot(occupied)
     )
-    table = survival.block.schema.point_table
-    assert table.row_count == 3
-    by_name = {column.name: column for column in table.columns}
-    assert by_name["condition_frame"].values == (0.0, 0.0, 1.0)
-    assert by_name["value_frame"].values == (1.0, 2.0, 2.0)
-    assert by_name["condition_frame"].coordinate_id == AxisId("fs.condition_frame")
+    schema = survival.block.schema
+    assert schema.point_table.row_count == 1
+    assert schema.point_table.columns == ()
+    pair_axis, site_axis = schema.cell_schema.data_axes
+    assert pair_axis.axis_id == AxisId("fs.pair")
+    assert pair_axis.size == 3
+    assert pair_axis.coordinate_labels == ("0-1", "0-2", "1-2")
+    assert site_axis.axis_id == AxisId("occupancy.site")
 
 
 def test_single_frame_and_wrong_shapes_are_refused() -> None:
@@ -200,9 +206,9 @@ def test_evaluate_translates_exact_coverage_by_whole_cycles() -> None:
     )
     outputs = FrameSurvivalProcessor().evaluate(signal)
     survival = outputs["survival"]
-    assert survival.coverage == DatasetCoverage(2 * 3, 5 * 3)  # 3 pairs
+    assert survival.coverage == DatasetCoverage(2, 5)  # one cell per cycle
     assert survival.cell_origin == (1, 0)
-    assert survival.canonical_schema.point_table.row_count == 3
+    assert survival.canonical_schema.point_table.row_count == 1
     assert survival.canonical_schema.repeat_axis.size == 5
 
 
@@ -228,9 +234,9 @@ def test_terminal_dataset_evaluates_frozen() -> None:
         SignalValue("@logic/occupancy/occupied", snapshot, None)
     )
     survival = outputs["survival"]
-    assert survival.coverage == DatasetCoverage(8, 8)  # one pair per cycle
+    assert survival.coverage == DatasetCoverage(8, 8)  # one cell per cycle
     values = np.asarray(survival.snapshot.block.values)
-    assert values.shape == (8, 1, 3)
+    assert values.shape == (8, 1, 1, 3)  # (cycles, 1 point, 1 pair, sites)
 
 
 def test_discovered_as_a_logic_node() -> None:
@@ -248,16 +254,22 @@ def test_plot_mean_projection_gives_pooled_rate_and_binomial_band() -> None:
     from zlc_plot.kinds import AxisRef
 
     rng = np.random.default_rng(7)
-    occupied = rng.random((80, 2, 6)) < 0.55
+    occupied = rng.random((80, 3, 6)) < 0.55
     survival = FrameSurvivalProcessor()._pair(_occupied_snapshot(occupied))
     view = DataView(survival)
     series = view.curve(
-        AxisRef.point("frame_survival.value_frame"), uncertainty=True
+        AxisRef.data("frame_survival.pair"), uncertainty=True
     ).series[0]
-    loaded = occupied[:, 0, :]
-    pooled = (occupied[:, 1, :] & loaded).sum() / loaded.sum()
-    np.testing.assert_allclose(float(series.y.canonical[0]), pooled, rtol=1e-12)
-    count = int(loaded.sum())
-    binomial = np.sqrt(pooled * (1.0 - pooled) / (count - 1))
-    np.testing.assert_allclose(float(series.sem[0]), binomial, rtol=1e-12)
-    assert int(series.counts[0]) == count
+    assert len(series.y.canonical) == 3  # one plotted point per pair
+    for entry, (condition, value) in enumerate(_forward_pairs(3)):
+        loaded = occupied[:, condition, :]
+        pooled = (occupied[:, value, :] & loaded).sum() / loaded.sum()
+        np.testing.assert_allclose(
+            float(series.y.canonical[entry]), pooled, rtol=1e-12
+        )
+        count = int(loaded.sum())
+        binomial = np.sqrt(pooled * (1.0 - pooled) / (count - 1))
+        np.testing.assert_allclose(
+            float(series.sem[entry]), binomial, rtol=1e-12
+        )
+        assert int(series.counts[entry]) == count

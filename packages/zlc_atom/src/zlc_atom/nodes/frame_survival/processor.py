@@ -14,23 +14,27 @@ pairing: its two probe windows are that task's semantics.  THIS processor
 is the frame-general pairing for any multi-frame cycle.
 
 WHAT IT PUBLISHES.  One dataset, ``survival``, holding EVERY forward frame
-pair at once: the pairs are the point axis (two columns, condition_frame
-and value_frame), so a three-frame cycle publishes rows (0,1), (0,2) and
-(1,2) with no authored configuration -- the combinations follow from the
-data.  Each row's value is the value frame's occupancy as a float and its
-validity is that row's OWN denominator: condition frame loaded AND both
-frames judgeable.  A panel's MEAN projection is therefore exactly the
-pooled survival fraction -- every loaded site is one Bernoulli trial, and
-a shot that loaded three atoms says less than one that loaded thirty.  The
-SITE axis is kept: a trap that never keeps its atom is a fact about that
-trap, and averaging it away is how you never find out.
+pair at once as ONE labelled cell axis: a three-frame cycle carries pair
+entries "0-1", "0-2", "1-2" straight from the data -- one identity per
+pair, the calibration model-axis pattern (numeric identity, readable
+labels).  A pair is derived structure INSIDE one acquisition cycle, not a
+scan step, so it is cell data and the point table degenerates to one row.
+Each pair's value is the later frame's occupancy as a float and its
+validity is that pair's OWN denominator: the earlier frame loaded AND
+both frames judgeable.  A panel's MEAN projection is therefore exactly
+the pooled survival fraction -- every loaded site is one Bernoulli trial,
+and a shot that loaded three atoms says less than one that loaded thirty.
+The SITE axis is kept: a trap that never keeps its atom is a fact about
+that trap, and averaging it away is how you never find out.
 """
 
 from __future__ import annotations
 
 import numpy as np
 from zlc_data import (
+    COMPONENT,
     AxisId,
+    AxisSpec,
     DatasetSchema,
     OwnedSnapshot,
     PointColumn,
@@ -117,29 +121,35 @@ class FrameSurvivalProcessor:
     def _output_schema(self, source: DatasetSchema) -> DatasetSchema:
         frame_column, site_axis = self._source_axes(source)
         pairs = _forward_pairs(source.point_table.row_count)
-        condition_column = PointColumn(
-            AxisId(f"{self.instance_id}.condition_frame"),
-            "condition_frame",
-            frame_column.role,
-            PointColumn.NUMERIC,
-            tuple(float(condition) for condition, _value in pairs),
+        # Labels carry the SOURCE frame coordinates, whatever numbering the
+        # camera declared: the pair identity an operator reads is the one
+        # the frame axis already showed them.
+        frame_names = tuple(
+            "?" if value is None else f"{value:g}"
+            for value in frame_column.values
         )
-        value_column = PointColumn(
-            AxisId(f"{self.instance_id}.value_frame"),
-            "value_frame",
-            frame_column.role,
-            PointColumn.NUMERIC,
-            tuple(float(value) for _condition, value in pairs),
+        pair_axis = AxisSpec(
+            AxisId(f"{self.instance_id}.pair"),
+            "pair",
+            COMPONENT,
+            len(pairs),
+            coordinate_labels=tuple(
+                f"{frame_names[condition]}-{frame_names[value]}"
+                for condition, value in pairs
+            ),
         )
-        # The pair rows are not a scan grid: any topology the source carried
-        # described its own point rows, which no longer exist here.
+        # A pair is derived structure inside one cycle, not a scan step: the
+        # point table degenerates to one row, and any topology the source
+        # carried described its own rows, which no longer exist here.
         return DatasetSchema(
             source.repeat_axis,
-            PointTable(len(pairs), (condition_column, value_column)),
+            PointTable(1, ()),
             None,
             ValueSchema(
-                (site_axis,),
-                ValidityContract.components(site_axis.axis_id),
+                (pair_axis, site_axis),
+                ValidityContract.components(
+                    pair_axis.axis_id, site_axis.axis_id
+                ),
                 np.dtype("<f8"),
                 "1",
             ),
@@ -154,20 +164,22 @@ class FrameSurvivalProcessor:
         values = np.asarray(occupied.block.values, dtype=bool)
         valid = np.asarray(occupied.expanded_validity(), dtype=bool)
         cycles, _frames, sites = values.shape
-        survival = np.full((cycles, len(pairs), sites), np.nan, dtype="<f8")
-        eligible = np.zeros((cycles, len(pairs), sites), dtype=bool)
-        for row, (condition, value) in enumerate(pairs):
-            # Eligible = the condition frame saw the site loaded AND both
+        survival = np.full(
+            (cycles, 1, len(pairs), sites), np.nan, dtype="<f8"
+        )
+        eligible = np.zeros((cycles, 1, len(pairs), sites), dtype=bool)
+        for entry, (condition, value) in enumerate(pairs):
+            # Eligible = the earlier frame saw the site loaded AND both
             # frames were judgeable.  That set is the denominator, so it IS
             # the validity: a MEAN over it is the pooled survival fraction.
-            row_eligible = (
+            entry_eligible = (
                 values[:, condition, :]
                 & valid[:, condition, :]
                 & valid[:, value, :]
             )
-            eligible[:, row, :] = row_eligible
-            survival[:, row, :] = np.where(
-                row_eligible, values[:, value, :].astype("<f8"), np.nan
+            eligible[:, 0, entry, :] = entry_eligible
+            survival[:, 0, entry, :] = np.where(
+                entry_eligible, values[:, value, :].astype("<f8"), np.nan
             )
         return owned_snapshot_from_arrays(
             self._output_schema(schema),
@@ -204,9 +216,9 @@ class FrameSurvivalProcessor:
                 raise ValueError("finite source event lacks canonical placement")
             canonical = self._output_schema(signal_value.canonical_schema)
             # The source ledger counts (cycles x frames) cells; this output
-            # is (cycles x pairs).  A cycle publishes all of its frames
-            # together, so the translation is exact -- and refused loudly if
-            # it ever is not.
+            # is ONE cell per cycle -- the pairs live inside the cell.  A
+            # cycle publishes all of its frames together, so the translation
+            # is exact -- and refused loudly if it ever is not.
             source_coverage = signal_value.coverage
             if (
                 source_coverage.written_cells % frames
@@ -217,14 +229,14 @@ class FrameSurvivalProcessor:
                     "keep exact bookkeeping"
                 )
             coverage = DatasetCoverage(
-                (source_coverage.written_cells // frames) * pair_count,
-                (source_coverage.total_cells // frames) * pair_count,
+                source_coverage.written_cells // frames,
+                source_coverage.total_cells // frames,
             )
             origin = (signal_value.cell_origin[0], 0)
         elif signal_value.coverage is None:
             cycles = source_schema.repeat_axis.size
             canonical = self._output_schema(source_schema)
-            coverage = DatasetCoverage(cycles * pair_count, cycles * pair_count)
+            coverage = DatasetCoverage(cycles, cycles)
             origin = (0, 0)
         else:
             canonical = None
