@@ -1771,18 +1771,25 @@ class DataView:
             value = _reduce_scalar(pooled, aggregation)
             sem = None
             if uncertainty:
-                finite = pooled[np.isfinite(pooled)]
+                # Masked mean of squares, never a gather of the finite
+                # subset: the copy cost more than the moment.
+                finite = np.isfinite(pooled)
+                count = int(np.count_nonzero(finite))
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    mean_square = (
+                        np.sum(
+                            np.square(pooled),
+                            where=finite,
+                            dtype=np.float64,
+                        )
+                        / count
+                        if count
+                        else np.nan
+                    )
                 sem = _sem_from_moments(
                     np.asarray([value], dtype=np.float64),
-                    np.asarray(
-                        [
-                            np.mean(np.square(finite))
-                            if finite.size
-                            else np.nan
-                        ],
-                        dtype=np.float64,
-                    ),
-                    np.asarray([finite.size], dtype=np.int64),
+                    np.asarray([mean_square], dtype=np.float64),
+                    np.asarray([count], dtype=np.int64),
                 )
             return RollingSample(
                 revision=self._samples.revision,

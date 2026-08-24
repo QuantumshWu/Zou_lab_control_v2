@@ -9,6 +9,8 @@ from numbers import Integral
 from types import MappingProxyType
 from typing import Any, Callable
 
+import math
+
 import numpy as np
 
 from zlc_data import BlockId, DatasetRevisionRef, OwnedSnapshot
@@ -33,6 +35,7 @@ from .data_view import (
     QuantityArray,
     RollingSample,
     aligned_histogram_edges,
+    _sem_from_moments,
 )
 from .fit import (
     FitModelSpec,
@@ -68,6 +71,7 @@ from .specs import (
     PulseTimelinePlot,
     RollingPlot,
     semantic_spec,
+    Reduction,
 )
 from .state import DisplayState
 from ._validation import integer, readonly_copy
@@ -171,13 +175,16 @@ def _moments_of(values: np.ndarray | None) -> tuple[float, float, float] | None:
     if values is None:
         return None
     flat = np.asarray(values, dtype=float).reshape(-1)
-    flat = flat[np.isfinite(flat)]
-    if not flat.size:
+    # Masked sums, never a gather: copying the finite subset of a
+    # camera-sized pool cost more than the three moments themselves.
+    finite = np.isfinite(flat)
+    count = int(np.count_nonzero(finite))
+    if not count:
         return (0.0, 0.0, 0.0)
     return (
-        float(flat.size),
-        float(np.sum(flat)),
-        float(np.dot(flat, flat)),
+        float(count),
+        float(np.sum(flat, where=finite, dtype=np.float64)),
+        float(np.sum(np.square(flat), where=finite, dtype=np.float64)),
     )
 
 
@@ -232,12 +239,39 @@ def accumulate_history(
         )
     elif history[-1].sample.revision != projection._revision:
         appended = view.pooled_values()
+        moments = _moments_of(appended)
+        # The ungrouped MEAN sample IS the moments: deriving it here keeps
+        # ONE pass over the pool where rolling_sample would run the same
+        # sums again on the same bytes.
+        if group is None and aggregation is Reduction.MEAN and moments:
+            count, total, squares = moments
+            mean = total / count if count else math.nan
+            sem = _sem_from_moments(
+                np.asarray([mean], dtype=np.float64),
+                np.asarray(
+                    [squares / count if count else math.nan],
+                    dtype=np.float64,
+                ),
+                np.asarray([int(count)], dtype=np.int64),
+            )
+            sample = RollingSample(
+                revision=projection._revision,
+                generation=view.samples.generation,
+                values=np.asarray([mean], dtype=np.float64),
+                valid=np.asarray([count > 0 and math.isfinite(mean)]),
+                group_keys=((),),
+                sem=sem,
+            )
+        else:
+            sample = view.rolling_sample(
+                group=group, aggregation=aggregation
+            )
         history.append(
             RollingHistoryPoint(
-                view.rolling_sample(group=group, aggregation=aggregation),
+                sample,
                 history[-1].shot_index + 1,
                 appended,
-                _moments_of(appended),
+                moments,
             )
         )
     return _within_value_budget(history[-RETAINED_HISTORY_LIMIT:])
