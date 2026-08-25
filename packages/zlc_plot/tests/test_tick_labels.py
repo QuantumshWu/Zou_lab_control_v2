@@ -256,9 +256,11 @@ def test_no_two_tick_labels_come_closer_than_one_digit(
     Every panel this bench opens: a camera frame or a grid of them, at the
     presets an operator picks, at the ROIs this camera takes.  Two labels may
     only come within a digit of each other when the axis is already at the
-    bottom of the ladder -- two labels at the smallest readable size -- and no
-    two may overlap at all, whichever axes drew them, because a label that
-    prints across its neighbour's reads as one wrong number.
+    bottom of the ladder -- two labels at the smallest readable size.  Labels
+    of DIFFERENT axes may not overlap either, except where both axes are at
+    that same floor: the floor of two outranks separation, because a single
+    label names a point, not a scale, while a crowded corner is still two
+    readable numbers.
     """
 
     import numpy as np
@@ -289,8 +291,11 @@ def test_no_two_tick_labels_come_closer_than_one_digit(
         dpi = float(renderer.figure.dpi)
         boxes = []
         rails = []
+        floor_axes = set()
         for where, name, drawn in _rendered_labels(renderer):
             boxes.extend((where, text, box) for text, _pt, box in drawn)
+            if len(drawn) <= 2:
+                floor_axes.add(where)
             if where.startswith("distribution") and name == "x":
                 rails.append(len(drawn))
             if len(drawn) < 2:
@@ -315,6 +320,10 @@ def test_no_two_tick_labels_come_closer_than_one_digit(
                 one, two = boxes[first], boxes[second]
                 if one[0] == two[0]:
                     continue
+                if one[0] in floor_axes and two[0] in floor_axes:
+                    # Both axes are at the two-label floor: the corner may
+                    # crowd, by the same ruling that put the floor there.
+                    continue
                 assert not one[2].overlaps(two[2]), (
                     f"{one[0]} {one[1]!r} prints over {two[0]} {two[1]!r}"
                 )
@@ -322,3 +331,32 @@ def test_no_two_tick_labels_come_closer_than_one_digit(
         assert all(count <= 2 for count in rails), rails
     finally:
         session.close()
+
+
+@pytest.mark.parametrize("name,low,high", RANGES)
+@pytest.mark.parametrize(
+    "inches", (0.3, 0.45, 0.6, 0.9, 1.2), ids=lambda v: f"{v}in"
+)
+def test_every_axis_shows_at_least_two_labels_even_as_a_tiny_cell(
+    name, low, high, inches
+) -> None:
+    """A single label names a point, not a scale.
+
+    The floor of two holds on every linear axis at every size this bench
+    can shrink a facet cell to -- crowding a neighbour is the accepted
+    price, an image cell whose one label reads "0" is not.  (The one
+    surface allowed a single label is a zero-anchored counts rail, which
+    never takes this locator.)
+    """
+
+    figure, axes = _drawn(low, high, surface="cell", inches=inches)
+    try:
+        for axis in (axes.xaxis, axes.yaxis):
+            shown = [
+                text.get_text()
+                for text in axis.get_ticklabels()
+                if text.get_text()
+            ]
+            assert len(shown) >= 2, (name, inches, axis.axis_name, shown)
+    finally:
+        plt.close(figure)
