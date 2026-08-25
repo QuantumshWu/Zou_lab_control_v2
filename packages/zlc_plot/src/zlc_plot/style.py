@@ -546,7 +546,7 @@ class RenderPolicyConfig:
 
     image_default_colormap: str = "gray"
     image_colormaps: tuple[str, ...] = (
-        "inferno", "viridis", "magma", "plasma", "gray", "RdBu_r",
+        "inferno", "viridis", "magma", "plasma", "gray", "RdBu_r", "Blues",
     )
     image_front: ImageFrontPolicy = ImageFrontPolicy()
     image_origin: str = "upper"
@@ -555,7 +555,9 @@ class RenderPolicyConfig:
     #: outline darkening, the scene chrome greys, the bar-height budget as
     #: a fraction of the ground diagonal, and the quality knobs -- one
     #: place, so no shading coefficient lives in the renderer.
-    height_bars_side_shades: tuple[float, float] = (0.62, 0.80)
+    #: Interp-shaded sides carry the depth cue; keep both faces unshaded
+    #: like the reference (MATLAB shading interp draws no lighting).
+    height_bars_side_shades: tuple[float, float] = (1.0, 1.0)
     height_bars_edge_darken: float = 0.85
     height_bars_background_rgb: tuple[float, float, float] = (1.0, 1.0, 1.0)
     height_bars_axis_color: str = "black" 

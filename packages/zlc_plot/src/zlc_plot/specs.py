@@ -554,6 +554,11 @@ def _histogram_parameters() -> tuple[ParameterSpec[object], ...]:
     )
 
 
+from ._height3d_raster import HeightBarCamera as _HeightBarCamera
+
+_HOME_CAMERA = _HeightBarCamera()
+
+
 class ImagePresentation(str, Enum):
     """How the Image kind paints its one value grid."""
 
@@ -636,7 +641,7 @@ def _image_parameters(style: PlotStyleConfig) -> tuple[ParameterSpec[object], ..
                 "camera_azimuth",
                 (int, float),
                 RenderEffect.BASE_GEOMETRY,
-                default=-55.0,
+                default=_HOME_CAMERA.azimuth_deg,
                 normalizer=_finite_number,
                 label="View azimuth",
             ),
@@ -644,7 +649,7 @@ def _image_parameters(style: PlotStyleConfig) -> tuple[ParameterSpec[object], ..
                 "camera_elevation",
                 (int, float),
                 RenderEffect.BASE_GEOMETRY,
-                default=28.0,
+                default=_HOME_CAMERA.elevation_deg,
                 normalizer=_finite_number,
                 label="View elevation",
             ),
@@ -652,7 +657,7 @@ def _image_parameters(style: PlotStyleConfig) -> tuple[ParameterSpec[object], ..
                 "camera_zoom",
                 (int, float),
                 RenderEffect.BASE_GEOMETRY,
-                default=1.0,
+                default=_HOME_CAMERA.zoom,
                 normalizer=_finite_number,
                 label="View zoom",
             ),

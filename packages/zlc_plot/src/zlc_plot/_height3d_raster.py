@@ -40,7 +40,7 @@ class HeightBarCamera:
     """The presentation camera: orbit angles plus a zoom factor."""
 
     azimuth_deg: float = -55.0
-    elevation_deg: float = 28.0
+    elevation_deg: float = 30.0
     zoom: float = 1.0
 
     def __post_init__(self) -> None:
@@ -187,10 +187,11 @@ def render_height_bars(
     width: int,
     height: int,
     supersample: int = 1,
-    side_shades: tuple[float, float] = (0.62, 0.80),
+    side_shades: tuple[float, float] = (1.0, 1.0),
     edge_darken: float = 0.85,
     grid_rgb: tuple[float, float, float] = (0.78, 0.78, 0.80),
     background_rgb: tuple[float, float, float] = (1.0, 1.0, 1.0),
+    zero_rgb: tuple[float, float, float] | None = None,
     z_fraction: float = 0.55,
     wall_ticks: int = 4,
     pool_pixels_per_cell: float = 2.0,
@@ -371,8 +372,23 @@ def render_height_bars(
 
     cell_rgb = rgb_grid[cell_b, cell_a]
     top_rgb_cells = cell_rgb
-    side_rgb_cells = cell_rgb * shade[..., None]
     dense_surface = scale < edge_min_cell_px * supersample
+    # Side faces interp-shade through the colour scale, the reference
+    # figures' MATLAB ``shading interp`` look: the z=0 end of every side
+    # face takes the zero-value colour, the far end the bar's own.
+    if zero_rgb is None:
+        base_rgb_cells = cell_rgb
+    else:
+        base_rgb_cells = np.broadcast_to(
+            np.asarray(zero_rgb, dtype=np.float32), cell_rgb.shape
+        )
+    positive = z_top32[cell_b, cell_a] > 0.0
+    side_top_rgb = np.where(
+        positive[..., None], cell_rgb, base_rgb_cells
+    ) * shade[..., None]
+    side_bottom_rgb = np.where(
+        positive[..., None], base_rgb_cells, cell_rgb
+    ) * shade[..., None]
     if dense_surface:
         # Sub-outline density: the grid reads as a heightfield, and flat
         # per-cell tops lose all depth.  Light the top faces by the local
@@ -392,7 +408,8 @@ def render_height_bars(
         # face slivers: painting those the constant side grey turned the
         # whole surface grey.  A dense grid is a continuous surface, so
         # its sides carry the same lit colour as its tops.
-        side_rgb_cells = top_rgb_cells
+        side_top_rgb = top_rgb_cells
+        side_bottom_rgb = top_rgb_cells
     background = np.asarray(background_rgb, dtype=np.float32)
 
     span_cols = [
@@ -405,11 +422,23 @@ def render_height_bars(
     floor_hi = np.where(inside & ~cell_ok, g_hi, -np.inf)
     span_lo = [side_lo.ravel(), top_lo.ravel(), floor_lo.ravel()]
     span_hi = [side_hi.ravel(), top_hi.ravel(), floor_hi.ravel()]
-    span_rgb = [
-        side_rgb_cells.reshape(-1, 3),
+    # The side spans remember their UNCLIPPED extremes: the gradient's
+    # intercept and slope come from the full face, so watermark clipping
+    # trims pixels without shifting the shading.
+    side_full_lo = (g_lo + cell_bot).ravel()
+    side_full_hi = (g_lo + cell_top).ravel()
+    span_rgb_low = [
+        side_bottom_rgb.reshape(-1, 3),
         top_rgb_cells.reshape(-1, 3),
         np.broadcast_to(background, (S * render_w, 3)),
     ]
+    span_rgb_high = [
+        side_top_rgb.reshape(-1, 3),
+        top_rgb_cells.reshape(-1, 3),
+        np.broadcast_to(background, (S * render_w, 3)),
+    ]
+    span_full_lo = [side_full_lo, top_lo.ravel(), floor_lo.ravel()]
+    span_full_hi = [side_full_hi, top_hi.ravel(), floor_hi.ravel()]
     span_id = [
         (face_id + 1 + entered_x.astype(np.int64)).ravel(),
         (face_id + 3).ravel(),
@@ -426,22 +455,33 @@ def render_height_bars(
     )
     pane_visible = t_exit > t_enter
     span_cols.append(columns_row)
-    span_lo.append(np.where(pane_visible, pane_bottom, np.inf))
-    span_hi.append(np.where(pane_visible, pane_top_y, -np.inf))
-    span_rgb.append(np.broadcast_to(background, (render_w, 3)))
+    pane_lo_values = np.where(pane_visible, pane_bottom, np.inf)
+    pane_hi_values = np.where(pane_visible, pane_top_y, -np.inf)
+    span_lo.append(pane_lo_values)
+    span_hi.append(pane_hi_values)
+    span_rgb_low.append(np.broadcast_to(background, (render_w, 3)))
+    span_rgb_high.append(np.broadcast_to(background, (render_w, 3)))
+    span_full_lo.append(pane_lo_values)
+    span_full_hi.append(pane_hi_values)
     span_id.append(np.broadcast_to(np.int64(2), (render_w,)))
 
     all_cols = np.concatenate(span_cols)
     all_lo = np.concatenate(span_lo)
     all_hi = np.concatenate(span_hi)
-    all_rgb = np.concatenate(span_rgb)
+    all_rgb_low = np.concatenate(span_rgb_low)
+    all_rgb_high = np.concatenate(span_rgb_high)
+    all_full_lo = np.concatenate(span_full_lo)
+    all_full_hi = np.concatenate(span_full_hi)
     all_id = np.concatenate(span_id)
 
     keep = all_hi > all_lo
     cols = all_cols[keep]
     lo = all_lo[keep]
     hi = all_hi[keep]
-    colors = all_rgb[keep]
+    color_low = all_rgb_low[keep]
+    color_high = all_rgb_high[keep]
+    full_lo = all_full_lo[keep]
+    full_hi = all_full_hi[keep]
     ids = all_id[keep]
     row_hi = np.clip((y_high - lo) * scale, 0.0, float(render_h)).astype(
         np.int64
@@ -453,8 +493,19 @@ def render_height_bars(
     cols = cols[keep2]
     row_lo = row_lo[keep2]
     row_hi = row_hi[keep2]
-    colors = colors[keep2]
+    color_low = color_low[keep2]
+    color_high = color_high[keep2]
+    full_lo = full_lo[keep2]
+    full_hi = full_hi[keep2]
     ids = ids[keep2]
+
+    # Gradient as intercept+slope in row space, from the UNCLIPPED face:
+    # colour(row) = A + s*row, with s = 0 for every constant span.
+    full_row_bottom = (y_high - full_lo) * scale   # larger row (z low end)
+    full_row_top = (y_high - full_hi) * scale
+    span_height = np.maximum(full_row_bottom - full_row_top, 1e-6)
+    slope = (color_low - color_high) / span_height[:, None]
+    intercept = color_high - slope * full_row_top[:, None]
 
     stride = render_w
     flat_lo = row_lo * stride + cols
@@ -468,16 +519,29 @@ def render_height_bars(
         flat_hi * 3 + 1,
         flat_hi * 3 + 2,
     ])
-    channel_weights = np.concatenate([
-        colors[:, 0], colors[:, 1], colors[:, 2],
-        -colors[:, 0], -colors[:, 1], -colors[:, 2],
+    intercept_weights = np.concatenate([
+        intercept[:, 0], intercept[:, 1], intercept[:, 2],
+        -intercept[:, 0], -intercept[:, 1], -intercept[:, 2],
     ]).astype(np.float64) * 255.0
-    rgb_diff = np.bincount(
-        channel_index, weights=channel_weights, minlength=plane * 3
+    slope_weights = np.concatenate([
+        slope[:, 0], slope[:, 1], slope[:, 2],
+        -slope[:, 0], -slope[:, 1], -slope[:, 2],
+    ]).astype(np.float64) * 255.0
+    intercept_diff = np.bincount(
+        channel_index, weights=intercept_weights, minlength=plane * 3
+    ).astype(np.float32)
+    slope_diff = np.bincount(
+        channel_index, weights=slope_weights, minlength=plane * 3
     ).astype(np.float32)
     filled = np.cumsum(
-        rgb_diff.reshape(render_h + 1, stride, 3), axis=0
+        intercept_diff.reshape(render_h + 1, stride, 3), axis=0
     )[:render_h]
+    slope_plane = np.cumsum(
+        slope_diff.reshape(render_h + 1, stride, 3), axis=0
+    )[:render_h]
+    filled += slope_plane * np.arange(render_h, dtype=np.float32)[
+        :, None, None
+    ]
     id_weights = ids.astype(np.float64)
     id_diff = np.bincount(
         flat_lo, weights=id_weights, minlength=plane

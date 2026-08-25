@@ -3269,11 +3269,19 @@ class MatplotlibRenderer:
             )
             else 1
         )
+        with np.errstate(invalid="ignore"):
+            zero_code = int(
+                np.clip((0.0 - low) * (256.0 / (high - low)), 0.0, 255.0)
+            )
+        zero_rgb = tuple(
+            float(v) for v in lut[zero_code][:3].astype(np.float32) / 255.0
+        )
         frame, scene = render_height_bars(
             heights,
             top_rgb,
             camera=camera,
             value_limits=(low, high),
+            zero_rgb=zero_rgb,
             width=max(box_w // divisor, 8),
             height=max(box_h // divisor, 8),
             supersample=supersample,
@@ -3286,6 +3294,9 @@ class MatplotlibRenderer:
         )
         self._height_bars_scene_map = scene
         self._height_bars_axes_id = id(axes)
+        finite_heights = heights[np.isfinite(heights)]
+        lowest = float(finite_heights.min()) if finite_heights.size else 0.0
+        self._height_bars_floor_value = float(np.clip(min(lowest, 0.0), low, 0.0))
         self._height_bars_data_frame = (
             tuple(float(v) for v in extent),
             int(heights.shape[1]),
@@ -3377,7 +3388,11 @@ class MatplotlibRenderer:
         data_frame = getattr(self, "_height_bars_data_frame", None)
         if data_frame is not None:
             (left, right, bottom, top_c), source_nx, source_ny = data_frame
-            base_value = min(z_low, 0.0)
+            # Labels hug the lowest geometry actually drawn: the floor at
+            # z=0, or the deepest hanging bar.  Anchoring at the colour
+            # limit floated them mid-air below the scene whenever the
+            # limits reach below the data.
+            base_value = getattr(self, "_height_bars_floor_value", 0.0)
 
             def picks(count: int) -> list[int]:
                 shown = min(count, 6)
@@ -3390,6 +3405,8 @@ class MatplotlibRenderer:
                 a, b = scene.fold_cell(0, column * scene.pool_x)
                 anchor = scene.project(a + 0.5, 0.0, base_value)
                 f = self._height_bars_fraction(scene, *anchor)
+                segments_x.extend((f[0], f[0], np.nan))
+                segments_y.extend((f[1], f[1] - 0.8 * tick_px, np.nan))
                 value = left + (column + 0.5) * (right - left) / source_nx
                 wanted_texts.append(
                     (f[0], f[1] - 1.2 * tick_px, f"{value:g}", "center", "top")
@@ -3403,6 +3420,8 @@ class MatplotlibRenderer:
                 a, b = scene.fold_cell(row * scene.pool_y, 0)
                 anchor = scene.project(float(scene.nx), b + 0.5, base_value)
                 f = self._height_bars_fraction(scene, *anchor)
+                segments_x.extend((f[0], f[0] + 0.7 * tick_px, np.nan))
+                segments_y.extend((f[1], f[1] - 0.6 * tick_px, np.nan))
                 value = top_c + (row + 0.5) * (bottom - top_c) / source_ny
                 wanted_texts.append(
                     (f[0] + tick_px, f[1] - tick_px, f"{value:g}", "left", "top")
