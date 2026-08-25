@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "matplotlib==3.10.8",
+    "numba==0.67.0",
     "numpy==2.4.2",
     "Pillow==12.1.1",
     "PyQt5==5.15.11",

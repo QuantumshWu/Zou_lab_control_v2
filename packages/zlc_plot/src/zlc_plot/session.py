@@ -34,6 +34,8 @@ from .errors import RevisionError
 
 from ._axis_transform import AxisTransform, canvas_physical_size
 from ._gesture_engine import (
+    _OrbitGesture,
+    _PickGesture,
     _ColorGesture,
     _ColorLimitDrag,
     _PanGesture,
@@ -4346,7 +4348,12 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             color_candidate if color_candidate is not None else snapshot.candidate
         )
         gesture = self._gesture
-        active_pan = isinstance(gesture, _PanGesture)
+        # Orbit and scene-pick gestures ride the pan pathway: no selector
+        # candidate, but the frontend must keep the button latched and the
+        # gesture axes so the release comes home.
+        active_pan = isinstance(
+            gesture, (_PanGesture, _OrbitGesture, _PickGesture)
+        )
         axis = (
             gesture.axes
             if gesture is not None and (candidate is not None or active_pan)

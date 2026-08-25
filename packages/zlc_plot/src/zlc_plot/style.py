@@ -545,10 +545,36 @@ class RenderPolicyConfig:
     """Renderer-wide visual geometry, image defaults and bounded-work policy."""
 
     image_default_colormap: str = "gray"
-    image_colormaps: tuple[str, ...] = ("inferno", "viridis", "magma", "plasma", "gray")
+    image_colormaps: tuple[str, ...] = (
+        "inferno", "viridis", "magma", "plasma", "gray", "RdBu_r", "Blues",
+    )
     image_front: ImageFrontPolicy = ImageFrontPolicy()
     image_origin: str = "upper"
     image_anchor: str = "W"
+    #: Height-bar presentation: fixed face shading (x-side, y-side), the
+    #: outline darkening, the scene chrome greys, the bar-height budget as
+    #: a fraction of the ground diagonal, and the quality knobs -- one
+    #: place, so no shading coefficient lives in the renderer.
+    #: Interp-shaded sides carry the depth cue; keep both faces unshaded
+    #: like the reference (MATLAB shading interp draws no lighting).
+    height_bars_side_shades: tuple[float, float] = (1.0, 1.0)
+    height_bars_edge_darken: float = 0.85
+    height_bars_background_rgb: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    height_bars_axis_color: str = "black"
+    #: Pane/floor grid rules: the reference look is a WIDE, translucent
+    #: light rule -- clearly softer than the hairline bar outlines.
+    height_bars_grid_rgb: tuple[float, float, float] = (0.45, 0.45, 0.50)
+    height_bars_grid_line_pt: float = 1.0
+    height_bars_grid_alpha: float = 0.1
+    height_bars_z_fraction: float = 0.55
+    #: Grids this small draw their outlines as vector artists.
+    height_bars_supersample_tiny_bars: int = 256
+    #: The selection cage shares the grid's colour and width -- it is
+    #: scene furniture -- and only its stronger alpha marks it out.
+    height_bars_cage_alpha: float = 0.2
+    #: While the camera is being dragged the raster renders at 1/divisor
+    #: resolution and the release repaints at full resolution.
+    height_bars_drag_resolution_divisor: int = 2
     axes_title_pad_pt: float = 2.5
     compact_axes_title_pad_pt: float = 1.5
     figure_title_y: float = 0.992

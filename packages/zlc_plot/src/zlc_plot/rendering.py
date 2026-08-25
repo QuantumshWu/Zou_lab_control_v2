@@ -825,8 +825,19 @@ class MatplotlibRenderer:
         self._series_press: tuple[float, float, object | None] | None = None
         self._series_annotations: dict[int, Any] = {}
         self._raster_generation = 0
+        #: The generation whose pixels currently sit in the Agg buffer,
+        #: or -1 while artist state has mutated since the last compose.
+        #: ``rgba`` reuses the buffer when they match instead of paying
+        #: a full draw -- which also nuked the compose background and
+        #: forced the NEXT frame to rebuild it: one stray full draw per
+        #: publication, twice over.
+        self._composed_generation = -1
         self._focused_facet_index: int | None = None
         self._facet_focus_index: int | None = None
+        self._height_bars_preview = None
+        self._height_bars_dragging = False
+        self._height_bars_rendered_camera = None
+        self._height_bars_scene = False
         self._visible_facet_count = 0
         #: Which cell currently owns the focused image side chrome (the
         #: distribution/colorbar axes over ``plan.facet_focus_axes``), or
@@ -1093,6 +1104,7 @@ class MatplotlibRenderer:
         payload = frame.payload
         state = frame.state
         selected_effects = frame.effects
+        self._composed_generation = -1
         previous_payload = self._last_payload
         previous_data_revision = self._data_revision
         state_changed = self._last_state is None or state.revision != self._last_state.revision
@@ -1159,22 +1171,40 @@ class MatplotlibRenderer:
                 self._update_text_artists(payload, state)
             if state_changed and selected_effects & RenderEffect.CHROME:
                 self._update_chrome_artists(state)
+            # A height-bar scene owns its whole data region: 2D overlays --
+            # selectors, fit polylines, classifier guides, the point
+            # overlay -- speak data coordinates that do not exist on the
+            # projected scene, so their artists hide while the COMMITTED
+            # state stays in the session and returns with the heatmap.
+            scene_3d = self._height_bars_active(
+                self.primary_surface[0], state
+            )
+            self._height_bars_scene = scene_3d
             # Every painted surface honours the requested view, not just the
             # selected one: a FacetGrid overview shows N cells of the same
             # picture, and zooming one of them alone is not a view of anything.
-            for _key, axes, _index in painted:
-                self._apply_requested_view(axes, frame.view_limits)
+            if not scene_3d:
+                for _key, axes, _index in painted:
+                    self._apply_requested_view(axes, frame.view_limits)
             self._classifier_labels = frame.classifier_labels
             self._update_classifier(
-                frame.classifier_overlays,
+                () if scene_3d else frame.classifier_overlays,
                 frame.classifier_thresholds,
                 frame.classifier_labels,
             )
-            self._last_selectors = painted_selectors
+            self._last_selectors = (
+                SelectorSnapshot(()) if scene_3d else painted_selectors
+            )
             self._update_selectors(self._last_selectors)
-            self._set_fit_mode(bool(painted_fit_overlays) and not overview)
+            if scene_3d:
+                self._update_height_bars_cage(painted_selectors)
+            else:
+                self._update_height_bars_cage(SelectorSnapshot(()))
+            self._set_fit_mode(
+                bool(painted_fit_overlays) and not overview and not scene_3d
+            )
             self._update_fit(
-                painted_fit_overlays,
+                () if scene_3d else painted_fit_overlays,
                 overview=overview,
                 model_id=frame.fit_model_id,
             )
@@ -1184,7 +1214,7 @@ class MatplotlibRenderer:
                 self._update_image_point_overlay(
                     axes,
                     payload if cell is None else getattr(cell, "payload", cell),
-                    frame.image_overlay,
+                    None if scene_3d else frame.image_overlay,
                     state,
                     key,
                     None
@@ -1360,6 +1390,7 @@ class MatplotlibRenderer:
             self._background_region = None
             self._forget_gesture_region()
             self._raster_generation += 1
+            self._composed_generation = self._raster_generation
 
     def _dynamic_artists(self) -> list[tuple[tuple[int, float, int], Any]]:
         """Every artist this renderer owns, keyed for full-draw-exact stacking.
@@ -1397,6 +1428,15 @@ class MatplotlibRenderer:
             )
 
         def add(value: Any) -> None:
+            if isinstance(value, dict):
+                # The height-bar chrome keeps its artists in a dict; its
+                # lines and TEXTS move with the camera, so they must be
+                # dynamic -- baked into the background they could only
+                # stay correct while something forced a full redraw
+                # between frames.
+                for item in value.values():
+                    add(item)
+                return
             if isinstance(value, (tuple, list, set)):
                 for item in value:
                     add(item)
@@ -1468,6 +1508,11 @@ class MatplotlibRenderer:
         for axes in {entry[1].axes for entry in tuple(collected)}:
             if not axes.get_visible():
                 continue
+            if not getattr(axes, "axison", True):
+                # ``set_axis_off`` (the height-bar scene) removes ticks and
+                # spines from a full draw; composing their cached artists
+                # anyway framed the 3D scene with 2D chrome.
+                continue
             if id(axes) in dynamic_full_axes_ids:
                 continue
             cached = (
@@ -1493,12 +1538,20 @@ class MatplotlibRenderer:
                 # alone, so the refresh runs when one of those moved (the
                 # axes is chrome-dirty, or the signature above changed) and
                 # the collected artists are replayed verbatim in between.
+                # An INVISIBLE artist paints nothing in a full draw, and
+                # visibility is as stable as the cached geometry itself:
+                # dropping them here (gridlines are off everywhere, most
+                # cells hide one tick side) removes a thousand no-op draw
+                # calls per composed frame without touching a pixel.
                 for tick in axis._update_ticks():
-                    entries.append((tick.gridline, axes, axis_z))
-                    entries.append((tick.tick1line, axes, axis_z))
-                    entries.append((tick.tick2line, axes, axis_z))
+                    for artist in (
+                        tick.gridline, tick.tick1line, tick.tick2line
+                    ):
+                        if artist.get_visible():
+                            entries.append((artist, axes, axis_z))
             for spine in axes.spines.values():
-                entries.append((spine, axes, spine.get_zorder()))
+                if spine.get_visible():
+                    entries.append((spine, axes, spine.get_zorder()))
             self._boundary_chrome_cache[id(axes)] = tuple(entries)
             for artist, owner, zorder in entries:
                 keyed(artist, owner, zorder)
@@ -1588,6 +1641,7 @@ class MatplotlibRenderer:
         if split is None:
             self._forget_gesture_region()
         self._raster_generation += 1
+        self._composed_generation = self._raster_generation
 
     def _selector_artist_ids(self) -> frozenset[int]:
         """Every artist the selector scene owns right now, by identity."""
@@ -1642,6 +1696,7 @@ class MatplotlibRenderer:
                 if not self._blit_exact_rgba_image(artist, canvas):
                     artist.draw(renderer)
         self._raster_generation += 1
+        self._composed_generation = self._raster_generation
         return True
 
     def _blit_exact_rgba_image(self, artist: Any, canvas: Any) -> bool:
@@ -1677,6 +1732,12 @@ class MatplotlibRenderer:
             and shown.ndim == 3
             and shown.shape[2] == 4
         ):
+            return False
+        # The copy OVERWRITES; a full draw alpha-BLENDS.  They agree only
+        # when every pixel is opaque -- a translucent front (the 3D
+        # scene outside its pane, a NaN-holed image) must take the real
+        # draw or it would punch its transparency into the buffer.
+        if shown[..., 3].min() != 255:
             return False
         if artist.get_interpolation() != "nearest":
             return False
@@ -1779,6 +1840,7 @@ class MatplotlibRenderer:
     def preview_color_limit_candidate(self, candidate: ColorLimitCandidate) -> bool:
         """Paint the current color-limit candidate as one complete frame."""
 
+        self._composed_generation = -1
         if not isinstance(candidate, ColorLimitCandidate):
             raise TypeError("candidate must be ColorLimitCandidate")
         if self._selector_gesture_kind is not SelectorSceneKind.COLOR_LIMITS:
@@ -2849,6 +2911,7 @@ class MatplotlibRenderer:
         *,
         square_view: bool,
         coordinate_aspect: float | None,
+        valid_identity: object = None,
     ) -> tuple[Any, Any]:
         import matplotlib
 
@@ -2870,6 +2933,27 @@ class MatplotlibRenderer:
         mapping_state = (cmap_name, color_limits)
         mapping_key = f"{key}:mapping_state"
         previous_mapping = self._artists.get(mapping_key)
+
+        if self._height_bars_active(key, state):
+            self._artists[mapping_key] = mapping_state
+            return self._update_height_bars_artist(
+                axes,
+                values,
+                valid,
+                extent,
+                state,
+                key,
+                color_limits,
+                cmap_name,
+                cmap,
+                valid_identity=valid_identity,
+            )
+        if not axes.axison:
+            # Returning from the height-bar presentation restores the 2D
+            # chrome this artist path owns and hides the scene's.
+            axes.set_axis_on()
+            self._hide_height_bars_chrome(key)
+            self._mark_axes_chrome_dirty(axes)
 
         home_extent = (
             _square_image_limits(
@@ -3099,6 +3183,1027 @@ class MatplotlibRenderer:
         sized.setflags(write=False)
         self._artists[cache_name] = (cache_key, sized)
         return sized
+
+    def _height_bars_active(self, key: str, state: DisplayState) -> bool:
+        """Whether this image surface paints the height-bar presentation.
+
+        The presentation is a property of the ONE examined image surface:
+        the standalone image, or a focused facet cell.  A facet overview
+        stays a heatmap grid -- sixty-four simultaneous 3D scenes would
+        be neither readable nor affordable.
+        """
+
+        try:
+            wanted = str(state["presentation"])
+        except KeyError:
+            return False
+        if wanted != "height_bars":
+            return False
+        if key == "image":
+            return True
+        return key.startswith("facet:") and self._facet_focus_index is not None
+
+    def set_height_bars_preview(
+        self,
+        camera: "HeightBarCamera | None",
+        *,
+        dragging: bool = False,
+    ) -> None:
+        """Install (or clear) the transient camera the next render uses."""
+
+        self._composed_generation = -1
+        self._height_bars_preview = camera
+        self._height_bars_dragging = bool(dragging)
+
+    @property
+    def height_bars_camera(self) -> "HeightBarCamera | None":
+        """The camera the LAST height-bar render actually used."""
+
+        return getattr(self, "_height_bars_rendered_camera", None)
+
+    def _update_height_bars_artist(
+        self,
+        axes: Any,
+        values: np.ndarray,
+        valid: np.ndarray,
+        extent: tuple[float, float, float, float],
+        state: DisplayState,
+        key: str,
+        color_limits: tuple[float, float] | None,
+        cmap_name: str,
+        cmap: Any,
+        valid_identity: object = None,
+    ) -> tuple[Any, Any]:
+        """Paint the value grid as shaded outlined boxes via the raster.
+
+        The scene replaces only the data region: the same artist, clim,
+        colormap, colorbar and distribution rail keep their meanings, so
+        a colour-limit drag recolours the bars exactly as it recolours
+        the heatmap.
+        """
+
+        from ._height3d_raster import HeightBarCamera, render_height_bars
+
+        policy = self.style.render
+        if axes.axison:
+            # The 2D ticks and spines say nothing about a 3D scene.
+            axes.set_axis_off()
+            self._mark_axes_chrome_dirty(axes)
+        if axes.get_aspect() != "auto":
+            axes.set_aspect("auto")
+        # Everything here depends on (data revision, validity, colour
+        # limits, colormap) alone -- never on the camera.  A camera
+        # commit on a 1000x2000 scan spent more time REDERIVING these
+        # (masking, code quantization, the LUT gather) than rendering,
+        # so they cache under exactly the facts they derive from.  The
+        # cached arrays double as identity anchors for the kernel's
+        # pooling cache below.
+        # ``valid`` itself is rebuilt (broadcast) on every render, so its
+        # id would bust this key each frame; the caller hands the STABLE
+        # identity of the validity it was given -- the same lesson the
+        # image range cache already carries.
+        input_key = (
+            self._data_revision,
+            id(values),
+            values.shape,
+            values.strides,
+            values.dtype.str,
+            valid_identity,
+            None
+            if color_limits is None
+            else (float(color_limits[0]), float(color_limits[1])),
+            cmap_name,
+        )
+        cached_inputs = self._artists.get("image:h3d_inputs")
+        if cached_inputs is not None and cached_inputs[0] == input_key:
+            heights, top_rgb, low, high, zero_rgb = cached_inputs[1]
+        else:
+            heights = np.asarray(values, dtype=np.float64)
+            usable = (
+                _valid_array(valid, heights.shape)
+                if valid is not None
+                else np.ones(heights.shape, dtype=bool)
+            )
+            heights = np.where(usable, heights, np.nan)
+
+            if color_limits is not None and color_limits[1] > color_limits[0]:
+                low, high = (float(value) for value in color_limits)
+            else:
+                finite = heights[np.isfinite(heights)]
+                low = float(finite.min()) if finite.size else 0.0
+                high = float(finite.max()) if finite.size else 1.0
+                if high <= low:
+                    high = low + 1.0
+            lut = self._image_color_lut(cmap_name, cmap)
+            with np.errstate(invalid="ignore"):
+                codes = np.clip(
+                    (heights - low) * (256.0 / (high - low)), 0.0, 255.0
+                )
+            codes = np.where(np.isfinite(codes), codes, 0.0).astype(np.uint8)
+            top_rgb = lut[codes][..., :3].astype(np.float32) / np.float32(255.0)
+            with np.errstate(invalid="ignore"):
+                zero_code = int(
+                    np.clip((0.0 - low) * (256.0 / (high - low)), 0.0, 255.0)
+                )
+            zero_rgb = tuple(
+                float(v) for v in lut[zero_code][:3].astype(np.float32) / 255.0
+            )
+            self._artists["image:h3d_inputs"] = (
+                input_key,
+                (heights, top_rgb, low, high, zero_rgb),
+            )
+
+        preview = getattr(self, "_height_bars_preview", None)
+        if preview is not None:
+            camera = preview
+        else:
+            camera = HeightBarCamera(
+                azimuth_deg=float(state["camera_azimuth"]),
+                elevation_deg=float(state["camera_elevation"]),
+                zoom=float(state["camera_zoom"]),
+            )
+        self._height_bars_rendered_camera = camera
+
+        box = axes.bbox
+        box_w = max(int(round(float(box.width))), 8)
+        box_h = max(int(round(float(box.height))), 8)
+        divisor = 1
+        if getattr(self, "_height_bars_dragging", False):
+            divisor = max(1, int(policy.height_bars_drag_resolution_divisor))
+        vector_outlines = (
+            heights.size <= policy.height_bars_supersample_tiny_bars
+            and divisor == 1
+        )
+        # Vertical anti-aliasing is ANALYTIC (exact coverage), so the
+        # only sampling knob left is horizontal: three subcolumn taps on
+        # every committed frame, whatever the grid size.  The camera
+        # DRAG preview is the fast lane instead.
+        supersample = 1 if divisor != 1 else 3
+        frame, scene = render_height_bars(
+            heights,
+            top_rgb,
+            camera=camera,
+            value_limits=(low, high),
+            zero_rgb=zero_rgb,
+            width=max(box_w // divisor, 8),
+            height=max(box_h // divisor, 8),
+            supersample=supersample,
+            pool_cache=self._artists.setdefault("image:h3d_pool_cache", {}),
+            side_shades=policy.height_bars_side_shades,
+            edge_darken=policy.height_bars_edge_darken,
+            background_rgb=policy.height_bars_background_rgb,
+            z_fraction=policy.height_bars_z_fraction,
+            bar_edges=not vector_outlines,
+        )
+        self._height_bars_scene_map = scene
+        self._height_bars_values = heights
+        self._height_bars_axes_id = id(axes)
+        finite_heights = heights[np.isfinite(heights)]
+        lowest = float(finite_heights.min()) if finite_heights.size else 0.0
+        self._height_bars_floor_value = float(np.clip(min(lowest, 0.0), low, 0.0))
+        self._height_bars_data_frame = (
+            tuple(float(v) for v in extent),
+            int(heights.shape[1]),
+            int(heights.shape[0]),
+        )
+
+        scene_extent = (0.0, 1.0, 0.0, 1.0)
+        image = self._artists.get(key)
+        if image is None:
+            image = axes.imshow(
+                frame,
+                origin=policy.image_origin,
+                aspect="auto",
+                extent=scene_extent,
+                interpolation="nearest",
+            )
+            self._artists[key] = image
+        else:
+            image.set_data(frame)
+            extent_key = f"{key}:applied_extent"
+            if self._artists.get(extent_key) != scene_extent:
+                image.set_extent(scene_extent)
+                self._artists[extent_key] = scene_extent
+        self._artists[f"{key}:applied_front"] = frame
+        self._artists[f"{key}:color_mode"] = "rgba"
+        # The artist stays the clim/cmap authority every consumer reads.
+        image.set_cmap(cmap)
+        image.set_clim(low, high)
+        self._home_limits[id(axes)] = ((0.0, 1.0), (0.0, 1.0))
+        self._set_xlim(axes, 0.0, 1.0)
+        self._set_ylim(axes, 0.0, 1.0)
+        self._update_height_bars_chrome(axes, key, scene)
+        self._update_height_bars_outlines(
+            axes, key, scene, heights if vector_outlines else None
+        )
+        return image, cmap
+
+    def _height_bars_fraction(
+        self, scene: Any, x: float, y: float
+    ) -> tuple[float, float]:
+        """Scene pixel (top-origin) -> axes-fraction coordinates."""
+
+        return x / max(scene.width, 1), 1.0 - y / max(scene.height, 1)
+
+    def _update_height_bars_chrome(
+        self, axes: Any, key: str, scene: Any
+    ) -> None:
+        """The scene's axis chrome: z ticks/labels and base coordinate labels.
+
+        Text stays Matplotlib text at the style's fonts -- only positions
+        come from the projection, so the 3D scene reads in the same
+        typography as every 2D panel.
+        """
+
+        from matplotlib.ticker import MaxNLocator
+
+        chrome_key = f"{key}:h3d_chrome"
+        artists = self._artists.get(chrome_key)
+        if artists is None:
+            artists = {"lines": None, "grid": None, "texts": []}
+            self._artists[chrome_key] = artists
+
+        import matplotlib as _matplotlib
+
+        segments_x: list[float] = []
+        segments_y: list[float] = []
+
+        def add_segment(p0, p1):
+            f0 = self._height_bars_fraction(scene, *p0)
+            f1 = self._height_bars_fraction(scene, *p1)
+            segments_x.extend((f0[0], f1[0], np.nan))
+            segments_y.extend((f0[1], f1[1], np.nan))
+
+        wanted_texts: list[tuple[float, float, str, str, str]] = []
+        # The SAME chrome metrics every 2D panel runs under: tick length,
+        # tick pad and line width come from the style's rc context, in
+        # points, converted at this figure's dpi.
+        dots_per_point = float(axes.figure.dpi) / 72.0
+        tick_length_px = (
+            float(_matplotlib.rcParams["xtick.major.size"]) * dots_per_point
+        )
+        tick_pad_px = (
+            float(_matplotlib.rcParams["xtick.major.pad"]) * dots_per_point
+        )
+        label_gap_px = tick_length_px + tick_pad_px
+        tick_px = tick_length_px / max(scene.width, 1)
+        gap_px = label_gap_px / max(scene.width, 1)
+        gap_py = label_gap_px / max(scene.height, 1)
+
+        # The pane grid follows the reference (MATLAB) convention: RULES
+        # sit at tick positions, and every rule runs the FULL display
+        # limits.  The open-boundary look needs nothing special: the
+        # limits themselves carry no tick, so no vertical rule ever
+        # lands on the pane border -- horizontals reach the border and
+        # end unclosed.  Grid rules, axis ticks and wall rules all read
+        # the same tick lists: one authority, never two.
+        grid_edges: list[tuple[tuple[float, float, float],
+                               tuple[float, float, float]]] = []
+        z_low, z_high = scene.value_low, scene.value_high
+        wall_low = min(z_low, 0.0)
+        wall_high = max(z_high, 0.0)
+        # nbins=2 is the reference's tick sparseness: a [0, 1] scale
+        # reads 0 / 0.5 / 1 exactly as the MATLAB panels do (nbins=3
+        # picked a 0.4 step whose top tick fell outside the range).
+        z_ticks = [
+            float(tick)
+            for tick in MaxNLocator(nbins=2).tick_values(z_low, z_high)
+            if z_low - 1e-12 <= tick <= z_high + 1e-12
+        ]
+        for tick in z_ticks:
+            grid_edges.append(
+                ((0.0, float(scene.ny), tick),
+                 (float(scene.nx), float(scene.ny), tick))
+            )
+            grid_edges.append(((0.0, 0.0, tick), (0.0, float(scene.ny), tick)))
+
+        # ---- z axis along the left pane's front edge, at ground (0, 0)
+        base = scene.project(0.0, 0.0, wall_low)
+        top = scene.project(0.0, 0.0, wall_high)
+        add_segment(base, top)
+        for tick in z_ticks:
+            anchor = scene.project(0.0, 0.0, float(tick))
+            f = self._height_bars_fraction(scene, *anchor)
+            segments_x.extend((f[0], f[0] - tick_px, np.nan))
+            segments_y.extend((f[1], f[1], np.nan))
+            wanted_texts.append(
+                (f[0] - gap_px, f[1], f"{tick:g}", "right", "center")
+            )
+
+        # ---- base coordinate labels along the two front edges
+        data_frame = getattr(self, "_height_bars_data_frame", None)
+        if data_frame is not None:
+            (left, right, bottom, top_c), source_nx, source_ny = data_frame
+            # Labels hug the lowest geometry actually drawn: the floor at
+            # z=0, or the deepest hanging bar.  Anchoring at the colour
+            # limit floated them mid-air below the scene whenever the
+            # limits reach below the data.
+            base_value = getattr(self, "_height_bars_floor_value", 0.0)
+
+            def picks(count: int) -> list[int]:
+                shown = min(count, 6)
+                return sorted({
+                    int(round(v))
+                    for v in np.linspace(0, count - 1, shown)
+                })
+
+            # The two front floor edges are the scene's x/y axis lines,
+            # carrying the tick marks exactly as a 2D panel's spines do.
+            add_segment(
+                scene.project(0.0, 0.0, base_value),
+                scene.project(float(scene.nx), 0.0, base_value),
+            )
+            add_segment(
+                scene.project(float(scene.nx), 0.0, base_value),
+                scene.project(float(scene.nx), float(scene.ny), base_value),
+            )
+
+            tick_py = tick_length_px / max(scene.height, 1)
+            for column in picks(source_nx):
+                a, b = scene.fold_cell(0, column * scene.pool_x)
+                centre = a + 0.5
+                grid_edges.append(
+                    ((centre, float(scene.ny), wall_low),
+                     (centre, float(scene.ny), wall_high))
+                )
+                if not scene.dense:
+                    grid_edges.append(
+                        ((centre, 0.0, 0.0), (centre, float(scene.ny), 0.0))
+                    )
+                anchor = scene.project(centre, 0.0, base_value)
+                f = self._height_bars_fraction(scene, *anchor)
+                segments_x.extend((f[0], f[0], np.nan))
+                segments_y.extend((f[1], f[1] - tick_py, np.nan))
+                value = left + (column + 0.5) * (right - left) / source_nx
+                wanted_texts.append(
+                    (f[0], f[1] - gap_py, f"{value:g}", "center", "top")
+                )
+            # The y edge shares its far corner with the x edge's last
+            # label; dropping y's endpoint keeps the corner readable.
+            y_picks = picks(source_ny)
+            if len(y_picks) > 2:
+                y_picks = y_picks[:-1]
+            for row in y_picks:
+                a, b = scene.fold_cell(row * scene.pool_y, 0)
+                centre = b + 0.5
+                grid_edges.append(
+                    ((0.0, centre, wall_low), (0.0, centre, wall_high))
+                )
+                if not scene.dense:
+                    grid_edges.append(
+                        ((0.0, centre, 0.0), (float(scene.nx), centre, 0.0))
+                    )
+                anchor = scene.project(float(scene.nx), centre, base_value)
+                f = self._height_bars_fraction(scene, *anchor)
+                segments_x.extend((f[0], f[0] + 0.8 * tick_px, np.nan))
+                segments_y.extend((f[1], f[1] - 0.6 * tick_py, np.nan))
+                value = top_c + (row + 0.5) * (bottom - top_c) / source_ny
+                wanted_texts.append(
+                    (
+                        f[0] + gap_px,
+                        f[1] - 0.7 * gap_py,
+                        f"{value:g}",
+                        "left",
+                        "top",
+                    )
+                )
+
+        # ---- the pane/floor grid, occluded like real geometry
+        grid = artists["grid"]
+        if grid is None:
+            (grid,) = axes.plot(
+                [], [],
+                transform=axes.transAxes,
+                color=self.style.render.height_bars_grid_rgb,
+                alpha=self.style.render.height_bars_grid_alpha,
+                linewidth=self.style.render.height_bars_grid_line_pt,
+                solid_capstyle="butt",
+                zorder=5,
+                clip_on=True,
+            )
+            artists["grid"] = grid
+        if grid_edges:
+            edge_array = np.asarray(grid_edges, dtype=np.float64)
+            grid_x, grid_y = self._height_bars_occluded_polyline(
+                scene, edge_array
+            )
+            grid.set_data(grid_x, grid_y)
+        else:
+            grid.set_data([], [])
+        grid.set_visible(True)
+
+        line = artists["lines"]
+        if line is None:
+            (line,) = axes.plot(
+                [], [],
+                transform=axes.transAxes,
+                color=self.style.render.height_bars_axis_color,
+                linewidth=float(_matplotlib.rcParams["axes.linewidth"]),
+                zorder=6,
+                clip_on=True,
+            )
+            artists["lines"] = line
+        line.set_data(segments_x, segments_y)
+        line.set_visible(True)
+
+        texts = artists["texts"]
+        for index, (fx, fy, content, ha, va) in enumerate(wanted_texts):
+            if index < len(texts):
+                text = texts[index]
+            else:
+                text = axes.text(
+                    0, 0, "",
+                    transform=axes.transAxes,
+                    fontsize=self.style.fonts.tick_pt,
+                    zorder=6,
+                    clip_on=False,
+                )
+                texts.append(text)
+            text.set_position((fx, fy))
+            text.set_text(content)
+            text.set_horizontalalignment(ha)
+            text.set_verticalalignment(va)
+            text.set_visible(True)
+        for text in texts[len(wanted_texts):]:
+            text.set_visible(False)
+
+    def _hide_height_bars_chrome(self, key: str) -> None:
+        artists = self._artists.get(f"{key}:h3d_chrome")
+        if artists:
+            if artists["lines"] is not None:
+                artists["lines"].set_visible(False)
+            if artists["grid"] is not None:
+                artists["grid"].set_visible(False)
+            for text in artists["texts"]:
+                text.set_visible(False)
+        cage = self._artists.get(f"{key}:h3d_cage")
+        if cage is not None:
+            cage.set_visible(False)
+        outline = self._artists.get(f"{key}:h3d_outlines")
+        if outline is not None:
+            outline.set_visible(False)
+
+    def height_bars_pick(
+        self, canvas_x: float, canvas_y: float
+    ) -> tuple[float, float] | None:
+        """Canvas pixel -> the picked bar's DATA coordinates, or None."""
+
+        scene = getattr(self, "_height_bars_scene_map", None)
+        data_frame = getattr(self, "_height_bars_data_frame", None)
+        if scene is None or data_frame is None:
+            return None
+        axes = self.primary_axes
+        box = axes.bbox
+        local_x = float(canvas_x) - float(box.x0)
+        local_y = float(box.y1) - float(canvas_y)
+        picked = scene.pick(local_x, local_y)
+        if picked is None:
+            return None
+        row, column = picked
+        (left, right, bottom, top), source_nx, source_ny = data_frame
+        x_value = left + (column + 0.5) * (right - left) / source_nx
+        y_value = top + (row + 0.5) * (bottom - top) / source_ny
+        return x_value, y_value
+
+    def _height_bars_cell_of(
+        self, x_value: float, y_value: float
+    ) -> tuple[int, int] | None:
+        data_frame = getattr(self, "_height_bars_data_frame", None)
+        if data_frame is None:
+            return None
+        (left, right, bottom, top), source_nx, source_ny = data_frame
+        if right == left or bottom == top:
+            return None
+        column = int(np.floor((x_value - left) / (right - left) * source_nx))
+        row = int(np.floor((y_value - top) / (bottom - top) * source_ny))
+        if not (0 <= column < source_nx and 0 <= row < source_ny):
+            return None
+        return row, column
+
+    def _height_bars_occluded_polyline(
+        self,
+        scene: Any,
+        edges: "np.ndarray",
+        samples_per_edge: int = 24,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Sample 3D edges against the scene, NaN-ing occluded samples.
+
+        ``edges`` is (E, 2, 3) folded (a, b, value) endpoints.  The
+        occlusion test is EXACT and purely local.  The occluder is the
+        whole BOX whose face the sample's pixel shows, and this camera's
+        view rays rise toward the viewer within one pixel column, so:
+        the box hides the sample iff it lies AHEAD of the sample along
+        the ray and the ray is still BELOW the box top where it enters
+        the box footprint.  The floor and the panes hide nothing.
+
+        No centre-depth proxy: a cell's centre is up to half a cell
+        nearer than its own boundary, and that approximation carved
+        dashes into every edge along a neighbouring cell.  And no
+        per-face plane test: a face is just where the ray was measured,
+        the body behind it is what blocks.
+
+        ``samples_per_edge`` is a floor: the density adapts to the
+        LONGEST projected edge (a pane-wide grid rule needs its occlusion
+        breaks at pixel granularity, not at 1/24 of its span), bounded by
+        a total-sample budget so huge edge sets stay cheap.
+        """
+
+        E = edges.shape[0]
+        end_x = edges[:, :, 0] * scene.ca + edges[:, :, 1] * scene.sa
+        end_y = (
+            -edges[:, :, 0] * scene.sa * scene.se
+            + edges[:, :, 1] * scene.ca * scene.se
+            + edges[:, :, 2] * scene.z_unit * scene.ce
+        )
+        longest = float(
+            np.max(
+                np.hypot(
+                    np.diff(end_x, axis=1), np.diff(end_y, axis=1)
+                )
+            )
+            * scene.scale
+        ) if E else 0.0
+        samples = int(min(
+            max(samples_per_edge, longest / 2.0 + 2.0),
+            max(samples_per_edge, 2_000_000 / max(E, 1)),
+            512,
+        ))
+        from ._height3d_raster import _scanline_selected
+
+        if E and samples > 1 and _scanline_selected():
+            # The numba mirror of everything below -- pure float64 with
+            # integer lookups, bit-identical by construction; the code
+            # underneath remains the specification and the fallback.
+            from ._height3d_scanline import _occlusion_samples
+
+            xs = np.empty(E * (samples + 1), dtype=np.float64)
+            ys = np.empty(E * (samples + 1), dtype=np.float64)
+            _occlusion_samples(
+                np.ascontiguousarray(edges),
+                scene.id_plane,
+                np.ascontiguousarray(scene.top_values),
+                float(scene.ca),
+                float(scene.sa),
+                float(scene.se),
+                float(scene.z_unit),
+                float(scene.ce),
+                float(scene.x_low),
+                float(scene.y_high),
+                float(scene.scale),
+                np.int64(samples),
+                xs,
+                ys,
+            )
+            return xs, ys
+        fractions = np.linspace(0.0, 1.0, samples)[None, :, None]
+        points = edges[:, 0:1, :] + (
+            edges[:, 1:2, :] - edges[:, 0:1, :]
+        ) * fractions  # (E, N, 3)
+        ga = points[..., 0]
+        gb = points[..., 1]
+        gz = points[..., 2]
+        sx = ga * scene.ca + gb * scene.sa
+        sy = (
+            -ga * scene.sa * scene.se
+            + gb * scene.ca * scene.se
+            + gz * scene.z_unit * scene.ce
+        )
+        px = (sx - scene.x_low) * scene.scale
+        py = (scene.y_high - sy) * scene.scale
+        columns = np.clip(px.astype(np.int64), 0, scene.width - 1)
+        rows = np.clip(py.astype(np.int64), 0, scene.height - 1)
+        face = scene.id_plane[rows, columns]
+        shown_cell = (face - 4) >> 2
+        shown_a = shown_cell % scene.nx
+        shown_b = shown_cell // scene.nx
+        shown_top = scene.top_values[
+            np.clip(shown_b, 0, scene.ny - 1),
+            np.clip(shown_a, 0, scene.nx - 1),
+        ]
+        # Half a pixel of height tolerance absorbs the raster rounding of
+        # which face a borderline pixel shows.
+        z_slack = 0.5 / max(scene.z_unit * scene.ce * scene.scale, 1e-9)
+        # Toward the viewer the ray walks (+sa, -ca) over the ground and
+        # RISES by this many value units per ground unit walked.
+        rise = scene.se / (scene.z_unit * scene.ce)
+        enter = np.maximum(
+            np.maximum(
+                (shown_a - ga) / scene.sa,
+                (gb - shown_b - 1) / scene.ca,
+            ),
+            0.0,
+        )
+        leave = np.minimum(
+            (shown_a + 1 - ga) / scene.sa,
+            (gb - shown_b) / scene.ca,
+        )
+        hidden = (
+            (face >= 4)
+            & (leave > 1e-9)
+            & (gz + enter * rise < shown_top - z_slack)
+        )
+        # A sample INSIDE solid geometry -- within some cell's footprint
+        # and below that cell's top -- is hidden whatever its pixel
+        # shows.  This is pixel-independent, so it also catches seam
+        # samples whose rounded pixel falls on the floor or a pane
+        # (the pixel test alone leaked dots there), and it conceals a
+        # lower bar's rim where a taller neighbour's body covers it.
+        # A sample exactly ON a cell boundary belongs to the VIEWER-side
+        # cell -- that is the only body that can stand in front of it.
+        # The ray walks (+a, -b) toward the viewer, so that is floor()
+        # along a but ceil()-1 along b (a plain floor put a b-boundary
+        # sample in the far cell and leaked dots along the pane seam).
+        cell_a = np.floor(ga).astype(np.int64)
+        cell_b = np.ceil(gb).astype(np.int64) - 1
+        inside = (
+            (cell_a >= 0) & (cell_a < scene.nx)
+            & (cell_b >= 0) & (cell_b < scene.ny)
+        )
+        inside_top = np.where(
+            inside,
+            scene.top_values[
+                np.clip(cell_b, 0, scene.ny - 1),
+                np.clip(cell_a, 0, scene.nx - 1),
+            ],
+            -np.inf,
+        )
+        hidden |= gz < inside_top - z_slack
+        # A visible sample with hidden samples on BOTH sides is pixel
+        # rounding poking through at a corner -- a stray dot, not a line
+        # segment.  Erode it.
+        visible = ~hidden
+        alone = visible.copy()
+        alone[:, 1:] &= hidden[:, :-1]
+        alone[:, :-1] &= hidden[:, 1:]
+        hidden |= alone
+        fx = px / max(scene.width, 1)
+        fy = 1.0 - py / max(scene.height, 1)
+        fx = np.where(hidden, np.nan, fx)
+        fy = np.where(hidden, np.nan, fy)
+        # One NaN column between edges keeps them separate polylines.
+        pad = np.full((E, 1), np.nan)
+        xs = np.concatenate([fx, pad], axis=1).ravel()
+        ys = np.concatenate([fy, pad], axis=1).ravel()
+        return xs, ys
+
+    def _height_bars_box_edges(
+        self, scene: Any, cells: "list[tuple[int, int]]",
+        z_low: "np.ndarray", z_high: "np.ndarray",
+    ) -> np.ndarray:
+        """The box edges of each cell -> (E, 2, 3) folded points."""
+
+        edges = []
+        pixel_z = 1.0 / max(scene.z_unit * scene.ce * scene.scale, 1e-9)
+        for index, (row, column) in enumerate(cells):
+            a, b = scene.fold_cell(row, column)
+            low = float(z_low[index])
+            high = float(z_high[index])
+            corners = ((0, 0), (1, 0), (1, 1), (0, 1))
+            bottom = [(a + da, b + db, low) for da, db in corners]
+            top = [(a + da, b + db, high) for da, db in corners]
+            # A box flatter than a pixel keeps only its top rectangle.
+            flat_box = (high - low) < pixel_z
+            for i in range(4):
+                edges.append((top[i], top[(i + 1) % 4]))
+                if not flat_box:
+                    edges.append((bottom[i], bottom[(i + 1) % 4]))
+                    edges.append((bottom[i], top[i]))
+        return np.asarray(edges, dtype=np.float64)
+
+    @staticmethod
+    def _height_bars_node_verticals(
+        folded: "np.ndarray",
+    ) -> list[tuple[tuple[float, float, float], tuple[float, float, float]]]:
+        """The EXACT vertical edge set of the drawn surface, per node.
+
+        Two kinds of vertical line exist at a grid node, both derived
+        from the four surrounding quadrant heights (absent cells count
+        as floor-height zero) -- no thresholds, no heuristics:
+
+        * CREASES of the box-union surface: at a height where the set
+          of occupied quadrants forms a corner (one quadrant, three
+          quadrants, or two diagonal ones), the surface turns and owns
+          a vertical edge.  Two ADJACENT occupied quadrants make a
+          straight wall through the node -- no edge.
+        * SEAMS between coplanar side faces (the bar3 convention that
+          also draws every cell boundary ON the surface): where the two
+          half-walls on one wall plane both expose faces in the SAME
+          direction, their overlap carries the seam.
+
+        Emitting per NODE keeps every vertical single-stroked: boxes
+        share these edges, and per-box copies used to double-draw the
+        overlap into a visibly fatter line.
+        """
+
+        ny, nx = folded.shape
+
+        def quadrant(a: int, b: int) -> float | None:
+            if 0 <= a < nx and 0 <= b < ny:
+                value = folded[b, a]
+                if np.isfinite(value):
+                    return float(value)
+            return None
+
+        segments: list[
+            tuple[tuple[float, float, float], tuple[float, float, float]]
+        ] = []
+        for b0 in range(ny + 1):
+            for a0 in range(nx + 1):
+                cells = {
+                    "mm": quadrant(a0 - 1, b0 - 1),
+                    "pm": quadrant(a0, b0 - 1),
+                    "mp": quadrant(a0 - 1, b0),
+                    "pp": quadrant(a0, b0),
+                }
+                if all(v is None for v in cells.values()):
+                    continue
+                spans: list[tuple[float, float]] = []
+                for sign in (1.0, -1.0):
+                    # sign=+1 handles the tops above the floor, sign=-1
+                    # mirrors the analysis for hanging (negative) boxes.
+                    h = {
+                        k: (0.0 if v is None else max(sign * v, 0.0))
+                        for k, v in cells.items()
+                    }
+                    levels = sorted({v for v in h.values() if v > 0.0})
+                    lo = 0.0
+                    for hi in levels:
+                        occupied = {
+                            k for k, v in h.items() if v >= hi - 1e-12
+                        }
+                        corner = (
+                            len(occupied) in (1, 3)
+                            or occupied in ({"mm", "pp"}, {"pm", "mp"})
+                        )
+                        if corner:
+                            spans.append((sign * lo, sign * hi))
+                        lo = hi
+                    for near, far in (
+                        (("mm", "pm"), ("mp", "pp")),  # wall a = a0
+                        (("mm", "mp"), ("pm", "pp")),  # wall b = b0
+                    ):
+                        d_near = h[near[1]] - h[near[0]]
+                        d_far = h[far[1]] - h[far[0]]
+                        if (
+                            d_near == 0.0
+                            or d_far == 0.0
+                            or (d_near > 0.0) != (d_far > 0.0)
+                        ):
+                            continue
+                        seam_lo = max(
+                            min(h[near[0]], h[near[1]]),
+                            min(h[far[0]], h[far[1]]),
+                        )
+                        seam_hi = min(
+                            max(h[near[0]], h[near[1]]),
+                            max(h[far[0]], h[far[1]]),
+                        )
+                        if seam_hi > seam_lo:
+                            spans.append((sign * seam_lo, sign * seam_hi))
+                if not spans:
+                    continue
+                # Merge overlapping spans so every vertical strokes once.
+                ordered = sorted(
+                    (min(z0, z1), max(z0, z1)) for z0, z1 in spans
+                )
+                merged = [list(ordered[0])]
+                for z0, z1 in ordered[1:]:
+                    if z0 <= merged[-1][1] + 1e-12:
+                        merged[-1][1] = max(merged[-1][1], z1)
+                    else:
+                        merged.append([z0, z1])
+                for z0, z1 in merged:
+                    segments.append((
+                        (float(a0), float(b0), z0),
+                        (float(a0), float(b0), z1),
+                    ))
+        return segments
+
+    def _height_bars_dedupe_edges(self, edges: "np.ndarray") -> np.ndarray:
+        """Draw every coincident edge ONCE.
+
+        Neighbouring equal-height boxes share edges; each box emitting
+        its own copy double-strokes the antialiased line into a heavier
+        one.  Occlusion is a local test, so which copy survives cannot
+        matter.
+        """
+
+        if edges.shape[0] < 2:
+            return edges
+        rounded = np.round(edges, 9)
+        p0, p1 = rounded[:, 0, :], rounded[:, 1, :]
+        flip = (
+            (p1[:, 0] < p0[:, 0])
+            | ((p1[:, 0] == p0[:, 0]) & (p1[:, 1] < p0[:, 1]))
+            | (
+                (p1[:, 0] == p0[:, 0])
+                & (p1[:, 1] == p0[:, 1])
+                & (p1[:, 2] < p0[:, 2])
+            )
+        )
+        low = np.where(flip[:, None], p1, p0)
+        high = np.where(flip[:, None], p0, p1)
+        key = np.concatenate([low, high], axis=1)
+        order = np.lexsort((
+            key[:, 5], key[:, 4], key[:, 3],
+            key[:, 2], key[:, 1], key[:, 0],
+        ))
+        ordered = key[order]
+        first = np.ones(order.shape[0], dtype=bool)
+        first[1:] = np.any(ordered[1:] != ordered[:-1], axis=1)
+        return edges[order[first]]
+
+    def _update_height_bars_outlines(
+        self, axes: Any, key: str, scene: Any, heights: "np.ndarray | None"
+    ) -> None:
+        """Vector bar outlines for small grids: anti-aliased artist lines
+        at the style's axes line width, occluded like real geometry."""
+
+        import matplotlib as _matplotlib
+
+        outline = self._artists.get(f"{key}:h3d_outlines")
+        if heights is None:
+            if outline is not None:
+                outline.set_visible(False)
+            return
+        finite = np.isfinite(heights)
+        rows_grid, cols_grid = np.nonzero(finite)
+        if rows_grid.size == 0:
+            if outline is not None:
+                outline.set_visible(False)
+            return
+        clipped = np.where(
+            finite,
+            np.clip(heights, scene.value_low, scene.value_high),
+            np.nan,
+        )
+        # Outline geometry quantizes to PIXEL resolution -- heights the
+        # display cannot distinguish become exactly equal, so their
+        # coincident lines dedupe to one.  The resolution of the screen
+        # is the only "threshold" anywhere in this pass; everything else
+        # is the exact geometry of the drawn surface.
+        # The edge SET depends on (heights identity, that quantum, the
+        # fold quadrant) alone -- an azimuth orbit inside one quadrant
+        # replays it, so only the occlusion SAMPLING reruns per camera.
+        pixel_z = 1.0 / max(scene.z_unit * scene.ce * scene.scale, 1e-9)
+        geometry_key = (
+            id(heights), heights.shape, repr(pixel_z), scene.quadrant
+        )
+        cached_geometry = self._artists.get(f"{key}:h3d_outline_geometry")
+        if cached_geometry is not None and cached_geometry[0] == geometry_key:
+            edges = cached_geometry[1]
+            xs, ys = self._height_bars_occluded_polyline(scene, edges)
+            outline = self._height_bars_outline_artist(axes, key)
+            outline.set_data(xs, ys)
+            outline.set_visible(True)
+            return
+        quantized = np.round(clipped / pixel_z) * pixel_z
+        # The scene works in FOLDED orientation; flip the height grid to
+        # match so neighbourhoods read directly.
+        folded = quantized
+        if scene.quadrant == 1:
+            folded = folded[:, ::-1]
+        elif scene.quadrant == 2:
+            folded = folded[::-1, ::-1]
+        elif scene.quadrant == 3:
+            folded = folded[::-1, :]
+        if folded.shape != (scene.ny, scene.nx):
+            # A pooled scene's outline cells are the POOLED boxes; the
+            # generic per-cell path handles the fold-plus-pool mapping.
+            cells = list(zip(rows_grid.tolist(), cols_grid.tolist()))
+            values = quantized[rows_grid, cols_grid]
+            edges = self._height_bars_box_edges(
+                scene, cells, np.minimum(values, 0.0),
+                np.maximum(values, 0.0),
+            )
+            edges = self._height_bars_dedupe_edges(edges)
+            self._artists[f"{key}:h3d_outline_geometry"] = (
+                geometry_key, edges
+            )
+            xs, ys = self._height_bars_occluded_polyline(scene, edges)
+            outline = self._height_bars_outline_artist(axes, key)
+            outline.set_data(xs, ys)
+            outline.set_visible(True)
+            return
+        padded = np.full(
+            (folded.shape[0] + 2, folded.shape[1] + 2), np.nan
+        )
+        padded[1:-1, 1:-1] = folded
+        edge_list: list[tuple[tuple[float, float, float],
+                              tuple[float, float, float]]] = []
+        grid_ny, grid_nx = folded.shape
+        corners = ((0, 0), (1, 0), (1, 1), (0, 1))
+        for b in range(grid_ny):
+            for a in range(grid_nx):
+                h = folded[b, a]
+                if not np.isfinite(h):
+                    continue
+                low, high = min(h, 0.0), max(h, 0.0)
+                bottom = [(a + da, b + db, low) for da, db in corners]
+                top = [(a + da, b + db, high) for da, db in corners]
+                # rim i runs corner[i] -> corner[i+1]; its neighbour:
+                neighbours = (
+                    padded[b, a + 1],      # rim 0: constant b side
+                    padded[b + 1, a + 2],  # rim 1: constant a+1 side
+                    padded[b + 2, a + 1],  # rim 2: constant b+1 side
+                    padded[b + 1, a],      # rim 3: constant a side
+                )
+                for i in range(4):
+                    other = neighbours[i]
+                    # Both horizontal creases of every boundary are real
+                    # geometry: the top ring stays CLOSED at the box's
+                    # own height (coincident rims of equal boxes dedupe
+                    # to one), and where the surface drops to the floor
+                    # -- an absent neighbour -- the foot line closes the
+                    # face against the floor.
+                    edge_list.append((top[i], top[(i + 1) % 4]))
+                    if not np.isfinite(other) and high > low:
+                        edge_list.append(
+                            (bottom[i], bottom[(i + 1) % 4])
+                        )
+        edge_list.extend(self._height_bars_node_verticals(folded))
+        if not edge_list:
+            if outline is not None:
+                outline.set_visible(False)
+            return
+        edges = np.asarray(edge_list, dtype=np.float64)
+        edges = self._height_bars_dedupe_edges(edges)
+        self._artists[f"{key}:h3d_outline_geometry"] = (geometry_key, edges)
+        xs, ys = self._height_bars_occluded_polyline(scene, edges)
+        outline = self._height_bars_outline_artist(axes, key)
+        outline.set_data(xs, ys)
+        outline.set_visible(True)
+
+    def _height_bars_outline_artist(self, axes: Any, key: str) -> Any:
+        import matplotlib as _matplotlib
+
+        outline = self._artists.get(f"{key}:h3d_outlines")
+        if outline is None:
+            (outline,) = axes.plot(
+                [], [],
+                transform=axes.transAxes,
+                color=self.style.render.height_bars_axis_color,
+                linewidth=float(_matplotlib.rcParams["axes.linewidth"]),
+                solid_capstyle="butt",
+                zorder=6,
+                clip_on=True,
+            )
+            self._artists[f"{key}:h3d_outlines"] = outline
+        return outline
+
+    def _update_height_bars_cage(self, snapshot: Any) -> None:
+        """A wireframe cage over the crosshair-selected bar, full z span.
+
+        Semi-transparent grey, and OCCLUDED like real geometry: every
+        edge is sampled against the scene's id plane, and a sample whose
+        pixel shows a strictly NEARER bar drops out of the polyline --
+        so the cage passes behind the bars that stand in front of it.
+        """
+
+        key = self.primary_surface[0]
+        cage = self._artists.get(f"{key}:h3d_cage")
+        scene = getattr(self, "_height_bars_scene_map", None)
+        crosshair = next(
+            (
+                state
+                for state in getattr(snapshot, "states", ())
+                if getattr(state.kind, "value", None) == "crosshair"
+            ),
+            None,
+        )
+        if scene is None or crosshair is None:
+            if cage is not None:
+                cage.set_visible(False)
+            return
+        cell = self._height_bars_cell_of(
+            float(crosshair.value.x), float(crosshair.value.y)
+        )
+        if cell is None:
+            if cage is not None:
+                cage.set_visible(False)
+            return
+        z_low = np.asarray([min(scene.value_low, 0.0)])
+        z_high = np.asarray([max(scene.value_high, 0.0)])
+        edges = self._height_bars_box_edges(scene, [cell], z_low, z_high)
+        xs, ys = self._height_bars_occluded_polyline(
+            scene, edges, samples_per_edge=48
+        )
+
+        axes = self.primary_axes
+        if cage is None:
+            (cage,) = axes.plot(
+                [], [],
+                transform=axes.transAxes,
+                color=self.style.render.height_bars_grid_rgb,
+                alpha=self.style.render.height_bars_cage_alpha,
+                linewidth=self.style.render.height_bars_grid_line_pt,
+                solid_capstyle="round",
+                zorder=7,
+                clip_on=True,
+            )
+            self._artists[f"{key}:h3d_cage"] = cage
+        cage.set_data(xs, ys)
+        cage.set_visible(True)
 
     def _image_color_lut(self, cmap_name: str, cmap: Any) -> np.ndarray:
         """The colormap's 256-entry uint8 RGBA table, cached per colormap."""
@@ -3345,6 +4450,14 @@ class MatplotlibRenderer:
             (vmin, vmax),
             square_view=coordinate_aspect is not None,
             coordinate_aspect=coordinate_aspect,
+            valid_identity=(
+                None
+                if source_valid is None
+                else (
+                    id(source_valid),
+                    np.shape(source_valid),
+                )
+            ),
         )
         if paint_labels:
             if axes.get_xlabel() != x_label:
@@ -5505,9 +6618,19 @@ class MatplotlibRenderer:
         return padded.tobytes(order="C"), target_height, target_width
 
     def rgba(self) -> np.ndarray:
-        """Draw the current scene and return an immutable RGBA snapshot."""
+        """Return an immutable RGBA snapshot of the current scene.
 
-        self.draw()
+        When the Agg buffer already holds the latest composed frame the
+        snapshot is a copy of it -- pixel-identical to a full draw by the
+        compose contract.  Anything that mutates artist state without
+        composing resets the freshness mark and lands here as a full
+        draw, so a stale frame can never be published.
+        """
+
+        if self._composed_generation != self._raster_generation or (
+            self._composed_generation < 0
+        ):
+            self.draw()
         return self._rgba_buffer()
 
     def save(self, path: str | Path | BytesIO, *, dpi: float | None = None, **kwargs: Any) -> None:
