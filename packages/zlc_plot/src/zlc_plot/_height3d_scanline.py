@@ -235,8 +235,15 @@ def warm(force: bool = False) -> str:
     return "kernel compiled and cached"
 
 
-if __name__ == "__main__":  # pragma: no cover
+def main() -> int:
+    """``zlc warm_numba``: compile-or-verify the kernel cache, say which."""
+
     print(warm())
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
 
 
 @njit(cache=True, parallel=True, nogil=True)
