@@ -1,0 +1,336 @@
+"""The Image kind's height-bar presentation: kernel, session and gestures.
+
+The scene must be a PRESENTATION of the same image surface: identical
+snapshot, payload, clim, colormap and pipeline -- so the contract here is
+mostly about what must NOT change: a heatmap->bars->heatmap roundtrip is
+bit-identical, committed selectors survive the trip, and the camera is
+display state that never touches the projection.
+"""
+
+from __future__ import annotations
+
+from time import perf_counter
+
+import matplotlib
+
+matplotlib.use("Agg", force=True)
+
+import numpy as np
+import pytest
+
+from data_factory import (
+    Axis,
+    DatasetSchema,
+    DatasetSnapshot,
+    PointTable,
+    PointTopology,
+)
+from zlc_data import AxisId
+from zlc_plot import AxisRef, FacetGridPlot, ImagePlot, PlotSession
+from zlc_plot._height3d_raster import (
+    HeightBarCamera,
+    render_height_bars,
+)
+from zlc_plot.selectors import (
+    NumericRange,
+    RectangleRange,
+    SelectorKind,
+    SelectorState,
+)
+
+MAX_STRESS_RENDER_SECONDS = 0.5
+
+
+def _scan_snapshot(
+    side: int = 10, *, repeats: int = 4, revision: int = 1, seed: int = 7
+):
+    rows = side * side
+    cells = [(i % side, i // side) for i in range(rows)]
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=repeats),
+        PointTable.from_columns({
+            "ax": np.asarray([float(c[0]) for c in cells]),
+            "ay": np.asarray([float(c[1]) for c in cells]),
+        }),
+        data_axes=(Axis.create("site", values=[0.0, 1.0]),),
+        dtype=np.float64,
+        point_topology=PointTopology(
+            (AxisId("ax"), AxisId("ay")),
+            (tuple(float(i) for i in range(side)),) * 2,
+            tuple(cells),
+        ),
+    )
+    rng = np.random.default_rng(seed)
+    xx, yy = np.meshgrid(np.arange(side), np.arange(side))
+    profile = np.exp(
+        -((xx - side / 2) ** 2 + (yy - side / 2) ** 2) / (side / 1.5)
+    )
+    values = profile.reshape(-1)[None, :, None] + rng.normal(
+        scale=0.05, size=(repeats, rows, 2)
+    )
+    return DatasetSnapshot(schema, values, revision=revision)
+
+
+def _session(side: int = 10) -> PlotSession:
+    session = PlotSession(
+        _scan_snapshot(side),
+        ImagePlot(AxisRef.point_dimension("ax"), AxisRef.point_dimension("ay")),
+    )
+    session.set_size("2x2")
+    return session
+
+
+# --------------------------------------------------------------- kernel
+@pytest.mark.parametrize("azimuth", [-55.0, 40.0, 130.0, 220.0, 305.0])
+def test_pick_inverts_projection_in_every_quadrant(azimuth) -> None:
+    """Projecting a bar's top-face centre and picking it must return the
+    same bar, whatever fold quadrant the azimuth lands in."""
+
+    heights = np.full((6, 9), 0.5)
+    colors = np.ones((6, 9, 3), dtype=np.float32) * 0.5
+    camera = HeightBarCamera(azimuth_deg=azimuth, elevation_deg=30.0)
+    _frame, scene = render_height_bars(
+        heights, colors, camera=camera, value_limits=(0.0, 1.0),
+        width=320, height=240,
+    )
+    for row, column in ((0, 0), (2, 5), (5, 8), (3, 3)):
+        a, b = scene.fold_cell(row, column)
+        x, y = scene.project(a + 0.5, b + 0.5, 0.5)
+        picked = scene.pick(x, y)
+        assert picked == (row, column), (azimuth, row, column, picked)
+
+
+def test_bars_clip_to_the_value_limits() -> None:
+    """A value beyond the colour limits saturates in HEIGHT exactly as it
+    saturates in colour: the z axis and the colorbar are one scale."""
+
+    heights = np.asarray([[0.5, 2.0]])
+    colors = np.ones((1, 2, 3), dtype=np.float32) * 0.5
+    camera = HeightBarCamera()
+    _frame, scene = render_height_bars(
+        heights, colors, camera=camera, value_limits=(0.0, 1.0),
+        width=320, height=240,
+    )
+    a0, b0 = scene.fold_cell(0, 0)
+    a1, b1 = scene.fold_cell(0, 1)
+    top_full = scene.project(a1 + 0.5, b1 + 0.5, 1.0)
+    picked = scene.pick(*top_full)
+    assert picked == (0, 1)
+
+
+def test_absent_bars_leave_the_floor() -> None:
+    # Near-flat neighbours, so the hole shows FLOOR rather than the side
+    # face of the bar behind it (which a deep hole correctly reveals).
+    heights = np.full((4, 4), 0.02)
+    heights[1, 2] = np.nan
+    colors = np.ones((4, 4, 3), dtype=np.float32) * 0.5
+    frame, scene = render_height_bars(
+        heights, colors, camera=HeightBarCamera(), value_limits=(0.0, 1.0),
+        width=320, height=240,
+    )
+    a, b = scene.fold_cell(1, 2)
+    x, y = scene.project(a + 0.5, b + 0.5, 0.0)
+    assert scene.pick(x, y) is None
+
+
+def test_dense_grids_pool_to_display_resolution() -> None:
+    rng = np.random.default_rng(0)
+    heights = rng.random((400, 800))
+    colors = np.ones((400, 800, 3), dtype=np.float32) * 0.5
+    _frame, scene = render_height_bars(
+        heights, colors, camera=HeightBarCamera(), value_limits=(0.0, 1.0),
+        width=300, height=220,
+    )
+    assert scene.pool_x > 1 and scene.pool_y > 1
+    assert scene.nx <= 300 and scene.ny <= 300
+    # Picks still speak SOURCE indices (of the pooled block's origin).
+    a, b = scene.fold_cell(100, 200)
+    x, y = scene.project(a + 0.5, b + 0.5, 0.5)
+    picked = scene.pick(x, y)
+    assert picked is not None
+    assert picked[0] % scene.pool_y == 0 and picked[1] % scene.pool_x == 0
+
+
+def test_stress_grid_renders_inside_the_guard() -> None:
+    rng = np.random.default_rng(1)
+    heights = rng.random((96, 128))
+    colors = np.ones((96, 128, 3), dtype=np.float32) * 0.5
+    start = perf_counter()
+    render_height_bars(
+        heights, colors, camera=HeightBarCamera(), value_limits=(0.0, 1.0),
+        width=600, height=440,
+    )
+    assert perf_counter() - start < MAX_STRESS_RENDER_SECONDS
+
+
+def test_camera_clamps_its_angles() -> None:
+    camera = HeightBarCamera(azimuth_deg=10.0, elevation_deg=89.0, zoom=99.0)
+    assert camera.elevation_deg == 80.0
+    assert camera.zoom == 6.0
+
+
+# --------------------------------------------------------------- session
+def test_presentation_roundtrip_is_bit_identical_and_keeps_selectors() -> None:
+    session = _session()
+    try:
+        session.set_area_selector(
+            NumericRange(2.0, 6.0), NumericRange(2.0, 6.0)
+        )
+        heatmap_before = session.rgba().copy()
+        session.set_parameter("presentation", "height_bars")
+        bars = session.rgba()
+        assert np.abs(
+            bars.astype(int) - heatmap_before.astype(int)
+        ).max() > 0, "the scene must actually change the pixels"
+        assert [s.kind for s in session.selectors] == [SelectorKind.AREA]
+        session.set_parameter("presentation", "heatmap")
+        heatmap_after = session.rgba()
+        np.testing.assert_array_equal(heatmap_after, heatmap_before)
+        assert [s.kind for s in session.selectors] == [SelectorKind.AREA]
+    finally:
+        session.close()
+
+
+def test_camera_parameters_are_display_state_not_projection() -> None:
+    session = _session()
+    try:
+        session.set_parameter("presentation", "height_bars")
+        revision_before = session.data_revision
+        first = session.rgba().copy()
+        session.set_parameter("camera_azimuth", -20.0)
+        second = session.rgba()
+        assert session.data_revision == revision_before
+        assert np.abs(second.astype(int) - first.astype(int)).max() > 0
+    finally:
+        session.close()
+
+
+def test_live_revision_rerenders_the_scene() -> None:
+    session = _session()
+    try:
+        session.set_parameter("presentation", "height_bars")
+        first = session.rgba().copy()
+        session.update_data(_scan_snapshot(revision=2, seed=11))
+        second = session.rgba()
+        assert np.abs(second.astype(int) - first.astype(int)).max() > 0
+    finally:
+        session.close()
+
+
+def _pointer(session, action, axis, fx, fy, **kwargs):
+    left, top, right, bottom = axis.bounds
+    return session._raster_pointer_event(
+        action,
+        left + fx * (right - left),
+        top + fy * (bottom - top),
+        axes_snapshot=axis,
+        **kwargs,
+    )
+
+
+def test_orbit_drag_commits_camera_and_creates_no_selector() -> None:
+    session = _session()
+    try:
+        session.set_parameter("presentation", "height_bars")
+        session.rgba()
+        axis = next(
+            t for t in session._raster_axes_snapshot() if t.role == "image"
+        )
+        _pointer(session, "press", axis, 0.5, 0.5, button=1)
+        _pointer(session, "move", axis, 0.7, 0.6, button=1)
+        _pointer(session, "release", axis, 0.7, 0.6, button=1)
+        state = session.display_state
+        assert float(state["camera_azimuth"]) != -55.0
+        assert session.selectors == ()
+    finally:
+        session.close()
+
+
+def test_click_picks_the_bar_as_a_crosshair() -> None:
+    session = _session()
+    try:
+        session.set_parameter("presentation", "height_bars")
+        session.rgba()
+        renderer = session._renderer
+        scene = renderer._height_bars_scene_map
+        # Aim at the TALLEST bar's top-face centre: the peak cannot be
+        # occluded by anything nearer, so the pick must return it.
+        payload = session._payload
+        z_grid = np.asarray(payload.z.canonical)
+        row, column = np.unravel_index(np.nanargmax(z_grid), z_grid.shape)
+        row, column = int(row), int(column)
+        a, b = scene.fold_cell(row, column)
+        px, py = scene.project(
+            a + 0.5, b + 0.5, float(z_grid[row, column])
+        )
+        box = renderer.primary_axes.bbox
+        canvas_x = float(box.x0) + px
+        canvas_y = float(box.y1) - py
+        width, height_px = renderer.figure.canvas.get_width_height(
+            physical=True
+        )
+        image_axis = next(
+            t for t in session._raster_axes_snapshot() if t.role == "image"
+        )
+        session._raster_pointer_event(
+            "press",
+            canvas_x / width,
+            1.0 - canvas_y / height_px,
+            button=1,
+            axes_snapshot=image_axis,
+        )
+        session._raster_pointer_event(
+            "release",
+            canvas_x / width,
+            1.0 - canvas_y / height_px,
+            button=1,
+            axes_snapshot=image_axis,
+        )
+        kinds = [s.kind for s in session.selectors]
+        assert kinds == [SelectorKind.CROSSHAIR], kinds
+        crosshair = session.selectors[0]
+        cell = renderer._height_bars_cell_of(
+            float(crosshair.value.x), float(crosshair.value.y)
+        )
+        assert cell == (row, column)
+    finally:
+        session.close()
+
+
+def test_facet_overview_stays_heatmap_and_focus_honours_the_scene() -> None:
+    rows = 100
+    cells = [(i % 10, i // 10) for i in range(rows)]
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=4),
+        PointTable.from_columns({
+            "ax": np.asarray([float(c[0]) for c in cells]),
+            "ay": np.asarray([float(c[1]) for c in cells]),
+        }),
+        data_axes=(Axis.create("site", values=[0.0, 1.0, 2.0]),),
+        dtype=np.float64,
+        point_topology=PointTopology(
+            (AxisId("ax"), AxisId("ay")),
+            (tuple(float(i) for i in range(10)),) * 2,
+            tuple(cells),
+        ),
+    )
+    rng = np.random.default_rng(0)
+    session = PlotSession(
+        DatasetSnapshot(schema, rng.random((4, rows, 3)), revision=1),
+        FacetGridPlot(
+            AxisRef.data("site"),
+            ImagePlot(
+                AxisRef.point_dimension("ax"), AxisRef.point_dimension("ay")
+            ),
+        ),
+    )
+    session.set_size("2x2")
+    try:
+        overview = session.rgba().copy()
+        session.set_parameter("presentation", "height_bars")
+        np.testing.assert_array_equal(session.rgba(), overview)
+        session.focus_facet(1)
+        focused = session.rgba()
+        assert np.abs(focused.astype(int) - overview.astype(int)).max() > 0
+    finally:
+        session.close()

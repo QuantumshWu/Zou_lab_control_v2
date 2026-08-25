@@ -8,6 +8,8 @@ change (for example) ``bin_count`` without constructing another Figure.
 
 from __future__ import annotations
 
+import math
+
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
@@ -552,6 +554,24 @@ def _histogram_parameters() -> tuple[ParameterSpec[object], ...]:
     )
 
 
+class ImagePresentation(str, Enum):
+    """How the Image kind paints its one value grid."""
+
+    HEATMAP = "heatmap"
+    HEIGHT_BARS = "height_bars"
+
+
+def _image_presentation(value: object) -> str:
+    return ImagePresentation(str(value)).value
+
+
+def _finite_number(value: object) -> float:
+    number = float(value)  # type: ignore[arg-type]
+    if not math.isfinite(number):
+        raise ValueError("camera parameters must be finite")
+    return number
+
+
 def _image_parameters(style: PlotStyleConfig) -> tuple[ParameterSpec[object], ...]:
     policy = style.render
     entries: list[ParameterSpec[object]] = [
@@ -599,6 +619,43 @@ def _image_parameters(style: PlotStyleConfig) -> tuple[ParameterSpec[object], ..
             RenderEffect.CHROME,
             default=True,
             label="Colorbar",
+        )
+    )
+    entries.extend(
+        (
+            ParameterSpec(
+                "presentation",
+                str,
+                _IMAGE_COLOR_EFFECTS | RenderEffect.BASE_GEOMETRY,
+                default=ImagePresentation.HEATMAP.value,
+                normalizer=_image_presentation,
+                label="Presentation",
+                choices=tuple(item.value for item in ImagePresentation),
+            ),
+            ParameterSpec(
+                "camera_azimuth",
+                (int, float),
+                RenderEffect.BASE_GEOMETRY,
+                default=-55.0,
+                normalizer=_finite_number,
+                label="View azimuth",
+            ),
+            ParameterSpec(
+                "camera_elevation",
+                (int, float),
+                RenderEffect.BASE_GEOMETRY,
+                default=28.0,
+                normalizer=_finite_number,
+                label="View elevation",
+            ),
+            ParameterSpec(
+                "camera_zoom",
+                (int, float),
+                RenderEffect.BASE_GEOMETRY,
+                default=1.0,
+                normalizer=_finite_number,
+                label="View zoom",
+            ),
         )
     )
     return tuple(entries)

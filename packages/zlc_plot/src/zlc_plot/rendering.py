@@ -827,6 +827,10 @@ class MatplotlibRenderer:
         self._raster_generation = 0
         self._focused_facet_index: int | None = None
         self._facet_focus_index: int | None = None
+        self._height_bars_preview = None
+        self._height_bars_dragging = False
+        self._height_bars_rendered_camera = None
+        self._height_bars_scene = False
         self._visible_facet_count = 0
         #: Which cell currently owns the focused image side chrome (the
         #: distribution/colorbar axes over ``plan.facet_focus_axes``), or
@@ -1159,22 +1163,40 @@ class MatplotlibRenderer:
                 self._update_text_artists(payload, state)
             if state_changed and selected_effects & RenderEffect.CHROME:
                 self._update_chrome_artists(state)
+            # A height-bar scene owns its whole data region: 2D overlays --
+            # selectors, fit polylines, classifier guides, the point
+            # overlay -- speak data coordinates that do not exist on the
+            # projected scene, so their artists hide while the COMMITTED
+            # state stays in the session and returns with the heatmap.
+            scene_3d = self._height_bars_active(
+                self.primary_surface[0], state
+            )
+            self._height_bars_scene = scene_3d
             # Every painted surface honours the requested view, not just the
             # selected one: a FacetGrid overview shows N cells of the same
             # picture, and zooming one of them alone is not a view of anything.
-            for _key, axes, _index in painted:
-                self._apply_requested_view(axes, frame.view_limits)
+            if not scene_3d:
+                for _key, axes, _index in painted:
+                    self._apply_requested_view(axes, frame.view_limits)
             self._classifier_labels = frame.classifier_labels
             self._update_classifier(
-                frame.classifier_overlays,
+                () if scene_3d else frame.classifier_overlays,
                 frame.classifier_thresholds,
                 frame.classifier_labels,
             )
-            self._last_selectors = painted_selectors
+            self._last_selectors = (
+                SelectorSnapshot(()) if scene_3d else painted_selectors
+            )
             self._update_selectors(self._last_selectors)
-            self._set_fit_mode(bool(painted_fit_overlays) and not overview)
+            if scene_3d:
+                self._update_height_bars_cage(painted_selectors)
+            else:
+                self._update_height_bars_cage(SelectorSnapshot(()))
+            self._set_fit_mode(
+                bool(painted_fit_overlays) and not overview and not scene_3d
+            )
             self._update_fit(
-                painted_fit_overlays,
+                () if scene_3d else painted_fit_overlays,
                 overview=overview,
                 model_id=frame.fit_model_id,
             )
@@ -1184,7 +1206,7 @@ class MatplotlibRenderer:
                 self._update_image_point_overlay(
                     axes,
                     payload if cell is None else getattr(cell, "payload", cell),
-                    frame.image_overlay,
+                    None if scene_3d else frame.image_overlay,
                     state,
                     key,
                     None
@@ -1467,6 +1489,11 @@ class MatplotlibRenderer:
             self._boundary_chrome_signature = signature
         for axes in {entry[1].axes for entry in tuple(collected)}:
             if not axes.get_visible():
+                continue
+            if not getattr(axes, "axison", True):
+                # ``set_axis_off`` (the height-bar scene) removes ticks and
+                # spines from a full draw; composing their cached artists
+                # anyway framed the 3D scene with 2D chrome.
                 continue
             if id(axes) in dynamic_full_axes_ids:
                 continue
@@ -2871,6 +2898,26 @@ class MatplotlibRenderer:
         mapping_key = f"{key}:mapping_state"
         previous_mapping = self._artists.get(mapping_key)
 
+        if self._height_bars_active(key, state):
+            self._artists[mapping_key] = mapping_state
+            return self._update_height_bars_artist(
+                axes,
+                values,
+                valid,
+                extent,
+                state,
+                key,
+                color_limits,
+                cmap_name,
+                cmap,
+            )
+        if not axes.axison:
+            # Returning from the height-bar presentation restores the 2D
+            # chrome this artist path owns and hides the scene's.
+            axes.set_axis_on()
+            self._hide_height_bars_chrome(key)
+            self._mark_axes_chrome_dirty(axes)
+
         home_extent = (
             _square_image_limits(
                 extent,
@@ -3099,6 +3146,403 @@ class MatplotlibRenderer:
         sized.setflags(write=False)
         self._artists[cache_name] = (cache_key, sized)
         return sized
+
+    def _height_bars_active(self, key: str, state: DisplayState) -> bool:
+        """Whether this image surface paints the height-bar presentation.
+
+        The presentation is a property of the ONE examined image surface:
+        the standalone image, or a focused facet cell.  A facet overview
+        stays a heatmap grid -- sixty-four simultaneous 3D scenes would
+        be neither readable nor affordable.
+        """
+
+        try:
+            wanted = str(state["presentation"])
+        except KeyError:
+            return False
+        if wanted != "height_bars":
+            return False
+        if key == "image":
+            return True
+        return key.startswith("facet:") and self._facet_focus_index is not None
+
+    def set_height_bars_preview(
+        self,
+        camera: "HeightBarCamera | None",
+        *,
+        dragging: bool = False,
+    ) -> None:
+        """Install (or clear) the transient camera the next render uses."""
+
+        self._height_bars_preview = camera
+        self._height_bars_dragging = bool(dragging)
+
+    @property
+    def height_bars_camera(self) -> "HeightBarCamera | None":
+        """The camera the LAST height-bar render actually used."""
+
+        return getattr(self, "_height_bars_rendered_camera", None)
+
+    def _update_height_bars_artist(
+        self,
+        axes: Any,
+        values: np.ndarray,
+        valid: np.ndarray,
+        extent: tuple[float, float, float, float],
+        state: DisplayState,
+        key: str,
+        color_limits: tuple[float, float] | None,
+        cmap_name: str,
+        cmap: Any,
+    ) -> tuple[Any, Any]:
+        """Paint the value grid as shaded outlined boxes via the raster.
+
+        The scene replaces only the data region: the same artist, clim,
+        colormap, colorbar and distribution rail keep their meanings, so
+        a colour-limit drag recolours the bars exactly as it recolours
+        the heatmap.
+        """
+
+        from ._height3d_raster import HeightBarCamera, render_height_bars
+
+        policy = self.style.render
+        if axes.axison:
+            # The 2D ticks and spines say nothing about a 3D scene.
+            axes.set_axis_off()
+            self._mark_axes_chrome_dirty(axes)
+        if axes.get_aspect() != "auto":
+            axes.set_aspect("auto")
+        heights = np.asarray(values, dtype=np.float64)
+        usable = _valid_array(valid, heights.shape) if valid is not None else (
+            np.ones(heights.shape, dtype=bool)
+        )
+        heights = np.where(usable, heights, np.nan)
+
+        if color_limits is not None and color_limits[1] > color_limits[0]:
+            low, high = (float(value) for value in color_limits)
+        else:
+            finite = heights[np.isfinite(heights)]
+            low = float(finite.min()) if finite.size else 0.0
+            high = float(finite.max()) if finite.size else 1.0
+            if high <= low:
+                high = low + 1.0
+        lut = self._image_color_lut(cmap_name, cmap)
+        with np.errstate(invalid="ignore"):
+            codes = np.clip(
+                (heights - low) * (256.0 / (high - low)), 0.0, 255.0
+            )
+        codes = np.where(np.isfinite(codes), codes, 0.0).astype(np.uint8)
+        top_rgb = lut[codes][..., :3].astype(np.float32) / np.float32(255.0)
+
+        preview = getattr(self, "_height_bars_preview", None)
+        if preview is not None:
+            camera = preview
+        else:
+            camera = HeightBarCamera(
+                azimuth_deg=float(state["camera_azimuth"]),
+                elevation_deg=float(state["camera_elevation"]),
+                zoom=float(state["camera_zoom"]),
+            )
+        self._height_bars_rendered_camera = camera
+
+        box = axes.bbox
+        box_w = max(int(round(float(box.width))), 8)
+        box_h = max(int(round(float(box.height))), 8)
+        divisor = 1
+        if getattr(self, "_height_bars_dragging", False):
+            divisor = max(1, int(policy.height_bars_drag_resolution_divisor))
+        # Anti-aliasing is bought where it shows and costs little: small
+        # grids on small boxes.  A large box has small pixels already, and
+        # supersampling it would quadruple the raster for nothing visible.
+        supersample = (
+            2
+            if divisor == 1
+            and heights.size <= policy.height_bars_supersample_bar_limit
+            and box_w * box_h <= policy.height_bars_supersample_pixel_limit
+            else 1
+        )
+        frame, scene = render_height_bars(
+            heights,
+            top_rgb,
+            camera=camera,
+            value_limits=(low, high),
+            width=max(box_w // divisor, 8),
+            height=max(box_h // divisor, 8),
+            supersample=supersample,
+            side_shades=policy.height_bars_side_shades,
+            edge_darken=policy.height_bars_edge_darken,
+            grid_rgb=policy.height_bars_grid_rgb,
+            background_rgb=policy.height_bars_background_rgb,
+            z_fraction=policy.height_bars_z_fraction,
+            wall_ticks=policy.height_bars_wall_ticks,
+        )
+        self._height_bars_scene_map = scene
+        self._height_bars_axes_id = id(axes)
+        self._height_bars_data_frame = (
+            tuple(float(v) for v in extent),
+            int(heights.shape[1]),
+            int(heights.shape[0]),
+        )
+
+        scene_extent = (0.0, 1.0, 0.0, 1.0)
+        image = self._artists.get(key)
+        if image is None:
+            image = axes.imshow(
+                frame,
+                origin=policy.image_origin,
+                aspect="auto",
+                extent=scene_extent,
+                interpolation="nearest",
+            )
+            self._artists[key] = image
+        else:
+            image.set_data(frame)
+            extent_key = f"{key}:applied_extent"
+            if self._artists.get(extent_key) != scene_extent:
+                image.set_extent(scene_extent)
+                self._artists[extent_key] = scene_extent
+        self._artists[f"{key}:applied_front"] = frame
+        self._artists[f"{key}:color_mode"] = "rgba"
+        # The artist stays the clim/cmap authority every consumer reads.
+        image.set_cmap(cmap)
+        image.set_clim(low, high)
+        self._home_limits[id(axes)] = ((0.0, 1.0), (0.0, 1.0))
+        self._set_xlim(axes, 0.0, 1.0)
+        self._set_ylim(axes, 0.0, 1.0)
+        self._update_height_bars_chrome(axes, key, scene)
+        return image, cmap
+
+    def _height_bars_fraction(
+        self, scene: Any, x: float, y: float
+    ) -> tuple[float, float]:
+        """Scene pixel (top-origin) -> axes-fraction coordinates."""
+
+        return x / max(scene.width, 1), 1.0 - y / max(scene.height, 1)
+
+    def _update_height_bars_chrome(
+        self, axes: Any, key: str, scene: Any
+    ) -> None:
+        """The scene's axis chrome: z ticks/labels and base coordinate labels.
+
+        Text stays Matplotlib text at the style's fonts -- only positions
+        come from the projection, so the 3D scene reads in the same
+        typography as every 2D panel.
+        """
+
+        from matplotlib.ticker import MaxNLocator
+
+        chrome_key = f"{key}:h3d_chrome"
+        artists = self._artists.get(chrome_key)
+        if artists is None:
+            artists = {"lines": None, "texts": []}
+            self._artists[chrome_key] = artists
+
+        segments_x: list[float] = []
+        segments_y: list[float] = []
+
+        def add_segment(p0, p1):
+            f0 = self._height_bars_fraction(scene, *p0)
+            f1 = self._height_bars_fraction(scene, *p1)
+            segments_x.extend((f0[0], f1[0], np.nan))
+            segments_y.extend((f0[1], f1[1], np.nan))
+
+        wanted_texts: list[tuple[float, float, str, str, str]] = []
+        tick_px = 5.0 / max(scene.width, 1)
+
+        # ---- z axis along the left pane's front edge, at ground (0, 0)
+        z_low, z_high = scene.value_low, scene.value_high
+        base = scene.project(0.0, 0.0, min(z_low, 0.0))
+        top = scene.project(0.0, 0.0, max(z_high, 0.0))
+        add_segment(base, top)
+        for tick in MaxNLocator(nbins=5).tick_values(z_low, z_high):
+            if not (z_low - 1e-12 <= tick <= z_high + 1e-12):
+                continue
+            anchor = scene.project(0.0, 0.0, float(tick))
+            f = self._height_bars_fraction(scene, *anchor)
+            segments_x.extend((f[0], f[0] - tick_px, np.nan))
+            segments_y.extend((f[1], f[1], np.nan))
+            wanted_texts.append(
+                (f[0] - 1.6 * tick_px, f[1], f"{tick:g}", "right", "center")
+            )
+
+        # ---- base coordinate labels along the two front edges
+        data_frame = getattr(self, "_height_bars_data_frame", None)
+        if data_frame is not None:
+            (left, right, bottom, top_c), source_nx, source_ny = data_frame
+            base_value = min(z_low, 0.0)
+
+            def picks(count: int) -> list[int]:
+                shown = min(count, 6)
+                return sorted({
+                    int(round(v))
+                    for v in np.linspace(0, count - 1, shown)
+                })
+
+            for column in picks(source_nx):
+                a, b = scene.fold_cell(0, column * scene.pool_x)
+                anchor = scene.project(a + 0.5, 0.0, base_value)
+                f = self._height_bars_fraction(scene, *anchor)
+                value = left + (column + 0.5) * (right - left) / source_nx
+                wanted_texts.append(
+                    (f[0], f[1] - 1.2 * tick_px, f"{value:g}", "center", "top")
+                )
+            for row in picks(source_ny):
+                a, b = scene.fold_cell(row * scene.pool_y, 0)
+                anchor = scene.project(float(scene.nx), b + 0.5, base_value)
+                f = self._height_bars_fraction(scene, *anchor)
+                value = top_c + (row + 0.5) * (bottom - top_c) / source_ny
+                wanted_texts.append(
+                    (f[0] + tick_px, f[1] - tick_px, f"{value:g}", "left", "top")
+                )
+
+        line = artists["lines"]
+        if line is None:
+            (line,) = axes.plot(
+                [], [],
+                transform=axes.transAxes,
+                color=self.style.render.height_bars_axis_color,
+                linewidth=0.8,
+                zorder=6,
+                clip_on=False,
+            )
+            artists["lines"] = line
+        line.set_data(segments_x, segments_y)
+        line.set_visible(True)
+
+        texts = artists["texts"]
+        for index, (fx, fy, content, ha, va) in enumerate(wanted_texts):
+            if index < len(texts):
+                text = texts[index]
+            else:
+                text = axes.text(
+                    0, 0, "",
+                    transform=axes.transAxes,
+                    fontsize=self.style.fonts.tick_pt,
+                    zorder=6,
+                    clip_on=False,
+                )
+                texts.append(text)
+            text.set_position((fx, fy))
+            text.set_text(content)
+            text.set_horizontalalignment(ha)
+            text.set_verticalalignment(va)
+            text.set_visible(True)
+        for text in texts[len(wanted_texts):]:
+            text.set_visible(False)
+
+    def _hide_height_bars_chrome(self, key: str) -> None:
+        artists = self._artists.get(f"{key}:h3d_chrome")
+        if artists:
+            if artists["lines"] is not None:
+                artists["lines"].set_visible(False)
+            for text in artists["texts"]:
+                text.set_visible(False)
+        cage = self._artists.get(f"{key}:h3d_cage")
+        if cage is not None:
+            cage.set_visible(False)
+
+    def height_bars_pick(
+        self, canvas_x: float, canvas_y: float
+    ) -> tuple[float, float] | None:
+        """Canvas pixel -> the picked bar's DATA coordinates, or None."""
+
+        scene = getattr(self, "_height_bars_scene_map", None)
+        data_frame = getattr(self, "_height_bars_data_frame", None)
+        if scene is None or data_frame is None:
+            return None
+        axes = self.primary_axes
+        box = axes.bbox
+        local_x = float(canvas_x) - float(box.x0)
+        local_y = float(box.y1) - float(canvas_y)
+        picked = scene.pick(local_x, local_y)
+        if picked is None:
+            return None
+        row, column = picked
+        (left, right, bottom, top), source_nx, source_ny = data_frame
+        x_value = left + (column + 0.5) * (right - left) / source_nx
+        y_value = top + (row + 0.5) * (bottom - top) / source_ny
+        return x_value, y_value
+
+    def _height_bars_cell_of(
+        self, x_value: float, y_value: float
+    ) -> tuple[int, int] | None:
+        data_frame = getattr(self, "_height_bars_data_frame", None)
+        if data_frame is None:
+            return None
+        (left, right, bottom, top), source_nx, source_ny = data_frame
+        if right == left or bottom == top:
+            return None
+        column = int(np.floor((x_value - left) / (right - left) * source_nx))
+        row = int(np.floor((y_value - top) / (bottom - top) * source_ny))
+        if not (0 <= column < source_nx and 0 <= row < source_ny):
+            return None
+        return row, column
+
+    def _update_height_bars_cage(self, snapshot: Any) -> None:
+        """A wireframe cage over the crosshair-selected bar, full z span."""
+
+        key = self.primary_surface[0]
+        cage = self._artists.get(f"{key}:h3d_cage")
+        scene = getattr(self, "_height_bars_scene_map", None)
+        crosshair = next(
+            (
+                state
+                for state in getattr(snapshot, "states", ())
+                if getattr(state.kind, "value", None) == "crosshair"
+            ),
+            None,
+        )
+        if scene is None or crosshair is None:
+            if cage is not None:
+                cage.set_visible(False)
+            return
+        cell = self._height_bars_cell_of(
+            float(crosshair.value.x), float(crosshair.value.y)
+        )
+        if cell is None:
+            if cage is not None:
+                cage.set_visible(False)
+            return
+        corners = scene.cell_corners(*cell)
+        a, b = scene.fold_cell(*cell)
+        z_low = min(scene.value_low, 0.0)
+        z_high = max(scene.value_high, 0.0)
+        bottom_pts = [
+            scene.project(a + da, b + db, z_low)
+            for da, db in ((0, 0), (1, 0), (1, 1), (0, 1))
+        ]
+        top_pts = [
+            scene.project(a + da, b + db, z_high)
+            for da, db in ((0, 0), (1, 0), (1, 1), (0, 1))
+        ]
+        xs: list[float] = []
+        ys: list[float] = []
+
+        def path(points):
+            for point in points:
+                fx, fy = self._height_bars_fraction(scene, *point)
+                xs.append(fx)
+                ys.append(fy)
+            xs.append(np.nan)
+            ys.append(np.nan)
+
+        path([*bottom_pts, bottom_pts[0]])
+        path([*top_pts, top_pts[0]])
+        for low_pt, high_pt in zip(bottom_pts, top_pts):
+            path([low_pt, high_pt])
+        axes = self.primary_axes
+        if cage is None:
+            (cage,) = axes.plot(
+                [], [],
+                transform=axes.transAxes,
+                color=self.style.palette.bright,
+                linewidth=1.4,
+                zorder=7,
+                clip_on=False,
+            )
+            self._artists[f"{key}:h3d_cage"] = cage
+        cage.set_data(xs, ys)
+        cage.set_visible(True)
 
     def _image_color_lut(self, cmap_name: str, cmap: Any) -> np.ndarray:
         """The colormap's 256-entry uint8 RGBA table, cached per colormap."""

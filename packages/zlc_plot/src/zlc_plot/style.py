@@ -545,10 +545,30 @@ class RenderPolicyConfig:
     """Renderer-wide visual geometry, image defaults and bounded-work policy."""
 
     image_default_colormap: str = "gray"
-    image_colormaps: tuple[str, ...] = ("inferno", "viridis", "magma", "plasma", "gray")
+    image_colormaps: tuple[str, ...] = (
+        "inferno", "viridis", "magma", "plasma", "gray", "RdBu_r",
+    )
     image_front: ImageFrontPolicy = ImageFrontPolicy()
     image_origin: str = "upper"
     image_anchor: str = "W"
+    #: Height-bar presentation: fixed face shading (x-side, y-side), the
+    #: outline darkening, the scene chrome greys, the bar-height budget as
+    #: a fraction of the ground diagonal, and the quality knobs -- one
+    #: place, so no shading coefficient lives in the renderer.
+    height_bars_side_shades: tuple[float, float] = (0.62, 0.80)
+    height_bars_edge_darken: float = 0.85
+    height_bars_background_rgb: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    height_bars_axis_color: str = "black" 
+    height_bars_grid_rgb: tuple[float, float, float] = (0.78, 0.78, 0.80)
+    height_bars_z_fraction: float = 0.55
+    height_bars_wall_ticks: int = 4
+    #: Supersampled anti-aliasing while the grid is small enough to afford
+    #: it; above the limit the render runs at native resolution.
+    height_bars_supersample_bar_limit: int = 4096
+    height_bars_supersample_pixel_limit: int = 300_000
+    #: While the camera is being dragged the raster renders at 1/divisor
+    #: resolution and the release repaints at full resolution.
+    height_bars_drag_resolution_divisor: int = 2
     axes_title_pad_pt: float = 2.5
     compact_axes_title_pad_pt: float = 1.5
     figure_title_y: float = 0.992

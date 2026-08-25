@@ -184,13 +184,25 @@ class _PanGesture(_PointerGestureBase):
     candidate: RectangleRange | None = None
 
 
-_PointerGesture: TypeAlias = _SelectorGesture | _ColorGesture | _PanGesture
+@dataclass(slots=True)
+class _OrbitGesture(_PointerGestureBase):
+    """A height-bar camera drag: pixels in, orbit angles out."""
+
+    origin_px: tuple[float, float]
+    start: Any
+    current: Any
+
+
+_PointerGesture: TypeAlias = (
+    _SelectorGesture | _ColorGesture | _PanGesture | _OrbitGesture
+)
 
 
 __all__ = [
     "area_drag_handle",
     "_ColorGesture",
     "_ColorLimitDrag",
+    "_OrbitGesture",
     "_PanGesture",
     "_PointerGesture",
     "_PointerGestureBase",
