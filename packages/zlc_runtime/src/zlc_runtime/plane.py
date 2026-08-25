@@ -1768,8 +1768,14 @@ class SignalDataPlane:
         self,
         node: object,
         outputs: Mapping[str, LiveDatasetOutput],
+        *,
+        worker_source: tuple[str, SignalPublication] | None = None,
     ) -> Mapping[str, SignalValue]:
-        return self._commit_outputs(node, outputs)
+        return self._commit_outputs(
+            node,
+            outputs,
+            worker_source=worker_source,
+        )
 
     def commit_processor(
         self,
@@ -1832,6 +1838,7 @@ class SignalDataPlane:
         outputs: Mapping[str, LiveDatasetOutput],
         *,
         source_publication: SignalPublication | None = None,
+        worker_source: tuple[str, SignalPublication] | None = None,
         trigger: tuple[str, int] | None = None,
     ) -> Mapping[str, SignalValue]:
         """Commit one immutable sibling bundle into Runtime-owned run state."""
@@ -1839,6 +1846,8 @@ class SignalDataPlane:
         if not isinstance(outputs, Mapping) or not outputs:
             raise TypeError("live commit outputs must be a non-empty mapping")
         owner_id = _node_instance_id(node)
+        if source_publication is not None and worker_source is not None:
+            raise ValueError("one commit cannot have processor and worker sources")
         kind = "producer" if source_publication is None else "processor"
         with self._lock:
             if self._closed:
@@ -1872,6 +1881,16 @@ class SignalDataPlane:
                 ):
                     raise RuntimeError(
                         "Processor result belongs to an obsolete parent"
+                    )
+            worker_parent = None
+            worker_signal = None
+            if worker_source is not None:
+                worker_signal, worker_parent = worker_source
+                worker_signal = canonical_text(worker_signal, "worker source signal")
+                self._require_issued_publication_locked(worker_parent)
+                if worker_parent.value(worker_signal) is None:
+                    raise ValueError(
+                        "worker source publication does not contain its signal"
                     )
 
             declared = self._declarations_by_bare(state)
@@ -2013,20 +2032,24 @@ class SignalDataPlane:
                     event_record=event_record,
                 )
 
-            parents = () if source_publication is None else (source_publication,)
+            parent = source_publication if worker_parent is None else worker_parent
+            parents = () if parent is None else (parent,)
             publication = self._publish_locked(
                 state,
                 values,
                 parents=parents,
                 notify=False,
             )
-            replay_parents = tuple(
-                self._slim_publication_locked(
-                    parent,
-                    state.source_name,
-                    {},
+            replay_parents = (
+                ()
+                if parent is None
+                else (
+                    self._slim_publication_locked(
+                        parent,
+                        worker_signal or state.source_name,
+                        {},
+                    ),
                 )
-                for parent in parents
             )
             for qualified, mask, target in occupied_updates:
                 mask[target] = True

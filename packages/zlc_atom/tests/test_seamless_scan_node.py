@@ -68,6 +68,8 @@ def _scan_host(node: object, plane: SignalDataPlane) -> NodeHost:
         instance_id=node.instance_id,
         kind="measurement",
         dataset_output_declarations=(SCAN_OUTPUT,),
+        input_signal=node.source.signal_name,
+        input_delivery="exact",
     )
 
 
@@ -155,6 +157,10 @@ def _scripted_run(
             "the seamless scan never finished; it published "
             f"{bench.published} and kept waiting"
         )
+        publication = plane.latest_publication(host.signal_key("scan"))
+        assert publication is not None
+        (parent,) = plane.direct_parent_publications(publication)
+        assert parent.value(bench.signal_name) is not None
         value = plane.current_dataset(host.signal_key("scan"))
         block = np.asarray(value.block.values, dtype=float)
         # (visit, plan row, y, x): every pixel of a scripted frame carries the

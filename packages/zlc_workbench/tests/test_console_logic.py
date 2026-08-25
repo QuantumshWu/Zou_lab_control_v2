@@ -1071,8 +1071,8 @@ def test_make_host_passes_descriptor_contract_without_reading_node_attributes() 
         )
         try:
             assert scan_host._mode == "worker"
-            assert scan_host._source_signal is None
-            assert scan_host._input_delivery is None
+            assert scan_host._source_signal == "@logic/camera-2/frames"
+            assert scan_host._input_delivery == "exact"
         finally:
             scan_host.shutdown()
     finally:

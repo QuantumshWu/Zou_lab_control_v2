@@ -26,6 +26,7 @@ from zlc_workbench.logic import stable_signal_key
 from zlc_workbench.panel_catalog import task_console_fitting_spec
 from zlc_workbench.panel_state import project_panel_state
 from zlc_workbench.session import ExperimentSession
+from zlc_workbench.viewer import describe_archive
 
 from test_console_presenter import _ConsoleView, _Signal, _one_shot
 from pulse_fixtures import write_ordinary_pulse
@@ -299,6 +300,13 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
         assert records["occupancy"]["parameters"]["calibration_path"] == str(
             calibration_path.resolve()
         )
+        description = describe_archive(info, arrays)
+        device = next(iter(dict(dict(description.tabs)["Device"]).values()))
+        assert device["exposure_seconds"] == pytest.approx(0.02)
+        root_label, root_children = description.lineage[0]
+        assert "occupancy" in root_label
+        upstream = dict(root_children)["Upstream"]
+        assert len(upstream) == 1 and "camera_measurement" in upstream[0][0]
         encoded_archive = json.dumps(info).lower()
         assert CALIBRATION_SENTINEL.lower() not in encoded_archive
         assert all(word not in encoded_archive for word in ("fingerprint", "sha256", "hash"))

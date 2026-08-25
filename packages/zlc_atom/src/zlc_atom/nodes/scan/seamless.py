@@ -263,7 +263,7 @@ class SeamlessScanMeasurement:
                 check_cancelled(context)
                 sweep, rest = divmod(played, per_sweep)
                 row_index, shot = divmod(rest, shots)
-                value = self.source.next_value(context)
+                value, source_publication = self.source.next_value(context)
                 visit = sweep * shots + shot
                 front = {
                     SCAN_OUTPUT.name: writer.write(
@@ -293,7 +293,10 @@ class SeamlessScanMeasurement:
                             for name, output in companions.items()
                         }
                     )
-                context.commit_live(front)
+                context.commit_live(
+                    front,
+                    source_publication=source_publication,
+                )
                 if (played + 1) % shots == 0:
                     context.report_progress(
                         "Scanning",

@@ -47,7 +47,7 @@ from .panel_state import (
 __all__ = ["ArchiveDescription", "FigureViewerPresenter", "describe_archive"]
 
 
-Rows = tuple[tuple[str, str], ...]
+Rows = tuple[tuple[str, object], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +187,50 @@ def _lineage_tree(value: object) -> tuple[tuple[str, tuple], ...]:
         return ()
     visiting: set[str] = set()
     visited: set[str] = set()
+
+    def leaves(values: object) -> tuple[tuple[str, tuple], ...]:
+        if not isinstance(values, Mapping):
+            return ()
+        return tuple((f"{key} = {_text(item)}", ()) for key, item in values.items())
+
+    def details(node: Mapping[str, Any]) -> tuple[tuple[str, tuple], ...]:
+        record = node["record"]
+        result: list[tuple[str, tuple]] = []
+        source = record.get("source_signal")
+        if source and not node["parents"]:
+            result.append((f"Source · {source}", ()))
+        source_camera = record.get("source_camera")
+        if source_camera:
+            result.append((f"Camera source · {source_camera}", ()))
+        pulse = record.get("pulse")
+        if pulse:
+            result.append((f"Pulse · {pulse}", ()))
+        plan = record.get("plan")
+        axes = plan.get("axes") if isinstance(plan, Mapping) else None
+        if isinstance(axes, (tuple, list)):
+            planned = []
+            for axis in axes:
+                if not isinstance(axis, Mapping):
+                    continue
+                port = str(axis.get("port") or "axis")
+                prefix = "Device call" if port.startswith("device:") else "Scan axis"
+                planned.append((f"{prefix} · {port} = {_text(axis.get('values'))}", ()))
+            if planned:
+                result.append(("Plan", tuple(planned)))
+        parameters = leaves(record.get("parameters"))
+        if parameters:
+            result.append(("Parameters", parameters))
+        devices = tuple(
+            (
+                f"{role} → {device_key}",
+                leaves(snapshot),
+            )
+            for role, device_key, snapshot in _record_devices(record)
+        )
+        if devices:
+            result.append(("Devices", devices))
+        return tuple(result)
+
     def branch(node_id: str) -> tuple[str, tuple]:
         if node_id in visiting:
             raise ValueError("figure lineage contains a cycle")
@@ -194,10 +238,13 @@ def _lineage_tree(value: object) -> tuple[tuple[str, tuple], ...]:
         node = nodes[node_id]
         event = node["event"]
         signals = ", ".join(node["signals"]) or event["stream"]
-        children = tuple(branch(parent) for parent in node["parents"])
+        parents = tuple(branch(parent) for parent in node["parents"])
+        node_details = details(node)
+        children = node_details + (("Upstream", parents),) if parents else node_details
         visiting.remove(node_id)
         visited.add(node_id)
-        return f"{signals} @{event['sequence']}", children
+        subject = str(node["record"].get("node") or event["stream"])
+        return f"{subject} → {signals} @{event['sequence']}", children
     tree = (branch(root),)
     if visited != set(nodes):
         raise ValueError("figure lineage contains nodes outside the root graph")
@@ -206,19 +253,51 @@ def _lineage_tree(value: object) -> tuple[tuple[str, tuple], ...]:
 
 def _lineage_rows(value: object) -> Rows:
     _root, nodes = _lineage_nodes(value)
-    return tuple((node_id, _text(node["record"])) for node_id, node in nodes.items())
+    return tuple((node_id, node["record"]) for node_id, node in nodes.items())
+
+
+def _record_devices(
+    record: Mapping[str, object],
+) -> tuple[tuple[str, str, Mapping[str, object]], ...]:
+    named = record.get("named_devices")
+    snapshots = record.get("device_snapshots")
+    result = []
+    if isinstance(named, Mapping) and isinstance(snapshots, Mapping):
+        result.extend(
+            (str(role), str(named.get(role) or role), snapshot)
+            for role, snapshot in snapshots.items()
+            if isinstance(snapshot, Mapping)
+        )
+    actual = record.get("actual_devices")
+    if isinstance(actual, Mapping):
+        result.extend(
+            (str(device_key), str(device_key), snapshot)
+            for device_key, snapshot in actual.items()
+            if isinstance(snapshot, Mapping)
+            and not any(existing[1] == str(device_key) for existing in result)
+        )
+    return tuple(result)
 
 
 def _device_rows(value: object) -> Rows:
-    _lineage_nodes(value)
+    _root, nodes = _lineage_nodes(value)
     assert isinstance(value, Mapping)
-    return tuple(
+    baseline = tuple(
+        (
+            f"{role} → {device_key}",
+            snapshot,
+        )
+        for node in nodes.values()
+        for role, device_key, snapshot in _record_devices(node["record"])
+    )
+    changes = tuple(
         (
             f"{item.get('device_key', 'device')} epoch {item.get('settings_epoch', '?')}",
-            _text(item),
+            item,
         )
         for item in value["device_settings"]
     )
+    return baseline + changes
 
 
 def _flatten(value: Any, prefix: str = "") -> Rows:

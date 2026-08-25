@@ -442,7 +442,9 @@ class CameraCycleSource:
                 self.camera_node.camera.finish_record_capture()
                 raise
 
-    def next_value(self, context: object) -> SignalValue:
+    def next_value(
+        self, context: object
+    ) -> tuple[SignalValue, SignalPublication | None]:
         if self._capture is None:
             raise RuntimeError("the camera source was not armed")
         if context.cancel_requested():
@@ -466,7 +468,7 @@ class CameraCycleSource:
             event_record=self.camera_node._camera_event_record(
                 records, accumulate=True
             ),
-        )
+        ), None
 
     def close(self) -> CameraCaptureTerminalRecord | None:
         capture, self._capture = self._capture, None

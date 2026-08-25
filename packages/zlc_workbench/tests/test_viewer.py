@@ -370,7 +370,11 @@ def test_the_description_reports_only_facts_saved_in_the_archive(saved) -> None:
 
     measurement = dict(tabs["Measurement"])
     assert measurement
-    assert dict(tabs["Device"]) == {}
+    devices = dict(tabs["Device"])
+    assert len(devices) == 1
+    camera = next(iter(devices.values()))
+    assert camera["exposure_seconds"] == pytest.approx(0.02)
+    assert camera["roi_shape_yx"] == [96, 128]
 
     plot_rows = dict(tabs["Plot"])
     assert "data" in plot_rows and "uint16" in plot_rows["data"]
@@ -382,6 +386,9 @@ def test_the_flow_projection_is_the_saved_exact_lineage_tree(saved) -> None:
     description = describe_archive(*read_archive(path))
     assert description.lineage
     assert "@logic/cm/frames" in description.lineage[0][0]
+    details = dict(description.lineage[0][1])
+    assert set(details) >= {"Parameters", "Devices"}
+    assert "camera → camera" in dict(details["Devices"])
 
 
 def test_the_raw_tab_is_the_typed_document_not_a_node_probe(saved) -> None:

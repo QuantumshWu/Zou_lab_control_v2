@@ -42,6 +42,7 @@ print(zlc_ui.__file__)
 def test_fluent_controls_and_shared_scale() -> None:
     _run_qt_smoke(
         """
+from PyQt5 import QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.fluent import FluentButton, FluentLabel, scaled_px, set_fluent_scale, window_pad
 ensure_qt_app(['zlc-ui-tests'])
@@ -174,7 +175,6 @@ def test_drop_chooses_the_nearest_two_dimensional_gravity_anchor() -> None:
 def test_figure_info_construct() -> None:
     _run_qt_smoke(
         """
-from PyQt5 import QtWidgets
 from zlc_ui.qt import ensure_qt_app
 from zlc_ui.fluent import FluentReadoutMultiline, InfoPane
 app = ensure_qt_app(['zlc-ui-tests'])

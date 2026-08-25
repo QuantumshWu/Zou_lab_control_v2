@@ -228,6 +228,7 @@ class InfoPane(QtWidgets.QWidget):
                 if not isinstance(label, str) or not isinstance(children, tuple):
                     raise TypeError("info tree branch label/children are malformed")
                 item = QtWidgets.QTreeWidgetItem((label,))
+                item.setToolTip(0, label)
                 if parent is None:
                     tree.addTopLevelItem(item)
                 else:

@@ -175,10 +175,15 @@ class NodeExecutionContext:
     def commit_live(
         self,
         outputs: Mapping[str, LiveDatasetOutput],
+        *,
+        source_publication: SignalPublication | None = None,
     ) -> Mapping[str, SignalValue]:
-        """Commit one new immutable event bundle into this run's datasets."""
+        """Commit one event and its exact consumed source, when it has one."""
 
-        return self._host._commit_live(outputs)
+        return self._host._commit_live(
+            outputs,
+            source_publication=source_publication,
+        )
 
     def current_dataset(
         self,
@@ -843,6 +848,8 @@ class NodeHost:
     def _commit_live(
         self,
         outputs: Mapping[str, LiveDatasetOutput],
+        *,
+        source_publication: SignalPublication | None = None,
     ) -> Mapping[str, SignalValue]:
         if self._mode != "worker":
             raise RuntimeError("processor outputs publish through their source publication")
@@ -856,7 +863,23 @@ class NodeHost:
         declared = {value.name for value in self._dataset_outputs}
         if not set(values).issubset(declared):
             raise ValueError("live outputs contain an undeclared name")
-        published = self._data_plane.commit_live(self, values)
+        if source_publication is not None:
+            if not isinstance(source_publication, SignalPublication):
+                raise TypeError("worker source publication must be SignalPublication")
+            if (
+                self._source_signal is None
+                or source_publication.value(self._source_signal) is None
+            ):
+                raise ValueError("worker source publication differs from its input signal")
+        published = self._data_plane.commit_live(
+            self,
+            values,
+            worker_source=(
+                None
+                if source_publication is None
+                else (self._source_signal, source_publication)
+            ),
+        )
         with self._start_lock:
             self._live_commit_count += 1
         self._request_owner_wake()

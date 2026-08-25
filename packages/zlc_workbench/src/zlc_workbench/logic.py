@@ -638,9 +638,9 @@ def make_host(
     if len(inputs) > 1:
         raise ValueError("NodeHost supports exactly one declared Dataset input")
     kind = str(getattr(descriptor.kind, "value", descriptor.kind))
-    processor_input = bool(inputs) and kind == "processor"
+    has_input = bool(inputs)
     selected_source = (
-        str(source_signal or "").strip() if processor_input else None
+        str(source_signal or "").strip() if has_input else None
     )
     return NodeHost(
         node,
@@ -651,7 +651,7 @@ def make_host(
         dataset_output_declarations=tuple(descriptor.outputs),
         input_signal=selected_source,
         input_delivery=(
-            str(inputs[0].delivery) if processor_input else None
+            str(inputs[0].delivery) if has_input else None
         ),
         required_artifacts={
             output.name: output.contract_id

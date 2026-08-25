@@ -63,6 +63,7 @@
 - Figure只使用稳定`zlc.figure`格式，无数字版本；reader只接受当前完整grammar，其它root或缺失字段均loud拒绝。
 - Figure NPZ是可重绘的数据真相，包含typed Dataset、exact PlotSpec、完整normalized parameters、overlay、viewport、selectors、facet focus、classifier、fit和exact causal lineage graph；PNG只是同stem preview。
 - FigureViewer按保存的recipe恢复typed plot input，并和TaskConsole Live/Frozen使用同一个Plot host/configure与accepted `DisplayDescription.spec` contract；不得按array shape重新猜plot kind。一个immutable archive可在同一Monitor board增加多个共享`PanelCardView`，默认panel恢复exact recipe，operator新增的其它plot kind只从同一typed Dataset schema重新compose。每个panel的Setting、可关闭Edit tab、size/signal/cell kind/display/fit均复用TaskConsole现有owner；saved/static Edit不显示live cadence、producer、snapshot refresh或第二套Save controls。Lineage以root、event nodes和direct parent IDs保存，并投影成可展开的真实树。
+- Measurement worker若显式消费一个Dataset signal，必须在取出值的同一时刻把该exact source publication交给Runtime commit；Runtime是direct parent edge唯一owner。Scan不得只保留`SignalValue`后丢弃publication identity，也不得在Figure Save/Viewer中按`source_signal`反查latest补边。FigureViewer Flow只展开archive中的event parents与各node已保存的source/pulse/plan/parameters/device details；Device页同时显示node `device_snapshots/actual_devices`记录的run working point和lineage顶层仅对实际引用epoch展开的active override，不得拿后者为空解释成run未使用device。
 - Dataset/Figure encoder只写caller-owned binary IO；路径原子发布唯一属于`zlc_durable`。
 
 ### 3.3 Durable paths

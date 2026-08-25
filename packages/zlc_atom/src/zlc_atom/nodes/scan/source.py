@@ -18,13 +18,14 @@ a camera capture wearing this protocol, so it lives with the camera
 it, and the scan package is what the scan NODES stand on.
 
 Both are sources: open before the board is loaded, validate the actual played
-program before LOAD, arm just before the fire, return one value per played
-point, and close at the end.
+program before LOAD, arm just before the fire, return one value plus its exact
+causal publication per played point, and close at the end.  A Task-owned camera
+has no upstream publication and returns ``None`` for that half.
 """
 
 from __future__ import annotations
 
-from zlc_runtime import SignalValue
+from zlc_runtime import SignalPublication, SignalValue
 from zlc_runtime.streams import SourceGenerationEnded, StreamEndedEarly
 
 
@@ -170,8 +171,10 @@ class PublishedSignalSource:
                     "the source signal restarted during the scan"
                 ) from None
 
-    def next_value(self, context: object) -> SignalValue:
-        """The next publication's value of the watched signal, waiting for it."""
+    def next_value(
+        self, context: object
+    ) -> tuple[SignalValue, SignalPublication]:
+        """The next value and the exact publication the scan consumed."""
 
         tap = self._require_tap()
         while True:
@@ -188,7 +191,7 @@ class PublishedSignalSource:
             value = publication.value(self.signal_name)
             if not isinstance(value, SignalValue):
                 raise RuntimeError("the source publication lost the selected signal")
-            return value
+            return value, publication
 
     def close(self) -> None:
         tap, self._tap = self._tap, None
