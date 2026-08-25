@@ -543,3 +543,26 @@ def test_scanline_engine_matches_the_reference_bit_for_bit() -> None:
             )
     finally:
         raster._ENGINE = previous
+
+
+def test_composed_camera_frames_equal_a_full_draw() -> None:
+    """The compose fast lane must be invisible: after any run of camera
+    commits (buffer reused, background preserved, chrome repainted as
+    dynamic artists), the published pixels equal a forced full draw."""
+
+    session = _session(6)
+    try:
+        session.set_parameter("presentation", "height_bars")
+        session.rgba()
+        # two commits WITHOUT reading frames in between: the second
+        # compose must not lean on a full draw having wiped the stale
+        # background between them.
+        session.set_parameter("camera_azimuth", -40.0)
+        session.set_parameter("camera_elevation", 44.0)
+        composed = session.rgba().copy()
+        renderer = session._renderer
+        renderer.draw()
+        full = renderer._rgba_buffer()
+        np.testing.assert_array_equal(composed, full)
+    finally:
+        session.close()

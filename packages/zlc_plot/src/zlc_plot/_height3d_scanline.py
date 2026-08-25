@@ -48,6 +48,135 @@ except Exception:  # pragma: no cover
     prange = range  # type: ignore[assignment]
 
 
+@njit(cache=True, nogil=True)
+def _occlusion_samples(  # one edge set, sampled against one scene
+    edges,       # f64 (E, 2, 3) folded (a, b, value) endpoints
+    id_plane,    # i32 (H, W)
+    top_values,  # f64 (ny, nx)
+    ca,          # f64
+    sa,          # f64
+    se,          # f64
+    z_unit,      # f64
+    ce,          # f64
+    x_low,       # f64
+    y_high,      # f64
+    scale,       # f64
+    samples,     # i64 per edge
+    xs,          # f64 (E * (samples + 1),) written
+    ys,          # f64 (E * (samples + 1),) written
+):
+    """The occlusion sampler's math, fused per edge.
+
+    Mirrors ``_height_bars_occluded_polyline`` operation for operation
+    (pure float64 with integer lookups, so the mirror is direct): the
+    projection, the shown box's ahead-and-below test, the inside-solid
+    test with viewer-side cells, and the isolated-sample erosion.
+    """
+
+    E = edges.shape[0]
+    height = id_plane.shape[0]
+    width = id_plane.shape[1]
+    ny = top_values.shape[0]
+    nx = top_values.shape[1]
+    z_slack = 0.5 / max(z_unit * ce * scale, 1e-9)
+    rise = se / (z_unit * ce)
+    stride = samples + 1
+    for e in range(E):
+        a0 = edges[e, 0, 0]
+        b0 = edges[e, 0, 1]
+        z0 = edges[e, 0, 2]
+        da = edges[e, 1, 0] - a0
+        db = edges[e, 1, 1] - b0
+        dz = edges[e, 1, 2] - z0
+        base = e * stride
+        # np.linspace computes delta once and multiplies -- mirror that,
+        # including the forced exact endpoint.
+        delta = 1.0 / (samples - 1.0)
+        for n in range(samples):
+            if n == samples - 1:
+                fraction = 1.0
+            else:
+                fraction = n * delta
+            ga = a0 + da * fraction
+            gb = b0 + db * fraction
+            gz = z0 + dz * fraction
+            sx = ga * ca + gb * sa
+            sy = -ga * sa * se + gb * ca * se + gz * z_unit * ce
+            px = (sx - x_low) * scale
+            py = (y_high - sy) * scale
+            column = np.int64(px)
+            if column < 0:
+                column = 0
+            elif column > width - 1:
+                column = width - 1
+            row = np.int64(py)
+            if row < 0:
+                row = 0
+            elif row > height - 1:
+                row = height - 1
+            face = id_plane[row, column]
+            hidden = False
+            if face >= 4:
+                shown = (face - 4) >> 2
+                shown_a = shown % nx
+                shown_b = shown // nx
+                sa_i = shown_a
+                if sa_i < 0:
+                    sa_i = 0
+                elif sa_i > nx - 1:
+                    sa_i = nx - 1
+                sb_i = shown_b
+                if sb_i < 0:
+                    sb_i = 0
+                elif sb_i > ny - 1:
+                    sb_i = ny - 1
+                shown_top = top_values[sb_i, sa_i]
+                enter_a = (shown_a - ga) / sa
+                enter_b = (gb - shown_b - 1) / ca
+                enter = enter_a
+                if enter_b > enter:
+                    enter = enter_b
+                if enter < 0.0:
+                    enter = 0.0
+                leave_a = (shown_a + 1 - ga) / sa
+                leave_b = (gb - shown_b) / ca
+                leave = leave_a
+                if leave_b < leave:
+                    leave = leave_b
+                if leave > 1e-9 and gz + enter * rise < shown_top - z_slack:
+                    hidden = True
+            if not hidden:
+                cell_a = np.int64(np.floor(ga))
+                cell_b = np.int64(np.ceil(gb)) - 1
+                if 0 <= cell_a < nx and 0 <= cell_b < ny:
+                    if gz < top_values[cell_b, cell_a] - z_slack:
+                        hidden = True
+            if hidden:
+                xs[base + n] = np.nan
+                ys[base + n] = np.nan
+            else:
+                xs[base + n] = px / max(width, 1)
+                ys[base + n] = 1.0 - py / max(height, 1)
+        xs[base + samples] = np.nan
+        ys[base + samples] = np.nan
+        # isolated-visible erosion, exactly the vectorized rule: a
+        # visible sample with hidden neighbours on BOTH sides (edge
+        # boundaries count as hidden) becomes hidden.
+        for n in range(samples):
+            index = base + n
+            if not np.isnan(xs[index]):
+                left_hidden = n == 0 or np.isnan(xs[index - 1])
+                right_hidden = n == samples - 1 or np.isnan(xs[index + 1])
+                if left_hidden and right_hidden:
+                    # defer to keep neighbour reads pristine
+                    ys[index] = np.inf  # mark
+        for n in range(samples):
+            index = base + n
+            if ys[index] == np.inf:
+                xs[index] = np.nan
+                ys[index] = np.nan
+
+
 def warm(force: bool = False) -> str:
     """Compile (or load) the kernel's disk cache; returns the outcome.
 

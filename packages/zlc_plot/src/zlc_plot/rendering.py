@@ -825,6 +825,13 @@ class MatplotlibRenderer:
         self._series_press: tuple[float, float, object | None] | None = None
         self._series_annotations: dict[int, Any] = {}
         self._raster_generation = 0
+        #: The generation whose pixels currently sit in the Agg buffer,
+        #: or -1 while artist state has mutated since the last compose.
+        #: ``rgba`` reuses the buffer when they match instead of paying
+        #: a full draw -- which also nuked the compose background and
+        #: forced the NEXT frame to rebuild it: one stray full draw per
+        #: publication, twice over.
+        self._composed_generation = -1
         self._focused_facet_index: int | None = None
         self._facet_focus_index: int | None = None
         self._height_bars_preview = None
@@ -1097,6 +1104,7 @@ class MatplotlibRenderer:
         payload = frame.payload
         state = frame.state
         selected_effects = frame.effects
+        self._composed_generation = -1
         previous_payload = self._last_payload
         previous_data_revision = self._data_revision
         state_changed = self._last_state is None or state.revision != self._last_state.revision
@@ -1382,6 +1390,7 @@ class MatplotlibRenderer:
             self._background_region = None
             self._forget_gesture_region()
             self._raster_generation += 1
+            self._composed_generation = self._raster_generation
 
     def _dynamic_artists(self) -> list[tuple[tuple[int, float, int], Any]]:
         """Every artist this renderer owns, keyed for full-draw-exact stacking.
@@ -1419,6 +1428,15 @@ class MatplotlibRenderer:
             )
 
         def add(value: Any) -> None:
+            if isinstance(value, dict):
+                # The height-bar chrome keeps its artists in a dict; its
+                # lines and TEXTS move with the camera, so they must be
+                # dynamic -- baked into the background they could only
+                # stay correct while something forced a full redraw
+                # between frames.
+                for item in value.values():
+                    add(item)
+                return
             if isinstance(value, (tuple, list, set)):
                 for item in value:
                     add(item)
@@ -1623,6 +1641,7 @@ class MatplotlibRenderer:
         if split is None:
             self._forget_gesture_region()
         self._raster_generation += 1
+        self._composed_generation = self._raster_generation
 
     def _selector_artist_ids(self) -> frozenset[int]:
         """Every artist the selector scene owns right now, by identity."""
@@ -1677,6 +1696,7 @@ class MatplotlibRenderer:
                 if not self._blit_exact_rgba_image(artist, canvas):
                     artist.draw(renderer)
         self._raster_generation += 1
+        self._composed_generation = self._raster_generation
         return True
 
     def _blit_exact_rgba_image(self, artist: Any, canvas: Any) -> bool:
@@ -1712,6 +1732,12 @@ class MatplotlibRenderer:
             and shown.ndim == 3
             and shown.shape[2] == 4
         ):
+            return False
+        # The copy OVERWRITES; a full draw alpha-BLENDS.  They agree only
+        # when every pixel is opaque -- a translucent front (the 3D
+        # scene outside its pane, a NaN-holed image) must take the real
+        # draw or it would punch its transparency into the buffer.
+        if shown[..., 3].min() != 255:
             return False
         if artist.get_interpolation() != "nearest":
             return False
@@ -1814,6 +1840,7 @@ class MatplotlibRenderer:
     def preview_color_limit_candidate(self, candidate: ColorLimitCandidate) -> bool:
         """Paint the current color-limit candidate as one complete frame."""
 
+        self._composed_generation = -1
         if not isinstance(candidate, ColorLimitCandidate):
             raise TypeError("candidate must be ColorLimitCandidate")
         if self._selector_gesture_kind is not SelectorSceneKind.COLOR_LIMITS:
@@ -3184,6 +3211,7 @@ class MatplotlibRenderer:
     ) -> None:
         """Install (or clear) the transient camera the next render uses."""
 
+        self._composed_generation = -1
         self._height_bars_preview = camera
         self._height_bars_dragging = bool(dragging)
 
@@ -3555,7 +3583,7 @@ class MatplotlibRenderer:
                 linewidth=self.style.render.height_bars_grid_line_pt,
                 solid_capstyle="butt",
                 zorder=5,
-                clip_on=False,
+                clip_on=True,
             )
             artists["grid"] = grid
         if grid_edges:
@@ -3576,7 +3604,7 @@ class MatplotlibRenderer:
                 color=self.style.render.height_bars_axis_color,
                 linewidth=float(_matplotlib.rcParams["axes.linewidth"]),
                 zorder=6,
-                clip_on=False,
+                clip_on=True,
             )
             artists["lines"] = line
         line.set_data(segments_x, segments_y)
@@ -3704,6 +3732,33 @@ class MatplotlibRenderer:
             max(samples_per_edge, 2_000_000 / max(E, 1)),
             512,
         ))
+        from ._height3d_raster import _scanline_selected
+
+        if E and samples > 1 and _scanline_selected():
+            # The numba mirror of everything below -- pure float64 with
+            # integer lookups, bit-identical by construction; the code
+            # underneath remains the specification and the fallback.
+            from ._height3d_scanline import _occlusion_samples
+
+            xs = np.empty(E * (samples + 1), dtype=np.float64)
+            ys = np.empty(E * (samples + 1), dtype=np.float64)
+            _occlusion_samples(
+                np.ascontiguousarray(edges),
+                scene.id_plane,
+                np.ascontiguousarray(scene.top_values),
+                float(scene.ca),
+                float(scene.sa),
+                float(scene.se),
+                float(scene.z_unit),
+                float(scene.ce),
+                float(scene.x_low),
+                float(scene.y_high),
+                float(scene.scale),
+                np.int64(samples),
+                xs,
+                ys,
+            )
+            return xs, ys
         fractions = np.linspace(0.0, 1.0, samples)[None, :, None]
         points = edges[:, 0:1, :] + (
             edges[:, 1:2, :] - edges[:, 0:1, :]
@@ -3991,7 +4046,21 @@ class MatplotlibRenderer:
         # coincident lines dedupe to one.  The resolution of the screen
         # is the only "threshold" anywhere in this pass; everything else
         # is the exact geometry of the drawn surface.
+        # The edge SET depends on (heights identity, that quantum, the
+        # fold quadrant) alone -- an azimuth orbit inside one quadrant
+        # replays it, so only the occlusion SAMPLING reruns per camera.
         pixel_z = 1.0 / max(scene.z_unit * scene.ce * scene.scale, 1e-9)
+        geometry_key = (
+            id(heights), heights.shape, repr(pixel_z), scene.quadrant
+        )
+        cached_geometry = self._artists.get(f"{key}:h3d_outline_geometry")
+        if cached_geometry is not None and cached_geometry[0] == geometry_key:
+            edges = cached_geometry[1]
+            xs, ys = self._height_bars_occluded_polyline(scene, edges)
+            outline = self._height_bars_outline_artist(axes, key)
+            outline.set_data(xs, ys)
+            outline.set_visible(True)
+            return
         quantized = np.round(clipped / pixel_z) * pixel_z
         # The scene works in FOLDED orientation; flip the height grid to
         # match so neighbourhoods read directly.
@@ -4012,20 +4081,11 @@ class MatplotlibRenderer:
                 np.maximum(values, 0.0),
             )
             edges = self._height_bars_dedupe_edges(edges)
+            self._artists[f"{key}:h3d_outline_geometry"] = (
+                geometry_key, edges
+            )
             xs, ys = self._height_bars_occluded_polyline(scene, edges)
-            if outline is None:
-                (outline,) = axes.plot(
-                    [], [],
-                    transform=axes.transAxes,
-                    color=self.style.render.height_bars_axis_color,
-                    linewidth=float(
-                        _matplotlib.rcParams["axes.linewidth"]
-                    ),
-                    solid_capstyle="butt",
-                    zorder=6,
-                    clip_on=False,
-                )
-                self._artists[f"{key}:h3d_outlines"] = outline
+            outline = self._height_bars_outline_artist(axes, key)
             outline.set_data(xs, ys)
             outline.set_visible(True)
             return
@@ -4072,7 +4132,16 @@ class MatplotlibRenderer:
             return
         edges = np.asarray(edge_list, dtype=np.float64)
         edges = self._height_bars_dedupe_edges(edges)
+        self._artists[f"{key}:h3d_outline_geometry"] = (geometry_key, edges)
         xs, ys = self._height_bars_occluded_polyline(scene, edges)
+        outline = self._height_bars_outline_artist(axes, key)
+        outline.set_data(xs, ys)
+        outline.set_visible(True)
+
+    def _height_bars_outline_artist(self, axes: Any, key: str) -> Any:
+        import matplotlib as _matplotlib
+
+        outline = self._artists.get(f"{key}:h3d_outlines")
         if outline is None:
             (outline,) = axes.plot(
                 [], [],
@@ -4081,11 +4150,10 @@ class MatplotlibRenderer:
                 linewidth=float(_matplotlib.rcParams["axes.linewidth"]),
                 solid_capstyle="butt",
                 zorder=6,
-                clip_on=False,
+                clip_on=True,
             )
             self._artists[f"{key}:h3d_outlines"] = outline
-        outline.set_data(xs, ys)
-        outline.set_visible(True)
+        return outline
 
     def _update_height_bars_cage(self, snapshot: Any) -> None:
         """A wireframe cage over the crosshair-selected bar, full z span.
@@ -4135,7 +4203,7 @@ class MatplotlibRenderer:
                 linewidth=self.style.render.height_bars_grid_line_pt,
                 solid_capstyle="round",
                 zorder=7,
-                clip_on=False,
+                clip_on=True,
             )
             self._artists[f"{key}:h3d_cage"] = cage
         cage.set_data(xs, ys)
@@ -6549,9 +6617,19 @@ class MatplotlibRenderer:
         return padded.tobytes(order="C"), target_height, target_width
 
     def rgba(self) -> np.ndarray:
-        """Draw the current scene and return an immutable RGBA snapshot."""
+        """Return an immutable RGBA snapshot of the current scene.
 
-        self.draw()
+        When the Agg buffer already holds the latest composed frame the
+        snapshot is a copy of it -- pixel-identical to a full draw by the
+        compose contract.  Anything that mutates artist state without
+        composing resets the freshness mark and lands here as a full
+        draw, so a stale frame can never be published.
+        """
+
+        if self._composed_generation != self._raster_generation or (
+            self._composed_generation < 0
+        ):
+            self.draw()
         return self._rgba_buffer()
 
     def save(self, path: str | Path | BytesIO, *, dpi: float | None = None, **kwargs: Any) -> None:
