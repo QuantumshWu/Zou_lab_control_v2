@@ -27,6 +27,7 @@ from data_factory import (
 )
 from zlc_data import AxisId
 from zlc_plot import AxisRef, FacetGridPlot, ImagePlot, PlotSession
+from zlc_plot.specs import RenderEffect
 from zlc_plot._height3d_raster import (
     HeightBarCamera,
     render_height_bars,
@@ -321,6 +322,50 @@ def test_color_limit_preview_rerenders_the_scene() -> None:
         session.rgba()
         committed = np.array(renderer._active_image_artist().get_array())
         np.testing.assert_array_equal(preview, committed)
+    finally:
+        session.close()
+
+
+def test_drag_preview_keeps_the_chrome_typography_in_place() -> None:
+    """The half-resolution drag preview must not move the scene chrome.
+
+    Tick lengths and label gaps are POINT metrics on the canvas; dividing
+    them by the reduced preview raster inflated every gap by the drag
+    divisor, so the labels flew outward the moment a drag began.  With
+    the same camera, preview and committed chrome may differ only by the
+    raster's coarser position quantization.
+    """
+
+    session = _session()
+    try:
+        session.set_parameters({
+            "presentation": "height_bars",
+            "color_min": 0.0,
+            "color_max": 1.0,
+        })
+        session.rgba()
+        renderer = session._renderer
+        def chrome_positions():
+            artists = renderer._artists["image:h3d_chrome"]
+            return {
+                text.get_text(): text.get_position()
+                for text in artists["texts"]
+            }
+        committed = chrome_positions()
+        camera = renderer.height_bars_camera
+        renderer.set_height_bars_preview(camera, dragging=True)
+        try:
+            session._render_current(RenderEffect.BASE_GEOMETRY)
+            preview = chrome_positions()
+        finally:
+            renderer.set_height_bars_preview(None)
+            session._render_current(RenderEffect.BASE_GEOMETRY)
+        assert set(preview) == set(committed)
+        for label, (px, py) in preview.items():
+            cx, cy = committed[label]
+            assert abs(px - cx) <= 0.008 and abs(py - cy) <= 0.008, (
+                label, (px, py), (cx, cy)
+            )
     finally:
         session.close()
 
