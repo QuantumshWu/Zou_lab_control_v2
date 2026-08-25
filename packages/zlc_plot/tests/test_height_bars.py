@@ -228,7 +228,15 @@ def _pointer(session, action, axis, fx, fy, **kwargs):
     )
 
 
-def test_orbit_drag_commits_camera_and_creates_no_selector() -> None:
+def test_middle_drag_orbits_and_left_drag_is_inert() -> None:
+    """The scene keeps the 2D button grammar: MIDDLE navigates the view.
+
+    A middle drag commits the camera orbit in one display revision; a
+    left drag says nothing -- no camera change, no selector -- because
+    the left button speaks data (a click picks) and the 2D selector
+    gestures wait for the heatmap to return.
+    """
+
     session = _session()
     try:
         session.set_parameter("presentation", "height_bars")
@@ -236,12 +244,44 @@ def test_orbit_drag_commits_camera_and_creates_no_selector() -> None:
         axis = next(
             t for t in session._raster_axes_snapshot() if t.role == "image"
         )
-        _pointer(session, "press", axis, 0.5, 0.5, button=1)
-        _pointer(session, "move", axis, 0.7, 0.6, button=1)
-        _pointer(session, "release", axis, 0.7, 0.6, button=1)
+        _pointer(session, "press", axis, 0.5, 0.5, button=2)
+        _pointer(session, "move", axis, 0.7, 0.6, button=2)
+        _pointer(session, "release", axis, 0.7, 0.6, button=2)
         state = session.display_state
         assert float(state["camera_azimuth"]) != -55.0
         assert session.selectors == ()
+        committed = float(state["camera_azimuth"])
+        _pointer(session, "press", axis, 0.5, 0.5, button=1)
+        _pointer(session, "move", axis, 0.2, 0.3, button=1)
+        _pointer(session, "release", axis, 0.2, 0.3, button=1)
+        state = session.display_state
+        assert float(state["camera_azimuth"]) == committed
+        assert session.selectors == ()
+    finally:
+        session.close()
+
+
+def test_middle_double_click_restores_the_home_camera() -> None:
+    session = _session()
+    try:
+        session.set_parameter("presentation", "height_bars")
+        session.set_parameters({
+            "camera_azimuth": 130.0,
+            "camera_elevation": 62.0,
+            "camera_zoom": 2.5,
+        })
+        session.rgba()
+        axis = next(
+            t for t in session._raster_axes_snapshot() if t.role == "image"
+        )
+        _pointer(session, "press", axis, 0.5, 0.5, button=2)
+        _pointer(session, "release", axis, 0.5, 0.5, button=2)
+        _pointer(session, "press", axis, 0.5, 0.5, button=2)
+        _pointer(session, "release", axis, 0.5, 0.5, button=2)
+        state = session.display_state
+        assert float(state["camera_azimuth"]) == -55.0
+        assert float(state["camera_elevation"]) == 30.0
+        assert float(state["camera_zoom"]) == 1.0
     finally:
         session.close()
 

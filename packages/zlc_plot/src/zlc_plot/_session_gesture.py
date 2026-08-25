@@ -13,6 +13,7 @@ from ._gesture_engine import (
     _ColorGesture,
     _ColorLimitDrag,
     _OrbitGesture,
+    _PickGesture,
     _PanGesture,
     _PointerGesture,
     _SelectorGesture,
@@ -163,10 +164,12 @@ class GestureSessionMixin:
             else None
         )
         if scene_camera is not None and event_axes is active_axes:
-            # The 3D scene owns its pointer: left drag orbits the camera,
-            # a double click restores the home view, and the 2D gestures
-            # (area, pan, crosshair) wait for the heatmap to return.
-            if button == 1 and is_double:
+            # The 3D scene keeps the 2D button grammar: the MIDDLE button
+            # navigates the view (a drag orbits the camera, a double click
+            # restores the home view) exactly where the heatmap pans, the
+            # LEFT button speaks data (a click picks a bar), and the
+            # remaining 2D gestures wait for the heatmap to return.
+            if button == 2 and is_double:
                 schema = self.parameter_schema
                 self.set_parameters({
                     name: schema[name].default
@@ -175,13 +178,20 @@ class GestureSessionMixin:
                     )
                 })
                 return
-            if button == 1:
+            if button == 2:
                 self._gesture = _OrbitGesture(
                     event_axes,
                     interaction_transform,
                     (float(event.x), float(event.y)),
                     scene_camera,
                     scene_camera,
+                )
+                return
+            if button == 1 and not is_double:
+                self._gesture = _PickGesture(
+                    event_axes,
+                    interaction_transform,
+                    (float(event.x), float(event.y)),
                 )
             return
         if button == 2:
@@ -696,6 +706,10 @@ class GestureSessionMixin:
                     RenderEffect.BASE_GEOMETRY, schedule_fit=False
                 )
             return
+        if isinstance(gesture, _PickGesture):
+            # A scene press is a pick in waiting: release decides click
+            # vs inert drag, movement means nothing until then.
+            return
         point = self._event_canonical(
             event,
             captured_transform=gesture.transform,
@@ -748,6 +762,30 @@ class GestureSessionMixin:
         gesture = self._gesture
         if gesture is None:
             return
+        if isinstance(gesture, _OrbitGesture):
+            self._clear_gesture(gesture)
+            assert self._renderer is not None
+            self._renderer.set_height_bars_preview(None)
+            moved = math.hypot(
+                float(event.x) - gesture.origin_px[0],
+                float(event.y) - gesture.origin_px[1],
+            )
+            if moved <= self._defaults.interaction.double_click_radius_px:
+                # A middle click, not a drag: nothing to navigate, just
+                # repaint the committed camera at full resolution.
+                with self._renderer.raster_transaction():
+                    self._render_current(
+                        RenderEffect.BASE_GEOMETRY, schedule_fit=False
+                    )
+                return
+            camera = gesture.current
+            # ONE display revision commits the whole drag, and its render
+            # effect repaints the scene at full resolution.
+            self.set_parameters({
+                "camera_azimuth": camera.azimuth_deg,
+                "camera_elevation": camera.elevation_deg,
+            })
+            return
         if getattr(event, "button", None) == 2:
             if not isinstance(gesture, _PanGesture):
                 return
@@ -760,43 +798,37 @@ class GestureSessionMixin:
             return
         if isinstance(gesture, _PanGesture):
             return
-        if isinstance(gesture, _OrbitGesture):
+        if isinstance(gesture, _PickGesture):
             self._clear_gesture(gesture)
             assert self._renderer is not None
-            self._renderer.set_height_bars_preview(None)
             moved = math.hypot(
                 float(event.x) - gesture.origin_px[0],
                 float(event.y) - gesture.origin_px[1],
             )
-            if moved <= self._defaults.interaction.double_click_radius_px:
-                # A click, not a drag: pick the bar under the pointer and
-                # select it with the SAME crosshair the heatmap uses; a
-                # click on the floor or a pane clears the selection.
-                picked = self._renderer.height_bars_pick(
-                    float(event.x), float(event.y)
-                )
-                if picked is not None:
-                    self.set_crosshair_selector(picked[0], picked[1])
-                elif (
-                    self._projected._selector_state_or_none(
-                        SelectorKind.CROSSHAIR
-                    )
-                    is not None
-                ):
-                    self.remove_selector(SelectorKind.CROSSHAIR)
-                else:
-                    with self._renderer.raster_transaction():
-                        self._render_current(
-                            RenderEffect.BASE_GEOMETRY, schedule_fit=False
-                        )
+            if moved > self._defaults.interaction.double_click_radius_px:
+                # A left drag says nothing in the scene: the 2D selector
+                # gestures wait for the heatmap to return.
                 return
-            camera = gesture.current
-            # ONE display revision commits the whole drag, and its render
-            # effect repaints the scene at full resolution.
-            self.set_parameters({
-                "camera_azimuth": camera.azimuth_deg,
-                "camera_elevation": camera.elevation_deg,
-            })
+            # A click: pick the bar under the pointer and select it with
+            # the SAME crosshair the heatmap uses; a click on the floor
+            # or a pane clears the selection.
+            picked = self._renderer.height_bars_pick(
+                float(event.x), float(event.y)
+            )
+            if picked is not None:
+                self.set_crosshair_selector(picked[0], picked[1])
+            elif (
+                self._projected._selector_state_or_none(
+                    SelectorKind.CROSSHAIR
+                )
+                is not None
+            ):
+                self.remove_selector(SelectorKind.CROSSHAIR)
+            else:
+                with self._renderer.raster_transaction():
+                    self._render_current(
+                        RenderEffect.BASE_GEOMETRY, schedule_fit=False
+                    )
             return
         if isinstance(gesture, _ColorGesture):
             self._finish_color_gesture(event, gesture)
