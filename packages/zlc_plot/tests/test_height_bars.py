@@ -334,3 +334,88 @@ def test_facet_overview_stays_heatmap_and_focus_honours_the_scene() -> None:
         assert np.abs(focused.astype(int) - overview.astype(int)).max() > 0
     finally:
         session.close()
+
+
+def test_occlusion_is_a_box_test_not_a_centre_depth_proxy() -> None:
+    """The exact-occlusion semantics the outline sampler must keep.
+
+    A LOWER neighbour can never hide a higher edge (the centre-depth
+    proxy carved dashes there); an equal-height shared rim stays whole;
+    and a floor-level line under a plate is covered by it.
+    """
+
+    from zlc_plot.rendering import MatplotlibRenderer
+
+    heights = np.asarray([[0.02, 0.03]])
+    colors = np.tile(
+        np.asarray([0.5, 0.7, 0.9], dtype=np.float32), (1, 2, 1)
+    )
+    frame, scene = render_height_bars(
+        heights, colors, camera=HeightBarCamera(), value_limits=(0.0, 1.0),
+        width=400, height=300, bar_edges=False,
+    )
+    sampler = MatplotlibRenderer._height_bars_occluded_polyline
+
+    def visible_fraction(edge):
+        xs, _ = sampler(None, scene, np.asarray([edge], dtype=np.float64))
+        finite = np.isfinite(xs[:-1])
+        return finite.mean()
+
+    a0, b0 = scene.fold_cell(0, 0)   # the 0.02 plate
+    a1, b1 = scene.fold_cell(0, 1)   # the 0.03 plate
+    shared_a = max(a0, a1)           # the plane between them
+
+    # The higher plate's top edge along the shared plane: its LOWER
+    # neighbour must not eat it.
+    high_edge = ((shared_a, b1, 0.03), (shared_a, b1 + 1.0, 0.03))
+    assert visible_fraction(high_edge) == 1.0
+
+    # A floor-level segment across the 0.02 plate's footprint is covered.
+    across = ((a0 + 0.2, b0 + 0.5, 0.0), (a0 + 0.8, b0 + 0.5, 0.0))
+    assert visible_fraction(across) < 0.2
+
+    # An equal-height shared rim stays whole.
+    frame, scene = render_height_bars(
+        np.asarray([[0.4, 0.4]]), colors,
+        camera=HeightBarCamera(), value_limits=(0.0, 1.0),
+        width=400, height=300, bar_edges=False,
+    )
+    a0, b0 = scene.fold_cell(0, 0)
+    a1, b1 = scene.fold_cell(0, 1)
+    rim = ((max(a0, a1), b0, 0.4), (max(a0, a1), b0 + 1.0, 0.4))
+    assert visible_fraction(rim) == 1.0
+
+
+def test_pane_grid_rules_sit_at_tick_centres_and_never_close_the_pane() -> None:
+    """The reference (MATLAB) pane-grid convention: rules at TICK
+    positions only, so no rule can coincide with a pane border."""
+
+    session = _session(4)
+    try:
+        session.set_parameter("presentation", "height_bars")
+        session.rgba()
+        renderer = session._renderer
+        scene = renderer._height_bars_scene_map
+        chrome = renderer._artists["image:h3d_chrome"]
+        xs, ys = chrome["grid"].get_data()
+        assert len(xs), "the scene must draw a vector pane grid"
+        # Every pane-border screen x: the far corner (0, ny), the right
+        # corner and the left corner columns.  No grid sample may sit on
+        # the closing borders (left pane edge a=nx is the z axis; the
+        # right pane border is the open edge the user called out).
+        right_x = scene.project(scene.nx, scene.ny, 0.0)[0] / scene.width
+        finite = np.isfinite(np.asarray(xs, float))
+        max_x = np.nanmax(np.asarray(xs, float)[finite])
+        # The rightmost grid geometry is the z-tick rule ENDING at the
+        # right corner column; vertical rules stay half a cell inside.
+        vertical_low = scene.project(
+            scene.nx - 0.5, scene.ny, min(scene.value_low, 0.0)
+        )
+        vertical_x = vertical_low[0] / scene.width
+        assert max_x <= right_x + 1e-6
+        assert any(
+            abs(float(x) - vertical_x) < 2.0 / scene.width
+            for x in np.asarray(xs, float)[finite]
+        ), "vertical rules anchor at tick centres"
+    finally:
+        session.close()

@@ -3203,8 +3203,6 @@ class MatplotlibRenderer:
         the heatmap.
         """
 
-        import matplotlib
-
         from ._height3d_raster import HeightBarCamera, render_height_bars
 
         policy = self.style.render
@@ -3291,15 +3289,8 @@ class MatplotlibRenderer:
             supersample=supersample,
             side_shades=policy.height_bars_side_shades,
             edge_darken=policy.height_bars_edge_darken,
-            grid_rgb=policy.height_bars_grid_rgb,
             background_rgb=policy.height_bars_background_rgb,
             z_fraction=policy.height_bars_z_fraction,
-            wall_ticks=policy.height_bars_wall_ticks,
-            line_px=(
-                float(matplotlib.rcParams["axes.linewidth"])
-                * float(axes.figure.dpi)
-                / 72.0
-            ),
             bar_edges=not vector_outlines,
         )
         self._height_bars_scene_map = scene
@@ -3367,7 +3358,7 @@ class MatplotlibRenderer:
         chrome_key = f"{key}:h3d_chrome"
         artists = self._artists.get(chrome_key)
         if artists is None:
-            artists = {"lines": None, "texts": []}
+            artists = {"lines": None, "grid": None, "texts": []}
             self._artists[chrome_key] = artists
 
         import matplotlib as _matplotlib
@@ -3397,14 +3388,33 @@ class MatplotlibRenderer:
         gap_px = label_gap_px / max(scene.width, 1)
         gap_py = label_gap_px / max(scene.height, 1)
 
-        # ---- z axis along the left pane's front edge, at ground (0, 0)
+        # The pane grid follows the reference (MATLAB) convention: rules
+        # sit at TICK positions -- never at the pane borders -- so the
+        # grid runs open-ended, with no closing line along any pane edge,
+        # no pane|pane seam and no pane|floor seam.  Grid rules, axis
+        # ticks and wall rules all read the same tick lists: one
+        # authority, never two.
+        grid_edges: list[tuple[tuple[float, float, float],
+                               tuple[float, float, float]]] = []
         z_low, z_high = scene.value_low, scene.value_high
-        base = scene.project(0.0, 0.0, min(z_low, 0.0))
-        top = scene.project(0.0, 0.0, max(z_high, 0.0))
+        wall_low = min(z_low, 0.0)
+        wall_high = max(z_high, 0.0)
+        z_ticks = [
+            float(tick)
+            for tick in MaxNLocator(nbins=5).tick_values(z_low, z_high)
+            if z_low - 1e-12 <= tick <= z_high + 1e-12
+        ]
+        for tick in z_ticks:
+            grid_edges.append(
+                ((0.0, float(scene.ny), tick), (float(scene.nx), float(scene.ny), tick))
+            )
+            grid_edges.append(((0.0, 0.0, tick), (0.0, float(scene.ny), tick)))
+
+        # ---- z axis along the left pane's front edge, at ground (0, 0)
+        base = scene.project(0.0, 0.0, wall_low)
+        top = scene.project(0.0, 0.0, wall_high)
         add_segment(base, top)
-        for tick in MaxNLocator(nbins=5).tick_values(z_low, z_high):
-            if not (z_low - 1e-12 <= tick <= z_high + 1e-12):
-                continue
+        for tick in z_ticks:
             anchor = scene.project(0.0, 0.0, float(tick))
             f = self._height_bars_fraction(scene, *anchor)
             segments_x.extend((f[0], f[0] - tick_px, np.nan))
@@ -3430,10 +3440,30 @@ class MatplotlibRenderer:
                     for v in np.linspace(0, count - 1, shown)
                 })
 
+            # The two front floor edges are the scene's x/y axis lines,
+            # carrying the tick marks exactly as a 2D panel's spines do.
+            add_segment(
+                scene.project(0.0, 0.0, base_value),
+                scene.project(float(scene.nx), 0.0, base_value),
+            )
+            add_segment(
+                scene.project(float(scene.nx), 0.0, base_value),
+                scene.project(float(scene.nx), float(scene.ny), base_value),
+            )
+
             tick_py = tick_length_px / max(scene.height, 1)
             for column in picks(source_nx):
                 a, b = scene.fold_cell(0, column * scene.pool_x)
-                anchor = scene.project(a + 0.5, 0.0, base_value)
+                centre = a + 0.5
+                grid_edges.append(
+                    ((centre, float(scene.ny), wall_low),
+                     (centre, float(scene.ny), wall_high))
+                )
+                if not scene.dense:
+                    grid_edges.append(
+                        ((centre, 0.0, 0.0), (centre, float(scene.ny), 0.0))
+                    )
+                anchor = scene.project(centre, 0.0, base_value)
                 f = self._height_bars_fraction(scene, *anchor)
                 segments_x.extend((f[0], f[0], np.nan))
                 segments_y.extend((f[1], f[1] - tick_py, np.nan))
@@ -3448,7 +3478,15 @@ class MatplotlibRenderer:
                 y_picks = y_picks[:-1]
             for row in y_picks:
                 a, b = scene.fold_cell(row * scene.pool_y, 0)
-                anchor = scene.project(float(scene.nx), b + 0.5, base_value)
+                centre = b + 0.5
+                grid_edges.append(
+                    ((0.0, centre, wall_low), (0.0, centre, wall_high))
+                )
+                if not scene.dense:
+                    grid_edges.append(
+                        ((0.0, centre, 0.0), (float(scene.nx), centre, 0.0))
+                    )
+                anchor = scene.project(float(scene.nx), centre, base_value)
                 f = self._height_bars_fraction(scene, *anchor)
                 segments_x.extend((f[0], f[0] + 0.8 * tick_px, np.nan))
                 segments_y.extend((f[1], f[1] - 0.6 * tick_py, np.nan))
@@ -3462,6 +3500,28 @@ class MatplotlibRenderer:
                         "top",
                     )
                 )
+
+        # ---- the pane/floor grid, occluded like real geometry
+        grid = artists["grid"]
+        if grid is None:
+            (grid,) = axes.plot(
+                [], [],
+                transform=axes.transAxes,
+                color=self.style.render.height_bars_grid_rgb,
+                linewidth=float(_matplotlib.rcParams["axes.linewidth"]),
+                zorder=5,
+                clip_on=False,
+            )
+            artists["grid"] = grid
+        if grid_edges:
+            edge_array = np.asarray(grid_edges, dtype=np.float64)
+            grid_x, grid_y = self._height_bars_occluded_polyline(
+                scene, edge_array
+            )
+            grid.set_data(grid_x, grid_y)
+        else:
+            grid.set_data([], [])
+        grid.set_visible(True)
 
         line = artists["lines"]
         if line is None:
@@ -3503,6 +3563,8 @@ class MatplotlibRenderer:
         if artists:
             if artists["lines"] is not None:
                 artists["lines"].set_visible(False)
+            if artists["grid"] is not None:
+                artists["grid"].set_visible(False)
             for text in artists["texts"]:
                 text.set_visible(False)
         cage = self._artists.get(f"{key}:h3d_cage")
@@ -3553,20 +3615,51 @@ class MatplotlibRenderer:
         self,
         scene: Any,
         edges: "np.ndarray",
-        cells: "np.ndarray",
-        top_values: "np.ndarray",
         samples_per_edge: int = 24,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Sample 3D edges against the scene, NaN-ing occluded samples.
 
-        ``edges`` is (E, 2, 3) folded (a, b, value) endpoints; ``cells``
-        is (E,) the folded flat cell index each edge belongs to.  A
-        sample is hidden when its pixel shows a STRICTLY nearer bar, so
-        the polylines pass behind the geometry in front of them.
+        ``edges`` is (E, 2, 3) folded (a, b, value) endpoints.  The
+        occlusion test is EXACT and purely local.  The occluder is the
+        whole BOX whose face the sample's pixel shows, and this camera's
+        view rays rise toward the viewer within one pixel column, so:
+        the box hides the sample iff it lies AHEAD of the sample along
+        the ray and the ray is still BELOW the box top where it enters
+        the box footprint.  The floor and the panes hide nothing.
+
+        No centre-depth proxy: a cell's centre is up to half a cell
+        nearer than its own boundary, and that approximation carved
+        dashes into every edge along a neighbouring cell.  And no
+        per-face plane test: a face is just where the ray was measured,
+        the body behind it is what blocks.
+
+        ``samples_per_edge`` is a floor: the density adapts to the
+        LONGEST projected edge (a pane-wide grid rule needs its occlusion
+        breaks at pixel granularity, not at 1/24 of its span), bounded by
+        a total-sample budget so huge edge sets stay cheap.
         """
 
         E = edges.shape[0]
-        fractions = np.linspace(0.0, 1.0, samples_per_edge)[None, :, None]
+        end_x = edges[:, :, 0] * scene.ca + edges[:, :, 1] * scene.sa
+        end_y = (
+            -edges[:, :, 0] * scene.sa * scene.se
+            + edges[:, :, 1] * scene.ca * scene.se
+            + edges[:, :, 2] * scene.z_unit * scene.ce
+        )
+        longest = float(
+            np.max(
+                np.hypot(
+                    np.diff(end_x, axis=1), np.diff(end_y, axis=1)
+                )
+            )
+            * scene.scale
+        ) if E else 0.0
+        samples = int(min(
+            max(samples_per_edge, longest / 2.0 + 2.0),
+            max(samples_per_edge, 2_000_000 / max(E, 1)),
+            512,
+        ))
+        fractions = np.linspace(0.0, 1.0, samples)[None, :, None]
         points = edges[:, 0:1, :] + (
             edges[:, 1:2, :] - edges[:, 0:1, :]
         ) * fractions  # (E, N, 3)
@@ -3587,23 +3680,31 @@ class MatplotlibRenderer:
         shown_cell = (face - 4) >> 2
         shown_a = shown_cell % scene.nx
         shown_b = shown_cell // scene.nx
-        depth_shown = -scene.sa * (shown_a + 0.5) + scene.ca * (shown_b + 0.5)
-        depth_sample = -scene.sa * ga + scene.ca * gb
-        own = shown_cell == cells[:, None]
-        # A FOREIGN bar hides a sample when it is strictly nearer.  The
-        # sample's OWN bar hides it only from behind: a back edge below
-        # the bar's visible top lies inside the body (drawing it made an
-        # x-ray wireframe); the top-back rim, at the top itself, shows.
-        centre_depth = (
-            -scene.sa * (cells[:, None] % scene.nx + 0.5)
-            + scene.ca * (cells[:, None] // scene.nx + 0.5)
+        shown_top = scene.top_values[
+            np.clip(shown_b, 0, scene.ny - 1),
+            np.clip(shown_a, 0, scene.nx - 1),
+        ]
+        # Half a pixel of height tolerance absorbs the raster rounding of
+        # which face a borderline pixel shows.
+        z_slack = 0.5 / max(scene.z_unit * scene.ce * scene.scale, 1e-9)
+        # Toward the viewer the ray walks (+sa, -ca) over the ground and
+        # RISES by this many value units per ground unit walked.
+        rise = scene.se / (scene.z_unit * scene.ce)
+        enter = np.maximum(
+            np.maximum(
+                (shown_a - ga) / scene.sa,
+                (gb - shown_b - 1) / scene.ca,
+            ),
+            0.0,
         )
-        behind_own = depth_sample > centre_depth + 1e-2
-        below_top = gz < top_values[:, None] - 1e-9
-        hidden = np.where(
-            own,
-            behind_own & below_top,
-            (face >= 4) & (depth_shown < depth_sample - 1e-2),
+        leave = np.minimum(
+            (shown_a + 1 - ga) / scene.sa,
+            (gb - shown_b) / scene.ca,
+        )
+        hidden = (
+            (face >= 4)
+            & (leave > 1e-9)
+            & (gz + enter * rise < shown_top - z_slack)
         )
         fx = px / max(scene.width, 1)
         fy = 1.0 - py / max(scene.height, 1)
@@ -3618,13 +3719,10 @@ class MatplotlibRenderer:
     def _height_bars_box_edges(
         self, scene: Any, cells: "list[tuple[int, int]]",
         z_low: "np.ndarray", z_high: "np.ndarray",
-        top_of_bar: "np.ndarray",
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """The 12 box edges of each cell -> ((E,2,3) points, (E,) cells)."""
+    ) -> np.ndarray:
+        """The box edges of each cell -> (E, 2, 3) folded points."""
 
         edges = []
-        owners = []
-        tops = []
         pixel_z = 1.0 / max(scene.z_unit * scene.ce * scene.scale, 1e-9)
         for index, (row, column) in enumerate(cells):
             a, b = scene.fold_cell(row, column)
@@ -3633,25 +3731,49 @@ class MatplotlibRenderer:
             corners = ((0, 0), (1, 0), (1, 1), (0, 1))
             bottom = [(a + da, b + db, low) for da, db in corners]
             top = [(a + da, b + db, high) for da, db in corners]
-            flat = b * scene.nx + a
-            bar_top = float(top_of_bar[index])
             # A box flatter than a pixel keeps only its top rectangle:
             # the bottom rectangle would double every plate outline.
             flat_box = (high - low) < pixel_z
             for i in range(4):
                 edges.append((top[i], top[(i + 1) % 4]))
-                owners.append(flat)
-                tops.append(bar_top)
                 if not flat_box:
                     edges.append((bottom[i], bottom[(i + 1) % 4]))
                     edges.append((bottom[i], top[i]))
-                    owners.extend((flat, flat))
-                    tops.extend((bar_top, bar_top))
-        return (
-            np.asarray(edges, dtype=np.float64),
-            np.asarray(owners, dtype=np.int64),
-            np.asarray(tops, dtype=np.float64),
+        return np.asarray(edges, dtype=np.float64)
+
+    def _height_bars_dedupe_edges(self, edges: "np.ndarray") -> np.ndarray:
+        """Draw every coincident edge ONCE.
+
+        Neighbouring equal-height boxes share edges; each box emitting
+        its own copy double-strokes the antialiased line into a heavier
+        one.  Occlusion is a local test, so which copy survives cannot
+        matter.
+        """
+
+        if edges.shape[0] < 2:
+            return edges
+        rounded = np.round(edges, 9)
+        p0, p1 = rounded[:, 0, :], rounded[:, 1, :]
+        flip = (
+            (p1[:, 0] < p0[:, 0])
+            | ((p1[:, 0] == p0[:, 0]) & (p1[:, 1] < p0[:, 1]))
+            | (
+                (p1[:, 0] == p0[:, 0])
+                & (p1[:, 1] == p0[:, 1])
+                & (p1[:, 2] < p0[:, 2])
+            )
         )
+        low = np.where(flip[:, None], p1, p0)
+        high = np.where(flip[:, None], p0, p1)
+        key = np.concatenate([low, high], axis=1)
+        order = np.lexsort((
+            key[:, 5], key[:, 4], key[:, 3],
+            key[:, 2], key[:, 1], key[:, 0],
+        ))
+        ordered = key[order]
+        first = np.ones(order.shape[0], dtype=bool)
+        first[1:] = np.any(ordered[1:] != ordered[:-1], axis=1)
+        return edges[order[first]]
 
     def _update_height_bars_outlines(
         self, axes: Any, key: str, scene: Any, heights: "np.ndarray | None"
@@ -3678,12 +3800,9 @@ class MatplotlibRenderer:
         z_low = np.minimum(values, 0.0)
         z_high = np.maximum(values, 0.0)
         cells = list(zip(rows_grid.tolist(), cols_grid.tolist()))
-        edges, owners, tops = self._height_bars_box_edges(
-            scene, cells, z_low, z_high, z_high
-        )
-        xs, ys = self._height_bars_occluded_polyline(
-            scene, edges, owners, tops
-        )
+        edges = self._height_bars_box_edges(scene, cells, z_low, z_high)
+        edges = self._height_bars_dedupe_edges(edges)
+        xs, ys = self._height_bars_occluded_polyline(scene, edges)
         if outline is None:
             (outline,) = axes.plot(
                 [], [],
@@ -3730,20 +3849,9 @@ class MatplotlibRenderer:
             return
         z_low = np.asarray([min(scene.value_low, 0.0)])
         z_high = np.asarray([max(scene.value_high, 0.0)])
-        values_grid = getattr(self, "_height_bars_values", None)
-        bar_value = 0.0
-        if values_grid is not None:
-            candidate = values_grid[cell[0], cell[1]]
-            if np.isfinite(candidate):
-                bar_value = float(
-                    np.clip(candidate, scene.value_low, scene.value_high)
-                )
-        bar_top = np.asarray([max(bar_value, 0.0)])
-        edges, owners, tops = self._height_bars_box_edges(
-            scene, [cell], z_low, z_high, bar_top
-        )
+        edges = self._height_bars_box_edges(scene, [cell], z_low, z_high)
         xs, ys = self._height_bars_occluded_polyline(
-            scene, edges, owners, tops, samples_per_edge=48
+            scene, edges, samples_per_edge=48
         )
 
         axes = self.primary_axes

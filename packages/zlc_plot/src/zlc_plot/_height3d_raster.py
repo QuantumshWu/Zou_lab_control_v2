@@ -86,6 +86,16 @@ class HeightBarScene:
     width: int
     height: int
     id_plane: NDArray[np.int32]
+    #: Folded (ny, nx) drawn TOP-surface height per cell in value units
+    #: (max(clipped, 0); -inf where no bar).  With the z axis vertical on
+    #: screen a pixel's view ray RISES toward the viewer, so "this pixel's
+    #: top face occludes a point" is exactly "its top is above the point".
+    top_values: NDArray[np.float64]
+    #: True when cells are below outline density and the grid drew as a
+    #: lit continuous surface; scene chrome skips floor rules then --
+    #: a rule at z=0 under a near-zero surface wins the height tie and
+    #: leaks through as bright dashes.
+    dense: bool
 
     def project(self, a: float, b: float, value: float) -> tuple[float, float]:
         """Folded ground point + value -> pixel (x, y), y down."""
@@ -189,14 +199,11 @@ def render_height_bars(
     supersample: int = 1,
     side_shades: tuple[float, float] = (1.0, 1.0),
     edge_darken: float = 0.85,
-    grid_rgb: tuple[float, float, float] = (0.78, 0.78, 0.80),
     background_rgb: tuple[float, float, float] = (1.0, 1.0, 1.0),
     zero_rgb: tuple[float, float, float] | None = None,
     z_fraction: float = 0.55,
-    wall_ticks: int = 4,
     pool_pixels_per_cell: float = 2.0,
     edge_min_cell_px: float = 3.0,
-    line_px: float = 0.55,
     bar_edges: bool = True,
 ) -> tuple[NDArray[np.uint8], HeightBarScene]:
     """Render the grid as boxes -> ((H, W, 4) uint8 RGBA, scene map).
@@ -204,8 +211,10 @@ def render_height_bars(
     NaN heights are absent bars.  Bar heights anchor to ``value_limits``
     (the colour limits): values clip to them exactly as colours saturate,
     a negative low hangs the zero plane mid-scene, and the pane/z-axis
-    span IS the limit span.  The floor and the two back panes are drawn
-    background-coloured, carrying grid lines only.
+    span IS the limit span.  The floor and the two back panes are plain
+    background surfaces: every LINE of the scene -- pane grids, floor
+    grid, axes and bar outlines -- is vector chrome drawn by the caller,
+    never raster pixels, so nothing here can alias.
     """
 
     if supersample not in (1, 2, 3, 4):
@@ -560,103 +569,31 @@ def render_height_bars(
     out[..., :3] = filled
     out[..., 3] = covered.astype(np.uint8) * np.uint8(255)
 
-    # ---- outlines from the id plane
-    edge = np.zeros((render_h, render_w), dtype=bool)
-    edge[:, 1:] |= (id_plane[:, 1:] != id_plane[:, :-1]) & (
-        covered[:, 1:] & covered[:, :-1]
-    )
-    edge[1:, :] |= (id_plane[1:, :] != id_plane[:-1, :]) & (
-        covered[1:, :] & covered[:-1, :]
-    )
-    for _ in range(supersample - 1):
-        edge[1:, :] |= edge[:-1, :]
-        edge[:, 1:] |= edge[:, :-1]
-    edge_rows, edge_cols = np.nonzero(edge)
-    grid_color = (np.asarray(grid_rgb, dtype=np.float32) * 255.0).astype(
-        np.uint8
-    )
-    # Chrome-to-chrome boundaries take the light grid colour; anything
-    # touching a bar face darkens into an outline.
-    edge_ids = id_plane[edge_rows, edge_cols]
-    left_ids = id_plane[edge_rows, np.maximum(edge_cols - 1, 0)]
-    up_ids = id_plane[np.maximum(edge_rows - 1, 0), edge_cols]
-    bar_edge = (edge_ids >= 4) | (left_ids >= 4) | (up_ids >= 4)
-    if dense_surface or not bar_edges:
-        # Sub-3px bars would ink the whole surface; a small grid hands
-        # its outlines to vector chrome instead.  Either way only the
-        # chrome boundaries (floor|pane seams) keep their grid line.
-        chrome_rows = edge_rows[~bar_edge]
-        chrome_cols = edge_cols[~bar_edge]
-        out[chrome_rows, chrome_cols, :3] = grid_color[None, :]
-    else:
-        darkened = (
+    # ---- raster outlines from the id plane (mid-density grids only:
+    # small grids hand their outlines to vector chrome, dense grids are
+    # a lit continuous surface, and neither takes raster lines)
+    if bar_edges and not dense_surface:
+        edge = np.zeros((render_h, render_w), dtype=bool)
+        edge[:, 1:] |= (id_plane[:, 1:] != id_plane[:, :-1]) & (
+            covered[:, 1:] & covered[:, :-1]
+        )
+        edge[1:, :] |= (id_plane[1:, :] != id_plane[:-1, :]) & (
+            covered[1:, :] & covered[:-1, :]
+        )
+        for _ in range(supersample - 1):
+            edge[1:, :] |= edge[:-1, :]
+            edge[:, 1:] |= edge[:, :-1]
+        edge_rows, edge_cols = np.nonzero(edge)
+        edge_ids = id_plane[edge_rows, edge_cols]
+        left_ids = id_plane[edge_rows, np.maximum(edge_cols - 1, 0)]
+        up_ids = id_plane[np.maximum(edge_rows - 1, 0), edge_cols]
+        bar_edge = (edge_ids >= 4) | (left_ids >= 4) | (up_ids >= 4)
+        edge_rows = edge_rows[bar_edge]
+        edge_cols = edge_cols[bar_edge]
+        out[edge_rows, edge_cols, :3] = (
             out[edge_rows, edge_cols, :3].astype(np.float32)
             * np.float32(1.0 - edge_darken)
         ).astype(np.uint8)
-        out[edge_rows, edge_cols, :3] = np.where(
-            bar_edge[:, None], darkened, grid_color[None, :]
-        )
-
-    # ---- grid lines ON the floor and the panes
-    chrome_mask = (id_plane == 1) | (id_plane == 2)
-    if chrome_mask.any():
-        rows_map, cols_map = np.nonzero(chrome_mask)
-        pixel_x = (cols_map + 0.5) / scale + x_low
-        pixel_sy = y_high - (rows_map + 0.5) / scale
-        on_floor = id_plane[rows_map, cols_map] == 1
-        det = ux * vy - vx * uy
-        a_coord = (pixel_x * vy - pixel_sy * vx) / det
-        b_coord = (pixel_sy * ux - pixel_x * uy) / det
-        # Cell-boundary lines: on a dense (pooled) grid rule every POOLED
-        # cell, which is the drawn geometry.
-        half_line = max(0.5 * line_px * supersample, 0.5)
-        if dense_surface:
-            floor_line = np.zeros(rows_map.shape, dtype=bool)
-        else:
-            near_a = (
-                np.abs(a_coord - np.round(a_coord)) * scale * sa < half_line
-            )
-            near_b = (
-                np.abs(b_coord - np.round(b_coord)) * scale * ca < half_line
-            )
-            floor_line = on_floor & (near_a | near_b)
-        wall_line = np.zeros(rows_map.shape, dtype=bool)
-        if wall_ticks > 0:
-            base_y = np.interp(
-                cols_map + 0.5, np.arange(render_w) + 0.5, g_exit
-            )
-            local_z = pixel_sy - base_y
-            step = max((pane_high - pane_low) / (wall_ticks + 1), 1e-9)
-            wall_line = (~on_floor) & (
-                np.abs(local_z - np.round(local_z / step) * step) * scale
-                < half_line
-            )
-            # Vertical pane rules continue the floor grid up the panes,
-            # the reference figure's look.  Which pane a column's far
-            # silhouette belongs to decides the coordinate ruled on it.
-            left_pane = (a0 / sa) < (ny / ca)  # t_exit bound by a = 0
-            pane_of_pixel = left_pane[cols_map]
-            exit_b = np.interp(
-                cols_map + 0.5,
-                np.arange(render_w) + 0.5,
-                t_exit * ca,
-            )
-            exit_a = np.interp(
-                cols_map + 0.5,
-                np.arange(render_w) + 0.5,
-                a0 - t_exit * sa,
-            )
-            if not dense_surface:
-                along = np.where(pane_of_pixel, exit_b, exit_a)
-                along_scale = np.where(
-                    pane_of_pixel, scale * ca, scale * sa
-                )
-                vertical = (~on_floor) & (
-                    np.abs(along - np.round(along)) * along_scale < half_line
-                )
-                wall_line |= vertical
-        chosen = floor_line | wall_line
-        out[rows_map[chosen], cols_map[chosen], :3] = grid_color[None, :]
 
     scene_id_plane = id_plane
     if supersample > 1:
@@ -691,6 +628,10 @@ def render_height_bars(
         width=int(width),
         height=int(height),
         id_plane=np.ascontiguousarray(scene_id_plane.astype(np.int32)),
+        top_values=np.where(
+            finite_grid, np.maximum(clipped, 0.0), -np.inf
+        ),
+        dense=bool(dense_surface),
     )
     return out, scene
 

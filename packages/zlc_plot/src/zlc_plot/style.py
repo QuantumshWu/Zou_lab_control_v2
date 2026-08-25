@@ -563,7 +563,6 @@ class RenderPolicyConfig:
     height_bars_axis_color: str = "black" 
     height_bars_grid_rgb: tuple[float, float, float] = (0.78, 0.78, 0.80)
     height_bars_z_fraction: float = 0.55
-    height_bars_wall_ticks: int = 4
     #: Supersampled anti-aliasing while the grid is small enough to afford
     #: it; above the limit the render runs at native resolution.
     height_bars_supersample_bar_limit: int = 4096
