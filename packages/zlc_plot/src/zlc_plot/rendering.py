@@ -3884,20 +3884,36 @@ class MatplotlibRenderer:
             outline.set_data(xs, ys)
             outline.set_visible(True)
             return
+        merge_span = (
+            self.style.render.height_bars_outline_merge_px * pixel_z
+        )
         padded = np.full(
             (folded.shape[0] + 2, folded.shape[1] + 2), np.nan
         )
         padded[1:-1, 1:-1] = folded
+        # Per grid NODE: may verticals stand here?  Only where the four
+        # surrounding cells' heights spread at least the merge span (a
+        # real cliff) or the node touches the silhouette.  Anywhere else
+        # a vertical could only poke out as a sub-threshold stub -- the
+        # corner dots that littered flat regions.
+        around = np.stack([
+            padded[:-1, :-1], padded[:-1, 1:],
+            padded[1:, :-1], padded[1:, 1:],
+        ])
+        has_gap = np.isnan(around).any(axis=0)
+        node_max = np.max(np.where(np.isnan(around), -np.inf, around), axis=0)
+        node_min = np.min(np.where(np.isnan(around), np.inf, around), axis=0)
+        node_keep = has_gap | ((node_max - node_min) >= merge_span)
         edge_list: list[tuple[tuple[float, float, float],
                               tuple[float, float, float]]] = []
         grid_ny, grid_nx = folded.shape
+        corners = ((0, 0), (1, 0), (1, 1), (0, 1))
         for b in range(grid_ny):
             for a in range(grid_nx):
                 h = folded[b, a]
                 if not np.isfinite(h):
                     continue
                 low, high = min(h, 0.0), max(h, 0.0)
-                corners = ((0, 0), (1, 0), (1, 1), (0, 1))
                 bottom = [(a + da, b + db, low) for da, db in corners]
                 top = [(a + da, b + db, high) for da, db in corners]
                 # rim i runs corner[i] -> corner[i+1]; its neighbour:
@@ -3913,17 +3929,41 @@ class MatplotlibRenderer:
                     if (
                         np.isfinite(other)
                         and h < other
-                        and other - h < flat_span
+                        and other - h < merge_span
                     ):
                         # A sub-threshold step: the taller side draws
                         # the single boundary line.
                         continue
                     edge_list.append((top[i], top[(i + 1) % 4]))
-                    if not flat_box:
+                    if not flat_box and not np.isfinite(other):
+                        # Bottom rims only show along the silhouette; a
+                        # neighboured bottom ring lies inside geometry.
                         edge_list.append(
                             (bottom[i], bottom[(i + 1) % 4])
                         )
-                        edge_list.append((bottom[i], top[i]))
+        # Verticals merge PER GRID NODE: neighbouring boxes SHARE their
+        # vertical edges, and each box stroking its own copy (spans
+        # differing by a hair) double-drew the overlap into a fat line.
+        # One node, one segment, spanning everything that meets there;
+        # the sampler trims the hidden interior exactly.
+        node_top = np.max(
+            np.where(np.isnan(around), -np.inf, np.maximum(around, 0.0)),
+            axis=0,
+        )
+        node_bot = np.min(
+            np.where(np.isnan(around), np.inf, np.minimum(around, 0.0)),
+            axis=0,
+        )
+        draw_node = (
+            node_keep
+            & np.isfinite(node_top)
+            & ((node_top - node_bot) >= flat_span)
+        )
+        for bn, an in zip(*np.nonzero(draw_node)):
+            edge_list.append((
+                (float(an), float(bn), float(node_bot[bn, an])),
+                (float(an), float(bn), float(node_top[bn, an])),
+            ))
         if not edge_list:
             if outline is not None:
                 outline.set_visible(False)

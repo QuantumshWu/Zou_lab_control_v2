@@ -565,7 +565,7 @@ class RenderPolicyConfig:
     #: light rule -- clearly softer than the hairline bar outlines.
     height_bars_grid_rgb: tuple[float, float, float] = (0.45, 0.45, 0.50)
     height_bars_grid_line_pt: float = 1.0
-    height_bars_grid_alpha: float = 0.2
+    height_bars_grid_alpha: float = 0.1
     height_bars_z_fraction: float = 0.55
     #: Small grids buy the cleanest fills; everything else still
     #: anti-aliases at 2x (art first -- the drag path is the fast lane).
@@ -575,9 +575,13 @@ class RenderPolicyConfig:
     #: a shallower step cannot read as a box, and its bottom rim plus
     #: corner stubs pile into stray-line clutter on flat regions.
     height_bars_outline_flat_px: float = 2.5
+    #: Steps between NEIGHBOURS below this many pixels draw a single
+    #: boundary line (the taller rim) with no corner stubs: near-equal
+    #: bars must read exactly like one bar, not like a fat double line.
+    height_bars_outline_merge_px: float = 6.0
     #: The selection cage shares the grid's colour and width -- it is
     #: scene furniture -- and only its stronger alpha marks it out.
-    height_bars_cage_alpha: float = 0.65
+    height_bars_cage_alpha: float = 0.2
     #: While the camera is being dragged the raster renders at 1/divisor
     #: resolution and the release repaints at full resolution.
     height_bars_drag_resolution_divisor: int = 2
