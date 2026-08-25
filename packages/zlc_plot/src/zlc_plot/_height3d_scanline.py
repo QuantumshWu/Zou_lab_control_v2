@@ -149,8 +149,6 @@ def _materialize(  # noqa: C901 - one kernel, mirrored from the reference
     S = nx + ny
     max_spans = 3 * S + 1
     chunk = (render_w + n_chunks - 1) // n_chunks
-    neg_inf32 = np.float32(-np.inf)
-    pos_inf32 = np.float32(np.inf)
     for chunk_index in prange(n_chunks):
         c0 = chunk_index * chunk
         c1 = min(c0 + chunk, render_w)
