@@ -622,69 +622,136 @@ def composed_spec(
             scope.pop(axis, None)
         else:
             scope[axis] = "latest" if value == "latest" else float(value)
-    # A fate row says what becomes of ONE axis; the roles are what the plot
-    # kinds are written in.  Translating here means the collision rules, the
-    # facet routing and the labels all stay in one place and the table is a
-    # way of SAYING the edit rather than a second way of composing it.
+    # Kind establishes the vocabulary against which the WHOLE fate table is
+    # interpreted.  Applying fates to the old kind and rebasing afterwards
+    # made one saved table mean two different specifications.
+    if "kind" in rest:
+        kind = rest.pop("kind")
+        if not isinstance(kind, PlotKind):
+            raise TypeError("semantic kind value must be PlotKind")
+        if kind is not spec.kind:
+            candidate = default_spec(schema, kind)
+            if candidate is None:
+                raise ValueError(
+                    f"{kind.value} has no unambiguous default for this dataset"
+                )
+
+    # A fate table is ONE assignment, not a sequence of role edits.  First
+    # resolve every row against the same base candidate, then assign roles.
+    # The former loop repaired each vacated role while later rows were still
+    # pending: ``field.y -> y, pair -> reduce`` therefore put pair back on y,
+    # and a 10x10 scan silently returned to the default 35x3 site image.
+    fate_values: dict[AxisRef, object] = {}
     for name in tuple(rest):
         if not name.startswith(FATE_PREFIX):
             continue
         value = rest.pop(name)
         axis = _scope_axis(schema, name[len(FATE_PREFIX) :])
-        previous = _fate_of(spec, axis)
+        fate_values[axis] = value
         scope.pop(axis, None)
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            scope[axis] = float(value)
-            role_now = previous if previous in ROLE_FATES else None
-        elif value == "latest":
-            scope[axis] = "latest"
-            role_now = previous if previous in ROLE_FATES else None
-        elif value in (FATE_REDUCE, FATE_POOL):
-            role_now = previous if previous in ROLE_FATES else None
-        elif value in ROLE_FATES:
-            role_now = None
-            # Whoever held this role takes what this axis was: two axes
-            # trading places is ONE gesture, and making the operator vacate a
-            # role first would mean passing through a state with no x.
-            displaced = _role_holder(spec, str(value))
-            rest[str(value)] = axis
-            if displaced is not None and displaced != axis:
-                if previous in ROLE_FATES:
-                    rest[str(previous)] = displaced
-                elif previous == "latest":
-                    scope[displaced] = "latest"
-                elif isinstance(previous, (int, float)):
-                    scope[displaced] = float(previous)
-        else:
-            raise ValueError(f"unknown fate {value!r} for axis {name!r}")
-        if role_now in OPTIONAL_ROLES:
-            rest[role_now] = None
-        elif role_now is not None:
-            # The axis has left a role the kind still needs filled.  The
-            # repair is the kind's own default for this dataset, which is
-            # deterministic and is what an operator sees when they add the
-            # panel in the first place.
-            fallback = default_spec(schema, candidate.kind)
-            preferred = None if fallback is None else _role_holder(fallback, role_now)
+
+    if fate_values:
+        declared_roles = tuple(
+            role for role in ROLE_FATES if role in _field_names(candidate)
+        )
+        current_roles = {
+            role: _role_holder(candidate, role) for role in declared_roles
+        }
+        desired_roles = dict(current_roles)
+        role_targets: dict[str, AxisRef] = {}
+
+        for axis, value in fate_values.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                scope[axis] = float(value)
+            elif value == "latest":
+                scope[axis] = "latest"
+            elif value in (FATE_REDUCE, FATE_POOL):
+                pass
+            elif value in ROLE_FATES:
+                role = str(value)
+                if role not in declared_roles:
+                    raise ValueError(
+                        f"{candidate.kind.value} has no {role!r} fate"
+                    )
+                previous_target = role_targets.get(role)
+                if previous_target is not None and previous_target != axis:
+                    raise ValueError(
+                        f"fate {role!r} is assigned to more than one axis"
+                    )
+                role_targets[role] = axis
+            else:
+                raise ValueError(f"unknown fate {value!r} for axis {axis!r}")
+
+        # Every explicitly edited axis first leaves its old role.  No required
+        # role is repaired until all new role targets are known.
+        for role, holder in tuple(desired_roles.items()):
+            if holder in fate_values:
+                desired_roles[role] = None
+
+        for role, axis in role_targets.items():
+            for other, holder in tuple(desired_roles.items()):
+                if other != role and holder == axis:
+                    desired_roles[other] = None
+            desired_roles[role] = axis
+
+        # A single row can still trade two occupied roles in one gesture.  If
+        # both rows were authored, their explicit targets already decide the
+        # result and no inferred swap is allowed to overwrite them.
+        for role, axis in role_targets.items():
+            previous_role = next(
+                (
+                    name
+                    for name, holder in current_roles.items()
+                    if holder == axis
+                ),
+                None,
+            )
+            displaced = current_roles.get(role)
+            if (
+                previous_role is not None
+                and previous_role != role
+                and previous_role not in role_targets
+                and displaced is not None
+                and displaced not in fate_values
+            ):
+                desired_roles[previous_role] = displaced
+
+        # Only now repair a genuinely unfilled required role.  Explicitly
+        # reduced/pinned axes are excluded: choosing Reduced must not be
+        # silently undone by the repair it was meant to accompany.
+        fallback = default_spec(schema, candidate.kind)
+        blocked = {
+            axis
+            for axis, value in fate_values.items()
+            if value not in ROLE_FATES
+        }
+        for role in declared_roles:
+            if desired_roles[role] is not None:
+                continue
+            if role in OPTIONAL_ROLES:
+                continue
+            preferred = None if fallback is None else _role_holder(fallback, role)
             taken = {
-                _role_holder(spec, other)
-                for other in ROLE_FATES
-                if other != role_now
+                holder
+                for other, holder in desired_roles.items()
+                if other != role and holder is not None
             }
-            taken.add(axis)
             replacement = next(
                 (
                     ref
                     for ref in (preferred, *axis_choices_for_schema(schema))
-                    if ref is not None and ref not in taken
+                    if ref is not None and ref not in taken and ref not in blocked
                 ),
                 None,
             )
             if replacement is None:
                 raise ValueError(
-                    f"{role_now} cannot be vacated: this dataset offers no other axis for it"
+                    f"{role} cannot be vacated: this dataset offers no other axis for it"
                 )
-            rest[role_now] = replacement
+            desired_roles[role] = replacement
+
+        for role in declared_roles:
+            rest[role] = desired_roles[role]
 
     def _settled(candidate: PlotSpec) -> PlotSpec:
         """Attach the scope to the FINISHED candidate and repair the conflict.
@@ -710,19 +777,6 @@ def composed_spec(
             candidate = replace(candidate, scope=terms)
         return replace(candidate, labels=merge_labels(spec, candidate))
 
-    if "kind" in rest:
-        # The kind rebases everything: the other choices land on ITS default.
-        kind = rest.pop("kind")
-        if not isinstance(kind, PlotKind):
-            raise TypeError("semantic kind value must be PlotKind")
-        if kind is not spec.kind:
-            candidate = default_spec(schema, kind)
-            if candidate is None:
-                raise ValueError(
-                    f"{kind.value} has no unambiguous default for this dataset"
-                )
-        if not rest:
-            return _settled(candidate)
     if not rest:
         return _settled(candidate)
     unknown = tuple(name for name in rest if name not in _field_names(candidate))

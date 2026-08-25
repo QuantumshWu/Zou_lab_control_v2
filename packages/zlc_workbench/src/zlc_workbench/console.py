@@ -28,7 +28,7 @@ from zlc_plot import (
     image_point_overlay_from_signal,
 )
 from zlc_plot.primitives import ImageFrame, ImagePointOverlay, PointStatus
-from zlc_plot.specs import validate_authored_display
+from zlc_plot.specs import semantic_spec, validate_authored_display
 from zlc_plot.ui import parameter_controls_for_kind
 from zlc_runtime import (
     IndexedHistoryLease,
@@ -81,6 +81,7 @@ from .panel_state import (
     draws_image_surfaces,
     panel_state_from_description,
     panel_surface_from_description,
+    project_panel_state,
 )
 from .presentation import PlotPanelPort
 from .selection import (
@@ -991,6 +992,72 @@ class ConsolePresenter:
     # inside one batch accept pass) and every non-batch render a host produces
     # -- configure, an armed fit, a mirrored selector -- still reaches pixels.
 
+    def _panel_resolved_spec(
+        self,
+        binding: PanelBinding,
+        state: PanelState | None = None,
+        *,
+        subject: object | None = None,
+    ) -> object | None:
+        """Resolve the exact plot vocabulary interaction state would enter."""
+
+        selected = binding.state if state is None else state
+        snapshot = self._shown_snapshot(binding) if subject is None else subject
+        snapshot = getattr(snapshot, "snapshot", snapshot)
+        schema = getattr(getattr(snapshot, "block", None), "schema", None)
+        if schema is None:
+            return None
+        spec = self._spec_for(snapshot, selected.kind, selected.cell_kind)
+        if spec is None:
+            return None
+        try:
+            resolved, _semantic, _display = project_panel_state(
+                schema, spec, selected
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+        return resolved
+
+    @staticmethod
+    def _panel_threshold_classifier_enabled(
+        spec: object,
+        state: PanelState,
+    ) -> bool:
+        """Whether this resolved vocabulary can consume authored thresholds."""
+
+        return bool(
+            semantic_spec(spec).kind is PlotKind.HISTOGRAM
+            and state.display.get("threshold_classifier") is True
+        )
+
+    def _normalize_panel_interaction(self, binding: PanelBinding) -> None:
+        """Drop interaction state that cannot describe the current view."""
+
+        spec = self._panel_resolved_spec(binding)
+        if spec is None:
+            return
+        state = binding.state
+        changes: dict[str, object] = {}
+        if (
+            state.classifier_thresholds
+            and not self._panel_threshold_classifier_enabled(spec, state)
+        ):
+            changes["classifier_thresholds"] = ()
+        selection = panel_selection_from_document(state.selector)
+        if (
+            selection is not None
+            and str(selection.plot_kind) != semantic_spec(spec).kind.value
+        ):
+            changes["selector"] = {}
+        if changes:
+            binding.state = replace(state, **changes)
+        if (
+            binding.interaction_viewport is not None
+            and binding.interaction_viewport[0]
+            != self._panel_view_identity(binding)
+        ):
+            binding.interaction_viewport = None
+
     def _panel_host_configuration(
         self,
         panel_state: PanelState,
@@ -1000,6 +1067,8 @@ class ConsolePresenter:
         viewport: object,
         live: bool,
         restore_interaction: bool,
+        classifier_thresholds: object = _UNCHANGED,
+        selectors: object = _UNCHANGED,
     ) -> dict[str, object]:
         configuration: dict[str, object] = {
             "semantic": self._declared_only(
@@ -1015,13 +1084,12 @@ class ConsolePresenter:
         if restore_interaction:
             configuration.update(
                 facet_focus=panel_state.focused_cell,
-                classifier_thresholds=panel_state.classifier_thresholds,
-                selectors=panel_plot_selectors(
-                    panel_selection_from_document(panel_state.selector),
-                    facet_index=panel_state.focused_cell,
-                ),
                 viewport=viewport,
             )
+            if classifier_thresholds is not _UNCHANGED:
+                configuration["classifier_thresholds"] = classifier_thresholds
+            if selectors is not _UNCHANGED:
+                configuration["selectors"] = selectors
         if overlay is not _UNCHANGED:
             configuration["image_overlay"] = overlay
         return configuration
@@ -1039,6 +1107,7 @@ class ConsolePresenter:
         present: bool = False,
         live: bool = True,
         restore_interaction: bool = False,
+        interaction_input: object = _UNCHANGED,
     ) -> object:
         """Make one of this panel's hosts show what the panel says.
 
@@ -1064,6 +1133,39 @@ class ConsolePresenter:
 
         panel_state = binding.state if state is None else state
         surface = binding.parameter_surface
+        interaction_spec = None
+        classifier_thresholds: object = _UNCHANGED
+        selectors: object = _UNCHANGED
+        if restore_interaction:
+            interaction_spec = self._panel_resolved_spec(
+                binding,
+                panel_state,
+                subject=(
+                    None
+                    if interaction_input is _UNCHANGED
+                    else interaction_input
+                ),
+            )
+            if interaction_spec is not None:
+                semantic_kind = semantic_spec(interaction_spec).kind
+                if self._panel_threshold_classifier_enabled(
+                    interaction_spec, panel_state
+                ):
+                    classifier_thresholds = panel_state.classifier_thresholds
+                selection = panel_selection_from_document(panel_state.selector)
+                selectors = (
+                    panel_plot_selectors(
+                        selection,
+                        facet_index=panel_state.focused_cell,
+                    )
+                    if selection is not None
+                    and str(selection.plot_kind) == semantic_kind.value
+                    else ()
+                )
+            else:
+                # An unresolved host must not receive interaction state whose
+                # coordinate vocabulary cannot yet be proved.
+                selectors = ()
         selected_viewport = None if viewport is _UNCHANGED else viewport
         if (
             restore_interaction
@@ -1071,7 +1173,15 @@ class ConsolePresenter:
             and binding.interaction_viewport is not None
         ):
             measured_on, remembered = binding.interaction_viewport
-            if measured_on == self._panel_view_identity(binding):
+            if measured_on == self._panel_view_identity(
+                binding,
+                state=panel_state,
+                subject=(
+                    None
+                    if interaction_input is _UNCHANGED
+                    else interaction_input
+                ),
+            ):
                 selected_viewport = remembered
             else:
                 # The data underneath moved: a range measured on the previous
@@ -1086,6 +1196,8 @@ class ConsolePresenter:
             viewport=selected_viewport,
             live=live,
             restore_interaction=restore_interaction,
+            classifier_thresholds=classifier_thresholds,
+            selectors=selectors,
         )
         if display_updates is not _UNCHANGED:
             if not isinstance(display_updates, Mapping):
@@ -1308,6 +1420,7 @@ class ConsolePresenter:
                 staged,
                 host,
                 restore_interaction=True,
+                interaction_input=plot_input,
             )
         except BaseException:
             self._retire_plot_host(host)
@@ -1345,7 +1458,10 @@ class ConsolePresenter:
                 None
                 if accepted_value is None
                 else self._schema_projected_parameters(
-                    binding, accepted_value.snapshot, self._RESOLVING_REASON
+                    binding,
+                    getattr(accepted_value, "canonical_schema", None)
+                    or accepted_value.snapshot.block.schema,
+                    self._RESOLVING_REASON,
                 )
             )
             or self._unbound_panel_parameters(binding.state)
@@ -2266,6 +2382,15 @@ class ConsolePresenter:
                             surface,
                         )
                         binding.parameter_surface = surface
+                        if binding.interaction_viewport is not None:
+                            binding.interaction_viewport = (
+                                None
+                                if description.viewport is None
+                                else (
+                                    self._panel_view_identity(binding),
+                                    description.viewport,
+                                )
+                            )
                         self._publish_panel_state(binding)
             editor_pending = binding.editor_configuration
             if editor_pending is not None and editor_pending.done():
@@ -2581,6 +2706,7 @@ class ConsolePresenter:
             binding,
             host,
             restore_interaction=True,
+            interaction_input=plot_input,
         )
         return host
 
@@ -2623,7 +2749,7 @@ class ConsolePresenter:
             lambda selection: _routed(selection),
             on_removed=lambda _removed: _routed(None),
             on_threshold=lambda thresholds: self._enqueue_panel_threshold(
-                panel_id, host, thresholds
+                panel_id, host, thresholds, frozen=frozen
             ),
             on_viewport=lambda selection, viewport: _routed(
                 selection, viewport=viewport
@@ -2909,6 +3035,7 @@ class ConsolePresenter:
     def _publish_panel_state(self, binding: PanelBinding) -> None:
         """Push one accepted replacement to every view of the same state."""
 
+        self._normalize_panel_interaction(binding)
         surface = dict(binding.parameter_surface)
         science_locked = self._task_science_locked(binding)
         surface["science_locked"] = science_locked
@@ -3488,9 +3615,13 @@ class ConsolePresenter:
         panel_id: str,
         host: object,
         thresholds: object,
+        *,
+        frozen: PanelFrozenData | None = None,
     ) -> None:
         self._enqueue_panel_interaction(
-            lambda: self._settle_panel_threshold(panel_id, host, thresholds)
+            lambda: self._settle_panel_threshold(
+                panel_id, host, thresholds, frozen=frozen
+            )
         )
 
     def _settle_panel_threshold(
@@ -3498,6 +3629,8 @@ class ConsolePresenter:
         panel_id: str,
         source: object,
         thresholds: object,
+        *,
+        frozen: PanelFrozenData | None = None,
     ) -> None:
         """A threshold set on either surface is the panel's answer.
 
@@ -3512,6 +3645,35 @@ class ConsolePresenter:
         binding = self.panels.get(str(panel_id))
         if binding is None:
             return
+        if source is None:
+            return
+        if source is not binding.host and source is not binding.editor_host:
+            return
+        if source is binding.editor_host and (
+            binding.frozen_stale
+            or (frozen is not None and binding.frozen_data is not frozen)
+        ):
+            return
+        if source is binding.host:
+            subject = (
+                None
+                if binding.port is None
+                else binding.port.presented_input()
+            )
+        else:
+            held = binding.frozen_data
+            subject = (
+                None
+                if held is None
+                else held.snapshot
+                if held.plot_input is None
+                else held.plot_input
+            )
+        spec = self._panel_resolved_spec(binding, subject=subject)
+        if spec is None or not self._panel_threshold_classifier_enabled(
+            spec, binding.state
+        ):
+            return
         target = tuple(thresholds)
         if binding.state.classifier_thresholds == target:
             return
@@ -3519,7 +3681,11 @@ class ConsolePresenter:
             binding, classifier_thresholds=target
         )
         for host in (binding.host, binding.editor_host):
-            if host is None or host is source:
+            if (
+                host is None
+                or host is source
+                or (host is binding.editor_host and binding.frozen_stale)
+            ):
                 continue
             operation = host.configure(classifier_thresholds=target)
             if host is binding.host and operation is not None:
@@ -3795,19 +3961,49 @@ class ConsolePresenter:
                 context.update(actual)
         return context
 
-    def _panel_view_identity(self, binding: PanelBinding) -> object:
+    def _panel_view_identity(
+        self,
+        binding: PanelBinding,
+        *,
+        state: PanelState | None = None,
+        subject: object | None = None,
+    ) -> object:
         """What a remembered viewport was measured on.
 
-        The generation and the painted extent together: a range taken on one
-        run means nothing on the next, and a run that changes the camera's
-        geometry changes the axes under the same generation.
+        Dataset identity alone is insufficient: two plots over the same bytes
+        can put different axes under the same numeric rectangle.  The resolved
+        spec and coordinate units are therefore part of the identity too.
         """
 
-        snapshot = self._shown_snapshot(binding)
+        selected = binding.state if state is None else state
+        snapshot = self._shown_snapshot(binding) if subject is None else subject
+        snapshot = getattr(snapshot, "snapshot", snapshot)
         block = getattr(snapshot, "block", None)
+        schema = getattr(block, "schema", None)
+        resolved = self._panel_resolved_spec(
+            binding, selected, subject=snapshot
+        )
+        units = tuple(
+            (name, selected.display.get(name))
+            for name in (
+                "x_display_unit",
+                "y_display_unit",
+                "facet_display_unit",
+            )
+            if name in selected.display
+        )
         return (
-            None if snapshot is None else getattr(getattr(snapshot, "ref", None), "generation", None),
-            None if block is None else tuple(getattr(block, "values", ()).shape),
+            (
+                None
+                if snapshot is None
+                else getattr(
+                    getattr(snapshot, "ref", None), "generation", None
+                )
+            ),
+            None if schema is None else getattr(schema, "fingerprint", None),
+            resolved,
+            units,
+            selected.focused_cell,
         )
 
     def _report_panel_errors(self) -> None:

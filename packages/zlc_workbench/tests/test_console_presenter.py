@@ -935,7 +935,39 @@ def test_changing_the_cell_kind_rebuilds_the_plot_host(
     # Both directions of the vocabulary change: whatever the data decided
     # first, each switch crosses into names the other cells do not declare.
     _switch("histogram", first_host)
-    _switch("image", binding.host)
+    histogram_host = binding.host
+    assert histogram_host is not None
+    assert presenter.update_panel_state(
+        binding.panel_id,
+        {"display": {"threshold_classifier": True}},
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.configuration is None
+        and binding.state.display.get("threshold_classifier") is True,
+    )
+    threshold = {"value": 1.0, "scope": (), "repeat_index": None}
+    presenter._settle_panel_threshold(
+        binding.panel_id, histogram_host, (threshold,)
+    )
+    assert binding.state.classifier_thresholds
+
+    _switch("image", histogram_host)
+    assert binding.state.classifier_thresholds == (), (
+        "histogram interaction leaked into image cells"
+    )
+    # A callback already queued by the retired histogram host is stale; it
+    # cannot repopulate state after the image host has been accepted.
+    presenter._settle_panel_threshold(
+        binding.panel_id, histogram_host, (threshold,)
+    )
+    assert binding.state.classifier_thresholds == ()
+    assert presenter.edit_panel(binding.panel_id)
+    editor_configuration = binding.editor_configuration
+    assert binding.editor_host is not None and editor_configuration is not None
+    assert editor_configuration.result(timeout=10) is not None
+    _settle_panel_hosts(presenter)
+    assert binding.editor_host.startup_failure is None
 
 
 def test_a_blank_panel_can_be_wired_after_a_signal_publishes(
@@ -3072,13 +3104,6 @@ def test_a_running_task_freezes_logic_identity_but_not_panels(
     preview.port = object()
     presenter.set_deriving(True)
     assert presenter.view._cards[preview.panel_id].selectors_enabled is True
-    threshold = {
-        "value": 1.0,
-        "scope": (),
-        "repeat_index": None,
-    }
-    presenter._settle_panel_threshold(preview.panel_id, None, (threshold,))
-    assert preview.state.classifier_thresholds == (threshold,)
     viewport = object()
     presenter._route_panel_selection(
         preview.panel_id,
@@ -3842,17 +3867,33 @@ def test_a_cell_kind_change_is_not_refused_by_the_previous_kinds_assignments(
         presenter,
         lambda: binding.host is not None
         and binding.configuration is None
-        and binding.state.semantic.get(row) == "pool",
+        and not binding.parameter_surface.get("semantic_provisional", True),
+    )
+    settled = next(
+        entry["value"]
+        for entry in binding.parameter_surface["semantic"]
+        if str(entry["key"]) == row
+    )
+    assert settled != "group"
+    assert binding.state.semantic.get(row) == settled, dict(
+        binding.state.semantic
     )
     assert binding.state.cell_kind == "histogram"
-    # An axis row is a question BOTH kinds answer, so the histogram's answer
-    # for that axis -- pooled, which is what a distribution does to every axis
-    # it is given -- is what the record now holds.  The record says what the
-    # panel IS; it does not carry an answer the current kind contradicts.
-    assert binding.state.semantic.get(row) == "pool"
+    # The outer grid may legitimately own this row as its facet.  Whatever the
+    # resolved histogram vocabulary says is the one current record; the old
+    # curve-only Group answer cannot remain authoritative.
     assert presenter.update_panel_state(binding.panel_id, {"cell_kind": "curve"})
-    _settle_panel_hosts(presenter, lambda: binding.state.cell_kind == "curve")
-    assert binding.state.semantic.get(row) in {"pool", "reduce"}
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.state.cell_kind == "curve"
+        and not binding.parameter_surface.get("semantic_provisional", True),
+    )
+    curve_settled = next(
+        entry["value"]
+        for entry in binding.parameter_surface["semantic"]
+        if str(entry["key"]) == row
+    )
+    assert binding.state.semantic.get(row) == curve_settled
     assert binding.reported_error is None
 
 
@@ -4539,3 +4580,172 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     assert presenter.view.panel_parameter_surfaces[
         refused.panel_id
     ]["data_structure"] == expected
+
+    # The real large-map geometry that exposed the second half of this bug:
+    # a dense 3x35 result is deliberately moved off the image axes so the
+    # three scan dimensions become facet/y/x.  The whole fate table must land
+    # atomically and a terminal Frozen host must reproduce the same limits.
+    map_dimensions = (10, 10, 10)
+    map_cells = tuple(np.ndindex(*map_dimensions))
+    map_site = AxisSpec(
+        AxisId("map.site"), "site", SITE, 35, tuple(range(35))
+    )
+    map_cell_schema = ValueSchema(
+        (pair, map_site),
+        ValidityContract.components(pair.axis_id, map_site.axis_id),
+        np.dtype("<f8"),
+        "1",
+    )
+    map_event_schema = DatasetSchema(
+        event_repeat, PointTable(1, ()), None, map_cell_schema
+    )
+    map_canonical = scan_dataset_schema(
+        map_event_schema,
+        tuple(
+            tuple(float(value) for value in cell) for cell in map_cells
+        ),
+        tuple((name, "") for name in names),
+        visits=20,
+    )
+    map_event = owned_snapshot_from_arrays(
+        map_event_schema,
+        np.ones((1, 1, pair.size, map_site.size)),
+        1,
+        stream_generation="exact-map-panel",
+    )
+    map_signal = "scan-map/survival"
+    map_node = SimpleNamespace(
+        instance_id="scan-map",
+        dataset_output_declarations=(declaration,),
+        signal_key=lambda name: f"scan-map/{name}",
+    )
+    session.signal_plane.reserve(map_node)
+    session.signal_plane.commit_live(
+        map_node,
+        {
+            "survival": LiveDatasetOutput(
+                declaration,
+                map_event,
+                DatasetCoverage(
+                    1,
+                    map_canonical.repeat_axis.size * len(map_cells),
+                ),
+                canonical_schema=map_canonical,
+                cell_origin=(0, 0),
+            )
+        },
+    )
+    map_publication = session.signal_plane.freeze().publication(map_signal)
+    mapped = presenter.add_panel(
+        map_signal,
+        map_event,
+        title="mapped survival",
+        kind="facet_grid",
+        initial_publication=map_publication,
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: mapped.host is not None
+        and mapped.frozen_data is not None
+        and not mapped.parameter_surface.get("semantic_provisional", True),
+    )
+    from zlc_plot import AxisRef, NumericRange
+    from zlc_plot.selectors import RectangleRange
+
+    scan_fates = {
+        "fate:field.y": "y",
+        "fate:field.z": "x",
+        "fate:pair": "reduce",
+        "fate:site": "reduce",
+    }
+    offered_fates = {
+        str(entry["key"]): tuple(
+            value for _label, value in entry["choices"]
+        )
+        for entry in mapped.parameter_surface["semantic"]
+    }
+    assert all(
+        value in offered_fates.get(name, ())
+        for name, value in scan_fates.items()
+    ), offered_fates
+    mapped.interaction_viewport = (
+        presenter._panel_view_identity(mapped),
+        RectangleRange(
+            NumericRange(0.0, 1.0),
+            NumericRange(0.0, 1.0),
+        ),
+    )
+    assert presenter.update_panel_state(
+        mapped.panel_id, {"semantic": scan_fates}
+    )
+    scan_configuration = mapped.configuration
+    assert scan_configuration is not None
+    scan_operation = scan_configuration.result(timeout=10)
+    scan_description = scan_operation.value
+    assert scan_description.semantics.x == AxisRef.point_dimension(
+        "scan.field.z"
+    )
+    assert scan_description.semantics.y == AxisRef.point_dimension(
+        "scan.field.y"
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: mapped.configuration is None,
+    )
+    assert all(
+        mapped.state.semantic.get(name) == value
+        for name, value in scan_fates.items()
+    ), dict(mapped.state.semantic)
+    assert mapped.interaction_viewport is None, (
+        "a viewport measured on pair/site was retained on field.z/field.y"
+    )
+    live_snapshot = mapped.port.presented_input()
+    assert live_snapshot.block.schema.fingerprint == map_canonical.fingerprint
+    assert live_snapshot.block.values.shape == (20, 1000, 3, 35)
+    assert (
+        mapped.frozen_data.snapshot.block.schema.fingerprint
+        == map_canonical.fingerprint
+    )
+    live_description = _operation_value(mapped.host.describe_display())
+    assert live_description.semantics.facet == AxisRef.point_dimension(
+        "scan.field.x"
+    )
+    assert live_description.semantics.x == AxisRef.point_dimension(
+        "scan.field.z"
+    )
+    assert live_description.semantics.y == AxisRef.point_dimension(
+        "scan.field.y"
+    )
+    assert (
+        live_description.limits.x.low,
+        live_description.limits.x.high,
+        live_description.limits.y.low,
+        live_description.limits.y.high,
+    ) == (-0.5, 9.5, -0.5, 9.5)
+
+    assert presenter.edit_panel(mapped.panel_id)
+    editor_configuration = mapped.editor_configuration
+    assert mapped.editor_host is not None and editor_configuration is not None
+    editor_configuration.result(timeout=10)
+    frozen_description = _operation_value(
+        mapped.editor_host.describe_display()
+    )
+    assert frozen_description.semantics == live_description.semantics
+    assert frozen_description.limits == live_description.limits
+
+    assert session.signal_plane.seal_committed(map_node, cut_short=True)
+    assert presenter.close_panel_editor(mapped.panel_id)
+    _settle_panel_hosts(presenter)
+    assert presenter.edit_panel(mapped.panel_id)
+    terminal_configuration = mapped.editor_configuration
+    assert mapped.editor_host is not None and terminal_configuration is not None
+    terminal_configuration.result(timeout=10)
+    terminal_description = _operation_value(
+        mapped.editor_host.describe_display()
+    )
+    assert (
+        mapped.frozen_data.snapshot.block.schema.fingerprint
+        == map_canonical.fingerprint
+    )
+    assert terminal_description.semantics == live_description.semantics
+    assert terminal_description.limits == live_description.limits

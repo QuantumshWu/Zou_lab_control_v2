@@ -15,7 +15,7 @@ from zlc_plot import (
     Reduction,
     describe_semantics,
 )
-from zlc_plot.semantics import axis_size, updated_spec
+from zlc_plot.semantics import axis_size, composed_spec, updated_spec
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
 from zlc_plot._kinds import HANDLERS
 from zlc_plot.selectors import NumericRange, RectangleRange
@@ -337,6 +337,57 @@ def test_a_two_dimensional_scan_reports_the_fate_its_panel_applies() -> None:
     assert description.fate(AxisRef.point_rows()) == "facet"
     assert [name.removeprefix('fate:') for _ref, name in description.fate_rows][0] == "repeat"
     assert "fate:coil_x" in [name for _ref, name in description.fate_rows]
+
+
+def test_a_whole_fate_table_moves_dense_image_roles_to_scan_axes_atomically() -> None:
+    """Settling the old dense axes cannot overwrite pending scan-axis roles."""
+
+    import itertools
+
+    from data_factory import PointTopology
+
+    domain = np.arange(10.0)
+    rows = tuple(itertools.product(domain, domain, domain))
+    table = PointTable.from_columns({
+        "field.x": [row[0] for row in rows],
+        "field.y": [row[1] for row in rows],
+        "field.z": [row[2] for row in rows],
+    })
+    topology = PointTopology.from_cartesian(
+        tuple(
+            Axis.create(name, values=domain)
+            for name in ("field.x", "field.y", "field.z")
+        ),
+        point_table=table,
+    )
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=20),
+        table,
+        point_topology=topology,
+        data_axes=(Axis.create("pair", size=3), Axis.create("site", size=35)),
+        dtype=np.float64,
+    )
+    initial = FacetGridPlot(
+        AxisRef.point_dimension("field.x"),
+        ImagePlot(AxisRef.data("site"), AxisRef.data("pair")),
+    )
+    fates = {
+        "fate:field.y": "y",
+        "fate:field.z": "x",
+        "fate:pair": "reduce",
+        "fate:site": "reduce",
+    }
+
+    selected = composed_spec(schema, initial, fates)
+    assert selected == composed_spec(
+        schema, initial, dict(reversed(tuple(fates.items())))
+    ), "a fate table must not depend on row iteration order"
+    assert selected.facet == AxisRef.point_dimension("field.x")
+    assert selected.cell.x == AxisRef.point_dimension("field.z")
+    assert selected.cell.y == AxisRef.point_dimension("field.y")
+    description = describe_semantics(schema, selected)
+    assert description.fate(AxisRef.data("pair")) == "reduce"
+    assert description.fate(AxisRef.data("site")) == "reduce"
 
 
 def test_a_scan_dimension_of_a_long_sweep_still_offers_its_scope() -> None:
