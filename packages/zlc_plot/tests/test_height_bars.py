@@ -387,10 +387,10 @@ def test_occlusion_is_a_box_test_not_a_centre_depth_proxy() -> None:
 
 
 def test_pane_grid_leaves_the_right_wall_open() -> None:
-    """The reference (MATLAB) pane-grid look the user asked for: rules
-    at TICK centres, no vertical at the last column, and horizontals
-    ending with it -- the right wall's outer cell is BLANK, so nothing
-    can read as a closing border."""
+    """The reference (MATLAB) pane-grid construction: every rule sits at
+    a TICK position and runs the full display limits.  The limits carry
+    no tick, so horizontals reach the pane border but NO VERTICAL rule
+    ever lands on it -- that absence IS the open boundary."""
 
     side = 4
     rows = side * side
@@ -422,17 +422,31 @@ def test_pane_grid_leaves_the_right_wall_open() -> None:
         renderer = session._renderer
         scene = renderer._height_bars_scene_map
         chrome = renderer._artists["image:h3d_chrome"]
-        xs, _ = chrome["grid"].get_data()
-        values = np.asarray(xs, float)
-        assert np.isfinite(values).any(), "the scene must draw a pane grid"
-        # No visible RUN of grid geometry right of the open span's
-        # terminus: the last cell's stretch of the right wall is blank.
-        # (A floor rule's endpoint dot ON the front silhouette base is
-        # sub-pixel and sits on the black base edge -- allowed.)
-        terminus_x = scene.project(
-            float(scene.nx - 1), float(scene.ny), 0.0
+        xs, ys = chrome["grid"].get_data()
+        xs = np.asarray(xs, float)
+        ys = np.asarray(ys, float)
+        assert np.isfinite(xs).any(), "the scene must draw a pane grid"
+        border_x = scene.project(
+            float(scene.nx), float(scene.ny), 0.0
         )[0] / scene.width
-        beyond = np.isfinite(values) & (values > terminus_x + 2.0 / scene.width)
-        assert not np.any(beyond[1:] & beyond[:-1])
+        # Horizontal rules run the FULL limits: some grid geometry must
+        # reach the pane border...
+        near_border = np.isfinite(xs) & (
+            np.abs(xs - border_x) < 3.0 / scene.width
+        )
+        assert near_border.any()
+        # ...but no VERTICAL rule may land there: split the polyline at
+        # NaNs and demand every constant-x (vertical) run keeps its
+        # distance from the border.
+        breaks = np.nonzero(~np.isfinite(xs))[0]
+        start = 0
+        for stop in list(breaks) + [len(xs)]:
+            run_x = xs[start:stop]
+            start = stop + 1
+            run_x = run_x[np.isfinite(run_x)]
+            if run_x.size < 4:
+                continue
+            if run_x.max() - run_x.min() < 1.0 / scene.width:
+                assert abs(float(run_x.mean()) - border_x) > 10.0 / scene.width
     finally:
         session.close()

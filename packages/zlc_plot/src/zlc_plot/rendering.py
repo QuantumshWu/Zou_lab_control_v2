@@ -3381,13 +3381,13 @@ class MatplotlibRenderer:
         gap_px = label_gap_px / max(scene.width, 1)
         gap_py = label_gap_px / max(scene.height, 1)
 
-        # The pane grid follows the reference (MATLAB) convention: rules
-        # sit at TICK positions -- never at the pane borders -- and the
-        # right wall's grid stops a full cell short of its outer edge:
-        # no vertical rule at the last column, horizontals ending with
-        # it.  The right boundary is OPEN -- blank wall, no closing
-        # line, no aligned terminus.  Grid rules, axis ticks and wall
-        # rules all read the same tick lists: one authority, never two.
+        # The pane grid follows the reference (MATLAB) convention: RULES
+        # sit at tick positions, and every rule runs the FULL display
+        # limits.  The open-boundary look needs nothing special: the
+        # limits themselves carry no tick, so no vertical rule ever
+        # lands on the pane border -- horizontals reach the border and
+        # end unclosed.  Grid rules, axis ticks and wall rules all read
+        # the same tick lists: one authority, never two.
         grid_edges: list[tuple[tuple[float, float, float],
                                tuple[float, float, float]]] = []
         z_low, z_high = scene.value_low, scene.value_high
@@ -3401,11 +3401,10 @@ class MatplotlibRenderer:
             for tick in MaxNLocator(nbins=2).tick_values(z_low, z_high)
             if z_low - 1e-12 <= tick <= z_high + 1e-12
         ]
-        open_span = float(max(scene.nx - 1, 1))
         for tick in z_ticks:
             grid_edges.append(
                 ((0.0, float(scene.ny), tick),
-                 (open_span, float(scene.ny), tick))
+                 (float(scene.nx), float(scene.ny), tick))
             )
             grid_edges.append(((0.0, 0.0, tick), (0.0, float(scene.ny), tick)))
 
@@ -3454,13 +3453,10 @@ class MatplotlibRenderer:
             for column in picks(source_nx):
                 a, b = scene.fold_cell(0, column * scene.pool_x)
                 centre = a + 0.5
-                # The vertical nearest the wall's open outer edge stays
-                # unpainted: it is what would read as a closing line.
-                if centre < open_span:
-                    grid_edges.append(
-                        ((centre, float(scene.ny), wall_low),
-                         (centre, float(scene.ny), wall_high))
-                    )
+                grid_edges.append(
+                    ((centre, float(scene.ny), wall_low),
+                     (centre, float(scene.ny), wall_high))
+                )
                 if not scene.dense:
                     grid_edges.append(
                         ((centre, 0.0, 0.0), (centre, float(scene.ny), 0.0))
@@ -3736,6 +3732,14 @@ class MatplotlibRenderer:
             -np.inf,
         )
         hidden |= gz < inside_top - z_slack
+        # A visible sample with hidden samples on BOTH sides is pixel
+        # rounding poking through at a corner -- a stray dot, not a line
+        # segment.  Erode it.
+        visible = ~hidden
+        alone = visible.copy()
+        alone[:, 1:] &= hidden[:, :-1]
+        alone[:, :-1] &= hidden[:, 1:]
+        hidden |= alone
         fx = px / max(scene.width, 1)
         fy = 1.0 - py / max(scene.height, 1)
         fx = np.where(hidden, np.nan, fx)
@@ -3754,6 +3758,9 @@ class MatplotlibRenderer:
 
         edges = []
         pixel_z = 1.0 / max(scene.z_unit * scene.ce * scene.scale, 1e-9)
+        flat_span = (
+            self.style.render.height_bars_outline_flat_px * pixel_z
+        )
         for index, (row, column) in enumerate(cells):
             a, b = scene.fold_cell(row, column)
             low = float(z_low[index])
@@ -3761,9 +3768,10 @@ class MatplotlibRenderer:
             corners = ((0, 0), (1, 0), (1, 1), (0, 1))
             bottom = [(a + da, b + db, low) for da, db in corners]
             top = [(a + da, b + db, high) for da, db in corners]
-            # A box flatter than a pixel keeps only its top rectangle:
-            # the bottom rectangle would double every plate outline.
-            flat_box = (high - low) < pixel_z
+            # A box flatter than the style's threshold keeps only its
+            # top rectangle: a shallower step cannot read as a box, and
+            # its bottom rim plus corner stubs pile into clutter.
+            flat_box = (high - low) < flat_span
             for i in range(4):
                 edges.append((top[i], top[(i + 1) % 4]))
                 if not flat_box:
@@ -3824,13 +3832,103 @@ class MatplotlibRenderer:
             if outline is not None:
                 outline.set_visible(False)
             return
-        values = np.clip(
-            heights[rows_grid, cols_grid], scene.value_low, scene.value_high
+        clipped = np.where(
+            finite,
+            np.clip(heights, scene.value_low, scene.value_high),
+            np.nan,
         )
-        z_low = np.minimum(values, 0.0)
-        z_high = np.maximum(values, 0.0)
-        cells = list(zip(rows_grid.tolist(), cols_grid.tolist()))
-        edges = self._height_bars_box_edges(scene, cells, z_low, z_high)
+        # Outline geometry quantizes to PIXEL resolution, and a shared
+        # boundary whose step is below the flat threshold draws ONE line
+        # -- the taller side's rim.  Un-suppressed, every hair-height
+        # step strokes two parallel rims a pixel or two apart, and flat
+        # regions dissolve into stray-line clutter no step could ever
+        # actually show at this scale.
+        pixel_z = 1.0 / max(scene.z_unit * scene.ce * scene.scale, 1e-9)
+        quantized = np.round(clipped / pixel_z) * pixel_z
+        # The scene works in FOLDED orientation; flip the height grid to
+        # match so neighbourhoods read directly.
+        folded = quantized
+        if scene.quadrant == 1:
+            folded = folded[:, ::-1]
+        elif scene.quadrant == 2:
+            folded = folded[::-1, ::-1]
+        elif scene.quadrant == 3:
+            folded = folded[::-1, :]
+        flat_span = (
+            self.style.render.height_bars_outline_flat_px * pixel_z
+        )
+        if folded.shape != (scene.ny, scene.nx):
+            # A pooled scene's outline cells are the POOLED boxes; the
+            # generic per-cell path handles the fold-plus-pool mapping.
+            cells = list(zip(rows_grid.tolist(), cols_grid.tolist()))
+            values = quantized[rows_grid, cols_grid]
+            edges = self._height_bars_box_edges(
+                scene, cells, np.minimum(values, 0.0),
+                np.maximum(values, 0.0),
+            )
+            edges = self._height_bars_dedupe_edges(edges)
+            xs, ys = self._height_bars_occluded_polyline(scene, edges)
+            if outline is None:
+                (outline,) = axes.plot(
+                    [], [],
+                    transform=axes.transAxes,
+                    color=self.style.render.height_bars_axis_color,
+                    linewidth=float(
+                        _matplotlib.rcParams["axes.linewidth"]
+                    ),
+                    solid_capstyle="butt",
+                    zorder=6,
+                    clip_on=False,
+                )
+                self._artists[f"{key}:h3d_outlines"] = outline
+            outline.set_data(xs, ys)
+            outline.set_visible(True)
+            return
+        padded = np.full(
+            (folded.shape[0] + 2, folded.shape[1] + 2), np.nan
+        )
+        padded[1:-1, 1:-1] = folded
+        edge_list: list[tuple[tuple[float, float, float],
+                              tuple[float, float, float]]] = []
+        grid_ny, grid_nx = folded.shape
+        for b in range(grid_ny):
+            for a in range(grid_nx):
+                h = folded[b, a]
+                if not np.isfinite(h):
+                    continue
+                low, high = min(h, 0.0), max(h, 0.0)
+                corners = ((0, 0), (1, 0), (1, 1), (0, 1))
+                bottom = [(a + da, b + db, low) for da, db in corners]
+                top = [(a + da, b + db, high) for da, db in corners]
+                # rim i runs corner[i] -> corner[i+1]; its neighbour:
+                neighbours = (
+                    padded[b, a + 1],      # rim 0: constant b side
+                    padded[b + 1, a + 2],  # rim 1: constant a+1 side
+                    padded[b + 2, a + 1],  # rim 2: constant b+1 side
+                    padded[b + 1, a],      # rim 3: constant a side
+                )
+                flat_box = (high - low) < flat_span
+                for i in range(4):
+                    other = neighbours[i]
+                    if (
+                        np.isfinite(other)
+                        and h < other
+                        and other - h < flat_span
+                    ):
+                        # A sub-threshold step: the taller side draws
+                        # the single boundary line.
+                        continue
+                    edge_list.append((top[i], top[(i + 1) % 4]))
+                    if not flat_box:
+                        edge_list.append(
+                            (bottom[i], bottom[(i + 1) % 4])
+                        )
+                        edge_list.append((bottom[i], top[i]))
+        if not edge_list:
+            if outline is not None:
+                outline.set_visible(False)
+            return
+        edges = np.asarray(edge_list, dtype=np.float64)
         edges = self._height_bars_dedupe_edges(edges)
         xs, ys = self._height_bars_occluded_polyline(scene, edges)
         if outline is None:
@@ -3839,6 +3937,7 @@ class MatplotlibRenderer:
                 transform=axes.transAxes,
                 color=self.style.render.height_bars_axis_color,
                 linewidth=float(_matplotlib.rcParams["axes.linewidth"]),
+                solid_capstyle="butt",
                 zorder=6,
                 clip_on=False,
             )
@@ -3889,9 +3988,9 @@ class MatplotlibRenderer:
             (cage,) = axes.plot(
                 [], [],
                 transform=axes.transAxes,
-                color=self.style.render.height_bars_cage_color,
+                color=self.style.render.height_bars_grid_rgb,
                 alpha=self.style.render.height_bars_cage_alpha,
-                linewidth=self.style.artists.selector_line_width,
+                linewidth=self.style.render.height_bars_grid_line_pt,
                 solid_capstyle="round",
                 zorder=7,
                 clip_on=False,

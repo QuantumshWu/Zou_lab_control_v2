@@ -564,14 +564,19 @@ class RenderPolicyConfig:
     #: Pane/floor grid rules: the reference look is a WIDE, translucent
     #: light rule -- clearly softer than the hairline bar outlines.
     height_bars_grid_rgb: tuple[float, float, float] = (0.45, 0.45, 0.50)
-    height_bars_grid_line_pt: float = 0.8
-    height_bars_grid_alpha: float = 0.4
+    height_bars_grid_line_pt: float = 1.0
+    height_bars_grid_alpha: float = 0.2
     height_bars_z_fraction: float = 0.55
     #: Small grids buy the cleanest fills; everything else still
     #: anti-aliases at 2x (art first -- the drag path is the fast lane).
     height_bars_supersample_few_bars: int = 1024
     height_bars_supersample_tiny_bars: int = 256
-    height_bars_cage_color: str = "#5f6368"
+    #: Boxes flatter than this many pixels outline only their top rim:
+    #: a shallower step cannot read as a box, and its bottom rim plus
+    #: corner stubs pile into stray-line clutter on flat regions.
+    height_bars_outline_flat_px: float = 2.5
+    #: The selection cage shares the grid's colour and width -- it is
+    #: scene furniture -- and only its stronger alpha marks it out.
     height_bars_cage_alpha: float = 0.65
     #: While the camera is being dragged the raster renders at 1/divisor
     #: resolution and the release repaints at full resolution.
