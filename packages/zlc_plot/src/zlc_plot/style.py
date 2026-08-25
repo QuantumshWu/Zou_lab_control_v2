@@ -571,14 +571,6 @@ class RenderPolicyConfig:
     #: anti-aliases at 2x (art first -- the drag path is the fast lane).
     height_bars_supersample_few_bars: int = 1024
     height_bars_supersample_tiny_bars: int = 256
-    #: Boxes flatter than this many pixels outline only their top rim:
-    #: a shallower step cannot read as a box, and its bottom rim plus
-    #: corner stubs pile into stray-line clutter on flat regions.
-    height_bars_outline_flat_px: float = 2.5
-    #: Steps between NEIGHBOURS below this many pixels draw a single
-    #: boundary line (the taller rim) with no corner stubs: near-equal
-    #: bars must read exactly like one bar, not like a fat double line.
-    height_bars_outline_merge_px: float = 6.0
     #: The selection cage shares the grid's colour and width -- it is
     #: scene furniture -- and only its stronger alpha marks it out.
     height_bars_cage_alpha: float = 0.2

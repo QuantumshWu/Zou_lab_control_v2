@@ -3758,9 +3758,6 @@ class MatplotlibRenderer:
 
         edges = []
         pixel_z = 1.0 / max(scene.z_unit * scene.ce * scene.scale, 1e-9)
-        flat_span = (
-            self.style.render.height_bars_outline_flat_px * pixel_z
-        )
         for index, (row, column) in enumerate(cells):
             a, b = scene.fold_cell(row, column)
             low = float(z_low[index])
@@ -3768,16 +3765,123 @@ class MatplotlibRenderer:
             corners = ((0, 0), (1, 0), (1, 1), (0, 1))
             bottom = [(a + da, b + db, low) for da, db in corners]
             top = [(a + da, b + db, high) for da, db in corners]
-            # A box flatter than the style's threshold keeps only its
-            # top rectangle: a shallower step cannot read as a box, and
-            # its bottom rim plus corner stubs pile into clutter.
-            flat_box = (high - low) < flat_span
+            # A box flatter than a pixel keeps only its top rectangle.
+            flat_box = (high - low) < pixel_z
             for i in range(4):
                 edges.append((top[i], top[(i + 1) % 4]))
                 if not flat_box:
                     edges.append((bottom[i], bottom[(i + 1) % 4]))
                     edges.append((bottom[i], top[i]))
         return np.asarray(edges, dtype=np.float64)
+
+    @staticmethod
+    def _height_bars_node_verticals(
+        folded: "np.ndarray",
+    ) -> list[tuple[tuple[float, float, float], tuple[float, float, float]]]:
+        """The EXACT vertical edge set of the drawn surface, per node.
+
+        Two kinds of vertical line exist at a grid node, both derived
+        from the four surrounding quadrant heights (absent cells count
+        as floor-height zero) -- no thresholds, no heuristics:
+
+        * CREASES of the box-union surface: at a height where the set
+          of occupied quadrants forms a corner (one quadrant, three
+          quadrants, or two diagonal ones), the surface turns and owns
+          a vertical edge.  Two ADJACENT occupied quadrants make a
+          straight wall through the node -- no edge.
+        * SEAMS between coplanar side faces (the bar3 convention that
+          also draws every cell boundary ON the surface): where the two
+          half-walls on one wall plane both expose faces in the SAME
+          direction, their overlap carries the seam.
+
+        Emitting per NODE keeps every vertical single-stroked: boxes
+        share these edges, and per-box copies used to double-draw the
+        overlap into a visibly fatter line.
+        """
+
+        ny, nx = folded.shape
+
+        def quadrant(a: int, b: int) -> float | None:
+            if 0 <= a < nx and 0 <= b < ny:
+                value = folded[b, a]
+                if np.isfinite(value):
+                    return float(value)
+            return None
+
+        segments: list[
+            tuple[tuple[float, float, float], tuple[float, float, float]]
+        ] = []
+        for b0 in range(ny + 1):
+            for a0 in range(nx + 1):
+                cells = {
+                    "mm": quadrant(a0 - 1, b0 - 1),
+                    "pm": quadrant(a0, b0 - 1),
+                    "mp": quadrant(a0 - 1, b0),
+                    "pp": quadrant(a0, b0),
+                }
+                if all(v is None for v in cells.values()):
+                    continue
+                spans: list[tuple[float, float]] = []
+                for sign in (1.0, -1.0):
+                    # sign=+1 handles the tops above the floor, sign=-1
+                    # mirrors the analysis for hanging (negative) boxes.
+                    h = {
+                        k: (0.0 if v is None else max(sign * v, 0.0))
+                        for k, v in cells.items()
+                    }
+                    levels = sorted({v for v in h.values() if v > 0.0})
+                    lo = 0.0
+                    for hi in levels:
+                        occupied = {
+                            k for k, v in h.items() if v >= hi - 1e-12
+                        }
+                        corner = (
+                            len(occupied) in (1, 3)
+                            or occupied in ({"mm", "pp"}, {"pm", "mp"})
+                        )
+                        if corner:
+                            spans.append((sign * lo, sign * hi))
+                        lo = hi
+                    for near, far in (
+                        (("mm", "pm"), ("mp", "pp")),  # wall a = a0
+                        (("mm", "mp"), ("pm", "pp")),  # wall b = b0
+                    ):
+                        d_near = h[near[1]] - h[near[0]]
+                        d_far = h[far[1]] - h[far[0]]
+                        if (
+                            d_near == 0.0
+                            or d_far == 0.0
+                            or (d_near > 0.0) != (d_far > 0.0)
+                        ):
+                            continue
+                        seam_lo = max(
+                            min(h[near[0]], h[near[1]]),
+                            min(h[far[0]], h[far[1]]),
+                        )
+                        seam_hi = min(
+                            max(h[near[0]], h[near[1]]),
+                            max(h[far[0]], h[far[1]]),
+                        )
+                        if seam_hi > seam_lo:
+                            spans.append((sign * seam_lo, sign * seam_hi))
+                if not spans:
+                    continue
+                # Merge overlapping spans so every vertical strokes once.
+                ordered = sorted(
+                    (min(z0, z1), max(z0, z1)) for z0, z1 in spans
+                )
+                merged = [list(ordered[0])]
+                for z0, z1 in ordered[1:]:
+                    if z0 <= merged[-1][1] + 1e-12:
+                        merged[-1][1] = max(merged[-1][1], z1)
+                    else:
+                        merged.append([z0, z1])
+                for z0, z1 in merged:
+                    segments.append((
+                        (float(a0), float(b0), z0),
+                        (float(a0), float(b0), z1),
+                    ))
+        return segments
 
     def _height_bars_dedupe_edges(self, edges: "np.ndarray") -> np.ndarray:
         """Draw every coincident edge ONCE.
@@ -3837,12 +3941,11 @@ class MatplotlibRenderer:
             np.clip(heights, scene.value_low, scene.value_high),
             np.nan,
         )
-        # Outline geometry quantizes to PIXEL resolution, and a shared
-        # boundary whose step is below the flat threshold draws ONE line
-        # -- the taller side's rim.  Un-suppressed, every hair-height
-        # step strokes two parallel rims a pixel or two apart, and flat
-        # regions dissolve into stray-line clutter no step could ever
-        # actually show at this scale.
+        # Outline geometry quantizes to PIXEL resolution -- heights the
+        # display cannot distinguish become exactly equal, so their
+        # coincident lines dedupe to one.  The resolution of the screen
+        # is the only "threshold" anywhere in this pass; everything else
+        # is the exact geometry of the drawn surface.
         pixel_z = 1.0 / max(scene.z_unit * scene.ce * scene.scale, 1e-9)
         quantized = np.round(clipped / pixel_z) * pixel_z
         # The scene works in FOLDED orientation; flip the height grid to
@@ -3854,9 +3957,6 @@ class MatplotlibRenderer:
             folded = folded[::-1, ::-1]
         elif scene.quadrant == 3:
             folded = folded[::-1, :]
-        flat_span = (
-            self.style.render.height_bars_outline_flat_px * pixel_z
-        )
         if folded.shape != (scene.ny, scene.nx):
             # A pooled scene's outline cells are the POOLED boxes; the
             # generic per-cell path handles the fold-plus-pool mapping.
@@ -3884,26 +3984,10 @@ class MatplotlibRenderer:
             outline.set_data(xs, ys)
             outline.set_visible(True)
             return
-        merge_span = (
-            self.style.render.height_bars_outline_merge_px * pixel_z
-        )
         padded = np.full(
             (folded.shape[0] + 2, folded.shape[1] + 2), np.nan
         )
         padded[1:-1, 1:-1] = folded
-        # Per grid NODE: may verticals stand here?  Only where the four
-        # surrounding cells' heights spread at least the merge span (a
-        # real cliff) or the node touches the silhouette.  Anywhere else
-        # a vertical could only poke out as a sub-threshold stub -- the
-        # corner dots that littered flat regions.
-        around = np.stack([
-            padded[:-1, :-1], padded[:-1, 1:],
-            padded[1:, :-1], padded[1:, 1:],
-        ])
-        has_gap = np.isnan(around).any(axis=0)
-        node_max = np.max(np.where(np.isnan(around), -np.inf, around), axis=0)
-        node_min = np.min(np.where(np.isnan(around), np.inf, around), axis=0)
-        node_keep = has_gap | ((node_max - node_min) >= merge_span)
         edge_list: list[tuple[tuple[float, float, float],
                               tuple[float, float, float]]] = []
         grid_ny, grid_nx = folded.shape
@@ -3923,47 +4007,20 @@ class MatplotlibRenderer:
                     padded[b + 2, a + 1],  # rim 2: constant b+1 side
                     padded[b + 1, a],      # rim 3: constant a side
                 )
-                flat_box = (high - low) < flat_span
                 for i in range(4):
                     other = neighbours[i]
-                    if (
-                        np.isfinite(other)
-                        and h < other
-                        and other - h < merge_span
-                    ):
-                        # A sub-threshold step: the taller side draws
-                        # the single boundary line.
-                        continue
+                    # Both horizontal creases of every boundary are real
+                    # geometry: the top ring stays CLOSED at the box's
+                    # own height (coincident rims of equal boxes dedupe
+                    # to one), and where the surface drops to the floor
+                    # -- an absent neighbour -- the foot line closes the
+                    # face against the floor.
                     edge_list.append((top[i], top[(i + 1) % 4]))
-                    if not flat_box and not np.isfinite(other):
-                        # Bottom rims only show along the silhouette; a
-                        # neighboured bottom ring lies inside geometry.
+                    if not np.isfinite(other) and high > low:
                         edge_list.append(
                             (bottom[i], bottom[(i + 1) % 4])
                         )
-        # Verticals merge PER GRID NODE: neighbouring boxes SHARE their
-        # vertical edges, and each box stroking its own copy (spans
-        # differing by a hair) double-drew the overlap into a fat line.
-        # One node, one segment, spanning everything that meets there;
-        # the sampler trims the hidden interior exactly.
-        node_top = np.max(
-            np.where(np.isnan(around), -np.inf, np.maximum(around, 0.0)),
-            axis=0,
-        )
-        node_bot = np.min(
-            np.where(np.isnan(around), np.inf, np.minimum(around, 0.0)),
-            axis=0,
-        )
-        draw_node = (
-            node_keep
-            & np.isfinite(node_top)
-            & ((node_top - node_bot) >= flat_span)
-        )
-        for bn, an in zip(*np.nonzero(draw_node)):
-            edge_list.append((
-                (float(an), float(bn), float(node_bot[bn, an])),
-                (float(an), float(bn), float(node_top[bn, an])),
-            ))
+        edge_list.extend(self._height_bars_node_verticals(folded))
         if not edge_list:
             if outline is not None:
                 outline.set_visible(False)
