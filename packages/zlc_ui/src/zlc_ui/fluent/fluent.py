@@ -1263,35 +1263,16 @@ class FluentReadoutMultiline(QtWidgets.QPlainTextEdit):
         super().resizeEvent(event)
         self._adjust_height()
 
-    def _visual_line_count(self) -> int:
-        """The number of VISUAL lines the text occupies once wrapped at the current width (a wrapped
-        long line counts as several) -- the dynamic plain-text line-count walk."""
-        doc = self.document()
-        doc.setTextWidth(self.viewport().width())     # wrap at the live viewport width
-        doc.adjustSize()                              # force relayout so line counts are current
-        layout = doc.documentLayout()
-        count = 0
-        block = doc.begin()
-        while block.isValid():
-            if layout is not None:
-                layout.blockBoundingRect(block)       # ensure the block's layout exists
-            block_layout = block.layout()
-            count += block_layout.lineCount() if block_layout is not None else 1
-            block = block.next()
-        return max(1, count)
-
     def _adjust_height(self) -> None:
         """Size the field to fit ALL its wrapped content (no row cap -> every line shown, no inner
         scroll).
 
-        A ONE-line value must land at EXACTLY the single-line :class:`FluentReadoutEdit` height so an
-        Info row with a short value looks identical whether it is a line edit or this multi-line field.
-        So the height is ANCHORED to that single-row height -- ``scaled_px(30, minimum=22)``, the SAME
-        expression :class:`FluentLineEdit` uses for its own row -- and each EXTRA wrapped line adds one
-        ``lineSpacing``.  That base row already reserves the doc margin + PADDING_V + border of one text
-        line, and every added line contributes exactly its own text height, so the field grows to show
-        every line in full with none clipped (the QPlainTextEdit ``frameWidth`` is NOT used: with a
-        stylesheet 1 px border it over-reports and would inflate a one-line field past the line edit).
+        Qt's actual ``QTextLayout`` line boxes are the height authority.  Font
+        ``lineSpacing`` is smaller on some platforms, and the scrollbar range
+        is measured in logical block positions rather than pixels; using either
+        as geometry left one hidden line position even when every glyph looked
+        visible.  Summing each block's laid-out rectangle plus the document and
+        widget margins gives the exact wrapped content box at the live width.
 
         Re-entrancy guard: measuring the wrapped line count calls ``document().adjustSize()`` and the
         resize re-lays-out the document, either of which can emit ``documentSizeChanged`` -- a connected
@@ -1302,10 +1283,19 @@ class FluentReadoutMultiline(QtWidgets.QPlainTextEdit):
             return
         self._adjusting_height = True
         try:
-            lines = self._visual_line_count()
-            line_height = self.fontMetrics().lineSpacing()
-            base_row = scaled_px(30, minimum=22)    # == FluentLineEdit's single-row height (one source)
-            total = base_row + (lines - 1) * line_height
+            document = self.document()
+            document.setTextWidth(self.viewport().width())
+            document.adjustSize()
+            layout = document.documentLayout()
+            content_height = 0.0
+            block = document.begin()
+            while block.isValid():
+                content_height += layout.blockBoundingRect(block).height()
+                block = block.next()
+            margins = self.contentsMargins()
+            total = math.ceil(
+                content_height + 2.0 * document.documentMargin()
+            ) + margins.top() + margins.bottom()
             cap = self._max_height
             if cap is not None and total > cap:
                 # Too tall to fit: STOP at the cap and SCROLL the overflow.  The vertical bar shows
@@ -1318,13 +1308,9 @@ class FluentReadoutMultiline(QtWidgets.QPlainTextEdit):
                 self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
                 if total != self.height():
                     self.setFixedHeight(total)
-                # Absorb any residual: if the wrapped content is still a hair taller than the anchored
-                # estimate (sub-pixel wrap rounding differs run-to-run), the scrollbar reports how many
-                # pixels are hidden -- add exactly those so the LAST line's glyphs are never clipped.  A
-                # one-line value has no residual, so it stays exactly the single-row height.
-                residual = self.verticalScrollBar().maximum()
-                if residual > 0:
-                    self.setFixedHeight(total + residual)
+                self.horizontalScrollBar().setRange(0, 0)
+                self.verticalScrollBar().setRange(0, 0)
+                self.verticalScrollBar().setValue(0)
             self.updateGeometry()
         finally:
             self._adjusting_height = False

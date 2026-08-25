@@ -11,7 +11,6 @@ from PyQt5 import QtCore, QtWidgets
 from .fluent import (
     FluentFrame,
     FluentPathEdit,
-    FluentReadoutEdit,
     FluentReadoutMultiline,
     FluentScrollArea,
     FluentSectionLabel,
@@ -179,11 +178,7 @@ class InfoPane(QtWidgets.QWidget):
     def _fill_rows(self, layout: QtWidgets.QVBoxLayout, rows: tuple[InfoRow, ...]) -> None:
         for key, value in rows:
             text = self._readout_text(value)
-            field = (
-                FluentReadoutMultiline(text)
-                if "\n" in text
-                else FluentReadoutEdit(text)
-            )
+            field = FluentReadoutMultiline(text)
             field.setSizePolicy(
                 QtWidgets.QSizePolicy.Ignored,
                 QtWidgets.QSizePolicy.Fixed,

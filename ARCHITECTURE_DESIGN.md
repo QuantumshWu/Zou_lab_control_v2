@@ -196,7 +196,7 @@ Node new chunk
 - Timeout显示真实错误但不冻结UI；未确认前不能显示Safe。
 - Form reconcile必须按当前schema重建dependency graph。
 - PanelState decoder只接受当前完整grammar；owner wake和产品Figure save各只有一个实现。
-- FigureViewer与TaskConsole必须复用同一个`PanelCardView` frame owner、Monitor board、panel preset尺寸、title band、Setting按钮和body padding；Viewer右栏是白色Fluent work surface，global action bar固定自身高度，Panel在其下方top-align，不能把剩余窗口高度塞进action bar或让同一2x2 card漂到中部；card title读取当前archive dataset的operator label。左侧InfoPane宽度在window创建时一次确定，任何archive label/value不得改变window split；无换行的readout使用单行read-only control，只有真实多行值使用multiline；Flow使用带展开indicator的树控件而不是ASCII伪树。
+- FigureViewer与TaskConsole必须复用同一个`PanelCardView` frame owner、Monitor board、panel preset尺寸、title band、Setting按钮和body padding；Viewer右栏是白色Fluent work surface，global action bar固定自身高度，Panel在其下方top-align，不能把剩余窗口高度塞进action bar或让同一2x2 card漂到中部；card title读取当前archive dataset的operator label。左侧InfoPane宽度在window创建时一次确定，任何archive label/value不得改变window split；全部readout统一使用可选择、可自动换行的multiline control，并按Qt实际visual layout精确包住内容，一行保持紧凑、长无换行值不得cutoff、未设height cap时不得产生inner scroll range，整个表单只由外层Info tab滚动；Flow使用带展开indicator的树控件而不是ASCII伪树。
 
 ## 7. Pulse、Camera、Remote与FPGA
 
