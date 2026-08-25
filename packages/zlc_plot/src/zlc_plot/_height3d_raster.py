@@ -229,6 +229,26 @@ def _pooled(
     return pooled_h, pooled_rgb, counts > 0, pool_x, pool_y
 
 
+_ENGINE = os.environ.get("ZLC_H3D_ENGINE", "auto")
+
+
+def _scanline_selected() -> bool:
+    """Whether the numba scanline engine renders this frame.
+
+    ``ZLC_H3D_ENGINE`` forces ``numpy`` (the reference) or ``numba``;
+    ``auto`` uses the scanline engine whenever numba imports.  Both
+    engines are bit-identical by contract (test_height_bars pins it).
+    """
+
+    if _ENGINE == "numpy":
+        return False
+    try:
+        from . import _height3d_scanline as scanline
+    except Exception:
+        return False
+    return scanline.HAVE_NUMBA
+
+
 def render_height_bars(
     heights: NDArray[np.floating],
     top_rgb: NDArray[np.floating],
@@ -353,292 +373,338 @@ def render_height_bars(
     # ---- crossings merged arithmetically (ties resolve a-before-b)
     t_a0 = t_enter + (a_at - ia0) / sa
     t_b0 = t_enter + ((ib0 + 1.0) - b_at) / ca
-    k = np.arange(nx, dtype=np.float64)[:, None]
-    m = np.arange(ny, dtype=np.float64)[:, None]
-    t_cross_a = t_a0[None, :] + k / sa
-    t_cross_b = t_b0[None, :] + m / ca
-    b_before_a = np.clip(np.ceil((t_cross_a - t_b0[None, :]) * ca), 0.0, ny)
-    pos_a = (k + b_before_a).astype(np.int64)
-
-    # The b-crossings take the COMPLEMENT of the a slots, in order.  A
-    # second float formula for their positions could disagree with
-    # ``pos_a`` at an exact tie -- two crossings claiming one slot, the
-    # orphaned slot left holding uninitialized memory, and the frame
-    # nondeterministic.  The complement is pure integer bookkeeping, so
-    # the merge is a permutation BY CONSTRUCTION.
-    S = nx + ny
-    columns_row = np.arange(render_w, dtype=np.int64)
-    used = np.zeros((render_w, S), dtype=bool)
-    used[columns_row[None, :], pos_a] = True
-    unused_cols, unused_slots = np.nonzero(~used)
-    pos_b = unused_slots.reshape(render_w, ny).T
-    sorted_t = np.empty((S, render_w), dtype=np.float64)
-    sorted_is_b = np.ones((S, render_w), dtype=bool)
-    sorted_t[pos_a, columns_row[None, :]] = t_cross_a
-    sorted_is_b[pos_a, columns_row[None, :]] = False
-    sorted_t[pos_b, columns_row[None, :]] = t_cross_b
-
-    with np.errstate(over="ignore"):
-        # Clamped-azimuth crossings can exceed float32 range; they land
-        # as inf, which every comparison downstream handles.
-        sorted_t = sorted_t.astype(np.float32)
-    seg_t0 = np.empty((S, render_w), dtype=np.float32)
-    seg_t0[0] = t_enter
-    seg_t0[1:] = sorted_t[:-1]
-    np.clip(seg_t0, None, t_exit[None, :], out=seg_t0)
-    seg_t1 = np.clip(sorted_t, None, t_exit[None, :])
-
-    before_b = np.cumsum(sorted_is_b, axis=0)
-    before_b_prior = np.empty_like(before_b)
-    before_b_prior[0] = 0
-    before_b_prior[1:] = before_b[:-1]
-    seg_index = np.arange(S, dtype=np.int64)[:, None]
-    ia = ia0[None, :].astype(np.int64) - (seg_index - before_b_prior)
-    ib = ib0[None, :].astype(np.int64) + before_b_prior
-    inside = (ia >= 0) & (ia < nx) & (ib >= 0) & (ib < ny) & (seg_t1 > seg_t0)
-    cell_a = np.clip(ia, 0, nx - 1)
-    cell_b = np.clip(ib, 0, ny - 1)
-
-    entered_x = np.empty((S, render_w), dtype=bool)
-    entered_x[0] = np.abs(a_at - np.round(a_at)) < 1e-9
-    entered_x[1:] = ~sorted_is_b[:-1]
-
+    # ---- per-cell colour grids and z planes, shared by both engines
     z_top32 = z_top.astype(np.float32)
     z_bot32 = z_bot.astype(np.float32)
-    cell_top = z_top32[cell_b, cell_a]
-    cell_bot = z_bot32[cell_b, cell_a]
-    cell_ok = finite_grid[cell_b, cell_a] & inside
-    g0 = (a0 * uy).astype(np.float32)
-    se32 = np.float32(se)
-    g_lo = g0[None, :] + seg_t0 * se32
-    g_hi = g0[None, :] + seg_t1 * se32
-
-    silhouette = np.where(cell_ok, g_hi + cell_top, -np.inf)
-    running = np.maximum.accumulate(silhouette, axis=0)
-    watermark = np.empty_like(running)
-    watermark[0] = -np.inf
-    watermark[1:] = running[:-1]
-
-    # Bar face ids start at 4: 1 is the floor, 2 the panes, 3 reserved --
-    # a bar's faces must never collide with the scene chrome.
-    face_id = (cell_b * nx + cell_a) * 4 + 4
-    shade = np.where(entered_x, side_shades[0], side_shades[1]).astype(
-        np.float32
-    )
-    side_lo = np.maximum(g_lo + cell_bot, watermark)
-    side_hi = np.where(cell_ok, g_lo + cell_top, -np.inf)
-    top_lo = np.maximum(np.where(cell_ok, g_lo + cell_top, np.inf), watermark)
-    top_hi = np.where(cell_ok, g_hi + cell_top, -np.inf)
-
-    cell_rgb = rgb_grid[cell_b, cell_a]
-    top_rgb_cells = cell_rgb
     dense_surface = scale < edge_min_cell_px * supersample
-    # Side faces interp-shade through the colour scale, the reference
-    # figures' MATLAB ``shading interp`` look: the z=0 end of every side
-    # face takes the zero-value colour, the far end the bar's own.
     if zero_rgb is None:
-        base_rgb_cells = cell_rgb
+        base_grid = rgb_grid
     else:
-        base_rgb_cells = np.broadcast_to(
-            np.asarray(zero_rgb, dtype=np.float32), cell_rgb.shape
-        )
-    positive = z_top32[cell_b, cell_a] > 0.0
-    side_top_rgb = np.where(
-        positive[..., None], cell_rgb, base_rgb_cells
-    ) * shade[..., None]
-    side_bottom_rgb = np.where(
-        positive[..., None], base_rgb_cells, cell_rgb
-    ) * shade[..., None]
+        base_grid = np.ascontiguousarray(np.broadcast_to(
+            np.asarray(zero_rgb, dtype=np.float32), rgb_grid.shape
+        ))
     if dense_surface:
         # Sub-outline density: the grid reads as a heightfield, and flat
         # per-cell tops lose all depth.  Light the top faces by the local
-        # slope (light from the upper-left of the screen frame), the
-        # standard heightfield cue, computed once per pooled cell.
+        # slope (light from the upper-left of the screen frame) -- per
+        # CELL here, gathered per span below: elementwise either way, so
+        # the two orders are bit-identical.
         gradient_b, gradient_a = np.gradient(hz)
-        # Scale-free slope: hz carries the scene's z factor, so the raw
-        # gradient saturates any fixed gain.  g/sqrt(1+g^2) is the sine
-        # of the slope angle -- bounded, unit-independent.
-        slope = gradient_b - gradient_a
-        slope = slope / np.sqrt(1.0 + np.square(slope))
-        lighting = np.clip(1.0 + 0.45 * slope, 0.6, 1.2).astype(np.float32)
-        top_rgb_cells = np.clip(
-            cell_rgb * lighting[cell_b, cell_a][..., None], 0.0, 1.0
+        slope_field = gradient_b - gradient_a
+        slope_field = slope_field / np.sqrt(1.0 + np.square(slope_field))
+        lighting = np.clip(
+            1.0 + 0.45 * slope_field, 0.6, 1.2
+        ).astype(np.float32)
+        top_grid = np.clip(rgb_grid * lighting[..., None], 0.0, 1.0)
+    else:
+        top_grid = rgb_grid
+
+    if _scanline_selected():
+        # The numba scanline engine: one pixel written once per column
+        # walk, bit-identical to the reference materialization below by
+        # the standing contract test.
+        from ._height3d_scanline import _materialize
+
+        out = np.empty((render_h, render_w, 4), dtype=np.uint8)
+        id_plane = np.empty((render_h, render_w), dtype=np.int32)
+        bg32 = np.asarray(background_rgb, dtype=np.float32)
+        _materialize(
+            a_at,
+            t_enter,
+            t_exit,
+            ia0,
+            ib0,
+            t_a0,
+            t_b0,
+            (a0 * uy).astype(np.float32),
+            np.ascontiguousarray(z_top32),
+            np.ascontiguousarray(z_bot32),
+            np.ascontiguousarray(finite_grid),
+            np.ascontiguousarray(rgb_grid),
+            np.ascontiguousarray(base_grid),
+            np.ascontiguousarray(top_grid),
+            bool(dense_surface),
+            np.float32(side_shades[0]),
+            np.float32(side_shades[1]),
+            float(sa),
+            float(ca),
+            np.float32(se),
+            float(y_high),
+            float(scale),
+            np.float32(pane_high),
+            np.float32(min(pane_low, 0.0)),
+            bg32,
+            (bg32 * 255.0).astype(np.uint8),
+            out,
+            id_plane,
+            np.int64(min(32, (os.cpu_count() or 4) * 2)),
         )
-        # At this density a cell's visible pixels are mostly its front
-        # face slivers: painting those the constant side grey turned the
-        # whole surface grey.  A dense grid is a continuous surface, so
-        # its sides carry the same lit colour as its tops.
-        side_top_rgb = top_rgb_cells
-        side_bottom_rgb = top_rgb_cells
-    background = np.asarray(background_rgb, dtype=np.float32)
+    else:
+        k = np.arange(nx, dtype=np.float64)[:, None]
+        m = np.arange(ny, dtype=np.float64)[:, None]
+        t_cross_a = t_a0[None, :] + k / sa
+        t_cross_b = t_b0[None, :] + m / ca
+        b_before_a = np.clip(np.ceil((t_cross_a - t_b0[None, :]) * ca), 0.0, ny)
+        pos_a = (k + b_before_a).astype(np.int64)
 
-    span_cols = [
-        np.broadcast_to(columns_row, (S, render_w)).ravel(),
-        np.broadcast_to(columns_row, (S, render_w)).ravel(),
-        np.broadcast_to(columns_row, (S, render_w)).ravel(),
-    ]
-    # The floor: the background surface under every cell without a bar.
-    floor_lo = np.maximum(g_lo, watermark)
-    floor_hi = np.where(inside & ~cell_ok, g_hi, -np.inf)
-    span_lo = [side_lo.ravel(), top_lo.ravel(), floor_lo.ravel()]
-    span_hi = [side_hi.ravel(), top_hi.ravel(), floor_hi.ravel()]
-    # The side spans remember their UNCLIPPED extremes: the gradient's
-    # intercept and slope come from the full face, so watermark clipping
-    # trims pixels without shifting the shading.
-    side_full_lo = (g_lo + cell_bot).ravel()
-    side_full_hi = (g_lo + cell_top).ravel()
-    span_rgb_low = [
-        side_bottom_rgb.reshape(-1, 3),
-        top_rgb_cells.reshape(-1, 3),
-        np.broadcast_to(background, (S * render_w, 3)),
-    ]
-    span_rgb_high = [
-        side_top_rgb.reshape(-1, 3),
-        top_rgb_cells.reshape(-1, 3),
-        np.broadcast_to(background, (S * render_w, 3)),
-    ]
-    span_full_lo = [side_full_lo, top_lo.ravel(), floor_lo.ravel()]
-    span_full_hi = [side_full_hi, top_hi.ravel(), floor_hi.ravel()]
-    span_id = [
-        (face_id + 1 + entered_x.astype(np.int64)).ravel(),
-        (face_id + 3).ravel(),
-        np.broadcast_to(np.int64(1), (S * render_w,)),
-    ]
+        # The b-crossings take the COMPLEMENT of the a slots, in order.  A
+        # second float formula for their positions could disagree with
+        # ``pos_a`` at an exact tie -- two crossings claiming one slot, the
+        # orphaned slot left holding uninitialized memory, and the frame
+        # nondeterministic.  The complement is pure integer bookkeeping, so
+        # the merge is a permutation BY CONSTRUCTION.
+        S = nx + ny
+        columns_row = np.arange(render_w, dtype=np.int64)
+        used = np.zeros((render_w, S), dtype=bool)
+        used[columns_row[None, :], pos_a] = True
+        unused_cols, unused_slots = np.nonzero(~used)
+        pos_b = unused_slots.reshape(render_w, ny).T
+        sorted_t = np.empty((S, render_w), dtype=np.float64)
+        sorted_is_b = np.ones((S, render_w), dtype=bool)
+        sorted_t[pos_a, columns_row[None, :]] = t_cross_a
+        sorted_is_b[pos_a, columns_row[None, :]] = False
+        sorted_t[pos_b, columns_row[None, :]] = t_cross_b
 
-    # Back panes: background-coloured, from the grid's far silhouette up
-    # to the pane top.
-    final_watermark = running[-1] if S else np.full(render_w, -np.inf)
-    g_exit = g0 + (t_exit.astype(np.float32) * se32)
-    pane_top_y = g_exit + np.float32(pane_high)
-    pane_bottom = np.maximum(
-        g_exit + np.float32(min(pane_low, 0.0)), final_watermark
-    )
-    pane_visible = t_exit > t_enter
-    span_cols.append(columns_row)
-    pane_lo_values = np.where(pane_visible, pane_bottom, np.inf)
-    pane_hi_values = np.where(pane_visible, pane_top_y, -np.inf)
-    span_lo.append(pane_lo_values)
-    span_hi.append(pane_hi_values)
-    span_rgb_low.append(np.broadcast_to(background, (render_w, 3)))
-    span_rgb_high.append(np.broadcast_to(background, (render_w, 3)))
-    span_full_lo.append(pane_lo_values)
-    span_full_hi.append(pane_hi_values)
-    span_id.append(np.broadcast_to(np.int64(2), (render_w,)))
+        with np.errstate(over="ignore"):
+            # Clamped-azimuth crossings can exceed float32 range; they land
+            # as inf, which every comparison downstream handles.
+            sorted_t = sorted_t.astype(np.float32)
+        seg_t0 = np.empty((S, render_w), dtype=np.float32)
+        seg_t0[0] = t_enter
+        seg_t0[1:] = sorted_t[:-1]
+        np.clip(seg_t0, None, t_exit[None, :], out=seg_t0)
+        seg_t1 = np.clip(sorted_t, None, t_exit[None, :])
 
-    all_cols = np.concatenate(span_cols)
-    all_lo = np.concatenate(span_lo)
-    all_hi = np.concatenate(span_hi)
-    all_rgb_low = np.concatenate(span_rgb_low)
-    all_rgb_high = np.concatenate(span_rgb_high)
-    all_full_lo = np.concatenate(span_full_lo)
-    all_full_hi = np.concatenate(span_full_hi)
-    all_id = np.concatenate(span_id)
+        before_b = np.cumsum(sorted_is_b, axis=0)
+        before_b_prior = np.empty_like(before_b)
+        before_b_prior[0] = 0
+        before_b_prior[1:] = before_b[:-1]
+        seg_index = np.arange(S, dtype=np.int64)[:, None]
+        ia = ia0[None, :].astype(np.int64) - (seg_index - before_b_prior)
+        ib = ib0[None, :].astype(np.int64) + before_b_prior
+        inside = (ia >= 0) & (ia < nx) & (ib >= 0) & (ib < ny) & (seg_t1 > seg_t0)
+        cell_a = np.clip(ia, 0, nx - 1)
+        cell_b = np.clip(ib, 0, ny - 1)
 
-    keep = all_hi > all_lo
-    cols = all_cols[keep]
-    lo = all_lo[keep]
-    hi = all_hi[keep]
-    color_low = all_rgb_low[keep]
-    color_high = all_rgb_high[keep]
-    full_lo = all_full_lo[keep]
-    full_hi = all_full_hi[keep]
-    ids = all_id[keep]
-    row_hi = np.clip((y_high - lo) * scale, 0.0, float(render_h)).astype(
-        np.int64
-    )
-    row_lo = np.clip((y_high - hi) * scale, 0.0, float(render_h)).astype(
-        np.int64
-    )
-    keep2 = row_hi > row_lo
-    cols = cols[keep2]
-    row_lo = row_lo[keep2]
-    row_hi = row_hi[keep2]
-    color_low = color_low[keep2]
-    color_high = color_high[keep2]
-    full_lo = full_lo[keep2]
-    full_hi = full_hi[keep2]
-    ids = ids[keep2]
+        entered_x = np.empty((S, render_w), dtype=bool)
+        entered_x[0] = np.abs(a_at - np.round(a_at)) < 1e-9
+        entered_x[1:] = ~sorted_is_b[:-1]
 
-    # Gradient as intercept+slope in row space, from the UNCLIPPED face:
-    # colour(row) = A + s*row, with s = 0 for every constant span.
-    full_row_bottom = (y_high - full_lo) * scale   # larger row (z low end)
-    full_row_top = (y_high - full_hi) * scale
-    span_height = np.maximum(full_row_bottom - full_row_top, 1e-6)
-    slope = (color_low - color_high) / span_height[:, None]
-    intercept = color_high - slope * full_row_top[:, None]
+        cell_top = z_top32[cell_b, cell_a]
+        cell_bot = z_bot32[cell_b, cell_a]
+        cell_ok = finite_grid[cell_b, cell_a] & inside
+        g0 = (a0 * uy).astype(np.float32)
+        se32 = np.float32(se)
+        g_lo = g0[None, :] + seg_t0 * se32
+        g_hi = g0[None, :] + seg_t1 * se32
 
-    stride = render_w
-    flat_lo = row_lo * stride + cols
-    flat_hi = row_hi * stride + cols
-    plane = (render_h + 1) * stride
-    channel_index = np.concatenate([
-        flat_lo * 3,
-        flat_lo * 3 + 1,
-        flat_lo * 3 + 2,
-        flat_hi * 3,
-        flat_hi * 3 + 1,
-        flat_hi * 3 + 2,
-    ])
-    intercept_weights = np.concatenate([
-        intercept[:, 0], intercept[:, 1], intercept[:, 2],
-        -intercept[:, 0], -intercept[:, 1], -intercept[:, 2],
-    ]).astype(np.float64) * 255.0
-    slope_weights = np.concatenate([
-        slope[:, 0], slope[:, 1], slope[:, 2],
-        -slope[:, 0], -slope[:, 1], -slope[:, 2],
-    ]).astype(np.float64) * 255.0
-    # The three scatter planes are independent of one another: fan the
-    # bincounts out over the pool (bit-identical -- no shared sums), and
-    # let each cast to its cumsum dtype in its own thread.
-    # For the id plane, ONE weighted bincount with +/- weights replaces
-    # two full planes; the ids are exact integers, so the merged
-    # summation order cannot change a value, and the cumsum runs in
-    # int32 -- a quarter of the float64 bytes, no rounding pass.
-    id_weights = ids.astype(np.float64)
-    futures = [
-        _pool().submit(
-            lambda w: np.bincount(
-                channel_index, weights=w, minlength=plane * 3
-            ).astype(np.float32),
-            weights,
+        silhouette = np.where(cell_ok, g_hi + cell_top, -np.inf)
+        running = np.maximum.accumulate(silhouette, axis=0)
+        watermark = np.empty_like(running)
+        watermark[0] = -np.inf
+        watermark[1:] = running[:-1]
+
+        # Bar face ids start at 4: 1 is the floor, 2 the panes, 3 reserved --
+        # a bar's faces must never collide with the scene chrome.
+        face_id = (cell_b * nx + cell_a) * 4 + 4
+        shade = np.where(entered_x, side_shades[0], side_shades[1]).astype(
+            np.float32
         )
-        for weights in (intercept_weights, slope_weights)
-    ]
-    futures.append(_pool().submit(
-        lambda: np.bincount(
-            np.concatenate([flat_lo, flat_hi]),
-            weights=np.concatenate([id_weights, -id_weights]),
-            minlength=plane,
-        ).astype(np.int32)
-    ))
-    intercept_diff, slope_diff, id_diff = (f.result() for f in futures)
-    filled_full = np.empty((render_h + 1, stride * 3), dtype=np.float32)
-    _cumsum_axis0(intercept_diff.reshape(render_h + 1, stride * 3), filled_full)
-    filled = filled_full[:render_h].reshape(render_h, stride, 3)
-    slope_full = np.empty((render_h + 1, stride * 3), dtype=np.float32)
-    _cumsum_axis0(slope_diff.reshape(render_h + 1, stride * 3), slope_full)
-    slope_plane = slope_full[:render_h].reshape(render_h, stride, 3)
-    # Scale the slope plane by its row IN PLACE: the broadcast product
-    # would allocate a full extra colour plane per frame.
-    slope_plane *= np.arange(render_h, dtype=np.float32)[:, None, None]
-    filled += slope_plane
-    id_plane_full = np.empty((render_h + 1, stride), dtype=np.int32)
-    _cumsum_axis0(id_diff.reshape(render_h + 1, stride), id_plane_full)
-    id_plane = id_plane_full[:render_h]
+        side_lo = np.maximum(g_lo + cell_bot, watermark)
+        side_hi = np.where(cell_ok, g_lo + cell_top, -np.inf)
+        top_lo = np.maximum(np.where(cell_ok, g_lo + cell_top, np.inf), watermark)
+        top_hi = np.where(cell_ok, g_hi + cell_top, -np.inf)
+
+        cell_rgb = rgb_grid[cell_b, cell_a]
+        top_rgb_cells = cell_rgb
+        # Side faces interp-shade through the colour scale, the reference
+        # figures' MATLAB ``shading interp`` look: the z=0 end of every side
+        # face takes the zero-value colour, the far end the bar's own.
+        base_rgb_cells = base_grid[cell_b, cell_a]
+        positive = z_top32[cell_b, cell_a] > 0.0
+        side_top_rgb = np.where(
+            positive[..., None], cell_rgb, base_rgb_cells
+        ) * shade[..., None]
+        side_bottom_rgb = np.where(
+            positive[..., None], base_rgb_cells, cell_rgb
+        ) * shade[..., None]
+        if dense_surface:
+            # A dense grid is a lit continuous surface (see the shared
+            # per-cell colour grids above): tops and sides gather the same
+            # pre-lit colours.
+            top_rgb_cells = top_grid[cell_b, cell_a]
+            side_top_rgb = top_rgb_cells
+            side_bottom_rgb = top_rgb_cells
+        background = np.asarray(background_rgb, dtype=np.float32)
+
+        span_cols = [
+            np.broadcast_to(columns_row, (S, render_w)).ravel(),
+            np.broadcast_to(columns_row, (S, render_w)).ravel(),
+            np.broadcast_to(columns_row, (S, render_w)).ravel(),
+        ]
+        # The floor: the background surface under every cell without a bar.
+        floor_lo = np.maximum(g_lo, watermark)
+        floor_hi = np.where(inside & ~cell_ok, g_hi, -np.inf)
+        span_lo = [side_lo.ravel(), top_lo.ravel(), floor_lo.ravel()]
+        span_hi = [side_hi.ravel(), top_hi.ravel(), floor_hi.ravel()]
+        # The side spans remember their UNCLIPPED extremes: the gradient's
+        # intercept and slope come from the full face, so watermark clipping
+        # trims pixels without shifting the shading.
+        side_full_lo = (g_lo + cell_bot).ravel()
+        side_full_hi = (g_lo + cell_top).ravel()
+        span_rgb_low = [
+            side_bottom_rgb.reshape(-1, 3),
+            top_rgb_cells.reshape(-1, 3),
+            np.broadcast_to(background, (S * render_w, 3)),
+        ]
+        span_rgb_high = [
+            side_top_rgb.reshape(-1, 3),
+            top_rgb_cells.reshape(-1, 3),
+            np.broadcast_to(background, (S * render_w, 3)),
+        ]
+        span_full_lo = [side_full_lo, top_lo.ravel(), floor_lo.ravel()]
+        span_full_hi = [side_full_hi, top_hi.ravel(), floor_hi.ravel()]
+        span_id = [
+            (face_id + 1 + entered_x.astype(np.int64)).ravel(),
+            (face_id + 3).ravel(),
+            np.broadcast_to(np.int64(1), (S * render_w,)),
+        ]
+
+        # Back panes: background-coloured, from the grid's far silhouette up
+        # to the pane top.
+        final_watermark = running[-1] if S else np.full(render_w, -np.inf)
+        g_exit = g0 + (t_exit.astype(np.float32) * se32)
+        pane_top_y = g_exit + np.float32(pane_high)
+        pane_bottom = np.maximum(
+            g_exit + np.float32(min(pane_low, 0.0)), final_watermark
+        )
+        pane_visible = t_exit > t_enter
+        span_cols.append(columns_row)
+        pane_lo_values = np.where(pane_visible, pane_bottom, np.inf)
+        pane_hi_values = np.where(pane_visible, pane_top_y, -np.inf)
+        span_lo.append(pane_lo_values)
+        span_hi.append(pane_hi_values)
+        span_rgb_low.append(np.broadcast_to(background, (render_w, 3)))
+        span_rgb_high.append(np.broadcast_to(background, (render_w, 3)))
+        span_full_lo.append(pane_lo_values)
+        span_full_hi.append(pane_hi_values)
+        span_id.append(np.broadcast_to(np.int64(2), (render_w,)))
+
+        all_cols = np.concatenate(span_cols)
+        all_lo = np.concatenate(span_lo)
+        all_hi = np.concatenate(span_hi)
+        all_rgb_low = np.concatenate(span_rgb_low)
+        all_rgb_high = np.concatenate(span_rgb_high)
+        all_full_lo = np.concatenate(span_full_lo)
+        all_full_hi = np.concatenate(span_full_hi)
+        all_id = np.concatenate(span_id)
+
+        keep = all_hi > all_lo
+        cols = all_cols[keep]
+        lo = all_lo[keep]
+        hi = all_hi[keep]
+        color_low = all_rgb_low[keep]
+        color_high = all_rgb_high[keep]
+        full_lo = all_full_lo[keep]
+        full_hi = all_full_hi[keep]
+        ids = all_id[keep]
+        row_hi = np.clip((y_high - lo) * scale, 0.0, float(render_h)).astype(
+            np.int64
+        )
+        row_lo = np.clip((y_high - hi) * scale, 0.0, float(render_h)).astype(
+            np.int64
+        )
+        keep2 = row_hi > row_lo
+        cols = cols[keep2]
+        row_lo = row_lo[keep2]
+        row_hi = row_hi[keep2]
+        color_low = color_low[keep2]
+        color_high = color_high[keep2]
+        full_lo = full_lo[keep2]
+        full_hi = full_hi[keep2]
+        ids = ids[keep2]
+
+        # Gradient as intercept+slope in row space, from the UNCLIPPED face:
+        # colour(row) = A + s*row, with s = 0 for every constant span.
+        full_row_bottom = (y_high - full_lo) * scale   # larger row (z low end)
+        full_row_top = (y_high - full_hi) * scale
+        span_height = np.maximum(full_row_bottom - full_row_top, 1e-6)
+        slope = (color_low - color_high) / span_height[:, None]
+        intercept = color_high - slope * full_row_top[:, None]
+
+        stride = render_w
+        flat_lo = row_lo * stride + cols
+        flat_hi = row_hi * stride + cols
+        plane = (render_h + 1) * stride
+        channel_index = np.concatenate([
+            flat_lo * 3,
+            flat_lo * 3 + 1,
+            flat_lo * 3 + 2,
+            flat_hi * 3,
+            flat_hi * 3 + 1,
+            flat_hi * 3 + 2,
+        ])
+        intercept_weights = np.concatenate([
+            intercept[:, 0], intercept[:, 1], intercept[:, 2],
+            -intercept[:, 0], -intercept[:, 1], -intercept[:, 2],
+        ]).astype(np.float64) * 255.0
+        slope_weights = np.concatenate([
+            slope[:, 0], slope[:, 1], slope[:, 2],
+            -slope[:, 0], -slope[:, 1], -slope[:, 2],
+        ]).astype(np.float64) * 255.0
+        # The three scatter planes are independent of one another: fan the
+        # bincounts out over the pool (bit-identical -- no shared sums), and
+        # let each cast to its cumsum dtype in its own thread.
+        # For the id plane, ONE weighted bincount with +/- weights replaces
+        # two full planes; the ids are exact integers, so the merged
+        # summation order cannot change a value, and the cumsum runs in
+        # int32 -- a quarter of the float64 bytes, no rounding pass.
+        id_weights = ids.astype(np.float64)
+        futures = [
+            _pool().submit(
+                lambda w: np.bincount(
+                    channel_index, weights=w, minlength=plane * 3
+                ).astype(np.float32),
+                weights,
+            )
+            for weights in (intercept_weights, slope_weights)
+        ]
+        futures.append(_pool().submit(
+            lambda: np.bincount(
+                np.concatenate([flat_lo, flat_hi]),
+                weights=np.concatenate([id_weights, -id_weights]),
+                minlength=plane,
+            ).astype(np.int32)
+        ))
+        intercept_diff, slope_diff, id_diff = (f.result() for f in futures)
+        filled_full = np.empty((render_h + 1, stride * 3), dtype=np.float32)
+        _cumsum_axis0(intercept_diff.reshape(render_h + 1, stride * 3), filled_full)
+        filled = filled_full[:render_h].reshape(render_h, stride, 3)
+        slope_full = np.empty((render_h + 1, stride * 3), dtype=np.float32)
+        _cumsum_axis0(slope_diff.reshape(render_h + 1, stride * 3), slope_full)
+        slope_plane = slope_full[:render_h].reshape(render_h, stride, 3)
+        # Scale the slope plane by its row IN PLACE: the broadcast product
+        # would allocate a full extra colour plane per frame.
+        slope_plane *= np.arange(render_h, dtype=np.float32)[:, None, None]
+        filled += slope_plane
+        id_plane_full = np.empty((render_h + 1, stride), dtype=np.int32)
+        _cumsum_axis0(id_diff.reshape(render_h + 1, stride), id_plane_full)
+        id_plane = id_plane_full[:render_h]
+
+        covered = id_plane > 0
+        np.clip(filled, 0.0, 255.0, out=filled)
+        out = np.empty((render_h, render_w, 4), dtype=np.uint8)
+        out[..., :3] = filled
+        out[..., 3] = covered.astype(np.uint8) * np.uint8(255)
+        # Uncovered pixels carry the BACKGROUND colour, not black: the
+        # supersample average otherwise mixes black into the scene's border
+        # pixels and draws the pane silhouette as a faint dotted outline --
+        # the very closing border this scene must not have.
+        out[..., :3][~covered] = (
+            np.asarray(background_rgb, dtype=np.float32) * 255.0
+        ).astype(np.uint8)
 
     covered = id_plane > 0
-    np.clip(filled, 0.0, 255.0, out=filled)
-    out = np.empty((render_h, render_w, 4), dtype=np.uint8)
-    out[..., :3] = filled
-    out[..., 3] = covered.astype(np.uint8) * np.uint8(255)
-    # Uncovered pixels carry the BACKGROUND colour, not black: the
-    # supersample average otherwise mixes black into the scene's border
-    # pixels and draws the pane silhouette as a faint dotted outline --
-    # the very closing border this scene must not have.
-    out[..., :3][~covered] = (
-        np.asarray(background_rgb, dtype=np.float32) * 255.0
-    ).astype(np.uint8)
-
     # ---- raster outlines from the id plane (mid-density grids only:
     # small grids hand their outlines to vector chrome, dense grids are
     # a lit continuous surface, and neither takes raster lines)

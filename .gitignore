@@ -24,3 +24,6 @@ packages/zlc_pulse/fpga/.Xil/
 # between shots and a reclone does not carry one machine's experiment to
 # another.
 /workspace/
+
+# Numba disk cache: regenerable machine code (bin/warm_numba_cache.bat)
+/.numba_cache/

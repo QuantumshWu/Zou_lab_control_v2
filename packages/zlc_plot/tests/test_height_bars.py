@@ -483,3 +483,63 @@ def test_render_is_deterministic_at_exact_crossing_ties() -> None:
         del noise
     for frame in frames[1:]:
         np.testing.assert_array_equal(frames[0], frame)
+
+
+def test_scanline_engine_matches_the_reference_bit_for_bit() -> None:
+    """The numba scanline engine is a SPEED path, never a semantics path.
+
+    The numpy kernel is the specification; the compiled engine must
+    reproduce it bit for bit -- frame and pick map both -- across folds,
+    exact crossing ties (azimuth 45), clipping limits, NaN holes,
+    hanging negative bars and the pooled dense surface.
+    """
+
+    pytest.importorskip("numba")
+    from zlc_plot import _height3d_raster as raster
+
+    rng = np.random.default_rng(9)
+    xx, yy = np.meshgrid(np.arange(16), np.arange(16))
+    gauss = np.exp(-((xx - 8.0) ** 2 + (yy - 7.0) ** 2) / 18.0)
+    holes = gauss.copy()
+    holes[3, 4] = np.nan
+    holes[9:11, 12] = np.nan
+    cases = (
+        (gauss, (0.0, 1.0), dict(azimuth_deg=-55.0), 3, 360, 300),
+        (gauss, (0.0, 1.0), dict(azimuth_deg=-45.0), 2, 320, 260),
+        (gauss, (0.2, 0.8), dict(azimuth_deg=130.0, elevation_deg=12.0),
+         2, 300, 240),
+        (holes, (0.0, 1.0), dict(azimuth_deg=220.0, elevation_deg=70.0),
+         2, 280, 280),
+        (rng.normal(scale=0.5, size=(8, 8)), (-1.0, 1.0),
+         dict(azimuth_deg=40.0), 2, 300, 260),
+        (rng.random((300, 500)), (0.0, 1.0), dict(azimuth_deg=-55.0),
+         2, 240, 200),
+    )
+    previous = raster._ENGINE
+    try:
+        for heights, limits, camera_kwargs, ss, width, height in cases:
+            colors = np.ascontiguousarray(
+                np.stack([
+                    np.clip(np.nan_to_num(heights), 0.0, 1.0),
+                    np.full(heights.shape, 0.4),
+                    1.0 - np.clip(np.nan_to_num(heights), 0.0, 1.0),
+                ], axis=-1).astype(np.float32)
+            )
+            frames = {}
+            for engine in ("numpy", "numba"):
+                raster._ENGINE = engine
+                frame, scene = render_height_bars(
+                    heights, colors,
+                    camera=HeightBarCamera(**camera_kwargs),
+                    value_limits=limits, width=width, height=height,
+                    supersample=ss, zero_rgb=(0.9, 0.9, 1.0),
+                )
+                frames[engine] = (frame, scene.id_plane)
+            np.testing.assert_array_equal(
+                frames["numpy"][0], frames["numba"][0]
+            )
+            np.testing.assert_array_equal(
+                frames["numpy"][1], frames["numba"][1]
+            )
+    finally:
+        raster._ENGINE = previous
