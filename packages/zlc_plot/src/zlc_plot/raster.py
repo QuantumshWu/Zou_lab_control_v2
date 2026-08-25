@@ -68,27 +68,36 @@ def _axis_at_normalized(
     front: "RasterFront",
     x: float,
     y: float,
+    *,
+    tolerance_px: float = 0.0,
 ) -> AxisTransform | None:
-    """Resolve the current front's axis under a normalized pointer.
+    """Resolve the axis under -- or nearest within tolerance of -- a pointer.
 
-    With half a pixel of tolerance: a guide painted exactly ON an axes
-    boundary -- the autoscaled colour-limit high guide sits at the
-    distribution rail's top edge -- must be grabbable, and an exact
-    bounds test lost it to one ulp of the transform arithmetic.
+    What you can SEE you can grab: a guide painted ON an axes boundary
+    (the autoscaled colour-limit guides sit exactly at the distribution
+    rail's edges) spills its visible linewidth outside the box, so the
+    box test extends by the same handle radius every other grab already
+    uses.  Where expanded boxes would overlap -- the gaps between an
+    image, its rail and its colorbar -- the NEAREST axis wins; a press
+    inside an axes box is distance zero and behaves exactly as before.
     """
 
     width, height = front.logical_size
-    half_x = 0.5 / max(1, int(width))
-    half_y = 0.5 / max(1, int(height))
-    return next(
-        (
-            axis
-            for axis in front.interaction.axes
-            if axis.bounds[0] - half_x <= x <= axis.bounds[2] + half_x
-            and axis.bounds[1] - half_y <= y <= axis.bounds[3] + half_y
-        ),
-        None,
-    )
+    scale_x = float(max(1, int(width)))
+    scale_y = float(max(1, int(height)))
+    best: AxisTransform | None = None
+    best_distance = float("inf")
+    for axis in front.interaction.axes:
+        left, top, right, bottom = axis.bounds
+        outside_x = max(left - x, x - right, 0.0) * scale_x
+        outside_y = max(top - y, y - bottom, 0.0) * scale_y
+        distance = max(outside_x, outside_y)
+        if distance == 0.0:
+            return axis
+        if distance <= float(tolerance_px) and distance < best_distance:
+            best = axis
+            best_distance = distance
+    return best
 
 
 @dataclass(frozen=True, slots=True)
@@ -1940,6 +1949,9 @@ class RasterPlotHost:
                         current_front,
                         x_value,
                         y_value,
+                        tolerance_px=(
+                            session._defaults.interaction.selector_handle_radius_px
+                        ),
                     )
                     effective_interaction = current_front.interaction
                 revisions = session.revisions

@@ -333,7 +333,11 @@ class HostBench:
         if limits is None:
             return {"error": "no color limits on front"}
         span = limits.high - limits.low
-        start = _value_point(axis, limits.high)
+        # Press on the OUTER half of the edge guide's visible linewidth --
+        # two pixels above the rail's top boundary -- so the run keeps
+        # validating what-you-see-you-can-grab end to end.
+        start_x, start_y = _value_point(axis, limits.high)
+        start = (start_x, start_y - 2.0 / max(1, self.widget.height()))
         path = [start] + [
             _value_point(axis, limits.high - span * 0.04 * (i + 1))
             for i in range(8)

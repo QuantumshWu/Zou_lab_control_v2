@@ -25,6 +25,7 @@ from .assets import HELVETICA_LIGHT_FAMILY, helvetica_light_path
 from .raster import (
     RasterFront,
     RasterPlotHost,
+    _axis_at_normalized,
 )
 from .selectors import SelectorState
 
@@ -988,20 +989,17 @@ def _qt5_plot_widget_class() -> type[Any]:
                 else None
             )
             if source_axes is None and source_front is not None and event is not None:
-                # Half a pixel of tolerance: a guide painted ON an axes
-                # boundary (the autoscaled colour-limit high guide sits at
-                # the distribution's top edge) must be grabbable, and the
-                # exact test lost it to one ulp of the bounds arithmetic.
-                half_x = 0.5 / max(1, self.width())
-                half_y = 0.5 / max(1, self.height())
-                source_axes = next(
-                    (
-                        item
-                        for item in source_front.interaction.axes
-                        if item.bounds[0] - half_x <= x <= item.bounds[2] + half_x
-                        and item.bounds[1] - half_y <= y <= item.bounds[3] + half_y
+                # The same what-you-see-you-can-grab resolution the host
+                # applies at press time: nearest axis within the selector
+                # handle radius, so a guide's visible linewidth on an axes
+                # boundary is grabbable from either side.
+                source_axes = _axis_at_normalized(
+                    source_front,
+                    x,
+                    y,
+                    tolerance_px=(
+                        self._host.defaults.interaction.selector_handle_radius_px
                     ),
-                    None,
                 )
             if action == "press":
                 self._gesture_front = source_front

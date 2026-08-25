@@ -1181,3 +1181,43 @@ def test_locked_curve_wheel_steps_canonical_series_without_zoom() -> None:
         assert tuple(axes.get_xlim()) != original_xlim
     finally:
         session.close()
+
+
+def test_axis_resolution_grabs_what_is_visible() -> None:
+    """Nearest-axis pointer resolution within the selector handle radius.
+
+    A guide painted ON an axes boundary spills its visible linewidth
+    outside the box; the resolver must grab it from either side, and the
+    nearest axis must win inside the gaps between adjacent axes."""
+
+    from types import SimpleNamespace
+
+    from zlc_plot._axis_transform import AxisTransform
+    from zlc_plot.raster import _axis_at_normalized
+
+    def transform(role, left, top, right, bottom):
+        return AxisTransform(
+            role, None, (left, top, right, bottom),
+            (0.0, 1.0), (0.0, 1.0), (0.0, 1.0), (0.0, 1.0),
+        )
+
+    image = transform("image", 0.10, 0.10, 0.70, 0.90)
+    rail = transform("distribution", 0.72, 0.10, 0.80, 0.90)
+    front = SimpleNamespace(
+        logical_size=(1000, 1000),
+        interaction=SimpleNamespace(axes=(image, rail)),
+    )
+
+    inside = _axis_at_normalized(front, 0.75, 0.5, tolerance_px=10.0)
+    assert inside is rail
+    # 3 px ABOVE the rail's top edge: the outer half of an edge guide.
+    above = _axis_at_normalized(front, 0.75, 0.10 - 0.003, tolerance_px=10.0)
+    assert above is rail
+    # In the gap between image and rail, the nearer one wins.
+    near_rail = _axis_at_normalized(front, 0.715, 0.5, tolerance_px=10.0)
+    assert near_rail is rail
+    near_image = _axis_at_normalized(front, 0.705, 0.5, tolerance_px=10.0)
+    assert near_image is image
+    # Beyond the radius resolves to nothing, exactly as before.
+    assert _axis_at_normalized(front, 0.75, 0.05, tolerance_px=10.0) is None
+    assert _axis_at_normalized(front, 0.75, 0.099, tolerance_px=0.0) is None
