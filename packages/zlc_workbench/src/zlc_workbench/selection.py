@@ -403,6 +403,7 @@ class PlotSelectionSource:
         host: Any,
         *,
         on_threshold: Callable[[object], object] | None = None,
+        on_crosshair: Callable[[object], object] | None = None,
     ) -> None:
         self._host = host
         self._releases: list[Callable[[], None]] = []
@@ -410,6 +411,7 @@ class PlotSelectionSource:
         self._closed = False
         self._last_error: Exception | None = None
         self._on_threshold = on_threshold
+        self._on_crosshair = on_crosshair
 
     # ------------------------------------------------------------- properties
 
@@ -443,6 +445,18 @@ class PlotSelectionSource:
                 ):
                     self._deliver(
                         self._on_threshold,
+                        event,
+                    )
+                elif (
+                    self._on_crosshair is not None
+                    and _selector_kind_of(event) == "crosshair"
+                ):
+                    # A crosshair cuts no region either, but it IS the
+                    # panel's marker: both of a panel's surfaces point at
+                    # the same place or the operator is reading two
+                    # different numbers off "one" panel.
+                    self._deliver(
+                        self._on_crosshair,
                         event,
                     )
                 return
@@ -739,6 +753,7 @@ def attach_selection_bridge(
         object,
     ],
     on_threshold: Callable[[Any], object] | None = None,
+    on_crosshair: Callable[[Any], object] | None = None,
 ) -> tuple[SelectionBridge, PlotSelectionSource]:
     """Resolve exact observations for the interaction owner that commits them.
 
@@ -751,7 +766,9 @@ def attach_selection_bridge(
     selection, and the subscription outlives the bridge only if it leaks.
     """
 
-    source = PlotSelectionSource(host, on_threshold=on_threshold)
+    source = PlotSelectionSource(
+        host, on_threshold=on_threshold, on_crosshair=on_crosshair
+    )
     if not callable(on_observation):
         raise TypeError("on_observation must be callable")
     bridge = SelectionBridge(

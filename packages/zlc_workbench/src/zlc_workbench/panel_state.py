@@ -460,6 +460,10 @@ class PanelState:
     #: of them is being read.  Written down so a board comes back as it was
     #: left; empty means "nothing chosen", not "restore nothing".
     selector: Mapping[str, Any] = field(default_factory=dict)
+    #: The panel's crosshair marker ({"x": float, "y": float}, empty when
+    #: none): both surfaces point at the same place, and a board restores
+    #: it with the rest of the record.
+    crosshair: Mapping[str, Any] = field(default_factory=dict)
     classifier_thresholds: tuple[Mapping[str, Any], ...] = ()
     focused_cell: int | None = None
 
@@ -553,6 +557,7 @@ class PanelState:
             "overlay_signal": self.overlay_signal,
             "published_outputs": dict(self.published_outputs),
             "selector": _document_value(self.selector),
+            "crosshair": _document_value(self.crosshair),
             "classifier_thresholds": _document_value(self.classifier_thresholds),
             "focused_cell": self.focused_cell,
         }
@@ -576,6 +581,7 @@ class PanelState:
             "overlay_signal",
             "published_outputs",
             "selector",
+            "crosshair",
             "classifier_thresholds",
             "focused_cell",
         }
@@ -628,6 +634,7 @@ class PanelState:
             overlay_signal=text("overlay_signal"),
             published_outputs=published,
             selector=mapping("selector"),
+            crosshair=mapping("crosshair"),
             classifier_thresholds=tuple(thresholds),
             focused_cell=focused,
         )

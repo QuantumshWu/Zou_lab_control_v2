@@ -106,3 +106,71 @@ def test_non_fate_unknown_names_stay_hard_errors() -> None:
         assert "no_such_field" in str(error)
     else:  # pragma: no cover
         raise AssertionError("unknown non-fate names must still raise")
+
+
+def test_shot_index_presents_as_shots_not_as_a_point_geometry() -> None:
+    """The materialized shot index is its own bracket entry, and the
+    rolling fate row says what rolling does with it instead of claiming
+    it is reduced."""
+
+    from zlc_plot.semantics import schema_structure
+
+    indexed = _indexed_schema(4)
+    structure = schema_structure(indexed)
+    flattened = [entry for group in structure for entry in group]
+    assert ("source index", 4) in flattened
+    assert all(name != "point" for name, _size in flattened)
+
+    spec = task_console_fitting_spec(indexed, PlotKind.ROLLING.value, "")
+    assert spec is not None
+    description = describe_semantics(indexed, spec)
+    row = next(
+        field
+        for field in description.fields
+        if field.name.startswith(FATE_PREFIX)
+        and "primary-index" in field.name
+    )
+    labels = dict((value, label) for value, label in row.choices)
+    assert labels[row.value] == "(shot axis)"
+
+
+def test_frozen_stale_sees_same_run_coverage_growth(monkeypatch) -> None:
+    """A seamless scan grows inside ONE run; a picture frozen at partial
+    coverage is stale the moment the live card has written more cells."""
+
+    from types import SimpleNamespace
+
+    from zlc_runtime import DatasetCoverage
+    from zlc_workbench.console import PanelBinding
+    from zlc_workbench.panel_state import PanelFrozenData
+
+    state = _state({})
+
+    def publication(written: int) -> object:
+        return SimpleNamespace(
+            event_ref=SimpleNamespace(generation="run-1"),
+            coverage=DatasetCoverage(written, 16),
+        )
+
+    frozen = PanelFrozenData(
+        publication=publication(2),
+        plot_input=object(),
+        target=state,
+        description=object(),
+    )
+    binding = PanelBinding(panel_id="p", state=state, frozen_data=frozen)
+    shown = {"value": publication(2)}
+    monkeypatch.setattr(
+        PanelBinding,
+        "accepted_surface",
+        property(lambda self: SimpleNamespace(publication=shown["value"])),
+    )
+    assert binding.frozen_stale is False
+    shown["value"] = publication(16)
+    assert binding.frozen_stale is True
+    # a later RUN stays stale regardless of coverage
+    shown["value"] = SimpleNamespace(
+        event_ref=SimpleNamespace(generation="run-2"),
+        coverage=DatasetCoverage(1, 16),
+    )
+    assert binding.frozen_stale is True
