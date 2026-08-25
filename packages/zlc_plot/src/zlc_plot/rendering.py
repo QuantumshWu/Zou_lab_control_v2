@@ -2884,6 +2884,7 @@ class MatplotlibRenderer:
         *,
         square_view: bool,
         coordinate_aspect: float | None,
+        valid_identity: object = None,
     ) -> tuple[Any, Any]:
         import matplotlib
 
@@ -2918,6 +2919,7 @@ class MatplotlibRenderer:
                 color_limits,
                 cmap_name,
                 cmap,
+                valid_identity=valid_identity,
             )
         if not axes.axison:
             # Returning from the height-bar presentation restores the 2D
@@ -3202,6 +3204,7 @@ class MatplotlibRenderer:
         color_limits: tuple[float, float] | None,
         cmap_name: str,
         cmap: Any,
+        valid_identity: object = None,
     ) -> tuple[Any, Any]:
         """Paint the value grid as shaded outlined boxes via the raster.
 
@@ -3220,27 +3223,67 @@ class MatplotlibRenderer:
             self._mark_axes_chrome_dirty(axes)
         if axes.get_aspect() != "auto":
             axes.set_aspect("auto")
-        heights = np.asarray(values, dtype=np.float64)
-        usable = _valid_array(valid, heights.shape) if valid is not None else (
-            np.ones(heights.shape, dtype=bool)
+        # Everything here depends on (data revision, validity, colour
+        # limits, colormap) alone -- never on the camera.  A camera
+        # commit on a 1000x2000 scan spent more time REDERIVING these
+        # (masking, code quantization, the LUT gather) than rendering,
+        # so they cache under exactly the facts they derive from.  The
+        # cached arrays double as identity anchors for the kernel's
+        # pooling cache below.
+        # ``valid`` itself is rebuilt (broadcast) on every render, so its
+        # id would bust this key each frame; the caller hands the STABLE
+        # identity of the validity it was given -- the same lesson the
+        # image range cache already carries.
+        input_key = (
+            self._data_revision,
+            id(values),
+            values.shape,
+            values.strides,
+            values.dtype.str,
+            valid_identity,
+            None
+            if color_limits is None
+            else (float(color_limits[0]), float(color_limits[1])),
+            cmap_name,
         )
-        heights = np.where(usable, heights, np.nan)
-
-        if color_limits is not None and color_limits[1] > color_limits[0]:
-            low, high = (float(value) for value in color_limits)
+        cached_inputs = self._artists.get("image:h3d_inputs")
+        if cached_inputs is not None and cached_inputs[0] == input_key:
+            heights, top_rgb, low, high, zero_rgb = cached_inputs[1]
         else:
-            finite = heights[np.isfinite(heights)]
-            low = float(finite.min()) if finite.size else 0.0
-            high = float(finite.max()) if finite.size else 1.0
-            if high <= low:
-                high = low + 1.0
-        lut = self._image_color_lut(cmap_name, cmap)
-        with np.errstate(invalid="ignore"):
-            codes = np.clip(
-                (heights - low) * (256.0 / (high - low)), 0.0, 255.0
+            heights = np.asarray(values, dtype=np.float64)
+            usable = (
+                _valid_array(valid, heights.shape)
+                if valid is not None
+                else np.ones(heights.shape, dtype=bool)
             )
-        codes = np.where(np.isfinite(codes), codes, 0.0).astype(np.uint8)
-        top_rgb = lut[codes][..., :3].astype(np.float32) / np.float32(255.0)
+            heights = np.where(usable, heights, np.nan)
+
+            if color_limits is not None and color_limits[1] > color_limits[0]:
+                low, high = (float(value) for value in color_limits)
+            else:
+                finite = heights[np.isfinite(heights)]
+                low = float(finite.min()) if finite.size else 0.0
+                high = float(finite.max()) if finite.size else 1.0
+                if high <= low:
+                    high = low + 1.0
+            lut = self._image_color_lut(cmap_name, cmap)
+            with np.errstate(invalid="ignore"):
+                codes = np.clip(
+                    (heights - low) * (256.0 / (high - low)), 0.0, 255.0
+                )
+            codes = np.where(np.isfinite(codes), codes, 0.0).astype(np.uint8)
+            top_rgb = lut[codes][..., :3].astype(np.float32) / np.float32(255.0)
+            with np.errstate(invalid="ignore"):
+                zero_code = int(
+                    np.clip((0.0 - low) * (256.0 / (high - low)), 0.0, 255.0)
+                )
+            zero_rgb = tuple(
+                float(v) for v in lut[zero_code][:3].astype(np.float32) / 255.0
+            )
+            self._artists["image:h3d_inputs"] = (
+                input_key,
+                (heights, top_rgb, low, high, zero_rgb),
+            )
 
         preview = getattr(self, "_height_bars_preview", None)
         if preview is not None:
@@ -3272,13 +3315,6 @@ class MatplotlibRenderer:
             supersample = 3
         else:
             supersample = 2
-        with np.errstate(invalid="ignore"):
-            zero_code = int(
-                np.clip((0.0 - low) * (256.0 / (high - low)), 0.0, 255.0)
-            )
-        zero_rgb = tuple(
-            float(v) for v in lut[zero_code][:3].astype(np.float32) / 255.0
-        )
         frame, scene = render_height_bars(
             heights,
             top_rgb,
@@ -3288,6 +3324,7 @@ class MatplotlibRenderer:
             width=max(box_w // divisor, 8),
             height=max(box_h // divisor, 8),
             supersample=supersample,
+            pool_cache=self._artists.setdefault("image:h3d_pool_cache", {}),
             side_shades=policy.height_bars_side_shades,
             edge_darken=policy.height_bars_edge_darken,
             background_rgb=policy.height_bars_background_rgb,
@@ -4349,6 +4386,14 @@ class MatplotlibRenderer:
             (vmin, vmax),
             square_view=coordinate_aspect is not None,
             coordinate_aspect=coordinate_aspect,
+            valid_identity=(
+                None
+                if source_valid is None
+                else (
+                    id(source_valid),
+                    np.shape(source_valid),
+                )
+            ),
         )
         if paint_labels:
             if axes.get_xlabel() != x_label:

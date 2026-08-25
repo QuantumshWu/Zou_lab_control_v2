@@ -266,6 +266,7 @@ def render_height_bars(
     pool_pixels_per_cell: float = 2.0,
     edge_min_cell_px: float = 3.0,
     bar_edges: bool = True,
+    pool_cache: dict | None = None,
 ) -> tuple[NDArray[np.uint8], HeightBarScene]:
     """Render the grid as boxes -> ((H, W, 4) uint8 RGBA, scene map).
 
@@ -290,13 +291,26 @@ def render_height_bars(
     if h_grid.ndim != 2 or rgb_grid.shape != (*h_grid.shape, 3):
         raise ValueError("heights must be (ny, nx) and top_rgb (ny, nx, 3)")
     source_ny, source_nx = h_grid.shape
-    finite_grid = np.isfinite(h_grid)
 
-    # ---- LOD: a grid denser than the pixels pools to display resolution
+    # ---- LOD: a grid denser than the pixels pools to display resolution.
+    # Pooling depends only on the inputs and the pixel budget, never the
+    # camera, and it dominated large-scan camera commits; the caller may
+    # hand a cache whose validity rides on INPUT IDENTITY -- safe because
+    # the caller's own input cache keeps those arrays alive and unchanged.
     limit = max(8, int(render_w / max(pool_pixels_per_cell, 0.5)))
-    h_grid, rgb_grid, finite_grid, pool_x, pool_y = _pooled(
-        h_grid, rgb_grid, finite_grid, limit
-    )
+    pool_key = (id(h_grid), id(rgb_grid), h_grid.shape, limit)
+    if pool_cache is not None and pool_cache.get("key") == pool_key:
+        h_grid, rgb_grid, finite_grid, pool_x, pool_y = pool_cache["value"]
+    else:
+        finite_grid = np.isfinite(h_grid)
+        h_grid, rgb_grid, finite_grid, pool_x, pool_y = _pooled(
+            h_grid, rgb_grid, finite_grid, limit
+        )
+        if pool_cache is not None:
+            pool_cache["key"] = pool_key
+            pool_cache["value"] = (
+                h_grid, rgb_grid, finite_grid, pool_x, pool_y
+            )
     ny, nx = h_grid.shape
 
     # ---- fold the azimuth into [0, 90) by flipping the grid
