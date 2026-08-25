@@ -350,6 +350,24 @@ ROLE_FATES = ("x", "y", "group", "facet")
 #: split by; vacating a required one means SOMETHING has to be drawn along, so
 #: the kind's own default steps in.
 OPTIONAL_ROLES = frozenset({"group"})
+
+
+class SemanticVacancy(ValueError):
+    """A required role has no axis: the authored table cannot draw.
+
+    Not a rejection.  The operator's fates are exactly what they said --
+    the plot simply has nothing on this role, so there is nothing to
+    display until some axis takes it.  Callers keep the authored table
+    and present this reason; they never assign an axis the operator did
+    not choose.
+    """
+
+    def __init__(self, role: str, kind: "PlotKind") -> None:
+        self.role = str(role)
+        super().__init__(
+            f"no axis holds {role!r}: give an axis the {role!r} fate to "
+            f"draw this {kind.value}"
+        )
 #: What becomes of an axis nobody gave a role to.  Which of the two it is, is
 #: the KIND's to say and not the operator's: a distribution pools everything
 #: it is given -- that is what a distribution IS -- and every other kind
@@ -760,41 +778,14 @@ def composed_spec(
             ):
                 desired_roles[previous_role] = displaced
 
-        # Only now repair a genuinely unfilled required role.  Explicitly
-        # reduced/pinned axes are excluded: choosing Reduced must not be
-        # silently undone by the repair it was meant to accompany.
-        fallback = default_spec(schema, candidate.kind)
-        blocked = {
-            axis.physical_identity
-            for axis, value in fate_values.items()
-            if value not in ROLE_FATES
-        }
+        # A genuinely unfilled required role is NEVER repaired.  Grabbing
+        # some axis the operator did not choose turned one explicit edit
+        # into a different plot, and refusing the edit outright made the
+        # fates unassignable.  The vacancy is a STATE: the caller keeps
+        # the authored table, draws nothing, and says why.
         for role in declared_roles:
-            if desired_roles[role] is not None:
-                continue
-            if role in OPTIONAL_ROLES:
-                continue
-            preferred = None if fallback is None else _role_holder(fallback, role)
-            taken = {
-                holder.physical_identity
-                for other, holder in desired_roles.items()
-                if other != role and holder is not None
-            }
-            replacement = next(
-                (
-                    ref
-                    for ref in (preferred, *axis_choices_for_schema(schema))
-                    if ref is not None
-                    and ref.physical_identity not in taken
-                    and ref.physical_identity not in blocked
-                ),
-                None,
-            )
-            if replacement is None:
-                raise ValueError(
-                    f"{role} cannot be vacated: this dataset offers no other axis for it"
-                )
-            desired_roles[role] = replacement
+            if desired_roles[role] is None and role not in OPTIONAL_ROLES:
+                raise SemanticVacancy(role, candidate.kind)
 
         for role in declared_roles:
             rest[role] = desired_roles[role]

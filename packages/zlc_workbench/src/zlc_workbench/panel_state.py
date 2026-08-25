@@ -13,7 +13,7 @@ from zlc_plot import (
     normalize_classifier_threshold_targets,
     normalize_fit_target,
 )
-from zlc_plot.semantics import composed_spec
+from zlc_plot.semantics import FATE_PREFIX, composed_spec
 
 
 __all__ = [
@@ -387,6 +387,17 @@ def project_panel_state(
     for name, saved in saved_values.items():
         key = str(name)
         if not description.declares(key):
+            if key.startswith(FATE_PREFIX):
+                # A fate names an AXIS.  The same signal legally changes
+                # its schema representation -- the Runtime's indexed
+                # history injects a source-index point column, and its
+                # arrival or departure adds and removes fate rows (the
+                # synthetic point-row ordinal among them).  A saved fate
+                # for an axis the current representation does not offer
+                # is not a typo (the editor authors these names); it is a
+                # statement about an axis that is not here to have a
+                # fate.  Non-fate names remain hard errors.
+                continue
             raise KeyError(key)
         value = restore_semantic_choice(description, key, saved)
         field = description.field(key)

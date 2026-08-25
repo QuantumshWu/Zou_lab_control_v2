@@ -60,6 +60,7 @@ def test_product_manifest_owns_all_commands_and_layers() -> None:
     assert set(entry_specs("zou_lab_control.commands")) == {
         "capture", "check", "device_manager", "evidence", "figure_viewer", "fpga",
         "pulse_editor", "pulse_server", "slm_server", "task_console",
+        "warm_numba",
     }
     assert set(entry_specs("zou_lab_control.evidence")) == {
         "software", "gui_offscreen", "virtual_vertical", "notebook_offline",

@@ -17,6 +17,7 @@ from zlc_plot import (
     describe_semantics,
 )
 from zlc_plot.semantics import (
+    SemanticVacancy,
     axis_size,
     composed_spec,
     fate_field_name,
@@ -569,3 +570,50 @@ def test_a_scan_dimension_of_a_long_sweep_still_offers_its_scope() -> None:
         assert len(pins) == 10, (
             f"{dimension} must offer its ten coordinates as scopes, got {pins}"
         )
+
+
+def test_taking_an_occupied_role_swaps_fates_never_repairs() -> None:
+    """The operator's rule: a conflicting choice TRADES fates, that's it.
+
+    Promoting a reduced axis onto an occupied role leaves the displaced
+    axis reduced -- no axis the operator never chose is drafted into any
+    role, in either direction.
+    """
+
+    snapshot = _snapshot()
+    schema = snapshot.block.schema
+    spec = CurvePlot(AxisRef.point("x"))
+    promoted = updated_spec(
+        schema, spec, fate_field_name(AxisRef.point("row")), "x"
+    )
+    assert promoted.x == AxisRef.point("row")
+    description = describe_semantics(schema, promoted)
+    # the displaced axis inherits the taker's former fate: reduced
+    assert description.fate(AxisRef.point("x")) == "reduce"
+
+
+def test_vacating_a_required_role_is_a_state_not_a_repair() -> None:
+    """Demoting the x holder leaves x VACANT: nothing is drafted, the
+    edit raises the vacancy for the caller to present, and the message
+    names the role the operator must fill to draw again."""
+
+    snapshot = _snapshot()
+    schema = snapshot.block.schema
+    spec = CurvePlot(AxisRef.point("x"))
+    with pytest.raises(SemanticVacancy) as caught:
+        updated_spec(
+            schema, spec, fate_field_name(AxisRef.point("x")), "reduce"
+        )
+    assert caught.value.role == "x"
+    assert "'x'" in str(caught.value)
+
+
+def test_two_occupied_roles_trade_places_in_one_edit() -> None:
+    snapshot = _snapshot()
+    schema = snapshot.block.schema
+    spec = ImagePlot(AxisRef.point("x"), AxisRef.point("row"))
+    swapped = updated_spec(
+        schema, spec, fate_field_name(AxisRef.point("row")), "x"
+    )
+    assert swapped.x == AxisRef.point("row")
+    assert swapped.y == AxisRef.point("x")

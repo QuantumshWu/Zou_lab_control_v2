@@ -34,6 +34,7 @@ from zlc_plot import (
     image_point_overlay_from_signal,
 )
 from zlc_plot.primitives import ImageFrame, ImagePointOverlay, PointStatus
+from zlc_plot.semantics import SemanticVacancy
 from zlc_plot.specs import semantic_spec, validate_authored_display
 from zlc_plot.ui import parameter_controls_for_kind
 from zlc_runtime import (
@@ -1234,12 +1235,17 @@ class ConsolePresenter:
         subject: object | None = None,
         schema: object | None = None,
     ) -> object | None:
-        projection = self._panel_projection(
-            binding,
-            state,
-            subject=subject,
-            schema=schema,
-        )
+        try:
+            projection = self._panel_projection(
+                binding,
+                state,
+                subject=subject,
+                schema=schema,
+            )
+        except SemanticVacancy:
+            # An authored table with a vacant required role: legitimate
+            # panel state that simply has no drawable specification.
+            return None
         return None if projection is None else projection[0]
 
     @staticmethod
@@ -2120,6 +2126,21 @@ class ConsolePresenter:
                     base_spec,
                     patch_state,
                 )
+            except SemanticVacancy as vacancy:
+                # The operator's fates STICK.  A table whose required role
+                # is vacant draws nothing -- that is the panel's state, not
+                # a reason to bounce the edit back.
+                semantic = {
+                    **{
+                        str(name): value
+                        for name, value in dict(current.semantic).items()
+                    },
+                    **{
+                        str(name): value
+                        for name, value in dict(changes["semantic"]).items()
+                    },
+                }
+                self._report(f"{panel_id}: {vacancy}", severity="info")
             except (KeyError, TypeError, ValueError) as error:
                 self._report(
                     f"{panel_id}: {_error_text(error)}",
@@ -2555,6 +2576,8 @@ class ConsolePresenter:
         )
         if spec is None:
             return None
+        semantic_reason = ""
+        authored: Mapping[str, object] = {}
         try:
             resolved, _semantic, _display = project_panel_state(
                 schema, spec, state
@@ -2570,6 +2593,12 @@ class ConsolePresenter:
             except Exception:
                 return None
             reason = _error_text(error)
+            if isinstance(error, SemanticVacancy):
+                # The operator's own table, not the default's: the fates
+                # they chose stay on the form, with the vacancy as the
+                # reason nothing draws.
+                semantic_reason = _error_text(error)
+                authored = dict(state.semantic)
         actual_cell_kind = (
             semantic_spec(resolved).kind.value
             if state.kind == PlotKind.FACET_GRID.value
@@ -2583,10 +2612,20 @@ class ConsolePresenter:
             )
         except (TypeError, ValueError, KeyError):
             controls = ()
+        entries = list(semantic_entries(description))
+        if authored:
+            shown = []
+            for entry in entries:
+                name = str(entry.get("name", ""))
+                if name in authored:
+                    entry = {**entry, "value": authored[name]}
+                shown.append(entry)
+            entries = shown
         return self._parameter_surface(
             controls,
             state,
-            semantic=semantic_entries(description),
+            semantic=tuple(entries),
+            semantic_unavailable=semantic_reason,
             fit_unavailable=str(reason),
             semantic_provisional=True,
         )
