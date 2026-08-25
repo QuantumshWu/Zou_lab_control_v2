@@ -194,6 +194,7 @@ def render_height_bars(
     z_fraction: float = 0.55,
     wall_ticks: int = 4,
     pool_pixels_per_cell: float = 2.0,
+    edge_min_cell_px: float = 3.0,
 ) -> tuple[NDArray[np.uint8], HeightBarScene]:
     """Render the grid as boxes -> ((H, W, 4) uint8 RGBA, scene map).
 
@@ -369,6 +370,29 @@ def render_height_bars(
     top_hi = np.where(cell_ok, g_hi + cell_top, -np.inf)
 
     cell_rgb = rgb_grid[cell_b, cell_a]
+    top_rgb_cells = cell_rgb
+    side_rgb_cells = cell_rgb * shade[..., None]
+    dense_surface = scale < edge_min_cell_px * supersample
+    if dense_surface:
+        # Sub-outline density: the grid reads as a heightfield, and flat
+        # per-cell tops lose all depth.  Light the top faces by the local
+        # slope (light from the upper-left of the screen frame), the
+        # standard heightfield cue, computed once per pooled cell.
+        gradient_b, gradient_a = np.gradient(hz)
+        # Scale-free slope: hz carries the scene's z factor, so the raw
+        # gradient saturates any fixed gain.  g/sqrt(1+g^2) is the sine
+        # of the slope angle -- bounded, unit-independent.
+        slope = gradient_b - gradient_a
+        slope = slope / np.sqrt(1.0 + np.square(slope))
+        lighting = np.clip(1.0 + 0.45 * slope, 0.6, 1.2).astype(np.float32)
+        top_rgb_cells = np.clip(
+            cell_rgb * lighting[cell_b, cell_a][..., None], 0.0, 1.0
+        )
+        # At this density a cell's visible pixels are mostly its front
+        # face slivers: painting those the constant side grey turned the
+        # whole surface grey.  A dense grid is a continuous surface, so
+        # its sides carry the same lit colour as its tops.
+        side_rgb_cells = top_rgb_cells
     background = np.asarray(background_rgb, dtype=np.float32)
 
     span_cols = [
@@ -382,8 +406,8 @@ def render_height_bars(
     span_lo = [side_lo.ravel(), top_lo.ravel(), floor_lo.ravel()]
     span_hi = [side_hi.ravel(), top_hi.ravel(), floor_hi.ravel()]
     span_rgb = [
-        (cell_rgb * shade[..., None]).reshape(-1, 3),
-        cell_rgb.reshape(-1, 3),
+        side_rgb_cells.reshape(-1, 3),
+        top_rgb_cells.reshape(-1, 3),
         np.broadcast_to(background, (S * render_w, 3)),
     ]
     span_id = [
@@ -488,13 +512,21 @@ def render_height_bars(
     left_ids = id_plane[edge_rows, np.maximum(edge_cols - 1, 0)]
     up_ids = id_plane[np.maximum(edge_rows - 1, 0), edge_cols]
     bar_edge = (edge_ids >= 4) | (left_ids >= 4) | (up_ids >= 4)
-    darkened = (
-        out[edge_rows, edge_cols, :3].astype(np.float32)
-        * np.float32(1.0 - edge_darken)
-    ).astype(np.uint8)
-    out[edge_rows, edge_cols, :3] = np.where(
-        bar_edge[:, None], darkened, grid_color[None, :]
-    )
+    if dense_surface:
+        # Sub-3px bars: an outline per bar would ink the whole surface.
+        # The dense grid reads as a lit continuous surface instead; only
+        # the chrome boundaries (floor|pane seams) keep their grid line.
+        chrome_rows = edge_rows[~bar_edge]
+        chrome_cols = edge_cols[~bar_edge]
+        out[chrome_rows, chrome_cols, :3] = grid_color[None, :]
+    else:
+        darkened = (
+            out[edge_rows, edge_cols, :3].astype(np.float32)
+            * np.float32(1.0 - edge_darken)
+        ).astype(np.uint8)
+        out[edge_rows, edge_cols, :3] = np.where(
+            bar_edge[:, None], darkened, grid_color[None, :]
+        )
 
     # ---- grid lines ON the floor and the panes
     chrome_mask = (id_plane == 1) | (id_plane == 2)

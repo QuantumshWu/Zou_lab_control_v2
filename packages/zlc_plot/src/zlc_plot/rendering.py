@@ -3386,7 +3386,12 @@ class MatplotlibRenderer:
                 wanted_texts.append(
                     (f[0], f[1] - 1.2 * tick_px, f"{value:g}", "center", "top")
                 )
-            for row in picks(source_ny):
+            # The y edge shares its far corner with the x edge's last
+            # label; dropping y's endpoint keeps the corner readable.
+            y_picks = picks(source_ny)
+            if len(y_picks) > 2:
+                y_picks = y_picks[:-1]
+            for row in y_picks:
                 a, b = scene.fold_cell(row * scene.pool_y, 0)
                 anchor = scene.project(float(scene.nx), b + 0.5, base_value)
                 f = self._height_bars_fraction(scene, *anchor)
