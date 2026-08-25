@@ -260,7 +260,7 @@ def test_source_preflight_rejects_before_the_board_is_loaded(monkeypatch) -> Non
         installation.close()
 
 
-def test_the_table_is_the_plan_and_the_shots_ride_the_bracket() -> None:
+def test_the_table_is_the_plan_and_the_shots_ride_the_bracket(monkeypatch) -> None:
     """One load, one fire: the table IS the plan, and order is the assignment.
 
     Two points, two shots each, two sweeps: the board is handed one TWO-row
@@ -288,6 +288,84 @@ def test_the_table_is_the_plan_and_the_shots_ride_the_bracket() -> None:
     assert first != second, "the two plan points must reach the board apart"
     assert bench.fired_cycles == [4], "one fired cycle per point per sweep"
     assert bench.loaded_loop_counts == [2], "the shot count IS the bracket"
+
+    # A long duration is still a full-width period; only its variation rides
+    # the signed slot multiplier.  Make the requested span wider than one
+    # 25-bit tick operand so the application must choose scale 2, and retain
+    # the canonical schema that the real writer hands Runtime.
+    from zlc_atom.nodes.scan.dataset import ScanDatasetWriter
+    from zlc_pulse import PulseFieldRef, PulseSlot, scan_columns_for
+
+    canonical = []
+    original_write = ScanDatasetWriter.write
+
+    def record_canonical(writer, value, *, row, visit):
+        output = original_write(writer, value, row=row, visit=visit)
+        canonical.append(output)
+        return output
+
+    monkeypatch.setattr(ScanDatasetWriter, "write", record_canonical)
+    sequence = _template_sequence()
+    period_id = sequence.periods[-1].period_id
+    sequence = replace(
+        sequence,
+        periods=tuple(
+            replace(period, duration=700.0, unit="ms")
+            if period.period_id == period_id
+            else period
+            for period in sequence.periods
+        ),
+        slots=(
+            PulseSlot(
+                "duration",
+                PulseFieldRef("duration", period_id=period_id),
+                "ms",
+                slot_id="da_bias_x",
+            ),
+        ),
+    )
+    requested = (200.00001, 1200.00001)
+    _kept, long_bench = _scripted_run(
+        values=requested,
+        shots=1,
+        repeats=1,
+        settle=0.0,
+        sequence=sequence,
+    )
+
+    program = long_bench._loaded_program
+    assert program.slot_tick_scales == (2,)
+    coefficient = (1 << program.scan_coeff_frac_bits) * 2
+    assert {
+        abs(value)
+        for row in program.tick_slot_coeffs
+        for value in row
+        if value
+    } == {coefficient}, "the compiled affine program did not apply scale 2"
+
+    wire = tuple(
+        tuple(int(value) for value in row)
+        for row in long_bench.scan_tables[0]
+    )
+    columns = scan_columns_for(
+        long_bench.loaded_sources[0],
+        program.slot_tick_scales,
+    )
+    played = tuple(
+        (float(value) - columns[0].wire_offset) / columns[0].wire_scale
+        for value, in wire
+    )
+    assert played == pytest.approx((200.0, 1200.0))
+    assert played != requested, "this case must exercise visible tick quantization"
+
+    schema = canonical[0].canonical_schema
+    coordinate = next(
+        column
+        for column in schema.point_table.columns
+        if column.name == "da_bias_x"
+    )
+    assert coordinate.values == pytest.approx(played)
+    assert canonical[0].run_record["slot_tick_scales"] == [2]
 
 
 def test_an_authored_whole_bracket_multiplies_with_the_shots() -> None:

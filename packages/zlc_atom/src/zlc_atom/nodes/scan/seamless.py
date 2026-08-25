@@ -39,16 +39,14 @@ import time
 from collections.abc import Sequence
 from dataclasses import replace
 
-import numpy as np
 from zlc_pulse import (
     MAXIMUM_REPEAT_COUNT,
     PulseSequence,
     RepeatRegion,
     compile_sequence,
+    prepare_scan_application,
     resolve_api_parameters,
     scan_columns_for,
-    scan_rows_to_wire,
-    validate_scan_table,
 )
 from .dataset import SCAN_OUTPUT, ScanDatasetWriter
 from .plan import PULSE_PARAM_FAMILY, ScanPlan, ScanPort
@@ -184,11 +182,21 @@ class SeamlessScanMeasurement:
             tuple(float(row[index]) for index in order) for row in rows
         )
 
-    def _wire_table(self, rows: Sequence[Sequence[float]], columns) -> np.ndarray:
-        """The played table: exactly the plan's rows.  Shots are the bracket."""
+    def _plan_ordered_rows(
+        self,
+        rows: Sequence[Sequence[float]],
+        columns,
+    ) -> tuple[tuple[float, ...], ...]:
+        """Return quantized slot rows to the plan's authored axis order."""
 
-        table = np.asarray(rows, dtype=float)
-        return scan_rows_to_wire(validate_scan_table(table, columns), columns)
+        planned = tuple(
+            port.port[len(PULSE_PARAM_FAMILY):] for port in self.ports
+        )
+        slot_names = tuple(column.name for column in columns)
+        order = tuple(slot_names.index(name) for name in planned)
+        return tuple(
+            tuple(float(row[index]) for index in order) for row in rows
+        )
 
     def acquire(self, context: object, *, on_point: object = None):
         """Play the whole plan from one fire and return the dataset it filled.
@@ -213,9 +221,22 @@ class SeamlessScanMeasurement:
         streamed, shots = self._shot_bracketed(streamed)
         fired = self.repeats * len(rows)
         readouts = fired * shots
-        run_record = self.run_record()
+        slot_rows = self._slot_ordered_rows(rows, columns)
+        effective_slot_rows, slot_tick_scales, wire = prepare_scan_application(
+            streamed,
+            slot_rows,
+            params=board.geometry,
+        )
+        effective_rows = self._plan_ordered_rows(
+            effective_slot_rows,
+            columns,
+        )
+        run_record = self.run_record(
+            effective_rows=effective_rows,
+            slot_tick_scales=slot_tick_scales,
+        )
         writer = ScanDatasetWriter(
-            rows,
+            effective_rows,
             [(port.label, port.unit) for port in self.ports],
             visits=self.repeats * shots,
             run_record=run_record,
@@ -227,8 +248,12 @@ class SeamlessScanMeasurement:
         time.sleep(self.settle_seconds)
         self.source.open(context, cycles=readouts)
         try:
-            wire = self._wire_table(self._slot_ordered_rows(rows, columns), columns)
-            program = compile_sequence(streamed, board.geometry, board.clock_hz)
+            program = compile_sequence(
+                streamed,
+                board.geometry,
+                board.clock_hz,
+                slot_tick_scales=slot_tick_scales,
+            )
             self.source.validate(program, wire, cycles=readouts)
             self.sequencer.load(program, source=streamed, rows=wire)
             self.source.arm()
@@ -252,7 +277,12 @@ class SeamlessScanMeasurement:
                     # SAME front as the frames it was read from: they are one
                     # shot, and two publications could show a panel a survival
                     # that its own evidence has not arrived for yet.
-                    companions = on_point(value, row=row_index, visit=visit) or {}
+                    companions = on_point(
+                        value,
+                        row=row_index,
+                        visit=visit,
+                        point_rows=effective_rows,
+                    ) or {}
                     front.update(
                         {
                             name: replace(
@@ -277,23 +307,48 @@ class SeamlessScanMeasurement:
             finally:
                 self.sequencer.safe()
         check_cancelled(context)
-        return context.current_dataset(SCAN_OUTPUT.name)
+        return context.current_dataset(SCAN_OUTPUT.name), run_record
 
-    def run_record(self) -> dict[str, object]:
+    def run_record(
+        self,
+        *,
+        effective_rows: Sequence[Sequence[float]],
+        slot_tick_scales: Sequence[int],
+    ) -> dict[str, object]:
         """What this run WAS, in the words of the plan that drove it."""
+
+        requested_rows = self.plan.rows()
+        played_rows = tuple(tuple(float(value) for value in row) for row in effective_rows)
+        if len(played_rows) != len(requested_rows):
+            raise ValueError("effective scan rows differ in length from the plan")
+        axes = []
+        for index, axis in enumerate(self.plan.axes):
+            mapping: dict[float, float] = {}
+            for requested, played in zip(requested_rows, played_rows, strict=True):
+                previous = mapping.setdefault(float(requested[index]), float(played[index]))
+                if previous != float(played[index]):
+                    raise ValueError("one authored scan value quantized two different ways")
+            axes.append(
+                {
+                    "port": axis.port,
+                    "values": [mapping[float(value)] for value in axis.values],
+                }
+            )
 
         return {
             **self.source.describe(),
             "pulse": self.sequence.name,
-            "plan": self.plan.to_tree(),
+            "plan": {"axes": axes},
             "scan_shape": list(self.plan.shape),
             "repeats": self.repeats,
             "shots_per_point": self.shots_per_point,
             "settle_seconds": self.settle_seconds,
+            "slot_tick_scales": list(slot_tick_scales),
         }
 
     def execute(self, context: object):
-        return self.acquire(context)
+        dataset, _run_record = self.acquire(context)
+        return dataset
 
 
 __all__ = ["SeamlessScanMeasurement"]

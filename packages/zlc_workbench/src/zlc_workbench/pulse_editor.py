@@ -1442,7 +1442,33 @@ class PulseEditorPresenter:
 
     # ------------------------------------------------------------- hardware
 
-    def compile(self, sequence: Any = None) -> Any:
+    def _compiler_target(self) -> tuple[object, float]:
+        """The one deployed geometry/clock pair used by compile and scan scaling."""
+
+        if self.sequencer is not None:
+            if self.board is None:
+                raise RuntimeError(
+                    "the attached sequencer has no board description; refusing "
+                    "to substitute this computer's board config"
+                )
+            return self.board.geometry, self.board.clock_hz
+
+        from zlc_pulse import load_streamer_config
+
+        config = load_streamer_config()
+        if config["source"] is None:
+            raise RuntimeError(
+                "no streamer config was found, so the deployed board geometry is "
+                "unknown; refusing to compile against built-in defaults"
+            )
+        return config["params"], config["clock_hz"]
+
+    def compile(
+        self,
+        sequence: Any = None,
+        *,
+        slot_tick_scales: Sequence[int] | None = None,
+    ) -> Any:
         """The sequence as the board would receive it.
 
 
@@ -1456,27 +1482,13 @@ class PulseEditorPresenter:
         sequence = sequence if sequence is not None else self.sequence
         if sequence is None:
             raise RuntimeError("no pulse is open, so there is nothing to compile")
-        if self.sequencer is not None:
-            if self.board is None:
-                raise RuntimeError(
-                    "the attached sequencer has no board description; refusing "
-                    "to substitute this computer's board config"
-                )
-            return compile_sequence(
-                sequence,
-                self.board.geometry,
-                self.board.clock_hz,
-            )
-
-        from zlc_pulse import load_streamer_config
-
-        config = load_streamer_config()
-        if config["source"] is None:
-            raise RuntimeError(
-                "no streamer config was found, so the deployed board geometry is "
-                "unknown; refusing to compile against built-in defaults"
-            )
-        return compile_sequence(sequence or self.sequence, config["params"], config["clock_hz"])
+        geometry, clock_hz = self._compiler_target()
+        return compile_sequence(
+            sequence,
+            geometry,
+            clock_hz,
+            slot_tick_scales=slot_tick_scales,
+        )
 
     def connect_to(self, mode: str, endpoint: str) -> bool:
         """Attach this editor to a sequencer, or say why it could not.
@@ -1795,6 +1807,10 @@ class PulseEditorPresenter:
             )
             return False
         wire_rows = tuple(getattr(state, "rows", ()) or ())
+        program = getattr(state, "program", None)
+        if wire_rows and program is None:
+            self._warn("the board returned scan rows without their compiled program")
+            return False
         authored_rows: tuple[tuple[float, ...], ...] = ()
         if wire_rows:
             # Back into the units this window writes tables in.  The board
@@ -1807,13 +1823,16 @@ class PulseEditorPresenter:
                 tuple(value for value in row)
                 for row in scan_rows_from_wire(
                     wire_rows,
-                    scan_columns_for(source),
+                    scan_columns_for(
+                        source,
+                        program.slot_tick_scales,
+                        params=self._compiler_target()[0],
+                    ),
                 )
             )
-        digest = str(getattr(getattr(state, "program", None), "digest", ""))
-        if digest and wire_rows:
-            self._remember_applied_scan(digest, source, wire_rows)
-        elif not wire_rows:
+        if wire_rows:
+            self._remember_applied_scan(program, source, wire_rows)
+        else:
             self._applied_scan = None
         self._accept_state(
             replace(
@@ -1865,15 +1884,48 @@ class PulseEditorPresenter:
     def _prepare_execution(self) -> tuple[PulseSequence, Any, tuple[tuple[int, ...], ...], int]:
         """Compile every local fact before attempting to acquire the device."""
 
-        source, rows, sweeps = self._execution_request()
-        return source, self.compile(source), rows, sweeps
+        source, rows, sweeps, slot_tick_scales = self._execution_request()
+        return (
+            source,
+            self.compile(source, slot_tick_scales=slot_tick_scales),
+            rows,
+            sweeps,
+        )
 
     def _execution_request(
         self,
-    ) -> tuple[PulseSequence, tuple[tuple[int, ...], ...], int]:
+    ) -> tuple[
+        PulseSequence,
+        tuple[tuple[int, ...], ...],
+        int,
+        tuple[int, ...],
+    ]:
         source = self._execution_sequence()
-        rows = self._wire_rows(self._state.scan_rows) if self._scan_armed() else ()
-        return source, rows, self._state.scan_repeats
+        if self._scan_armed():
+            _effective, slot_tick_scales, rows = self._prepared_scan(source)
+        else:
+            rows = ()
+            slot_tick_scales = ()
+        return source, rows, self._state.scan_repeats, slot_tick_scales
+
+    def _prepared_scan(
+        self,
+        source: PulseSequence,
+    ) -> tuple[
+        tuple[tuple[float, ...], ...],
+        tuple[int, ...],
+        tuple[tuple[int, ...], ...],
+    ]:
+        """One quantized table shared by Run, Hold, digest and readback."""
+
+        from zlc_pulse import prepare_scan_application
+
+        geometry, _clock_hz = self._compiler_target()
+        return prepare_scan_application(
+            source,
+            self._state.scan_rows,
+            params=geometry,
+        )
 
     def _load_prepared(
         self,
@@ -1881,11 +1933,11 @@ class PulseEditorPresenter:
     ) -> None:
         source, program, rows, _sweeps = prepared
         self.sequencer.load(program, source=source, rows=rows)
-        self._remember_applied_scan(program.digest, source, rows)
+        self._remember_applied_scan(program, source, rows)
 
     def _remember_applied_scan(
         self,
-        digest: str,
+        program: object,
         source: PulseSequence,
         wire_rows: Sequence[Sequence[int]],
     ) -> None:
@@ -1899,9 +1951,13 @@ class PulseEditorPresenter:
             return
         from zlc_pulse import scan_columns_for, scan_rows_from_wire
 
-        columns = scan_columns_for(source)
+        columns = scan_columns_for(
+            source,
+            program.slot_tick_scales,
+            params=self._compiler_target()[0],
+        )
         self._applied_scan = (
-            str(digest),
+            str(program.digest),
             tuple(column.name for column in columns),
             scan_rows_from_wire(wire_rows, columns),
         )
@@ -1963,7 +2019,7 @@ class PulseEditorPresenter:
             self._warn("this editor is not connected to a sequencer")
             return
         try:
-            source, rows, sweeps = self._execution_request()
+            source, rows, sweeps, slot_tick_scales = self._execution_request()
         except Exception as error:
             self._warn(f"cannot load this pulse: {error}")
             return
@@ -1985,7 +2041,10 @@ class PulseEditorPresenter:
             touched_device = False
             try:
                 if operation == self._device_operation:
-                    program = self.compile(source)
+                    program = self.compile(
+                        source,
+                        slot_tick_scales=slot_tick_scales,
+                    )
                 if operation == self._device_operation:
                     if bool(sequencer.snapshot().get("firing")):
                         touched_device = True
@@ -2017,7 +2076,7 @@ class PulseEditorPresenter:
                 self._board_state = state
                 if error is None:
                     self._finite_drive = requested_cycles is not None
-                    self._remember_applied_scan(program.digest, source, rows)
+                    self._remember_applied_scan(program, source, rows)
                     self._digest = program.digest
                     self._digest_revision = self.revision
                     self.view.set_summary("Started")
@@ -2284,7 +2343,11 @@ class PulseEditorPresenter:
             return ""
         if self._digest_revision != self.revision:
             try:
-                self._digest = self.compile(self._execution_sequence()).digest
+                source, _rows, _sweeps, scales = self._execution_request()
+                self._digest = self.compile(
+                    source,
+                    slot_tick_scales=scales,
+                ).digest
             except Exception:
                 # A pulse that does not compile is not one any board can be
                 # holding, which is the honest answer to the question asked.
@@ -2838,7 +2901,7 @@ class PulseEditorPresenter:
         return True
 
     def save_scan_array(self) -> str:
-        """Write the table exactly as it will be uploaded."""
+        """Write the authored table without discarding fractional durations."""
 
         import numpy as np
 
@@ -2846,7 +2909,7 @@ class PulseEditorPresenter:
             self._warn("there is no scan table to save")
             return ""
         folder = Path(self.path).parent if self.path else Path.cwd()
-        values = np.asarray(self._state.scan_rows, dtype=np.int64)
+        values = np.asarray(self._state.scan_rows, dtype=float)
         target = unique_path(
             folder,
             f"{(self.sequence.name if self.sequence else 'scan')}-scan",
@@ -2910,10 +2973,9 @@ class PulseEditorPresenter:
             # its DAC segments were never re-applied while the digital edges
             # kept playing.  So resolve the row into the document and load a
             # plain pulse, which is the state the board is designed to hold.
-            resolved = resolve_scan_point(
-                resolve_api_parameters(self.sequence),
-                rows[self._held_point],
-            )
+            source = resolve_api_parameters(self.sequence)
+            effective_rows, _scales, _wire = self._prepared_scan(source)
+            resolved = resolve_scan_point(source, effective_rows[self._held_point])
             program = self.compile(resolved)
         except Exception as error:
             self._scan_progress = f"cannot hold that point: {error}"
@@ -2971,20 +3033,6 @@ class PulseEditorPresenter:
         return bool(self._state.scan_rows) and bool(
             self.sequence is not None and self.sequence.slots
         )
-
-    def _wire_rows(self, rows: Sequence[Sequence[float]]) -> tuple[tuple[int, ...], ...]:
-        """The author's table as the slots will hold it.
-
-        The one crossing between the two number systems, taken here because
-        here is the boundary: everything above writes what the editor shows,
-        everything below writes what the wire holds.  zlc_pulse owns the
-        arithmetic -- each column carries its own scale and offset -- so this
-        is a place, not a calculation.
-        """
-
-        from zlc_pulse import scan_columns_for, scan_rows_to_wire
-
-        return scan_rows_to_wire(rows, scan_columns_for(self.sequence))
 
     def refresh_scan_progress(self) -> None:
         """Where the board is in the table, asked only while the page is visible."""

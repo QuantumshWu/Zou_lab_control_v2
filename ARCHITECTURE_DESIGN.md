@@ -204,6 +204,8 @@ Node new chunk
 - `RepeatRegion`只表达timeline内部loop。
 - Cycle/shot、scan sweep和Dataset repeat是独立事实。
 - 一个finite execution入口表达N cycles；actual played values进入Dataset coordinates和run record。
+- Hardware duration scan的绝对period由32-bit nominal tick base保存；25-bit signed slot只携相对nominal的delta，不得冒充约335 ms的绝对period上限。Host按整张scan table选择能覆盖它的最小整数tick scale，scale受现有signed Q8 coefficient约束且DAC恒为1；不为扩大范围修改RTL multiplier宽度。
+- 同一次application的compiler、wire table、readback、Pulse Editor Run/Sync/Hold/Step与Seamless Dataset共用一个量化结果。Dataset coordinates和run record记录实际played values；若所需分辨率使两个不同authored points坍缩为同一点，必须在碰device前loud拒绝。
 
 ### 7.2 Camera
 

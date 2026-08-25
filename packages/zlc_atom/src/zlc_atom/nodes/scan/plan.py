@@ -66,12 +66,26 @@ class ScanPort:
     unit: str
     lo: float
     hi: float
+    seed_lo: float | None = None
+    seed_hi: float | None = None
 
     def __post_init__(self) -> None:
         if not str(self.port):
             raise ValueError("a scan port needs a name")
         if not math.isfinite(self.lo) or not math.isfinite(self.hi) or self.lo > self.hi:
             raise ValueError(f"port {self.port!r} has no usable range")
+        seed_lo = self.lo if self.seed_lo is None else float(self.seed_lo)
+        seed_hi = self.hi if self.seed_hi is None else float(self.seed_hi)
+        if (
+            not math.isfinite(seed_lo)
+            or not math.isfinite(seed_hi)
+            or seed_lo < self.lo
+            or seed_hi > self.hi
+            or seed_lo >= seed_hi
+        ):
+            raise ValueError(f"port {self.port!r} has no usable initial sweep")
+        object.__setattr__(self, "seed_lo", seed_lo)
+        object.__setattr__(self, "seed_hi", seed_hi)
 
 
 def port_label(port: str) -> str:
@@ -119,6 +133,8 @@ def _ports_from_columns(columns) -> tuple[ScanPort, ...]:
                 "" if column.is_dac else str(column.unit),
                 lo,
                 hi,
+                float(column.lo),
+                float(column.hi),
             )
         )
     return tuple(ports)

@@ -114,6 +114,7 @@ class _ScheduleView:
         self.capabilities = None
         self.control_state = None
         self.can_run = None
+        self.scan_busy = False
 
     def set_visible_ports(self, ports) -> None:
         """The value path, mirrored: the real view re-flags its own rows."""
@@ -185,6 +186,9 @@ class _ScheduleView:
 
     def set_capabilities(self, can_sync: bool, can_hold: bool, can_step: bool) -> None:
         self.capabilities = (bool(can_sync), bool(can_hold), bool(can_step))
+
+    def set_scan_busy(self, busy: bool) -> None:
+        self.scan_busy = bool(busy)
 
     def set_control_state(
         self,
@@ -834,6 +838,7 @@ def _board_description():
 class _AppliedEcho:
     """What the board is holding, in the shape the real one reports it."""
 
+    program: object
     source: object
     rows: tuple
 
@@ -881,7 +886,7 @@ class _Sequencer:
         self.scan_rows = tuple(tuple(int(value) for value in row) for row in rows)
         # The real board keeps what it was handed, which is what Sync reads
         # back; a double that forgets it answers "nothing applied" forever.
-        self._applied = _AppliedEcho(source, self.scan_rows)
+        self._applied = _AppliedEcho(prog, source, self.scan_rows)
 
     def fire(self, *, cycles: int | None = 1) -> None:
         self.events.append("fire forever" if cycles is None else "fire")
@@ -2372,20 +2377,24 @@ def test_the_table_is_uploaded_with_the_pulse(presenter, sequence) -> None:
     presenter.sequencer = board
     assert presenter.adopt_board() is True
     board.events.clear()
-    schedule = presenter.view.schedule_view
-    scan = presenter.view.scan_view
-    presenter.view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
-    # Written in the unit the period is in -- this pulse is authored in
-    # seconds -- and converted once, at the boundary, into what a slot holds:
-    # device ticks at 20 ns.  The author never sees a tick; the board never
-    # sees a second.
+    period_id = sequence.periods[3].period_id
+    presenter.view.duration_committed.emit(period_id, 1.0, "s")
+    presenter.view.binding_cycle_requested.emit("duration", period_id, None)
+    # The authored duration is long and its span needs a two-tick slot scale.
+    # The board receives signed deltas around the one-second base, while Sync
+    # must report the exact values those deltas play rather than the
+    # unquantized requests.
     _run_scan(
         presenter.view,
-        "import numpy as np\nscan_table = np.array([0.004, 0.005, 0.006]).reshape(-1, 1)\n"
+        "import numpy as np\n"
+        "scan_table = np.array([0.50000002, 1.0, 1.49999998]).reshape(-1, 1)\n"
     )
 
     assert presenter.load_into_sequencer() is True
-    assert uploaded == [((200_000,), (250_000,), (300_000,))]
+    assert board._applied.program.slot_tick_scales == (2,)
+    assert uploaded == [((-12_500_000,), (0,), (12_500_000,))]
+    assert presenter.sync_from_sequencer() is True
+    assert presenter._state.scan_rows == ((0.5,), (1.0,), (1.5,))
 
 
 def test_the_status_dot_says_what_the_board_is_doing(presenter, sequence) -> None:
@@ -2554,6 +2563,17 @@ def test_a_loaded_scan_file_is_checked_the_way_a_generated_one_is(presenter, tmp
     # One tick is the floor for a duration column, in whatever unit that
     # column is written in -- a zero-length period is not a scan point.
     assert validate_scan_table(np.full((4, len(columns)), 0.001), columns)
+
+    authored = ((0.0041,), (0.0052,), (0.0063,))
+    presenter._take_scan_rows(authored)
+    presenter.path = str(tmp_path / "pulse.json")
+    saved = presenter.save_scan_array()
+    np.testing.assert_allclose(np.load(saved), authored)
+
+    presenter._take_scan_rows(((0.01,),))
+    presenter.view.open_answer = saved
+    assert presenter.load_scan_array() is True
+    assert presenter._state.scan_rows == authored
 
 
 def test_connecting_opens_a_pulse_and_names_which_board_answered() -> None:
@@ -3093,32 +3113,37 @@ def test_hold_and_step_play_the_point_they_hold(presenter, sequence) -> None:
 
     view = presenter.view
     board = _Sequencer()
-    board.cursor = lambda: 4
+    board.cursor = lambda: 0
     presenter.sequencer = board
     assert presenter.adopt_board() is True
     board.events.clear()
-    view.binding_cycle_requested.emit("duration", sequence.periods[3].period_id, None)
+    period_id = sequence.periods[3].period_id
+    view.duration_committed.emit(period_id, 1.0, "s")
+    view.binding_cycle_requested.emit("duration", period_id, None)
     _run_scan(
         view,
         "import numpy as np\n"
-        "scan_table = np.linspace(0.001, 0.2, 7).reshape(-1, 1)\n"
+        "scan_table = np.array([0.50000002, 1.0, 1.49999998]).reshape(-1, 1)\n"
     )
+    assert presenter.load_into_sequencer() is True
+    assert board._applied.program.slot_tick_scales == (2,)
 
     board.events.clear()
     view.scan_hold_requested.emit()
     assert board.events == ["safe", "load", "fire forever"], board.events
-    assert presenter._held_point == 4
-    held = board._applied.source
+    assert presenter._held_point == 0
+    held = board._applied.source.period_by_id[period_id].duration
+    assert held == pytest.approx(0.5)
     assert board._applied.rows == ()
 
     board.events.clear()
     view.scan_step_requested.emit(1)
     assert board.events == ["safe", "load", "fire forever"], "a step must play its point too"
-    assert presenter._held_point == 5
-    assert board._applied.source != held
+    assert presenter._held_point == 1
+    assert board._applied.source.period_by_id[period_id].duration == pytest.approx(1.0)
 
     view.scan_step_requested.emit(-1)
-    assert board._applied.source == held, "stepping back returns to the same row"
+    assert board._applied.source.period_by_id[period_id].duration == pytest.approx(held)
     assert board._applied.rows == ()
 
 

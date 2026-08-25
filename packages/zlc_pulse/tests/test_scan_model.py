@@ -9,7 +9,10 @@ from zlc_pulse import PulsePeriod, PulseSequence, pulse_target_from_xdc
 from zlc_pulse.model import PulseFieldRef, PulseSlot
 from zlc_pulse.scan import (
     ScanColumnSpec,
+    prepare_scan_application,
     scan_columns_for,
+    scan_rows_from_wire,
+    scan_rows_to_wire,
     scan_table_template,
     validate_scan_table,
 )
@@ -36,7 +39,7 @@ def test_binding_cycle_is_owned_by_canonical_pulse_field_kinds() -> None:
         cycle_binding_kind(None, field_kind="analog")
 
 
-def _sequence(slots=()):
+def _sequence(slots=(), *, probe_duration=5.0, probe_unit="ms"):
     target = pulse_target_from_xdc()
     lanes = len(target.raw_lanes)
     return PulseSequence(
@@ -45,7 +48,7 @@ def _sequence(slots=()):
         time_step_ns=20.0,
         periods=(
             PulsePeriod("load", 2.0, "ms", (0,) * lanes),
-            PulsePeriod("probe", 5.0, "ms", (0,) * lanes),
+            PulsePeriod("probe", probe_duration, probe_unit, (0,) * lanes),
         ),
         slots=slots,
     )
@@ -75,6 +78,8 @@ def test_a_column_is_seeded_by_its_slot_kind() -> None:
     low, high = dac_port.signed_range
     assert dac.is_dac and (dac.lo, dac.hi) == (float(low), float(high))
     assert (dac.wire_scale, dac.wire_offset) == (1.0, float(-low))
+    with pytest.raises(ValueError, match="DAC code"):
+        validate_scan_table(((float(high) + 0.5,),), (dac,))
     # A time column is in the unit its period is written in, and carries the
     # ticks-per-unit that gets it onto the wire.  Generated in ticks, it asked
     # the author to convert; generated in nanoseconds and labelled "ns" while
@@ -87,33 +92,91 @@ def test_a_column_is_seeded_by_its_slot_kind() -> None:
     assert duration.lo < 5 < duration.hi
 
 
-def test_a_column_says_what_the_board_will_accept_not_only_what_to_try() -> None:
-    """The seeded sweep and the legal range are different questions.
-
-    They were one pair of numbers, so the only thing that knew a duration slot
-    cannot exceed a 25-bit multiplier operand was the device -- which said so
-    in ticks, at load time, having already compiled:
-
-        scan slot 0 value 50000000000 does not fit the board's 25-bit signed
-        multiplier operand ([-16777216, 16777215])
-
-    ...for a table whose author had written milliseconds.
-    """
+def test_a_long_duration_uses_a_full_width_base_and_signed_scan_delta() -> None:
+    """The 25-bit DSP operand limits variation, not absolute period length."""
 
     from zlc_pulse.compile import slot_operand_width
 
     sequence = _sequence(
-        (PulseSlot("duration", PulseFieldRef("duration", period_id="probe"), "ms"),)
+        (PulseSlot("duration", PulseFieldRef("duration", period_id="probe"), "s"),),
+        probe_duration=1.0,
+        probe_unit="s",
     )
     column, = scan_columns_for(sequence)
 
-    longest = ((1 << (slot_operand_width() - 1)) - 1) * 20.0 / 1e6
-    assert column.limit_hi == pytest.approx(longest)
-    # Seeded around the 5 ms the field holds, not across the board's reach.
-    assert column.lo < 5 < column.hi < column.limit_hi
+    delta = (1 << (slot_operand_width() - 1)) * 20.0e-9
+    assert column.limit_lo == pytest.approx(20.0e-9)
+    assert column.limit_hi > 40.0
+    assert column.lo < 1.0 < column.hi
+    assert column.wire_offset == -50_000_000.0
 
-    with pytest.raises(ValueError, match="ms must be within"):
-        validate_scan_table(np.linspace(1e6, 10e6, 5).reshape(-1, 1), (column,))
+    authored = ((0.4,), (1.0,), (1.6,))
+    effective, scales, wire = prepare_scan_application(sequence, authored)
+    assert scales == (2,)
+    assert wire == ((-15_000_000,), (0,), (15_000_000,))
+    assert effective == authored
+    execution_column, = scan_columns_for(sequence, scales)
+    assert scan_rows_from_wire(wire, (execution_column,)) == authored
+    assert execution_column.wire_scale == column.wire_scale / 2.0
+    assert delta * scales[0] > 0.6
+
+    negative_limit = 1 << (slot_operand_width() - 1)
+    positive_limit = negative_limit - 1
+    edge_rows = (
+        (1.0 - negative_limit * 20.0e-9,),
+        (1.0 + positive_limit * 20.0e-9,),
+    )
+    edge_effective, edge_scales, edge_wire = prepare_scan_application(
+        sequence,
+        edge_rows,
+    )
+    assert edge_scales == (1,)
+    assert edge_wire == ((-negative_limit,), (positive_limit,))
+    np.testing.assert_allclose(edge_effective, edge_rows)
+
+    widest = _sequence(
+        (PulseSlot("duration", PulseFieldRef("duration", period_id="probe"), "s"),),
+        probe_duration=43.0,
+        probe_unit="s",
+    )
+    widest_rows = (
+        (43.0 - negative_limit * 127 * 20.0e-9,),
+        (43.0 + positive_limit * 127 * 20.0e-9,),
+    )
+    widest_effective, widest_scales, widest_wire = prepare_scan_application(
+        widest,
+        widest_rows,
+    )
+    assert widest_scales == (127,)
+    assert widest_wire == ((-negative_limit,), (positive_limit,))
+    np.testing.assert_allclose(widest_effective, widest_rows)
+
+    coarse_effective, coarse_scales, _coarse_wire = prepare_scan_application(
+        sequence,
+        ((20.0e-9,), (43.5,)),
+    )
+    assert coarse_scales == (127,)
+    assert coarse_effective[0][0] >= 20.0e-9
+    assert coarse_effective[1][0] <= column.limit_hi
+    with pytest.raises(ValueError, match="become identical"):
+        prepare_scan_application(
+            sequence,
+            ((0.4,), (0.40000002,), (1.6,)),
+        )
+
+    with pytest.raises(ValueError, match="s must be within"):
+        validate_scan_table(((50.0,),), (column,))
+
+    dac_port = next(
+        port for port in pulse_target_from_xdc().ports if port.kind == "dac"
+    )
+    with pytest.raises(ValueError, match="DAC slot tick scale"):
+        scan_columns_for(
+            _sequence(
+                (PulseSlot("dac", PulseFieldRef("dac", "probe", dac_port.key), "value"),)
+            ),
+            (2,),
+        )
 
 
 def test_the_starter_program_builds_one_table_of_the_right_width() -> None:

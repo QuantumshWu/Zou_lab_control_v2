@@ -32,6 +32,7 @@ from .wire import StreamerParams
 __all__ = [
     "ScanColumnSpec",
     "api_parameter_columns_for",
+    "prepare_scan_application",
     "resolve_scan_point",
     "scan_columns_for",
     "scan_table_template",
@@ -91,6 +92,8 @@ def _column_for_field(
     unit: str,
     *,
     api_parameter: bool,
+    tick_scale: int = 1,
+    maximum_tick_scale: int = 1,
 ) -> ScanColumnSpec:
     if reference.kind == FIELD_DAC:
         # The SIGNED code, which is what the operator types into that same
@@ -134,27 +137,79 @@ def _column_for_field(
         )
 
     nominal = abs(float(pulse_field_value(sequence, reference, unit)))
-    longest_ticks = (
-        (1 << StreamerParams().tick_width) - 1
-        if api_parameter
-        else _longest_slot_ticks()
-    )
-    longest = longest_ticks / _ticks_per(sequence, unit)
+    ticks_per_unit = _ticks_per(sequence, unit)
+    longest = ((1 << StreamerParams().tick_width) - 1) / ticks_per_unit
+    if api_parameter:
+        limit_lo = quantum
+        limit_hi = longest
+        wire_offset = 0.0
+    else:
+        # The RTL's full-width base holds the authored duration.  Its signed
+        # DSP operand is only the variation around that base; treating the
+        # operand as the absolute duration imposed a fictitious 335 ms period
+        # ceiling and made a >=671 ms period produce an empty seed range.
+        from .compile import slot_operand_width
+
+        nominal_ticks = int(round(nominal * ticks_per_unit))
+        delta_limit = 1 << (slot_operand_width() - 1)
+        limit_lo = max(
+            quantum,
+            (nominal_ticks - delta_limit * maximum_tick_scale)
+            / ticks_per_unit,
+        )
+        limit_hi = min(
+            longest,
+            (
+                nominal_ticks
+                + (delta_limit - 1) * maximum_tick_scale
+            )
+            / ticks_per_unit,
+        )
+        wire_offset = float(-nominal_ticks) / tick_scale
     return ScanColumnSpec(
         name,
-        max(quantum, nominal * 0.5),
-        min(longest, max(2.0 * quantum, nominal * 1.5)),
+        max(limit_lo, nominal * 0.5),
+        min(limit_hi, max(2.0 * quantum, nominal * 1.5)),
         False,
         unit,
-        limit_lo=quantum,
-        limit_hi=longest,
-        wire_scale=_ticks_per(sequence, unit),
+        limit_lo=limit_lo,
+        limit_hi=limit_hi,
+        wire_scale=ticks_per_unit / tick_scale,
+        wire_offset=wire_offset,
     )
 
 
-def scan_columns_for(sequence: PulseSequence) -> tuple[ScanColumnSpec, ...]:
+def scan_columns_for(
+    sequence: PulseSequence,
+    slot_tick_scales: Sequence[int] | None = None,
+    *,
+    params: StreamerParams | None = None,
+) -> tuple[ScanColumnSpec, ...]:
     """The hardware-scan columns declared by this sequence, in slot order."""
 
+    geometry = StreamerParams() if params is None else params
+    scales = (
+        (1,) * len(sequence.slots)
+        if slot_tick_scales is None
+        else tuple(slot_tick_scales)
+    )
+    if (
+        len(scales) != len(sequence.slots)
+        or any(type(value) is not int or value < 1 for value in scales)
+    ):
+        raise ValueError("slot_tick_scales must contain one positive integer per slot")
+    from .compile import maximum_duration_tick_scale
+
+    maximum_tick_scale = maximum_duration_tick_scale(geometry)
+    if any(value > maximum_tick_scale for value in scales):
+        raise ValueError(
+            f"slot tick scale exceeds the coefficient range ({maximum_tick_scale})"
+        )
+    if any(
+        slot.kind != FIELD_DURATION and scale != 1
+        for slot, scale in zip(sequence.slots, scales, strict=True)
+    ):
+        raise ValueError("DAC slot tick scale must remain 1")
     return tuple(
         _column_for_field(
             sequence,
@@ -162,8 +217,10 @@ def scan_columns_for(sequence: PulseSequence) -> tuple[ScanColumnSpec, ...]:
             slot.field_ref,
             sequence.field_unit(slot.field_ref),
             api_parameter=False,
+            tick_scale=scale,
+            maximum_tick_scale=maximum_tick_scale,
         )
-        for slot in sequence.slots
+        for slot, scale in zip(sequence.slots, scales, strict=True)
     )
 
 
@@ -261,13 +318,25 @@ def scan_rows_to_wire(
     """
 
     specs = tuple(columns)
-    return tuple(
+    converted = tuple(
         tuple(
             int(round(float(value) * spec.wire_scale + spec.wire_offset))
             for value, spec in zip(row, specs, strict=True)
         )
         for row in rows
     )
+    from .compile import slot_operand_width
+
+    limit = 1 << (slot_operand_width() - 1)
+    for row in converted:
+        for value, spec in zip(row, specs, strict=True):
+            if not -limit <= value < limit:
+                raise ValueError(
+                    f"{spec.name}: this scan needs wire delta {value}, outside "
+                    f"the board's signed {slot_operand_width()}-bit slot range "
+                    f"[{-limit} .. {limit - 1}]"
+                )
+    return converted
 
 
 def scan_rows_from_wire(
@@ -290,17 +359,111 @@ def scan_rows_from_wire(
     )
 
 
-def _longest_slot_ticks() -> float:
-    """The largest tick count a slot can hold, from the board's own width.
+def prepare_scan_application(
+    sequence: PulseSequence,
+    rows: Sequence[Sequence[float]],
+    *,
+    params: StreamerParams | None = None,
+) -> tuple[
+    tuple[tuple[float, ...], ...],
+    tuple[int, ...],
+    tuple[tuple[int, ...], ...],
+]:
+    """Quantize one authored table with the finest scales that make it fit.
 
-    Asked of the compiler rather than written down again: the multiplier
-    operand width is a fact of the design, and a second copy of it here would
-    drift the moment the design changed.
+    Absolute durations stay in the user's field units.  For each duration
+    slot, the compiler keeps the template's nominal value in its 32-bit base;
+    this function chooses the smallest whole-tick delta quantum whose 25-bit
+    signed operand covers the requested table.  DAC slots always use scale 1.
+    The returned authored rows are the exact values the board will play after
+    that quantization, so Dataset coordinates and readback never claim the
+    unrounded request.
     """
 
-    from .compile import slot_operand_width
+    if not isinstance(sequence, PulseSequence):
+        raise TypeError("sequence must be PulseSequence")
+    geometry = StreamerParams() if params is None else params
+    authored = validate_scan_table(rows, scan_columns_for(sequence, params=geometry))
+    from .compile import maximum_duration_tick_scale, slot_operand_width
 
-    return float((1 << (slot_operand_width() - 1)) - 1)
+    negative_operand = 1 << (slot_operand_width() - 1)
+    positive_operand = negative_operand - 1
+    maximum_tick_scale = maximum_duration_tick_scale(geometry)
+    scales: list[int] = []
+    for index, slot in enumerate(sequence.slots):
+        if slot.kind != FIELD_DURATION:
+            scales.append(1)
+            continue
+        unit = sequence.field_unit(slot.field_ref)
+        ticks_per_unit = _ticks_per(sequence, unit)
+        nominal_ticks = int(round(
+            float(pulse_field_value(sequence, slot.field_ref, unit))
+            * ticks_per_unit
+        ))
+        requested_deltas = tuple(
+            int(round(row[index] * ticks_per_unit)) - nominal_ticks
+            for row in authored
+        )
+        positive_delta = max(0, max(requested_deltas))
+        negative_delta = max(0, -min(requested_deltas))
+        positive_scale = (
+            (positive_delta + positive_operand - 1) // positive_operand
+        )
+        negative_scale = (
+            (negative_delta + negative_operand - 1) // negative_operand
+        )
+        tick_scale = max(1, positive_scale, negative_scale)
+        if tick_scale > maximum_tick_scale:
+            raise ValueError(
+                f"{slot.slot_id}: this scan needs tick scale {tick_scale}, but "
+                f"the coefficient field supports at most {maximum_tick_scale}; "
+                "narrow the duration range"
+            )
+        scales.append(tick_scale)
+    selected_scales = tuple(scales)
+    columns = scan_columns_for(
+        sequence,
+        selected_scales,
+        params=geometry,
+    )
+    mutable_wire = [list(row) for row in scan_rows_to_wire(authored, columns)]
+    tick_limit = (1 << geometry.tick_width) - 1
+    signed_lo = -negative_operand
+    signed_hi = positive_operand
+    for index, (slot, tick_scale) in enumerate(
+        zip(sequence.slots, selected_scales, strict=True)
+    ):
+        if slot.kind != FIELD_DURATION:
+            continue
+        unit = sequence.field_unit(slot.field_ref)
+        ticks_per_unit = _ticks_per(sequence, unit)
+        nominal_ticks = int(round(
+            float(pulse_field_value(sequence, slot.field_ref, unit))
+            * ticks_per_unit
+        ))
+        wire_lo = max(
+            signed_lo,
+            -((nominal_ticks - 1) // tick_scale),
+        )
+        wire_hi = min(
+            signed_hi,
+            (tick_limit - nominal_ticks) // tick_scale,
+        )
+        for row in mutable_wire:
+            row[index] = min(wire_hi, max(wire_lo, row[index]))
+    wire = tuple(tuple(row) for row in mutable_wire)
+    effective = scan_rows_from_wire(wire, columns)
+    validate_scan_table(effective, scan_columns_for(sequence, params=geometry))
+    played_by_row: dict[tuple[float, ...], tuple[float, ...]] = {}
+    for requested, played in zip(authored, effective, strict=True):
+        previous = played_by_row.setdefault(played, requested)
+        if previous != requested:
+            raise ValueError(
+                "two distinct scan points become identical at the required "
+                "hardware time resolution; reduce the point count or narrow "
+                "the duration range"
+            )
+    return effective, selected_scales, wire
 
 
 def _ticks_per(sequence: PulseSequence, unit: str) -> float:
@@ -355,7 +518,14 @@ def validate_scan_table(
     # wire's rule applied one layer too early.
     for index, spec in enumerate(specs):
         column = values[:, index]
-        if (column < spec.limit_lo).any() or (column > spec.limit_hi).any():
+        tolerance = (
+            0.0
+            if spec.is_dac
+            else np.nextafter(0.5 / abs(float(spec.wire_scale)), np.inf)
+        )
+        lower = float(spec.limit_lo) - tolerance
+        upper = float(spec.limit_hi) + tolerance
+        if (column < lower).any() or (column > upper).any():
             raise ValueError(
                 f"{spec.name}: {spec.unit} must be within "
                 f"[{spec.limit_lo:g} .. {spec.limit_hi:g}], and this table asks for "
