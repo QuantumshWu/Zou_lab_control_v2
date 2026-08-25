@@ -1,0 +1,54 @@
+{
+  "results": [
+    {
+      "case": "curve_2M",
+      "points": 2040000,
+      "first_render_ms": 232.6,
+      "update_data": {
+        "n": 8,
+        "median_ms": 7.39,
+        "p90_ms": 7.86,
+        "best_ms": 6.69
+      }
+    },
+    {
+      "case": "curve_20M",
+      "points": 20400000,
+      "first_render_ms": 95.7,
+      "update_data": {
+        "n": 8,
+        "median_ms": 50.22,
+        "p90_ms": 51.25,
+        "best_ms": 48.93
+      }
+    },
+    {
+      "case": "facet64_curve_2M",
+      "points": 2048000,
+      "first_render_ms": 639.2,
+      "update_data": {
+        "n": 8,
+        "median_ms": 54.4,
+        "p90_ms": 55.45,
+        "best_ms": 51.63
+      }
+    },
+    {
+      "case": "fit_curve_2M",
+      "points": 2040000,
+      "first_render_ms": 54.3,
+      "update_data": {
+        "n": 8,
+        "median_ms": 7.38,
+        "p90_ms": 8.06,
+        "best_ms": 6.77
+      },
+      "fit_solve": {
+        "n": 4,
+        "median_ms": 3.09,
+        "p90_ms": 3.41,
+        "best_ms": 2.91
+      }
+    }
+  ]
+}

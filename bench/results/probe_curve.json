@@ -1,0 +1,138 @@
+{
+  "results": [
+    {
+      "case": "curve_2M",
+      "notes": "",
+      "points": 2040000,
+      "first_render_ms": 1126.5,
+      "live_serialized": {
+        "n": 12,
+        "median_ms": 11.92,
+        "p90_ms": 12.2,
+        "best_ms": 10.96
+      },
+      "live_free_running": {
+        "submitted_hz": 145.5,
+        "presented_hz": 29.3
+      },
+      "interactions": {
+        "hover_series": {
+          "serialized": {
+            "n": 12,
+            "median_ms": 3.99,
+            "p90_ms": 6.92,
+            "best_ms": 3.25
+          },
+          "spray": {
+            "sent_hz": 177.2,
+            "presented_hz": 160.6
+          }
+        },
+        "click_series": {
+          "n": 8,
+          "median_ms": 9.97,
+          "p90_ms": 12.81,
+          "best_ms": 6.38
+        },
+        "drag_main": {
+          "serialized": {
+            "n": 8,
+            "median_ms": 8.67,
+            "p90_ms": 12.75,
+            "best_ms": 7.43
+          },
+          "spray": {
+            "sent_hz": 207.1,
+            "presented_hz": 51.8
+          },
+          "selectors_after": [
+            "area"
+          ]
+        },
+        "wheel_main": {
+          "n": 6,
+          "median_ms": 18.07,
+          "p90_ms": 22.07,
+          "best_ms": 16.4
+        }
+      },
+      "live_plus_drag": {
+        "submitted_hz": 44.6,
+        "presented_hz": 42.2
+      }
+    },
+    {
+      "case": "facet64_curve_2M",
+      "notes": "64 curve cells",
+      "points": 2048000,
+      "first_render_ms": 639.9,
+      "live_serialized": {
+        "n": 12,
+        "median_ms": 73.54,
+        "p90_ms": 94.85,
+        "best_ms": 63.67
+      },
+      "live_free_running": {
+        "submitted_hz": 91.5,
+        "presented_hz": 6.0
+      },
+      "interactions": {
+        "hover_series": {
+          "serialized": {
+            "n": 12,
+            "median_ms": 28.88,
+            "p90_ms": 34.91,
+            "best_ms": 23.38
+          },
+          "spray": {
+            "sent_hz": 88.4,
+            "presented_hz": 31.9
+          }
+        },
+        "dclick_cell": {
+          "n": 4,
+          "median_ms": 14.31,
+          "p90_ms": 42.81,
+          "best_ms": 0.57
+        }
+      }
+    },
+    {
+      "case": "fit_curve_2M",
+      "notes": "live gaussian fit re-solved per revision",
+      "points": 2040000,
+      "first_render_ms": 48.6,
+      "live_serialized": {
+        "n": 12,
+        "median_ms": 19.6,
+        "p90_ms": 20.73,
+        "best_ms": 15.26
+      },
+      "live_free_running": {
+        "submitted_hz": 137.6,
+        "presented_hz": 18.7
+      },
+      "interactions": {
+        "drag_main": {
+          "serialized": {
+            "n": 8,
+            "median_ms": 5.24,
+            "p90_ms": 6.39,
+            "best_ms": 3.74
+          },
+          "spray": {
+            "sent_hz": 179.6,
+            "presented_hz": 177.6
+          },
+          "selectors_after": [
+            "area"
+          ]
+        }
+      },
+      "live_plus_drag": {
+        "submitted_hz": 44.9,
+        "presented_hz": 147.5
+      }
+    }
+  ]
+}

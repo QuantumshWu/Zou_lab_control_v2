@@ -1,0 +1,15 @@
+{
+  "results": [
+    {
+      "case": "image_camera_4M",
+      "points": 4194304,
+      "first_render_ms": 305.5,
+      "update_data": {
+        "n": 8,
+        "median_ms": 27.78,
+        "p90_ms": 29.09,
+        "best_ms": 25.99
+      }
+    }
+  ]
+}

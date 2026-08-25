@@ -176,6 +176,13 @@ def _data_limits(values: np.ndarray) -> tuple[float, float] | None:
     return float(np.min(finite)), float(np.max(finite))
 
 
+def _scalar_close(left: float, right: float) -> bool:
+    """The same closeness np.allclose(rtol=1e-12, atol=1e-15) answers,
+    without the per-call array wrapping."""
+
+    return abs(left - right) <= 1e-15 + 1e-12 * abs(right)
+
+
 def _relim_retains(mode: str) -> bool:
     """Whether an autoscaled axis may keep the limits it already shows.
 
@@ -226,22 +233,23 @@ def _autoscaled_limits(
     if current is None or not retain:
         return target
     current_low, current_high = map(float, current)
-    if zero_based and low >= 0.0:
-        if (
-            current_low == 0.0
-            and current_high > 0.0
-            and 0.7 * current_high <= high <= current_high
-        ):
-            return current_low, current_high
-        return target
     span = current_high - current_low
     if span <= 0.0:
         return target
+    # Retention is decided against the view ON SCREEN, whatever shape
+    # derived it.  Restoring the zero-anchored shape whenever the data
+    # happened to be non-negative made an axis whose minimum wanders
+    # around zero flip between two limit shapes forever -- and every flip
+    # re-captured all the chrome keyed to the scale.  The zero-anchored
+    # keep-rule applies exactly when the current view IS zero-anchored.
     clips = low < current_low or high > current_high
-    too_empty = (
-        high < current_high - deadband_fraction * span
-        or low > current_low + deadband_fraction * span
-    )
+    if zero_based and low >= 0.0 and current_low == 0.0:
+        too_empty = not (0.7 * current_high <= high) or current_high <= 0.0
+    else:
+        too_empty = (
+            high < current_high - deadband_fraction * span
+            or low > current_low + deadband_fraction * span
+        )
     return target if clips or too_empty else (current_low, current_high)
 
 
@@ -1311,17 +1319,24 @@ class MatplotlibRenderer:
                 )
 
     def _set_xlim(self, axis: Any, low: float, high: float) -> None:
-        previous = np.asarray(axis.get_xlim(), dtype=float)
-        wanted = np.asarray((low, high), dtype=float)
-        if not np.allclose(previous, wanted, rtol=1e-12, atol=1e-15):
+        # Scalar closeness: np.allclose costs ~25 us of array wrapping per
+        # call, and a 64-cell grid asks this question hundreds of times a
+        # frame.
+        previous_low, previous_high = axis.get_xlim()
+        if not (
+            _scalar_close(float(previous_low), float(low))
+            and _scalar_close(float(previous_high), float(high))
+        ):
             axis.set_xlim(float(low), float(high))
             self._mark_axes_chrome_dirty(axis)
             self._refresh_enveloped_lines(axis)
 
     def _set_ylim(self, axis: Any, low: float, high: float) -> None:
-        previous = np.asarray(axis.get_ylim(), dtype=float)
-        wanted = np.asarray((low, high), dtype=float)
-        if not np.allclose(previous, wanted, rtol=1e-12, atol=1e-15):
+        previous_low, previous_high = axis.get_ylim()
+        if not (
+            _scalar_close(float(previous_low), float(low))
+            and _scalar_close(float(previous_high), float(high))
+        ):
             axis.set_ylim(float(low), float(high))
             self._mark_axes_chrome_dirty(axis)
 
@@ -2188,7 +2203,11 @@ class MatplotlibRenderer:
                 axes.set_xlabel(x_label)
             if axes.get_ylabel() != y_label:
                 axes.set_ylabel(y_label)
-        apply_smart_ticks(axes, label_pt=self.style.fonts.tick_pt)
+            # A facet cell (paint_labels=False) gets its tick policy from
+            # the GRID loop, at the grid's typography.  Installing the
+            # standalone policy here too made the two signatures thrash:
+            # every cell re-installed both locators on every frame.
+            apply_smart_ticks(axes, label_pt=self.style.fonts.tick_pt)
         labelled = next(
             (item for item in series if item.x_labels is not None), None
         )
@@ -2303,6 +2322,30 @@ class MatplotlibRenderer:
     def _apply_series_focus(self) -> None:
         locked = self._series_locked
         active = locked or self._series_hover
+        # Focus styling is a pure function of (focus state, the exact line
+        # artists alive).  Data revisions reuse their artists, so replaying
+        # the whole property walk over 64 cells' series on every frame was
+        # 17 ms of setting every value to itself.
+        token = (
+            locked,
+            self._series_hover,
+            tuple(
+                id(line)
+                for entries in self._series_lines.values()
+                for line, _series_id, _label in entries
+            ),
+            # Error-bar artists are rebuilt per revision; fresh ones carry
+            # default properties until this walk styles them.
+            tuple(
+                id(artist)
+                for bars in self._series_bars.values()
+                for artists in bars.values()
+                for artist in artists
+            ),
+        )
+        if getattr(self, "_series_focus_applied", None) == token:
+            return
+        self._series_focus_applied = token
         identity = None if active is None else active[1]
         focus_line = None
         bar_alpha = self.style.render.uncertainty_bar_alpha
@@ -2582,7 +2625,8 @@ class MatplotlibRenderer:
                 axes.set_xlabel(x_label)
             if axes.get_ylabel() != y_label:
                 axes.set_ylabel(y_label)
-        apply_smart_ticks(axes, label_pt=self.style.fonts.tick_pt)
+        if paint_labels:
+            apply_smart_ticks(axes, label_pt=self.style.fonts.tick_pt)
 
     def _resolve_histogram_y_limits(
         self,
@@ -2861,12 +2905,26 @@ class MatplotlibRenderer:
             axes.set_aspect(wanted_aspect, adjustable="box")
         # Equal aspect changes the actual drawable box.  Resolve that box
         # before choosing a source reduction so one prepared sample maps to at
-        # roughly one physical output pixel at the current DPR.
-        axes.apply_aspect()
-        display_pixel_shape = (
-            max(1, round(float(axes.bbox.width))),
-            max(1, round(float(axes.bbox.height))),
+        # roughly one physical output pixel at the current DPR.  The resolve
+        # is a pure function of (aspect, limits, position); a 64-cell grid
+        # re-asked it per cell per frame with none of them changed.
+        aspect_signature = (
+            wanted_aspect,
+            tuple(map(float, x_limits)),
+            tuple(map(float, y_limits)),
+            tuple(axes.get_position(original=True).bounds),
         )
+        aspect_key = f"{key}:aspect_box"
+        aspect_cached = self._artists.get(aspect_key)
+        if aspect_cached is not None and aspect_cached[0] == aspect_signature:
+            display_pixel_shape = aspect_cached[1]
+        else:
+            axes.apply_aspect()
+            display_pixel_shape = (
+                max(1, round(float(axes.bbox.width))),
+                max(1, round(float(axes.bbox.height))),
+            )
+            self._artists[aspect_key] = (aspect_signature, display_pixel_shape)
         store_key = f"{key}:front_store"
         store = self._artists.get(store_key)
         if not isinstance(store, ImageFrontStore):
@@ -2904,6 +2962,15 @@ class MatplotlibRenderer:
         self._artists[f"{key}:color_mode"] = (
             "scalar" if rgba_front is None else "rgba"
         )
+        if rgba_front is not None:
+            rgba_front = self._box_sized_rgba_front(
+                key,
+                rgba_front,
+                prepared.extent,
+                x_limits,
+                y_limits,
+                axes,
+            )
         shown: Any = prepared.values if rgba_front is None else rgba_front
         applied_key = f"{key}:applied_front"
         image = self._artists.get(key)
@@ -2938,33 +3005,100 @@ class MatplotlibRenderer:
                 # ``set_data`` copies the front; skip it when the artist
                 # already holds this exact composed object (cache hit).
                 image.set_data(shown)
-                image.set_extent(prepared.extent)
+                extent_key = f"{key}:applied_extent"
+                if self._artists.get(extent_key) != prepared.extent:
+                    # ``set_extent`` rebuilds transforms and re-autoscales;
+                    # a live feed re-sets the same extent per revision.
+                    image.set_extent(prepared.extent)
+                    self._artists[extent_key] = prepared.extent
                 self._artists[applied_key] = shown
             # The artist's cmap/clim stay authoritative in both modes: RGBA
             # rendering ignores them, but selector handles, rail guides and
             # pointer snapshots all read the painted limits off the artist.
             if previous_mapping is None or previous_mapping[0] != cmap_name:
                 image.set_cmap(cmap)
-            if (
-                color_limits is not None
-                and (
+            if color_limits is not None:
+                applied_low, applied_high = image.get_clim()
+                if (
                     previous_mapping is None
                     or previous_mapping[1] != color_limits
-                    or not np.allclose(
-                        np.asarray(image.get_clim(), dtype=float),
-                        np.asarray(color_limits, dtype=float),
-                        rtol=1.0e-12,
-                        atol=1.0e-15,
+                    or not (
+                        _scalar_close(float(applied_low), float(color_limits[0]))
+                        and _scalar_close(
+                            float(applied_high), float(color_limits[1])
+                        )
                     )
-                )
-            ):
-                image.set_clim(*color_limits)
+                ):
+                    image.set_clim(*color_limits)
         self._artists[mapping_key] = mapping_state
         # ``imshow``/``set_extent`` may autoscale a new artist.  Reassert the
         # transaction's final transform after mutating the front.
         self._set_xlim(axes, *x_limits)
         self._set_ylim(axes, *y_limits)
         return image, cmap
+
+    def _box_sized_rgba_front(
+        self,
+        key: str,
+        rgba: np.ndarray,
+        extent: tuple[float, float, float, float],
+        x_limits: tuple[float, float],
+        y_limits: tuple[float, float],
+        axes: Any,
+    ) -> np.ndarray:
+        """Upsample a small composed RGBA front to its axes' pixel box.
+
+        A 10x10 heatmap cell paid Matplotlib's full image machinery on
+        every draw of every cell; at the box size the compose's exact
+        row-copy blit takes over, and a facet of 64 such cells stops
+        re-rendering 64 images per frame.  Nearest-neighbour placement is
+        computed here instead of inside Agg -- boundary rows may land one
+        pixel from Agg's fixed-point choice, which changes no value or
+        coordinate semantics.  Anything but a strict integer-box upsample
+        of a view-filling front is returned unchanged.
+        """
+
+        rows, columns = rgba.shape[:2]
+        left, right, bottom, top = (float(v) for v in extent)
+        x_low, x_high = sorted(map(float, x_limits))
+        y_low, y_high = sorted(map(float, y_limits))
+        if not (
+            math.isclose(x_low, min(left, right), rel_tol=1e-12, abs_tol=1e-9)
+            and math.isclose(x_high, max(left, right), rel_tol=1e-12, abs_tol=1e-9)
+            and math.isclose(y_low, min(bottom, top), rel_tol=1e-12, abs_tol=1e-9)
+            and math.isclose(y_high, max(bottom, top), rel_tol=1e-12, abs_tol=1e-9)
+        ):
+            return rgba
+        bbox = axes.bbox
+        corners = (
+            float(bbox.x0),
+            float(bbox.y0),
+            float(bbox.x1),
+            float(bbox.y1),
+        )
+        if any(abs(v - round(v)) > 1e-6 for v in corners):
+            return rgba
+        box_w = int(round(corners[2])) - int(round(corners[0]))
+        box_h = int(round(corners[3])) - int(round(corners[1]))
+        if box_w <= columns or box_h <= rows or box_w < 1 or box_h < 1:
+            return rgba
+        cache_name = f"{key}:rgba_box"
+        cache_key = (id(rgba), box_w, box_h)
+        cached = self._artists.get(cache_name)
+        if cached is not None and cached[0] == cache_key:
+            return cached[1]
+        row_map = np.minimum(
+            ((np.arange(box_h) + 0.5) * (rows / box_h)).astype(np.intp),
+            rows - 1,
+        )
+        column_map = np.minimum(
+            ((np.arange(box_w) + 0.5) * (columns / box_w)).astype(np.intp),
+            columns - 1,
+        )
+        sized = rgba[row_map][:, column_map]
+        sized.setflags(write=False)
+        self._artists[cache_name] = (cache_key, sized)
+        return sized
 
     def _image_color_lut(self, cmap_name: str, cmap: Any) -> np.ndarray:
         """The colormap's 256-entry uint8 RGBA table, cached per colormap."""
@@ -3606,6 +3740,70 @@ class MatplotlibRenderer:
             self._forget_gesture_region()
         self._facet_focus_chrome_index = index
 
+    def _pixel_quantized_bounds(
+        self,
+        axis: Any,
+        bounds: tuple[float, float, float, float],
+    ) -> tuple[float, float, float, float]:
+        """Snap one cell's box to whole physical pixels.
+
+        A cell box on fractional pixels denies the compose's exact image
+        blit to every heatmap cell and smears its tick marks; the plan's
+        normalized fractions land wherever the figure size puts them.
+        Snapping moves an edge by under a pixel.  An aspect-locked cell
+        additionally keeps its pixel box exactly ON the aspect (in the
+        exactly-representable case, e.g. square data), so ``apply_aspect``
+        preserves the snapped box instead of re-deriving a fractional one;
+        an aspect this cannot represent keeps the plan's box unchanged.
+        """
+
+        figure_box = self._figure.bbox
+        width = float(figure_box.width)
+        height = float(figure_box.height)
+        if width <= 1.0 or height <= 1.0:
+            return bounds
+        # Grow-only snapping: the box floor/ceils outward into the grid
+        # gap, so the tick policy never sees LESS room than the plan gave
+        # it (a half-pixel shrink at a pricing threshold dropped a cell
+        # from five labels to three).
+        x0 = math.floor(bounds[0] * width)
+        y0 = math.floor(bounds[1] * height)
+        x1 = math.ceil((bounds[0] + bounds[2]) * width)
+        y1 = math.ceil((bounds[1] + bounds[3]) * height)
+        if x1 - x0 < 2 or y1 - y0 < 2:
+            return bounds
+        aspect = axis.get_aspect()
+        if isinstance(aspect, (int, float)) and not isinstance(aspect, bool):
+            x_limits = axis.get_xlim()
+            y_limits = axis.get_ylim()
+            x_span = abs(float(x_limits[1]) - float(x_limits[0]))
+            y_span = abs(float(y_limits[1]) - float(y_limits[0]))
+            if not (x_span > 0.0 and y_span > 0.0):
+                return bounds
+            ratio = float(aspect) * y_span / x_span
+            box_w = x1 - x0
+            box_h = y1 - y0
+            wanted_h = box_w * ratio
+            if abs(wanted_h - round(wanted_h)) < 1e-9 and round(wanted_h) >= 2:
+                if round(wanted_h) <= box_h:
+                    y1 = y0 + int(round(wanted_h))
+                else:
+                    wanted_w = box_h / ratio
+                    if abs(wanted_w - round(wanted_w)) < 1e-9 and round(
+                        wanted_w
+                    ) >= 2:
+                        x1 = x0 + int(round(wanted_w))
+                    else:
+                        return bounds
+            else:
+                return bounds
+        return (
+            x0 / width,
+            y0 / height,
+            (x1 - x0) / width,
+            (y1 - y0) / height,
+        )
+
     def _position_facet_axes_for_frame(self, axes: Sequence[Any]) -> None:
         """Apply final cell boxes before artists resolve pixel-dependent work."""
 
@@ -3620,11 +3818,23 @@ class MatplotlibRenderer:
         )
         if self._facet_focus_index is None:
             for index, axis in enumerate(axes):
-                bounds = self.plan.axes[index].box.matplotlib_bounds()
+                bounds = self._pixel_quantized_bounds(
+                    axis, self.plan.axes[index].box.matplotlib_bounds()
+                )
                 # ``set_position`` invalidates the axes transform stack even
-                # for an identical box; skip the per-frame no-op.
-                if tuple(axis.get_position().bounds) != tuple(bounds):
+                # for an identical box; skip the per-frame no-op.  The
+                # comparison needs a tolerance: Bbox round-trips width as
+                # (x0+w)-x0, one ulp off the stored fraction, and an exact
+                # compare re-positioned (and now re-captured chrome for)
+                # every cell on every frame.
+                current = tuple(axis.get_position().bounds)
+                if any(
+                    abs(now - wanted) > 1e-12
+                    for now, wanted in zip(current, bounds)
+                ):
                     axis.set_position(bounds)
+                    # A moved box invalidates the captured chrome behind it.
+                    self._mark_axes_chrome_dirty(axis)
                 visible = index < self._visible_facet_count
                 if axis.get_visible() != visible:
                     axis.set_visible(visible)

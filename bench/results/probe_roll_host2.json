@@ -1,0 +1,34 @@
+{
+  "results": [
+    {
+      "case": "rolling_2M",
+      "notes": "",
+      "points": 2040000,
+      "first_render_ms": 1337.0,
+      "live_serialized": {
+        "n": 12,
+        "median_ms": 19.07,
+        "p90_ms": 20.35,
+        "best_ms": 18.06
+      },
+      "live_25hz": {
+        "submitted_hz": 21.0,
+        "presented_hz": 21.0
+      },
+      "interactions": {
+        "hover_series": {
+          "serialized": {
+            "n": 12,
+            "median_ms": 7.04,
+            "p90_ms": 7.35,
+            "best_ms": 5.58
+          },
+          "spray": {
+            "sent_hz": 165.3,
+            "presented_hz": 151.9
+          }
+        }
+      }
+    }
+  ]
+}

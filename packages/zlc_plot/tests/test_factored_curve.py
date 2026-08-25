@@ -278,3 +278,102 @@ def test_factored_row_facet_matches_the_generic_path(
             assert ours.label == theirs.label
             assert ours.facet_index == theirs.facet_index
             _assert_same(ours.payload, theirs.payload)
+
+
+def _assert_same_image(ours, theirs) -> None:
+    np.testing.assert_array_equal(
+        np.asarray(ours.x.canonical), np.asarray(theirs.x.canonical)
+    )
+    np.testing.assert_array_equal(
+        np.asarray(ours.y.canonical), np.asarray(theirs.y.canonical)
+    )
+    np.testing.assert_array_equal(ours.valid, theirs.valid)
+    np.testing.assert_allclose(
+        np.asarray(ours.z.canonical),
+        np.asarray(theirs.z.canonical),
+        equal_nan=True,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+
+@pytest.mark.parametrize("holes", [0.0, 0.3])
+@pytest.mark.parametrize(
+    "aggregation", (Reduction.MEAN, Reduction.SUM, Reduction.MIN)
+)
+def test_factored_facet_image_cells_match_the_generic_path(
+    holes, aggregation
+) -> None:
+    """Heatmap cells over a DATA-axis facet: pixel for pixel per cell."""
+
+    from zlc_plot import FacetGridPlot, ImagePlot
+
+    view = DataView(_snapshot(holes=holes, seed=41))
+    spec = FacetGridPlot(
+        AxisRef.data("site"),
+        ImagePlot(
+            AxisRef.point_dimension("ax"),
+            AxisRef.point_dimension("ay"),
+            reduction=aggregation,
+        ),
+    )
+    fast = view._factored_facet(spec, False)
+    assert fast is not None
+    slow = view._facet_from_positions(
+        spec, None, view._all_positions(), False
+    )
+    assert len(fast.cells) == len(slow.cells)
+    for ours, theirs in zip(fast.cells, slow.cells):
+        assert ours.label == theirs.label
+        assert ours.facet_index == theirs.facet_index
+        _assert_same_image(ours.payload, theirs.payload)
+
+
+def test_factored_row_facet_image_cells_compress_to_their_used_sets() -> None:
+    """A scan-dimension facet of heatmap cells over a HOLED topology: each
+    cell owns only its own present coordinates, exactly as the generic
+    per-cell domains do."""
+
+    from zlc_plot import FacetGridPlot, ImagePlot
+
+    rng = np.random.default_rng(43)
+    combos = [(i, j, k) for k in range(2) for j in range(3) for i in range(4)]
+    cells = [c for c in combos if not (c[2] == 1 and c[0] == 3)]
+    rows = len(cells)
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=5),
+        PointTable.from_columns({
+            "ax": np.asarray([float(c[0]) for c in cells]),
+            "ay": np.asarray([float(c[1]) for c in cells]),
+            "az": np.asarray([float(c[2]) for c in cells]),
+        }),
+        data_axes=(Axis.create("site", values=[0.0, 1.0, 2.0]),),
+        dtype=np.float64,
+        point_topology=PointTopology(
+            (AxisId("ax"), AxisId("ay"), AxisId("az")),
+            ((0.0, 1.0, 2.0, 3.0), (0.0, 1.0, 2.0), (0.0, 1.0)),
+            tuple(cells),
+        ),
+    )
+    shape = (5, rows, 3)
+    validity = np.broadcast_to(
+        rng.random(shape[:2] + (1,)) > 0.2, shape
+    ).copy()
+    view = DataView(
+        DatasetSnapshot(schema, rng.normal(size=shape), 1, validity=validity)
+    )
+    spec = FacetGridPlot(
+        AxisRef.point_dimension("az"),
+        ImagePlot(
+            AxisRef.point_dimension("ax"), AxisRef.point_dimension("ay")
+        ),
+    )
+    fast = view._factored_facet(spec, False)
+    assert fast is not None
+    slow = view._facet_from_positions(
+        spec, None, view._all_positions(), False
+    )
+    assert len(fast.cells) == len(slow.cells)
+    for ours, theirs in zip(fast.cells, slow.cells):
+        assert ours.label == theirs.label
+        _assert_same_image(ours.payload, theirs.payload)

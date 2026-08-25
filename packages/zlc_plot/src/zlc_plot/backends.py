@@ -988,12 +988,18 @@ def _qt5_plot_widget_class() -> type[Any]:
                 else None
             )
             if source_axes is None and source_front is not None and event is not None:
+                # Half a pixel of tolerance: a guide painted ON an axes
+                # boundary (the autoscaled colour-limit high guide sits at
+                # the distribution's top edge) must be grabbable, and the
+                # exact test lost it to one ulp of the bounds arithmetic.
+                half_x = 0.5 / max(1, self.width())
+                half_y = 0.5 / max(1, self.height())
                 source_axes = next(
                     (
                         item
                         for item in source_front.interaction.axes
-                        if item.bounds[0] <= x <= item.bounds[2]
-                        and item.bounds[1] <= y <= item.bounds[3]
+                        if item.bounds[0] - half_x <= x <= item.bounds[2] + half_x
+                        and item.bounds[1] - half_y <= y <= item.bounds[3] + half_y
                     ),
                     None,
                 )

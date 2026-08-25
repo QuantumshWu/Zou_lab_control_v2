@@ -1,0 +1,554 @@
+{
+  "results": [
+    {
+      "case": "curve_2M",
+      "notes": "",
+      "points": 2040000,
+      "first_render_ms": 1143.0,
+      "live_serialized": {
+        "n": 12,
+        "median_ms": 11.33,
+        "p90_ms": 12.19,
+        "best_ms": 10.46
+      },
+      "live_25hz": {
+        "submitted_hz": 21.0,
+        "presented_hz": 21.0
+      },
+      "interactions": {
+        "hover_series": {
+          "serialized": {
+            "n": 12,
+            "median_ms": 4.08,
+            "p90_ms": 4.48,
+            "best_ms": 1.73
+          },
+          "spray": {
+            "sent_hz": 167.1,
+            "presented_hz": 148.4
+          }
+        },
+        "click_series": {
+          "n": 8,
+          "median_ms": 9.8,
+          "p90_ms": 14.49,
+          "best_ms": 8.22
+        },
+        "drag_main": {
+          "serialized": {
+            "n": 8,
+            "median_ms": 4.59,
+            "p90_ms": 5.95,
+            "best_ms": 3.3
+          },
+          "spray": {
+            "sent_hz": 175.6,
+            "presented_hz": 173.6
+          },
+          "selectors_after": [
+            "area"
+          ]
+        },
+        "pan_drag": {
+          "serialized": {
+            "n": 4,
+            "median_ms": 17.17,
+            "p90_ms": 18.58,
+            "best_ms": 15.71,
+            "no_front": 4
+          },
+          "spray": {
+            "sent_hz": 223.3,
+            "presented_hz": 21.3
+          }
+        },
+        "wheel_main": {
+          "n": 6,
+          "median_ms": 17.87,
+          "p90_ms": 19.38,
+          "best_ms": 16.26
+        }
+      },
+      "live_plus_drag": {
+        "submitted_hz": 21.0,
+        "presented_hz": 60.6
+      }
+    },
+    {
+      "case": "curve_20M",
+      "notes": "",
+      "points": 20400000,
+      "first_render_ms": 122.8,
+      "live_serialized": {
+        "n": 12,
+        "median_ms": 65.65,
+        "p90_ms": 74.69,
+        "best_ms": 57.68
+      },
+      "live_25hz": {
+        "submitted_hz": 21.0,
+        "presented_hz": 15.4
+      },
+      "interactions": {
+        "hover_series": {
+          "serialized": {
+            "n": 12,
+            "median_ms": 3.9,
+            "p90_ms": 5.61,
+            "best_ms": 2.16
+          },
+          "spray": {
+            "sent_hz": 172.2,
+            "presented_hz": 154.3
+          }
+        },
+        "drag_main": {
+          "serialized": {
+            "n": 8,
+            "median_ms": 4.19,
+            "p90_ms": 5.89,
+            "best_ms": 2.97
+          },
+          "spray": {
+            "sent_hz": 174.0,
+            "presented_hz": 172.0
+          },
+          "selectors_after": [
+            "area"
+          ]
+        }
+      },
+      "live_plus_drag": {
+        "submitted_hz": 21.0,
+        "presented_hz": 65.1
+      }
+    },
+    {
+      "case": "hist_2M",
+      "notes": "",
+      "points": 2040000,
+      "first_render_ms": 94.8,
+      "live_serialized": {
+        "n": 12,
+        "median_ms": 51.05,
+        "p90_ms": 64.5,
+        "best_ms": 47.75
+      },
+      "live_25hz": {
+        "submitted_hz": 20.9,
+        "presented_hz": 18.9
+      },
+      "interactions": {
+        "drag_main": {
+          "serialized": {
+            "n": 8,
+            "median_ms": 4.54,
+            "p90_ms": 5.33,
+            "best_ms": 2.67
+          },
+          "spray": {
+            "sent_hz": 171.5,
+            "presented_hz": 168.8
+          },
+          "selectors_after": [
+            "area"
+          ]
+        },
+        "drag_threshold": {
+          "serialized": {
+            "n": 8,
+            "median_ms": 3.3,
+            "p90_ms": 4.2,
+            "best_ms": 3.02
+          },
+          "spray": {
+            "sent_hz": 191.2,
+            "presented_hz": 191.2
+          }
+        },
+        "wheel_main": {
+          "n": 6,
+          "median_ms": 12.87,
+          "p90_ms": 14.86,
+          "best_ms": 11.67
+        }
+      },
+      "live_plus_drag": {
+        "submitted_hz": 21.0,
+        "presented_hz": 141.6
+      }
+    },
+    {
+      "case": "image_heatmap_2M",
+      "notes": "",
+      "points": 2040000,
+      "first_render_ms": 82.8,
+      "live_serialized": {
+        "n": 12,
+        "median_ms": 26.2,
+        "p90_ms": 27.57,
+        "best_ms": 24.34
+      },
+      "live_25hz": {
+        "submitted_hz": 20.9,
+        "presented_hz": 20.9
+      },
+      "interactions": {
+        "drag_main": {
+          "serialized": {
+            "n": 8,
+            "median_ms": 12.9,
+            "p90_ms": 14.23,
+            "best_ms": 11.94
+          },
+          "spray": {
+            "sent_hz": 165.2,
+            "presented_hz": 73.3
+          },
+          "selectors_after": [
+            "area"
+          ]
+        },
+        "drag_clim": {
+          "serialized": {
+            "n": 0,
+            "no_front": 8
+          },
+          "spray": {
+            "sent_hz": 250.3,
+            "presented_hz": 0.0
+          }
+        },
+        "drag_threshold": {
+          "serialized": {
+            "n": 0,
+            "no_front": 8
+          },
+          "spray": {
+            "sent_hz": 248.0,
+            "presented_hz": 0.0
+          }
+        },
+        "click_main": {
+          "n": 6,
+          "median_ms": 24.23,
+          "p90_ms": 40.95,
+          "best_ms": 16.36
+        },
+        "pan_drag": {
+          "serialized": {
+            "n": 4,
+            "median_ms": 27.94,
+            "p90_ms": 28.52,
+            "best_ms": 24.79,
+            "no_front": 4
+          },
+          "spray": {
+            "sent_hz": 205.9,
+            "presented_hz": 27.2
+          }
+        },
+        "wheel_main": {
+          "n": 6,
+          "median_ms": 28.87,
+          "p90_ms": 35.46,
+          "best_ms": 27.45
+        }
+      },
+      "live_plus_drag": {
+        "submitted_hz": 21.1,
+        "presented_hz": 60.8
+      }
+    },
+    {
+      "case": "image_camera_4M",
+      "notes": "2048x2048 uint16 dense camera frame",
+      "points": 4194304,
+      "first_render_ms": 94.7,
+      "live_serialized": {
+        "n": 12,
+        "median_ms": 39.04,
+        "p90_ms": 42.65,
+        "best_ms": 36.22
+      },
+      "live_25hz": {
+        "submitted_hz": 21.0,
+        "presented_hz": 21.0
+      },
+      "interactions": {
+        "drag_main": {
+          "serialized": {
+            "n": 8,
+            "median_ms": 14.41,
+            "p90_ms": 14.96,
+            "best_ms": 13.23
+          },
+          "spray": {
+            "sent_hz": 165.6,
+            "presented_hz": 77.8
+          },
+          "selectors_after": [
+            "area"
+          ]
+        },
+        "drag_clim": {
+          "serialized": {
+            "n": 0,
+            "no_front": 8
+          },
+          "spray": {
+            "sent_hz": 259.9,
+            "presented_hz": 0.0
+          }
+        },
+        "click_main": {
+          "n": 6,
+          "median_ms": 15.37,
+          "p90_ms": 17.44,
+          "best_ms": 14.32
+        },
+        "pan_drag": {
+          "serialized": {
+            "n": 8,
+            "median_ms": 32.72,
+            "p90_ms": 38.5,
+            "best_ms": 30.6
+          },
+          "spray": {
+            "sent_hz": 237.1,
+            "presented_hz": 9.3
+          }
+        },
+        "wheel_main": {
+          "n": 6,
+          "median_ms": 31.94,
+          "p90_ms": 33.28,
+          "best_ms": 25.3
+        }
+      },
+      "live_plus_drag": {
+        "submitted_hz": 21.1,
+        "presented_hz": 100.4
+      }
+    },
+    {
+      "case": "rolling_2M",
+      "notes": "",
+      "points": 2040000,
+      "first_render_ms": 262.5,
+      "live_serialized": {
+        "n": 12,
+        "median_ms": 31.29,
+        "p90_ms": 32.34,
+        "best_ms": 30.02
+      },
+      "live_25hz": {
+        "submitted_hz": 21.1,
+        "presented_hz": 21.1
+      },
+      "interactions": {
+        "hover_series": {
+          "error": "no hover-responsive position found"
+        }
+      }
+    },
+    {
+      "case": "facet_frame3_2M",
+      "notes": "",
+      "points": 2040000,
+      "first_render_ms": 83.6,
+      "live_serialized": {
+        "n": 12,
+        "median_ms": 15.57,
+        "p90_ms": 17.18,
+        "best_ms": 13.66
+      },
+      "live_25hz": {
+        "submitted_hz": 21.0,
+        "presented_hz": 21.3
+      },
+      "interactions": {
+        "hover_series": {
+          "serialized": {
+            "n": 12,
+            "median_ms": 5.11,
+            "p90_ms": 5.87,
+            "best_ms": 3.44
+          },
+          "spray": {
+            "sent_hz": 158.5,
+            "presented_hz": 148.5
+          }
+        },
+        "dclick_cell": {
+          "n": 4,
+          "median_ms": 20.0,
+          "p90_ms": 22.62,
+          "best_ms": 10.43
+        }
+      }
+    },
+    {
+      "case": "facet_scan10_2M",
+      "notes": "",
+      "points": 2040000,
+      "first_render_ms": 155.2,
+      "live_serialized": {
+        "n": 12,
+        "median_ms": 23.76,
+        "p90_ms": 28.89,
+        "best_ms": 20.59
+      },
+      "live_25hz": {
+        "submitted_hz": 20.6,
+        "presented_hz": 20.6
+      },
+      "interactions": {
+        "dclick_cell": {
+          "n": 4,
+          "median_ms": 19.01,
+          "p90_ms": 27.32,
+          "best_ms": 10.21
+        }
+      }
+    },
+    {
+      "case": "facet64_curve_2M",
+      "notes": "64 curve cells",
+      "points": 2048000,
+      "first_render_ms": 641.7,
+      "live_serialized": {
+        "n": 12,
+        "median_ms": 79.88,
+        "p90_ms": 86.58,
+        "best_ms": 71.86
+      },
+      "live_25hz": {
+        "submitted_hz": 21.0,
+        "presented_hz": 12.3
+      },
+      "interactions": {
+        "hover_series": {
+          "serialized": {
+            "n": 12,
+            "median_ms": 29.69,
+            "p90_ms": 32.49,
+            "best_ms": 27.52
+          },
+          "spray": {
+            "sent_hz": 87.8,
+            "presented_hz": 31.9
+          }
+        },
+        "dclick_cell": {
+          "n": 4,
+          "median_ms": 32.5,
+          "p90_ms": 45.57,
+          "best_ms": 11.8
+        }
+      }
+    },
+    {
+      "case": "facet10_image_2M",
+      "notes": "10 image cells (site x frame)",
+      "points": 2040000,
+      "first_render_ms": 316.7,
+      "live_serialized": {
+        "n": 12,
+        "median_ms": 43.47,
+        "p90_ms": 47.83,
+        "best_ms": 37.91
+      },
+      "live_25hz": {
+        "submitted_hz": 21.1,
+        "presented_hz": 21.1
+      },
+      "interactions": {
+        "dclick_cell": {
+          "n": 4,
+          "median_ms": 38.83,
+          "p90_ms": 48.62,
+          "best_ms": 28.83
+        }
+      }
+    },
+    {
+      "case": "facet64_image_2M",
+      "notes": "64 heatmap cells (ax x ay per site)",
+      "points": 2048000,
+      "first_render_ms": 1085.6,
+      "live_serialized": {
+        "n": 12,
+        "median_ms": 549.8,
+        "p90_ms": 580.93,
+        "best_ms": 499.74
+      },
+      "live_25hz": {
+        "submitted_hz": 21.0,
+        "presented_hz": 2.0
+      },
+      "interactions": {
+        "dclick_cell": {
+          "n": 4,
+          "median_ms": 59.62,
+          "p90_ms": 82.84,
+          "best_ms": 33.66
+        }
+      }
+    },
+    {
+      "case": "fit_curve_2M",
+      "notes": "live gaussian fit re-solved per revision",
+      "points": 2040000,
+      "first_render_ms": 47.5,
+      "live_serialized": {
+        "n": 12,
+        "median_ms": 15.8,
+        "p90_ms": 20.3,
+        "best_ms": 13.86
+      },
+      "live_25hz": {
+        "submitted_hz": 20.9,
+        "presented_hz": 20.9
+      },
+      "interactions": {
+        "drag_main": {
+          "serialized": {
+            "n": 8,
+            "median_ms": 3.19,
+            "p90_ms": 4.66,
+            "best_ms": 2.57
+          },
+          "spray": {
+            "sent_hz": 174.8,
+            "presented_hz": 170.1
+          },
+          "selectors_after": [
+            "area"
+          ]
+        }
+      },
+      "live_plus_drag": {
+        "submitted_hz": 21.0,
+        "presented_hz": 65.0
+      }
+    },
+    {
+      "case": "fit_facet10_2M",
+      "notes": "facet batch fit, 10 cells",
+      "points": 2040000,
+      "first_render_ms": 326.3,
+      "live_serialized": {
+        "n": 12,
+        "median_ms": 412.31,
+        "p90_ms": 634.38,
+        "best_ms": 270.3
+      },
+      "live_25hz": {
+        "submitted_hz": 21.1,
+        "presented_hz": 2.3
+      },
+      "interactions": {}
+    }
+  ]
+}
