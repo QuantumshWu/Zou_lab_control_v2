@@ -560,15 +560,15 @@ class RenderPolicyConfig:
     height_bars_side_shades: tuple[float, float] = (1.0, 1.0)
     height_bars_edge_darken: float = 0.85
     height_bars_background_rgb: tuple[float, float, float] = (1.0, 1.0, 1.0)
-    height_bars_axis_color: str = "black" 
-    height_bars_grid_rgb: tuple[float, float, float] = (0.78, 0.78, 0.80)
+    height_bars_axis_color: str = "black"
+    #: Pane/floor grid rules: the reference look is a WIDE, translucent
+    #: light rule -- clearly softer than the hairline bar outlines.
+    height_bars_grid_rgb: tuple[float, float, float] = (0.45, 0.45, 0.50)
+    height_bars_grid_line_pt: float = 0.8
+    height_bars_grid_alpha: float = 0.4
     height_bars_z_fraction: float = 0.55
-    #: Supersampled anti-aliasing while the grid is small enough to afford
-    #: it; above the limit the render runs at native resolution.
-    height_bars_supersample_bar_limit: int = 4096
-    height_bars_supersample_pixel_limit: int = 300_000
-    #: Grids this small always anti-alias, whatever the box size: a
-    #: tomography panel is a handful of boxes and jaggies dominate it.
+    #: Small grids buy the cleanest fills; everything else still
+    #: anti-aliases at 2x (art first -- the drag path is the fast lane).
     height_bars_supersample_few_bars: int = 1024
     height_bars_supersample_tiny_bars: int = 256
     height_bars_cage_color: str = "#5f6368"

@@ -568,6 +568,13 @@ def render_height_bars(
     out = np.empty((render_h, render_w, 4), dtype=np.uint8)
     out[..., :3] = filled
     out[..., 3] = covered.astype(np.uint8) * np.uint8(255)
+    # Uncovered pixels carry the BACKGROUND colour, not black: the
+    # supersample average otherwise mixes black into the scene's border
+    # pixels and draws the pane silhouette as a faint dotted outline --
+    # the very closing border this scene must not have.
+    out[..., :3][~covered] = (
+        np.asarray(background_rgb, dtype=np.float32) * 255.0
+    ).astype(np.uint8)
 
     # ---- raster outlines from the id plane (mid-density grids only:
     # small grids hand their outlines to vector chrome, dense grids are

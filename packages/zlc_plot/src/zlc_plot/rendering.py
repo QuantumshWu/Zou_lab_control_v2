@@ -3251,26 +3251,19 @@ class MatplotlibRenderer:
         divisor = 1
         if getattr(self, "_height_bars_dragging", False):
             divisor = max(1, int(policy.height_bars_drag_resolution_divisor))
-        # Anti-aliasing is bought where it shows and costs little: small
-        # grids on small boxes.  A large box has small pixels already, and
-        # supersampling it would quadruple the raster for nothing visible.
-        few_bars = heights.size <= policy.height_bars_supersample_few_bars
         vector_outlines = (
             heights.size <= policy.height_bars_supersample_tiny_bars
             and divisor == 1
         )
+        # Art first: every committed frame anti-aliases -- small grids at
+        # 3x (their fills are all shallow diagonal silhouettes), the rest
+        # at 2x.  The camera DRAG preview is the fast lane instead.
         if divisor != 1:
             supersample = 1
-        elif few_bars or (
-            heights.size <= policy.height_bars_supersample_bar_limit
-            and box_w * box_h <= policy.height_bars_supersample_pixel_limit
-        ):
-            # Fills and grids anti-alias fine at 2x; on small grids the
-            # OUTLINES -- where jaggies actually live -- are drawn as
-            # vector artists instead of raster pixels.
-            supersample = 2
+        elif heights.size <= policy.height_bars_supersample_few_bars:
+            supersample = 3
         else:
-            supersample = 1
+            supersample = 2
         with np.errstate(invalid="ignore"):
             zero_code = int(
                 np.clip((0.0 - low) * (256.0 / (high - low)), 0.0, 255.0)
@@ -3389,24 +3382,30 @@ class MatplotlibRenderer:
         gap_py = label_gap_px / max(scene.height, 1)
 
         # The pane grid follows the reference (MATLAB) convention: rules
-        # sit at TICK positions -- never at the pane borders -- so the
-        # grid runs open-ended, with no closing line along any pane edge,
-        # no pane|pane seam and no pane|floor seam.  Grid rules, axis
-        # ticks and wall rules all read the same tick lists: one
-        # authority, never two.
+        # sit at TICK positions -- never at the pane borders -- and the
+        # right wall's grid stops a full cell short of its outer edge:
+        # no vertical rule at the last column, horizontals ending with
+        # it.  The right boundary is OPEN -- blank wall, no closing
+        # line, no aligned terminus.  Grid rules, axis ticks and wall
+        # rules all read the same tick lists: one authority, never two.
         grid_edges: list[tuple[tuple[float, float, float],
                                tuple[float, float, float]]] = []
         z_low, z_high = scene.value_low, scene.value_high
         wall_low = min(z_low, 0.0)
         wall_high = max(z_high, 0.0)
+        # nbins=2 is the reference's tick sparseness: a [0, 1] scale
+        # reads 0 / 0.5 / 1 exactly as the MATLAB panels do (nbins=3
+        # picked a 0.4 step whose top tick fell outside the range).
         z_ticks = [
             float(tick)
-            for tick in MaxNLocator(nbins=5).tick_values(z_low, z_high)
+            for tick in MaxNLocator(nbins=2).tick_values(z_low, z_high)
             if z_low - 1e-12 <= tick <= z_high + 1e-12
         ]
+        open_span = float(max(scene.nx - 1, 1))
         for tick in z_ticks:
             grid_edges.append(
-                ((0.0, float(scene.ny), tick), (float(scene.nx), float(scene.ny), tick))
+                ((0.0, float(scene.ny), tick),
+                 (open_span, float(scene.ny), tick))
             )
             grid_edges.append(((0.0, 0.0, tick), (0.0, float(scene.ny), tick)))
 
@@ -3455,10 +3454,13 @@ class MatplotlibRenderer:
             for column in picks(source_nx):
                 a, b = scene.fold_cell(0, column * scene.pool_x)
                 centre = a + 0.5
-                grid_edges.append(
-                    ((centre, float(scene.ny), wall_low),
-                     (centre, float(scene.ny), wall_high))
-                )
+                # The vertical nearest the wall's open outer edge stays
+                # unpainted: it is what would read as a closing line.
+                if centre < open_span:
+                    grid_edges.append(
+                        ((centre, float(scene.ny), wall_low),
+                         (centre, float(scene.ny), wall_high))
+                    )
                 if not scene.dense:
                     grid_edges.append(
                         ((centre, 0.0, 0.0), (centre, float(scene.ny), 0.0))
@@ -3508,7 +3510,9 @@ class MatplotlibRenderer:
                 [], [],
                 transform=axes.transAxes,
                 color=self.style.render.height_bars_grid_rgb,
-                linewidth=float(_matplotlib.rcParams["axes.linewidth"]),
+                alpha=self.style.render.height_bars_grid_alpha,
+                linewidth=self.style.render.height_bars_grid_line_pt,
+                solid_capstyle="butt",
                 zorder=5,
                 clip_on=False,
             )
@@ -3706,6 +3710,32 @@ class MatplotlibRenderer:
             & (leave > 1e-9)
             & (gz + enter * rise < shown_top - z_slack)
         )
+        # A sample INSIDE solid geometry -- within some cell's footprint
+        # and below that cell's top -- is hidden whatever its pixel
+        # shows.  This is pixel-independent, so it also catches seam
+        # samples whose rounded pixel falls on the floor or a pane
+        # (the pixel test alone leaked dots there), and it conceals a
+        # lower bar's rim where a taller neighbour's body covers it.
+        # A sample exactly ON a cell boundary belongs to the VIEWER-side
+        # cell -- that is the only body that can stand in front of it.
+        # The ray walks (+a, -b) toward the viewer, so that is floor()
+        # along a but ceil()-1 along b (a plain floor put a b-boundary
+        # sample in the far cell and leaked dots along the pane seam).
+        cell_a = np.floor(ga).astype(np.int64)
+        cell_b = np.ceil(gb).astype(np.int64) - 1
+        inside = (
+            (cell_a >= 0) & (cell_a < scene.nx)
+            & (cell_b >= 0) & (cell_b < scene.ny)
+        )
+        inside_top = np.where(
+            inside,
+            scene.top_values[
+                np.clip(cell_b, 0, scene.ny - 1),
+                np.clip(cell_a, 0, scene.nx - 1),
+            ],
+            -np.inf,
+        )
+        hidden |= gz < inside_top - z_slack
         fx = px / max(scene.width, 1)
         fy = 1.0 - py / max(scene.height, 1)
         fx = np.where(hidden, np.nan, fx)

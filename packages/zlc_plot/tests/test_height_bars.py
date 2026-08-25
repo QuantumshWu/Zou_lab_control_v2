@@ -386,36 +386,53 @@ def test_occlusion_is_a_box_test_not_a_centre_depth_proxy() -> None:
     assert visible_fraction(rim) == 1.0
 
 
-def test_pane_grid_rules_sit_at_tick_centres_and_never_close_the_pane() -> None:
-    """The reference (MATLAB) pane-grid convention: rules at TICK
-    positions only, so no rule can coincide with a pane border."""
+def test_pane_grid_leaves_the_right_wall_open() -> None:
+    """The reference (MATLAB) pane-grid look the user asked for: rules
+    at TICK centres, no vertical at the last column, and horizontals
+    ending with it -- the right wall's outer cell is BLANK, so nothing
+    can read as a closing border."""
 
-    session = _session(4)
+    side = 4
+    rows = side * side
+    cells = [(i % side, i // side) for i in range(rows)]
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns({
+            "ax": np.asarray([float(c[0]) for c in cells]),
+            "ay": np.asarray([float(c[1]) for c in cells]),
+        }),
+        data_axes=(Axis.create("site", values=[0.0]),),
+        dtype=np.float64,
+        point_topology=PointTopology(
+            (AxisId("ax"), AxisId("ay")),
+            (tuple(float(i) for i in range(side)),) * 2,
+            tuple(cells),
+        ),
+    )
+    # Deterministically tall bars: every floor cell is covered, so the
+    # only visible grid geometry is the pane grid under test.
+    session = PlotSession(
+        DatasetSnapshot(schema, np.full((1, rows, 1), 0.5), revision=1),
+        ImagePlot(AxisRef.point_dimension("ax"), AxisRef.point_dimension("ay")),
+    )
+    session.set_size("2x2")
     try:
         session.set_parameter("presentation", "height_bars")
         session.rgba()
         renderer = session._renderer
         scene = renderer._height_bars_scene_map
         chrome = renderer._artists["image:h3d_chrome"]
-        xs, ys = chrome["grid"].get_data()
-        assert len(xs), "the scene must draw a vector pane grid"
-        # Every pane-border screen x: the far corner (0, ny), the right
-        # corner and the left corner columns.  No grid sample may sit on
-        # the closing borders (left pane edge a=nx is the z axis; the
-        # right pane border is the open edge the user called out).
-        right_x = scene.project(scene.nx, scene.ny, 0.0)[0] / scene.width
-        finite = np.isfinite(np.asarray(xs, float))
-        max_x = np.nanmax(np.asarray(xs, float)[finite])
-        # The rightmost grid geometry is the z-tick rule ENDING at the
-        # right corner column; vertical rules stay half a cell inside.
-        vertical_low = scene.project(
-            scene.nx - 0.5, scene.ny, min(scene.value_low, 0.0)
-        )
-        vertical_x = vertical_low[0] / scene.width
-        assert max_x <= right_x + 1e-6
-        assert any(
-            abs(float(x) - vertical_x) < 2.0 / scene.width
-            for x in np.asarray(xs, float)[finite]
-        ), "vertical rules anchor at tick centres"
+        xs, _ = chrome["grid"].get_data()
+        values = np.asarray(xs, float)
+        assert np.isfinite(values).any(), "the scene must draw a pane grid"
+        # No visible RUN of grid geometry right of the open span's
+        # terminus: the last cell's stretch of the right wall is blank.
+        # (A floor rule's endpoint dot ON the front silhouette base is
+        # sub-pixel and sits on the black base edge -- allowed.)
+        terminus_x = scene.project(
+            float(scene.nx - 1), float(scene.ny), 0.0
+        )[0] / scene.width
+        beyond = np.isfinite(values) & (values > terminus_x + 2.0 / scene.width)
+        assert not np.any(beyond[1:] & beyond[:-1])
     finally:
         session.close()
