@@ -566,6 +566,11 @@ class RenderPolicyConfig:
     #: it; above the limit the render runs at native resolution.
     height_bars_supersample_bar_limit: int = 4096
     height_bars_supersample_pixel_limit: int = 300_000
+    #: Grids this small always anti-alias, whatever the box size: a
+    #: tomography panel is a handful of boxes and jaggies dominate it.
+    height_bars_supersample_few_bars: int = 1024
+    height_bars_cage_color: str = "#5f6368"
+    height_bars_cage_alpha: float = 0.65
     #: While the camera is being dragged the raster renders at 1/divisor
     #: resolution and the release repaints at full resolution.
     height_bars_drag_resolution_divisor: int = 2

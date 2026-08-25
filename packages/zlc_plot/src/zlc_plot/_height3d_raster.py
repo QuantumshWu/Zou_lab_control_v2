@@ -540,9 +540,12 @@ def render_height_bars(
         b_coord = (pixel_sy * ux - pixel_x * uy) / det
         # Cell-boundary lines: on a dense (pooled) grid rule every POOLED
         # cell, which is the drawn geometry.
-        near_a = np.abs(a_coord - np.round(a_coord)) * scale * sa < 0.6
-        near_b = np.abs(b_coord - np.round(b_coord)) * scale * ca < 0.6
-        floor_line = on_floor & (near_a | near_b)
+        if dense_surface:
+            floor_line = np.zeros(rows_map.shape, dtype=bool)
+        else:
+            near_a = np.abs(a_coord - np.round(a_coord)) * scale * sa < 0.6
+            near_b = np.abs(b_coord - np.round(b_coord)) * scale * ca < 0.6
+            floor_line = on_floor & (near_a | near_b)
         wall_line = np.zeros(rows_map.shape, dtype=bool)
         if wall_ticks > 0:
             base_y = np.interp(
@@ -554,6 +557,30 @@ def render_height_bars(
                 np.abs(local_z - np.round(local_z / step) * step) * 1.0
                 < 0.6 / scale
             )
+            # Vertical pane rules continue the floor grid up the panes,
+            # the reference figure's look.  Which pane a column's far
+            # silhouette belongs to decides the coordinate ruled on it.
+            left_pane = (a0 / sa) < (ny / ca)  # t_exit bound by a = 0
+            pane_of_pixel = left_pane[cols_map]
+            exit_b = np.interp(
+                cols_map + 0.5,
+                np.arange(render_w) + 0.5,
+                t_exit * ca,
+            )
+            exit_a = np.interp(
+                cols_map + 0.5,
+                np.arange(render_w) + 0.5,
+                a0 - t_exit * sa,
+            )
+            if not dense_surface:
+                along = np.where(pane_of_pixel, exit_b, exit_a)
+                along_scale = np.where(
+                    pane_of_pixel, scale * ca, scale * sa
+                )
+                vertical = (~on_floor) & (
+                    np.abs(along - np.round(along)) * along_scale < 0.6
+                )
+                wall_line |= vertical
         chosen = floor_line | wall_line
         out[rows_map[chosen], cols_map[chosen], :3] = grid_color[None, :]
 

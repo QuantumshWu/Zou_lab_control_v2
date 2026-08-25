@@ -3254,11 +3254,19 @@ class MatplotlibRenderer:
         # Anti-aliasing is bought where it shows and costs little: small
         # grids on small boxes.  A large box has small pixels already, and
         # supersampling it would quadruple the raster for nothing visible.
+        few_bars = heights.size <= policy.height_bars_supersample_few_bars
         supersample = (
             2
             if divisor == 1
-            and heights.size <= policy.height_bars_supersample_bar_limit
-            and box_w * box_h <= policy.height_bars_supersample_pixel_limit
+            and (
+                few_bars
+                or (
+                    heights.size
+                    <= policy.height_bars_supersample_bar_limit
+                    and box_w * box_h
+                    <= policy.height_bars_supersample_pixel_limit
+                )
+            )
             else 1
         )
         frame, scene = render_height_bars(
@@ -3484,7 +3492,13 @@ class MatplotlibRenderer:
         return row, column
 
     def _update_height_bars_cage(self, snapshot: Any) -> None:
-        """A wireframe cage over the crosshair-selected bar, full z span."""
+        """A wireframe cage over the crosshair-selected bar, full z span.
+
+        Semi-transparent grey, and OCCLUDED like real geometry: every
+        edge is sampled against the scene's id plane, and a sample whose
+        pixel shows a strictly NEARER bar drops out of the polyline --
+        so the cage passes behind the bars that stand in front of it.
+        """
 
         key = self.primary_surface[0]
         cage = self._artists.get(f"{key}:h3d_cage")
@@ -3508,40 +3522,73 @@ class MatplotlibRenderer:
             if cage is not None:
                 cage.set_visible(False)
             return
-        corners = scene.cell_corners(*cell)
         a, b = scene.fold_cell(*cell)
         z_low = min(scene.value_low, 0.0)
         z_high = max(scene.value_high, 0.0)
-        bottom_pts = [
-            scene.project(a + da, b + db, z_low)
-            for da, db in ((0, 0), (1, 0), (1, 1), (0, 1))
-        ]
-        top_pts = [
-            scene.project(a + da, b + db, z_high)
-            for da, db in ((0, 0), (1, 0), (1, 1), (0, 1))
-        ]
+        corners = ((0, 0), (1, 0), (1, 1), (0, 1))
+        bottom = [(a + da, b + db, z_low) for da, db in corners]
+        top = [(a + da, b + db, z_high) for da, db in corners]
+        edges = (
+            [(bottom[i], bottom[(i + 1) % 4]) for i in range(4)]
+            + [(top[i], top[(i + 1) % 4]) for i in range(4)]
+            + [(bottom[i], top[i]) for i in range(4)]
+        )
+
+        id_plane = scene.id_plane
         xs: list[float] = []
         ys: list[float] = []
+        for start, end in edges:
+            p0 = scene.project(*start)
+            p1 = scene.project(*end)
+            length = max(abs(p1[0] - p0[0]), abs(p1[1] - p0[1]))
+            samples = max(int(length / 2.0), 4)
+            run_x: list[float] = []
+            run_y: list[float] = []
+            for index in range(samples + 1):
+                f = index / samples
+                ga = start[0] + (end[0] - start[0]) * f
+                gb = start[1] + (end[1] - start[1]) * f
+                gz = start[2] + (end[2] - start[2]) * f
+                px, py = scene.project(ga, gb, gz)
+                column = min(max(int(px), 0), scene.width - 1)
+                row = min(max(int(py), 0), scene.height - 1)
+                face = int(id_plane[row, column])
+                visible = True
+                if face >= 4:
+                    shown = (face - 4) // 4
+                    shown_a = shown % scene.nx
+                    shown_b = shown // scene.nx
+                    depth_shown = (
+                        -scene.sa * (shown_a + 0.5)
+                        + scene.ca * (shown_b + 0.5)
+                    )
+                    depth_sample = -scene.sa * ga + scene.ca * gb
+                    visible = depth_shown >= depth_sample - 1e-2
+                if visible:
+                    fx, fy = self._height_bars_fraction(scene, px, py)
+                    run_x.append(fx)
+                    run_y.append(fy)
+                elif run_x:
+                    xs.extend(run_x)
+                    ys.extend(run_y)
+                    xs.append(np.nan)
+                    ys.append(np.nan)
+                    run_x, run_y = [], []
+            if run_x:
+                xs.extend(run_x)
+                ys.extend(run_y)
+                xs.append(np.nan)
+                ys.append(np.nan)
 
-        def path(points):
-            for point in points:
-                fx, fy = self._height_bars_fraction(scene, *point)
-                xs.append(fx)
-                ys.append(fy)
-            xs.append(np.nan)
-            ys.append(np.nan)
-
-        path([*bottom_pts, bottom_pts[0]])
-        path([*top_pts, top_pts[0]])
-        for low_pt, high_pt in zip(bottom_pts, top_pts):
-            path([low_pt, high_pt])
         axes = self.primary_axes
         if cage is None:
             (cage,) = axes.plot(
                 [], [],
                 transform=axes.transAxes,
-                color=self.style.palette.bright,
-                linewidth=1.4,
+                color=self.style.render.height_bars_cage_color,
+                alpha=self.style.render.height_bars_cage_alpha,
+                linewidth=1.6,
+                solid_capstyle="round",
                 zorder=7,
                 clip_on=False,
             )
