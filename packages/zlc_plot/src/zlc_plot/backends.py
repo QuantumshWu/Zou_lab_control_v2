@@ -36,6 +36,44 @@ class BackendUnavailableError(RuntimeError):
     """An explicitly requested optional frontend is not installed/configured."""
 
 
+def _axis_at_normalized(
+    front: "RasterFront",
+    x: float,
+    y: float,
+    *,
+    tolerance_px: float = 0.0,
+) -> "AxisTransform | None":
+    """Resolve the axis under -- or nearest within tolerance of -- a pointer.
+
+    The widget is the one place a pointer meets a painted front, so this is
+    the one resolution there is.  What you can SEE you can grab: a guide
+    painted ON an axes boundary (the autoscaled colour-limit guides sit
+    exactly at the distribution rail's edges) spills its visible linewidth
+    outside the box, so the box test extends by the same handle radius
+    every other grab already uses.  Where expanded boxes would overlap --
+    the gaps between an image, its rail and its colorbar -- the NEAREST
+    axis wins; a press inside an axes box is distance zero and behaves
+    exactly as before.
+    """
+
+    width, height = front.logical_size
+    scale_x = float(max(1, int(width)))
+    scale_y = float(max(1, int(height)))
+    best = None
+    best_distance = float("inf")
+    for axis in front.interaction.axes:
+        left, top, right, bottom = axis.bounds
+        outside_x = max(left - x, x - right, 0.0) * scale_x
+        outside_y = max(top - y, y - bottom, 0.0) * scale_y
+        distance = max(outside_x, outside_y)
+        if distance == 0.0:
+            return axis
+        if distance <= float(tolerance_px) and distance < best_distance:
+            best = axis
+            best_distance = distance
+    return best
+
+
 def _complete_cleanup(callbacks: tuple[Callable[[], object], ...]) -> None:
     """Run every cleanup edge, then re-raise the first failure unchanged."""
 
@@ -988,20 +1026,17 @@ def _qt5_plot_widget_class() -> type[Any]:
                 else None
             )
             if source_axes is None and source_front is not None and event is not None:
-                # Half a pixel of tolerance: a guide painted ON an axes
-                # boundary (the autoscaled colour-limit high guide sits at
-                # the distribution's top edge) must be grabbable, and the
-                # exact test lost it to one ulp of the bounds arithmetic.
-                half_x = 0.5 / max(1, self.width())
-                half_y = 0.5 / max(1, self.height())
-                source_axes = next(
-                    (
-                        item
-                        for item in source_front.interaction.axes
-                        if item.bounds[0] - half_x <= x <= item.bounds[2] + half_x
-                        and item.bounds[1] - half_y <= y <= item.bounds[3] + half_y
+                # The same what-you-see-you-can-grab resolution the host
+                # applies at press time: nearest axis within the selector
+                # handle radius, so a guide's visible linewidth on an axes
+                # boundary is grabbable from either side.
+                source_axes = _axis_at_normalized(
+                    source_front,
+                    x,
+                    y,
+                    tolerance_px=(
+                        self._host.defaults.interaction.selector_handle_radius_px
                     ),
-                    None,
                 )
             if action == "press":
                 self._gesture_front = source_front

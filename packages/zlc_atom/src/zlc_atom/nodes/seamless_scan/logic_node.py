@@ -26,12 +26,12 @@ from zlc_atom.nodes._framework.descriptor import (
     ResolvedWorkspaceResource,
 )
 from zlc_atom.nodes.scan import (
+    watched_signal_source,
     SCAN_PLAN_SELECTIONS,
     DEVICE_PARAM_FAMILY,
     SCAN_OUTPUT,
     SCAN_PULSE_CONTRACT,
     SEAMLESS_PULSE_RESOURCE,
-    PublishedSignalSource,
     SeamlessScanMeasurement,
     bind_plan,
     hardware_scan_ports_for,
@@ -121,17 +121,10 @@ def _build(
                 "this plan belongs to the stepped_scan node"
             )
     ports = bind_plan(parsed, hardware_scan_ports_for(sequence))
-    publication = signal_plane.latest_publication(source_signal)
-    if publication is None or not signal_plane.is_generation_live(source_signal):
-        raise ValueError(
-            "the scan watches a LIVE signal for each point's value, and "
-            f"{source_signal!r} is not live on this bench"
-        )
+
     return SeamlessScanMeasurement(
         sequencer=sequencer,
-        source=PublishedSignalSource(
-            signal_plane, str(source_signal), publication.event_ref.generation
-        ),
+        source=watched_signal_source(signal_plane, source_signal),
         sequence=sequence,
         plan=parsed,
         ports=ports,

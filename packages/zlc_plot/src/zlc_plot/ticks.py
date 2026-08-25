@@ -445,25 +445,27 @@ class SmartOffsetLocator(ticker.Locator):
                 for position, tick in enumerate(ticks)
                 if lower + quarter <= tick <= upper - quarter
             ]
-            # One surviving label is a real answer here, and the floor of two
-            # does not apply: a cell is a small picture read against the
-            # grid's shared axis label, not a scale to read values off.  Held
-            # to two, a cell over 0..2048 kept both its EDGE labels and
-            # printed them across its neighbour's.
-            if not keep:
-                # Nothing but edges: keep the one nearest the middle, so
-                # every cell hangs the SAME label over the same side and no
-                # two of them meet.
+            if len(keep) < self.FLOOR:
+                # The floor of two holds in a cell too, overlap and all: a
+                # single label names a point, not a scale, and an axis
+                # whose one label reads "0" cannot be told from a dead
+                # one.  (This branch once kept a lone middle label to
+                # spare the neighbour cell; crowding is the accepted
+                # price now.)  Fill from the ticks nearest the middle
+                # outwards, so the pair stays as interior as this unit
+                # allows.
                 middle = 0.5 * (lower + upper)
-                keep = [
-                    min(
-                        range(len(ticks)),
-                        key=lambda position: abs(ticks[position] - middle),
-                    )
-                ]
-            if keep:
-                ticks = [ticks[position] for position in keep]
-                indices = [indices[position] for position in keep]
+                for position in sorted(
+                    range(len(ticks)),
+                    key=lambda position: abs(ticks[position] - middle),
+                ):
+                    if position not in keep:
+                        keep.append(position)
+                    if len(keep) >= self.FLOOR:
+                        break
+                keep.sort()
+            ticks = [ticks[position] for position in keep]
+            indices = [indices[position] for position in keep]
         self.step = step
         self.m = label_decade
         self.k = scale

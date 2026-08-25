@@ -976,6 +976,20 @@ class NodeHost:
         assert self._source_signal is not None
         publication = self._data_plane.latest_publication(self._source_signal)
         if publication is None:
+            if (
+                self._input_delivery == "exact"
+                and self._data_plane.is_generation_live(self._source_signal)
+            ):
+                # ARMED but not yet publishing: an externally triggered
+                # chain publishes nothing until something fires its
+                # triggers -- possibly a consumer this processor itself
+                # feeds (a scan watching the derived signal fires the
+                # pulse).  Exact delivery binds to the armed stream and
+                # the first frame is the first input; validation of that
+                # frame happens where it always did, on arrival.
+                self._processor_path = "follow"
+                self._start_follow_processor(None, None)
+                return
             self._phase = "failed"
             self._terminal = True
             self._error = f"processor input signal {self._source_signal!r} is not active"
@@ -1150,11 +1164,12 @@ class NodeHost:
 
     def _start_follow_processor(
         self,
-        publication: SignalPublication,
-        source: SignalValue,
+        publication: SignalPublication | None,
+        source: SignalValue | None,
     ) -> None:
         assert self._source_signal is not None
-        self._validate_follow_source(source)
+        if publication is not None:
+            self._validate_follow_source(source)
         tap = self._data_plane.reserve_follow_processor(
             self,
             source_name=self._source_signal,

@@ -104,6 +104,7 @@ def _scripted_run(
     settle: float,
     sequence: object | None = None,
     readouts: int | None = None,
+    seed: bool = True,
 ) -> tuple[np.ndarray, ScriptedScanBench]:
     """Play the table over a source whose every publication is named.
 
@@ -127,7 +128,8 @@ def _scripted_run(
                 repeats * len(values) * shots if readouts is None else readouts
             ),
         )
-        bench.publish(SCRIPTED_SEED_VALUE)
+        if seed:
+            bench.publish(SCRIPTED_SEED_VALUE)
         plan = ScanPlan((ScanAxis(BIAS_X_PORT, values),))
         node = descriptors["seamless_scan"].instantiate(
             sequencer=bench,
@@ -617,3 +619,53 @@ def test_the_board_advanced_scan_recovers_the_planted_trap_loss() -> None:
             monitor.close()
         plane.close()
         installation.close()
+
+
+def test_an_armed_silent_chain_is_a_valid_scan_source() -> None:
+    """The user's bench flow: camera armed, pulse stopped, then Start scan.
+
+    An externally triggered chain publishes NOTHING until a pulse fires its
+    triggers -- and the scan is what fires them.  The scan must accept that
+    armed silence (it is the aligned start: frame one is point one), start
+    only its own pulse, and land every publication on its played row.  It
+    never starts the camera and never judges frame alignment; zero frames
+    before the first trigger makes alignment a construction, not a check.
+    """
+
+    kept, bench = _scripted_run(
+        values=(-256.0, 256.0), shots=1, repeats=1, settle=0.0, seed=False
+    )
+    assert kept.tolist() == [[0.0, 1.0]]
+    assert bench.published == [0, 1], (
+        "every frame the chain ever produced was fired by the scan itself"
+    )
+
+
+def test_a_chain_that_is_not_armed_stays_refused_by_name() -> None:
+    """No camera measurement running at all: the scan refuses loudly and
+    tells the operator to start the chain, not the pulse."""
+
+    from zlc_runtime import SignalDataPlane as _Plane
+
+    plane = _Plane()
+    try:
+        descriptor = {
+            value.api_name: value for value in discover_logic_nodes()
+        }["seamless_scan"]
+        with pytest.raises(ValueError, match="not armed"):
+            descriptor.instantiate(
+                sequencer=object(),
+                signal_plane=plane,
+                source_signal="nobody:frames",
+                pulse_resource=_pulse_resource(
+                    TEMPLATE_NAME, _template_sequence()
+                ),
+                plan=ScanPlan(
+                    (ScanAxis(BIAS_X_PORT, (0.0,)),)
+                ).to_tree(),
+                repeats=1,
+                shots_per_point=1,
+                settle_seconds=0.0,
+            )
+    finally:
+        plane.close()
