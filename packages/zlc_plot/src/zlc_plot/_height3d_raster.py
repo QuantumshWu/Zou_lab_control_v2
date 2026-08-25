@@ -343,10 +343,6 @@ def render_height_bars(
     if magnitude <= 0.0:
         magnitude = 1.0
     z_unit = z_fraction * max(nx, ny) / magnitude
-    clipped = np.clip(h_grid, value_low, value_high)
-    hz = np.where(finite_grid, clipped, 0.0) * z_unit
-    z_top = np.maximum(hz, 0.0) * ce
-    z_bot = np.minimum(hz, 0.0) * ce
     pane_high = max(value_high, 0.0) * z_unit * ce
     pane_low = min(value_low, 0.0) * z_unit * ce
 
@@ -387,31 +383,63 @@ def render_height_bars(
     # ---- crossings merged arithmetically (ties resolve a-before-b)
     t_a0 = t_enter + (a_at - ia0) / sa
     t_b0 = t_enter + ((ib0 + 1.0) - b_at) / ca
-    # ---- per-cell colour grids and z planes, shared by both engines
-    z_top32 = z_top.astype(np.float32)
-    z_bot32 = z_bot.astype(np.float32)
+    # ---- per-cell colour grids and z planes, shared by both engines.
+    # Every plane here depends on the inputs, the limits, the QUADRANT
+    # fold, the elevation and the density flag -- never on the azimuth
+    # within a quadrant or the zoom -- so an orbit drag reuses them
+    # verbatim: an identity cache, bit-exact by construction.
     dense_surface = scale < edge_min_cell_px * supersample
-    if zero_rgb is None:
-        base_grid = rgb_grid
+    derived_key = (
+        pool_key, quadrant, value_low, value_high,
+        float(camera.elevation_deg), zero_rgb, bool(dense_surface),
+        float(z_fraction),
+    )
+    if pool_cache is not None and pool_cache.get("derived_key") == derived_key:
+        (
+            z_top32, z_bot32, finite_grid, rgb_grid, base_grid, top_grid,
+            top_values,
+        ) = pool_cache["derived_value"]
     else:
-        base_grid = np.ascontiguousarray(np.broadcast_to(
-            np.asarray(zero_rgb, dtype=np.float32), rgb_grid.shape
-        ))
-    if dense_surface:
-        # Sub-outline density: the grid reads as a heightfield, and flat
-        # per-cell tops lose all depth.  Light the top faces by the local
-        # slope (light from the upper-left of the screen frame) -- per
-        # CELL here, gathered per span below: elementwise either way, so
-        # the two orders are bit-identical.
-        gradient_b, gradient_a = np.gradient(hz)
-        slope_field = gradient_b - gradient_a
-        slope_field = slope_field / np.sqrt(1.0 + np.square(slope_field))
-        lighting = np.clip(
-            1.0 + 0.45 * slope_field, 0.6, 1.2
-        ).astype(np.float32)
-        top_grid = np.clip(rgb_grid * lighting[..., None], 0.0, 1.0)
-    else:
-        top_grid = rgb_grid
+        clipped = np.clip(h_grid, value_low, value_high)
+        hz = np.where(finite_grid, clipped, 0.0) * z_unit
+        z_top32 = (np.maximum(hz, 0.0) * ce).astype(np.float32)
+        z_bot32 = (np.minimum(hz, 0.0) * ce).astype(np.float32)
+        if zero_rgb is None:
+            base_grid = rgb_grid
+        else:
+            base_grid = np.ascontiguousarray(np.broadcast_to(
+                np.asarray(zero_rgb, dtype=np.float32), rgb_grid.shape
+            ))
+        if dense_surface:
+            # Sub-outline density: the grid reads as a heightfield, and
+            # flat per-cell tops lose all depth.  Light the top faces by
+            # the local slope (light from the upper-left of the screen
+            # frame) -- per CELL here, gathered per span below:
+            # elementwise either way, so the two orders are bit-identical.
+            gradient_b, gradient_a = np.gradient(hz)
+            slope_field = gradient_b - gradient_a
+            slope_field = slope_field / np.sqrt(1.0 + np.square(slope_field))
+            lighting = np.clip(
+                1.0 + 0.45 * slope_field, 0.6, 1.2
+            ).astype(np.float32)
+            top_grid = np.clip(rgb_grid * lighting[..., None], 0.0, 1.0)
+        else:
+            top_grid = rgb_grid
+        top_values = np.where(
+            finite_grid, np.maximum(clipped, 0.0), -np.inf
+        )
+        z_top32 = np.ascontiguousarray(z_top32)
+        z_bot32 = np.ascontiguousarray(z_bot32)
+        finite_grid = np.ascontiguousarray(finite_grid)
+        rgb_grid = np.ascontiguousarray(rgb_grid)
+        base_grid = np.ascontiguousarray(base_grid)
+        top_grid = np.ascontiguousarray(top_grid)
+        if pool_cache is not None:
+            pool_cache["derived_key"] = derived_key
+            pool_cache["derived_value"] = (
+                z_top32, z_bot32, finite_grid, rgb_grid, base_grid,
+                top_grid, top_values,
+            )
 
     if _scanline_selected():
         # The numba analytic engine: exact vertical coverage per column
@@ -855,9 +883,7 @@ def render_height_bars(
         width=int(width),
         height=int(height),
         id_plane=np.ascontiguousarray(scene_id_plane.astype(np.int32)),
-        top_values=np.where(
-            finite_grid, np.maximum(clipped, 0.0), -np.inf
-        ),
+        top_values=top_values,
         dense=bool(dense_surface),
     )
     return out, scene
