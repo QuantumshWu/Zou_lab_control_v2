@@ -13,7 +13,16 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping, TypeAlias
 
 from ._kinds import HANDLERS, default_spec, handler_for
-from zlc_data import AxisId, DatasetSchema, point_ordinal_axis
+from .data_contract import schema_data_axis
+from zlc_data import (
+    LATEST_COORDINATE,
+    AxisId,
+    CoordinateScalar,
+    CoordinateSelector,
+    DatasetSchema,
+    canonical_coordinate_scalar,
+    point_ordinal_axis,
+)
 from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
 from .kinds import AxisDomain, AxisRef, PlotKind
 from .layout import DEFAULT_LAYOUT, PlotLayoutConfig
@@ -253,10 +262,8 @@ def axis_size(schema: DatasetSchema, ref: AxisRef) -> int:
                     return int(len(domain))
         raise KeyError(ref.axis_id)
     assert ref.domain is AxisDomain.DATA and ref.axis_id is not None
-    for axis in schema.cell_schema.data_axes:
-        if str(axis.axis_id) == ref.axis_id or axis.name == ref.axis_id:
-            return int(axis.size)
-    raise KeyError(ref.axis_id)
+    _position, axis = schema_data_axis(schema, ref.axis_id)
+    return int(axis.size)
 
 
 #: One dataset's shape, grouped the way a reader reads it: the repeats, then
@@ -291,10 +298,20 @@ def schema_structure(schema: DatasetSchema) -> SchemaStructure:
             )
         ]
     else:
-        points = [
-            (str(column.name), int(schema.point_table.row_count))
-            for column in schema.point_table.columns
-        ]
+        columns = tuple(schema.point_table.columns)
+        # Without topology, every point column is a coordinate over the SAME
+        # physical row dimension.  Printing one ``row_count`` per column turns
+        # 100 rows carrying (x, y) into a fictional 100×100 geometry.
+        points = (
+            []
+            if not columns
+            else [
+                (
+                    str(columns[0].name) if len(columns) == 1 else "point",
+                    int(schema.point_table.row_count),
+                )
+            ]
+        )
     # Exactly three brackets: (repeat) x (points) x (cell payload).  A cell
     # axis carrying a point-domain EVENT role -- the frame axis a producer
     # declares without a point column -- is still a fact about WHEN within one
@@ -361,11 +378,7 @@ def _axis_label(schema: DatasetSchema, ref: AxisRef) -> str:
         return str(ref.axis_id)
     elif ref.domain is AxisDomain.DATA:
         assert ref.axis_id is not None
-        axis = next(
-            axis
-            for axis in schema.cell_schema.data_axes
-            if str(axis.axis_id) == ref.axis_id or axis.name == ref.axis_id
-        )
+        _position, axis = schema_data_axis(schema, ref.axis_id)
     else:  # pragma: no cover - AxisDomain is exhaustive for AxisRef
         raise ValueError(f"unsupported semantic axis domain: {ref.domain!r}")
     # The choice names an axis identity, not a quantity: display units belong
@@ -397,10 +410,6 @@ _ROLE_LABELS = {
 FATE_REDUCE = "reduce"
 FATE_POOL = "pool"
 
-#: A scope row is named after the axis it pins, so a saved panel restores
-#: the same rows by name even as the kind changes underneath them.
-SCOPE_PREFIX = "scope:"
-
 #: An axis with more coordinates than this gets no scope row.  A dropdown of
 #: two thousand pixel rows is not an editor, and truncating one silently would
 #: claim a coverage it does not have; those axes are cut with a box selector,
@@ -408,12 +417,57 @@ SCOPE_PREFIX = "scope:"
 SCOPE_CHOICE_LIMIT = 256
 
 
-def scope_field_name(label: str) -> str:
-    return f"{SCOPE_PREFIX}{label}"
+_SCOPE_VALUE_TAG = "scope-value"
+_SCOPE_LATEST_TAG = "scope-latest"
 
 
-def fate_field_name(label: str) -> str:
-    return f"{FATE_PREFIX}{label}"
+def scope_fate(
+    coordinate: CoordinateScalar | CoordinateSelector,
+) -> tuple[object, ...]:
+    """Tagged fate value for one pinned coordinate (or Runtime latest)."""
+
+    if coordinate is LATEST_COORDINATE:
+        return (_SCOPE_LATEST_TAG,)
+    return (
+        _SCOPE_VALUE_TAG,
+        canonical_coordinate_scalar(coordinate, "scope coordinate"),
+    )
+
+
+def is_scope_fate(value: object) -> bool:
+    if not isinstance(value, (tuple, list)):
+        return False
+    tagged = tuple(value)
+    return bool(
+        tagged == (_SCOPE_LATEST_TAG,)
+        or len(tagged) == 2 and tagged[0] == _SCOPE_VALUE_TAG
+    )
+
+
+def scope_coordinate_from_fate(
+    value: object,
+) -> CoordinateScalar | CoordinateSelector:
+    """Decode one tagged pin without confusing text coordinates with verbs."""
+
+    if not isinstance(value, (tuple, list)):
+        raise TypeError("scope fate must be a tagged sequence")
+    tagged = tuple(value)
+    if tagged == (_SCOPE_LATEST_TAG,):
+        return LATEST_COORDINATE
+    if len(tagged) == 2 and tagged[0] == _SCOPE_VALUE_TAG:
+        return canonical_coordinate_scalar(tagged[1], "scope coordinate")
+    raise ValueError("scope fate tag is invalid")
+
+
+def fate_field_name(ref: AxisRef) -> str:
+    """Stable machine key for one exact AxisRef; labels are display-only."""
+
+    if not isinstance(ref, AxisRef):
+        raise TypeError("fate field axis must be AxisRef")
+    suffix = ref.domain.value
+    if ref.axis_id is not None:
+        suffix += f":{ref.axis_id}"
+    return f"{FATE_PREFIX}{suffix}"
 
 
 def _default_fate(spec: PlotSpec) -> str:
@@ -449,11 +503,13 @@ def _fate_of(spec: PlotSpec, ref: AxisRef) -> object:
         return "facet"
     scope = _scope_terms(spec)
     if ref in scope:
-        return scope[ref]
+        return scope_fate(scope[ref])
     return _default_fate(spec)
 
 
-def _scope_terms(spec: PlotSpec) -> dict[AxisRef, float | str]:
+def _scope_terms(
+    spec: PlotSpec,
+) -> dict[AxisRef, CoordinateScalar | CoordinateSelector]:
     return dict(getattr(spec, "scope", ()))
 
 
@@ -463,13 +519,35 @@ def _role_holder(spec: PlotSpec, role: str) -> AxisRef | None:
     return getattr(semantic_spec(spec), role, None)
 
 
-def _scope_axis(schema: DatasetSchema | None, label: str) -> AxisRef:
-    if schema is None:
-        raise KeyError(scope_field_name(label))
-    for ref in axis_choices_for_schema(schema):
-        if _axis_label(schema, ref) == label:
-            return ref
-    raise KeyError(scope_field_name(label))
+def _fate_axis(schema: DatasetSchema | None, name: str) -> AxisRef:
+    """Decode a fate key by stable domain/id, never by a display label."""
+
+    if schema is None or not str(name).startswith(FATE_PREFIX):
+        raise KeyError(name)
+    encoded = str(name)[len(FATE_PREFIX) :]
+    domain_text, separator, axis_id = encoded.partition(":")
+    try:
+        domain = AxisDomain(domain_text)
+        ref = AxisRef(domain, axis_id if separator else None)
+    except (TypeError, ValueError) as error:
+        raise KeyError(name) from error
+    try:
+        if ref.domain is AxisDomain.POINT_COORDINATE:
+            assert ref.axis_id is not None
+            schema.point_table.column(AxisId(ref.axis_id))
+        elif ref.domain is AxisDomain.POINT_DIMENSION:
+            assert ref.axis_id is not None
+            if (
+                schema.grid_topology is None
+                or AxisId(ref.axis_id) not in schema.grid_topology.dimension_ids
+            ):
+                raise KeyError(ref.axis_id)
+        elif ref.domain is AxisDomain.DATA:
+            assert ref.axis_id is not None
+            schema_data_axis(schema, ref.axis_id)
+    except (KeyError, TypeError, ValueError) as error:
+        raise KeyError(name) from error
+    return ref
 
 
 def _scope_coordinates(
@@ -485,14 +563,25 @@ def _scope_coordinates(
     from zlc_data.snapshot_projection import axis_catalog
 
     label = _axis_label(schema, ref)
-    axis = next(
-        (spec for name, _id, spec, _kind in axis_catalog(schema) if name == label),
-        None,
-    )
+    if ref.domain is AxisDomain.POINT_ROW:
+        axis = None
+    elif ref.domain is AxisDomain.REPEAT:
+        axis = schema.repeat_axis
+    else:
+        assert ref.axis_id is not None
+        domain = "data" if ref.domain is AxisDomain.DATA else "point"
+        matches = {
+            str(axis_id): spec
+            for _label, axis_id, spec, candidate_domain in axis_catalog(schema)
+            if candidate_domain == domain and str(axis_id) == ref.axis_id
+        }
+        if len(matches) != 1:
+            raise KeyError(ref.axis_id)
+        axis = next(iter(matches.values()))
     if axis is None:
         # The point-row ordinal is an addressing scheme, not a declared axis.
         size = schema.point_table.row_count
-        values: tuple[float, ...] = tuple(float(index) for index in range(size))
+        values: tuple[object, ...] = tuple(range(size))
         labels: tuple[str, ...] | None = None
     elif axis.coordinates is None:
         values = tuple(
@@ -500,7 +589,7 @@ def _scope_coordinates(
         )
         labels = axis.coordinate_labels
     else:
-        values = tuple(float(value) for value in axis.coordinates)
+        values = tuple(axis.coordinates)
         labels = axis.coordinate_labels
     # The pinnable coordinates are the DISTINCT ones, judged after the
     # dedup: a scan dimension lists one value per ROW, so a ten-coordinate
@@ -508,24 +597,44 @@ def _scope_coordinates(
     # size cap refused the very axis a scope exists for.  A labelled axis
     # pins by the name the operator reads everywhere else -- "0-1", "box"
     # -- not by its bare numeric identity.
-    first_labels: dict[float, str] = {}
+    first_labels: dict[CoordinateScalar, str] = {}
     for index, value in enumerate(values):
-        if value not in first_labels:
+        coordinate = canonical_coordinate_scalar(value, f"{label} coordinate")
+        if coordinate not in first_labels:
             if len(first_labels) >= SCOPE_CHOICE_LIMIT + 1:
                 break
-            first_labels[value] = (
-                labels[index] if labels is not None else f"{value:g}"
+            first_labels[coordinate] = (
+                labels[index]
+                if labels is not None
+                else "(null)"
+                if coordinate is None
+                else f"{coordinate:g}"
+                if isinstance(coordinate, (int, float))
+                else str(coordinate)
             )
     if len(first_labels) < 2 or len(first_labels) > SCOPE_CHOICE_LIMIT:
         choices: tuple[SemanticChoice, ...] = ()
     else:
-        choices = tuple(first_labels.items())
+        choices = tuple(
+            (scope_fate(value), text) for value, text in first_labels.items()
+        )
     if (
         ref.domain is AxisDomain.POINT_COORDINATE
         and ref.axis_id == PRIMARY_INDEX_AXIS_ID.value
     ):
-        return (("latest", "Latest"), *choices)
+        return ((scope_fate(LATEST_COORDINATE), "Latest"), *choices)
     return choices or None
+
+
+def _scope_choice_label(value: object) -> str:
+    coordinate = scope_coordinate_from_fate(value)
+    if coordinate is LATEST_COORDINATE:
+        return "Latest"
+    if coordinate is None:
+        return "(null)"
+    if isinstance(coordinate, (int, float)):
+        return f"{coordinate:g}"
+    return str(coordinate)
 
 
 def _kind_label(kind: PlotKind) -> str:
@@ -613,15 +722,6 @@ def composed_spec(
     # the new kind's default.  Dropping it there would silently widen the
     # panel back to the whole signal.
     scope = _scope_terms(spec)
-    for name in tuple(rest):
-        if not name.startswith(SCOPE_PREFIX):
-            continue
-        value = rest.pop(name)
-        axis = _scope_axis(schema, name[len(SCOPE_PREFIX) :])
-        if value is None:
-            scope.pop(axis, None)
-        else:
-            scope[axis] = "latest" if value == "latest" else float(value)
     # Kind establishes the vocabulary against which the WHOLE fate table is
     # interpreted.  Applying fates to the old kind and rebasing afterwards
     # made one saved table mean two different specifications.
@@ -646,7 +746,7 @@ def composed_spec(
         if not name.startswith(FATE_PREFIX):
             continue
         value = rest.pop(name)
-        axis = _scope_axis(schema, name[len(FATE_PREFIX) :])
+        axis = _fate_axis(schema, name)
         fate_values[axis] = value
         scope.pop(axis, None)
 
@@ -661,10 +761,8 @@ def composed_spec(
         role_targets: dict[str, AxisRef] = {}
 
         for axis, value in fate_values.items():
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                scope[axis] = float(value)
-            elif value == "latest":
-                scope[axis] = "latest"
+            if is_scope_fate(value):
+                scope[axis] = scope_coordinate_from_fate(value)
             elif value in (FATE_REDUCE, FATE_POOL):
                 pass
             elif value in ROLE_FATES:
@@ -973,10 +1071,10 @@ def describe_semantics(
     # be spelled by its id or by its name, and a table is one row per axis.
     listed: dict[str, AxisRef] = {}
     for candidate in (*axes, *_axes_used_by(spec)):
-        listed.setdefault(fate_field_name(_axis_label(schema, candidate)), candidate)
+        listed.setdefault(fate_field_name(candidate), candidate)
     for ref in listed.values():
         label = _axis_label(schema, ref)
-        name = fate_field_name(label)
+        name = fate_field_name(ref)
         current = _fate_of(spec, ref)
         offered: list[SemanticChoice] = [(default_fate, f"({default_label})")]
         for role in roles:
@@ -992,6 +1090,14 @@ def describe_semantics(
         pins = _scope_coordinates(schema, ref)
         if pins is not None:
             offered.extend((value, f"= {text}") for value, text in pins)
+        if is_scope_fate(current) and not any(
+            current == value for value, _label in offered
+        ):
+            # A saved/programmatic scope may name a coordinate on an axis too
+            # large for a dropdown.  The current truth remains visible and can
+            # be moved back to a role; the editor still does not fabricate a
+            # truncated list of alternative coordinates.
+            offered.append((current, f"= {_scope_choice_label(current)}"))
         fields.append(SemanticField(name, label, current, tuple(offered), True))
         fate_rows.append((ref, name))
     if "reduction" in declared:
@@ -1030,7 +1136,11 @@ __all__ = [
     "axis_choices_for_schema",
     "axis_size",
     "describe_semantics",
+    "fate_field_name",
+    "is_scope_fate",
     "schema_structure",
     "schema_summary",
+    "scope_coordinate_from_fate",
+    "scope_fate",
     "updated_spec",
 ]

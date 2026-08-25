@@ -60,7 +60,6 @@ __all__ = [
     "FitEventValue",
     "SelectionBridge",
     "SelectionChange",
-    "SelectionDataReader",
     "SelectionEventSource",
     "SelectionRange",
     "SelectionState",
@@ -95,7 +94,7 @@ def _top_10_mean(sample: np.ndarray) -> float:
     )
 
 
-_IMAGE_SELECTION_OUTPUTS = (
+_AREA_SELECTION_OUTPUTS = (
     ("roi_frame", "ROI frame", None),
     ("roi_mean", "Mean", _mean),
     ("roi_min", "Min", _minimum),
@@ -106,14 +105,20 @@ _IMAGE_SELECTION_OUTPUTS = (
 _RANGE_SELECTION_OUTPUTS = (("roi_mean", "Mean", _mean),)
 
 
-def selection_output_catalog(plot_kind: str) -> tuple[tuple[str, str], ...]:
-    """Stable derived-output names and labels for one selector surface."""
+def selection_output_catalog(selector_kind: str) -> tuple[tuple[str, str], ...]:
+    """Stable derived-output names for one selector geometry.
 
-    catalog = (
-        _IMAGE_SELECTION_OUTPUTS
-        if str(plot_kind) == "image"
-        else _RANGE_SELECTION_OUTPUTS
-    )
+    Runtime reduces a selected area or a selected x range; it does not need
+    to know which Plot kind happened to produce that canonical selector.
+    """
+
+    kind = str(selector_kind)
+    if kind == "area":
+        catalog = _AREA_SELECTION_OUTPUTS
+    elif kind == "x_range":
+        catalog = _RANGE_SELECTION_OUTPUTS
+    else:
+        raise ValueError(f"unsupported derived selector kind {kind!r}")
     return tuple((name, label) for name, label, _reducer in catalog)
 
 
@@ -175,8 +180,10 @@ class SelectionRange:
 
     def __post_init__(self) -> None:
         domain = canonical_text(self.domain, "selection domain")
-        if domain not in {"named", "repeat", "point_row"}:
-            raise ValueError("selection domain must be named, repeat, or point_row")
+        if domain not in {"named", "repeat", "point_row", "value"}:
+            raise ValueError(
+                "selection domain must be named, repeat, point_row, or value"
+            )
         if not isinstance(self.axis, str):
             raise TypeError("selection axis must be text")
         axis = self.axis.strip()
@@ -451,20 +458,10 @@ class FitEventValue:
 
 @runtime_checkable
 class SelectionEventSource(Protocol):
-    def subscribe_selection(
-        self,
-        callback: Callable[[SelectionChange, SelectionState], object],
-    ) -> Callable[[], None]: ...
-
     def subscribe_fit(
         self,
         callback: Callable[[FitEventValue | None], object],
     ) -> Callable[[], None]: ...
-
-
-@runtime_checkable
-class SelectionDataReader(Protocol):
-    def selector_data(self, kind: str) -> SelectionState: ...
 
 
 class _TriggeredOutputs(dict[str, LiveDatasetOutput]):
@@ -552,7 +549,6 @@ class SelectionBridge:
         plane: SignalDataPlane,
         source_signal: str,
         selection_source: SelectionEventSource,
-        selection_data: SelectionDataReader,
         *,
         bridge_id: str,
         source_publication_for: Callable[[int], object | None] | None = None,
@@ -562,8 +558,6 @@ class SelectionBridge:
             raise TypeError("plane must be SignalDataPlane")
         if not isinstance(selection_source, SelectionEventSource):
             raise TypeError("selection_source must implement SelectionEventSource")
-        if not isinstance(selection_data, SelectionDataReader):
-            raise TypeError("selection_data must implement SelectionDataReader")
         if source_publication_for is not None and not callable(
             source_publication_for
         ):
@@ -577,7 +571,6 @@ class SelectionBridge:
         self._plane = plane
         self._source_signal = source_signal
         self._selection_source = selection_source
-        self._selection_data = selection_data
         #: Resolves a fit's exact parent publication by data revision.  The
         #: renderer's panel port is the deterministic causal holder (the fit
         #: accepted inside that revision's own commit), so provenance comes
@@ -624,7 +617,7 @@ class SelectionBridge:
             fit_event = self._fit_event
             fit_publication = self._fit_publication
             selection_names = {
-                name for name, _label in selection_output_catalog("image")
+                name for name, _label in selection_output_catalog("area")
             }
             fit_names = (
                 set()
@@ -655,6 +648,7 @@ class SelectionBridge:
         if not started:
             return
         if selection_changed and selection is not None:
+            assert selection_publication is not None
             self._commit_selection(
                 selection,
                 source_publication=selection_publication,
@@ -689,9 +683,6 @@ class SelectionBridge:
         subscriptions: list[Callable[[], None]] = []
         try:
             subscriptions.append(
-                self._selection_source.subscribe_selection(self._on_selection)
-            )
-            subscriptions.append(
                 self._selection_source.subscribe_fit(self._on_fit)
             )
         except BaseException:
@@ -708,6 +699,35 @@ class SelectionBridge:
                 initial_selection,
                 source_publication=initial_publication,
             )
+
+    def commit_selection(
+        self,
+        state: SelectionState,
+        *,
+        source_publication: SignalPublication,
+    ) -> None:
+        """Commit one owner-routed region against the exact displayed parent."""
+
+        if not isinstance(state, SelectionState):
+            raise TypeError("state must be SelectionState")
+        if not isinstance(source_publication, SignalPublication):
+            raise TypeError("source_publication must be SignalPublication")
+        self._commit_selection(
+            state,
+            source_publication=source_publication,
+        )
+
+    def clear_selection(self) -> None:
+        """Withdraw the current region and every derived output it owns."""
+
+        with self._lock:
+            self._selection = None
+            self._selection_publication = None
+            self._selection_epoch += 1
+            processor = self._selection_processor
+            self._selection_processor = None
+        if processor is not None:
+            self._withdraw_processor(processor)
 
     def close(self) -> None:
         with self._lock:
@@ -731,45 +751,6 @@ class SelectionBridge:
             unsubscribe()
         for processor in processors:
             self._withdraw_processor(processor)
-
-    def _on_selection(
-        self,
-        change: SelectionChange,
-        state: SelectionState,
-    ) -> None:
-        if not isinstance(change, SelectionChange):
-            try:
-                change = SelectionChange(change)
-            except ValueError as error:
-                raise ValueError(f"unknown selection change {change!r}") from error
-        if not isinstance(state, SelectionState):
-            raise TypeError("selection callback state must be SelectionState")
-        if change in {SelectionChange.ADDED, SelectionChange.UPDATED}:
-            return
-        if change is SelectionChange.REMOVED:
-            with self._lock:
-                self._selection = None
-                self._selection_publication = None
-                self._selection_epoch += 1
-                processor = self._selection_processor
-                self._selection_processor = None
-            if processor is not None:
-                self._withdraw_processor(processor)
-            return
-        current = self._selection_data.selector_data(state.selector_kind)
-        if not isinstance(current, SelectionState):
-            raise TypeError("selector_data must return SelectionState")
-        if current != state:
-            if (
-                current.plot_kind != state.plot_kind
-                or current.selector_kind != state.selector_kind
-                or current.ranges != state.ranges
-                or current.facets != state.facets
-                or current.repeat_index != state.repeat_index
-                or current.revision != state.revision
-            ):
-                raise ValueError("selector_data disagrees with committed selection state")
-        self._commit_selection(current)
 
     def _on_fit(self, event: FitEventValue | None) -> None:
         if event is None:
@@ -970,13 +951,10 @@ class SelectionBridge:
         self,
         state: SelectionState,
         *,
-        source_publication: SignalPublication | None = None,
+        source_publication: SignalPublication,
     ) -> None:
-        if source_publication is not None and not isinstance(
-            source_publication, SignalPublication
-        ):
-            raise TypeError("source_publication must be SignalPublication or None")
-        exact_source = source_publication is not None
+        if not isinstance(source_publication, SignalPublication):
+            raise TypeError("source_publication must be SignalPublication")
         with self._lock:
             if self._closed or not self._started:
                 return
@@ -989,16 +967,10 @@ class SelectionBridge:
         publication = source_publication
         outputs = None
         if output_names:
-            if publication is None:
-                publication = self._current_source_publication()
-            if publication is None:
-                raise RuntimeError(
-                    "committed selection arrived before source publication"
-                )
             source = publication.value(self._source_signal)
             if source is None:
                 raise RuntimeError(
-                    "current source publication has no selected signal"
+                    "exact source publication has no selected signal"
                 )
             outputs = self._materialize_selection_outputs(
                 self._source_snapshot(publication),
@@ -1035,21 +1007,6 @@ class SelectionBridge:
             self._publish_terminal("selection", outputs, publication)
             return
 
-        if not exact_source:
-            latest = self._current_source_publication()
-            if latest is None:
-                raise RuntimeError("committed selection arrived before source publication")
-            if latest is not publication:
-                publication = latest
-                source = publication.value(self._source_signal)
-                if source is None:
-                    raise RuntimeError(
-                        "current source publication has no selected signal"
-                    )
-                outputs = self._materialize_selection_outputs(
-                    self._source_snapshot(publication),
-                    state,
-                )
         with self._lock:
             if (
                 self._closed
@@ -1344,7 +1301,7 @@ class SelectionBridge:
     def _selection_output_names(self, state: SelectionState) -> tuple[str, ...]:
         return tuple(
             name
-            for name, _label in selection_output_catalog(state.plot_kind)
+            for name, _label in selection_output_catalog(state.selector_kind)
             if self._output_enabled.get(name, True)
         )
 
@@ -1424,6 +1381,10 @@ class SelectionBridge:
         state: SelectionState,
     ) -> Selection:
         def range_term(value: SelectionRange):
+            if value.domain == "value":
+                raise ValueError(
+                    "a measured-value selector has no upstream Dataset axis"
+                )
             if value.domain == "repeat":
                 axis = schema.repeat_axis
             elif value.domain == "point_row":
@@ -1576,8 +1537,8 @@ class SelectionBridge:
             data_indices,
         )
         catalog = (
-            _IMAGE_SELECTION_OUTPUTS
-            if state.plot_kind == "image"
+            _AREA_SELECTION_OUTPUTS
+            if state.selector_kind == "area"
             else _RANGE_SELECTION_OUTPUTS
         )
         output: dict[str, LiveDatasetOutput] = {}

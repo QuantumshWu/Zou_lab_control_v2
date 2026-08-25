@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 import numpy as np
@@ -18,6 +19,15 @@ from ._diagnostic import exact_integer_text
 
 
 CoordinateScalar = None | str | int | float
+
+
+class CoordinateSelector(Enum):
+    """Selection-only coordinate sentinels, never producer data values."""
+
+    LATEST = "latest"
+
+
+LATEST_COORDINATE = CoordinateSelector.LATEST
 
 
 def canonical_coordinate_scalar(value: Any, field: str = "coordinate") -> CoordinateScalar:

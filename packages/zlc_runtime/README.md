@@ -16,8 +16,13 @@ output is capable of history. Runtime exposes a byte-bounded ordinary Dataset
 over a neutral `primary-index` only while a consumer holds a window lease;
 retention begins at the current event, uses the largest active window, and is
 dropped with the last lease. Missing computations inside that interval are
-invalid cells and bounded window materialization is independent of run length. Display
-materialization is presentation-paced, cached, and performed off the UI owner;
+invalid cells and bounded window materialization is independent of run length.
+Runtime is the only owner of data accumulated across publications. Changing a
+signal between latest-event and indexed-history representation advances that
+signal's presentation epoch and invalidates every display consumer, even when
+the scientific publication is unchanged; this representation epoch is neither
+a run generation nor a content revision. Display materialization is
+presentation-paced, cached, and performed off the UI owner;
 `freeze()` only reads committed state and never calls plugin science or a
 plugin materializer.
 

@@ -49,6 +49,9 @@
 - Snapshot restriction必须对values、validity、coordinates、labels和coordinate frame执行同一projection。
 - Validity入口只接受明确bool contract，不做numeric truthiness转换。
 - Selection按AxisId和typed coordinate唯一解析；重名或不可唯一映射必须拒绝。
+- Plot轴身份只用`AxisRef(domain, axis_id)`稳定key；label只用于显示，不进入
+  semantic field identity。Scope在内存、PanelState与Figure recipe中都使用tagged
+  `latest`或tagged typed coordinate value，文本坐标`"latest"`不得被当作控制字。
 - 同一run/content revision不可代表不同内容；EventRef只表达causal publication，不代替content identity。
 
 ### 3.2 Figure archive
@@ -59,7 +62,7 @@
 - 未知metadata类型拒绝，不自动字符串化。
 - Figure只使用稳定`zlc.figure`格式，无数字版本；reader只接受当前完整grammar，其它root或缺失字段均loud拒绝。
 - Figure NPZ是可重绘的数据真相，包含typed Dataset、exact PlotSpec、完整normalized parameters、overlay、viewport和exact causal lineage graph；PNG只是同stem preview。
-- FigureViewer按保存的recipe恢复typed plot input，并和TaskConsole使用同一个Plot host/configure路径；不得按array shape重新猜plot kind。一个immutable archive可在同一Monitor board增加多个共享`PanelCardView`，默认panel恢复exact recipe，operator新增的其它plot kind只从同一typed Dataset schema重新compose。每个panel的Setting、可关闭Edit tab、size/signal/cell kind/display/fit均复用TaskConsole现有owner；saved/static Edit不显示live cadence、producer、snapshot refresh或第二套Save controls。Lineage以root、event nodes和direct parent IDs保存，并投影成可展开的真实树。
+- FigureViewer按保存的recipe恢复typed plot input，并和TaskConsole Live/Frozen使用同一个Plot host/configure与accepted `DisplayDescription.spec` contract；不得按array shape重新猜plot kind。一个immutable archive可在同一Monitor board增加多个共享`PanelCardView`，默认panel恢复exact recipe，operator新增的其它plot kind只从同一typed Dataset schema重新compose。每个panel的Setting、可关闭Edit tab、size/signal/cell kind/display/fit均复用TaskConsole现有owner；saved/static Edit不显示live cadence、producer、snapshot refresh或第二套Save controls。Lineage以root、event nodes和direct parent IDs保存，并投影成可展开的真实树。
 - Dataset/Figure encoder只写caller-owned binary IO；路径原子发布唯一属于`zlc_durable`。
 
 ### 3.3 Durable paths
@@ -88,7 +91,7 @@ Node new chunk
 - Camera使用chunked append，避免每次复制全部历史；Scan按固定point geometry增长。
 - 未写位置invalid；coverage只描述实际写入extent。
 - Finite exact signal的event view只用于commit与exact Processor；所有UI/display consumer必须使用同一publication对应的canonical current view，从第一次publication起报告完整authored physical shape，未来位置invalid。
-- 普通Monitor signal没有finite canonical extent，UI显示latest complete event；Processor不得仅因“derived”就增加科学轴。输出契约的`index_by_source`只声明history能力；只有真实consumer按window取得lease后，Runtime才从当时的current event开始建立带通用`primary-index`的bounded ordinary Dataset，并按全部active leases的最大window保留、在最后一个lease释放时立即归零。lease之前的event不回填、不伪造；所有Plot读取同一Dataset且不建立Plot-kind、Fit或Workbench专用history lane。Occupancy exact处理每个camera cycle，但其公开Monitor几何仍是当前cycle的`frame`，不得再叠一层source index。
+- 普通Monitor signal没有finite canonical extent，UI显示latest complete event；Processor不得仅因“derived”就增加科学轴。输出契约的`index_by_source`只声明history能力；只有真实consumer按window取得lease后，Runtime才从当时的current event开始建立带通用`primary-index`的bounded ordinary Dataset，并按全部active leases的最大window保留、在最后一个lease释放时立即归零。lease之前的event不回填、不伪造；Runtime是唯一跨publication history owner，所有Plot读取同一Dataset且不建立Plot-kind、Fit或Workbench专用history lane。history event/indexed表示切换即推进该signal的presentation epoch并使全部consumer重新投影，即使scientific publication未变；该epoch不冒充run generation或content revision。Occupancy exact处理每个camera cycle，但其公开Monitor几何仍是当前cycle的`frame`，不得再叠一层source index。
 - `scope/reduction/fate`只决定怎样投影canonical view，绝不决定选择event还是canonical；同一publication不能因Panel semantic不同代表两份不同数据truth。
 - Incremental placement沿repeat与point rows；多维scan/grid通过point table与grid topology表达。一个cell payload原子完整发布，不新增cell-internal tile/slice streaming contract。
 - Canonical display materialization只在实际display consumer到期时合并/cache，并在Qt owner thread之外执行；不得让producer每commit强制复制full prefix，也不得因Panel存在与否改变采集结果。
@@ -147,7 +150,17 @@ Node new chunk
 ### 5.2 Performance与state
 
 - PanelState一次应用是幂等transaction；no-op产生0 solve、0 render、0 front。
-- Panel interaction按resolved plot capability投影：classifier threshold只属于实际启用classifier的Histogram语义，retired/stale/non-classifier host回调不得写回或重放；selector同样不得跨semantic plot kind。Viewport identity至少包含run generation、Dataset schema fingerprint、resolved spec、display coordinate units和focused cell；相同shape但不同axis roles绝不共享数值范围。Live configure接受的新viewport必须写回此identity，Frozen/Edit只能重放仍匹配的范围。
+- `PanelState`是可编辑、可在拒绝后继续修复的authored target；只有Plot成功接受后返回的
+  `DisplayDescription.spec`才是当前Live/Frozen/Viewer pixels的accepted spec，也是
+  capability、selector、classifier、overlay和viewport判断的唯一依据。拒绝的target不得
+  覆盖accepted truth。
+- Plot selector与viewport observation都携产生它们的exact Dataset generation和revision；
+  TaskConsole Console是唯一interaction owner，核对当前accepted publication/spec后才写入
+  PanelState、发布derivation或镜像到另一host。Plot host只产生gesture observation，View只
+  投影；retired/stale/non-classifier回调不得写回，selector不得跨semantic plot kind。
+  Viewport identity还包含Dataset schema fingerprint、accepted spec、display coordinate units和
+  focused cell；相同shape但不同axis roles绝不共享数值范围。Live configure接受的新viewport
+  必须写回此identity，Frozen/Edit/Viewer只能重放仍匹配的范围。
 - ImagePlot及FacetGrid的image cell统一使用`nearest`像素呈现；interpolation不是Parameter、PanelState、Figure recipe或UI字段，任何Logic/Task不得另行设置。
 - Title/layout等非plot变化不得re-fit。
 - 删除重复configure/clear/replay与多front handoff。

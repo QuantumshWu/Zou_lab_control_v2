@@ -1099,6 +1099,13 @@ class SignalDataPlane:
                 declaration is not None and declaration.index_by_source
             )
 
+    def indexed_history_active(self, signal_name: str) -> bool:
+        """Whether any consumer currently owns this signal's indexed view."""
+
+        name = canonical_text(signal_name, "signal name")
+        with self._lock:
+            return bool(self._indexed_history_demands.get(name))
+
     def acquire_indexed_history(
         self,
         signal_name: str,
@@ -1473,14 +1480,58 @@ class SignalDataPlane:
         """
 
         owner_id = _node_instance_id(node)
+        output_names, bare_names = self._node_route_names(node)
+        retired: tuple[_GenerationState, ...] = ()
         with self._lock:
             if self._closed:
                 raise RuntimeError("signal data plane is closed")
             existing = self._states.get(owner_id)
-            finished = existing is not None and (existing.retired or existing.terminal)
-        if finished:
-            self._withdraw_owner(owner_id)
-        return self.reserve(node)
+            if existing is not None and not (
+                existing.retired or existing.terminal
+            ):
+                if (
+                    existing.kind == "producer"
+                    and existing.node is node
+                    and existing.publication is None
+                    and existing.output_names == output_names
+                    and dict(existing.bare_names) == dict(bare_names)
+                ):
+                    return existing.generation
+                raise RuntimeError("producer generation is already active")
+            if existing is not None:
+                # Compare, retire and install under one lock.  The old
+                # check-unlock-withdraw-reserve sequence let a concurrent
+                # starter install G2 between the check and withdraw, after
+                # which the first starter deleted G2 by owner id and returned
+                # G3.  The G2 caller then failed on its first publication.
+                retired = self._retirement_closure_locked(owner_id)
+            state = self._install_state_locked(
+                owner_id=owner_id,
+                kind="producer",
+                output_names=output_names,
+                bare_names=bare_names,
+                node=node,
+            )
+        errors = self._cleanup_retired_states(retired)
+        if errors:
+            # No caller can publish through this state before begin returns.
+            # Roll the successor back so a reported cleanup failure never
+            # leaves an invisible active generation that blocks retry.
+            with self._lock:
+                rollback = (
+                    (state,)
+                    if self._states.get(owner_id) is state
+                    and state.publication is None
+                    else ()
+                )
+                for candidate in rollback:
+                    self._drop_state_locked(candidate)
+            self._cleanup_retired_states(rollback)
+            raise BaseExceptionGroup(
+                "previous signal generation cleanup failed",
+                list(errors),
+            )
+        return state.generation
 
     @staticmethod
     def _declarations_by_bare(
@@ -2895,7 +2946,9 @@ class SignalDataPlane:
         with self._lock:
             front = self._build_front_locked()
             self._front = front
-            self._membership_changed = False
+            # The first lock cleared the work it captured.  A commit while
+            # ``route`` ran has since set this flag again; clearing it here
+            # would lose that publication and its latest-only processor wake.
             return front
 
     def close(self) -> None:

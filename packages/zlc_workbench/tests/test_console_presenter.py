@@ -1282,7 +1282,14 @@ def test_plot_materialized_fixed_limits_become_the_panel_state(
 
     natural = _operation_value(binding.host.resolved_color_limits())
     huge = float(natural.high) + max(1.0, abs(float(natural.high))) * 1000.0
+    assert presenter.edit_panel(binding.panel_id)
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.editor_host is not None
+        and binding.editor_configuration is None,
+    )
     for mode in ("tight", "normal"):
+        presented_before = len(presenter.view.presented_fronts)
         assert presenter.update_panel_state(
             binding.panel_id,
             {
@@ -1293,9 +1300,18 @@ def test_plot_materialized_fixed_limits_become_the_panel_state(
                 }
             },
         )
-        _settle_panel_hosts(presenter, lambda: binding.configuration is None)
+        _settle_panel_hosts(
+            presenter,
+            lambda: binding.configuration is None
+            and binding.editor_configuration is None
+            and len(presenter.view.presented_fronts) > presented_before,
+        )
         fixed = _operation_value(binding.host.resolved_color_limits())
         assert float(fixed.high) == huge
+        frozen_fixed = _operation_value(
+            binding.editor_host.resolved_color_limits()
+        )
+        assert frozen_fixed == fixed
 
         assert presenter.update_panel_state(
             binding.panel_id,
@@ -1429,6 +1445,16 @@ def test_panel_publisher_edit_owns_stable_output_selection(
     tree = LayoutDocument((binding.state,), ()).to_tree()
     restored = LayoutDocument.from_tree(tree).panels[0]
     assert restored.published_outputs == binding.state.published_outputs
+
+    histogram = presenter.add_panel(
+        node.signal_key("frames"), snapshot, kind="histogram"
+    )
+    _settle_panel_hosts(
+        presenter, lambda: histogram.accepted_display is not None
+    )
+    assert presenter._panel_publisher_fields(histogram) == (), (
+        "a value-domain Histogram range has no upstream Dataset ROI outputs"
+    )
 
 
 def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
@@ -1639,9 +1665,8 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
     assert np.isfinite(plotted[[previous_valid, recovered_index]]).all()
     assert np.isnan(plotted[previous_valid + 1 : recovered_index]).all()
 
-    # Runtime demand follows the window.  The mounted Plot may still reproject
-    # history it already owns; it never asks Runtime to resurrect an old
-    # publication, and the cache disappears with this consumer.
+    # Runtime is the only history owner. Shrinking the active maximum releases
+    # older excess; widening cannot resurrect data Runtime deliberately freed.
     shown_before_edit = rolling.port.presented_publication()
     assert presenter.update_panel_state(
         rolling.panel_id,
@@ -1651,9 +1676,11 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
         presenter,
         lambda: (
             rolling.configuration is None
+            and rolling.port.presentation_current
             and rolling.host._session._payload.source_revisions == revisions[-2:]
         ),
     )
+    retained_revisions = revisions[-2:]
     assert rolling.port.presented_publication() is shown_before_edit
     assert presenter.update_panel_state(
         rolling.panel_id,
@@ -1663,29 +1690,42 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
         presenter,
         lambda: (
             rolling.configuration is None
-            and rolling.host._session._payload.source_revisions == revisions
+            and rolling.port.presentation_current
+            and rolling.host._session._payload.source_revisions
+            == retained_revisions
         ),
+    )
+    from zlc_data import LATEST_COORDINATE
+    from zlc_plot import AxisRef
+    from zlc_plot.semantics import fate_field_name, scope_fate
+
+    primary_fate = fate_field_name(
+        AxisRef.point("zlc_data.primary-index")
     )
     assert presenter.update_panel_state(
         rolling.panel_id,
-        {"semantic": {"fate:source index": "latest"}},
+        {"semantic": {primary_fate: scope_fate(LATEST_COORDINATE)}},
     )
     _settle_panel_hosts(
         presenter,
         lambda: (
             rolling.configuration is None
-            and rolling.host._session._payload.source_revisions == revisions[-1:]
+            and rolling.port.presentation_current
+            and rolling.host._session._payload.source_revisions
+            == retained_revisions[-1:]
         ),
     )
     assert presenter.update_panel_state(
         rolling.panel_id,
-        {"semantic": {"fate:source index": "reduce"}},
+        {"semantic": {primary_fate: "reduce"}},
     )
     _settle_panel_hosts(
         presenter,
         lambda: (
             rolling.configuration is None
-            and rolling.host._session._payload.source_revisions == revisions
+            and rolling.port.presentation_current
+            and rolling.host._session._payload.source_revisions
+            == retained_revisions
         ),
     )
     lease = rolling.history_lease
@@ -1783,17 +1823,16 @@ def test_roi_histogram_window_growth_waits_for_current_signal_generation(
         ),
     )
     shown = histogram.port.presented_publication()
+    one_shot_port = histogram.port
     assert shown is not None
-    assert histogram.history_lease is not None
-    assert histogram.history_lease.window == 1
-    assert histogram.host._session._history == ()
-    retained = session.signal_plane.current_dataset(roi_signal)
-    primary = next(
-        column
-        for column in retained.block.schema.point_table.columns
-        if str(column.coordinate_id) == "zlc_data.primary-index"
+    assert histogram.history_lease is None, (
+        "a one-shot Histogram consumes the current event, not history"
     )
-    assert len(tuple(dict.fromkeys(primary.values))) == 1
+    retained = session.signal_plane.current_dataset(roi_signal)
+    assert all(
+        str(column.coordinate_id) != "zlc_data.primary-index"
+        for column in retained.block.schema.point_table.columns
+    )
 
     # Re-committing the Area intentionally replaces the selection-derived
     # generation.  Pause prevents the board from swapping the Histogram host,
@@ -1826,7 +1865,8 @@ def test_roi_histogram_window_growth_waits_for_current_signal_generation(
             and histogram.state.display["window"] == 100
         ),
     )
-    assert histogram.port.presented_publication() is shown
+    assert histogram.port is not one_shot_port
+    assert histogram.port.presented_publication() is None
     assert histogram.history_lease is not None
     assert histogram.history_lease.window == 100
     assert histogram.port.last_error is None
@@ -1844,6 +1884,50 @@ def test_roi_histogram_window_growth_waits_for_current_signal_generation(
         ),
     )
     assert histogram.port.last_error is None
+
+    # History is signal-global but never owned by an ordinary Image.  It may
+    # consume the current indexed representation while Histogram is alive;
+    # releasing the last real history demand must invalidate and rebuild this
+    # second panel too, instead of feeding indexed data into its event host.
+    companion = presenter.add_panel(
+        roi_signal,
+        current_roi.value(roi_signal).snapshot,
+        kind="image",
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: companion.port is not None
+        and companion.port.presented_publication() is not None
+        and companion.host is not None,
+    )
+    companion_indexed_host = companion.host
+    assert companion.history_lease is None
+
+    indexed_port = histogram.port
+    assert presenter.update_panel_state(
+        histogram.panel_id,
+        {"display": {"window": 1}},
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: (
+            histogram.port is not indexed_port
+            and histogram.port.presented_publication() is not None
+            and histogram.host is not None
+            and companion.host is not companion_indexed_host
+            and companion.port.presented_publication() is not None
+        ),
+    )
+    assert histogram.history_lease is None
+    latest = session.signal_plane.current_dataset(roi_signal)
+    assert all(
+        str(column.coordinate_id) != "zlc_data.primary-index"
+        for column in latest.block.schema.point_table.columns
+    )
+    assert all(
+        str(entry["label"]) != "source index"
+        for entry in histogram.parameter_surface["semantic"]
+    )
 
 
 def test_committed_selection_outputs_enter_the_real_occupancy_input(
@@ -2209,7 +2293,9 @@ def test_retargeting_a_panel_keeps_its_place_and_releases_the_old_host(
     _settle_panel_hosts(
         presenter,
         lambda: binding.frozen_data is not None
-        and binding.frozen_data.signal == other.signal_key("frames"),
+        and binding.frozen_data.signal == other.signal_key("frames")
+        and binding.editor_configuration is None
+        and binding.editor_accepted_display is not None,
     )
     editor = presenter.view.panel_editors[first.panel_id]
     assert editor["stale"] is False
@@ -2704,7 +2790,7 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
         "signal": signal, "title": "camera", "kind": "image",
         "cell_kind": "",
         "size": "4x4", "interval_ms": 800,
-        "semantic": {semantic_key: str(semantic_value)},
+        "semantic": first.state.document()["semantic"],
         "display": authored_display,
         "fit": {"model": "gaussian"}, "overlay_signal": "",
         "published_outputs": {},
@@ -2768,7 +2854,10 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
     assert restored[0].kind == "image"
     assert restored[0].size == "4x4"
     assert restored[0].port.display_interval_ms == 800
-    assert restored[0].state.semantic == {semantic_key: semantic_value}
+    assert (
+        restored[0].state.document()["semantic"]
+        == document["panels"][0]["semantic"]
+    )
     assert restored[0].state.display == authored_display
     assert restored[0].state.fit == {"model": "gaussian"}
     assert restored[0].state.overlay_signal == ""
@@ -3032,6 +3121,10 @@ def test_a_running_task_freezes_logic_identity_but_not_panels(
         def published_signals(self) -> tuple[str, ...]:
             return ("@logic/calibration/capture_preview",)
 
+        @property
+        def operator_request(self):
+            return None
+
         def shutdown(self) -> None:
             self.running = False
 
@@ -3101,14 +3194,14 @@ def test_a_running_task_freezes_logic_identity_but_not_panels(
         preview.panel_id,
         {"roi": True},
     )
-    preview.port = object()
     presenter.set_deriving(True)
     assert presenter.view._cards[preview.panel_id].selectors_enabled is True
     viewport = object()
-    presenter._route_panel_selection(
-        preview.panel_id,
-        object(),
-        viewport=viewport,
+    presenter._synchronize_panel_interaction(
+        preview,
+        None,
+        None,
+        viewport,
     )
     assert preview.interaction_viewport[1] is viewport
     preview.port = None
@@ -3906,8 +3999,8 @@ def test_a_cell_kind_change_survives_a_shared_name_it_cannot_honour(
     there; the image cell paints that axis up its own side, so taking it as
     x collides -- "ImagePlot x and y must be different axes" -- and the whole
     record was refused as one edit.  The operator asked for an image cell, so
-    the image cell wins: what still composes is kept and the rest waits in the
-    bag for the way back.
+    the image cell wins: only the legal overlap crosses the transaction and
+    the accepted image description replaces the old vocabulary.
     """
 
     node, snapshot = _one_shot(session, producer="camera_measurement")
@@ -3926,7 +4019,7 @@ def test_a_cell_kind_change_survives_a_shared_name_it_cannot_honour(
         (
             str(entry["key"])
             for entry in binding.parameter_surface["semantic"]
-            if str(entry["key"]) == "fate:spatial-y"
+            if str(entry["label"]) == "spatial-y"
             and any(value == "x" for _label, value in tuple(entry["choices"]))
         ),
         None,
@@ -4018,7 +4111,11 @@ def test_a_panel_says_what_kind_of_data_it_is_drawing(presenter, session) -> Non
     sentence here that the strip would have to take apart again.
     """
 
-    from zlc_plot.semantics import schema_structure
+    from zlc_plot.semantics import (
+        is_scope_fate,
+        schema_structure,
+        scope_coordinate_from_fate,
+    )
 
     node, snapshot = _one_shot(session)
     signal = node.signal_key("frames")
@@ -4042,7 +4139,7 @@ def test_a_panel_says_what_kind_of_data_it_is_drawing(presenter, session) -> Non
         for field in binding.parameter_surface["semantic"]
         if str(field["key"]).startswith("fate:")
         for _label, value in tuple(field["choices"])
-        if isinstance(value, (int, float)) and not isinstance(value, bool)
+        if is_scope_fate(value)
     )
     assert presenter.update_panel_state(
         binding.panel_id, {"semantic": {str(fate["key"]): pinned}}
@@ -4051,7 +4148,7 @@ def test_a_panel_says_what_kind_of_data_it_is_drawing(presenter, session) -> Non
         presenter,
         lambda: bool(binding.parameter_surface.get("data_scope")),
     )
-    number = float(pinned)
+    number = float(scope_coordinate_from_fate(pinned))
     pinned_text = (
         str(int(number)) if number.is_integer() else f"{number:g}"
     )
@@ -4479,7 +4576,11 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
         owned_snapshot_from_arrays,
     )
     from zlc_atom.nodes.scan.dataset import scan_dataset_schema
-    from zlc_plot.semantics import schema_structure
+    from zlc_plot.semantics import (
+        is_scope_fate,
+        schema_structure,
+        scope_coordinate_from_fate,
+    )
     from zlc_runtime import (
         DatasetCoverage,
         DatasetOutputDeclaration,
@@ -4652,11 +4753,13 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     from zlc_plot import AxisRef, NumericRange
     from zlc_plot.selectors import RectangleRange
 
+    from zlc_plot.semantics import fate_field_name
+
     scan_fates = {
-        "fate:field.y": "y",
-        "fate:field.z": "x",
-        "fate:pair": "reduce",
-        "fate:site": "reduce",
+        fate_field_name(AxisRef.point_dimension("scan.field.y")): "y",
+        fate_field_name(AxisRef.point_dimension("scan.field.z")): "x",
+        fate_field_name(AxisRef.data("survival.pair")): "reduce",
+        fate_field_name(AxisRef.data("map.site")): "reduce",
     }
     offered_fates = {
         str(entry["key"]): tuple(
@@ -4674,6 +4777,20 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
             NumericRange(0.0, 1.0),
             NumericRange(0.0, 1.0),
         ),
+    )
+    from zlc_runtime import SelectionRange, SelectionState
+    from zlc_workbench.selection import panel_selection_document
+
+    mapped.state = replace(
+        mapped.state,
+        selector=panel_selection_document(SelectionState(
+            plot_kind="image",
+            selector_kind="area",
+            ranges=(
+                SelectionRange("map.site", 0.0, 10.0),
+                SelectionRange("survival.pair", 0.0, 2.0),
+            ),
+        )),
     )
     assert presenter.update_panel_state(
         mapped.panel_id, {"semantic": scan_fates}
@@ -4698,6 +4815,9 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     ), dict(mapped.state.semantic)
     assert mapped.interaction_viewport is None, (
         "a viewport measured on pair/site was retained on field.z/field.y"
+    )
+    assert mapped.state.selector == {}, (
+        "a selector measured on pair/site was retained on field.z/field.y"
     )
     live_snapshot = mapped.port.presented_input()
     assert live_snapshot.block.schema.fingerprint == map_canonical.fingerprint

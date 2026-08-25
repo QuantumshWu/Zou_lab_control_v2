@@ -20,9 +20,9 @@ from zlc_plot.specs import Reduction
 import pytest
 
 
-def _schema(sites: int) -> DatasetSchema:
+def _schema(sites: int, repeats: int = 1) -> DatasetSchema:
     return DatasetSchema.create(
-        Axis.create("repeat", size=1),
+        Axis.create("repeat", size=repeats),
         PointTable.from_columns({"site": np.arange(sites, dtype=np.int64)}),
         data_axes=(),
         dtype=np.float64,
@@ -36,23 +36,26 @@ def _shot(schema: DatasetSchema, occupied: np.ndarray, revision: int) -> Dataset
     )
 
 
+def _shots(occupied: np.ndarray, revision: int = 0) -> DatasetSnapshot:
+    values = np.asarray(occupied, dtype=np.float64)
+    schema = _schema(values.shape[1], values.shape[0])
+    return DatasetSnapshot(schema, values, revision=revision)
+
+
 def test_cumulative_trace_is_the_running_rate_with_binomial_sem() -> None:
     """Feed 0/1 occupancy shot by shot; the trace must equal the running
     mean over ALL samples pooled so far and its sem the sample standard
     error -- which for booleans IS the binomial error."""
 
     sites = 8
-    schema = _schema(sites)
     rng = np.random.default_rng(21)
     shots = (rng.random((30, sites)) < 0.4).astype(np.float64)
     session = PlotSession(
-        _shot(schema, shots[0], 0),
+        _shots(shots),
         RollingPlot(reduction=Reduction.MEAN),
         parameters={"cumulative": True, "uncertainty": True},
     )
     try:
-        for revision in range(1, len(shots)):
-            session.update_data(_shot(schema, shots[revision], revision))
         payload = session._projection._payload
         series = payload.series[0]
         pooled = shots.reshape(-1)  # every sample of every shot, in order
@@ -72,7 +75,6 @@ def test_cumulative_trace_is_the_running_rate_with_binomial_sem() -> None:
 
 def test_window_frames_the_view_without_changing_the_numbers() -> None:
     sites = 4
-    schema = _schema(sites)
     rng = np.random.default_rng(5)
     shots = (rng.random((20, sites)) < 0.5).astype(np.float64)
 
@@ -81,13 +83,11 @@ def test_window_frames_the_view_without_changing_the_numbers() -> None:
         if window is not None:
             values["window"] = window
         session = PlotSession(
-            _shot(schema, shots[0], 0),
+            _shots(shots),
             RollingPlot(reduction=Reduction.MEAN),
             parameters=values,
         )
         try:
-            for revision in range(1, len(shots)):
-                session.update_data(_shot(schema, shots[revision], revision))
             series = session._projection._payload.series[0]
             return float(series.y.canonical[-1]), float(series.sem[-1])
         finally:
@@ -98,18 +98,14 @@ def test_window_frames_the_view_without_changing_the_numbers() -> None:
 
 def test_cumulative_band_renders(tmp_path) -> None:
     sites = 6
-    schema = _schema(sites)
     rng = np.random.default_rng(3)
+    shots = (rng.random((12, sites)) < 0.5).astype(np.float64)
     session = PlotSession(
-        _shot(schema, (rng.random(sites) < 0.5).astype(np.float64), 0),
+        _shots(shots),
         RollingPlot(reduction=Reduction.MEAN),
         parameters={"cumulative": True, "uncertainty": True},
     )
     try:
-        for revision in range(1, 12):
-            session.update_data(
-                _shot(schema, (rng.random(sites) < 0.5).astype(np.float64), revision)
-            )
         session._renderer.draw()
         bands = [
             artist
@@ -150,17 +146,14 @@ def test_plain_rolling_uncertainty_is_each_shot_pooled_error() -> None:
     shot's own pooled standard error."""
 
     sites = 30
-    schema = _schema(sites)
     rng = np.random.default_rng(9)
     shots = (rng.random((6, sites)) < 0.5).astype(np.float64)
     session = PlotSession(
-        _shot(schema, shots[0], 0),
+        _shots(shots),
         RollingPlot(reduction=Reduction.MEAN),
         parameters={"uncertainty": True},
     )
     try:
-        for revision in range(1, len(shots)):
-            session.update_data(_shot(schema, shots[revision], revision))
         series = session._projection._payload.series[0]
         assert series.sem is not None
         for index in range(len(shots)):

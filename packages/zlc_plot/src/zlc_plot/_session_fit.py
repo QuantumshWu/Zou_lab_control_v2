@@ -43,7 +43,7 @@ from .selectors import (
     _classifier_threshold_key,
     normalize_classifier_threshold_targets,
 )
-from .specs import FacetGridPlot, HistogramPlot
+from .specs import accepts_classifier_thresholds, FacetGridPlot
 
 if TYPE_CHECKING:
     from .session import PlotSession
@@ -1119,9 +1119,9 @@ class FitSessionMixin:
         )
 
     def _threshold_classifier_enabled(self) -> bool:
-        return bool(
-            isinstance(self._semantic_spec, HistogramPlot)
-            and self.display_state.values.get("threshold_classifier", False)
+        return accepts_classifier_thresholds(
+            self._spec,
+            self.display_state.values,
         )
 
     def _authored_classifier_result(
@@ -1425,6 +1425,8 @@ class FitSessionMixin:
     def _set_classifier_thresholds_state(
         self,
         thresholds: object,
+        *,
+        discard_unmatched: bool = False,
     ) -> None:
         if not self._threshold_classifier_enabled():
             raise RuntimeError("threshold classifier is not enabled")
@@ -1450,6 +1452,8 @@ class FitSessionMixin:
             identity = _classifier_threshold_key(target)
             index = expected.get(identity)
             if index is None:
+                if discard_unmatched:
+                    continue
                 raise ValueError(
                     "classifier threshold target does not match a current distribution"
                 )

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Callable, Mapping
 
 from zlc_data import SelectionChange
 
-from ._fit_projection import FitProjection, FitSelection, RollingHistoryPoint
+from ._fit_projection import FitProjection, FitSelection
 from ._fit_scene import FitOverlay
 from ._selector_scene import ColorLimitCandidate
 from .selectors import RectangleRange, SelectorKind, SelectorState
@@ -157,7 +157,6 @@ class _ProjectionPresentation:
     previous_focused_facet_index: int | None
     previous_facet_focus_index: int | None
     previous_viewport: RectangleRange | None
-    previous_rolling_history: tuple[RollingHistoryPoint, ...]
     previous_layout_revision: int
     previous_plan: "SurfacePlan"
 

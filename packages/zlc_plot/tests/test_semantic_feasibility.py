@@ -226,7 +226,12 @@ def test_user_can_reach_a_single_mean_line_on_grouped_data() -> None:
         assert AxisRef.repeat() in description.axes_offering("group")
 
         session.replace_spec(
-            updated_spec(schema, spec, "fate:site", "reduce")
+            updated_spec(
+                schema,
+                spec,
+                dict(description.fate_rows)[AxisRef.data("site")],
+                "reduce",
+            )
         )
         assert len(session._payload.series) == 1
         np.testing.assert_allclose(

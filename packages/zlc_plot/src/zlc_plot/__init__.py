@@ -17,6 +17,7 @@ package you must load.
 from importlib import import_module as _import_module
 
 _EXPORTS = {
+    "LATEST_COORDINATE": ("zlc_data", "LATEST_COORDINATE"),
     "curve": ("zlc_plot.api", "curve"),
     "facet_grid": ("zlc_plot.api", "facet_grid"),
     "histogram": ("zlc_plot.api", "histogram"),
@@ -83,16 +84,31 @@ _EXPORTS = {
     "PlotSession": ("zlc_plot.session", "PlotSession"),
     "PulseTimelineSelectionData": ("zlc_plot.session", "PulseTimelineSelectionData"),
     "SelectionChange": ("zlc_plot.session", "SelectionChange"),
+    "SelectionSubject": ("zlc_plot.session", "SelectionSubject"),
+    "selection_subject_for": ("zlc_plot.session", "selection_subject_for"),
     "SelectorData": ("zlc_plot.session", "SelectorData"),
     "describe_semantics": ("zlc_plot.semantics", "describe_semantics"),
     "schema_summary": ("zlc_plot.semantics", "schema_summary"),
     "updated_spec": ("zlc_plot.semantics", "updated_spec"),
     "CurvePlot": ("zlc_plot.specs", "CurvePlot"),
+    "accepts_classifier_thresholds": (
+        "zlc_plot.specs",
+        "accepts_classifier_thresholds",
+    ),
     "FacetGridPlot": ("zlc_plot.specs", "FacetGridPlot"),
     "HistogramPlot": ("zlc_plot.specs", "HistogramPlot"),
+    "history_window_requirement": (
+        "zlc_plot.specs",
+        "history_window_requirement",
+    ),
+    "indexed_presentation_window": (
+        "zlc_plot.specs",
+        "indexed_presentation_window",
+    ),
     "ImagePlot": ("zlc_plot.specs", "ImagePlot"),
     "PlotLabels": ("zlc_plot.specs", "PlotLabels"),
     "PlotSpec": ("zlc_plot.specs", "PlotSpec"),
+    "paints_image_surface": ("zlc_plot.specs", "paints_image_surface"),
     "PulseTimelinePlot": ("zlc_plot.specs", "PulseTimelinePlot"),
     "Reduction": ("zlc_plot.specs", "Reduction"),
     "RollingPlot": ("zlc_plot.specs", "RollingPlot"),
@@ -139,6 +155,7 @@ def __dir__() -> list[str]:
 
 
 __all__ = [
+    "accepts_classifier_thresholds",
     "PANEL_SIZE_NAMES",
     "recommended_pulse_preset",
     "AxisRef",
@@ -155,10 +172,13 @@ __all__ = [
     "FitTarget",
     "fitting_spec",
     "HistogramPlot",
+    "history_window_requirement",
+    "indexed_presentation_window",
     "ImageFrame",
     "ImagePlot",
     "ImagePointOverlay",
     "ImagePointReviewSurface",
+    "LATEST_COORDINATE",
     "IMAGE_POINT_OVERLAY_CONTRACT",
     "IMAGE_POINT_OVERLAY_GEOMETRY_RECORD",
     "image_point_overlay_from_signal",
@@ -169,6 +189,7 @@ __all__ = [
     "PlotLabels",
     "PlotSession",
     "PlotSpec",
+    "paints_image_surface",
     "PointStatus",
     "PulseAnalogTrace",
     "PulseBlock",
@@ -186,6 +207,8 @@ __all__ = [
     "Reduction",
     "RollingPlot",
     "SelectionChange",
+    "SelectionSubject",
+    "selection_subject_for",
     "SelectorData",
     "SelectorKind",
     "normalize_classifier_threshold_targets",

@@ -348,10 +348,7 @@ class ImagePointOverlay:
             return None
         schema = self.status.block.schema
         terms: dict[AxisId, object] = {}
-        scopes = tuple(getattr(spec, "scope", ()))
-        cell = getattr(spec, "cell", None)
-        scopes += tuple(getattr(cell, "scope", ()))
-        for ref, coordinate in scopes:
+        for ref, coordinate in tuple(getattr(spec, "scope", ())):
             axis_id = self._leading_axis_id(schema, ref)
             if axis_id is None:
                 return None

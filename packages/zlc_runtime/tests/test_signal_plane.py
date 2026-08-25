@@ -1309,6 +1309,57 @@ def test_latest_processors_run_parallel_per_node_serial_and_coalesce() -> None:
         plane.close()
 
 
+def test_freeze_preserves_publication_committed_while_processor_route_runs(
+    monkeypatch,
+) -> None:
+    declaration = DatasetOutputDeclaration("frame", "test.frame")
+    source = _node("route-race-source", declaration)
+    plane = SignalDataPlane()
+    route_entered = threading.Event()
+    release_route = threading.Event()
+    routed_sequences: list[int] = []
+    freeze_errors: list[BaseException] = []
+    real_route = plane._lane.route
+
+    def gated_route(publications) -> None:
+        publication = publications[source.signal_key("frame")]
+        routed_sequences.append(publication.event_ref.sequence)
+        if len(routed_sequences) == 1:
+            route_entered.set()
+            assert release_route.wait(2.0), "processor route gate did not open"
+        real_route(publications)
+
+    monkeypatch.setattr(plane._lane, "route", gated_route)
+    try:
+        plane.reserve(source)
+        plane.commit_live(source, {"frame": _latest(declaration, 1.0)})
+
+        def freeze_first_publication() -> None:
+            try:
+                plane.freeze()
+            except BaseException as error:
+                freeze_errors.append(error)
+
+        worker = threading.Thread(target=freeze_first_publication)
+        worker.start()
+        assert route_entered.wait(2.0), "freeze never entered processor routing"
+
+        # This commit lands after freeze cleared the work it captured, but
+        # before it publishes the newly built front.  It must leave another
+        # routing turn owed instead of being cleared by freeze's second lock.
+        plane.commit_live(source, {"frame": _latest(declaration, 2.0)})
+        release_route.set()
+        worker.join(2.0)
+        assert not worker.is_alive(), "freeze did not leave the route gate"
+        assert not freeze_errors
+
+        plane.freeze()
+        assert routed_sequences == [1, 2]
+    finally:
+        release_route.set()
+        plane.close()
+
+
 def test_direct_latest_commit_retires_without_cleanup_callbacks() -> None:
     declaration = DatasetOutputDeclaration("preview", "test.preview")
     node = _node("preview", declaration)

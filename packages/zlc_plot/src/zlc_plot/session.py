@@ -14,8 +14,19 @@ import math
 
 import numpy as np
 
-from zlc_data import OwnedSnapshot
-from zlc_data.snapshot_projection import axis_catalog, indexed_schemas_compatible
+from zlc_data import (
+    LATEST_COORDINATE,
+    CoordinateScalar,
+    DatasetSchema,
+    OwnedSnapshot,
+    canonical_coordinate_scalar,
+)
+from zlc_data.snapshot_projection import (
+    indexed_schemas_compatible,
+    point_ordinal_axis,
+    selection_indices,
+    value_selection,
+)
 from zlc_durable import atomic_write_file
 
 from .data_contract import (
@@ -23,6 +34,7 @@ from .data_contract import (
     UnitRegistry,
     resolve_unit,
     schema_equal,
+    schema_data_axis,
     schema_value_unit,
     snapshot_generation,
     snapshot_revision,
@@ -65,7 +77,6 @@ from ._fit_projection import (
     FitScope,
     FitSelection,
     ProjectionContext,
-    RollingHistoryPoint,
 )
 from ._selector_scene import (
     ColorLimitCandidate,
@@ -159,7 +170,7 @@ _CONFIGURATION_STATE_NAMES = (
     "_viewport", "_focused_facet_index", "_facet_focus_index", "_accepted_fit",
     "_classifier_results", "_classifier_overlays", "_classifier_thresholds",
     "_classifier_gaussian_components",
-    "_history", "_layout_revision", "_size", "_fit_context_generation",
+    "_layout_revision", "_size", "_fit_context_generation",
     "_fit_request_generation", "_fit_batch_revision", "_fit_cancel",
     "_live_fit_cancel", "_live_fit_request", "_live_fit_future",
     "_live_fit_completion", "_presentation_epoch",
@@ -187,6 +198,7 @@ class DisplayDescription:
     """Immutable control-plane snapshot for a notebook or GUI frontend."""
 
     kind: PlotKind
+    spec: PlotSpec
     size: str
     size_choices: tuple[str, ...]
     parameter_schema: ParameterSchema
@@ -195,11 +207,26 @@ class DisplayDescription:
     limits: RectangleRange
     viewport: RectangleRange | None
     semantics: SemanticDescription
+    selection_subject: SelectionSubject
     fit_models: tuple[FitModelSpec, ...]
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, PlotKind):
             raise TypeError("display description kind must be PlotKind")
+        if not isinstance(
+            self.spec,
+            (
+                CurvePlot,
+                ImagePlot,
+                HistogramPlot,
+                RollingPlot,
+                FacetGridPlot,
+                PulseTimelinePlot,
+            ),
+        ):
+            raise TypeError("display description spec must be PlotSpec")
+        if self.spec.kind is not self.kind:
+            raise ValueError("display description kind differs from its spec")
         if not isinstance(self.size, str) or not self.size:
             raise ValueError("display description size must be non-empty")
         size_choices = tuple(self.size_choices)
@@ -211,6 +238,12 @@ class DisplayDescription:
             raise TypeError("display description requires DisplayState")
         if not isinstance(self.semantics, SemanticDescription):
             raise TypeError("display description requires SemanticDescription")
+        if not isinstance(self.selection_subject, SelectionSubject):
+            raise TypeError("display description requires SelectionSubject")
+        if self.selection_subject.plot_kind is not semantic_spec(self.spec).kind:
+            raise ValueError(
+                "display description selection subject differs from its semantic spec"
+            )
         object.__setattr__(self, "fit_models", tuple(self.fit_models))
         parameter_choices = {
             str(name): tuple(values)
@@ -355,8 +388,326 @@ class SelectionSubject:
     y: AxisRef | None
     x_coordinate_frame: str | None = None
     y_coordinate_frame: str | None = None
-    scope: tuple[tuple[AxisRef, object], ...] = ()
+    scope: tuple[tuple[AxisRef, CoordinateScalar], ...] = ()
     repeat_index: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.plot_kind, PlotKind):
+            raise TypeError("selection subject plot_kind must be PlotKind")
+        for name in ("x", "y"):
+            ref = getattr(self, name)
+            if ref is not None and not isinstance(ref, AxisRef):
+                raise TypeError(f"selection subject {name} must be AxisRef or None")
+            frame = getattr(self, f"{name}_coordinate_frame")
+            if frame is not None and not isinstance(frame, str):
+                raise TypeError(
+                    f"selection subject {name} coordinate frame must be text or None"
+                )
+            if isinstance(frame, str) and not frame.strip():
+                raise ValueError(
+                    f"selection subject {name} coordinate frame must be "
+                    "non-empty text or None"
+                )
+            if ref is None and frame is not None:
+                raise ValueError(
+                    f"selection subject {name} coordinate frame requires an axis"
+                )
+        if not isinstance(self.scope, tuple):
+            raise TypeError("selection subject scope must be a tuple")
+        scope: list[tuple[AxisRef, CoordinateScalar]] = []
+        for term in self.scope:
+            if not isinstance(term, tuple) or len(term) != 2:
+                raise TypeError(
+                    "selection subject scope entries must be (AxisRef, coordinate) pairs"
+                )
+            ref, coordinate = term
+            if not isinstance(ref, AxisRef):
+                raise TypeError("selection subject scope axis must be AxisRef")
+            if ref.domain is AxisDomain.REPEAT:
+                raise ValueError(
+                    "selection subject repeat scope belongs in repeat_index"
+                )
+            scope.append(
+                (
+                    ref,
+                    canonical_coordinate_scalar(
+                        coordinate,
+                        "selection subject scope coordinate",
+                    ),
+                )
+            )
+        repeat_index = self.repeat_index
+        if repeat_index is not None:
+            if isinstance(repeat_index, bool) or not isinstance(
+                repeat_index, Integral
+            ):
+                raise TypeError(
+                    "selection subject repeat_index must be an integer or None"
+                )
+            repeat_index = int(repeat_index)
+            if repeat_index < 0:
+                raise ValueError(
+                    "selection subject repeat_index cannot be negative"
+                )
+        object.__setattr__(self, "scope", tuple(scope))
+        object.__setattr__(self, "repeat_index", repeat_index)
+
+
+def selection_subject_for(
+    schema: DatasetSchema | None,
+    spec: PlotSpec,
+    *,
+    facet_index: int | None = None,
+) -> SelectionSubject:
+    """Resolve the exact upstream identity of one accepted plot projection.
+
+    This is the sole subject authority for descriptions, selector events and
+    viewport events.  A Histogram's horizontal quantity is the measured value,
+    not an upstream axis; Rolling's ordinal history coordinate is likewise a
+    plot-owned display index.  Facet focus is resolved to its canonical source
+    coordinate so consumers never need to reconstruct cell identity from a
+    spec, a payload, or positional UI state.
+    """
+
+    if not isinstance(
+        spec,
+        (
+            CurvePlot,
+            ImagePlot,
+            HistogramPlot,
+            RollingPlot,
+            FacetGridPlot,
+            PulseTimelinePlot,
+        ),
+    ):
+        raise TypeError("selection subject spec must be PlotSpec")
+    if facet_index is not None:
+        if isinstance(facet_index, bool) or not isinstance(
+            facet_index,
+            Integral,
+        ):
+            raise TypeError("selection subject facet_index must be an integer or None")
+        facet_index = int(facet_index)
+        if facet_index < 0:
+            raise ValueError("selection subject facet_index cannot be negative")
+        if not isinstance(spec, FacetGridPlot):
+            raise ValueError("selection subject facet_index requires FacetGridPlot")
+    if isinstance(spec, PulseTimelinePlot):
+        if schema is not None:
+            raise TypeError("PulseTimeline selection subject does not accept a schema")
+        return SelectionSubject(PlotKind.PULSE_TIMELINE, None, None)
+    if not isinstance(schema, DatasetSchema):
+        raise TypeError("dataset selection subject requires DatasetSchema")
+
+    def axis_identity(
+        ref: AxisRef,
+    ) -> tuple[tuple[CoordinateScalar, ...], str | None]:
+        """Canonical coordinates and frame for one exact plot-side axis."""
+
+        if not isinstance(ref, AxisRef):
+            raise TypeError("selection subject axis must be AxisRef")
+        if ref.domain is AxisDomain.REPEAT:
+            axis = schema.repeat_axis
+            coordinates = tuple(
+                axis.coordinate_at(index) for index in range(axis.size)
+            )
+            frame = axis.coordinate_frame
+        elif ref.domain is AxisDomain.POINT_ROW:
+            coordinates = tuple(range(schema.point_table.row_count))
+            frame = None
+        elif ref.domain is AxisDomain.POINT_COORDINATE:
+            assert ref.axis_id is not None
+            try:
+                column = next(
+                    column
+                    for column in schema.point_table.columns
+                    if str(column.coordinate_id) == ref.axis_id
+                )
+            except StopIteration as error:
+                raise ValueError(
+                    f"selection subject point axis {ref.axis_id!r} is absent"
+                ) from error
+            coordinates = tuple(column.values)
+            frame = column.coordinate_frame
+        elif ref.domain is AxisDomain.POINT_DIMENSION:
+            assert ref.axis_id is not None
+            topology = schema.grid_topology
+            if topology is None:
+                raise ValueError(
+                    f"selection subject point dimension {ref.axis_id!r} "
+                    "requires GridTopology"
+                )
+            try:
+                position = next(
+                    index
+                    for index, axis_id in enumerate(topology.dimension_ids)
+                    if str(axis_id) == ref.axis_id
+                )
+            except StopIteration as error:
+                raise ValueError(
+                    f"selection subject point dimension {ref.axis_id!r} is absent"
+                ) from error
+            coordinates = tuple(topology.coordinate_domains[position])
+            column = next(
+                (
+                    column
+                    for column in schema.point_table.columns
+                    if str(column.coordinate_id) == ref.axis_id
+                ),
+                None,
+            )
+            frame = None if column is None else column.coordinate_frame
+        else:
+            assert ref.domain is AxisDomain.DATA and ref.axis_id is not None
+            try:
+                _position, axis = schema_data_axis(schema, ref.axis_id)
+            except KeyError as error:
+                raise ValueError(
+                    f"selection subject data axis {ref.axis_id!r} is absent"
+                ) from error
+            coordinates = tuple(
+                axis.coordinate_at(index) for index in range(axis.size)
+            )
+            frame = axis.coordinate_frame
+        return (
+            tuple(
+                canonical_coordinate_scalar(
+                    coordinate,
+                    "selection subject axis coordinate",
+                )
+                for coordinate in coordinates
+            ),
+            None if frame is None else str(frame),
+        )
+
+    semantic = semantic_spec(spec)
+    if isinstance(semantic, CurvePlot):
+        x_ref, y_ref = semantic.x, None
+    elif isinstance(semantic, ImagePlot):
+        x_ref, y_ref = semantic.x, semantic.y
+    else:
+        # Histogram x is the measured value and Rolling x is a plot-owned
+        # ordinal.  Neither is an upstream axis that a consumer may slice.
+        x_ref = y_ref = None
+    x_frame = None if x_ref is None else axis_identity(x_ref)[1]
+    y_frame = None if y_ref is None else axis_identity(y_ref)[1]
+
+    scope: list[tuple[AxisRef, CoordinateScalar]] = []
+    scope_terms: dict[str, CoordinateScalar] = {}
+    repeat_index: int | None = None
+    for ref, authored in getattr(spec, "scope", ()):
+        coordinates, _frame = axis_identity(ref)
+        coordinate = (
+            coordinates[-1]
+            if authored is LATEST_COORDINATE
+            else canonical_coordinate_scalar(
+                authored,
+                "selection subject scope coordinate",
+            )
+        )
+        if ref.domain is AxisDomain.REPEAT:
+            matches = tuple(
+                index
+                for index, candidate in enumerate(coordinates)
+                if candidate == coordinate
+            )
+            if len(matches) != 1:
+                raise ValueError(
+                    "selection subject repeat scope is not uniquely present"
+                )
+            repeat_index = matches[0]
+            scope_terms[str(schema.repeat_axis.name)] = coordinate
+        else:
+            scope.append((ref, coordinate))
+            if ref.domain is AxisDomain.POINT_ROW:
+                key = point_ordinal_axis(schema.point_table.row_count).name
+            else:
+                if ref.axis_id is None:
+                    raise ValueError("selection subject scope axis has no stable id")
+                key = str(ref.axis_id)
+            scope_terms[str(key)] = coordinate
+
+    if scope_terms:
+        repeat_rows, point_rows, data_rows = selection_indices(
+            schema,
+            value_selection(schema, scope_terms),
+        )
+    else:
+        repeat_rows = range(schema.repeat_axis.size)
+        point_rows = range(schema.point_table.row_count)
+        data_rows = {
+            axis.axis_id: range(axis.size)
+            for axis in schema.cell_schema.data_axes
+        }
+
+    if isinstance(spec, FacetGridPlot) and facet_index is not None:
+        if spec.facet.domain is AxisDomain.REPEAT:
+            facet_rows = tuple(repeat_rows)
+            if facet_index >= len(facet_rows):
+                raise ValueError(
+                    "selection subject facet_index is outside the facet domain"
+                )
+            repeat_index = int(facet_rows[facet_index])
+        else:
+            facet_coordinates, _frame = axis_identity(spec.facet)
+            if spec.facet.domain is AxisDomain.POINT_ROW:
+                facet_coordinates = tuple(range(len(tuple(point_rows))))
+            elif spec.facet.domain is AxisDomain.POINT_COORDINATE:
+                assert spec.facet.axis_id is not None
+                column = next(
+                    column
+                    for column in schema.point_table.columns
+                    if str(column.coordinate_id) == spec.facet.axis_id
+                )
+                facet_coordinates = tuple(
+                    canonical_coordinate_scalar(
+                        value,
+                        "selection subject facet coordinate",
+                    )
+                    for value in np.unique(
+                        np.asarray([column.values[index] for index in point_rows])
+                    )
+                )
+            elif spec.facet.domain is AxisDomain.POINT_DIMENSION:
+                assert schema.grid_topology is not None
+                assert spec.facet.axis_id is not None
+                position = next(
+                    index
+                    for index, axis_id in enumerate(schema.grid_topology.dimension_ids)
+                    if str(axis_id) == spec.facet.axis_id
+                )
+                used = sorted(
+                    {
+                        schema.grid_topology.row_to_cell[index][position]
+                        for index in point_rows
+                    }
+                )
+                facet_coordinates = tuple(facet_coordinates[index] for index in used)
+            elif spec.facet.domain is AxisDomain.DATA:
+                assert spec.facet.axis_id is not None
+                axis_id = next(
+                    axis.axis_id
+                    for axis in schema.cell_schema.data_axes
+                    if str(axis.axis_id) == spec.facet.axis_id
+                )
+                facet_coordinates = tuple(
+                    facet_coordinates[index] for index in data_rows[axis_id]
+                )
+            if facet_index >= len(facet_coordinates):
+                raise ValueError(
+                    "selection subject facet_index is outside the facet domain"
+                )
+            scope.append((spec.facet, facet_coordinates[facet_index]))
+
+    return SelectionSubject(
+        semantic.kind,
+        x_ref,
+        y_ref,
+        x_frame,
+        y_frame,
+        tuple(scope),
+        repeat_index,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,24 +724,20 @@ class SelectionEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class ViewportEvent:
+    """One viewport change tied to the exact projection it was measured on."""
+
+    canonical: RectangleRange
+    display: RectangleRange | None
+    subject: SelectionSubject
+    data_revision: int
+    data_generation: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class _SelectionSubscription:
     callback: SelectionCallback
     selector_kind: SelectorKind | None
-
-
-def _keeps_history(spec: object) -> bool:
-    """Whether this drawing looks back over the session's past shots.
-
-    History is the session's accumulation for one signal, so what decides
-    whether it is kept is whether anything CONSUMES it -- a rolling trace
-    along its x, a distribution pooled into its bins.  Gating retention on
-    "is this a rolling plot" made the shots the property of one kind, and
-    switching a panel to a distribution of the same signal threw them away.
-    """
-
-    from .specs import HistogramPlot, RollingPlot, semantic_spec
-
-    return isinstance(semantic_spec(spec), (RollingPlot, HistogramPlot))
 
 
 class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
@@ -509,7 +856,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         self._fit_warm_starts: dict[tuple[int, str, int | None], _WarmSeed] = {}
         self._fit_batch_revision = 0
         self._viewport: RectangleRange | None = None
-        self._history: tuple[RollingHistoryPoint, ...] = ()
         self._focused_facet_index: int | None = (
             0 if isinstance(spec, FacetGridPlot) else None
         )
@@ -528,8 +874,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         )
         self._rebuild_projection()
         self._refresh_threshold_classifier()
-        if _keeps_history(self._spec):
-            self._history = self._projection.rolling_history
         self._presentation_epoch = 0
         # One configure unions existing owners' effects before one final paint.
         self._configuration_effects: RenderEffect | None = None
@@ -623,7 +967,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 selector_snapshot=self._selector_controller.snapshot(),
                 viewport=self._viewport,
                 focused_facet_index=self._focused_facet_index,
-                rolling_history=self._history,
             )
 
     @property
@@ -923,6 +1266,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             semantics = self.describe_semantics()
             return DisplayDescription(
                 kind=self._spec.kind,
+                spec=self._spec,
                 size=self.surface_plan.preset,
                 size_choices=self._defaults.layout.size_names,
                 parameter_schema=self._parameter_schema,
@@ -931,6 +1275,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 limits=self._current_display_limits(),
                 viewport=self._viewport,
                 semantics=semantics,
+                selection_subject=self._selection_subject(),
                 fit_models=self.fit_models,
             )
 
@@ -1351,12 +1696,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._focused_facet_index,
                 self._facet_focus_index,
                 self._viewport,
-                self._history,
                 self._layout_revision,
             )
             self._projection = projection
-            if _keeps_history(self._spec):
-                self._history = projection.rolling_history
             self._image_overlay = image_overlay
             self._accepted_fit = accepted_fit
             self._refresh_threshold_classifier()
@@ -1392,7 +1734,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     self._focused_facet_index,
                     self._facet_focus_index,
                     self._viewport,
-                    self._history,
                     self._layout_revision,
                 ) = previous
             try:
@@ -1444,7 +1785,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 )
                 self._facet_focus_index = presentation.previous_facet_focus_index
                 self._viewport = presentation.previous_viewport
-                self._history = presentation.previous_rolling_history
                 self._layout_revision = presentation.previous_layout_revision
             if current_plan != presentation.previous_plan:
                 self._apply_layout_plan(
@@ -2283,24 +2623,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             initial_revision=old_state.revision + 1,
         )
         focused = 0 if isinstance(spec, FacetGridPlot) else None
-        # History belongs to the SIGNAL this session is showing, so it
-        # survives a spec replacement -- switching a panel from a rolling
-        # trace to a distribution of the same shots must not throw the shots
-        # away.  What does not survive is a change to what one history point
-        # IS: a rolling trace whose group or reduction changed reseeds,
-        # because its stored samples were reduced the old way.
-        retained_history: tuple[RollingHistoryPoint, ...] = ()
-        if _keeps_history(spec) and _keeps_history(self._spec):
-            same_sample = not (
-                isinstance(spec, RollingPlot)
-                and isinstance(self._spec, RollingPlot)
-                and (
-                    spec.group != self._spec.group
-                    or spec.reduction != self._spec.reduction
-                )
-            )
-            if same_sample:
-                retained_history = self._history
         projection = FitProjection(
             data=data,
             revision=self.data_revision,
@@ -2310,7 +2632,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 SelectorSnapshot(()),
                 viewport=initial_state.viewport,
                 focused_facet_index=focused,
-                rolling_history=retained_history,
             ),
             unit_registry=self._unit_registry,
             defaults=self._defaults,
@@ -2367,6 +2688,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         with self._render_lock:
             with self._lock:
                 self._assert_open()
+                replacement_thresholds = (
+                    self._classifier_threshold_targets_state()
+                    if threshold_target is _UNSET
+                    else threshold_target
+                )
                 selected_size = self._defaults.layout.validate_preset(
                     self.surface_plan.preset if size is None else size
                 )
@@ -2411,7 +2737,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     self._classifier_overlays,
                     self._classifier_thresholds,
                     self._classifier_gaussian_components,
-                    self._history,
                     self._layout_revision,
                     self._size,
                 )
@@ -2435,17 +2760,24 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._focused_facet_index = focused
                 self._facet_focus_index = None
                 self._accepted_fit = None
-                self._history = (
-                    projection.rolling_history if _keeps_history(spec) else ()
-                )
+                # Threshold choices address distributions by canonical
+                # coordinates.  Positional state cannot cross a semantic
+                # replacement: equal result counts may name wholly different
+                # facets.  The exact old targets captured above are remapped
+                # only after the new projection has resolved its identities.
+                self._classifier_thresholds = ()
+                self._classifier_gaussian_components = ()
                 self._layout_revision += 1
             try:
                 # Layout resolution can reject a spec (for example the facet
                 # cell cap); it must stay inside the rollback envelope so a
                 # rejected replacement never leaves half-committed state.
                 self._refresh_threshold_classifier()
-                if threshold_target is not _UNSET:
-                    self._set_classifier_thresholds_state(threshold_target)
+                if self._threshold_classifier_enabled():
+                    self._set_classifier_thresholds_state(
+                        replacement_thresholds,
+                        discard_unmatched=True,
+                    )
                 renderer.spec = spec
                 plan = self._resolve_plan()
                 renderer.relayout(
@@ -2471,7 +2803,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         self._classifier_overlays,
                         self._classifier_thresholds,
                         self._classifier_gaussian_components,
-                        self._history,
                         self._layout_revision,
                         self._size,
                     ) = previous
@@ -3679,122 +4010,17 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         self,
         state: SelectorState | None = None,
     ) -> SelectionSubject:
-        """Resolve what the current selectors cut, through the projection.
+        """Return the pure subject for the projection that emitted an event."""
 
-        The projection already owns this rule for slicing and units; asking it
-        here keeps one answer rather than a second copy that can disagree.
-        """
-
-        semantic = self._semantic_spec
-        if self._view is None:
-            return SelectionSubject(semantic.kind, None, None)
-        x = self._projected._x_selector_source() if self._has_x_selector_source() else None
-        y = self._projected._y_ref_or_value()
-        x_ref = x if isinstance(x, AxisRef) else None
-        y_ref = y if isinstance(y, AxisRef) else None
-        scope, repeat_index = self._selection_scope(state)
-        return SelectionSubject(
-            semantic.kind,
-            x_ref,
-            y_ref,
-            self._selection_axis_frame(x_ref),
-            self._selection_axis_frame(y_ref),
-            scope,
-            repeat_index,
+        data = self._projection.data
+        schema = snapshot_schema(data) if isinstance(data, OwnedSnapshot) else None
+        return selection_subject_for(
+            schema,
+            self._spec,
+            facet_index=(
+                self._facet_focus_index if state is None else state.facet_index
+            ),
         )
-
-    def _selection_axis_frame(self, ref: AxisRef | None) -> str | None:
-        """The producer coordinate frame of one resolved plot axis."""
-
-        if ref is None or not isinstance(self._projection.data, OwnedSnapshot):
-            return None
-        if ref.domain is AxisDomain.POINT_ROW:
-            return None
-        physical_domain = (
-            "repeat"
-            if ref.domain is AxisDomain.REPEAT
-            else "data"
-            if ref.domain is AxisDomain.DATA
-            else "point"
-        )
-        for label, axis_id, axis, domain in axis_catalog(
-            snapshot_schema(self._projection.data)
-        ):
-            if domain != physical_domain:
-                continue
-            if ref.axis_id is not None and ref.axis_id not in {
-                str(label),
-                str(axis_id),
-            }:
-                continue
-            frame = axis.coordinate_frame
-            return None if frame is None else str(frame)
-        return None
-
-    def _selection_scope(
-        self,
-        state: SelectorState | None,
-    ) -> tuple[tuple[tuple[AxisRef, object], ...], int | None]:
-        """Canonical panel/facet narrowing that existed when a gesture fired."""
-
-        if not isinstance(self._projection.data, OwnedSnapshot):
-            return (), None
-        schema = snapshot_schema(self._projection.data)
-        scope: list[tuple[AxisRef, object]] = []
-        repeat_index: int | None = None
-        for ref, value in getattr(self._spec, "scope", ()):
-            if value == "latest":
-                physical_domain = (
-                    "repeat"
-                    if ref.domain is AxisDomain.REPEAT
-                    else "point"
-                    if ref.domain in {
-                        AxisDomain.POINT_ROW,
-                        AxisDomain.POINT_COORDINATE,
-                        AxisDomain.POINT_DIMENSION,
-                    }
-                    else "data"
-                )
-                matches = tuple(
-                    axis
-                    for _label, axis_id, axis, domain in axis_catalog(schema)
-                    if domain == physical_domain
-                    and (
-                        ref.axis_id is None
-                        or ref.axis_id in {str(axis_id), axis.name}
-                    )
-                )
-                if len(matches) != 1:
-                    raise ValueError("latest scope axis is not uniquely present")
-                value = matches[0].coordinate_at(matches[0].size - 1)
-            if ref.domain is AxisDomain.REPEAT:
-                repeat_index = next(
-                    index
-                    for index in range(schema.repeat_axis.size)
-                    if schema.repeat_axis.coordinate_at(index) == value
-                )
-            else:
-                scope.append((ref, value))
-
-        facet_index = (
-            self._facet_focus_index
-            if state is None
-            else state.facet_index
-        )
-        if isinstance(self._spec, FacetGridPlot) and facet_index is not None:
-            if self._spec.facet.domain is AxisDomain.REPEAT:
-                repeat_index = int(facet_index)
-            else:
-                cell = next(
-                    item
-                    for item in tuple(getattr(self._payload, "cells", ()))
-                    if item.facet_index == facet_index
-                )
-                value = cell.facet_value_canonical
-                if isinstance(value, np.generic):
-                    value = value.item()
-                scope.append((self._spec.facet, value))
-        return tuple(scope), repeat_index
 
     def _classifier_threshold_target_for_index(
         self,
@@ -3810,21 +4036,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             self._selection_subject(state),
             state.value,
         )
-
-    def _has_x_selector_source(self) -> bool:
-        """Whether an x source exists at all, asked before it is resolved.
-
-        A plot whose x is the value quantity or is unassigned has no x axis to
-        name; that is a description, not a failure, so it must not arrive as an
-        exception raised inside an event emission.
-        """
-
-        semantic = self._semantic_spec
-        if isinstance(semantic, HistogramPlot):
-            return True  # resolves to the value quantity, which is not an AxisRef
-        if isinstance(semantic, RollingPlot):
-            return True  # resolves to its ordinal row placeholder
-        return isinstance(getattr(semantic, "x", None), AxisRef)
 
     def selector_data(self, kind: SelectorKind) -> SelectorData:
         """Slice the current immutable snapshot only when explicitly called."""
@@ -4056,7 +4267,13 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             callbacks = tuple(self._viewport_callbacks)
         self._notify_callbacks(
             callbacks,
-            (canonical, display, subject),
+            ViewportEvent(
+                canonical,
+                display,
+                subject,
+                self.data_revision,
+                self.data_generation,
+            ),
         )
         return True
 
@@ -4488,6 +4705,8 @@ __all__ = [
     "SelectionChange",
     "SelectionData",
     "SelectionEvent",
+    "SelectionSubject",
+    "selection_subject_for",
     "SelectorData",
     "SessionRevisions",
 ]

@@ -292,7 +292,7 @@ def test_task_preview_policy_and_typed_output_reference_are_explicit() -> None:
     companion_preview = NodePreviewSpec(
         companion,
         "image",
-        {"fate:frame": 1},
+        {"fate:point_coordinate:frame": 1},
         producer="camera",
         overlay=companion_overlay,
     )
@@ -305,7 +305,9 @@ def test_task_preview_policy_and_typed_output_reference_are_explicit() -> None:
     assert companion_task.node_previews[0].producer == "camera"
     assert companion_task.node_previews[0].overlay is companion_overlay
     with pytest.raises(TypeError):
-        companion_task.node_previews[0].semantic["fate:frame"] = 2
+        companion_task.node_previews[0].semantic[
+            "fate:point_coordinate:frame"
+        ] = 2
 
 
 def test_device_requirements_name_build_arguments() -> None:

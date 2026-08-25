@@ -84,24 +84,6 @@ class FitScope(str, Enum):
     ALL = "all"
 
 
-#: How many history points survive between revisions.  Retention is a memory
-#: bound, deliberately independent of the ``window`` display parameter: the
-#: window selects what is SHOWN, so enlarging it mid-run must immediately
-#: reveal history that was already measured.
-RETAINED_HISTORY_LIMIT = 100_000
-
-#: How many bytes of pooled values the session's history may hold.
-#:
-#: History is what a window looks back over, so it has to keep the VALUES a
-#: revision pooled, not just the scalar a rolling trace plots.  A scoped panel
-#: keeps a handful of numbers per shot; an unscoped image panel would keep a
-#: whole frame, and a hundred of those is gigabytes.  The oldest values are
-#: released first, which is what a window over the LAST n shots wants anyway,
-#: and every point keeps its scalar sample regardless -- those are tiny, and a
-#: rolling trace must not develop holes.
-HISTORY_VALUE_BUDGET_BYTES = 64 << 20
-
-
 @dataclass(frozen=True, slots=True)
 class RollingHistoryPoint:
     """One successfully projected source revision in the session's history.
@@ -208,104 +190,31 @@ def accumulate_history(
     group: AxisRef | None,
     aggregation: Any,
 ) -> tuple[RollingHistoryPoint, ...]:
-    """This session's history of the signal, extended by the current revision.
+    """Project the complete history already present in this one Dataset.
 
-    ONE owner for what history is and when it grows, because both kinds that
-    look back -- a rolling trace and a windowed distribution -- must look back
-    over the same shots.  History is not repeats: repeats are what one
-    publication carries, and a publication that carries R of them contributes
-    R shots to the history exactly once, when it seeds it.
+    Cross-publication retention belongs solely to Runtime's primary-index
+    Dataset.  A non-indexed snapshot may still contain several authored
+    repeats, and those are projected as several samples, but a Plot session
+    never appends a later publication to a private second history.
     """
 
-    if view.has_primary_index:
-        samples = view.rolling_history_samples(
-            group=group,
-            aggregation=aggregation,
+    del projection
+    samples = view.rolling_history_samples(
+        group=group,
+        aggregation=aggregation,
+    )
+    pools = view.pooled_values_by_repeat()
+    return tuple(
+        RollingHistoryPoint(
+            sample,
+            sample.revision if view.has_primary_index else shot_index,
+            values,
+            _moments_of(values),
         )
-        pools = view.pooled_values_by_repeat()
-        return _within_value_budget(
-            [
-                RollingHistoryPoint(
-                    sample, sample.revision, values, _moments_of(values)
-                )
-                for sample, values in zip(samples, pools, strict=True)
-            ][-RETAINED_HISTORY_LIMIT:]
+        for shot_index, (sample, values) in enumerate(
+            zip(samples, pools, strict=True)
         )
-    history = list(projection._context.rolling_history)
-    if not history:
-        # The first revision seeds the full shot history from the repeat
-        # axis: a static snapshot is a complete record, and a live session
-        # starts with its seed data instead of a single point.
-        pooled = view.pooled_values_by_repeat()
-        history.extend(
-            RollingHistoryPoint(sample, shot_index, values, _moments_of(values))
-            for shot_index, (sample, values) in enumerate(
-                zip(
-                    view.rolling_history_samples(
-                        group=group,
-                        aggregation=aggregation,
-                    ),
-                    pooled,
-                    strict=True,
-                )
-            )
-        )
-    elif history[-1].sample.revision != projection._revision:
-        appended = view.pooled_values()
-        moments = _moments_of(appended)
-        # The ungrouped MEAN sample IS the moments: deriving it here keeps
-        # ONE pass over the pool where rolling_sample would run the same
-        # sums again on the same bytes.
-        if group is None and aggregation is Reduction.MEAN and moments:
-            count, total, squares = moments
-            mean = total / count if count else math.nan
-            sem = _sem_from_moments(
-                np.asarray([mean], dtype=np.float64),
-                np.asarray(
-                    [squares / count if count else math.nan],
-                    dtype=np.float64,
-                ),
-                np.asarray([int(count)], dtype=np.int64),
-            )
-            sample = RollingSample(
-                revision=projection._revision,
-                generation=view.samples.generation,
-                values=np.asarray([mean], dtype=np.float64),
-                valid=np.asarray([count > 0 and math.isfinite(mean)]),
-                group_keys=((),),
-                sem=sem,
-            )
-        else:
-            sample = view.rolling_sample(
-                group=group, aggregation=aggregation
-            )
-        history.append(
-            RollingHistoryPoint(
-                sample,
-                history[-1].shot_index + 1,
-                appended,
-                moments,
-            )
-        )
-    return _within_value_budget(history[-RETAINED_HISTORY_LIMIT:])
-
-
-def _within_value_budget(
-    history: list[RollingHistoryPoint],
-) -> tuple[RollingHistoryPoint, ...]:
-    """Release the OLDEST pooled values until the retained bytes fit."""
-
-    budget = HISTORY_VALUE_BUDGET_BYTES
-    kept: list[RollingHistoryPoint] = []
-    for point in reversed(history):
-        values = point.values
-        if values is None:
-            kept.append(point)
-            continue
-        budget -= int(values.nbytes)
-        kept.append(point if budget >= 0 else replace(point, values=None))
-    kept.reverse()
-    return tuple(kept)
+    )
 
 
 def _broadcast_all_true(mask: np.ndarray) -> bool:
@@ -458,7 +367,6 @@ class ProjectionContext:
     selector_snapshot: SelectorSnapshot
     viewport: RectangleRange | None = None
     focused_facet_index: int | None = None
-    rolling_history: tuple[RollingHistoryPoint, ...] = ()
 
     def selector_state(self, kind: SelectorKind) -> SelectorState:
         if not isinstance(kind, SelectorKind):
@@ -601,10 +509,6 @@ class FitProjection:
     @property
     def data(self) -> OwnedSnapshot | PulseTimelineData:
         return self._data
-
-    @property
-    def rolling_history(self) -> tuple[RollingHistoryPoint, ...]:
-        return tuple(getattr(self, "_rolling_history_cache", self._context.rolling_history))
 
     @property
     def viewport(self) -> RectangleRange | None:

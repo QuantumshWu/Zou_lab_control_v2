@@ -51,14 +51,8 @@ def test_histogram_spec_needs_no_axis_declaration() -> None:
         session.close()
 
 
-def test_a_window_pools_past_shots_and_shrinking_it_is_not_destructive() -> None:
-    """The window looks back over the SESSION's shots, not over one publication.
-
-    Eight publications of four values each arrive one at a time.  A window of
-    three pools the last three of them -- twelve values -- and narrowing it to
-    one and widening it back finds those shots still there, because the
-    retained history is bounded by memory policy and never by what is shown.
-    """
+def test_a_nonindexed_window_never_invents_cross_publication_history() -> None:
+    """Only a Runtime primary-index Dataset carries earlier publications."""
 
     session = PlotSession(_snapshot(), HistogramPlot())
     try:
@@ -68,13 +62,12 @@ def test_a_window_pools_past_shots_and_shrinking_it_is_not_destructive() -> None
         for revision in range(1, 8):
             session.update_data(_snapshot(revision=revision))
         payload = session._payload
-        assert int(np.asarray(payload.counts).sum()) == 3 * 8
-        assert len(payload.source_revisions) == 3
+        assert int(np.asarray(payload.counts).sum()) == 8
 
         session.set_parameter("window", 1)
         assert int(np.asarray(session._payload.counts).sum()) == 8
         session.set_parameter("window", 3)
-        assert int(np.asarray(session._payload.counts).sum()) == 3 * 8
+        assert int(np.asarray(session._payload.counts).sum()) == 8
     finally:
         session.close()
 

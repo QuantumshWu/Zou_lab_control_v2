@@ -169,6 +169,15 @@ class LiveBoard:
         future.add_done_callback(finished)
         return future
 
+    def invalidate_presentations(self, panel_ids: Sequence[str]) -> None:
+        """Re-stage unchanged publications whose PlotInput identity changed."""
+
+        selected = tuple(str(value) for value in panel_ids)
+        if not selected:
+            return
+        self._scheduler.invalidate_presentations(selected)
+        self.wake.request_owner_wake()
+
     def commit(self, *, admit_new: bool = True) -> None:
         """Put ready boards on screen.  The GUI thread, and only it.
 

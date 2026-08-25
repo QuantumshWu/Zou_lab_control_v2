@@ -24,8 +24,12 @@ from zlc_plot import (
     FacetGridPlot,
     HistogramPlot,
     ImagePlot,
+    LATEST_COORDINATE,
     PlotKind,
     PlotSession,
+    RollingPlot,
+    SelectionSubject,
+    selection_subject_for,
 )
 from zlc_plot.kinds import AxisRef
 from zlc_plot.selectors import NumericRange, SelectorKind
@@ -109,7 +113,10 @@ def _threshold_facet_snapshot(*, inserted_cell: bool = False) -> object:
     schema = DatasetSchema.create(
         Axis.create("repeat", size=len(samples)),
         PointTable.from_columns(
-            {"site": tuple(sites[index] for index in order)}
+            {
+                "site": tuple(sites[index] for index in order),
+                "region": tuple(100.0 + sites[index] for index in order),
+            }
         ),
         dtype=np.float64,
         generation=f"threshold-target-{int(inserted_cell)}",
@@ -121,8 +128,44 @@ def _threshold_facet_snapshot(*, inserted_cell: bool = False) -> object:
     )
 
 
+def test_selection_subject_strictly_owns_typed_axis_identity() -> None:
+    axis = AxisRef.point("site")
+    subject = SelectionSubject(
+        PlotKind.CURVE,
+        axis,
+        None,
+        scope=((axis, np.float64(2.0)),),
+        repeat_index=np.int64(1),
+    )
+    assert subject.scope == ((axis, 2),)
+    assert type(subject.scope[0][1]) is int
+    assert subject.repeat_index == 1
+    assert type(subject.repeat_index) is int
+
+    with pytest.raises(TypeError, match="plot_kind"):
+        SelectionSubject("curve", axis, None)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="coordinate frame requires an axis"):
+        SelectionSubject(
+            PlotKind.HISTOGRAM,
+            None,
+            None,
+            x_coordinate_frame="camera-pixel",
+        )
+    with pytest.raises(ValueError, match="repeat scope belongs in repeat_index"):
+        SelectionSubject(
+            PlotKind.CURVE,
+            axis,
+            None,
+            scope=((AxisRef.repeat(), 0),),
+        )
+    with pytest.raises(TypeError, match="repeat_index"):
+        SelectionSubject(PlotKind.CURVE, axis, None, repeat_index=True)
+
+
 def test_a_curve_names_the_axis_its_x_bounds_cut() -> None:
-    session = PlotSession(_curve_snapshot(), CurvePlot(x=AxisRef.point("detuning")))
+    snapshot = _curve_snapshot()
+    spec = CurvePlot(x=AxisRef.point("detuning"))
+    session = PlotSession(snapshot, spec)
     try:
         subject = _subjects(
             session,
@@ -132,14 +175,34 @@ def test_a_curve_names_the_axis_its_x_bounds_cut() -> None:
         assert subject.x == AxisRef.point("detuning")
         # A curve's y is the measured value, not an axis anyone can slice by.
         assert subject.y is None
+        description = session.describe_display()
+        assert isinstance(description.selection_subject, SelectionSubject)
+        assert description.selection_subject == subject
+        assert description.selection_subject == selection_subject_for(
+            snapshot.block.schema,
+            spec,
+        )
+        with pytest.raises(TypeError, match="requires SelectionSubject"):
+            replace(description, selection_subject=object())
+        with pytest.raises(ValueError, match="differs from its semantic spec"):
+            replace(
+                description,
+                selection_subject=SelectionSubject(
+                    PlotKind.HISTOGRAM,
+                    None,
+                    None,
+                ),
+            )
     finally:
         session.close()
 
 
 def test_an_image_names_both_axes_its_area_cuts() -> None:
+    snapshot = _image_snapshot()
+    spec = ImagePlot(AxisRef.data("column"), AxisRef.data("row"))
     session = PlotSession(
-        _image_snapshot(),
-        ImagePlot(AxisRef.data("column"), AxisRef.data("row")),
+        snapshot,
+        spec,
     )
     try:
         subject = _subjects(
@@ -151,6 +214,7 @@ def test_an_image_names_both_axes_its_area_cuts() -> None:
         assert subject.y == AxisRef.data("row")
         assert subject.x_coordinate_frame == "camera-pixel"
         assert subject.y_coordinate_frame == "camera-pixel"
+        assert subject == selection_subject_for(snapshot.block.schema, spec)
     finally:
         session.close()
 
@@ -162,7 +226,14 @@ def test_a_histogram_reports_no_axis_because_its_bounds_cut_values() -> None:
     honest answer is that there is no upstream axis to name.
     """
 
-    session = PlotSession(_curve_snapshot(), HistogramPlot())
+    snapshot = _curve_snapshot()
+    spec = HistogramPlot()
+    assert selection_subject_for(snapshot.block.schema, spec) == SelectionSubject(
+        PlotKind.HISTOGRAM,
+        None,
+        None,
+    )
+    session = PlotSession(snapshot, spec)
     try:
         subject = _subjects(
             session,
@@ -171,8 +242,58 @@ def test_a_histogram_reports_no_axis_because_its_bounds_cut_values() -> None:
         assert subject.plot_kind is PlotKind.HISTOGRAM
         assert subject.x is None
         assert subject.y is None
+        assert session.describe_display().selection_subject == subject
     finally:
         session.close()
+
+
+def test_rolling_ordinal_is_not_reported_as_an_upstream_axis() -> None:
+    snapshot = _curve_snapshot()
+    spec = RollingPlot()
+    expected = SelectionSubject(PlotKind.ROLLING, None, None)
+    assert selection_subject_for(snapshot.block.schema, spec) == expected
+
+    session = PlotSession(snapshot, spec)
+    try:
+        assert session.describe_display().selection_subject == expected
+        subject = _subjects(
+            session,
+            lambda: session.set_x_selector(0.0, 2.0),
+        )[-1]
+        assert subject == expected
+    finally:
+        session.close()
+
+
+def test_pure_subject_resolves_tagged_latest_scope_to_canonical_identity() -> None:
+    snapshot = _named_facet_snapshot()
+    site = AxisRef.point("site")
+    spec = CurvePlot(
+        AxisRef.point("detuning"),
+        scope=((site, LATEST_COORDINATE),),
+    )
+    subject = selection_subject_for(snapshot.block.schema, spec)
+    assert subject.scope == ((site, 20),)
+    assert subject.repeat_index is None
+
+
+def test_focused_facet_identity_is_resolved_inside_panel_scope() -> None:
+    snapshot = _threshold_facet_snapshot()
+    site = AxisRef.point("site")
+    region = AxisRef.point("region")
+    spec = FacetGridPlot(
+        site,
+        HistogramPlot(),
+        scope=((region, 120.0),),
+    )
+
+    subject = selection_subject_for(
+        snapshot.block.schema,
+        spec,
+        facet_index=0,
+    )
+
+    assert subject.scope == ((region, 120), (site, 20))
 
 
 def test_the_subject_follows_a_semantic_edit_within_one_session() -> None:
@@ -186,6 +307,7 @@ def test_the_subject_follows_a_semantic_edit_within_one_session() -> None:
         second = _subjects(session, lambda: session.set_x_selector(1.0, 3.0))[-1]
         assert second.plot_kind is PlotKind.HISTOGRAM
         assert second.x is None
+        assert session.describe_display().selection_subject == second
     finally:
         session.close()
 
@@ -236,6 +358,12 @@ def test_panel_and_focused_scope_carry_canonical_event_meaning(
             ((AxisRef.point("site"), 20.0),) if named else ()
         )
         assert event.subject.repeat_index == (None if named else 1)
+        assert session.describe_display().selection_subject == event.subject
+        assert event.subject == selection_subject_for(
+            snapshot.block.schema,
+            spec,
+            facet_index=1 if focused else None,
+        )
         if named and not focused:
             assert event.data_revision == 7
             assert event.data_generation == "selection-subject-run"
@@ -288,6 +416,30 @@ def test_classifier_threshold_targets_follow_coordinates_when_facets_reorder() -
         assert restored.selector_state(SelectorKind.THRESHOLD).value == -0.25
         restored.focus_facet(2)
         assert restored.selector_state(SelectorKind.THRESHOLD).value == 0.75
+
+        # FigureViewer applies semantic edits without replaying a separate
+        # interaction target.  Equal cell counts do not make thresholds for
+        # site coordinates thresholds for region coordinates.
+        region = AxisRef.point("region")
+        description = restored.configure(semantic={"facet": region})
+        assert description.spec.facet == region
+        assert restored._classifier_threshold_targets_state() == ()
+
+        # A live caller may submit its last accepted interaction beside the
+        # same legal semantic edit.  Stale coordinates are discarded rather
+        # than rejecting the spec transaction.
+        site = AxisRef.point("site")
+        restored.configure(
+            semantic={"facet": site},
+            classifier_thresholds=(target_a, target_b),
+        )
+        assert restored._classifier_threshold_targets_state() == (target_a, target_b)
+        description = restored.configure(
+            semantic={"facet": region},
+            classifier_thresholds=(target_a, target_b),
+        )
+        assert description.spec.facet == region
+        assert restored._classifier_threshold_targets_state() == ()
     finally:
         restored.close()
 

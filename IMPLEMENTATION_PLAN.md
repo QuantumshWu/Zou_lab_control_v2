@@ -1,6 +1,6 @@
 # ZLC — Current Implementation Checkpoint
 
-更新时间：2026-08-24
+更新时间：2026-08-25
 
 状态：`CURRENT SOFTWARE COMPLETE / RESIDUAL SWEEP COMPLETE`
 
@@ -23,6 +23,13 @@
   由各自domain owner保存精选artifact，并通过ExecutionContext注册已完成文件。
 - Figure NPZ是primary typed artifact，PNG只是preview。Figure保存exact Plot recipe、overlay、
   viewport和causal lineage graph；FigureViewer与TaskConsole使用同一个Plot host路径。
+- Plot axis/semantic identity已收口为`AxisRef(domain, axis_id)`稳定key；scope只接受tagged
+  latest或tagged typed coordinate value，不再让display label或裸文本控制字进入truth。
+- Runtime是唯一跨publication history owner；active leases的signal-level event/indexed表示变化
+  通过presentation epoch使同signal全部Panel重新投影，不增加scientific publication/revision。
+- PanelState只保存authored target；Live、Frozen和FigureViewer都以Plot成功返回的accepted
+  `DisplayDescription.spec`判断能力与交互。Selector/viewport observation携exact Dataset
+  generation+revision，TaskConsole Console核对后才持久化、镜像或发布derivation。
 
 ## 2. 当前代码收口状态
 
@@ -54,6 +61,8 @@
   typed image overlay；archive先发布，preview后渲染。
 - Panel Save只是公共Figure API的adapter，不再维护第二套writer或restore grammar。
 - FigureViewer必须从archive exact recipe恢复typed input，不按shape推断plot kind。
+- FigureViewer与TaskConsole Live/Frozen使用同一个accepted PlotSpec、parameter、selector/
+  viewport capability contract；Viewer semantic edit同样只在host accept后更新surface。
 - Lineage保存root、event nodes和direct parent IDs；Viewer验证引用、reachability和cycle后
   投影为tree。
 
@@ -119,7 +128,7 @@
 - Device Control当前回归：Workbench完整`425 passed`；Runtime完整加Figure grammar `112 passed`；adapter/camera/scan受影响组`53 passed`；Device Control Qt、风险revision、refresh close guard、in-flight latest-only和demo直接证据均通过。Atom完整回归同时暴露并修复Temperature sibling event record、Feedback输出声明和三条terminal/Stop残余；100-shot virtual Feedback仍为既有`34/35`上限，未用放宽断言冒充通过。
 - FigureViewer当前以formal launcher和`zlc_ui.capture_window`在真实Windows屏幕完成四条1152×653验收：current archive默认Image Monitor、点击Add panel新增Curve、从Setting点击Edit进入共享Fluent `PanelEditorView`、以及多层Flow展开树；四次均保持shared 90% window尺寸和固定左栏。右侧复用TaskConsole `ConsoleBoardView + PanelCardView`并置于白色work surface，支持每panel切saved dataset、alternate plot kind、Setting/remove/order与closable Edit；static Edit只保留Panel/Semantic/Display/Fit。Info标量改为紧包单行readout，真实多行才使用multiline；ASCII Flow删除。固定Plot kind从Setting删除，动态Signal keyed-choice在reconcile写值前更新choice domain。FigureViewer、Panel、Form与Workbench直接聚焦回归`66 passed`。
 - FigureViewer冻结树残余审计：相对`80116b5`无新增production/test文件或production class；production净增562行，其中Viewer presenter +327为multi-panel prepare/configure/atomic swap/retirement，FigureViewer view +97、InfoPane +61、Handle +28为复用board/card/Edit/tree的直接UI owner，shared panel description projection +131由TaskConsole与Viewer两个consumer共同使用，PanelEditor/Form合计+16为static模式与dynamic keyed-choice正确reconcile，demo另净增18行；同时旧Console/card/modal path净删98行。Tests净增122行，只有一个新test function（用户明确报告的loaded-left-pane变宽），其余均扩展既有Viewer/Panel/Edit/atomic cases，全部KEEP且无重复fixture。`dataset_picked/set_datasets/set_figure_*/show_figure/run_host_dialog/kind_read_only`等旧API与ASCII Flow owner搜索为零；旧单panel `_host/dataset/recipe`镜像和unused candidate viewport已删除，新增状态只存在于唯一presenter `panels`、window cards/Edit tabs、固定pane width和tree widgets，不进入archive grammar或第二份plot lifecycle；无deferred残余。
-- Exact Scan Panel恢复当前证据：真实event chunk为`1×1×3×5`、canonical为`2×(65×2×2)×3×5`的Signal经实际SignalPlane与Plot host由真实`field.x=65`触发>64拒绝；拒绝前后Setting均保留`field.x/y/z` fate且不再出现phantom `point`，独立Curve Panel title保持canonical axes，Fluent form在`fit_unavailable`同时仍含三个Semantic controls。精确目标`20×(10×10×10)×3×35`的title authority输出`(20)×(10×10×10)×(3×35)`。多维FacetGrid默认最外层真实scan axis，不再以flattened point rows制造1000 cells或`scope:point`。相同live projection与仅title metadata变化均不reconcile Setting form；固定Plot kind不再进入Setting，FacetGrid只保留可编辑Cell kind；Facet默认、feasibility、真实拒绝与Fluent Setting聚焦证据`22 passed`。
+- Exact Scan Panel恢复当前证据：真实event chunk为`1×1×3×5`、canonical为`2×(65×2×2)×3×5`的Signal经实际SignalPlane与Plot host由真实`field.x=65`触发>64拒绝；拒绝前后Setting均保留`field.x/y/z` fate且不再出现phantom `point`，独立Curve Panel title保持canonical axes，Fluent form在`fit_unavailable`同时仍含三个Semantic controls。精确目标`20×(10×10×10)×3×35`的title authority输出`(20)×(10×10×10)×(3×35)`。多维FacetGrid默认最外层真实scan axis，不再以flattened point rows制造1000 cells或phantom point-row restriction。相同live projection与仅title metadata变化均不reconcile Setting form；固定Plot kind不再进入Setting，FacetGrid只保留可编辑Cell kind；Facet默认、feasibility、真实拒绝与Fluent Setting聚焦证据`22 passed`。
 - Exact Scan terminal/Frozen根修当前证据：真实`20×(10×10×10)×(3×35)`canonical Dataset从partial Live publication开始，原子提交`field.x→Facet, field.y→Y, field.z→X, pair/site→Reduced`后，Live、运行中Frozen及terminal seal后重新创建的Frozen host均保持同一schema fingerprint、物理shape `(20,1000,3,35)`、resolved roles和`[-0.5,9.5]×[-0.5,9.5]` limits。根因三处均删除：multi-fate逐行修复导致回退默认35×3、host accept后以1×1×3×35 event schema覆盖canonical surface、以及histogram threshold/shape-only viewport无条件重放到image。当前实现使用atomic fate assignment、canonical accept metadata、resolved capability interaction和schema/spec view identity；Plot semantic/feasibility/facet/threshold聚焦`52 passed`，Workbench canonical/Frozen/retarget/save交叉聚焦`10 passed`。
 - 本cut冻结树残余审计：无新增production/test文件或production class；production净增250行，其中`zlc_plot.semantics`净增54行替换原逐行fate repair，Workbench Console净增196行用于唯一resolved-spec capability、interaction normalization、canonical accept及完整view identity。三个新增Console helper分别有4/3/1个同owner consumer，原`_panel_view_identity`直接升级而非平行实现；`composed_spec`仍是唯一fate composition owner。Tests净增261行且只新增1个test function（明确报告且order-sensitive的atomic fate bug），其余扩展既有cell-kind与Exact Scan用例，以真实大shape覆盖Live→terminal→Frozen、stale histogram callback和viewport invalidation；全部KEEP。event-snapshot metadata回灌、无能力threshold replay及shape-only viewport搜索为零；无compatibility path或deferred残余。
 - 长Task partial artifacts：Runtime在worker failure/Stop边界调用domain writer；Feedback普通异常从最后完成candidate生成6组Figure后rollback，Temperature从已提交survival保存partial curve/Figure，Calibration从最新完整三帧cycle保存partial capture（分析完成则保存完整报告）。`run.json`只索引这些已完成文件，不再是失败run唯一内容。

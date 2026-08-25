@@ -12,6 +12,8 @@ could therefore only ever run once.
 
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 import pytest
 
@@ -231,6 +233,73 @@ def test_begin_generation_on_an_untouched_generation_is_the_same_run() -> None:
         # is the caller state machine's job, which is why NodeHost has _active.
         assert plane.begin_generation(node) == first
     finally:
+        plane.close()
+
+
+def test_concurrent_generation_starters_share_one_installed_successor(
+    monkeypatch,
+) -> None:
+    plane = SignalDataPlane()
+    node = _Producer()
+    start = threading.Barrier(3)
+    withdraw_arrived = threading.Barrier(2)
+    successor_returned = threading.Event()
+    role_lock = threading.Lock()
+    leader: list[int] = []
+    results: list[object] = []
+    errors: list[BaseException] = []
+    real_withdraw = plane._withdraw_owner
+
+    def gated_withdraw(owner_id: str):
+        identity = threading.get_ident()
+        with role_lock:
+            if not leader:
+                leader.append(identity)
+        withdraw_arrived.wait(timeout=2.0)
+        if identity != leader[0]:
+            assert successor_returned.wait(2.0), (
+                "first starter did not return its successor"
+            )
+        return real_withdraw(owner_id)
+
+    monkeypatch.setattr(plane, "_withdraw_owner", gated_withdraw)
+    try:
+        plane.begin_generation(node)
+        _publish(plane, node, 1)
+
+        def start_successor() -> None:
+            identity = threading.get_ident()
+            try:
+                start.wait(timeout=2.0)
+                generation = plane.begin_generation(node)
+                results.append(generation)
+                if leader and identity == leader[0]:
+                    successor_returned.set()
+            except BaseException as error:
+                errors.append(error)
+                successor_returned.set()
+
+        workers = tuple(
+            threading.Thread(target=start_successor) for _index in range(2)
+        )
+        for worker in workers:
+            worker.start()
+        start.wait(timeout=2.0)
+        for worker in workers:
+            worker.join(2.0)
+
+        assert all(not worker.is_alive() for worker in workers)
+        assert not errors
+        assert len(results) == 2
+        assert results[0] == results[1]
+
+        value = plane.commit_live(
+            node,
+            {"frames": _commit(node, revision=2, total=1, origin=0)},
+        )[node.signal_key("frames")]
+        assert value.snapshot.ref.stream_generation == results[0]
+    finally:
+        successor_returned.set()
         plane.close()
 
 

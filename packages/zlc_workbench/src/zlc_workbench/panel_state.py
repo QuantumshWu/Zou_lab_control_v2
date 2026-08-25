@@ -18,11 +18,51 @@ from zlc_plot.semantics import composed_spec
 __all__ = [
     "PanelFrozenData",
     "PanelState",
-    "draws_image_surfaces",
+    "allows_image_overlay",
+    "panel_data_shape",
     "panel_state_from_description",
     "panel_surface_from_description",
     "project_panel_state",
 ]
+
+
+def panel_data_shape(
+    schema: object,
+    surface: Mapping[str, object],
+) -> dict[str, object]:
+    """Canonical three-part Dataset shape plus the accepted pinned fates."""
+
+    from zlc_plot.semantics import (
+        is_scope_fate,
+        schema_structure,
+        scope_coordinate_from_fate,
+    )
+    from zlc_data import LATEST_COORDINATE
+
+    def pinned_text(field: Mapping[str, object]) -> str:
+        value = field.get("value")
+        for label, choice_value in tuple(field.get("choices") or ()):
+            if choice_value == value:
+                return str(label).removeprefix("= ")
+        coordinate = scope_coordinate_from_fate(value)
+        if coordinate is LATEST_COORDINATE:
+            return "Latest"
+        if coordinate is None:
+            return "(null)"
+        if isinstance(coordinate, (int, float)):
+            return f"{coordinate:g}"
+        return str(coordinate)
+
+    pinned = tuple(
+        (str(field["label"]), pinned_text(field))
+        for field in tuple(surface.get("semantic", ()))
+        if str(field.get("key", "")).startswith("fate:")
+        and is_scope_fate(field.get("value"))
+    )
+    return {
+        "data_structure": schema_structure(schema),
+        "data_scope": pinned,
+    }
 
 
 def _semantic_entries(description: object) -> tuple[dict[str, object], ...]:
@@ -142,15 +182,16 @@ def panel_state_from_description(
         str(entry["key"]): entry.get("value")
         for entry in tuple(surface.get("semantic", ()))
     }
-    semantic = {
-        name: semantic_values.get(name, value)
-        for name, value in state.semantic.items()
-    }
-    display = dict(state.display)
-    display.update({
+    # Semantic state is the complete assignment of the ONE currently
+    # accepted vocabulary.  Keeping only keys that happened to be authored
+    # left defaults absent, while keeping foreign keys across cell kinds made
+    # misspellings indistinguishable from old vocabulary.  A successful Plot
+    # description is the exact current table and replaces it wholesale.
+    semantic = semantic_values
+    display = {
         str(entry["key"]): entry.get("value")
         for entry in tuple(surface.get("display", ()))
-    })
+    }
     return replace(state, semantic=semantic, display=display)
 
 
@@ -170,6 +211,21 @@ def _plain_state(values: Mapping[str, Any]) -> Mapping[str, Any]:
     """Deep-own one panel-state mapping without a parallel mutable tree."""
 
     return _state_value(values)
+
+
+def _validated_selector_document(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    from .selection import (
+        panel_selection_document,
+        panel_selection_from_document,
+    )
+
+    incoming = dict(value)
+    if not incoming:
+        return _plain_state({})
+    selection = panel_selection_from_document(incoming)
+    if selection is None:
+        raise ValueError("non-empty panel selector decoded as empty")
+    return _plain_state(panel_selection_document(selection))
 
 
 def _document_value(value: Any) -> Any:
@@ -218,12 +274,11 @@ def project_panel_state(
     """What this panel MEANS on ``spec``: the composed spec and the two bags
     that spec will accept.
 
-    A panel's records are the complete assignment of whatever vocabulary it
-    last settled under, and an operator crossing vocabularies -- a changed
-    kind, a changed facet cell kind -- is doing something legal.  So a name
-    the new vocabulary never declared is not an error and not a value: it
-    stays in the panel's bag, so switching back restores it, and it is not
-    offered to a spec that has no field for it.
+    A panel's record is the complete assignment of its current vocabulary.
+    Signal and cell-kind transitions clear their old semantic assignment at
+    the Console owner.  Within that current vocabulary, unknown names and
+    illegal values are errors rather than compatibility state to be silently
+    ignored.
 
     THE projection, for every consumer.  It used to exist only at the mount,
     and only for the appearance bag: the semantic bag was handed over whole,
@@ -240,58 +295,43 @@ def project_panel_state(
     candidate = spec
     semantic: dict[str, Any] = {}
     saved_values = dict(state.semantic)
-    # The kind comes first and alone: it decides which vocabulary the rest of
-    # the record is even spoken in.
     if "kind" in saved_values:
-        description = describe_semantics(schema, candidate)
-        saved_kind = saved_values.pop("kind")
-        if description.declares("kind"):
-            value = restore_semantic_choice(description, "kind", saved_kind)
-            candidate = composed_spec(schema, candidate, {"kind": value})
-            semantic["kind"] = value
+        raise ValueError("PanelState semantic cannot override its fixed plot kind")
     # Everything else is ONE edit.  Applied one field at a time, a record can
     # describe a plot that no order of gestures can reach -- a grid whose
     # facet and cell x trade places collides with itself either way round --
     # and the panel silently came back as something else.
     description = describe_semantics(schema, candidate)
-    wanted = {
-        str(name): restore_semantic_choice(description, str(name), saved)
-        for name, saved in saved_values.items()
-        if description.declares(str(name))
-    }
+    wanted: dict[str, object] = {}
+    for name, saved in saved_values.items():
+        key = str(name)
+        if not description.declares(key):
+            raise KeyError(key)
+        value = restore_semantic_choice(description, key, saved)
+        field = description.field(key)
+        if not any(value == choice for choice in field.choice_values):
+            raise ValueError(
+                f"semantic field {key!r} value is outside this plot vocabulary"
+            )
+        wanted[key] = value
     if wanted:
-        try:
-            candidate = composed_spec(schema, candidate, wanted)
-            semantic.update(wanted)
-        except Exception:
-            # The record was written in another vocabulary and does not
-            # describe a plot this one can be: an image cell cannot take the
-            # curve cell's single axis and keep its own y, and the whole edit
-            # is refused as a collision.  The operator asked for this kind, so
-            # the kind wins: whatever still composes is kept, and the rest
-            # stays in the bag for the way back.  One at a time only here --
-            # the whole edit is the rule, this is what is left when the whole
-            # edit cannot exist at all.
-            for name, value in wanted.items():
-                try:
-                    trial = composed_spec(schema, candidate, {name: value})
-                except Exception:
-                    continue
-                candidate = trial
-                semantic[name] = value
+        # One state, one composition.  A contradictory table is rejected as a
+        # table; applying the subset that happened to iterate first invented a
+        # valid-looking spec the operator never authored.
+        candidate = composed_spec(schema, candidate, wanted)
+        semantic.update(wanted)
     parameters = parameter_schema_for(
         candidate, style=DEFAULTS.style
     ).declared_subset(dict(state.display))
     return candidate, semantic, parameters
 
 
-def draws_image_surfaces(kind: str, cell_kind: str) -> bool:
-    """Whether the surfaces this declaration paints are images.
+def allows_image_overlay(kind: str, cell_kind: str) -> bool:
+    """Whether an unbound authored identity may legally carry an overlay.
 
-    A FacetGrid is a layout: its CELLS are the pictures, so a grid of image
-    cells paints images and may carry the site overlay.  An empty cell kind
-    means the data decides, and a camera cycle decides image -- offering the
-    overlay there is what lets an operator annotate frame_0 | frame_1 at all.
+    Empty FacetGrid cell kind means the data has not decided yet, so admission
+    must allow an overlay draft.  The resolved Plot capability projected to UI
+    later decides whether the field is actually offered/applied.
     """
 
     if kind == PlotKind.IMAGE.value:
@@ -369,7 +409,11 @@ class PanelState:
             "published_outputs",
             _plain_state(published_outputs),
         )
-        object.__setattr__(self, "selector", _plain_state(self.selector))
+        object.__setattr__(
+            self,
+            "selector",
+            _validated_selector_document(self.selector),
+        )
         object.__setattr__(
             self,
             "classifier_thresholds",
@@ -386,7 +430,7 @@ class PanelState:
                 raise ValueError("only a FacetGrid panel can open one cell")
         object.__setattr__(self, "focused_cell", focused_cell)
         overlay_signal = str(self.overlay_signal).strip()
-        if overlay_signal and not draws_image_surfaces(kind, cell_kind):
+        if overlay_signal and not allows_image_overlay(kind, cell_kind):
             raise ValueError(
                 "only a panel that paints image surfaces can select an overlay"
             )
@@ -498,8 +542,3 @@ class PanelFrozenData:
     plot_input: object | None = None
     lineage: Mapping[str, Any] = field(default_factory=dict)
     overlay: Mapping[str, Any] = field(default_factory=dict)
-    #: The coherent freeze this panel was frozen FROM.  Edit shows one exact
-    #: moment, and a panel may read more than one signal of it (an image and
-    #: the judgement annotating it), so the moment -- not one publication of
-    #: it -- is what has to be kept.
-    front: object | None = None

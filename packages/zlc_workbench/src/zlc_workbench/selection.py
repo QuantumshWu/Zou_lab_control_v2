@@ -32,12 +32,14 @@ Two constraints shaped the implementation and are easy to undo by accident:
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from threading import Lock
 from typing import Any
 
 import numpy as np
 from zlc_plot import (
     NumericRange,
+    SelectionSubject,
     SelectorKind,
 )
 from zlc_plot.selectors import RectangleRange, SelectorState as PlotSelectorState
@@ -49,18 +51,41 @@ from zlc_runtime import (
     SignalPublication,
     SelectionRange,
     SelectionState,
+    selection_output_catalog,
 )
 from zlc_runtime.selection_bridge import FacetCondition
 
 
 __all__ = [
     "PlotSelectionSource",
+    "PlotSelectionObservation",
+    "PlotViewportObservation",
     "panel_selection_document",
     "panel_selection_from_document",
+    "panel_selection_matches_subject",
+    "panel_selection_derives_signal",
+    "panel_selection_output_catalog",
     "panel_plot_selectors",
     "attach_selection_bridge",
-    "subscribe_committed_selection",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class PlotSelectionObservation:
+    """One panel selector event plus the exact data moment it was drawn on."""
+
+    change: SelectionChange
+    state: SelectionState
+    data_generation: str | None
+    data_revision: int
+
+
+@dataclass(frozen=True, slots=True)
+class PlotViewportObservation:
+    state: SelectionState | None
+    display: object | None
+    data_generation: str | None
+    data_revision: int
 
 
 #: Plot kinds the runtime can derive from.  Rolling x is plot-owned history,
@@ -185,6 +210,89 @@ def panel_plot_selectors(
     return tuple(states)
 
 
+def panel_selection_matches_subject(
+    selection: SelectionState,
+    subject: SelectionSubject,
+) -> bool:
+    """Whether a stored canonical selection still names this exact surface.
+
+    Plot owns the subject.  Workbench only translates that immutable subject
+    into Runtime's neutral range/facet vocabulary and compares the result;
+    it never reconstructs Histogram, scope or facet semantics from a spec.
+    """
+
+    if not isinstance(selection, SelectionState):
+        raise TypeError("selection must be SelectionState")
+    if not isinstance(subject, SelectionSubject):
+        raise TypeError("subject must be SelectionSubject")
+    plot_kind = _PLOT_KINDS.get(_name_of(subject.plot_kind))
+    if plot_kind is None or selection.plot_kind != plot_kind:
+        return False
+    dummy = NumericRange(0.0, 1.0)
+    try:
+        if selection.selector_kind == "x_range":
+            expected_ranges = (
+                _range(
+                    subject.x,
+                    dummy,
+                    "x",
+                    subject.x_coordinate_frame,
+                ),
+            )
+        elif selection.selector_kind == "area":
+            if subject.x is None or subject.y is None:
+                return False
+            expected_ranges = (
+                _range(subject.x, dummy, "x", subject.x_coordinate_frame),
+                _range(subject.y, dummy, "y", subject.y_coordinate_frame),
+            )
+        else:
+            return False
+        expected_facets, expected_repeat = _subject_scope(subject)
+    except _Unbridgeable:
+        return False
+
+    def range_identity(item: SelectionRange) -> tuple[str, str, str | None]:
+        return item.domain, item.axis, item.coordinate_frame
+
+    actual_facets = {
+        condition.axis: condition.value for condition in selection.facets
+    }
+    wanted_facets = {
+        condition.axis: condition.value for condition in expected_facets
+    }
+    return bool(
+        tuple(map(range_identity, selection.ranges))
+        == tuple(map(range_identity, expected_ranges))
+        and len(actual_facets) == len(selection.facets)
+        and actual_facets == wanted_facets
+        and selection.repeat_index == expected_repeat
+    )
+
+
+def panel_selection_output_catalog(
+    subject: SelectionSubject | None,
+) -> tuple[tuple[str, str], ...]:
+    """Runtime outputs this accepted surface can actually derive."""
+
+    if subject is None:
+        return ()
+    if not isinstance(subject, SelectionSubject):
+        raise TypeError("subject must be SelectionSubject or None")
+    if subject.x is None:
+        return ()
+    selector_kind = "area" if subject.y is not None else "x_range"
+    return selection_output_catalog(selector_kind)
+
+
+def panel_selection_derives_signal(selection: SelectionState) -> bool:
+    """Whether this panel-local selector also names upstream Dataset axes."""
+
+    if not isinstance(selection, SelectionState):
+        raise TypeError("selection must be SelectionState")
+    return all(item.domain != "value" for item in selection.ranges)
+
+
 def _apply_panel_selection(host: Any, selection: SelectionState) -> object:
     """Project one panel-owned canonical selection onto a plot surface."""
 
@@ -240,7 +348,6 @@ class PlotSelectionSource:
         on_threshold: Callable[[Any], object] | None = None,
     ) -> None:
         self._host = host
-        self._states: dict[str, SelectionState] = {}
         self._releases: list[Callable[[], None]] = []
         self._subscription_lock = Lock()
         self._closed = False
@@ -262,24 +369,17 @@ class PlotSelectionSource:
 
     # ---------------------------------------------------------- runtime ports
 
-    def subscribe_selection(
+    def subscribe_observation(
         self,
-        callback: Callable[[SelectionChange, SelectionState], object],
+        callback: Callable[[PlotSelectionObservation], object],
     ) -> Callable[[], None]:
-        """Report committed and removed selections as the runtime's values.
+        """Report panel-owned regions with their exact rendered data identity."""
 
-        A drag in progress is deliberately not reported: deriving from every
-        intermediate position publishes a stream of answers nobody asked for
-        and makes the plane's history unreadable.  The operator's answer is
-        where they let go.  Intermediate positions are still translated, so the
-        state this serves stays current, and a translation failure is visible
-        before the operator commits rather than after.
-        """
+        if not callable(callback):
+            raise TypeError("selection observation callback must be callable")
 
         def _on_selection(event: object) -> None:
             if _selector_kind_of(event) in _POINT_SELECTOR_KINDS:
-                # Derives nothing, records no failure -- and is still an
-                # answer about this panel, so whoever owns the panel hears it.
                 if (
                     self._on_threshold is not None
                     and _selector_kind_of(event) == "threshold"
@@ -290,33 +390,40 @@ class PlotSelectionSource:
                     )
                 return
             if _name_of(event.subject.plot_kind) == "rolling":
-                # Rolling x is the plot's cross-revision history ordinal, not
-                # an axis of the current source snapshot.
                 self._last_error = None
-                self._states.pop(_selector_kind_of(event), None)
                 return
             change = _change_of(event)
             try:
                 state = self._translate(event)
             except _Unbridgeable as error:
                 self._last_error = error
-                self._states.pop(_selector_kind_of(event), None)
                 return
             self._last_error = None
-            if change is SelectionChange.REMOVED:
-                self._states.pop(state.selector_kind, None)
-            else:
-                self._states[state.selector_kind] = state
             if change in {SelectionChange.COMMITTED, SelectionChange.REMOVED}:
-                self._deliver(callback, change, state)
+                self._deliver(
+                    callback,
+                    PlotSelectionObservation(
+                        change,
+                        state,
+                        (
+                            None
+                            if event.data_generation is None
+                            else str(event.data_generation)
+                        ),
+                        int(event.data_revision),
+                    ),
+                )
 
         return self._install(self._host.subscribe_selection, _on_selection)
 
-    def subscribe_viewport(
+    def subscribe_viewport_observation(
         self,
-        callback: Callable[[SelectionState, object | None], object],
+        callback: Callable[[PlotViewportObservation], object],
     ) -> Callable[[], None]:
-        """Report zoom/pan as the same canonical range used by a producer."""
+        """Report a viewport with the exact rendered data identity."""
+
+        if not callable(callback):
+            raise TypeError("viewport observation callback must be callable")
 
         def _on_viewport(event: object) -> None:
             try:
@@ -325,8 +432,19 @@ class PlotSelectionSource:
                 self._last_error = error
                 return
             self._last_error = None
-            if state is not None:
-                self._deliver(callback, state, display)
+            self._deliver(
+                callback,
+                PlotViewportObservation(
+                    state,
+                    display,
+                    (
+                        None
+                        if event.data_generation is None
+                        else str(event.data_generation)
+                    ),
+                    int(event.data_revision),
+                ),
+            )
 
         return self._install(self._host.subscribe_viewport, _on_viewport)
 
@@ -374,20 +492,6 @@ class PlotSelectionSource:
         except Exception as error:
             self._last_error = error
 
-    def selector_data(self, kind: str) -> SelectionState:
-        """The current state of one selector, as the runtime's value.
-
-        Served from the event stream rather than by asking the plot, because
-        the bridge calls this while handling a callback that may be running on
-        the plot's own worker thread.  It is not a cache of a separate truth:
-        the plot's every selector change passes through here first.
-        """
-
-        state = self._states.get(str(kind))
-        if state is None:
-            raise KeyError(f"no {kind} selector is current on this panel")
-        return state
-
     # ------------------------------------------------------------- life cycle
 
     def close(self) -> None:
@@ -399,7 +503,6 @@ class PlotSelectionSource:
             self._releases.clear()
         for release in releases:
             release()
-        self._states.clear()
 
     # ---------------------------------------------------------------- private
 
@@ -559,104 +662,79 @@ def attach_selection_bridge(
     request_owner_wake: Callable[[], object] | None = None,
     initial_selection: SelectionState | None = None,
     initial_publication: SignalPublication | None = None,
-    on_committed: Callable[[SelectionState], object] | None = None,
-    on_removed: Callable[[SelectionState], object] | None = None,
-    on_viewport: Callable[[SelectionState, object | None], object] | None = None,
+    on_observation: Callable[
+        [SelectionBridge, PlotSelectionObservation, SignalPublication],
+        object,
+    ],
     on_threshold: Callable[[Any], object] | None = None,
 ) -> tuple[SelectionBridge, PlotSelectionSource]:
-    """Connect one panel's gestures to the plane, deriving as they commit.
+    """Resolve exact observations for the interaction owner that commits them.
 
-    ``source_publication_for`` resolves a fit's exact parent publication by
-    data revision — the panel port that rendered the fit is the causal
-    holder, so the console passes its port's resolver here.
+    ``source_publication_for`` resolves an event's exact parent publication by
+    data revision.  Without a presentation-side holder, only the plane's
+    current publication may answer, and only when both its generation and
+    sequence match the observation exactly.
 
     Returns both so the caller can close them: the bridge outlives any single
     selection, and the subscription outlives the bridge only if it leaks.
     """
 
     source = PlotSelectionSource(host, on_threshold=on_threshold)
+    if not callable(on_observation):
+        raise TypeError("on_observation must be callable")
     bridge = SelectionBridge(
         plane,
         source_signal,
-        source,
         source,
         bridge_id=bridge_id,
         source_publication_for=source_publication_for,
         request_owner_wake=request_owner_wake,
     )
+
+    def exact_publication(observation: PlotSelectionObservation):
+        publication = (
+            source_publication_for(observation.data_revision)
+            if source_publication_for is not None
+            else plane.latest_publication(source_signal)
+        )
+        if publication is None:
+            return None
+        if not isinstance(publication, SignalPublication):
+            raise TypeError(
+                "selection publication resolver must return SignalPublication or None"
+            )
+        event_ref = publication.event_ref
+        generation = getattr(event_ref.generation, "value", event_ref.generation)
+        expected_generation = observation.data_generation
+        if (
+            (None if generation is None else str(generation))
+            != (
+                None
+                if expected_generation is None
+                else str(expected_generation)
+            )
+            or int(event_ref.sequence) != observation.data_revision
+        ):
+            return None
+        return publication
+
+    def route_observation(observation: PlotSelectionObservation) -> None:
+        publication = exact_publication(observation)
+        if publication is None:
+            return
+        on_observation(bridge, observation, publication)
+
     try:
         bridge.start(
             initial_selection=initial_selection,
             initial_publication=initial_publication,
         )
+        source.subscribe_observation(route_observation)
     except BaseException:
         bridge.close()
         source.close()
         raise
-    if on_committed is not None or on_removed is not None:
-        if on_committed is not None and not callable(on_committed):
-            bridge.close()
-            source.close()
-            raise TypeError("on_committed must be callable or None")
-        if on_removed is not None and not callable(on_removed):
-            bridge.close()
-            source.close()
-            raise TypeError("on_removed must be callable or None")
-
-        def _on_selection(
-            change: SelectionChange,
-            selection: SelectionState,
-        ) -> None:
-            if change is SelectionChange.COMMITTED and on_committed is not None:
-                on_committed(selection)
-            elif change is SelectionChange.REMOVED and on_removed is not None:
-                on_removed(selection)
-
-        source.subscribe_selection(_on_selection)
-    if on_viewport is not None:
-        source.subscribe_viewport(on_viewport)
     return bridge, source
-
-
-def subscribe_committed_selection(
-    host: Any,
-    callback: Callable[[SelectionState], object],
-    *,
-    on_removed: Callable[[SelectionState], object] | None = None,
-    on_viewport: Callable[[SelectionState, object | None], object] | None = None,
-    on_threshold: Callable[[Any], object] | None = None,
-) -> PlotSelectionSource:
-    """Translate committed gestures without publishing a derived signal.
-
-    Panel Edit uses a frozen plotting host: its selector updates the direct
-    producer draft, but must not create a second runtime derivation beside the
-    live monitor panel.  The returned source owns the host subscription and is
-    the one object the caller closes with that frozen surface.
-    """
-
-    if not callable(callback):
-        raise TypeError("callback must be callable")
-    if on_removed is not None and not callable(on_removed):
-        raise TypeError("on_removed must be callable or None")
-    source = PlotSelectionSource(host, on_threshold=on_threshold)
-
-    def _on_selection(
-        change: SelectionChange,
-        selection: SelectionState,
-    ) -> None:
-        if change is SelectionChange.COMMITTED:
-            callback(selection)
-        elif change is SelectionChange.REMOVED and on_removed is not None:
-            on_removed(selection)
-
-    try:
-        source.subscribe_selection(_on_selection)
-        if on_viewport is not None:
-            source.subscribe_viewport(on_viewport)
-    except Exception:
-        source.close()
-        raise
-    return source
 
 
 # --------------------------------------------------------------- translation
@@ -669,6 +747,14 @@ def _range(
     coordinate_frame: str | None = None,
 ) -> SelectionRange:
     if axis is None:
+        if role == "x":
+            return SelectionRange(
+                axis="",
+                lower=float(bounds.low),
+                upper=float(bounds.high),
+                coordinate_frame=coordinate_frame,
+                domain="value",
+            )
         raise _Unbridgeable(
             f"this plot's {role} bounds cut no named upstream axis, so there is "
             "nothing to select on"
@@ -712,7 +798,12 @@ def _subject_scope(
 
 
 def _viewport_state(event: object) -> tuple[SelectionState | None, object | None]:
-    canonical, display, subject = event
+    if hasattr(event, "canonical"):
+        canonical = event.canonical
+        display = event.display
+        subject = event.subject
+    else:
+        canonical, display, subject = event
     if _name_of(subject.plot_kind) == "rolling":
         return None, display
     plot_kind = _PLOT_KINDS.get(_name_of(subject.plot_kind))

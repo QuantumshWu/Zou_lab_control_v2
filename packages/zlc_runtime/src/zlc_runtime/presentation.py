@@ -881,6 +881,17 @@ class BoardScheduler:
         self._arbiter.tick_boundary()
         return front
 
+    def invalidate_presentations(self, panel_ids: Sequence[str]) -> None:
+        """Mark unchanged publications owed after their Dataset view changed."""
+
+        if self._closed:
+            return
+        active = set(self._port_map())
+        for panel_id in panel_ids:
+            selected = str(panel_id)
+            if selected in active:
+                self._admission_owed.add(selected)
+
     def stage_owed(self, *, admit_new: bool = True) -> SignalFront:
         """Stage already-due surfaces on the completion wake that makes them ready.
 

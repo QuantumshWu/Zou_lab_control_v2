@@ -32,13 +32,13 @@ def test_seeded_history_numbers_shots_from_zero() -> None:
         session.close()
 
 
-def test_live_revisions_extend_the_shot_axis_monotonically() -> None:
+def test_nonindexed_revisions_replace_instead_of_extending_the_shot_axis() -> None:
     session = PlotSession(_snapshot(0), RollingPlot())
     try:
         session.update_data(_snapshot(1))
         session.update_data(_snapshot(2))
         x = np.asarray(session._payload.series[0].x.canonical)
-        np.testing.assert_array_equal(x, np.arange(8.0))
+        np.testing.assert_array_equal(x, np.arange(6.0))
     finally:
         session.close()
 
@@ -71,13 +71,14 @@ def test_area_selector_display_coordinates_are_identity() -> None:
 
 
 def test_window_slides_forward_keeping_absolute_indices() -> None:
-    session = PlotSession(_snapshot(0), RollingPlot())
+    window = 100
+    total = window + 8
+    session = PlotSession(
+        _snapshot(0, repeats=total),
+        RollingPlot(),
+        parameters={"window": window},
+    )
     try:
-        window = int(session.display_state["window"])
-        total = 6
-        for revision in range(1, window + 3):
-            session.update_data(_snapshot(revision))
-            total += 1
         x = np.asarray(session._payload.series[0].x.canonical)
         assert x.size == min(window, total)
         # The window shows the most recent shots with their absolute indices.
@@ -94,15 +95,13 @@ def test_shot_axis_frames_the_full_window_from_the_first_revision() -> None:
     grows rightward inside it, and the frame slides only once it is full.
     """
 
-    session = PlotSession(_snapshot(0, repeats=1), RollingPlot(), parameters={"window": 20})
+    session = PlotSession(
+        _snapshot(0, repeats=30),
+        RollingPlot(),
+        parameters={"window": 20},
+    )
     try:
         axes = session._renderer.primary_axes
-        assert tuple(map(float, axes.get_xlim())) == (0.0, 19.0)
-        for revision in range(1, 4):
-            session.update_data(_snapshot(revision, repeats=1))
-        assert tuple(map(float, axes.get_xlim())) == (0.0, 19.0)
-        for revision in range(4, 30):
-            session.update_data(_snapshot(revision, repeats=1))
         assert tuple(map(float, axes.get_xlim())) == (10.0, 29.0)
     finally:
         session.close()
@@ -116,17 +115,13 @@ def test_window_selects_display_without_truncating_retention() -> None:
     reveal them again.
     """
 
-    session = PlotSession(_snapshot(0), RollingPlot())
+    session = PlotSession(_snapshot(0, repeats=14), RollingPlot())
     try:
-        for revision in range(1, 8):
-            session.update_data(_snapshot(revision))
-        # 6 seeded + 7 live shots recorded so far.
         session.set_parameter("window", 4)
         x = np.asarray(session._payload.series[0].x.canonical)
-        np.testing.assert_array_equal(x, np.arange(9.0, 13.0))
+        np.testing.assert_array_equal(x, np.arange(10.0, 14.0))
 
-        # A commit under the small window keeps the full record.
-        session.update_data(_snapshot(8))
+        # Shrinking changes only the view over this Runtime-supplied Dataset.
         session.set_parameter("window", 100)
         x = np.asarray(session._payload.series[0].x.canonical)
         np.testing.assert_array_equal(x, np.arange(14.0))
@@ -143,16 +138,14 @@ def test_replace_spec_keeps_history_for_an_equivalent_rolling_spec() -> None:
 
     from zlc_plot import Reduction
 
-    session = PlotSession(_snapshot(0), RollingPlot())
+    session = PlotSession(_snapshot(0, repeats=10), RollingPlot())
     try:
-        for revision in range(1, 5):
-            session.update_data(_snapshot(revision))
         session.replace_spec(RollingPlot())
         x = np.asarray(session._payload.series[0].x.canonical)
         np.testing.assert_array_equal(x, np.arange(10.0))
 
         session.replace_spec(RollingPlot(reduction=Reduction.MIN))
         x = np.asarray(session._payload.series[0].x.canonical)
-        np.testing.assert_array_equal(x, np.arange(6.0))
+        np.testing.assert_array_equal(x, np.arange(10.0))
     finally:
         session.close()

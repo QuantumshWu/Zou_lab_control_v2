@@ -79,6 +79,43 @@ def schema_data_axes(schema: DatasetSchema) -> tuple[AxisSpec, ...]:
     return tuple(schema.cell_schema.data_axes)
 
 
+def schema_data_axis(
+    schema: DatasetSchema,
+    reference: str,
+) -> tuple[int, AxisSpec]:
+    """Resolve one dense axis by exact id, then by one unambiguous name.
+
+    ``AxisRef.data`` historically accepts both spellings.  Searching them in
+    one ``id == ref or name == ref`` predicate makes declaration order decide
+    the result when one axis name equals another axis id.  Exact identity must
+    always win; a human-name alias is usable only when it names one axis.
+    """
+
+    if not isinstance(schema, DatasetSchema):
+        raise TypeError("schema must be zlc_data.DatasetSchema")
+    if not isinstance(reference, str) or not reference.strip():
+        raise TypeError("data axis reference must be non-empty text")
+    selected = reference.strip()
+    axes = tuple(schema.cell_schema.data_axes)
+    exact = tuple(
+        (index, axis)
+        for index, axis in enumerate(axes)
+        if str(axis.axis_id) == selected
+    )
+    if len(exact) == 1:
+        return exact[0]
+    aliases = tuple(
+        (index, axis)
+        for index, axis in enumerate(axes)
+        if axis.name == selected
+    )
+    if len(aliases) == 1:
+        return aliases[0]
+    if aliases:
+        raise KeyError(f"data axis name {selected!r} is ambiguous")
+    raise KeyError(selected)
+
+
 def schema_value_unit(schema: DatasetSchema, registry: UnitRegistry) -> Unit:
     return resolve_unit(schema.cell_schema.value_unit or "1", registry)
 
@@ -288,6 +325,7 @@ __all__ = [
     "point_column",
     "resolve_unit",
     "schema_data_axes",
+    "schema_data_axis",
     "schema_equal",
     "schema_point_count",
     "schema_repeat_count",

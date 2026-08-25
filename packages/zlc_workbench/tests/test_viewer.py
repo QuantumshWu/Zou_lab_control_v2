@@ -56,7 +56,6 @@ def test_saved_panel_state_keeps_every_public_facet_cell_kind(cell_kind) -> None
         interval_ms=400,
         title="Calibration report",
         published_outputs={"roi_mean": True},
-        selector={"kind": "area", "x": (0.1, 0.9)},
         focused_cell=1,
     )
     restored = PanelState.from_document(state.document())
@@ -820,7 +819,7 @@ def test_panel_save_thresholds_and_viewport_reopen_in_canonical_units(tmp_path) 
         size="4x4",
         interval_ms=400,
         title="unit report",
-        semantic={"fate:site": "facet"},
+        semantic={"fate:point_coordinate:site": "facet"},
         display={"value_display_unit": "mV", "threshold_classifier": True},
         classifier_thresholds=(
             {

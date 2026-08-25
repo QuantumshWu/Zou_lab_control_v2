@@ -40,10 +40,9 @@ from zlc_ui.form.form import FormChoice, FormFieldProps, FormSpec
 from zlc_ui.form.qt_form import FluentParameterForm
 
 from ._panel_projection import (
-    decode_parameter_value,
-    draws_image_surfaces,
     interval_form_field,
     panel_state_document,
+    parameter_edit_values,
     parameter_fields,
     parameter_form_spec,
     parameter_form_values,
@@ -263,6 +262,7 @@ class PanelCardView(FluentGroupBox):
         # card before a mounted panel can be used.
         self._selectors_on = True
         self._surface_error_connected = False
+        self._local_setting_error = ""
         self.set_status("", error=False)
         self.set_selectors_enabled(True)
         # An empty card still has a size: the frame it is.  Settle it now, so
@@ -806,7 +806,7 @@ class PanelCardView(FluentGroupBox):
                 required=True,
             ),
         ])
-        if draws_image_surfaces(state):
+        if bool(self._parameter_surface.get("paints_images")):
             fields.append(FormFieldProps(
                 "overlay_signal",
                 "keyed_choice",
@@ -878,7 +878,7 @@ class PanelCardView(FluentGroupBox):
             "signal": signal,
             "size": str(self._state_projection.get("size") or self._default_size),
         }
-        if draws_image_surfaces(self._state_projection):
+        if bool(self._parameter_surface.get("paints_images")):
             values["overlay_signal"] = str(
                 self._state_projection.get("overlay_signal") or ""
             )
@@ -1103,16 +1103,14 @@ class PanelCardView(FluentGroupBox):
             value = self._settings_form.read_value(name)
             section, separator, parameter_key = name.partition("__")
             if separator and section in {"semantic", "display", "fit"}:
-                declared = {
-                    str(field["key"]): field
-                    for field in parameter_fields(self._parameter_surface, section)
-                }
                 patch: dict[str, object] = {
-                    section: {
-                        parameter_key: decode_parameter_value(
-                            declared[parameter_key], value
-                        )
-                    }
+                    section: parameter_edit_values(
+                        parameter_fields(self._parameter_surface, section),
+                        parameter_key,
+                        lambda key: self._settings_form.read_value(
+                            f"{section}__{key}"
+                        ),
+                    )
                 }
             elif name == "interval_ms":
                 patch = {name: int(value)}
@@ -1121,8 +1119,12 @@ class PanelCardView(FluentGroupBox):
             else:
                 return
         except (KeyError, TypeError, ValueError) as error:
-            self.set_status(str(error) or type(error).__name__, error=True)
+            self._local_setting_error = str(error) or type(error).__name__
+            self.set_status(self._local_setting_error, error=True)
             return
+        if self._local_setting_error:
+            self._local_setting_error = ""
+            self.set_status("", error=False)
         self.state_changed.emit(patch)
 
     def _choice_groups(self, field: str):

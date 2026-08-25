@@ -27,21 +27,6 @@ class _ParameterChoice(Enum):
     NONE = "zlc-ui-panel-parameter-none"
 
 
-def draws_image_surfaces(state: Mapping[str, Any]) -> bool:
-    """Whether this panel paints image surfaces, so an Overlay may be picked.
-
-    A FacetGrid is a layout and its CELLS are the pictures; an empty cell kind
-    means the data decides, and a camera cycle decides image.  Mirrors the
-    Workbench rule of the same name -- this layer never imports its owner, and
-    a card that hid the field on a grid of frames made the choice unreachable.
-    """
-
-    kind = str(state.get("kind") or "")
-    if kind == "image":
-        return True
-    return kind == "facet_grid" and str(state.get("cell_kind") or "") in {"", "image"}
-
-
 def panel_state_document(state: object) -> dict[str, Any]:
     """Return a plain view projection without importing its Workbench owner."""
 
@@ -169,6 +154,31 @@ def decode_parameter_value(field: Mapping[str, object], edited: object) -> objec
     return edited
 
 
+def parameter_edit_values(fields: object, key: str, read_value) -> dict[str, object]:
+    """Read one edit, plus the other half of an authored limit pair."""
+
+    if not callable(read_value):
+        raise TypeError("read_value must be callable")
+    declared = {
+        str(field["key"]): dict(field) for field in tuple(fields or ())
+    }
+    selected = str(key)
+    if selected not in declared:
+        raise KeyError(selected)
+    names = [selected]
+    for suffix, other_suffix in (("_min", "_max"), ("_max", "_min")):
+        if not selected.endswith(suffix):
+            continue
+        other = f"{selected[:-len(suffix)]}{other_suffix}"
+        if other in declared:
+            names.append(other)
+        break
+    return {
+        name: decode_parameter_value(declared[name], read_value(name))
+        for name in names
+    }
+
+
 def signal_form_runtime(groups_for) -> FormRuntimeContext:
     """Project producer groups into the existing keyed tree-choice form seam."""
 
@@ -227,10 +237,10 @@ def interval_form_field(intervals: object, current: object) -> FormFieldProps:
 
 __all__ = [
     "decode_parameter_value",
-    "draws_image_surfaces",
     "interval_form_field",
     "panel_state_document",
     "parameter_fields",
+    "parameter_edit_values",
     "parameter_form_spec",
     "parameter_form_values",
     "signal_form_runtime",

@@ -805,10 +805,11 @@ assert catalog == (
     ('Measurement: Camera Measurement', ('logic', 'camera_measurement')),
     ('Measurement: Seamless Scan', ('logic', 'seamless_scan')),
     ('Measurement: Stepped Scan', ('logic', 'stepped_scan')),
-        ('Processor: Occupancy', ('logic', 'occupancy')),
-        ('Task: Calibration', ('logic', 'calibration')),
-        ('Task: Slm Feedback', ('logic', 'slm_feedback')),
-        ('Task: Temperature', ('logic', 'temperature')),
+    ('Processor: Frame Survival', ('logic', 'frame_survival')),
+    ('Processor: Occupancy', ('logic', 'occupancy')),
+    ('Task: Calibration', ('logic', 'calibration')),
+    ('Task: Slm Feedback', ('logic', 'slm_feedback')),
+    ('Task: Temperature', ('logic', 'temperature')),
 )
 facet_index = next(
     index for index in range(view._view.kind_combo.count())
@@ -923,7 +924,7 @@ print('TASK_TAKEOVER_PREVIEW_OK')
     assert "TASK_TAKEOVER_PREVIEW_OK" in completed.stdout
 
 
-def test_calibration_terminal_writes_six_figure_pairs_without_report_panels(
+def test_calibration_terminal_writes_seven_figure_pairs_without_report_panels(
     workspace,
 ) -> None:
     """The Task owns its files; Workbench only owns the live preview."""
@@ -999,7 +1000,10 @@ artifact_row = presenter.logic['calibration'].artifact_results[0]
 artifact_path = Path(artifact_row['path'])
 run_root = artifact_path.parents[1]
 figure_root = run_root / 'figures'
-stems = ('site_map', 'fidelity', 'box', 'psf', 'uniform_psf', 'psf_kernels')
+stems = (
+    'site_map', 'actual_fidelity', 'gaussian_fidelity',
+    'box', 'psf', 'uniform_psf', 'psf_kernels',
+)
 expected_report_files = {
     figure_root / f'{stem}{suffix}'
     for stem in stems

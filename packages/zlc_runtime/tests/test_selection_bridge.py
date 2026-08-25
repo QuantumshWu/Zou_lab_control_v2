@@ -64,21 +64,14 @@ class _Source:
 
 class _Events:
     def __init__(self) -> None:
-        self.current: SelectionState | None = None
-        self._selection_callbacks = []
         self._fit_callbacks = []
-
-    def subscribe_selection(self, callback):
-        self._selection_callbacks.append(callback)
-
-        def unsubscribe() -> None:
-            if callback in self._selection_callbacks:
-                self._selection_callbacks.remove(callback)
-
-        return unsubscribe
+        self._bridge: SelectionBridge | None = None
 
     def subscribe_fit(self, callback):
         self._fit_callbacks.append(callback)
+        owner = getattr(callback, "__self__", None)
+        if isinstance(owner, SelectionBridge):
+            self._bridge = owner
 
         def unsubscribe() -> None:
             if callback in self._fit_callbacks:
@@ -86,15 +79,19 @@ class _Events:
 
         return unsubscribe
 
-    def selector_data(self, _kind: str) -> SelectionState:
-        if self.current is None:
-            raise RuntimeError("no current selection")
-        return self.current
-
     def emit_selection(self, change: SelectionChange, state: SelectionState) -> None:
-        self.current = state
-        for callback in tuple(self._selection_callbacks):
-            callback(change, state)
+        bridge = self._bridge
+        if bridge is None:
+            raise RuntimeError("selection test bridge has not started")
+        if change in {SelectionChange.ADDED, SelectionChange.UPDATED}:
+            return
+        if change is SelectionChange.REMOVED:
+            bridge.clear_selection()
+            return
+        publication = bridge._plane.latest_publication(bridge._source_signal)
+        if publication is None:
+            raise RuntimeError("selection test source has no publication")
+        bridge.commit_selection(state, source_publication=publication)
 
     def emit_fit(self, event: FitEventValue | None) -> None:
         for callback in tuple(self._fit_callbacks):
@@ -286,7 +283,6 @@ def test_image_area_materializes_closed_roi_and_mean_with_lineage() -> None:
         plane,
         "camera/frame",
         events,
-        events,
         bridge_id="image",
     )
     bridge.start()
@@ -322,7 +318,7 @@ def test_image_area_catalog_statistics_and_publication_choice_share_one_owner() 
     values = np.arange(12, dtype=np.float64).reshape(1, 1, 4, 3)
     plane, source, _slot, _state, _initial = _source_setup(schema, values)
     events = _Events()
-    derived = {name for name, _label in selection_output_catalog("image")}
+    derived = {name for name, _label in selection_output_catalog("area")}
     assert derived == {
         "roi_frame",
         "roi_mean",
@@ -334,7 +330,7 @@ def test_image_area_catalog_statistics_and_publication_choice_share_one_owner() 
     plane.set_front_signals(
         {"camera/frame", *(f"@logic/image/{name}" for name in derived)}
     )
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="image")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="image")
     bridge.start()
     selection = SelectionState(
         "image",
@@ -382,7 +378,7 @@ def test_selection_commit_republishes_same_source_and_source_revision_follows() 
     plane, source, slot, state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/image/roi_mean"})
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="image")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="image")
     bridge.start()
     first_state = SelectionState(
         "image",
@@ -435,7 +431,6 @@ def test_close_does_not_wait_for_selection_materialization_or_publish_stale(
     bridge = SelectionBridge(
         plane,
         "camera/frame",
-        events,
         events,
         bridge_id="close-race",
     )
@@ -543,7 +538,6 @@ def test_selection_derives_from_the_canonical_repeat_prefix_not_the_event_chunk(
         plane,
         "camera/frame",
         events,
-        events,
         bridge_id="repeats",
     )
     bridge.start()
@@ -630,7 +624,6 @@ def test_restored_selection_starts_on_displayed_prefix_then_catches_live_latest(
     bridge = SelectionBridge(
         plane,
         "camera/frame",
-        events,
         events,
         bridge_id="restored-prefix",
     )
@@ -725,7 +718,6 @@ def test_delayed_selection_of_publication_n_never_reads_publication_n_plus_one(
         plane,
         "camera/frame",
         events,
-        events,
         bridge_id="exact-prefix",
     )
     bridge.start()
@@ -802,7 +794,7 @@ def test_curve_range_and_facet_condition_select_point_rows_inclusive() -> None:
     plane, source, _slot, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/curve/roi_mean"})
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="curve")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="curve")
     bridge.start()
     selection = SelectionState(
         "curve",
@@ -840,7 +832,7 @@ def test_fit_event_publishes_parameter_and_error_scalars() -> None:
     plane.set_front_signals(
         {"camera/frame", "@logic/fit/x0", "@logic/fit/x0_err"}
     )
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="fit")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="fit")
     bridge.start()
     try:
         events.emit_fit(
@@ -963,7 +955,7 @@ def test_a_withdrawn_fit_takes_its_outputs_with_it() -> None:
     plane, _source, _slot, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/fit/x0", "@logic/fit/x0_err"})
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="fit")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="fit")
     bridge.start()
     try:
         def emit(x0: float, batch_revision: int) -> None:
@@ -1013,7 +1005,7 @@ def test_fit_event_batch_publishes_vectors_with_units_validity_and_lineage() -> 
             "@logic/batch/width_err",
         }
     )
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="batch")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="batch")
     bridge.start()
     try:
         events.emit_fit(_batch_fit_event(source_revision=1))
@@ -1075,7 +1067,7 @@ def test_fit_event_batch_text_samples_use_numeric_indices_and_preserve_labels() 
     plane.set_front_signals(
         {"camera/frame", "@logic/text/center", "@logic/text/center_err"}
     )
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="text")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="text")
     bridge.start()
     try:
         event = _batch_fit_event(
@@ -1122,7 +1114,7 @@ def test_single_cell_facet_is_a_valid_vector_fit() -> None:
     plane.set_front_signals(
         {"camera/frame", "@logic/one/center", "@logic/one/center_err"}
     )
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="one")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="one")
     bridge.start()
     try:
         events.emit_fit(_single_cell_facet_event(source_revision=1, batch_revision=1))
@@ -1167,7 +1159,6 @@ def test_scalar_and_single_cell_facet_use_the_same_vector_materializer(monkeypat
         scalar_plane,
         "camera/frame",
         scalar_events,
-        scalar_events,
         bridge_id="scalar-path",
     )
     facet_plane, facet_source, _slot, _state, facet_initial = _source_setup(
@@ -1177,7 +1168,6 @@ def test_scalar_and_single_cell_facet_use_the_same_vector_materializer(monkeypat
     facet_bridge = SelectionBridge(
         facet_plane,
         "camera/frame",
-        facet_events,
         facet_events,
         bridge_id="facet-path",
     )
@@ -1215,7 +1205,7 @@ def test_late_stale_fit_failure_cannot_withdraw_newer_batch(monkeypatch) -> None
     plane, source, slot, state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/race/center"})
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="race")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="race")
     bridge.start()
     gate = Event()
     original_evaluate = bridge._evaluate_processor
@@ -1275,7 +1265,6 @@ def test_fit_contract_fields_and_exports_are_exact() -> None:
         "FitEventValue",
         "SelectionBridge",
         "SelectionChange",
-        "SelectionDataReader",
         "SelectionEventSource",
         "SelectionRange",
         "SelectionState",
@@ -1290,7 +1279,7 @@ def test_fit_event_batch_revision_is_retained_across_source_updates() -> None:
     plane, source, slot, state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/revision/center"})
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="revision")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="revision")
     bridge.start()
     try:
         first_event = _batch_fit_event(source_revision=1, batch_revision=1)
@@ -1358,7 +1347,6 @@ def test_a_trailing_fit_publishes_against_the_exact_shot_it_fitted() -> None:
     bridge = SelectionBridge(
         plane,
         "camera/frame",
-        events,
         events,
         bridge_id="trail",
         source_publication_for=lambda revision: held.get(revision),
@@ -1451,7 +1439,7 @@ def test_added_and_updated_selection_events_do_not_publish() -> None:
     plane, source, _slot, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/curve/roi_mean"})
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="curve")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="curve")
     bridge.start()
     state = SelectionState(
         "curve",
@@ -1481,7 +1469,7 @@ def test_removed_selection_retires_derived_signals_and_unknown_axis_is_loud() ->
     plane, source, _slot, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/curve/roi_mean"})
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="curve")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="curve")
     bridge.start()
     selection = SelectionState(
         "curve",
@@ -1529,7 +1517,7 @@ def test_a_box_on_a_finished_run_is_answered_once() -> None:
     assert not plane.is_generation_live("camera/frame")
 
     events = _Events()
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="frozen")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="frozen")
     bridge.start()
     try:
         events.emit_selection(
@@ -1570,7 +1558,7 @@ def test_a_second_box_on_a_finished_run_replaces_the_first() -> None:
     )
     _seal_source(plane, source, state_map["frame"])
     events = _Events()
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="frozen")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="frozen")
     bridge.start()
     try:
         for revision, upper in ((1, 1.0), (2, 2.0)):
@@ -1611,7 +1599,7 @@ def test_the_plane_can_say_who_is_producing_what() -> None:
     plane, source, _slot, _state, _initial = _source_setup(schema, values)
     plane.set_front_signals({"camera/frame", "@logic/topology/roi_frame"})
     events = _Events()
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="topology")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="topology")
     bridge.start()
     try:
         described = {item.name: item for item in plane.describe_signals()}
@@ -1745,7 +1733,6 @@ def test_selection_derives_from_incremental_scan_points_in_the_canonical_grid() 
         plane,
         "camera/frame",
         events,
-        events,
         bridge_id="point-prefix",
     )
     bridge.start()
@@ -1811,7 +1798,7 @@ def test_image_area_over_grid_dimensions_cuts_the_point_rows() -> None:
     plane.set_front_signals(
         {"camera/frame", "@logic/grid/roi_frame", "@logic/grid/roi_mean"}
     )
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="grid")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="grid")
     bridge.start()
     try:
         events.emit_selection(
@@ -1864,7 +1851,7 @@ def test_repeat_index_narrows_a_grid_cut_to_the_focused_repeat() -> None:
     plane.set_front_signals(
         {"camera/frame", "@logic/focus/roi_frame", "@logic/focus/roi_mean"}
     )
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="focus")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="focus")
     bridge.start()
     try:
         events.emit_selection(
@@ -1918,7 +1905,7 @@ def test_grid_dimensions_resolve_without_matching_point_columns() -> None:
     plane, source, _slot, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/bare/roi_mean"})
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="bare")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="bare")
     bridge.start()
     try:
         events.emit_selection(
@@ -1980,7 +1967,7 @@ def test_frames_on_point_axis_keep_deriving_and_facet_by_frame() -> None:
     plane.set_front_signals(
         {"camera/frame", "@logic/frames/roi_frame", "@logic/frames/roi_mean"}
     )
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="frames")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="frames")
     bridge.start()
     try:
         events.emit_selection(
@@ -2043,7 +2030,7 @@ def test_roi_mean_keeps_one_value_per_frame_point() -> None:
     plane.set_front_signals(
         {"camera/frame", "@logic/mean/roi_frame", "@logic/mean/roi_mean"}
     )
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="mean")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="mean")
     bridge.start()
     try:
         events.emit_selection(
@@ -2097,7 +2084,7 @@ def test_roi_mean_invalidity_is_per_point_not_pooled() -> None:
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/partial/roi_mean"})
     bridge = SelectionBridge(
-        plane, "camera/frame", events, events, bridge_id="partial"
+        plane, "camera/frame", events, bridge_id="partial"
     )
     bridge.start()
     try:
@@ -2163,7 +2150,7 @@ def test_a_faceted_fit_takes_its_sample_role_from_the_axis_it_was_cut_along() ->
         {"camera/frame", "@logic/perframe/center", "@logic/perframe/center_err"}
     )
     bridge = SelectionBridge(
-        plane, "camera/frame", events, events, bridge_id="perframe"
+        plane, "camera/frame", events, bridge_id="perframe"
     )
     bridge.start()
     try:
@@ -2191,7 +2178,7 @@ def test_a_scan_faceted_fit_still_publishes_a_scan_point_column() -> None:
         {"camera/frame", "@logic/perscan/center", "@logic/perscan/center_err"}
     )
     bridge = SelectionBridge(
-        plane, "camera/frame", events, events, bridge_id="perscan"
+        plane, "camera/frame", events, bridge_id="perscan"
     )
     bridge.start()
     try:
@@ -2220,7 +2207,7 @@ def test_a_repeat_faceted_fit_keeps_the_repeat_identity() -> None:
         {"camera/frame", "@logic/percycle/center", "@logic/percycle/center_err"}
     )
     bridge = SelectionBridge(
-        plane, "camera/frame", events, events, bridge_id="percycle"
+        plane, "camera/frame", events, bridge_id="percycle"
     )
     bridge.start()
     try:
@@ -2249,7 +2236,7 @@ def test_a_mixed_kind_image_area_is_refused_loudly() -> None:
     plane, source, _slot, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/mixed/roi_mean"})
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="mixed")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="mixed")
     bridge.start()
     try:
         with pytest.raises(ValueError, match="both be"):

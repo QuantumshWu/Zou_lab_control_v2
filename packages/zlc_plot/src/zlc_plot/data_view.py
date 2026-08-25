@@ -31,6 +31,7 @@ from .data_contract import (
     point_column,
     resolve_unit,
     schema_data_axes,
+    schema_data_axis,
     schema_point_count,
     schema_repeat_count,
     schema_shape,
@@ -2839,12 +2840,8 @@ class DataView:
         elif ref.domain is AxisDomain.DATA:
             assert ref.axis_id is not None
             try:
-                data_index, axis = next(
-                    (index, axis)
-                    for index, axis in enumerate(schema_data_axes(schema))
-                    if str(axis.axis_id) == ref.axis_id or axis.name == ref.axis_id
-                )
-            except StopIteration as exc:
+                data_index, axis = schema_data_axis(schema, ref.axis_id)
+            except KeyError as exc:
                 raise AxisResolutionError(
                     f"dataset has no data axis {ref.axis_id!r}"
                 ) from exc

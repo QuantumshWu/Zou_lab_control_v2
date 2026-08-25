@@ -9,10 +9,18 @@ change (for example) ``bin_count`` without constructing another Figure.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import partial
 from typing import ClassVar, TypeAlias
+
+from zlc_data import (
+    CoordinateScalar,
+    CoordinateSelector,
+    LATEST_COORDINATE,
+    canonical_coordinate_scalar,
+)
+from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
 
 from ._validation import finite_real, integer, text
 from .kinds import AxisRef, PlotKind
@@ -163,7 +171,7 @@ class PlotLabels:
 #: that.  It is a fate an axis can be given, exactly like being x or being
 #: grouped by, which is why it lives on the specification and not among the
 #: display parameters: it changes WHAT is plotted, not how it looks.
-ScopeTerm: TypeAlias = tuple[AxisRef, float | str]
+ScopeTerm: TypeAlias = tuple[AxisRef, CoordinateScalar | CoordinateSelector]
 
 
 def _validated_scope(value: object) -> tuple[ScopeTerm, ...]:
@@ -177,17 +185,15 @@ def _validated_scope(value: object) -> tuple[ScopeTerm, ...]:
         axis, coordinate = term
         if not isinstance(axis, AxisRef):
             raise TypeError("scope term axis must be AxisRef")
-        if coordinate != "latest" and (
-            isinstance(coordinate, bool)
-            or not isinstance(coordinate, (int, float))
-        ):
-            raise TypeError("scope term value must be a real coordinate or 'latest'")
+        coordinate = (
+            LATEST_COORDINATE
+            if coordinate is LATEST_COORDINATE
+            else canonical_coordinate_scalar(coordinate, "scope coordinate")
+        )
         if axis in seen:
             raise ValueError(f"axis {axis!r} is scoped twice")
         seen.add(axis)
-        terms.append(
-            (axis, "latest" if coordinate == "latest" else float(coordinate))
-        )
+        terms.append((axis, coordinate))
     return tuple(terms)
 
 
@@ -298,7 +304,19 @@ class FacetGridPlot:
             raise TypeError("FacetGrid cells must be CurvePlot, ImagePlot or HistogramPlot")
         if not isinstance(self.labels, PlotLabels):
             raise TypeError("FacetGridPlot.labels must be PlotLabels")
-        object.__setattr__(self, "scope", _validated_scope(self.scope))
+        # Scope narrows the Dataset BEFORE it is faceted, reduced, fitted or
+        # annotated.  Keeping another scope on the cell gave the same panel two
+        # contradictory truths: payload/fit consumed only the outer terms,
+        # while image-overlay status combined outer and cell terms.  Canonical
+        # FacetGrid specs therefore have exactly one scope owner.
+        cell_scope = tuple(self.cell.scope)
+        object.__setattr__(
+            self,
+            "scope",
+            _validated_scope((*tuple(self.scope), *cell_scope)),
+        )
+        if cell_scope:
+            object.__setattr__(self, "cell", replace(self.cell, scope=()))
         used = {
             getattr(self.cell, "x", None),
             getattr(self.cell, "y", None),
@@ -697,6 +715,81 @@ def validate_authored_display(
     _validate_authored_conflicts(state)
 
 
+def accepts_classifier_thresholds(
+    spec: PlotSpec,
+    display: Mapping[str, object],
+) -> bool:
+    """Whether this exact accepted plot vocabulary owns classifier levels."""
+
+    if not isinstance(display, Mapping):
+        raise TypeError("display must be a mapping")
+    return bool(
+        isinstance(semantic_spec(spec), HistogramPlot)
+        and display.get("threshold_classifier") is True
+    )
+
+
+def paints_image_surface(spec: PlotSpec) -> bool:
+    """Whether the resolved plot (including a FacetGrid cell) paints images."""
+
+    return semantic_spec(spec).kind is PlotKind.IMAGE
+
+
+def history_window_requirement(
+    spec: PlotSpec,
+    display: Mapping[str, object],
+) -> int | None:
+    """Bounded source-index history this accepted view actually requests.
+
+    A primary-index ``latest`` scope is only a projection rule for an indexed
+    Dataset that already exists.  Ordinary Curve/Image panels acquire that
+    scope automatically while some real history consumer is alive, so treating
+    it as demand would make those panels keep Runtime history alive forever.
+    Resource demand comes only from a vocabulary that exposes a bounded
+    history window; scope then decides how that already-retained Dataset is
+    projected.
+    """
+
+    if not isinstance(display, Mapping):
+        raise TypeError("display must be a mapping")
+    semantic = semantic_spec(spec)
+    if not isinstance(semantic, (RollingPlot, HistogramPlot)):
+        return None
+    window = display.get("window")
+    if type(window) is not int or window <= 0:
+        return None
+    if isinstance(semantic, HistogramPlot) and window == 1:
+        return None
+    return window
+
+
+def indexed_presentation_window(
+    spec: PlotSpec,
+    display: Mapping[str, object],
+) -> int | None:
+    """Primary-index extent this exact view needs when history already exists.
+
+    This is a read bound, not a retention request.  A one-shot Histogram and
+    an ordinary Image scoped to latest both need one indexed cell while
+    another panel owns history, but neither keeps that history alive.
+    """
+
+    if not isinstance(display, Mapping):
+        raise TypeError("display must be a mapping")
+    if any(
+        ref.axis_id == PRIMARY_INDEX_AXIS_ID.value
+        and value is LATEST_COORDINATE
+        for ref, value in tuple(getattr(spec, "scope", ()))
+    ):
+        return 1
+    semantic = semantic_spec(spec)
+    if isinstance(semantic, (RollingPlot, HistogramPlot)):
+        window = display.get("window")
+        if type(window) is int and window > 0:
+            return window
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class _ParameterSchemaContext:
     """The semantic facts that change a display-parameter schema."""
@@ -898,13 +991,17 @@ def parameter_schema_for_kind(
 
 
 __all__ = [
+    "accepts_classifier_thresholds",
     "CellPlot",
     "CurvePlot",
     "FacetGridPlot",
     "HistogramPlot",
+    "history_window_requirement",
+    "indexed_presentation_window",
     "ImagePlot",
     "PlotLabels",
     "PlotSpec",
+    "paints_image_surface",
     "PulseTimelinePlot",
     "Reduction",
     "RelimMode",

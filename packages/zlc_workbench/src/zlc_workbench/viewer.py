@@ -29,18 +29,21 @@ from typing import Any
 from zlc_plot import (
     DEFAULTS,
     decode_plot_recipe,
+    describe_semantics,
     encode_plot_recipe,
+    paints_image_surface,
     read_figure_plot,
 )
-from zlc_plot.semantics import schema_structure
+from zlc_plot.specs import semantic_spec
 
 from zlc_data.figure_archive import read_archive
 from .panel_catalog import GRID_CELL_KINDS, panel_kind_choices, task_console_fitting_spec
 from .panel_state import (
     PanelState,
-    draws_image_surfaces,
+    panel_data_shape,
     panel_state_from_description,
     panel_surface_from_description,
+    project_panel_state,
 )
 
 
@@ -401,16 +404,12 @@ class FigureViewerPresenter:
             host = record["host"]
 
             def apply() -> object:
-                if section == "semantic":
-                    description = None
-                    for name, value in updates.items():
-                        operation = self._await(host.apply_semantic(name, value))
-                        description = getattr(operation, "value", operation)
-                    return description
                 operation = self._await(
                     host.configure(
                         **(
-                            {"parameters": updates}
+                            {"semantic": updates}
+                            if section == "semantic"
+                            else {"parameters": updates}
                             if section == "display"
                             else {"fit": updates, "fit_live": False}
                         )
@@ -419,9 +418,11 @@ class FigureViewerPresenter:
                 return getattr(operation, "value", operation)
 
             def accepted(description: object) -> None:
-                values = dict(getattr(state, section))
+                current = record["state"]
+                assert isinstance(current, PanelState)
+                values = dict(getattr(current, section))
                 values.update(updates)
-                candidate_state = replace(state, **{section: values})
+                candidate_state = replace(current, **{section: values})
                 surface = panel_surface_from_description(
                     candidate_state,
                     description,
@@ -432,7 +433,9 @@ class FigureViewerPresenter:
                     candidate_state, surface
                 )
                 surface.update(
-                    self._panel_surface(record["plot_input"], candidate_state)
+                    self._panel_surface(
+                        record["plot_input"], candidate_state, surface
+                    )
                 )
                 record["state"] = candidate_state
                 record["surface"] = surface
@@ -632,11 +635,17 @@ class FigureViewerPresenter:
         dataset: str,
         title: str,
         recipe: Mapping[str, object],
+        plot_input: object,
     ) -> PanelState:
         spec = recipe["spec"]
+        snapshot = getattr(plot_input, "snapshot", plot_input)
+        semantics = describe_semantics(snapshot.block.schema, spec)
         kind = str(spec.kind.value)
-        cell = getattr(spec, "cell", None)
-        cell_kind = "" if cell is None else str(cell.kind.value)
+        cell_kind = (
+            semantic_spec(spec).kind.value
+            if kind == "facet_grid"
+            else ""
+        )
         return PanelState(
             signal=str(dataset),
             kind=kind,
@@ -644,6 +653,11 @@ class FigureViewerPresenter:
             size=str(recipe["size"]),
             interval_ms=400,
             title=str(title or panel_id),
+            semantic={
+                str(name): value
+                for name, value in semantics.values.items()
+                if str(name) != "kind"
+            },
             display=dict(recipe.get("parameters", {})),
             fit=dict(recipe.get("fit", {})),
         )
@@ -652,15 +666,23 @@ class FigureViewerPresenter:
     def _panel_surface(
         plot_input: object,
         state: PanelState,
+        surface: Mapping[str, object],
     ) -> dict[str, object]:
         snapshot = getattr(plot_input, "snapshot", plot_input)
         schema = snapshot.block.schema
+        base = task_console_fitting_spec(
+            schema, state.kind, state.cell_kind
+        )
+        resolved = None
+        if base is not None:
+            resolved, _semantic, _display = project_panel_state(
+                schema, base, state
+            )
         return {
-            "data_structure": schema_structure(schema),
-            "data_scope": (),
+            **panel_data_shape(schema, surface),
             "science_locked": False,
-            "paints_images": draws_image_surfaces(
-                state.kind, state.cell_kind
+            "paints_images": (
+                False if resolved is None else paints_image_surface(resolved)
             ),
         }
 
@@ -678,7 +700,9 @@ class FigureViewerPresenter:
             self._panel_serial += 1
             panel_id = f"saved-panel-{self._panel_serial}"
         label = dict(description.datasets).get(str(name), str(name) or "figure")
-        state = self._panel_state(panel_id, str(name), label, recipe)
+        state = self._panel_state(
+            panel_id, str(name), label, recipe, plot_input
+        )
         previous = self.panels.get(panel_id)
         if previous is not None:
             previous_state = previous["state"]
@@ -697,7 +721,7 @@ class FigureViewerPresenter:
             described.fit_models,
         )
         state = panel_state_from_description(state, surface)
-        surface.update(self._panel_surface(plot_input, state))
+        surface.update(self._panel_surface(plot_input, state, surface))
         if previous is None:
             self.view.add_panel(panel_id, state.title)
         try:

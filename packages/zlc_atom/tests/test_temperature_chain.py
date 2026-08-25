@@ -115,9 +115,9 @@ def test_the_temperature_task_publishes_release_recapture_survival(
         for preview in descriptors["temperature"].node_previews
     ] == [("survival", "curve")]
     assert dict(descriptors["temperature"].node_previews[0].semantic) == {
-        "fate:t_off": "x",
+        "fate:point_coordinate:temperature.t_off": "x",
         "fate:repeat": "reduce",
-        "fate:Site": "reduce",
+        "fate:data:calibration.site": "reduce",
         "reduction": "mean",
     }
     sequencer = installation.device("sequencer")
