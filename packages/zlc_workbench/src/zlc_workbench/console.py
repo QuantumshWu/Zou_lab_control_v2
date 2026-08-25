@@ -1861,7 +1861,7 @@ class ConsolePresenter:
             )
         for panel_id, binding in tuple(self.panels.items()):
             if (
-                binding.host is None
+                binding.port is None
                 and binding.state.signal
                 and front.value(binding.state.signal) is not None
             ):
