@@ -450,3 +450,36 @@ def test_pane_grid_leaves_the_right_wall_open() -> None:
                 assert abs(float(run_x.mean()) - border_x) > 10.0 / scene.width
     finally:
         session.close()
+
+
+def test_render_is_deterministic_at_exact_crossing_ties() -> None:
+    """The crossing merge must be a permutation BY CONSTRUCTION.
+
+    At azimuth 45 the two crossing ladders tie exactly; a second float
+    formula for the b positions could collide with the a positions and
+    leave a slot holding uninitialized memory -- frames then differed
+    run to run.  Fresh allocations between renders shake the heap so a
+    regression cannot hide behind recycled garbage.
+    """
+
+    rng = np.random.default_rng(11)
+    heights = rng.uniform(0.0, 1.0, size=(12, 12))
+    colors = np.tile(
+        np.asarray([0.4, 0.6, 0.9], dtype=np.float32), (12, 12, 1)
+    )
+    camera = HeightBarCamera(azimuth_deg=-45.0)
+    frames = []
+    for _ in range(4):
+        noise = [
+            np.random.default_rng(i).random(size)
+            for i, size in enumerate((317, 4093, 65537))
+        ]
+        frame, _ = render_height_bars(
+            heights.copy(), colors.copy(), camera=camera,
+            value_limits=(0.0, 1.0), width=360, height=280,
+            supersample=2, bar_edges=False,
+        )
+        frames.append(frame)
+        del noise
+    for frame in frames[1:]:
+        np.testing.assert_array_equal(frames[0], frame)

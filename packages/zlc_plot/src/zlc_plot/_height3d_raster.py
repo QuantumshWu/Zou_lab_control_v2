@@ -317,22 +317,30 @@ def render_height_bars(
     t_cross_a = t_a0[None, :] + k / sa
     t_cross_b = t_b0[None, :] + m / ca
     b_before_a = np.clip(np.ceil((t_cross_a - t_b0[None, :]) * ca), 0.0, ny)
-    a_before_b = np.clip(
-        np.floor((t_cross_b - t_a0[None, :]) * sa) + 1.0, 0.0, nx
-    )
     pos_a = (k + b_before_a).astype(np.int64)
-    pos_b = (m + a_before_b).astype(np.int64)
 
+    # The b-crossings take the COMPLEMENT of the a slots, in order.  A
+    # second float formula for their positions could disagree with
+    # ``pos_a`` at an exact tie -- two crossings claiming one slot, the
+    # orphaned slot left holding uninitialized memory, and the frame
+    # nondeterministic.  The complement is pure integer bookkeeping, so
+    # the merge is a permutation BY CONSTRUCTION.
     S = nx + ny
     columns_row = np.arange(render_w, dtype=np.int64)
+    used = np.zeros((render_w, S), dtype=bool)
+    used[columns_row[None, :], pos_a] = True
+    unused_cols, unused_slots = np.nonzero(~used)
+    pos_b = unused_slots.reshape(render_w, ny).T
     sorted_t = np.empty((S, render_w), dtype=np.float64)
-    sorted_is_b = np.empty((S, render_w), dtype=bool)
+    sorted_is_b = np.ones((S, render_w), dtype=bool)
     sorted_t[pos_a, columns_row[None, :]] = t_cross_a
     sorted_is_b[pos_a, columns_row[None, :]] = False
     sorted_t[pos_b, columns_row[None, :]] = t_cross_b
-    sorted_is_b[pos_b, columns_row[None, :]] = True
 
-    sorted_t = sorted_t.astype(np.float32)
+    with np.errstate(over="ignore"):
+        # Clamped-azimuth crossings can exceed float32 range; they land
+        # as inf, which every comparison downstream handles.
+        sorted_t = sorted_t.astype(np.float32)
     seg_t0 = np.empty((S, render_w), dtype=np.float32)
     seg_t0[0] = t_enter
     seg_t0[1:] = sorted_t[:-1]
@@ -550,18 +558,19 @@ def render_height_bars(
     slope_plane = np.cumsum(
         slope_diff.reshape(render_h + 1, stride, 3), axis=0
     )[:render_h]
-    filled += slope_plane * np.arange(render_h, dtype=np.float32)[
-        :, None, None
-    ]
+    # Scale the slope plane by its row IN PLACE: the broadcast product
+    # would allocate a full extra colour plane per frame.
+    slope_plane *= np.arange(render_h, dtype=np.float32)[:, None, None]
+    filled += slope_plane
     id_weights = ids.astype(np.float64)
     id_diff = np.bincount(
         flat_lo, weights=id_weights, minlength=plane
     ) - np.bincount(flat_hi, weights=id_weights, minlength=plane)
-    id_plane = (
-        np.cumsum(id_diff.reshape(render_h + 1, stride), axis=0)[:render_h]
-        .round()
-        .astype(np.int32)
-    )
+    # The diffs are exact small integers: cumsum in int32 moves a
+    # quarter of the float64 bytes and needs no rounding after.
+    id_plane = np.cumsum(
+        id_diff.astype(np.int32).reshape(render_h + 1, stride), axis=0
+    )[:render_h]
 
     covered = id_plane > 0
     np.clip(filled, 0.0, 255.0, out=filled)
