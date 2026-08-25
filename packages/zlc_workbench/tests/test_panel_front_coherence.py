@@ -94,7 +94,7 @@ def test_a_panels_annotation_reaches_the_planes_coherent_front_set() -> None:
         display_interval_ms=100,
         submit_projection=_submit_now,
         replace_host=_stage_on(host),
-        companion_signals=lambda: ("@logic/occupancy/occupied",),
+        companion_signals=lambda _target: ("@logic/occupancy/occupied",),
     )
     plane = _Plane()
     scheduler = BoardScheduler(
@@ -136,7 +136,12 @@ def test_the_projection_is_handed_the_front_it_was_prepared_from() -> None:
     class _Reached(Exception):
         """Raised once the projection has been handed its front."""
 
-    def project(_value: object, _publication: object, given: object) -> object:
+    def project(
+        _value: object,
+        _publication: object,
+        given: object,
+        _target: object,
+    ) -> object:
         seen.append(given)
         raise _Reached
 

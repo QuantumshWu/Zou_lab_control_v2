@@ -9,7 +9,7 @@ change (for example) ``bin_count`` without constructing another Figure.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import Enum
 from functools import partial
 from typing import ClassVar, TypeAlias
@@ -20,7 +20,6 @@ from zlc_data import (
     LATEST_COORDINATE,
     canonical_coordinate_scalar,
 )
-from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
 
 from ._validation import finite_real, integer, text
 from .kinds import AxisRef, PlotKind
@@ -174,11 +173,36 @@ class PlotLabels:
 ScopeTerm: TypeAlias = tuple[AxisRef, CoordinateScalar | CoordinateSelector]
 
 
+def _require_distinct_axes(
+    roles: tuple[tuple[str, AxisRef | None], ...],
+    scope: tuple[ScopeTerm, ...],
+) -> None:
+    used: dict[tuple[object, str | None], str] = {}
+    for name, axis in roles:
+        if axis is None:
+            continue
+        identity = axis.physical_identity
+        previous = used.get(identity)
+        if previous is not None:
+            raise ValueError(
+                f"one physical axis cannot be both {previous} and {name}"
+            )
+        used[identity] = name
+    for axis, _coordinate in scope:
+        identity = axis.physical_identity
+        previous = used.get(identity)
+        if previous is not None:
+            raise ValueError(
+                f"one physical axis cannot be both {previous} and scope"
+            )
+        used[identity] = "scope"
+
+
 def _validated_scope(value: object) -> tuple[ScopeTerm, ...]:
     if not isinstance(value, tuple):
         raise TypeError("scope must be a tuple of (AxisRef, value) pairs")
     terms: list[ScopeTerm] = []
-    seen: set[AxisRef] = set()
+    seen: set[tuple[object, str | None]] = set()
     for term in value:
         if not isinstance(term, tuple) or len(term) != 2:
             raise TypeError("each scope term must be an (AxisRef, value) pair")
@@ -190,9 +214,10 @@ def _validated_scope(value: object) -> tuple[ScopeTerm, ...]:
             if coordinate is LATEST_COORDINATE
             else canonical_coordinate_scalar(coordinate, "scope coordinate")
         )
-        if axis in seen:
+        identity = axis.physical_identity
+        if identity in seen:
             raise ValueError(f"axis {axis!r} is scoped twice")
-        seen.add(axis)
+        seen.add(identity)
         terms.append((axis, coordinate))
     return tuple(terms)
 
@@ -211,13 +236,13 @@ class CurvePlot:
             raise TypeError("CurvePlot.x must be AxisRef")
         if self.group is not None and not isinstance(self.group, AxisRef):
             raise TypeError("CurvePlot.group must be AxisRef or None")
-        if self.group == self.x:
-            raise ValueError("CurvePlot.group must differ from x")
         if not isinstance(self.reduction, Reduction):
             raise TypeError("CurvePlot.reduction must be Reduction")
         if not isinstance(self.labels, PlotLabels):
             raise TypeError("CurvePlot.labels must be PlotLabels")
-        object.__setattr__(self, "scope", _validated_scope(self.scope))
+        scope = _validated_scope(self.scope)
+        _require_distinct_axes((("x", self.x), ("group", self.group)), scope)
+        object.__setattr__(self, "scope", scope)
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,13 +257,13 @@ class ImagePlot:
     def __post_init__(self) -> None:
         if not isinstance(self.x, AxisRef) or not isinstance(self.y, AxisRef):
             raise TypeError("ImagePlot x and y must be AxisRef")
-        if self.x == self.y:
-            raise ValueError("ImagePlot x and y must be different axes")
         if not isinstance(self.reduction, Reduction):
             raise TypeError("ImagePlot.reduction must be Reduction")
         if not isinstance(self.labels, PlotLabels):
             raise TypeError("ImagePlot.labels must be PlotLabels")
-        object.__setattr__(self, "scope", _validated_scope(self.scope))
+        scope = _validated_scope(self.scope)
+        _require_distinct_axes((("x", self.x), ("y", self.y)), scope)
+        object.__setattr__(self, "scope", scope)
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,7 +283,9 @@ class HistogramPlot:
     def __post_init__(self) -> None:
         if not isinstance(self.labels, PlotLabels):
             raise TypeError("HistogramPlot.labels must be PlotLabels")
-        object.__setattr__(self, "scope", _validated_scope(self.scope))
+        scope = _validated_scope(self.scope)
+        _require_distinct_axes((), scope)
+        object.__setattr__(self, "scope", scope)
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,7 +303,9 @@ class RollingPlot:
             raise TypeError("RollingPlot.reduction must be Reduction")
         if not isinstance(self.labels, PlotLabels):
             raise TypeError("RollingPlot.labels must be PlotLabels")
-        object.__setattr__(self, "scope", _validated_scope(self.scope))
+        scope = _validated_scope(self.scope)
+        _require_distinct_axes((("group", self.group),), scope)
+        object.__setattr__(self, "scope", scope)
 
 
 CellPlot: TypeAlias = CurvePlot | ImagePlot | HistogramPlot
@@ -304,26 +333,21 @@ class FacetGridPlot:
             raise TypeError("FacetGrid cells must be CurvePlot, ImagePlot or HistogramPlot")
         if not isinstance(self.labels, PlotLabels):
             raise TypeError("FacetGridPlot.labels must be PlotLabels")
-        # Scope narrows the Dataset BEFORE it is faceted, reduced, fitted or
-        # annotated.  Keeping another scope on the cell gave the same panel two
-        # contradictory truths: payload/fit consumed only the outer terms,
-        # while image-overlay status combined outer and cell terms.  Canonical
-        # FacetGrid specs therefore have exactly one scope owner.
-        cell_scope = tuple(self.cell.scope)
-        object.__setattr__(
-            self,
-            "scope",
-            _validated_scope((*tuple(self.scope), *cell_scope)),
+        if self.cell.scope:
+            raise ValueError(
+                "FacetGrid cell.scope is invalid; scope belongs to FacetGridPlot"
+            )
+        scope = _validated_scope(self.scope)
+        _require_distinct_axes(
+            (
+                ("facet", self.facet),
+                ("x", getattr(self.cell, "x", None)),
+                ("y", getattr(self.cell, "y", None)),
+                ("group", getattr(self.cell, "group", None)),
+            ),
+            scope,
         )
-        if cell_scope:
-            object.__setattr__(self, "cell", replace(self.cell, scope=()))
-        used = {
-            getattr(self.cell, "x", None),
-            getattr(self.cell, "y", None),
-            getattr(self.cell, "group", None),
-        }
-        if self.facet in used:
-            raise ValueError("facet source cannot also be a cell axis or group")
+        object.__setattr__(self, "scope", scope)
 
 
 @dataclass(frozen=True, slots=True)
@@ -763,33 +787,6 @@ def history_window_requirement(
     return window
 
 
-def indexed_presentation_window(
-    spec: PlotSpec,
-    display: Mapping[str, object],
-) -> int | None:
-    """Primary-index extent this exact view needs when history already exists.
-
-    This is a read bound, not a retention request.  A one-shot Histogram and
-    an ordinary Image scoped to latest both need one indexed cell while
-    another panel owns history, but neither keeps that history alive.
-    """
-
-    if not isinstance(display, Mapping):
-        raise TypeError("display must be a mapping")
-    if any(
-        ref.axis_id == PRIMARY_INDEX_AXIS_ID.value
-        and value is LATEST_COORDINATE
-        for ref, value in tuple(getattr(spec, "scope", ()))
-    ):
-        return 1
-    semantic = semantic_spec(spec)
-    if isinstance(semantic, (RollingPlot, HistogramPlot)):
-        window = display.get("window")
-        if type(window) is int and window > 0:
-            return window
-    return None
-
-
 @dataclass(frozen=True, slots=True)
 class _ParameterSchemaContext:
     """The semantic facts that change a display-parameter schema."""
@@ -997,7 +994,6 @@ __all__ = [
     "FacetGridPlot",
     "HistogramPlot",
     "history_window_requirement",
-    "indexed_presentation_window",
     "ImagePlot",
     "PlotLabels",
     "PlotSpec",

@@ -28,13 +28,10 @@ from typing import Any
 
 from zlc_plot import (
     DEFAULTS,
-    decode_plot_recipe,
-    describe_semantics,
-    encode_plot_recipe,
     paints_image_surface,
     read_figure_plot,
 )
-from zlc_plot.specs import semantic_spec
+from zlc_plot.specs import parameter_schema_for, semantic_spec
 
 from zlc_data.figure_archive import read_archive
 from .panel_catalog import GRID_CELL_KINDS, panel_kind_choices, task_console_fitting_spec
@@ -43,7 +40,6 @@ from .panel_state import (
     panel_data_shape,
     panel_state_from_description,
     panel_surface_from_description,
-    project_panel_state,
 )
 
 
@@ -335,7 +331,12 @@ class FigureViewerPresenter:
             self.view.set_status("open a Figure before adding a panel", error=True)
             return
         active = self.panels.get(self._active_panel_id)
-        active_dataset = "" if active is None else str(active["dataset"])
+        active_state = None if active is None else active["state"]
+        active_dataset = (
+            ""
+            if not isinstance(active_state, PanelState)
+            else active_state.signal
+        )
         dataset = (
             active_dataset
             if active_dataset in description.dataset_keys
@@ -401,48 +402,44 @@ class FigureViewerPresenter:
         }:
             section = next(iter(changes))
             updates = dict(changes[section])
-            host = record["host"]
+            configuration = (
+                {"semantic": updates}
+                if section == "semantic"
+                else {"parameters": updates}
+                if section == "display"
+                else {"fit": updates, "fit_live": False}
+            )
+            candidate_values = dict(getattr(state, section))
+            candidate_values.update(updates)
+            requested_state = replace(
+                state,
+                **{section: candidate_values},
+            )
 
             def apply() -> object:
-                operation = self._await(
-                    host.configure(
-                        **(
-                            {"semantic": updates}
-                            if section == "semantic"
-                            else {"parameters": updates}
-                            if section == "display"
-                            else {"fit": updates, "fit_live": False}
-                        )
-                    )
-                )
-                return getattr(operation, "value", operation)
+                return self._stage_panel_configuration(record, configuration)
 
-            def accepted(description: object) -> None:
+            def accepted(candidate: object) -> object:
                 current = record["state"]
-                assert isinstance(current, PanelState)
-                values = dict(getattr(current, section))
-                values.update(updates)
-                candidate_state = replace(current, **{section: values})
-                surface = panel_surface_from_description(
-                    candidate_state,
-                    description,
-                    description.semantics,
-                    description.fit_models,
-                )
-                candidate_state = panel_state_from_description(
-                    candidate_state, surface
-                )
-                surface.update(
-                    self._panel_surface(
-                        record["plot_input"], candidate_state, surface
+                if current is not state:
+                    self._discard_candidate(candidate)
+                    raise RuntimeError("saved panel target changed while configuring")
+                previous = record["host"]
+                description = self.description
+                if description is None:
+                    self._discard_candidate(candidate)
+                    raise RuntimeError("viewer has no accepted archive")
+                try:
+                    self._install_panel_candidate(
+                        candidate,
+                        description,
+                        panel_id=key,
+                        requested_state=requested_state,
                     )
-                )
-                record["state"] = candidate_state
-                record["surface"] = surface
-                self.view.set_panel_projection(key, candidate_state, surface)
-                self.view.update_panel_editor(
-                    key, self._editor_projection(record)
-                )
+                except BaseException:
+                    self._discard_candidate(candidate)
+                    raise
+                return self._retire_previous(previous)
 
             self._submit(
                 f"updating {key} {section}…",
@@ -456,6 +453,53 @@ class FigureViewerPresenter:
             "Use Edit for semantic, display, and fit changes.",
             error=True,
         )
+
+    def _stage_panel_configuration(
+        self,
+        record: Mapping[str, object],
+        configuration: Mapping[str, object],
+    ) -> tuple[str, dict[str, object], object, object, object]:
+        """Configure a detached clone; the accepted Viewer host stays untouched."""
+
+        def recipe_of(value: object) -> dict[str, object]:
+            return {
+                "spec": value.spec,
+                "parameters": dict(value.display_state.values),
+                "size": value.size,
+                "viewport": value.viewport,
+                "classifier_thresholds": value.classifier_thresholds,
+                "facet_focus": value.facet_focus,
+                "fit": dict(value.fit),
+                "selectors": value.selectors,
+            }
+
+        current_host = record["host"]
+        current = self._await(current_host.describe_display())
+        description = getattr(current, "value", current)
+        state = record["state"]
+        assert isinstance(state, PanelState)
+        candidate = self._make_host(
+            record["plot_input"],
+            state.title,
+            recipe_of(description),
+        )
+        try:
+            operation = self._await(candidate.configure(**dict(configuration)))
+            accepted = getattr(operation, "value", operation)
+            if not hasattr(accepted, "spec"):
+                raise TypeError(
+                    "saved panel configuration did not return DisplayDescription"
+                )
+            return (
+                state.signal,
+                recipe_of(accepted),
+                candidate,
+                record["plot_input"],
+                accepted,
+            )
+        except BaseException:
+            self._close_host(candidate)
+            raise
 
     def _replace_panel_dataset(
         self, panel_id: str, dataset: str, cell_kind: str
@@ -620,14 +664,25 @@ class FigureViewerPresenter:
         spec = task_console_fitting_spec(schema, kind, cell_kind)
         if spec is None:
             raise ValueError(f"saved dataset cannot be drawn as {kind!r}")
-        encoded = encode_plot_recipe(
-            spec,
-            parameters={},
-            size=DEFAULTS.layout.default_preset if size is None else str(size),
-        )
-        recipe = decode_plot_recipe(encoded)
-        recipe.pop("overlay")
-        return recipe
+        return {
+            "spec": spec,
+            "parameters": dict(
+                parameter_schema_for(
+                    spec,
+                    style=DEFAULTS.style,
+                ).initial_values(None)
+            ),
+            "size": (
+                DEFAULTS.layout.default_preset
+                if size is None
+                else str(size)
+            ),
+            "viewport": None,
+            "classifier_thresholds": (),
+            "facet_focus": None,
+            "fit": {},
+            "selectors": (),
+        }
 
     @staticmethod
     def _panel_state(
@@ -635,11 +690,8 @@ class FigureViewerPresenter:
         dataset: str,
         title: str,
         recipe: Mapping[str, object],
-        plot_input: object,
     ) -> PanelState:
         spec = recipe["spec"]
-        snapshot = getattr(plot_input, "snapshot", plot_input)
-        semantics = describe_semantics(snapshot.block.schema, spec)
         kind = str(spec.kind.value)
         cell_kind = (
             semantic_spec(spec).kind.value
@@ -653,38 +705,14 @@ class FigureViewerPresenter:
             size=str(recipe["size"]),
             interval_ms=400,
             title=str(title or panel_id),
-            semantic={
-                str(name): value
-                for name, value in semantics.values.items()
-                if str(name) != "kind"
-            },
+            semantic={},
             display=dict(recipe.get("parameters", {})),
             fit=dict(recipe.get("fit", {})),
-        )
-
-    @staticmethod
-    def _panel_surface(
-        plot_input: object,
-        state: PanelState,
-        surface: Mapping[str, object],
-    ) -> dict[str, object]:
-        snapshot = getattr(plot_input, "snapshot", plot_input)
-        schema = snapshot.block.schema
-        base = task_console_fitting_spec(
-            schema, state.kind, state.cell_kind
-        )
-        resolved = None
-        if base is not None:
-            resolved, _semantic, _display = project_panel_state(
-                schema, base, state
-            )
-        return {
-            **panel_data_shape(schema, surface),
-            "science_locked": False,
-            "paints_images": (
-                False if resolved is None else paints_image_surface(resolved)
+            classifier_thresholds=tuple(
+                recipe.get("classifier_thresholds", ())
             ),
-        }
+            focused_cell=recipe.get("facet_focus"),
+        )
 
     def _install_panel_candidate(
         self,
@@ -692,6 +720,7 @@ class FigureViewerPresenter:
         description: ArchiveDescription,
         *,
         panel_id: str | None = None,
+        requested_state: PanelState | None = None,
     ) -> str:
         name, recipe, host, plot_input, described = candidate
         if recipe is None or host is None or plot_input is None:
@@ -700,11 +729,13 @@ class FigureViewerPresenter:
             self._panel_serial += 1
             panel_id = f"saved-panel-{self._panel_serial}"
         label = dict(description.datasets).get(str(name), str(name) or "figure")
-        state = self._panel_state(
-            panel_id, str(name), label, recipe, plot_input
+        state = (
+            self._panel_state(panel_id, str(name), label, recipe)
+            if requested_state is None
+            else requested_state
         )
         previous = self.panels.get(panel_id)
-        if previous is not None:
+        if previous is not None and requested_state is None:
             previous_state = previous["state"]
             assert isinstance(previous_state, PanelState)
             state = replace(
@@ -717,11 +748,20 @@ class FigureViewerPresenter:
         surface = panel_surface_from_description(
             state,
             described,
-            described.semantics,
-            described.fit_models,
         )
-        state = panel_state_from_description(state, surface)
-        surface.update(self._panel_surface(plot_input, state, surface))
+        state = panel_state_from_description(state, described)
+        snapshot = getattr(plot_input, "snapshot", plot_input)
+        surface.update(
+            panel_data_shape(snapshot.block.schema, described),
+            science_locked=False,
+            paints_images=paints_image_surface(described.spec),
+        )
+        candidate_record = {
+            "host": host,
+            "plot_input": plot_input,
+            "state": state,
+            "surface": surface,
+        }
         if previous is None:
             self.view.add_panel(panel_id, state.title)
         try:
@@ -730,28 +770,33 @@ class FigureViewerPresenter:
             )
             self.view.set_panel_projection(panel_id, state, surface)
             self.view.show_panel(panel_id, host)
+            self.panels[panel_id] = candidate_record
+            if previous is not None:
+                self.view.update_panel_editor(
+                    panel_id,
+                    self._editor_projection(candidate_record),
+                )
         except BaseException:
             if previous is None:
+                self.panels.pop(panel_id, None)
                 self.view.remove_panel(panel_id)
             else:
+                self.panels[panel_id] = previous
                 self.view.set_panel_datasets(
                     panel_id,
                     description.datasets,
-                    str(previous["dataset"]),
+                    str(previous["state"].signal),
                 )
                 self.view.set_panel_projection(
                     panel_id, previous["state"], previous["surface"]
                 )
                 self.view.show_panel(panel_id, previous["host"])
+                if self.description is not None:
+                    self.view.update_panel_editor(
+                        panel_id,
+                        self._editor_projection(previous),
+                    )
             raise
-        self.panels[panel_id] = {
-            "dataset": str(name),
-            "recipe": dict(recipe),
-            "host": host,
-            "plot_input": plot_input,
-            "state": state,
-            "surface": surface,
-        }
         self._active_panel_id = panel_id
         self.view.set_panel_order(tuple(self.panels))
         return panel_id
@@ -767,6 +812,9 @@ class FigureViewerPresenter:
     def _accept_archive(self, result: object) -> bool:
         resolved, info, arrays, description, candidate = result
         old_panels = dict(self.panels)
+        old_active = self._active_panel_id
+        old_path = self.path
+        old_description = self.description
         previous = tuple(record["host"] for record in old_panels.values())
         self._panel_serial += 1
         new_panel_id = f"saved-panel-{self._panel_serial}"
@@ -785,6 +833,28 @@ class FigureViewerPresenter:
         except BaseException:
             self.view.remove_panel(new_panel_id)
             self.panels.pop(new_panel_id, None)
+            self._active_panel_id = old_active
+            self.view.set_panel_order(tuple(old_panels))
+            try:
+                self.view.set_title(
+                    ""
+                    if old_description is None
+                    else old_description.name
+                    or ("" if old_path is None else old_path.stem)
+                )
+                self.view.set_path("" if old_path is None else str(old_path))
+                self.view.set_info(
+                    () if old_description is None else old_description.tabs
+                )
+                self.view.set_lineage_tree(
+                    () if old_description is None else old_description.lineage
+                )
+            except BaseException as restore_error:
+                self._discard_candidate(candidate)
+                raise RuntimeError(
+                    "new archive was rejected and the previous Viewer "
+                    "metadata could not be restored"
+                ) from restore_error
             self._discard_candidate(candidate)
             raise
 
@@ -797,8 +867,10 @@ class FigureViewerPresenter:
         self.description = description
         self._info, self._arrays = info, arrays
         if self.panels:
+            shown_state = next(iter(self.panels.values()))["state"]
+            assert isinstance(shown_state, PanelState)
             self.view.set_status(
-                f"showing {next(iter(self.panels.values()))['dataset']}"
+                f"showing {shown_state.signal}"
             )
         else:
             self.view.set_status(
@@ -889,27 +961,41 @@ class FigureViewerPresenter:
         record = self.panels.get(str(panel_id))
         if record is None:
             return
-        host = record["host"]
         state = record["state"]
         assert isinstance(state, PanelState)
-        previous_size = state.size
+        requested_state = replace(state, size=str(size))
 
         def resize() -> object:
-            self._await(host.configure(size=str(size)))
-            return str(size)
-
-        def accepted(selected: object) -> None:
-            resolved = str(selected)
-            if record.get("host") is not host:
-                return
-            recipe = {**dict(record["recipe"]), "size": resolved}
-            state = replace(record["state"], size=resolved)
-            record["recipe"] = recipe
-            record["state"] = state
-            self.view.set_panel_projection(
-                str(panel_id), state, record["surface"]
+            return self._stage_panel_configuration(
+                record,
+                {"size": str(size)},
             )
-            self.view.set_status(f"resized {panel_id} to {resolved}")
+
+        def accepted(candidate: object) -> object:
+            if record.get("state") is not state:
+                self._discard_candidate(candidate)
+                raise RuntimeError("saved panel target changed while resizing")
+            description = self.description
+            if description is None:
+                self._discard_candidate(candidate)
+                raise RuntimeError("viewer has no accepted archive")
+            previous = record["host"]
+            try:
+                self._install_panel_candidate(
+                    candidate,
+                    description,
+                    panel_id=str(panel_id),
+                    requested_state=requested_state,
+                )
+            except BaseException:
+                self._discard_candidate(candidate)
+                raise
+            complete = self._retire_previous(previous)
+            accepted_description = candidate[4]
+            self.view.set_status(
+                f"resized {panel_id} to {accepted_description.size}"
+            )
+            return complete
 
         def rejected(error: BaseException) -> None:
             self.view.set_panel_projection(
@@ -939,7 +1025,9 @@ class FigureViewerPresenter:
         if not callable(save):
             self.view.set_status("this figure cannot save itself", error=True)
             return
-        path, dataset = self.path, str(record["dataset"])
+        state = record["state"]
+        assert isinstance(state, PanelState)
+        path, dataset = self.path, state.signal
 
         def write_image() -> object:
             def write(temporary: Path) -> None:

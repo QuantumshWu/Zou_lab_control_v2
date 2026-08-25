@@ -29,7 +29,6 @@ from zlc_plot import (
     PlotSession,
     RollingPlot,
     SelectionSubject,
-    selection_subject_for,
 )
 from zlc_plot.kinds import AxisRef
 from zlc_plot.selectors import NumericRange, SelectorKind
@@ -178,10 +177,6 @@ def test_a_curve_names_the_axis_its_x_bounds_cut() -> None:
         description = session.describe_display()
         assert isinstance(description.selection_subject, SelectionSubject)
         assert description.selection_subject == subject
-        assert description.selection_subject == selection_subject_for(
-            snapshot.block.schema,
-            spec,
-        )
         with pytest.raises(TypeError, match="requires SelectionSubject"):
             replace(description, selection_subject=object())
         with pytest.raises(ValueError, match="differs from its semantic spec"):
@@ -214,7 +209,7 @@ def test_an_image_names_both_axes_its_area_cuts() -> None:
         assert subject.y == AxisRef.data("row")
         assert subject.x_coordinate_frame == "camera-pixel"
         assert subject.y_coordinate_frame == "camera-pixel"
-        assert subject == selection_subject_for(snapshot.block.schema, spec)
+        assert subject == session.describe_display().selection_subject
     finally:
         session.close()
 
@@ -228,13 +223,13 @@ def test_a_histogram_reports_no_axis_because_its_bounds_cut_values() -> None:
 
     snapshot = _curve_snapshot()
     spec = HistogramPlot()
-    assert selection_subject_for(snapshot.block.schema, spec) == SelectionSubject(
-        PlotKind.HISTOGRAM,
-        None,
-        None,
-    )
     session = PlotSession(snapshot, spec)
     try:
+        assert session.describe_display().selection_subject == SelectionSubject(
+            PlotKind.HISTOGRAM,
+            None,
+            None,
+        )
         subject = _subjects(
             session,
             lambda: session.set_x_selector(1.0, 3.0),
@@ -251,7 +246,6 @@ def test_rolling_ordinal_is_not_reported_as_an_upstream_axis() -> None:
     snapshot = _curve_snapshot()
     spec = RollingPlot()
     expected = SelectionSubject(PlotKind.ROLLING, None, None)
-    assert selection_subject_for(snapshot.block.schema, spec) == expected
 
     session = PlotSession(snapshot, spec)
     try:
@@ -272,9 +266,13 @@ def test_pure_subject_resolves_tagged_latest_scope_to_canonical_identity() -> No
         AxisRef.point("detuning"),
         scope=((site, LATEST_COORDINATE),),
     )
-    subject = selection_subject_for(snapshot.block.schema, spec)
-    assert subject.scope == ((site, 20),)
-    assert subject.repeat_index is None
+    session = PlotSession(snapshot, spec)
+    try:
+        subject = session.describe_display().selection_subject
+        assert subject.scope == ((site, 20),)
+        assert subject.repeat_index is None
+    finally:
+        session.close()
 
 
 def test_focused_facet_identity_is_resolved_inside_panel_scope() -> None:
@@ -287,13 +285,32 @@ def test_focused_facet_identity_is_resolved_inside_panel_scope() -> None:
         scope=((region, 120.0),),
     )
 
-    subject = selection_subject_for(
-        snapshot.block.schema,
-        spec,
-        facet_index=0,
-    )
-
-    assert subject.scope == ((region, 120), (site, 20))
+    session = PlotSession(snapshot, spec)
+    try:
+        focus_events = []
+        session.subscribe_facet_focus(
+            lambda focused, subject, generation, revision: focus_events.append(
+                (focused, subject, generation, revision)
+            )
+        )
+        session.focus_facet(0)
+        subject = session.describe_display().selection_subject
+        assert subject.scope == ((region, 120), (site, 20))
+        assert focus_events[0] == (
+            0,
+            subject,
+            session.data_generation,
+            session.data_revision,
+        )
+        session.show_facet_overview()
+        assert [event[0] for event in focus_events] == [0, None]
+        assert focus_events[-1][1].scope == ((region, 120),)
+        assert focus_events[-1][2:] == (
+            session.data_generation,
+            session.data_revision,
+        )
+    finally:
+        session.close()
 
 
 def test_the_subject_follows_a_semantic_edit_within_one_session() -> None:
@@ -359,11 +376,6 @@ def test_panel_and_focused_scope_carry_canonical_event_meaning(
         )
         assert event.subject.repeat_index == (None if named else 1)
         assert session.describe_display().selection_subject == event.subject
-        assert event.subject == selection_subject_for(
-            snapshot.block.schema,
-            spec,
-            facet_index=1 if focused else None,
-        )
         if named and not focused:
             assert event.data_revision == 7
             assert event.data_generation == "selection-subject-run"

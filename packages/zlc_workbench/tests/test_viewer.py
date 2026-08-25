@@ -28,7 +28,12 @@ from zlc_atom.nodes.camera_measurement.measurement import (
 )
 from zlc_data.figure_archive import read_archive, read_dataset
 from zlc_workbench.panel_save import capture_run_chain, save_panel_figure
-from zlc_workbench.panel_state import PanelFrozenData, PanelState
+from zlc_workbench.apps.task_console import build_panel_host
+from zlc_workbench.panel_state import (
+    PanelFrozenData,
+    PanelState,
+    panel_state_from_description,
+)
 from zlc_workbench.session import ExperimentSession
 from zlc_workbench.viewer import FigureViewerPresenter, describe_archive
 from zlc_data import (
@@ -42,8 +47,42 @@ from zlc_data import (
 )
 from zlc_plot import AxisRef, NumericRange, SelectorKind
 from zlc_plot.primitives import ImageFrame, ImagePointOverlay
-from zlc_plot.selectors import RectangleRange
+from zlc_plot.selectors import RectangleRange, SelectorState
 from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
+
+
+def _frozen_surface(
+    state: PanelState,
+    plot_input: object,
+    *,
+    publication: object | None = None,
+    lineage: object = None,
+    overlay: object = None,
+    viewport: RectangleRange | None = None,
+    selectors: object = (),
+) -> PanelFrozenData:
+    host = build_panel_host(plot_input, state)
+    try:
+        operation = host.configure(
+            viewport=viewport,
+            classifier_thresholds=state.classifier_thresholds,
+            facet_focus=state.focused_cell,
+            selectors=selectors,
+            fit=state.fit,
+            fit_live=False,
+        ).result()
+        description = operation.value
+        target = panel_state_from_description(state, description)
+    finally:
+        host.close()
+    return PanelFrozenData(
+        publication,
+        plot_input,
+        target,
+        description,
+        {} if lineage is None else lineage,
+        {} if overlay is None else overlay,
+    )
 
 
 @pytest.mark.parametrize("cell_kind", ("curve", "image", "histogram"))
@@ -273,12 +312,14 @@ def saved(tmp_path):
         signal = node.signal_key("frames")
         snapshot = result.publication.value(signal).snapshot
         state = PanelState(signal, "image", "2x2", 400, "camera")
-        frozen = PanelFrozenData(
-            signal, result.publication, snapshot,
+        frozen = _frozen_surface(
+            state,
+            snapshot,
+            publication=result.publication,
             lineage=capture_run_chain(session.signal_plane, result.publication),
         )
         written = save_panel_figure(
-            tmp_path / "run.png", state=state, frozen=frozen, viewport=None,
+            tmp_path / "run.png", state=state, frozen=frozen,
         )
         yield written.archive, snapshot
     finally:
@@ -394,7 +435,7 @@ def test_opening_shows_the_figure_and_its_record(presenter, saved) -> None:
     _wait_until(lambda: not presenter._busy)
     assert len(presenter.panels) == 2
     added = presenter._active_panel_id
-    assert presenter.panels[added]["recipe"]["spec"].kind.value == "curve"
+    assert presenter.panels[added]["state"].kind == "curve"
     presenter.view.panel_remove_requested.emit(added)
     _wait_until(lambda: not presenter._busy)
     assert tuple(presenter.panels) == (panel_id,)
@@ -678,19 +719,26 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         None,
         occupied,
     )
-    frozen = PanelFrozenData(
-        signal=state.signal,
+    frozen = _frozen_surface(
+        state,
+        ImageFrame(snapshot, overlay),
         publication=None,
-        snapshot=snapshot,
-        plot_input=ImageFrame(snapshot, overlay),
         overlay={"overlay_signal": state.overlay_signal},
+        selectors=(
+            SelectorState(
+                SelectorKind.AREA,
+                RectangleRange(
+                    NumericRange(20.0, 60.0),
+                    NumericRange(15.0, 55.0),
+                ),
+            ),
+        ),
     )
 
     written = save_panel_figure(
         tmp_path / "panel",
         state=state,
         frozen=frozen,
-        viewport=None,
     )
     with np.load(written.archive, allow_pickle=False) as payload:
         assert "data.overlay.coordinates" in payload.files
@@ -773,9 +821,12 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
 
         assert seen["recipe"]["parameters"]["show_colorbar"] is False
         assert seen["recipe"]["fit"]["model"] == "anisotropic_gaussian_center"
+        assert seen["recipe"]["selectors"][0].kind is SelectorKind.AREA
         assert seen["recipe"]["size"] == "4x4"
         assert next(iter(view.panels.values()))["state"].size == "4x4"
-        assert _active_record(presenter)["recipe"] == seen["recipe"]
+        active = _active_record(presenter)
+        assert seen["host"].description.spec == seen["recipe"]["spec"]
+        assert seen["host"].description.size == seen["recipe"]["size"]
     finally:
         _close_presenter(presenter)
 
@@ -785,10 +836,16 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         real_presenter.open(str(written.archive))
         _wait_until(lambda: not real_presenter._busy)
         assert real_presenter.description is not None
-        host = _active_record(real_presenter)["host"]
-        recipe = _active_record(real_presenter)["recipe"]
+        active = _active_record(real_presenter)
+        host = active["host"]
         assert host is not None, real_view.status
-        assert recipe["spec"].kind.value == "image"
+        assert host.describe_display().result().value.spec.kind.value == "image"
+        assert host.selector_state(SelectorKind.AREA).result().value.value == (
+            RectangleRange(
+                NumericRange(20.0, 60.0),
+                NumericRange(15.0, 55.0),
+            )
+        )
         host.wait_for_front(timeout=5.0)
         assert host._session._renderer.primary_axes.get_title() == ""
         # And the authored appearance really is on the built host.
@@ -846,17 +903,20 @@ def test_panel_save_thresholds_and_viewport_reopen_in_canonical_units(tmp_path) 
             },
         ),
     )
-    frozen = PanelFrozenData(state.signal, None, snapshot)
     viewport = RectangleRange(
         NumericRange(-2.0, 2.0),
         NumericRange(0.0, 40.0),
+    )
+    frozen = _frozen_surface(
+        state,
+        snapshot,
+        viewport=viewport,
     )
 
     written = save_panel_figure(
         tmp_path / "unit-report",
         state=state,
         frozen=frozen,
-        viewport=viewport,
     )
 
     view = _ViewerView()
@@ -894,7 +954,7 @@ def test_panel_save_reports_that_the_archive_survived_an_image_failure(
     import zlc_plot.figure_artifact as figure_module
     _old_path, snapshot = saved
     state = PanelState("camera", "image", "2x2", 400, "camera")
-    frozen = PanelFrozenData(state.signal, None, snapshot)
+    frozen = _frozen_surface(state, snapshot)
 
     def fail_image(_path) -> None:
         raise OSError("renderer failed")
@@ -903,7 +963,9 @@ def test_panel_save_reports_that_the_archive_survived_an_image_failure(
         figure_module,
         "build_figure_host",
         lambda *_args, **_kwargs: SimpleNamespace(
-            configure=lambda **_kwargs: None,
+            configure=lambda **_kwargs: SimpleNamespace(
+                result=lambda: SimpleNamespace(value=frozen.description)
+            ),
             save=fail_image,
             close=lambda: None,
         ),
@@ -914,7 +976,6 @@ def test_panel_save_reports_that_the_archive_survived_an_image_failure(
             tmp_path / "failed-image",
             state=state,
             frozen=frozen,
-            viewport=None,
         )
 
     archive = tmp_path / "failed-image.npz"
@@ -931,7 +992,7 @@ def test_panel_save_does_not_render_when_the_archive_fails(
 
     _old_path, snapshot = saved
     state = PanelState("camera", "image", "2x2", 400, "camera")
-    frozen = PanelFrozenData(state.signal, None, snapshot)
+    frozen = _frozen_surface(state, snapshot)
 
     def fail_archive(*_args, **_kwargs):
         raise OSError("archive disk full")
@@ -942,7 +1003,6 @@ def test_panel_save_does_not_render_when_the_archive_fails(
             tmp_path / "failed-archive",
             state=state,
             frozen=frozen,
-            viewport=None,
         )
 
     assert not (tmp_path / "failed-archive.png").exists()

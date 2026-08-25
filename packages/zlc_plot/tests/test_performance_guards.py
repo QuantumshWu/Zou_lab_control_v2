@@ -435,11 +435,9 @@ def test_large_ungrouped_rolling_reuses_its_exact_valid_pool(
         sample = view.rolling_sample(group=None, aggregation=reduction)
         pooled = view.pooled_values()
         again = view.pooled_values()
-        by_repeat = view.pooled_values_by_repeat()
         _current, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
         assert pooled is again
-        assert len(by_repeat) == 1 and by_repeat[0] is pooled
         np.testing.assert_array_equal(pooled, expected_pool)
         assert bool(sample.valid[0])
         np.testing.assert_allclose(sample.values[0], reducer(expected_pool))

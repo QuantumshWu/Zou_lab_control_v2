@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from zlc_plot import (
     AxisRef,
@@ -234,6 +235,16 @@ def test_exact_data_axis_id_wins_over_another_axis_name() -> None:
     series = DataView(snapshot).curve(target).series[0]
     assert series.x.label == "selected"
     np.testing.assert_array_equal(series.x.canonical, np.arange(3.0))
+    with pytest.raises(ValueError, match="no exact data axis"):
+        DataView(snapshot).curve(AxisRef.data("selected"))
+    session = PlotSession(
+        snapshot,
+        HistogramPlot(scope=((target, 1),)),
+    )
+    try:
+        assert int(np.sum(session._payload.counts)) == 2
+    finally:
+        session.close()
 
 
 def test_categorical_scope_values_do_not_collide_with_fate_tokens() -> None:
@@ -439,6 +450,12 @@ def test_a_two_dimensional_scan_reports_the_fate_its_panel_applies() -> None:
     assert fate_field_name(AxisRef.point_dimension("coil_x")) in [
         name for _ref, name in description.fate_rows
     ]
+    with pytest.raises(KeyError):
+        composed_spec(
+            schema,
+            spec,
+            {fate_field_name(AxisRef.point("coil_x")): "x"},
+        )
 
 
 def test_a_whole_fate_table_moves_dense_image_roles_to_scan_axes_atomically() -> None:

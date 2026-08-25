@@ -39,6 +39,7 @@ def _finite_output(
     total: int,
     origin: int,
     written: int,
+    event_record: dict[str, object] | None = None,
 ) -> LiveDatasetOutput:
     event = _snapshot(declaration.name, origin + 1, value=value)
     schema = event.block.schema
@@ -61,6 +62,7 @@ def _finite_output(
         DatasetCoverage(written, total),
         canonical_schema=canonical,
         cell_origin=(origin, 0),
+        event_record=event_record,
     )
 
 
@@ -778,6 +780,16 @@ def test_terminal_processor_always_receives_runtime_current_dataset(delivery: st
     derived_declaration = DatasetOutputDeclaration("derived", "test.derived")
     source = _Source(f"source-{delivery}", source_declaration)
     plane = SignalDataPlane()
+    def settings(epoch: int) -> dict[str, object]:
+        return {
+            "device_settings": {
+                "camera": {
+                    "device_session_id": "camera-session",
+                    "epoch_ranges": ((epoch, epoch),),
+                }
+            }
+        }
+
     plane.begin_generation(source)
     plane.commit_live(
         source,
@@ -788,6 +800,7 @@ def test_terminal_processor_always_receives_runtime_current_dataset(delivery: st
                 total=2,
                 origin=0,
                 written=1,
+                event_record=settings(0),
             )
         },
     )
@@ -800,11 +813,12 @@ def test_terminal_processor_always_receives_runtime_current_dataset(delivery: st
                 total=2,
                 origin=1,
                 written=2,
+                event_record=settings(2),
             )
         },
     )
     plane.seal_committed(source)
-    seen: list[tuple[int, list[float]]] = []
+    seen: list[tuple[int, list[float], object]] = []
 
     class Processor:
         def evaluate(self, value: SignalValue):
@@ -812,6 +826,9 @@ def test_terminal_processor_always_receives_runtime_current_dataset(delivery: st
                 (
                     value.snapshot.block.schema.repeat_axis.size,
                     value.snapshot.block.values[:, 0, 0].tolist(),
+                    value.event_record["device_settings"]["camera"][
+                        "epoch_ranges"
+                    ],
                 )
             )
             return {"derived": _monitor_output(derived_declaration, 1)}
@@ -830,7 +847,7 @@ def test_terminal_processor_always_receives_runtime_current_dataset(delivery: st
     try:
         host.start()
         assert _wait(host, wake).phase == "done"
-        assert seen == [(2, [1.0, 2.0])]
+        assert seen == [(2, [1.0, 2.0], ((0, 0), (2, 2)))]
         result = plane.current_dataset(host.signal_key("derived"))
         assert result.block.values.reshape(-1).tolist() == [1.0]
         assert not plane.is_generation_live(host.signal_key("derived"))

@@ -18,15 +18,13 @@ from zlc_data import (
     OwnedSnapshot,
     SPATIAL_X,
     SPATIAL_Y,
-    point_ordinal_axis,
 )
 from zlc_data.snapshot_projection import (
-    axis_catalog,
     selection_indices,
     value_selection,
 )
 
-from .data_contract import snapshot_revision
+from .data_contract import resolve_axis, snapshot_revision
 from .kinds import AxisDomain, AxisRef
 
 from ._validation import finite_real as _finite
@@ -402,15 +400,12 @@ class ImagePointOverlay:
     ) -> AxisId | None:
         if not isinstance(ref, AxisRef):
             raise TypeError("overlay scope/facet axes must be AxisRef values")
-        if ref.domain is AxisDomain.REPEAT:
-            return schema.repeat_axis.axis_id
-        if ref.domain is AxisDomain.POINT_ROW:
-            return point_ordinal_axis(schema.point_table.row_count).axis_id
         if ref.domain is AxisDomain.DATA:
             return None
-        axis_id = AxisId(str(ref.axis_id))
-        available = {entry[1] for entry in axis_catalog(schema)}
-        return axis_id if axis_id in available else None
+        try:
+            return resolve_axis(schema, ref).axis_id
+        except KeyError:
+            return None
 
     @classmethod
     def empty(cls, revision: int) -> "ImagePointOverlay":

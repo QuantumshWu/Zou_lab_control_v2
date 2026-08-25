@@ -20,7 +20,13 @@ from zlc_durable import atomic_write_file
 from .config import DEFAULTS
 from .kinds import AxisDomain, AxisRef, PlotKind
 from .primitives import ImageFrame, ImagePointOverlay, PointStatus
-from .selectors import NumericRange, RectangleRange
+from .selectors import (
+    CrosshairPoint,
+    NumericRange,
+    RectangleRange,
+    SelectorKind,
+    SelectorState,
+)
 from .specs import (
     CurvePlot, FacetGridPlot, HistogramPlot, ImagePlot, PlotLabels,
     Reduction, RollingPlot, parameter_schema_for,
@@ -193,6 +199,70 @@ def _viewport(value: object) -> RectangleRange | None:
     return RectangleRange(*axes)
 
 
+def _selectors_document(values: object) -> list[dict[str, object]]:
+    result: list[dict[str, object]] = []
+    for state in tuple(values):
+        if not isinstance(state, SelectorState):
+            raise TypeError("figure selectors must be SelectorState values")
+        value = state.value
+        if isinstance(value, NumericRange):
+            payload: object = [value.low, value.high]
+        elif isinstance(value, RectangleRange):
+            payload = {
+                "x": [value.x.low, value.x.high],
+                "y": [value.y.low, value.y.high],
+            }
+        elif isinstance(value, CrosshairPoint):
+            payload = [value.x, value.y]
+        else:
+            payload = float(value)
+        result.append(
+            {
+                "kind": state.kind.value,
+                "value": payload,
+                "revision": state.revision,
+                "facet_index": state.facet_index,
+            }
+        )
+    return result
+
+
+def _selectors(value: object) -> tuple[SelectorState, ...]:
+    if not isinstance(value, list):
+        raise TypeError("figure selectors must be an array")
+    result: list[SelectorState] = []
+    for item in value:
+        entry = _keys(
+            item,
+            {"kind", "value", "revision", "facet_index"},
+            "figure selector",
+        )
+        kind = SelectorKind(entry["kind"])
+        payload = entry["value"]
+        if kind is SelectorKind.X_RANGE:
+            low, high = payload
+            selected: object = NumericRange(low, high)
+        elif kind is SelectorKind.AREA:
+            rectangle = _keys(payload, {"x", "y"}, "area selector")
+            selected = RectangleRange(
+                NumericRange(*rectangle["x"]),
+                NumericRange(*rectangle["y"]),
+            )
+        elif kind is SelectorKind.CROSSHAIR:
+            selected = CrosshairPoint(*payload)
+        else:
+            selected = float(payload)
+        result.append(
+            SelectorState(
+                kind,
+                selected,
+                revision=entry["revision"],
+                facet_index=entry["facet_index"],
+            )
+        )
+    return tuple(result)
+
+
 def _overlay_payload(plot_input: object, prefix: str) -> tuple[dict[str, np.ndarray], object]:
     if not isinstance(plot_input, ImageFrame):
         return {}, None
@@ -243,6 +313,7 @@ def encode_plot_recipe(
     spec: object, *, parameters: Mapping[str, object], size: str,
     viewport: RectangleRange | None = None, classifier_thresholds: object = (),
     facet_focus: int | None = None, fit: Mapping[str, object] | None = None,
+    selectors: object = (),
     overlay: object = None,
 ) -> dict[str, object]:
     complete_parameters = dict(
@@ -253,12 +324,14 @@ def encode_plot_recipe(
         "spec": _encode_plot_spec(spec), "parameters": _plain(complete_parameters), "size": selected_size,
         "viewport": _viewport_document(viewport),
         "classifier_thresholds": _plain(list(classifier_thresholds)), "facet_focus": facet_focus,
-        "fit": _plain({} if fit is None else fit), "overlay": overlay,
+        "fit": _plain({} if fit is None else fit),
+        "selectors": _selectors_document(selectors),
+        "overlay": overlay,
     }
 
 
 def decode_plot_recipe(value: object) -> dict[str, object]:
-    entry = _keys(value, {"spec", "parameters", "size", "viewport", "classifier_thresholds", "facet_focus", "fit", "overlay"}, "plot recipe")
+    entry = _keys(value, {"spec", "parameters", "size", "viewport", "classifier_thresholds", "facet_focus", "fit", "selectors", "overlay"}, "plot recipe")
     if not isinstance(entry["parameters"], Mapping) or not isinstance(entry["fit"], Mapping):
         raise TypeError("plot recipe parameters and fit must be objects")
     if not isinstance(entry["size"], str) or not entry["size"]:
@@ -273,7 +346,8 @@ def decode_plot_recipe(value: object) -> dict[str, object]:
         "spec": _decode_plot_spec(entry["spec"]), "parameters": dict(entry["parameters"]),
         "size": entry["size"], "viewport": _viewport(entry["viewport"]),
         "classifier_thresholds": tuple(thresholds), "facet_focus": focus,
-        "fit": dict(entry["fit"]), "overlay": entry["overlay"],
+        "fit": dict(entry["fit"]), "selectors": _selectors(entry["selectors"]),
+        "overlay": entry["overlay"],
     }
 
 
@@ -304,7 +378,7 @@ def open_figure_host(plot_input: object, recipe: Mapping[str, object]) -> object
 
     expected = {
         "spec", "parameters", "size", "viewport", "classifier_thresholds",
-        "facet_focus", "fit",
+        "facet_focus", "fit", "selectors",
     }
     entry = _keys(recipe, expected, "decoded plot recipe")
     host = build_figure_host(
@@ -315,6 +389,7 @@ def open_figure_host(plot_input: object, recipe: Mapping[str, object]) -> object
             viewport=entry["viewport"],
             classifier_thresholds=entry["classifier_thresholds"],
             facet_focus=entry["facet_focus"],
+            selectors=entry["selectors"],
             fit=entry["fit"],
             fit_live=False,
         )
@@ -331,6 +406,7 @@ def save_figure_artifact(
     parameters: Mapping[str, object], size: str, viewport: RectangleRange | None = None,
     classifier_thresholds: object = (), facet_focus: int | None = None,
     fit: Mapping[str, object] | None = None, lineage: Mapping[str, object] | None = None,
+    selectors: object = (),
     source: Mapping[str, object] | None = None,
 ) -> tuple[Path, Path]:
     selected = Path(base_path).expanduser().resolve()
@@ -343,13 +419,39 @@ def save_figure_artifact(
     if not isinstance(snapshot, OwnedSnapshot):
         raise TypeError("data-backed figure requires an OwnedSnapshot")
     overlay_arrays, overlay = _overlay_payload(plot_input, "data.overlay")
-    recipe = encode_plot_recipe(
-        spec, parameters=parameters, size=size, viewport=viewport,
-        classifier_thresholds=classifier_thresholds, facet_focus=facet_focus,
-        fit=fit, overlay=overlay,
+    host = build_figure_host(
+        plot_input,
+        spec,
+        parameters=parameters,
+        size=size,
     )
+    try:
+        configured = host.configure(
+            viewport=viewport,
+            classifier_thresholds=classifier_thresholds,
+            facet_focus=facet_focus,
+            selectors=selectors,
+            fit={} if fit is None else fit,
+            fit_live=False,
+        )
+        operation = configured.result() if hasattr(configured, "result") else configured
+        description = operation.value
+        recipe = encode_plot_recipe(
+            description.spec,
+            parameters=description.display_state.values,
+            size=description.size,
+            viewport=description.viewport,
+            classifier_thresholds=description.classifier_thresholds,
+            facet_focus=description.facet_focus,
+            fit=description.fit,
+            selectors=description.selectors,
+            overlay=overlay,
+        )
+    except BaseException:
+        host.close()
+        raise
     source_document = dict(source or {})
-    title = getattr(getattr(spec, "labels", None), "title", None)
+    title = getattr(getattr(description.spec, "labels", None), "title", None)
     if title is not None:
         source_document.setdefault("title", title)
     sections = {
@@ -361,21 +463,25 @@ def save_figure_artifact(
         ),
         "source": _plain(source_document),
     }
-    atomic_write_file(
-        archive_path,
-        lambda stream: write_figure_archive(
-            stream, image_path.name, arrays={"data": snapshot, **overlay_arrays}, sections=sections,
-        ),
-    )
-    decoded = decode_plot_recipe(recipe)
-    decoded.pop("overlay")
-    host = open_figure_host(plot_input, decoded)
     try:
-        saved = host.save(image_path)
-        if hasattr(saved, "result"):
-            saved.result()
-    except Exception as error:
-        raise RuntimeError(f"figure archive {archive_path} was saved, but image rendering failed: {error}") from error
+        atomic_write_file(
+            archive_path,
+            lambda stream: write_figure_archive(
+                stream,
+                image_path.name,
+                arrays={"data": snapshot, **overlay_arrays},
+                sections=sections,
+            ),
+        )
+        try:
+            saved = host.save(image_path)
+            if hasattr(saved, "result"):
+                saved.result()
+        except Exception as error:
+            raise RuntimeError(
+                f"figure archive {archive_path} was saved, but image "
+                f"rendering failed: {error}"
+            ) from error
     finally:
         host.close()
     return image_path, archive_path

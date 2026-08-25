@@ -13,15 +13,13 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping, TypeAlias
 
 from ._kinds import HANDLERS, default_spec, handler_for
-from .data_contract import schema_data_axis
+from .data_contract import resolve_axis
 from zlc_data import (
     LATEST_COORDINATE,
-    AxisId,
     CoordinateScalar,
     CoordinateSelector,
     DatasetSchema,
     canonical_coordinate_scalar,
-    point_ordinal_axis,
 )
 from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
 from .kinds import AxisDomain, AxisRef, PlotKind
@@ -242,28 +240,7 @@ def axis_size(schema: DatasetSchema, ref: AxisRef) -> int:
 
     if not isinstance(schema, DatasetSchema):
         raise TypeError("schema must be DatasetSchema")
-    if not isinstance(ref, AxisRef):
-        raise TypeError("ref must be AxisRef")
-    if ref.domain is AxisDomain.REPEAT:
-        return int(schema.repeat_axis.size)
-    if ref.domain in {AxisDomain.POINT_ROW, AxisDomain.POINT_COORDINATE}:
-        # A point column spans the point rows; the row ordinal is the same
-        # domain under its degenerate name.
-        return int(schema.point_table.row_count)
-    if ref.domain is AxisDomain.POINT_DIMENSION:
-        assert ref.axis_id is not None
-        if schema.grid_topology is not None:
-            for axis_id, domain in zip(
-                schema.grid_topology.dimension_ids,
-                schema.grid_topology.coordinate_domains,
-                strict=True,
-            ):
-                if str(axis_id) == ref.axis_id:
-                    return int(len(domain))
-        raise KeyError(ref.axis_id)
-    assert ref.domain is AxisDomain.DATA and ref.axis_id is not None
-    _position, axis = schema_data_axis(schema, ref.axis_id)
-    return int(axis.size)
+    return resolve_axis(schema, ref).size
 
 
 #: One dataset's shape, grouped the way a reader reads it: the repeats, then
@@ -359,31 +336,7 @@ def schema_summary(schema: DatasetSchema) -> str:
 def _axis_label(schema: DatasetSchema, ref: AxisRef) -> str:
     """Return the only human label authority for a schema axis reference."""
 
-    if ref.domain is AxisDomain.POINT_ROW:
-        # The point domain as a whole, under the one name zlc_data gives it.
-        return point_ordinal_axis(schema.point_table.row_count).name
-    if ref.domain is AxisDomain.REPEAT:
-        axis = schema.repeat_axis
-    elif ref.domain is AxisDomain.POINT_COORDINATE:
-        assert ref.axis_id is not None
-        axis = schema.point_table.column(AxisId(ref.axis_id))
-    elif ref.domain is AxisDomain.POINT_DIMENSION:
-        assert ref.axis_id is not None and schema.grid_topology is not None
-        # A dimension and the column that carries it are one axis, and the
-        # column is where its human name lives; the raw id ('scan.coil_x')
-        # is what a producer wires with, not what an operator reads.
-        for column in schema.point_table.columns:
-            if str(column.coordinate_id) == ref.axis_id:
-                return str(column.name)
-        return str(ref.axis_id)
-    elif ref.domain is AxisDomain.DATA:
-        assert ref.axis_id is not None
-        _position, axis = schema_data_axis(schema, ref.axis_id)
-    else:  # pragma: no cover - AxisDomain is exhaustive for AxisRef
-        raise ValueError(f"unsupported semantic axis domain: {ref.domain!r}")
-    # The choice names an axis identity, not a quantity: display units belong
-    # to rendered axis labels, never to the selector text.
-    return str(axis.name)
+    return resolve_axis(schema, ref).label
 
 
 #: The vocabulary of what can become of one axis.  Exactly one of these is
@@ -519,35 +472,23 @@ def _role_holder(spec: PlotSpec, role: str) -> AxisRef | None:
     return getattr(semantic_spec(spec), role, None)
 
 
-def _fate_axis(schema: DatasetSchema | None, name: str) -> AxisRef:
-    """Decode a fate key by stable domain/id, never by a display label."""
+def _fate_row_axes(
+    schema: DatasetSchema,
+    spec: PlotSpec,
+    offered_axes: tuple[AxisRef, ...] | None = None,
+) -> tuple[AxisRef, ...]:
+    """The one exact editable row for each physical source axis."""
 
-    if schema is None or not str(name).startswith(FATE_PREFIX):
-        raise KeyError(name)
-    encoded = str(name)[len(FATE_PREFIX) :]
-    domain_text, separator, axis_id = encoded.partition(":")
-    try:
-        domain = AxisDomain(domain_text)
-        ref = AxisRef(domain, axis_id if separator else None)
-    except (TypeError, ValueError) as error:
-        raise KeyError(name) from error
-    try:
-        if ref.domain is AxisDomain.POINT_COORDINATE:
-            assert ref.axis_id is not None
-            schema.point_table.column(AxisId(ref.axis_id))
-        elif ref.domain is AxisDomain.POINT_DIMENSION:
-            assert ref.axis_id is not None
-            if (
-                schema.grid_topology is None
-                or AxisId(ref.axis_id) not in schema.grid_topology.dimension_ids
-            ):
-                raise KeyError(ref.axis_id)
-        elif ref.domain is AxisDomain.DATA:
-            assert ref.axis_id is not None
-            schema_data_axis(schema, ref.axis_id)
-    except (KeyError, TypeError, ValueError) as error:
-        raise KeyError(name) from error
-    return ref
+    axes = axis_choices_for_schema(schema) if offered_axes is None else offered_axes
+    used_axes = _axes_used_by(spec)
+    preferred = {axis.physical_identity: axis for axis in used_axes}
+    listed: dict[tuple[str, str | None], AxisRef] = {}
+    for offered in axes:
+        identity = offered.physical_identity
+        listed.setdefault(identity, preferred.pop(identity, offered))
+    for used in used_axes:
+        listed.setdefault(used.physical_identity, used)
+    return tuple(listed.values())
 
 
 def _scope_coordinates(
@@ -560,37 +501,10 @@ def _scope_coordinates(
     box instead -- see SCOPE_CHOICE_LIMIT.
     """
 
-    from zlc_data.snapshot_projection import axis_catalog
-
-    label = _axis_label(schema, ref)
-    if ref.domain is AxisDomain.POINT_ROW:
-        axis = None
-    elif ref.domain is AxisDomain.REPEAT:
-        axis = schema.repeat_axis
-    else:
-        assert ref.axis_id is not None
-        domain = "data" if ref.domain is AxisDomain.DATA else "point"
-        matches = {
-            str(axis_id): spec
-            for _label, axis_id, spec, candidate_domain in axis_catalog(schema)
-            if candidate_domain == domain and str(axis_id) == ref.axis_id
-        }
-        if len(matches) != 1:
-            raise KeyError(ref.axis_id)
-        axis = next(iter(matches.values()))
-    if axis is None:
-        # The point-row ordinal is an addressing scheme, not a declared axis.
-        size = schema.point_table.row_count
-        values: tuple[object, ...] = tuple(range(size))
-        labels: tuple[str, ...] | None = None
-    elif axis.coordinates is None:
-        values = tuple(
-            float(axis.index_origin + index) for index in range(axis.size)
-        )
-        labels = axis.coordinate_labels
-    else:
-        values = tuple(axis.coordinates)
-        labels = axis.coordinate_labels
+    resolved = resolve_axis(schema, ref)
+    label = resolved.label
+    values = resolved.coordinates
+    labels = resolved.coordinate_labels
     # The pinnable coordinates are the DISTINCT ones, judged after the
     # dedup: a scan dimension lists one value per ROW, so a ten-coordinate
     # sweep of a thousand rows arrived here as a thousand values and the
@@ -658,8 +572,10 @@ def _choice_pairs(
 
 
 def _without(values: Iterable[AxisRef], excluded: Iterable[AxisRef]) -> tuple[AxisRef, ...]:
-    blocked = set(excluded)
-    return tuple(value for value in values if value not in blocked)
+    blocked = {value.physical_identity for value in excluded}
+    return tuple(
+        value for value in values if value.physical_identity not in blocked
+    )
 
 
 def _field_names(spec: PlotSpec) -> tuple[str, ...]:
@@ -742,13 +658,29 @@ def composed_spec(
     # pending: ``field.y -> y, pair -> reduce`` therefore put pair back on y,
     # and a 10x10 scan silently returned to the default 35x3 site image.
     fate_values: dict[AxisRef, object] = {}
+    if schema is None:
+        fate_rows: dict[str, AxisRef] = {}
+    else:
+        row_spec = candidate
+        terms = tuple(scope.items())
+        if terms != tuple(_scope_terms(candidate).items()):
+            row_spec = replace(candidate, scope=terms)
+        fate_rows = {
+            fate_field_name(axis): axis
+            for axis in _fate_row_axes(schema, row_spec)
+        }
     for name in tuple(rest):
         if not name.startswith(FATE_PREFIX):
             continue
         value = rest.pop(name)
-        axis = _fate_axis(schema, name)
+        try:
+            axis = fate_rows[name]
+        except KeyError as error:
+            raise KeyError(name) from error
         fate_values[axis] = value
-        scope.pop(axis, None)
+        for scoped in tuple(scope):
+            if scoped.physical_identity == axis.physical_identity:
+                scope.pop(scoped)
 
     if fate_values:
         declared_roles = tuple(
@@ -759,6 +691,9 @@ def composed_spec(
         }
         desired_roles = dict(current_roles)
         role_targets: dict[str, AxisRef] = {}
+        edited_identities = {
+            axis.physical_identity for axis in fate_values
+        }
 
         for axis, value in fate_values.items():
             if is_scope_fate(value):
@@ -772,7 +707,10 @@ def composed_spec(
                         f"{candidate.kind.value} has no {role!r} fate"
                     )
                 previous_target = role_targets.get(role)
-                if previous_target is not None and previous_target != axis:
+                if (
+                    previous_target is not None
+                    and previous_target.physical_identity != axis.physical_identity
+                ):
                     raise ValueError(
                         f"fate {role!r} is assigned to more than one axis"
                     )
@@ -783,12 +721,19 @@ def composed_spec(
         # Every explicitly edited axis first leaves its old role.  No required
         # role is repaired until all new role targets are known.
         for role, holder in tuple(desired_roles.items()):
-            if holder in fate_values:
+            if (
+                isinstance(holder, AxisRef)
+                and holder.physical_identity in edited_identities
+            ):
                 desired_roles[role] = None
 
         for role, axis in role_targets.items():
             for other, holder in tuple(desired_roles.items()):
-                if other != role and holder == axis:
+                if (
+                    other != role
+                    and isinstance(holder, AxisRef)
+                    and holder.physical_identity == axis.physical_identity
+                ):
                     desired_roles[other] = None
             desired_roles[role] = axis
 
@@ -800,7 +745,8 @@ def composed_spec(
                 (
                     name
                     for name, holder in current_roles.items()
-                    if holder == axis
+                    if isinstance(holder, AxisRef)
+                    and holder.physical_identity == axis.physical_identity
                 ),
                 None,
             )
@@ -810,7 +756,7 @@ def composed_spec(
                 and previous_role != role
                 and previous_role not in role_targets
                 and displaced is not None
-                and displaced not in fate_values
+                and displaced.physical_identity not in edited_identities
             ):
                 desired_roles[previous_role] = displaced
 
@@ -819,7 +765,7 @@ def composed_spec(
         # silently undone by the repair it was meant to accompany.
         fallback = default_spec(schema, candidate.kind)
         blocked = {
-            axis
+            axis.physical_identity
             for axis, value in fate_values.items()
             if value not in ROLE_FATES
         }
@@ -830,7 +776,7 @@ def composed_spec(
                 continue
             preferred = None if fallback is None else _role_holder(fallback, role)
             taken = {
-                holder
+                holder.physical_identity
                 for other, holder in desired_roles.items()
                 if other != role and holder is not None
             }
@@ -838,7 +784,9 @@ def composed_spec(
                 (
                     ref
                     for ref in (preferred, *axis_choices_for_schema(schema))
-                    if ref is not None and ref not in taken and ref not in blocked
+                    if ref is not None
+                    and ref.physical_identity not in taken
+                    and ref.physical_identity not in blocked
                 ),
                 None,
             )
@@ -862,13 +810,19 @@ def composed_spec(
         """
 
         pinned = dict(scope)
-        roles = {
-            getattr(semantic_spec(candidate), name, None)
-            for name in ("x", "y", "group")
+        role_identities = {
+            axis.physical_identity
+            for axis in (
+                getattr(semantic_spec(candidate), name, None)
+                for name in ("x", "y", "group")
+            )
+            if isinstance(axis, AxisRef)
         }
-        roles.add(getattr(candidate, "facet", None))
+        facet = getattr(candidate, "facet", None)
+        if isinstance(facet, AxisRef):
+            role_identities.add(facet.physical_identity)
         for axis in tuple(pinned):
-            if axis in roles:
+            if axis.physical_identity in role_identities:
                 pinned.pop(axis)
         terms = tuple(pinned.items())
         if terms != tuple(_scope_terms(candidate).items()):
@@ -1067,12 +1021,9 @@ def describe_semantics(
     # omit that row: it reports the axis as reduced while the panel gives
     # every row its own cell, and fate() raises for the spec's own facet.
     #
-    # Deduplicated by the row each ref would BE, not by the ref: one axis can
-    # be spelled by its id or by its name, and a table is one row per axis.
-    listed: dict[str, AxisRef] = {}
-    for candidate in (*axes, *_axes_used_by(spec)):
-        listed.setdefault(fate_field_name(candidate), candidate)
-    for ref in listed.values():
+    # Deduplicated by physical source: a same-id PointColumn and topology
+    # dimension are two coordinate views of one point axis, hence one row.
+    for ref in _fate_row_axes(schema, spec, axes):
         label = _axis_label(schema, ref)
         name = fate_field_name(ref)
         current = _fate_of(spec, ref)

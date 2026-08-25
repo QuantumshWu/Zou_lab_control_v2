@@ -65,6 +65,20 @@ class AxisRef:
     def data(cls, axis_id: str) -> "AxisRef":
         return cls(AxisDomain.DATA, axis_id)
 
+    @property
+    def physical_identity(self) -> tuple[str, str | None]:
+        """One source identity across point-column/topology coordinate views."""
+
+        domain = (
+            "point"
+            if self.domain in {
+                AxisDomain.POINT_COORDINATE,
+                AxisDomain.POINT_DIMENSION,
+            }
+            else self.domain.value
+        )
+        return domain, self.axis_id
+
 
 __all__ = [
     "AxisDomain",

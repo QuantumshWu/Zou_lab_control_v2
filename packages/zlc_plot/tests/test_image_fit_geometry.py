@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
-from zlc_plot import AxisRef, FacetGridPlot, ImagePlot, PlotSession, Reduction
+from zlc_plot import AxisRef, FacetGridPlot, ImagePlot, PlotSession
 
 
 def _image_snapshot(*, x_unit: str = "m", y_unit: str = "m") -> DatasetSnapshot:
@@ -38,13 +38,29 @@ def _image_session(*, x_unit: str = "m", y_unit: str = "m") -> PlotSession:
 def test_non_equivalent_image_uses_anisotropic_fit_and_recovers_center() -> None:
     session = _image_session(x_unit="m", y_unit="s")
     try:
+        fit_events = []
+        session.subscribe_fit(fit_events.append)
         models = {model.model_id for model in session.fit_models}
         assert "anisotropic_gaussian_center" in models
         assert "radial_gaussian_center" not in models
-        result = session.fit("anisotropic_gaussian_center", live=False)
+        result = session.fit("anisotropic_gaussian_center")
         assert result.success
         assert abs(result.parameters["center_x"] - 0.35) < 1.0e-9
         assert abs(result.parameters["center_y"] + 0.8) < 1.0e-9
+        source = _image_snapshot(x_unit="m", y_unit="s")
+        from zlc_data import owned_snapshot_from_arrays
+
+        restarted = owned_snapshot_from_arrays(
+            source.block.schema,
+            source.block.values,
+            source.ref.revision,
+            block_id=source.ref.block_id,
+            stream_generation="image-fit-restarted",
+        )
+        session.update_data(restarted)
+        assert session.last_fit is None
+        assert session.fit_status is None
+        assert fit_events[-1] is None
     finally:
         session.close()
 
@@ -161,33 +177,6 @@ def test_non_equivalent_image_does_not_square_pad_unrelated_axes() -> None:
         assert np.allclose(axes.get_ylim(), extent[2:])
     finally:
         session.close()
-
-
-def test_an_axis_named_either_supported_way_takes_the_dense_image_path() -> None:
-    """The resolver accepts an axis NAME or a full axis id.
-
-    The dense image path used to build its own map keyed on the name alone, so
-    the precise spelling dropped silently into the generic per-pixel aggregator
-    -- measured 830 ms against 30 ms on one 640x480 frame, growing with the
-    pixel count.  One rule decides what an axis reference means.
-    """
-
-    snapshot = _image_snapshot()
-    axes = snapshot.block.schema.cell_schema.data_axes
-    by_name = ImagePlot(AxisRef.data(axes[0].name), AxisRef.data(axes[1].name))
-    by_id = ImagePlot(
-        AxisRef.data(str(axes[0].axis_id)), AxisRef.data(str(axes[1].axis_id))
-    )
-
-    from zlc_plot.data_view import DataView
-
-    view = DataView(snapshot)
-    dense = [
-        view._dense_data_image(spec.x, spec.y, Reduction.MEAN) is not None
-        for spec in (by_name, by_id)
-    ]
-
-    assert dense == [True, True], "one supported spelling missed the dense path"
 
 
 def test_the_schema_says_which_axes_are_the_image() -> None:

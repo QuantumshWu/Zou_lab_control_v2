@@ -21,7 +21,7 @@ from __future__ import annotations
 import os
 import time
 from concurrent.futures import Future
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -38,6 +38,8 @@ from zlc_atom.nodes.camera_measurement.measurement import (
 from zlc_data import (
     REPEAT,
     SCAN_POINT,
+    SPATIAL_X,
+    SPATIAL_Y,
     AxisId,
     AxisSpec,
     BlockId,
@@ -64,6 +66,7 @@ from zlc_workbench.selection import (
     panel_selection_document,
     panel_selection_derives_signal,
     panel_selection_from_document,
+    panel_selection_matches_subject,
 )
 from zlc_workbench.session import ExperimentSession
 from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
@@ -122,11 +125,12 @@ def image_panel(frames):
 
     plot = pytest.importorskip("zlc_plot")
     _signal, snapshot = frames
+    axes = {axis.role: axis for axis in snapshot.block.schema.cell_schema.data_axes}
     host = plot.RasterPlotHost.from_plot(
         snapshot,
         plot.ImagePlot(
-            plot.AxisRef.data("spatial-x"),
-            plot.AxisRef.data("spatial-y"),
+            plot.AxisRef.data(str(axes[SPATIAL_X].axis_id)),
+            plot.AxisRef.data(str(axes[SPATIAL_Y].axis_id)),
         ),
     )
     try:
@@ -195,7 +199,8 @@ def _commit_observation(bridge, observation, publication) -> None:
 def test_a_committed_box_publishes_a_signal_cut_from_the_drawn_axes(
     session, frames, image_panel
 ) -> None:
-    signal, _snapshot = frames
+    signal, snapshot = frames
+    axes = {axis.role: axis for axis in snapshot.block.schema.cell_schema.data_axes}
     routed: list[tuple[object, object, object]] = []
     bridge, source = attach_selection_bridge(
         session.signal_plane,
@@ -212,8 +217,8 @@ def test_a_committed_box_publishes_a_signal_cut_from_the_drawn_axes(
         assert seen
         selection = seen[-1].state
         assert [entry.axis for entry in selection.ranges] == [
-            "spatial-x",
-            "spatial-y",
+            str(axes[SPATIAL_X].axis_id),
+            str(axes[SPATIAL_Y].axis_id),
         ]
         assert session.signal_plane.latest_publication(
             "@logic/panel-1/roi_frame"
@@ -320,7 +325,11 @@ def test_a_point_selector_is_a_readout_not_an_error(image_panel) -> None:
         image_panel.set_threshold_selector(2.0).result()
         image_panel.set_crosshair_selector(2.0, 3.0).result()
         assert derived == []
-        assert thresholds == [()]
+        assert len(thresholds) == 1
+        assert thresholds[0].classifier_thresholds == ()
+        description = image_panel.describe_display().result().value
+        assert thresholds[0].subject == description.selection_subject
+        assert thresholds[0].data_generation is not None
         assert source.last_error is None
     finally:
         source.close()
@@ -584,7 +593,14 @@ def _plane_for(snapshot: OwnedSnapshot, front_signals: set[str]):
 
 @pytest.mark.parametrize(
     ("domain", "axis"),
-    (("repeat", ""), ("point_row", ""), ("named", "detuning")),
+    (
+        ("repeat", ""),
+        ("point_row", ""),
+        ("point_coordinate", "detuning"),
+        ("point_dimension", "detuning"),
+        ("data", "detuning"),
+        ("value", ""),
+    ),
 )
 def test_panel_selection_roundtrip_keeps_every_axis_domain(domain, axis) -> None:
     selection = SelectionState(
@@ -787,7 +803,7 @@ def test_public_selection_event_carries_repeat_and_named_panel_scope() -> None:
                 plot.AxisRef.point_dimension("bias_x"),
                 scope=((plot.AxisRef.point_dimension("grad"), 20.0),),
             ),
-            (("grad", 20.0),),
+            (("grad", 20.0, "point_dimension"),),
             None,
         ),
     )
@@ -804,10 +820,28 @@ def test_public_selection_event_carries_repeat_and_named_panel_scope() -> None:
             assert source.last_error is None, source.last_error
             assert committed
             state = committed[-1].state
-            assert tuple((item.axis, item.value) for item in state.facets) == (
-                expected_facets
-            )
+            assert tuple(
+                (item.axis, item.value, item.domain) for item in state.facets
+            ) == expected_facets
             assert state.repeat_index == expected_repeat
+            assert panel_selection_matches_subject(
+                state, committed[-1].subject
+            )
+            if state.facets:
+                facet = state.facets[0]
+                wrong = replace(
+                    state,
+                    facets=(
+                        type(facet)(
+                            facet.axis,
+                            facet.value,
+                            "point_coordinate",
+                        ),
+                    ),
+                )
+                assert not panel_selection_matches_subject(
+                    wrong, committed[-1].subject
+                )
         finally:
             source.close()
             host.close()
@@ -847,8 +881,8 @@ def test_structural_curve_axes_select_the_source_rows_without_a_fake_name() -> N
             ).result(timeout=15)
             assert (
                 viewports
-                and viewports[-1].state is not None
-                and viewports[-1].state.ranges[0].domain == domain
+                and viewports[-1].subject.x == axis
+                and viewports[-1].subject.x.domain.value == domain
             )
             _commit_x_range(host, 1.0, 2.0)
 
@@ -866,8 +900,8 @@ def test_structural_curve_axes_select_the_source_rows_without_a_fake_name() -> N
             plane.close()
 
 
-def test_rolling_history_is_not_claimed_as_an_upstream_point_axis() -> None:
-    """Rolling x belongs to plot history, so it derives nothing and is no error."""
+def test_rolling_viewport_survives_without_claiming_an_upstream_axis() -> None:
+    """Rolling cannot derive an ROI, but its viewport remains panel truth."""
 
     plot = pytest.importorskip("zlc_plot")
     snapshot = _curve_scan_snapshot()
@@ -885,7 +919,10 @@ def test_rolling_history_is_not_claimed_as_an_upstream_point_axis() -> None:
         ).result(timeout=15)
         _commit_x_range(host, 0.0, 1.0)
         assert seen == []
-        assert viewports and viewports[-1].state is None
+        assert viewports
+        assert viewports[-1].subject.plot_kind is plot.PlotKind.ROLLING
+        assert viewports[-1].subject.x is None
+        assert viewports[-1].display is not None
         assert source.last_error is None
     finally:
         source.close()
@@ -902,12 +939,25 @@ def test_an_area_on_a_focused_curve_facet_cell_carries_the_cell() -> None:
         plot.AxisRef.repeat(), plot.CurvePlot(x=plot.AxisRef.point("detuning"))
     )
     host = plot.RasterPlotHost.from_plot(snapshot, spec, size="4x4")
-    public_host = SimpleNamespace(subscribe_selection=host.subscribe_selection)
+    public_host = SimpleNamespace(
+        subscribe_selection=host.subscribe_selection,
+        subscribe_facet_focus=host.subscribe_facet_focus,
+    )
     source = PlotSelectionSource(public_host)
     committed: list = []
+    focused: list = []
     source.subscribe_observation(committed.append)
+    source.subscribe_focus_observation(
+        lambda index, subject, generation, revision: focused.append(
+            (index, subject, generation, revision)
+        )
+    )
     try:
         front, transform = _focused_cell_front(host, 1)
+        assert len(focused) == 1
+        assert focused[0][0] == 1
+        assert focused[0][1].repeat_index == 1
+        assert focused[0][2:] == ("curve-generation", 1)
         _gesture_area(host, front, transform)
         assert source.last_error is None, source.last_error
         assert committed, "a committed box reported nothing"
@@ -917,6 +967,14 @@ def test_an_area_on_a_focused_curve_facet_cell_carries_the_cell() -> None:
         assert state.repeat_index == 1
         assert state.facets == ()
         assert panel_plot_selectors(state, facet_index=1)[0].facet_index == 1
+
+        host.configure(facet_focus=0).result(timeout=15)
+        assert len(focused) == 1
+        host.show_facet_overview().result(timeout=15)
+        assert len(focused) == 2
+        assert focused[-1][0] is None
+        assert focused[-1][1].repeat_index is None
+        assert focused[-1][2:] == ("curve-generation", 1)
     finally:
         source.close()
         host.close()

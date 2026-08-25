@@ -21,7 +21,7 @@ seam is verified without a display.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 from typing import Any
@@ -169,13 +169,31 @@ class LiveBoard:
         future.add_done_callback(finished)
         return future
 
-    def invalidate_presentations(self, panel_ids: Sequence[str]) -> None:
-        """Re-stage unchanged publications whose PlotInput identity changed."""
+    def invalidate_presentations(
+        self,
+        panel_ids: Sequence[str],
+        *,
+        targets: Mapping[str, object] | None = None,
+    ) -> None:
+        """Atomically change representation identity and create display debt."""
 
         selected = tuple(str(value) for value in panel_ids)
         if not selected:
             return
-        self._scheduler.invalidate_presentations(selected)
+        ports = {port.panel_id: port for port in self._ports()}
+        active: list[str] = []
+        for panel_id in selected:
+            port = ports.get(panel_id)
+            if port is None:
+                continue
+            if targets is not None and panel_id in targets:
+                port.invalidate_presentation(targets[panel_id])
+            elif port.presentation_current or port.surface_busy:
+                port.invalidate_presentation()
+            active.append(panel_id)
+        if not active:
+            return
+        self._scheduler.invalidate_presentations(tuple(active))
         self.wake.request_owner_wake()
 
     def commit(self, *, admit_new: bool = True) -> None:

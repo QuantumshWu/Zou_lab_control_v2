@@ -202,8 +202,14 @@ def test_guard_b_task_console_selector_updates_shared_draft_and_producer_restart
         assert panel.host.describe_display().result().value.viewport == before_viewport
 
         assert presenter.edit_panel(panel.panel_id) is True
+        _wait_until(lambda: panel.editor_host is not None, presenter)
         assert panel.editor_host is not None and panel.editor_host is not panel.host
-        _wait_until(lambda: panel.editor_selections is not None, presenter)
+        _wait_until(
+            lambda: panel.editor_selections is not None
+            and panel.frozen_data is not None
+            and panel.frozen_data.description is not None,
+            presenter,
+        )
         panel_editor = view._panel_editors[panel.panel_id]
         assert panel_editor._surface is panel.editor_host.qt_widget()
         assert not panel_editor._surface.interaction_enabled

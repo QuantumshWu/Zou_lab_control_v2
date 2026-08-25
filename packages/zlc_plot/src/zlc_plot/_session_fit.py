@@ -216,7 +216,14 @@ class FitSessionMixin:
                 **self._facet_batch_geometry(projection, cells),
             )
             result = self._stamp_fit_batch_revision(failed)
-            return FitEvent(result, None, (), "", result.overlays)
+            return FitEvent(
+                result,
+                projection.data_generation,
+                None,
+                (),
+                "",
+                result.overlays,
+            )
 
         count = len(model.parameters)
         invalid = np.full(count, np.nan, dtype=np.float64)
@@ -235,7 +242,13 @@ class FitSessionMixin:
             covariance_valid=False,
             parameter_units=units,
         )
-        return FitEvent(self._stamp_fit_batch_revision(failed), None, (), "")
+        return FitEvent(
+            self._stamp_fit_batch_revision(failed),
+            projection.data_generation,
+            None,
+            (),
+            "",
+        )
 
     def publish_live_fit_gap(
         self,
@@ -537,11 +550,7 @@ class FitSessionMixin:
             return None
 
         if not isinstance(model, FitModelSpec):
-            try:
-                self._fit_engine.registry.get(str(model))
-            except ValueError:
-                clear_current()
-                return None
+            self._fit_engine.registry.get(str(model))
 
         selector_kind = values.pop("selector_kind", None)
         initial = values.pop("initial", None)
@@ -923,11 +932,13 @@ class FitSessionMixin:
         selector_kind: SelectorKind | None,
         initial: Mapping[str, float] | Sequence[float] | None,
         bounds: Mapping[str, tuple[float | None, float | None]] | None,
-        options: FitOptions | None,
+        options: FitOptions | Mapping[str, object] | None,
     ) -> _LiveFitRequest:
         model_spec = self._resolve_fit_model(model)
+        if isinstance(options, Mapping):
+            options = FitOptions(**dict(options))
         if options is not None and not isinstance(options, FitOptions):
-            raise TypeError("options must be FitOptions or None")
+            raise TypeError("options must be FitOptions, a mapping, or None")
         frozen_initial: Mapping[str, float] | tuple[float, ...] | None
         if initial is None:
             frozen_initial = None
@@ -1493,10 +1504,19 @@ class FitSessionMixin:
         except KeyError:
             pass
 
-    def _classifier_threshold_targets_state(self) -> tuple[Mapping[str, object], ...]:
+    def _classifier_threshold_targets_state(
+        self,
+        *,
+        settled: bool = False,
+    ) -> tuple[Mapping[str, object], ...]:
         facet_grid = isinstance(self._spec, FacetGridPlot)
         targets: list[Mapping[str, object]] = []
-        for index, value in enumerate(self._classifier_thresholds):
+        values = (
+            self._classifier_thresholds_settled()
+            if settled
+            else self._classifier_thresholds
+        )
+        for index, value in enumerate(values):
             if value is None:
                 continue
             target = dict(
@@ -1738,6 +1758,8 @@ class FitSessionMixin:
                 overlays=overlays,
                 selections=selections,
                 context_generation=started.context_generation,
+                source_generation=projection.data_generation,
+                request=started.request,
             ),
             selections,
         )
@@ -1845,6 +1867,7 @@ class FitSessionMixin:
         if isinstance(accepted.result, FacetFitBatchResult):
             return FitEvent(
                 accepted.result,
+                accepted.source_generation,
                 None,
                 (),
                 "",
@@ -1855,6 +1878,7 @@ class FitSessionMixin:
             raise RuntimeError("single fit acceptance has no overlay or selection")
         return FitEvent(
             accepted.result,
+            accepted.source_generation,
             accepted.selection,
             overlay.parameter_display,
             overlay.formula,

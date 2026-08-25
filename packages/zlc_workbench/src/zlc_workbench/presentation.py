@@ -27,14 +27,21 @@ from zlc_runtime import SurfaceUpdate
 __all__ = ["PlotPanelPort"]
 
 
+_UNCHANGED_TARGET = object()
+
+
 @dataclass(frozen=True)
 class _Prepared:
-    """What one panel handed to the batch, and what it was drawn from."""
+    """One staged or accepted panel transaction record."""
 
     publication: object
     plot_input: object
+    event_records: tuple[tuple[object, object], ...]
+    target: object
     front_refs: tuple[object, ...]
     presentation_epoch: int
+    host: object | None = None
+    description: object | None = None
     replacement_host: object | None = None
     operation: object | None = None
     completion: Future | None = None
@@ -44,13 +51,17 @@ def _revision_of(snapshot: object) -> object | None:
     """The data revision a snapshot carries, or None when it carries none."""
 
     snapshot = getattr(snapshot, "snapshot", snapshot)
-    block = getattr(snapshot, "block", None)
-    return getattr(block, "revision", None) if block is not None else None
+    return getattr(getattr(snapshot, "ref", None), "revision", None)
 
 
-def _publication_generation(publication: object) -> object | None:
-    event_ref = getattr(publication, "event_ref", None)
-    return getattr(event_ref, "generation", None)
+def _generation_of(snapshot: object) -> object | None:
+    snapshot = getattr(snapshot, "snapshot", snapshot)
+    ref = getattr(snapshot, "ref", None)
+    return getattr(ref, "stream_generation", None)
+
+
+def _generation_value(generation: object) -> object:
+    return getattr(generation, "value", generation)
 
 
 class PlotPanelPort:
@@ -61,34 +72,37 @@ class PlotPanelPort:
         panel_id: str,
         signal_name: str,
         *,
+        initial_target: object = None,
         display_interval_ms: int,
-        companion_signals: Callable[[], tuple[str, ...]] | None = None,
-        project_input: Callable[[object, object, object], object] | None = None,
+        companion_signals: Callable[[object], tuple[str, ...]] | None = None,
+        project_input: (
+            Callable[
+                [object, object, object, object],
+                tuple[object, tuple[tuple[object, object], ...]],
+            ]
+            | None
+        ) = None,
         submit_projection: Callable[[Callable[[], object]], Future],
         replace_host: (
-            Callable[[object, object, object], tuple[Any, object]] | None
+            Callable[[object, object, object, object], tuple[Any, object]] | None
         ) = None,
-        accept_host: (
-            Callable[[object, object, object, object], None] | None
-        ) = None,
+        accept_host: Callable[[object], None] | None = None,
         retire_host: Callable[[object], None] | None = None,
-        on_presented: Callable[[object, object], None] | None = None,
-        present: Callable[[object], None] | None = None,
+        on_presented: Callable[[object], None] | None = None,
+        present: Callable[[object, object], bool] | None = None,
+        invalidate: Callable[[str], None] | None = None,
     ) -> None:
         self._panel_id = str(panel_id)
         self._signal_name = str(signal_name)
-        self._host = None
-        self._host_token = object()
+        self._projection_target = initial_target
+        self._unmounted_token = object()
         self._interval_ms = int(display_interval_ms)
-        self._presented: object | None = None
-        self._presented_front_refs: tuple[object, ...] = ()
-        self._presented_input: object | None = None
+        self._surface: _Prepared | None = None
         #: Signal presentation can change without a new scientific
         #: publication (a Runtime history lease turns event geometry into a
         #: bounded primary-index Dataset).  This local epoch makes that a real
         #: input identity instead of pretending the old host still accepts it.
         self._presentation_epoch = 0
-        self._shown_presentation_epoch = -1
         self._project_input = project_input
         #: Signals this panel READS besides the one it shows -- an image's
         #: annotation.  Asked per tick because the operator can change it;
@@ -108,8 +122,7 @@ class PlotPanelPort:
         #: group land as one shot.  ``None`` keeps the port presentation-free
         #: for hosts whose widgets present their own fronts.
         self._present = present
-        self._shown_revision = None
-        self._shown_generation: object | None = None
+        self._invalidate = invalidate
         #: The newest revision ever handed to the host, per generation.  The
         #: port is the host's sole feeder and the host's revisions are
         #: strictly monotonic, so a revision at or below this mark can never
@@ -129,7 +142,6 @@ class PlotPanelPort:
         # plot rendering happen outside it.
         self._state_lock = Lock()
         self._closed = False
-        self.missing: list[str] = []
         #: The last render this panel could not show.  Read on the beat and put
         #: on the card, because a panel that quietly stopped drawing looks
         #: exactly like a panel whose data stopped arriving.
@@ -162,20 +174,22 @@ class PlotPanelPort:
             raise ValueError("a display interval must be positive")
         self._interval_ms = interval
 
-    def invalidate_presentation(self) -> None:
+    def invalidate_presentation(
+        self,
+        target: object = _UNCHANGED_TARGET,
+    ) -> None:
         """Require the current publication to be projected in a fresh host."""
 
         pending: tuple[Future, ...]
         with self._state_lock:
             if self._closed:
                 return
+            if target is not _UNCHANGED_TARGET:
+                self._projection_target = target
             self._presentation_epoch += 1
-            # Scheduler equality is publication-based; clear only its
-            # presented-front marker so the unchanged publication is offered
-            # again under the new representation epoch.  The actual
-            # publication/input remain the pixels currently on screen until
-            # replacement acceptance.
-            self._presented_front_refs = ()
+            # The accepted surface remains the exact screen truth.  Board
+            # debt, not falsifying its front identity, re-offers the unchanged
+            # publication under the new representation epoch.
             self._staged_front_refs = ()
             self._staged_revision = None
             self._staged_generation = None
@@ -188,23 +202,17 @@ class PlotPanelPort:
         for completion in pending:
             completion.cancel()
 
-    def presented_publication(self) -> object | None:
-        """What is on screen now, so the scheduler can skip an unchanged shot."""
-
-        with self._state_lock:
-            return self._presented
-
     def presented_front_refs(self) -> tuple[object, ...]:
         """EventRefs of the primary and companions currently on screen."""
 
         with self._state_lock:
-            return self._presented_front_refs
+            return () if self._surface is None else self._surface.front_refs
 
-    def presented_input(self) -> object | None:
-        """The exact plot input accepted beside ``presented_publication``."""
+    def accepted_surface(self) -> object | None:
+        """The host, pixels and description accepted in one screen commit."""
 
         with self._state_lock:
-            return self._presented_input
+            return self._surface
 
     @property
     def surface_busy(self) -> bool:
@@ -218,7 +226,10 @@ class PlotPanelPort:
         """Whether the mounted host accepts the current input representation."""
 
         with self._state_lock:
-            return self._shown_presentation_epoch == self._presentation_epoch
+            return (
+                self._surface is not None
+                and self._surface.presentation_epoch == self._presentation_epoch
+            )
 
     @staticmethod
     def _revision_value(revision: object) -> int | None:
@@ -233,14 +244,14 @@ class PlotPanelPort:
         value = getattr(revision, "value", revision)
         return value if isinstance(value, int) else None
 
-    def publication_for_revision(self, revision: object) -> object | None:
-        """The publication whose snapshot carries ``revision``, if held here.
+    def publication_for_identity(
+        self, generation: object, revision: object
+    ) -> object | None:
+        """The exact generation/revision publication held by this surface.
 
-        A fit accepted by this panel's renderer fires inside revision N's own
-        commit, so N is either still travelling toward the batch (pending) or
-        already on screen (presented).  The port is therefore the
-        deterministic causal holder of a fit publication's exact parent — no
-        plane-side retention window exists or is needed.
+        Revisions restart at one for every run.  A fit therefore names both
+        identities; revision-only lookup could bind a delayed result to a
+        different run carrying the same number.
         """
 
         with self._state_lock:
@@ -248,19 +259,34 @@ class PlotPanelPort:
             if wanted is None:
                 return None
             for prepared in self._pending.values():
-                if self._revision_value(_revision_of(prepared.plot_input)) == wanted:
+                if (
+                    _generation_value(
+                        _generation_of(prepared.plot_input)
+                    )
+                    == _generation_value(generation)
+                    and self._revision_value(_revision_of(prepared.plot_input))
+                    == wanted
+                ):
                     return prepared.publication
             if (
-                self._presented is not None
-                and self._revision_value(self._shown_revision) == wanted
+                self._surface is not None
+                and _generation_value(
+                    _generation_of(self._surface.plot_input)
+                )
+                == _generation_value(generation)
+                and self._revision_value(_revision_of(self._surface.plot_input))
+                == wanted
             ):
-                return self._presented
+                return self._surface.publication
             return None
 
-    @property
-    def host(self) -> Any:
-        with self._state_lock:
-            return self._host
+    def _host_token_locked(self) -> object:
+        surface = self._surface
+        return (
+            self._unmounted_token
+            if surface is None
+            else getattr(surface.host, "host_id")
+        )
 
     # -------------------------------------------------------------- the tick
 
@@ -268,7 +294,18 @@ class PlotPanelPort:
     def front_signals(self) -> tuple[str, ...]:
         """Every signal this panel reads from one front, shown one first."""
 
-        companions = () if self._companion_signals is None else self._companion_signals()
+        with self._state_lock:
+            target = (
+                self._projection_target
+                if self._surface is None
+                or self._surface.presentation_epoch != self._presentation_epoch
+                else self._surface.target
+            )
+        companions = (
+            ()
+            if self._companion_signals is None
+            else self._companion_signals(target)
+        )
         return tuple(
             dict.fromkeys(
                 (self._signal_name, *(str(name) for name in companions if name))
@@ -322,10 +359,10 @@ class PlotPanelPort:
                 raise RuntimeError("plot panel port is closed")
             presentation_epoch = self._presentation_epoch
         front_refs = self._front_refs(front, publication)
-        publication_generation = _publication_generation(publication)
+        publication_generation = _generation_of(value)
         revision = _revision_of(value)
         completion: Future = Future()
-        notify_presented: tuple[object, object] | None = None
+        notify_presented: _Prepared | None = None
         serial: int | None = None
         host_token: object | None = None
 
@@ -337,7 +374,7 @@ class PlotPanelPort:
             for pending_serial, prepared in tuple(self._pending.items()):
                 same_render = prepared.presentation_epoch == presentation_epoch and (
                     prepared.front_refs == front_refs or (
-                    _publication_generation(prepared.publication)
+                    _generation_of(prepared.plot_input)
                     == publication_generation
                     and _revision_of(prepared.plot_input) == revision
                     and prepared.front_refs[1:] == front_refs[1:]
@@ -348,16 +385,30 @@ class PlotPanelPort:
                         self._pending[pending_serial] = replace(
                             prepared,
                             publication=publication,
+                            event_records=(
+                                (publication, value.event_record),
+                                *prepared.event_records[1:],
+                            ),
                             front_refs=front_refs,
                         )
                     return None
 
+            surface = self._surface
+            shown_generation = (
+                None
+                if surface is None
+                else _generation_of(surface.plot_input)
+            )
+            shown_revision = (
+                None if surface is None else _revision_of(surface.plot_input)
+            )
             replacing_generation = (
-                self._shown_generation is not None
-                and publication_generation != self._shown_generation
+                surface is not None
+                and publication_generation != shown_generation
             )
             replacing_presentation = (
-                presentation_epoch != self._shown_presentation_epoch
+                surface is None
+                or presentation_epoch != surface.presentation_epoch
             )
             if replacing_generation or replacing_presentation:
                 if self._replace_host is None:
@@ -371,20 +422,28 @@ class PlotPanelPort:
                     return None
 
             if (
-                publication_generation == self._shown_generation
-                and presentation_epoch == self._shown_presentation_epoch
+                surface is not None
+                and publication_generation == shown_generation
+                and presentation_epoch == surface.presentation_epoch
                 and revision is not None
-                and revision == self._shown_revision
+                and revision == shown_revision
             ):
                 if (
                     not self._pending
-                    and self._presented is not publication
-                    and front_refs[1:] == self._presented_front_refs[1:]
+                    and surface.publication is not publication
+                    and front_refs[1:] == surface.front_refs[1:]
                 ):
-                    self._presented = publication
-                    self._presented_front_refs = front_refs
-                    notify_presented = (publication, self._presented_input)
-                elif front_refs == self._presented_front_refs:
+                    notify_presented = replace(
+                        surface,
+                        publication=publication,
+                        event_records=(
+                            (publication, value.event_record),
+                            *surface.event_records[1:],
+                        ),
+                        front_refs=front_refs,
+                    )
+                    self._surface = notify_presented
+                elif front_refs == surface.front_refs:
                     return None
 
             if notify_presented is None:
@@ -405,16 +464,26 @@ class PlotPanelPort:
                     and publication_generation == self._staged_generation
                     and presentation_epoch == self._staged_presentation_epoch
                     and staged_revision <= self._staged_revision
-                    and publication is not self._presented
+                    and (
+                        surface is None or publication is not surface.publication
+                    )
                 ):
                     return None
 
                 self._serial += 1
                 serial = self._serial
-                host_token = self._host_token
+                host_token = self._host_token_locked()
+                target = (
+                    self._projection_target
+                    if surface is None
+                    or surface.presentation_epoch != presentation_epoch
+                    else surface.target
+                )
                 self._pending[serial] = _Prepared(
                     publication,
                     value.snapshot,
+                    ((publication, value.event_record),),
+                    target,
                     front_refs,
                     presentation_epoch,
                     completion=completion,
@@ -422,16 +491,38 @@ class PlotPanelPort:
 
         if notify_presented is not None:
             if self._on_presented is not None:
-                self._on_presented(*notify_presented)
+                self._on_presented(notify_presented)
             return None
         assert serial is not None and host_token is not None
 
         def project_and_stage() -> object:
-            plot_input = (
-                value.snapshot
-                if self._project_input is None
-                else self._project_input(value, publication, front)
-            )
+            if self._project_input is None:
+                plot_input = value.snapshot
+                event_records = ((publication, value.event_record),)
+            else:
+                projected = self._project_input(
+                    value,
+                    publication,
+                    front,
+                    target,
+                )
+                if not isinstance(projected, tuple) or len(projected) != 2:
+                    raise TypeError(
+                        "panel input projection must return (plot_input, event_record)"
+                    )
+                plot_input, event_records = projected
+                if (
+                    not isinstance(event_records, tuple)
+                    or not event_records
+                    or any(
+                        not isinstance(item, tuple) or len(item) != 2
+                        for item in event_records
+                    )
+                    or event_records[0][0] is not publication
+                ):
+                    raise TypeError(
+                        "panel event records must start with the primary publication"
+                    )
             with self._state_lock:
                 prepared = self._pending.get(serial)
                 if (
@@ -441,13 +532,24 @@ class PlotPanelPort:
                     or prepared.completion is not completion
                 ):
                     raise CancelledError()
-                host = self._host
-                replace_current_host = host is None or (
-                    self._shown_generation is not None
-                    and publication_generation != self._shown_generation
-                ) or presentation_epoch != self._shown_presentation_epoch
-                shown_revision = self._shown_revision
-                is_presented = publication is self._presented
+                surface = self._surface
+                host = None if surface is None else surface.host
+                shown_generation = (
+                    None
+                    if surface is None
+                    else _generation_of(surface.plot_input)
+                )
+                replace_current_host = (
+                    surface is None
+                    or publication_generation != shown_generation
+                    or presentation_epoch != surface.presentation_epoch
+                )
+                shown_revision = (
+                    None if surface is None else _revision_of(surface.plot_input)
+                )
+                is_presented = (
+                    surface is not None and publication is surface.publication
+                )
 
             # Host construction/configuration can be substantial.  Keeping it
             # on this same projection job preserves ordering without holding
@@ -462,6 +564,7 @@ class PlotPanelPort:
                     plot_input,
                     value,
                     publication,
+                    target,
                 )
                 if replacement is None or not hasattr(replacement, "host_id"):
                     raise TypeError(
@@ -471,9 +574,9 @@ class PlotPanelPort:
                 is_presented
                 and _revision_of(plot_input) == shown_revision
                 and hasattr(plot_input, "overlay")
-                and callable(getattr(host, "update_image_overlay", None))
+                and callable(getattr(host, "configure", None))
             ):
-                rendered = host.update_image_overlay(plot_input.overlay)
+                rendered = host.configure(image_overlay=plot_input.overlay)
             else:
                 rendered = host.update_data(plot_input)
 
@@ -485,12 +588,15 @@ class PlotPanelPort:
                     or completion.cancelled()
                     or current is None
                     or current.completion is not completion
-                    or self._host is not host
+                    or (
+                        None if self._surface is None else self._surface.host
+                    ) is not host
                 )
                 if not stale:
                     self._pending[serial] = replace(
                         current,
                         plot_input=plot_input,
+                        event_records=event_records,
                         replacement_host=replacement,
                         operation=rendered,
                     )
@@ -594,11 +700,16 @@ class PlotPanelPort:
         batch is abandoned rather than showing one stale panel beside fresh ones.
         """
 
+        description = getattr(operation, "value", None)
+        if not hasattr(description, "spec"):
+            raise TypeError(
+                "a plotted surface operation must carry DisplayDescription"
+            )
         with self._state_lock:
             prepared = self._pending.get(update.serial)
             return (
                 not self._closed
-                and update.host_token == self._host_token
+                and update.host_token == self._host_token_locked()
                 and prepared is not None
                 and prepared.presentation_epoch == self._presentation_epoch
             )
@@ -638,10 +749,10 @@ class PlotPanelPort:
         return True
 
     def accept(self, update: SurfaceUpdate, operation: object) -> bool:
-        """Accept bookkeeping atomically, then run fallible app callbacks unlocked."""
+        """Present pixels, then atomically advance the accepted screen truth."""
 
         with self._state_lock:
-            if self._closed or update.host_token != self._host_token:
+            if self._closed or update.host_token != self._host_token_locked():
                 return False
             prepared = self._pending.pop(update.serial, None)
             if (
@@ -651,61 +762,121 @@ class PlotPanelPort:
                 return False
             publication = prepared.publication
             replacement = prepared.replacement_host
-            old_host = self._host
+            previous = self._surface
+            old_host = None if previous is None else previous.host
+            target_host = replacement if replacement is not None else old_host
+
+        if target_host is None:
+            return False
+        presented, present_error = self._put_on_screen(target_host, operation)
+        if not presented:
             if replacement is not None:
-                self._host = replacement
-                self._host_token = replacement.host_id
-            self._presented = publication
-            self._presented_input = prepared.plot_input
-            accepted_refs = prepared.front_refs
-            self._shown_generation = _publication_generation(publication)
-            self._shown_presentation_epoch = prepared.presentation_epoch
-            self._shown_revision = _revision_of(self._presented_input)
-            self._presented_front_refs = accepted_refs
+                self._close_staged_host(replacement)
+            with self._state_lock:
+                self.last_error = present_error or RuntimeError(
+                    "plot surface did not accept the rendered front"
+                )
+            self._request_invalidation()
+            # The batch was handled, but its candidate never became screen
+            # truth.  Debt will rebuild the unchanged latest publication.
+            return True
+
+        description = operation.value
+        accepted = replace(
+            prepared,
+            host=target_host,
+            description=description,
+            replacement_host=None,
+            operation=None,
+            completion=None,
+        )
+        with self._state_lock:
+            self._surface = accepted
+            self._projection_target = prepared.target
             self._advance_staged(
-                self._shown_generation,
-                self._shown_revision,
-                accepted_refs,
+                _generation_of(prepared.plot_input),
+                _revision_of(prepared.plot_input),
+                prepared.front_refs,
                 prepared.presentation_epoch,
             )
             self.last_error = None
-            presented_input = self._presented_input
 
         callback_error: BaseException | None = None
         if replacement is not None:
             try:
                 if self._accept_host is not None:
-                    self._accept_host(
-                        old_host,
-                        replacement,
-                        publication,
-                        prepared.plot_input,
-                    )
+                    self._accept_host(old_host)
             except BaseException as error:
                 # Staging already proved the new host is usable.  Application
                 # bookkeeping failure is reported on this panel but must not
                 # tear an already-accepted cohort in half.
                 callback_error = error
-        if self._present is not None:
-            # The pixels, on the owner thread, inside the batch's one accept
-            # pass -- this is the group's atomic present.  A refused present
-            # (the surface changed between staging and now) is remembered as
-            # the panel's error, never allowed to unwind the batch bookkeeping
-            # mid-pass: the next revision renders against the new surface and
-            # heals the pixels.
-            try:
-                self._present(operation)
-            except BaseException as error:
-                callback_error = error
         if self._on_presented is not None:
             try:
-                self._on_presented(publication, presented_input)
+                self._on_presented(accepted)
             except BaseException as error:
                 callback_error = error
         if callback_error is not None:
             with self._state_lock:
                 self.last_error = callback_error
         return True
+
+    def accept_configuration(
+        self,
+        operation: object,
+        target: object,
+    ) -> object | None:
+        """Commit one live configure result only after its front reaches screen."""
+
+        with self._state_lock:
+            surface = self._surface
+            if self._closed or surface is None:
+                return None
+            host = surface.host
+        presented, error = self._put_on_screen(host, operation)
+        if not presented:
+            with self._state_lock:
+                self.last_error = error or RuntimeError(
+                    "plot surface did not accept the configured front"
+                )
+            self._request_invalidation()
+            return None
+        description = getattr(operation, "value", None)
+        if not hasattr(description, "spec"):
+            raise TypeError("a live plot configuration must return DisplayDescription")
+        with self._state_lock:
+            current = self._surface
+            if current is None or current.host is not host:
+                return None
+            accepted = replace(
+                current,
+                target=target,
+                description=description,
+            )
+            self._surface = accepted
+            self._projection_target = target
+            self.last_error = None
+            return accepted
+
+    def _put_on_screen(
+        self, host: object, operation: object
+    ) -> tuple[bool, BaseException | None]:
+        if self._present is None:
+            return True, None
+        try:
+            return bool(self._present(host, operation)), None
+        except BaseException as error:
+            return False, error
+
+    def _request_invalidation(self) -> None:
+        if self._invalidate is None:
+            return
+        try:
+            self._invalidate(self._panel_id)
+        except BaseException as error:
+            with self._state_lock:
+                if self.last_error is None:
+                    self.last_error = error
 
     def reject(self, update: SurfaceUpdate, error: BaseException | None) -> None:
         """Abandon a prepared update, and remember why.
@@ -732,7 +903,7 @@ class PlotPanelPort:
                     and prepared.replacement_host is None
                 ):
                     self._advance_staged(
-                        _publication_generation(prepared.publication),
+                        _generation_of(prepared.plot_input),
                         _revision_of(prepared.plot_input),
                         prepared.front_refs,
                         prepared.presentation_epoch,
@@ -765,7 +936,7 @@ class PlotPanelPort:
                     and prepared.replacement_host is None
                 ):
                     self._advance_staged(
-                        _publication_generation(prepared.publication),
+                        _generation_of(prepared.plot_input),
                         _revision_of(prepared.plot_input),
                         prepared.front_refs,
                         prepared.presentation_epoch,
@@ -814,4 +985,4 @@ class PlotPanelPort:
     def report_waiting(self, missing_signal: str) -> None:
         """The signal this panel wants has not arrived on this tick."""
 
-        self.missing.append(str(missing_signal))
+        del missing_signal

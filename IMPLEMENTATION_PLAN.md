@@ -2,7 +2,7 @@
 
 更新时间：2026-08-25
 
-状态：`CURRENT SOFTWARE COMPLETE / RESIDUAL SWEEP COMPLETE`
+状态：`PLOT/RUNTIME/WORKBENCH CUT COMPLETE / OVERALL GOAL IN PROGRESS`
 
 本文只记录当前tree已经完成的产品切面、最新验证和有效的实验机边界。
 最终产品不变量见`ARCHITECTURE_DESIGN.md`。只有从当前tree重新取得的证据可以作为
@@ -22,13 +22,13 @@
 - Runtime不自动dump live/intermediate Dataset。Calibration、Temperature和SLM Feedback
   由各自domain owner保存精选artifact，并通过ExecutionContext注册已完成文件。
 - Figure NPZ是primary typed artifact，PNG只是preview。Figure保存exact Plot recipe、overlay、
-  viewport和causal lineage graph；FigureViewer与TaskConsole使用同一个Plot host路径。
+  viewport、selectors、facet focus和causal lineage graph；FigureViewer与TaskConsole使用同一个Plot host路径。
 - Plot axis/semantic identity已收口为`AxisRef(domain, axis_id)`稳定key；scope只接受tagged
   latest或tagged typed coordinate value，不再让display label或裸文本控制字进入truth。
 - Runtime是唯一跨publication history owner；active leases的signal-level event/indexed表示变化
   通过presentation epoch使同signal全部Panel重新投影，不增加scientific publication/revision。
-- PanelState只保存authored target；Live、Frozen和FigureViewer都以Plot成功返回的accepted
-  `DisplayDescription.spec`判断能力与交互。Selector/viewport observation携exact Dataset
+- PanelState只保存authored target；Live、Frozen和FigureViewer都以Plot成功返回的完整accepted
+  `DisplayDescription`判断当前pixels、能力与交互。Selector/viewport observation携exact Dataset
   generation+revision，TaskConsole Console核对后才持久化、镜像或发布derivation。
 
 ## 2. 当前代码收口状态
@@ -57,7 +57,7 @@
 
 ### 2.3 Figure与Viewer
 
-- 公共Figure API严格编码/解码PlotSpec、parameters、size、viewport、classifier、fit与
+- 公共Figure API严格编码/解码PlotSpec、parameters、size、viewport、selectors、facet focus、classifier、fit与
   typed image overlay；archive先发布，preview后渲染。
 - Panel Save只是公共Figure API的adapter，不再维护第二套writer或restore grammar。
 - FigureViewer必须从archive exact recipe恢复typed input，不按shape推断plot kind。
@@ -130,7 +130,7 @@
 - FigureViewer冻结树残余审计：相对`80116b5`无新增production/test文件或production class；production净增562行，其中Viewer presenter +327为multi-panel prepare/configure/atomic swap/retirement，FigureViewer view +97、InfoPane +61、Handle +28为复用board/card/Edit/tree的直接UI owner，shared panel description projection +131由TaskConsole与Viewer两个consumer共同使用，PanelEditor/Form合计+16为static模式与dynamic keyed-choice正确reconcile，demo另净增18行；同时旧Console/card/modal path净删98行。Tests净增122行，只有一个新test function（用户明确报告的loaded-left-pane变宽），其余均扩展既有Viewer/Panel/Edit/atomic cases，全部KEEP且无重复fixture。`dataset_picked/set_datasets/set_figure_*/show_figure/run_host_dialog/kind_read_only`等旧API与ASCII Flow owner搜索为零；旧单panel `_host/dataset/recipe`镜像和unused candidate viewport已删除，新增状态只存在于唯一presenter `panels`、window cards/Edit tabs、固定pane width和tree widgets，不进入archive grammar或第二份plot lifecycle；无deferred残余。
 - Exact Scan Panel恢复当前证据：真实event chunk为`1×1×3×5`、canonical为`2×(65×2×2)×3×5`的Signal经实际SignalPlane与Plot host由真实`field.x=65`触发>64拒绝；拒绝前后Setting均保留`field.x/y/z` fate且不再出现phantom `point`，独立Curve Panel title保持canonical axes，Fluent form在`fit_unavailable`同时仍含三个Semantic controls。精确目标`20×(10×10×10)×3×35`的title authority输出`(20)×(10×10×10)×(3×35)`。多维FacetGrid默认最外层真实scan axis，不再以flattened point rows制造1000 cells或phantom point-row restriction。相同live projection与仅title metadata变化均不reconcile Setting form；固定Plot kind不再进入Setting，FacetGrid只保留可编辑Cell kind；Facet默认、feasibility、真实拒绝与Fluent Setting聚焦证据`22 passed`。
 - Exact Scan terminal/Frozen根修当前证据：真实`20×(10×10×10)×(3×35)`canonical Dataset从partial Live publication开始，原子提交`field.x→Facet, field.y→Y, field.z→X, pair/site→Reduced`后，Live、运行中Frozen及terminal seal后重新创建的Frozen host均保持同一schema fingerprint、物理shape `(20,1000,3,35)`、resolved roles和`[-0.5,9.5]×[-0.5,9.5]` limits。根因三处均删除：multi-fate逐行修复导致回退默认35×3、host accept后以1×1×3×35 event schema覆盖canonical surface、以及histogram threshold/shape-only viewport无条件重放到image。当前实现使用atomic fate assignment、canonical accept metadata、resolved capability interaction和schema/spec view identity；Plot semantic/feasibility/facet/threshold聚焦`52 passed`，Workbench canonical/Frozen/retarget/save交叉聚焦`10 passed`。
-- 本cut冻结树残余审计：无新增production/test文件或production class；production净增250行，其中`zlc_plot.semantics`净增54行替换原逐行fate repair，Workbench Console净增196行用于唯一resolved-spec capability、interaction normalization、canonical accept及完整view identity。三个新增Console helper分别有4/3/1个同owner consumer，原`_panel_view_identity`直接升级而非平行实现；`composed_spec`仍是唯一fate composition owner。Tests净增261行且只新增1个test function（明确报告且order-sensitive的atomic fate bug），其余扩展既有cell-kind与Exact Scan用例，以真实大shape覆盖Live→terminal→Frozen、stale histogram callback和viewport invalidation；全部KEEP。event-snapshot metadata回灌、无能力threshold replay及shape-only viewport搜索为零；无compatibility path或deferred残余。
+- Plot/Runtime/Workbench当前candidate直接回归：Plot `534 passed`、Runtime `107 passed`、Workbench `435 passed`；Atom对Figure/hosted-node新contract的direct用例`1 passed`。这些结果来自当前tree，不复用旧Exact Scan cut的计数。
 - 长Task partial artifacts：Runtime在worker failure/Stop边界调用domain writer；Feedback普通异常从最后完成candidate生成6组Figure后rollback，Temperature从已提交survival保存partial curve/Figure，Calibration从最新完整三帧cycle保存partial capture（分析完成则保存完整报告）。`run.json`只索引这些已完成文件，不再是失败run唯一内容。
 - Feedback的`candidates/candidate-XXXX.npz`现为标准Science Context；operator可在既有Science Context输入中手动选择它作为新run起点。过程数组移至`data/measurements/measurement-XXXX.npz`。新run从candidate 1开始并使用本次authored update预算；没有resume输入、自动旧run查找、续编号或旧run预算继承。
 - Pulse STATUS ABI当前为LOADED/RUNNING/DONE/ENGINE_ERROR/UNDERFLOW/LINK_ERROR；UART fault不再置engine ERROR，observer failure不再伪装成board error，Remote日志使用ERROR/DONE真实事件名并写status/cursor双读、observer exception与FIRE总elapsed。该ABI令layout fingerprint更新为`0x5A55DF95`，实验板必须重build/program。
@@ -140,21 +140,35 @@
 
 ### 3.2 Frozen-tree residual sweep
 
-- 最终consumer graph只有三个新增共享owner：Runtime `TaskRun`被NodeHost和Calibration direct
-  run使用；Plot Figure API被Panel Save、Calibration、Temperature、SLM Feedback与FigureViewer
-  使用；Workbench lineage capture只连接Runtime publication与Viewer tree，不保存第二份science。
-- Material positive production files全部KEEP：SLM Feedback task（精选candidate data、六张图、
-  summary/rollback）、Plot Figure core（strict recipe/overlay/archive-first/shared host）、Runtime
-  TaskRun与Host接入、Calibration/Temperature产物接入、Workbench Task input projection和UI lineage tree。
-- Workbench重复archive wrapper、被忽略的Panel Save render callbacks、Figure/PanelState alternate readers、
-  Calibration alternate readers、旧bootstrap和内部带版本contract全部删除；无compatibility alias。
-- Tests净增13行。删除的`test_archive.py`能力已合并到Data Figure codec、Panel Save与Viewer tests；
-  其它删除只针对不再存在的格式/兼容行为，没有通过删科学验收掩盖失败。
-- 冻结统计为143 files、production `+2,599/-1,478`（净+1,121）、tests
-  `+958/-945`（净+13）、docs `+351/-255`（净+96）。新增生产量集中在上述三个真实owner
-  和三个domain Task；没有新增plugin-specific manager/registry或平行lifecycle。
-- Unsupported format/alias、旧bootstrap/contract/API、重复owner、Markdown本地链接、JSON、
-  conflict marker与`git diff --check`残余均为0；workspace实验数据未转换、未删除、未修改。
+- 本cut相对`1043aa7`的冻结统计为52 files：production 27 files
+  `+4,046/-3,320`（净+726）、tests 23 files `+1,356/-800`（净+556）、
+  active docs 2 files `+38/-24`（净+14）。无新增或删除文件。
+- Plot production净删48行；增量集中在Runtime净+298的exact axis/generation、
+  lease history与restart cleanup，以及Workbench净+476的staged/accepted surface、
+  Live/Edit/Viewer原子替换和overlay lineage。最大正增文件为Plot `data_view.py`
+  +174（`SelectionSubject`搬迁与统一axis projection）、Workbench `presentation.py` +171、
+  Workbench `console.py` +166、Runtime `selection_bridge.py` +155、Runtime `plane.py`
+  +140、Plot `figure_artifact.py` +106和Workbench `viewer.py` +88；全部是上述现有
+  owner的直接实现，全部KEEP。
+- Production class文本新增3、删除5，净删2。`ResolvedAxis`替换
+  `AxisDescriptor`，`SelectionSubject`从`session.py`移到`data_view.py`，`_ProjectedAxis`
+  替换`_ResolvedAxis`；同时删除`RollingHistoryPoint`和`PlotViewportObservation`。
+  Runtime六个`indexed_*` dict合并为唯一`indexed_history`；PanelBinding的accepted/host/focus
+  镜像与PlotPanelPort的presented/shown镜像已删除，当前pixels只由既有`_Prepared`
+  记录的`_surface`表达。新增definition无0-consumer；Figure selector encode/decode对与
+  Runtime锁内快照/锁外materialize分界是仅有的single-consumer helpers，均KEEP。
+- Test function从369减到366（净-3）；无新test文件或fixture，fixture数保持10。
+  7个新的直接用例全部KEEP，分别覆盖未上屏front手势拒绝、presentation debt、
+  fit跨restart identity、lease window、atomic surface accept、generation+revision publication identity
+  与Rolling viewport。旧label alias、`source_revisions`、revision-only和implementation-specific
+  materializer用例已删除或合并，无剩余文件级MERGE/DELETE项。
+- `AxisDescriptor`、`source_revisions`、`HistoryPool`、`AcceptedSurface`、
+  `editor_accepted_display`、`PlotViewportObservation`、revision-only publication lookup、
+  平行history owner、冲突标记与`git diff --check`残余均为0；workspace实验数据
+  未转换、未删除、未修改。
+- 下一未完成项严格为Seamless Scan的`duration_period4`/period上限根修，以及全plot/fit
+  family共用的通用Fit parameter constraints；二者都未被本cut的Plot/Runtime/Workbench
+  验证代替或暗中实施。
 
 ### 3.3 Calibration detected-site review增量残余审计
 

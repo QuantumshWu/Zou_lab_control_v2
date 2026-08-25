@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from operator import attrgetter
 from pathlib import Path
 from queue import Empty, SimpleQueue
 import time
@@ -23,14 +24,14 @@ from typing import Any
 from zlc_plot import (
     accepts_classifier_thresholds,
     DEFAULTS,
+    describe_semantics,
     IMAGE_POINT_OVERLAY_CONTRACT,
     IMAGE_POINT_OVERLAY_GEOMETRY_RECORD,
     history_window_requirement,
-    indexed_presentation_window,
     PlotKind,
+    SelectorKind,
     paints_image_surface,
     image_point_overlay_from_signal,
-    selection_subject_for,
 )
 from zlc_plot.primitives import ImageFrame, ImagePointOverlay, PointStatus
 from zlc_plot.specs import semantic_spec, validate_authored_display
@@ -82,11 +83,13 @@ from .panel_catalog import (
 from .panel_state import (
     PanelFrozenData,
     PanelState,
-    _semantic_entries,
+    control_document,
+    fit_output_fields,
     panel_state_from_description,
     panel_data_shape,
     panel_surface_from_description,
     project_panel_state,
+    semantic_entries,
 )
 from .presentation import PlotPanelPort
 from .selection import (
@@ -97,8 +100,9 @@ from .selection import (
     panel_selection_matches_subject,
     panel_selection_output_catalog,
     panel_plot_selectors,
+    observation_matches_plot_input,
+    plot_identity_matches_plot_input,
     _apply_panel_selection,
-    _apply_panel_viewport,
     _remove_panel_selection,
     attach_selection_bridge,
 )
@@ -141,6 +145,16 @@ def _same_panel_selection(left: object, right: object) -> bool:
     return signature(left) == signature(right)
 
 
+_PLOT_TARGET = attrgetter(
+    "signal", "kind", "cell_kind", "size", "semantic", "display", "fit",
+    "overlay_signal", "selector", "classifier_thresholds", "focused_cell",
+)
+
+
+def _same_panel_plot_target(left: PanelState, right: PanelState) -> bool:
+    return _PLOT_TARGET(left) == _PLOT_TARGET(right)
+
+
 def _run_of(publication: object) -> object | None:
     """Which RUN a publication belongs to.
 
@@ -159,7 +173,6 @@ class PanelBinding:
 
     panel_id: str
     state: PanelState
-    host: Any = None
     port: PlotPanelPort | None = None
     #: Runtime-owned source-index retention exists only while this panel asks
     #: for a history window.  The lease, not the signal declaration, is the
@@ -189,40 +202,40 @@ class PanelBinding:
     #: so it is kept beside the publication it was taken from and dropped when
     #: that no longer describes what is on screen.
     interaction_viewport: Any = None
-    #: What each host was last seen showing.  Whoever CHANGED is the operator;
-    #: a host that merely disagrees with the panel is the one still catching
-    #: up with the last mirror, and reading that as a second gesture makes the
-    #: two surfaces push each other back and forth forever.
-    focus_seen: tuple[Any, Any] = (None, None)
     #: The last failure already shown, so one refusal is reported once.
     reported_error: Any = None
-    #: Exact publication used to construct a not-yet-board-anchored host.
-    display_publication: Any = None
     #: Image annotation has its own presentation revision while its data remains
     #: an explicit sibling in the selected publication.
     overlay_revision: int = -1
-    #: Whether this host's very first render has been put on screen.  Console
-    #: panel widgets stage their fronts (the board presents them per same-shot
-    #: batch), so the initial render -- which no batch carries, because the
-    #: host was built from that exact snapshot -- is presented once from the
-    #: beat when it is ready.
-    initial_presented: bool = False
     #: UI-neutral parameter descriptions projected from this host's public
     #: zlc_plot control plane.  This is editor metadata, not a second authored
     #: state; accepted values still live only in ``state``.
     parameter_surface: Mapping[str, object] = field(default_factory=dict)
-    #: Exact descriptions accepted by the two raster hosts.  PanelState is the
-    #: authored target and may remain repairable after a refused configure;
-    #: interaction/capability decisions must describe pixels that actually
-    #: exist, never that not-yet-accepted target.
-    accepted_display: object | None = None
-    editor_accepted_display: object | None = None
     #: Monotonic across both Live and Edit hosts.  Plot selector revisions are
     #: host-local, so two surfaces can both emit revision 1; Runtime bridge
     #: triggers need the panel's single canonical sequence instead.
     selection_revision: int = 0
     configuration: Any = None
     editor_configuration: Any = None
+
+    @property
+    def accepted_surface(self) -> object | None:
+        return None if self.port is None else self.port.accepted_surface()
+
+    @property
+    def host(self) -> Any:
+        surface = self.accepted_surface
+        return None if surface is None else surface.host
+
+    @property
+    def display_publication(self) -> Any:
+        surface = self.accepted_surface
+        return None if surface is None else surface.publication
+
+    @property
+    def accepted_display(self) -> object | None:
+        surface = self.accepted_surface
+        return None if surface is None else surface.description
 
     @property
     def frozen_stale(self) -> bool:
@@ -243,7 +256,20 @@ class PanelBinding:
         frozen = self.frozen_data
         if frozen is None:
             return False
-        if frozen.signal != self.state.signal:
+        fields = (
+            "signal",
+            "kind",
+            "cell_kind",
+            "size",
+            "semantic",
+            "display",
+            "fit",
+            "overlay_signal",
+        )
+        if any(
+            getattr(frozen.target, name) != getattr(self.state, name)
+            for name in fields
+        ):
             return True
         # ``display_publication`` is what this card is showing: the publication
         # its host was built from, and thereafter every one presented on it.
@@ -684,47 +710,52 @@ class ConsolePresenter:
         value = getattr(publication, "value", None)
         return value(str(signal)) if callable(value) else None
 
-    def _panel_companion_signals(self, binding: PanelBinding) -> tuple[str, ...]:
-        """What else this panel must read from the SAME front."""
-
-        overlay = binding.state.overlay_signal
-        return (
-            (overlay,)
-            if overlay and self._paints_image_surfaces(binding)
-            else ()
-        )
-
-    def _make_panel_port(self, binding: PanelBinding) -> PlotPanelPort:
+    def _make_panel_port(
+        self,
+        binding: PanelBinding,
+        *,
+        target: PanelState | None = None,
+        notify_presented: bool = True,
+        sync_history: bool = True,
+    ) -> PlotPanelPort:
         """Wire one panel to the board through the single product path."""
 
+        selected = binding.state if target is None else target
         port = PlotPanelPort(
             binding.panel_id,
-            binding.state.signal,
-            display_interval_ms=binding.state.interval_ms,
-            companion_signals=lambda: self._panel_companion_signals(binding),
-            project_input=lambda value, pub, front: self._project_panel_input(
-                binding, value, pub, front
+            selected.signal,
+            initial_target=selected,
+            display_interval_ms=selected.interval_ms,
+            companion_signals=lambda target: (
+                (target.overlay_signal,) if target.overlay_signal else ()
+            ),
+            project_input=lambda value, pub, front, target: self._project_panel_input(
+                binding, value, pub, front, state=target
             ),
             submit_projection=self.board.submit_projection,
-            replace_host=lambda projected, value, pub: self._stage_panel_host(
-                binding, projected, value, pub
+            replace_host=lambda projected, value, pub, target: self._stage_panel_host(
+                binding, projected, value, pub, state=target
             ),
-            accept_host=lambda old, new, pub, projected: self._accept_panel_host(
-                binding, old, new, pub, projected
-            ),
+            accept_host=lambda old: self._accept_panel_host(binding, old),
             retire_host=self._retire_plot_host,
-            on_presented=lambda pub, projected: self._panel_presented(
-                binding, pub, projected
+            on_presented=(
+                (lambda surface: self._panel_presented(binding, surface))
+                if notify_presented
+                else None
             ),
-            present=lambda operation: self._present_panel_operation(
-                binding, operation
+            present=lambda host, operation: self._present_panel_operation(
+                binding, host, operation
+            ),
+            invalidate=lambda panel_id: self.board.invalidate_presentations(
+                (panel_id,)
             ),
         )
-        try:
-            self._sync_panel_history(binding)
-        except BaseException:
-            port.close()
-            raise
+        if sync_history:
+            try:
+                self._sync_panel_history(binding)
+            except BaseException:
+                port.close()
+                raise
         return port
 
     def _presentation_snapshot(
@@ -732,61 +763,15 @@ class ConsolePresenter:
         signal: str,
         value: object,
         publication: object,
-        *,
-        primary_window: int | None = None,
-    ) -> object:
-        """Resolve the one dataset entity every display consumer sees."""
+    ) -> tuple[object, object]:
+        """Resolve one Dataset together with its exact retained event record."""
 
         snapshot = getattr(value, "snapshot", None)
         if snapshot is None:
             raise TypeError("a panel signal value must carry an OwnedSnapshot")
-        if primary_window is None:
-            return self.session.signal_plane.current_dataset(signal, publication)
-        return self.session.signal_plane.current_dataset(
-            signal, publication, primary_window=primary_window
-        )
-
-    def _panel_primary_window(
-        self,
-        binding: PanelBinding,
-        state: PanelState | None = None,
-    ) -> int | None:
-        """Ask Plot how much of an already-indexed Dataset this view reads."""
-
-        selected = binding.state if state is None else state
-        display = {
-            str(entry["key"]): entry.get("value")
-            for entry in tuple(binding.parameter_surface.get("display", ()))
-        }
-        display.update(selected.display)
-        spec = self._panel_resolved_spec(binding, selected)
-        return None if spec is None else indexed_presentation_window(spec, display)
-
-    def _panel_history_window(
-        self,
-        binding: PanelBinding,
-        state: PanelState | None = None,
-    ) -> int | None:
-        """Bounded Runtime retention this panel actively owns."""
-
-        selected = binding.state if state is None else state
-        display = {
-            str(entry["key"]): entry.get("value")
-            for entry in tuple(binding.parameter_surface.get("display", ()))
-        }
-        display.update(selected.display)
-        spec = self._panel_resolved_spec(binding, selected)
-        requested = (
-            None if spec is None else history_window_requirement(spec, display)
-        )
-        if requested is None or not selected.signal:
-            return None
-        return (
-            requested
-            if self.session.signal_plane.supports_indexed_history(
-                selected.signal
-            )
-            else None
+        return self.session.signal_plane.current_dataset_view(
+            signal,
+            publication,
         )
 
     def _invalidate_signal_presentations(
@@ -794,138 +779,171 @@ class ConsolePresenter:
         signal: str,
         *,
         semantic_schema: object | None = None,
-    ) -> None:
+    ) -> frozenset[str]:
         """Invalidate every surface whose signal-level Dataset mode changed."""
 
         selected = str(signal)
         invalidated: list[str] = []
+        targets: dict[str, object] = {}
         for other in tuple(self.panels.values()):
             if other.state.signal != selected:
                 continue
             if semantic_schema is not None:
-                self._reconcile_panel_semantic_schema(
-                    other, semantic_schema
+                base = task_console_fitting_spec(
+                    semantic_schema,
+                    other.state.kind,
+                    other.state.cell_kind,
                 )
+                if base is not None:
+                    accepted = other.accepted_display
+                    if accepted is not None:
+                        previous = {
+                            str(field.name)
+                            for field in accepted.semantics.fields
+                            if str(field.name) != "kind"
+                        }
+                        current = {
+                            str(field.name)
+                            for field in describe_semantics(
+                                semantic_schema,
+                                base,
+                            ).fields
+                            if str(field.name) != "kind"
+                        }
+                        semantic = {
+                            str(name): value
+                            for name, value in other.state.semantic.items()
+                            if str(name) not in previous
+                            or str(name) in current
+                        }
+                        if semantic != dict(other.state.semantic):
+                            other.state = replace(
+                                other.state,
+                                semantic=semantic,
+                            )
                 projected = self._schema_projected_parameters(
                     other, semantic_schema, self._RESOLVING_REASON
                 )
                 if projected is not None:
                     other.parameter_surface = projected
-            other.accepted_display = None
             if other.port is not None:
-                other.port.invalidate_presentation()
                 invalidated.append(other.panel_id)
+                targets[other.panel_id] = other.state
             # A Frozen snapshot is an exact PlotInput representation.  An
             # event snapshot cannot honestly be re-labelled windowed/indexed
             # (or the reverse), even within the same run.
             if other.frozen_data is not None:
-                other.frozen_data = None
-                self._release_panel_editor(other)
-                self.refresh_panel_editor(other.panel_id)
+                other.refresh_requested = True
         if not self._closing:
-            self.board.invalidate_presentations(invalidated)
-
-    def _reconcile_panel_semantic_schema(
-        self,
-        binding: PanelBinding,
-        schema: object,
-    ) -> None:
-        """Drop only fields proven to belong to the replaced presentation.
-
-        Unknown authored keys remain loud.  The only values removed here are
-        fields the previously accepted surface declared and the replacement
-        Runtime schema no longer declares (for example its retired source
-        index).  This cannot turn an old grammar or a typo into a default.
-        """
-
-        from zlc_plot.semantics import describe_semantics
-
-        base = task_console_fitting_spec(
-            schema, binding.state.kind, binding.state.cell_kind
-        )
-        if base is None:
-            return
-        description = describe_semantics(schema, base)
-        accepted = binding.accepted_display
-        previously_declared = (
-            set()
-            if accepted is None
-            else {
-                str(entry["key"])
-                for entry in _semantic_entries(accepted.semantics)
-            }
-        )
-        kept = dict(binding.state.semantic)
-        for name, value in binding.state.semantic.items():
-            key = str(name)
-            if not description.declares(key):
-                if key in previously_declared:
-                    kept.pop(key, None)
-                continue
-            field = description.field(key)
-            if (
-                not any(value == choice for choice in field.choice_values)
-                and key in previously_declared
-            ):
-                kept.pop(key, None)
-        if kept != dict(binding.state.semantic):
-            binding.state = replace(binding.state, semantic=kept)
-
-    def _release_panel_history(self, binding: PanelBinding) -> None:
-        lease = binding.history_lease
-        if lease is not None:
-            signal = lease.signal_name
-            lease.close()
-            # Plane release is transactional and may fail while restoring its
-            # indexed state.  Keep the only live handle until close succeeds,
-            # otherwise an active demand becomes impossible to release.
-            if binding.history_lease is lease:
-                binding.history_lease = None
-            semantic_schema = None
-            if not self.session.signal_plane.indexed_history_active(signal):
-                publication = self.session.signal_plane.latest_publication(signal)
-                value = None if publication is None else publication.value(signal)
-                semantic_schema = (
-                    None
-                    if value is None
-                    else value.canonical_schema or value.snapshot.block.schema
-                )
-            self._invalidate_signal_presentations(
-                signal,
-                semantic_schema=semantic_schema,
+            self.board.invalidate_presentations(
+                invalidated,
+                targets=targets,
             )
+        return frozenset(invalidated)
+
+    def _apply_history_transition(
+        self,
+        signal: str,
+        transition: tuple[bool, bool, bool] | None,
+    ) -> frozenset[str]:
+        if transition is None:
+            return frozenset()
+        indexed, representation_changed, data_changed = transition
+        if not (representation_changed or data_changed):
+            return frozenset()
+        semantic_schema = None
+        if (
+            representation_changed
+            and not indexed
+        ):
+            publication = self.session.signal_plane.latest_publication(signal)
+            value = None if publication is None else publication.value(signal)
+            semantic_schema = (
+                None
+                if value is None
+                else value.canonical_schema or value.snapshot.block.schema
+            )
+        return self._invalidate_signal_presentations(
+            signal,
+            semantic_schema=semantic_schema,
+        )
+
+    def _release_panel_history(
+        self, binding: PanelBinding
+    ) -> frozenset[str]:
+        lease = binding.history_lease
+        if lease is None:
+            return frozenset()
+        signal = lease.signal_name
+        transition = lease.close()
+        # Plane release is transactional.  Keep the handle until close
+        # succeeds, otherwise an active demand becomes impossible to release.
+        if binding.history_lease is lease:
+            binding.history_lease = None
+        return self._apply_history_transition(signal, transition)
 
     def _sync_panel_history(
         self,
         binding: PanelBinding,
         state: PanelState | None = None,
-    ) -> None:
+        *,
+        schema: object | None = None,
+    ) -> frozenset[str]:
         """Make Runtime retention exactly match this panel's current demand."""
 
         selected = binding.state if state is None else state
         signal = str(selected.signal)
-        window = self._panel_history_window(binding, selected)
+        projection = self._panel_projection(
+            binding,
+            selected,
+            schema=schema,
+        )
+        window = None
+        if projection is not None:
+            from zlc_plot.specs import parameter_schema_for
+
+            spec, _semantic, display = projection
+            effective = dict(
+                parameter_schema_for(
+                    spec,
+                    style=DEFAULTS.style,
+                ).initial_values(None)
+            )
+            effective.update(display)
+            window = history_window_requirement(
+                spec,
+                effective,
+            )
+        if (
+            window is not None
+            and not self.session.signal_plane.supports_indexed_history(signal)
+        ):
+            window = None
         capable = bool(
             signal
             and window is not None
-            and self.session.signal_plane.supports_indexed_history(signal)
         )
         lease = binding.history_lease
         if not capable:
-            self._release_panel_history(binding)
-            return
+            return self._release_panel_history(binding)
         assert window is not None
         if lease is not None and lease.signal_name == signal:
             if lease.window != window:
-                lease.resize(window)
-                self._invalidate_signal_presentations(signal)
-            return
-        self._release_panel_history(binding)
+                transition = lease.resize(window)
+                return self._apply_history_transition(signal, transition)
+            return frozenset()
+        invalidated = set(self._release_panel_history(binding))
         binding.history_lease = self.session.signal_plane.acquire_indexed_history(
             signal,
             window,
         )
-        self._invalidate_signal_presentations(signal)
+        invalidated.update(
+            self._apply_history_transition(
+                signal,
+                binding.history_lease.acquisition_transition,
+            )
+        )
+        return frozenset(invalidated)
 
     def _project_panel_input(
         self,
@@ -946,43 +964,47 @@ class ConsolePresenter:
         """
 
         selected = binding.state if state is None else state
-        # Exact producers publish event chunks for scientific Processors, but
-        # every display consumer sees the canonical run geometry.  Whether an
-        # axis is scoped, reduced, faceted, or grouped changes only the plot
-        # projection; it never chooses a different data entity.  Ordinary
-        # Monitors, including Processor outputs, remain latest-event displays;
-        # explicitly source-indexed outputs resolve the same Runtime-owned
-        # history Dataset at the panel's generic target.
-        snapshot = self._presentation_snapshot(
+        snapshot, event_record = self._presentation_snapshot(
             selected.signal,
             value,
             publication,
-            primary_window=self._panel_primary_window(binding, selected),
         )
+        event_records = ((publication, event_record),)
         # The SEMANTIC surface, not the outer kind: a FacetGrid of image cells
         # paints images, and the overlay is a fact of the image.  A grid over
         # curve cells has nowhere to put a ring.
-        resolved = self._panel_accepted_spec(binding) or self._panel_resolved_spec(
+        resolved = (
+            self._panel_accepted_spec(binding)
+            if state is None
+            else None
+        ) or self._panel_resolved_spec(
             binding, selected, subject=snapshot
         )
         if resolved is None or not paints_image_surface(resolved):
-            return snapshot
+            return snapshot, event_records
         if selected.overlay_signal:
             if front is None:
-                return snapshot
-            overlay = self._image_point_overlay(
+                return snapshot, event_records
+            overlay_result = self._image_point_overlay(
                 front,
                 publication,
                 selected.overlay_signal,
                 snapshot,
                 binding.overlay_revision + 1,
             )
+            if overlay_result is None:
+                return snapshot, event_records
+            overlay, overlay_publication, overlay_record = overlay_result
+            event_records = (
+                *event_records,
+                (overlay_publication, overlay_record),
+            )
         else:
             geometry = publication.run_record.get(
                 IMAGE_POINT_OVERLAY_GEOMETRY_RECORD
             )
             if not isinstance(geometry, Mapping):
-                return snapshot
+                return snapshot, event_records
             point_ids = tuple(str(value) for value in geometry["point_ids"])
             overlay = ImagePointOverlay(
                 revision=binding.overlay_revision + 1,
@@ -994,9 +1016,9 @@ class ConsolePresenter:
                 ),
             )
         if overlay is None:
-            return snapshot
+            return snapshot, event_records
         binding.overlay_revision += 1
-        return ImageFrame(snapshot, overlay)
+        return ImageFrame(snapshot, overlay), event_records
 
     def _image_point_overlay(
         self,
@@ -1005,7 +1027,7 @@ class ConsolePresenter:
         overlay_signal: str,
         image_snapshot: object,
         revision: int,
-    ) -> object | None:
+    ) -> tuple[object, object, object] | None:
         """Ask the exact judgement publication for the layer to draw.
 
         Geometry and status both come out of the GIVEN FRONT.  Logic rows,
@@ -1020,84 +1042,123 @@ class ConsolePresenter:
             image_publication
         ) != self.session.signal_plane.publication_roots(overlay_publication):
             raise ValueError("image overlay publication is not from the image shot")
+        pending = [overlay_publication]
+        seen: set[int] = set()
+        while pending:
+            current = pending.pop()
+            if current is image_publication:
+                break
+            identity = id(current)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            pending.extend(
+                self.session.signal_plane.direct_parent_publications(current)
+            )
+        else:
+            raise ValueError(
+                "image overlay publication does not descend from the image"
+            )
         status = overlay_publication.value(overlay_signal)
         if status is None:
             return None
-        snapshot = self._presentation_snapshot(
-            overlay_signal,
-            status,
-            overlay_publication,
-            primary_window=1,
-        )
+        snapshot = status.snapshot
+        event_record = status.event_record
         geometry = overlay_publication.run_record.get(
             IMAGE_POINT_OVERLAY_GEOMETRY_RECORD
         )
-        return image_point_overlay_from_signal(
-            geometry,
-            snapshot,
-            image_snapshot,
-            revision=int(revision),
+        return (
+            image_point_overlay_from_signal(
+                geometry,
+                snapshot,
+                image_snapshot,
+                revision=int(revision),
+            ),
+            overlay_publication,
+            event_record,
         )
-
-    @staticmethod
-    def _overlay_annotation(
-        binding: PanelBinding,
-        publication: object | None,
-        plot_input: object,
-        *,
-        state: PanelState | None = None,
-    ) -> dict[str, Any]:
-        del publication
-        selected = binding.state if state is None else state
-        if not isinstance(plot_input, ImageFrame) or not selected.overlay_signal:
-            return {}
-        return {"overlay_signal": selected.overlay_signal}
 
     def _panel_frozen_data(
         self,
         binding: PanelBinding,
         *,
-        snapshot: object,
         publication: object | None,
         plot_input: object,
-        state: PanelState | None = None,
+        event_records: tuple[tuple[object, object], ...],
+        target: PanelState,
+        description: object,
     ) -> PanelFrozenData:
-        selected = binding.state if state is None else state
+        overlay = (
+            {"overlay_signal": target.overlay_signal}
+            if isinstance(plot_input, ImageFrame) and target.overlay_signal
+            else {}
+        )
         return PanelFrozenData(
-            selected.signal,
             publication,
-            snapshot,
             plot_input,
+            target,
+            description,
             capture_run_chain(
                 self.session.signal_plane,
-                publication,
+                event_records[-1][0] if event_records else publication,
+                event_records=dict(reversed(event_records)),
                 resolve_device_settings=(
                     self.session.resolve_device_setting_records
                 ),
             ),
-            self._overlay_annotation(
-                binding, publication, plot_input, state=selected
-            ),
+            overlay,
         )
 
     def _panel_presented(
         self,
         binding: PanelBinding,
-        publication: object,
-        plot_input: object,
+        surface: object,
     ) -> None:
         """Track the exact live event separately from Panel Edit's frozen one."""
 
-        binding.display_publication = publication
+        publication = surface.publication
+        plot_input = surface.plot_input
+        description = surface.description
+        describes_current_target = bool(
+            description is not None
+            and _same_panel_plot_target(surface.target, binding.state)
+        )
+        if describes_current_target:
+            accepted_state = panel_state_from_description(
+                binding.state,
+                description,
+            )
+            state_changed = accepted_state != binding.state
+            binding.state = accepted_state
+            frozen_target = binding.state
+        else:
+            state_changed = False
+            frozen_target = surface.target
+        ui_changed = False
+        if describes_current_target:
+            controls = panel_surface_from_description(
+                binding.state,
+                description,
+            )
+            ui_changed = any(
+                binding.parameter_surface.get(name) != controls.get(name)
+                for name in controls
+            )
+            if ui_changed:
+                binding.parameter_surface = controls
+        interaction_changed = self._normalize_panel_interaction(binding)
         if binding.frozen_data is not None and not binding.refresh_requested:
+            if state_changed or ui_changed or interaction_changed:
+                self._publish_panel_state(binding)
             return
         binding.refresh_requested = False
-        snapshot = getattr(plot_input, "snapshot", plot_input)
         binding.frozen_data = self._panel_frozen_data(
             binding,
-            snapshot=snapshot,
             publication=publication,
             plot_input=plot_input,
+            event_records=surface.event_records,
+            target=frozen_target,
+            description=description,
         )
         self._publish_panel_state(binding)
         if binding.editor_open:
@@ -1130,31 +1191,43 @@ class ConsolePresenter:
         schema = getattr(getattr(snapshot, "block", None), "schema", None)
         return self._panel_schema(binding) if schema is None else schema
 
+    def _panel_projection(
+        self,
+        binding: PanelBinding,
+        state: PanelState | None = None,
+        *,
+        subject: object | None = None,
+        schema: object | None = None,
+    ) -> tuple[object, dict[str, Any], dict[str, Any]] | None:
+        """Resolve the authored state once through Plot's existing owner."""
+
+        selected = binding.state if state is None else state
+        if schema is None:
+            schema = self._panel_subject_schema(binding, subject)
+        if schema is None:
+            return None
+        spec = task_console_fitting_spec(
+            schema, selected.kind, selected.cell_kind
+        )
+        if spec is None:
+            return None
+        return project_panel_state(schema, spec, selected)
+
     def _panel_resolved_spec(
         self,
         binding: PanelBinding,
         state: PanelState | None = None,
         *,
         subject: object | None = None,
+        schema: object | None = None,
     ) -> object | None:
-        """Resolve the exact plot vocabulary interaction state would enter."""
-
-        selected = binding.state if state is None else state
-        schema = self._panel_subject_schema(binding, subject)
-        if schema is None:
-            return None
-        try:
-            spec = task_console_fitting_spec(
-                schema, selected.kind, selected.cell_kind
-            )
-            if spec is None:
-                return None
-            resolved, _semantic, _display = project_panel_state(
-                schema, spec, selected
-            )
-        except (KeyError, TypeError, ValueError):
-            return None
-        return resolved
+        projection = self._panel_projection(
+            binding,
+            state,
+            subject=subject,
+            schema=schema,
+        )
+        return None if projection is None else projection[0]
 
     @staticmethod
     def _panel_accepted_display(
@@ -1162,8 +1235,11 @@ class ConsolePresenter:
         host: object | None = None,
     ) -> object | None:
         if host is not None and host is binding.editor_host:
-            return binding.editor_accepted_display
-        return binding.accepted_display
+            frozen = binding.frozen_data
+            return None if frozen is None else frozen.description
+        if host is None or host is binding.host:
+            return binding.accepted_display
+        return None
 
     @classmethod
     def _panel_accepted_spec(
@@ -1183,44 +1259,13 @@ class ConsolePresenter:
         display = cls._panel_accepted_display(binding, host)
         return None if display is None else display.selection_subject
 
-    def _panel_selection_subject(
-        self,
-        binding: PanelBinding,
-        host: object | None = None,
-        *,
-        state: PanelState | None = None,
-        plot_input: object | None = None,
-    ) -> object | None:
-        """Accepted subject, or an exact target subject during host mount."""
-
-        if state is None:
-            accepted = self._panel_accepted_subject(binding, host)
-            if accepted is not None:
-                return accepted
-        if plot_input is None:
-            return None
-        selected = binding.state if state is None else state
-        spec = self._panel_resolved_spec(
-            binding, selected, subject=plot_input
-        )
-        schema = self._panel_subject_schema(binding, plot_input)
-        if spec is None or schema is None:
-            return None
-        try:
-            return selection_subject_for(
-                schema,
-                spec,
-                facet_index=selected.focused_cell,
-            )
-        except (KeyError, TypeError, ValueError):
-            return None
-
-    def _normalize_panel_interaction(self, binding: PanelBinding) -> None:
+    def _normalize_panel_interaction(self, binding: PanelBinding) -> bool:
         """Drop interaction state that cannot describe the current view."""
 
-        spec = self._panel_accepted_spec(binding)
-        if spec is None:
-            return
+        description = binding.accepted_display
+        if description is None:
+            return False
+        spec = description.spec
         subject = self._panel_accepted_subject(binding)
         state = binding.state
         schema = self._panel_subject_schema(binding)
@@ -1237,7 +1282,10 @@ class ConsolePresenter:
                 changes["focused_cell"] = None
         if (
             state.classifier_thresholds
-            and not accepts_classifier_thresholds(spec, state.display)
+            and not accepts_classifier_thresholds(
+                spec,
+                description.display_state.values,
+            )
         ):
             changes["classifier_thresholds"] = ()
         selection = panel_selection_from_document(state.selector)
@@ -1253,50 +1301,15 @@ class ConsolePresenter:
             binding.state = replace(state, **changes)
             if "selector" in changes and binding.bridge is not None:
                 binding.bridge.clear_selection()
+        viewport_cleared = False
         if (
             binding.interaction_viewport is not None
             and binding.interaction_viewport[0]
             != self._panel_view_identity(binding)
         ):
             binding.interaction_viewport = None
-
-    def _panel_host_configuration(
-        self,
-        panel_state: PanelState,
-        surface: Mapping[str, object],
-        *,
-        overlay: object,
-        viewport: object,
-        live: bool,
-        restore_interaction: bool,
-        classifier_thresholds: object = _UNCHANGED,
-        selectors: object = _UNCHANGED,
-    ) -> dict[str, object]:
-        configuration: dict[str, object] = {
-            "semantic": self._declared_only(
-                panel_state.semantic, surface.get("semantic", ())
-            ),
-            "parameters": self._declared_only(
-                panel_state.display, surface.get("display", ())
-            ),
-            "size": panel_state.size,
-            "fit": self._declared_only(
-                panel_state.fit, surface.get("fit", ())
-            ),
-            "fit_live": live,
-        }
-        if restore_interaction:
-            configuration.update(
-                facet_focus=panel_state.focused_cell,
-                viewport=viewport,
-            )
-            if classifier_thresholds is not _UNCHANGED:
-                configuration["classifier_thresholds"] = classifier_thresholds
-            if selectors is not _UNCHANGED:
-                configuration["selectors"] = selectors
-        if overlay is not _UNCHANGED:
-            configuration["image_overlay"] = overlay
-        return configuration
+            viewport_cleared = True
+        return bool(changes) or viewport_cleared
 
     def _match_host_to_panel(
         self,
@@ -1304,12 +1317,8 @@ class ConsolePresenter:
         host: object,
         *,
         state: PanelState | None = None,
-        data: object = _UNCHANGED,
         overlay: object = _UNCHANGED,
-        viewport: object = _UNCHANGED,
         display_updates: object = _UNCHANGED,
-        present: bool = False,
-        live: bool = True,
         restore_interaction: bool = False,
         interaction_input: object = _UNCHANGED,
     ) -> object:
@@ -1323,11 +1332,6 @@ class ConsolePresenter:
         needs each resulting operation presented, while the Edit surface
         auto-presents its own.
 
-        ``live`` is False for a host that exists only to be written to a file.
-        Such a host is not following anything, and everything it was told must
-        have LANDED before the file is written -- the analysis is part of the
-        picture, not a later arrival somebody else will present.
-
         ``restore_interaction`` belongs only to a new/replacement/static host.
         A standing live host is the event authority for its committed Area,
         viewport, threshold and focus until the queued owner acknowledgement
@@ -1336,20 +1340,34 @@ class ConsolePresenter:
         """
 
         panel_state = binding.state if state is None else state
-        surface = binding.parameter_surface
+        interaction_subject = (
+            None if interaction_input is _UNCHANGED else interaction_input
+        )
+        projection = self._panel_projection(
+            binding,
+            panel_state,
+            subject=interaction_subject,
+        )
+        if projection is None:
+            raise ValueError("panel target does not resolve on this Dataset")
+        target_spec, _semantic, _display = projection
         interaction_spec = None
         classifier_thresholds: object = _UNCHANGED
         selectors: object = _UNCHANGED
         if restore_interaction:
-            interaction_subject = (
+            accepted_display = self._panel_accepted_display(binding, host)
+            if accepted_display is None:
+                accepted_display = binding.accepted_display
+            interaction_spec = (
                 None
-                if interaction_input is _UNCHANGED
-                else interaction_input
+                if accepted_display is None
+                or accepted_display.spec != target_spec
+                else accepted_display.spec
             )
-            interaction_spec = self._panel_resolved_spec(
-                binding,
-                panel_state,
-                subject=interaction_subject,
+            selection_subject = (
+                None
+                if accepted_display is None
+                else accepted_display.selection_subject
             )
             if interaction_spec is not None:
                 if accepts_classifier_thresholds(
@@ -1357,22 +1375,7 @@ class ConsolePresenter:
                 ):
                     classifier_thresholds = panel_state.classifier_thresholds
                 selection = panel_selection_from_document(panel_state.selector)
-                schema = self._panel_subject_schema(
-                    binding, interaction_subject
-                )
-                try:
-                    selection_subject = (
-                        None
-                        if schema is None
-                        else selection_subject_for(
-                            schema,
-                            interaction_spec,
-                            facet_index=panel_state.focused_cell,
-                        )
-                    )
-                except (KeyError, TypeError, ValueError):
-                    selection_subject = None
-                selectors = (
+                region_selectors = (
                     panel_plot_selectors(
                         selection,
                         facet_index=panel_state.focused_cell,
@@ -1384,14 +1387,21 @@ class ConsolePresenter:
                     )
                     else ()
                 )
+                selectors = (
+                    *region_selectors,
+                    *(
+                        selector
+                        for selector in accepted_display.selectors
+                        if selector.kind is SelectorKind.CROSSHAIR
+                    ),
+                )
             else:
                 # An unresolved host must not receive interaction state whose
                 # coordinate vocabulary cannot yet be proved.
                 selectors = ()
-        selected_viewport = None if viewport is _UNCHANGED else viewport
+        selected_viewport = None
         if (
             restore_interaction
-            and viewport is _UNCHANGED
             and binding.interaction_viewport is not None
         ):
             measured_on, remembered = binding.interaction_viewport
@@ -1411,16 +1421,25 @@ class ConsolePresenter:
                 # them, which is how a restarted producer came back framed by
                 # the picture before it.
                 binding.interaction_viewport = None
-        configuration = self._panel_host_configuration(
-            panel_state,
-            surface,
-            overlay=overlay,
-            viewport=selected_viewport,
-            live=live,
-            restore_interaction=restore_interaction,
-            classifier_thresholds=classifier_thresholds,
-            selectors=selectors,
-        )
+        _target_spec, semantic, display = projection
+        configuration: dict[str, object] = {
+            "semantic": semantic,
+            "parameters": display,
+            "size": panel_state.size,
+            "fit": dict(panel_state.fit),
+            "fit_live": True,
+        }
+        if restore_interaction:
+            configuration.update(
+                facet_focus=panel_state.focused_cell,
+                viewport=selected_viewport,
+            )
+            if classifier_thresholds is not _UNCHANGED:
+                configuration["classifier_thresholds"] = classifier_thresholds
+            if selectors is not _UNCHANGED:
+                configuration["selectors"] = selectors
+        if overlay is not _UNCHANGED:
+            configuration["image_overlay"] = overlay
         if display_updates is not _UNCHANGED:
             if not isinstance(display_updates, Mapping):
                 raise TypeError("display_updates must be a mapping")
@@ -1430,85 +1449,18 @@ class ConsolePresenter:
             # from Fixed" from an explicit request to keep numeric bounds.
             # Treating the full PanelState as newly authored made Tight/Normal
             # retain old fixed bounds until remount.
-            configuration["parameter_updates"] = self._declared_only(
-                display_updates,
-                surface.get("display", ()),
-            )
-        if data is not _UNCHANGED:
-            configuration["data"] = data
+            from zlc_plot.specs import parameter_schema_for
+
+            configuration["parameter_updates"] = parameter_schema_for(
+                target_spec,
+                style=DEFAULTS.style,
+            ).declared_subset(display_updates)
         pending = host.configure(**configuration)
-        if present:
-            self._present_when_done(binding, pending)
-        elif not live and hasattr(pending, "result"):
-            pending.result()
+        if host is binding.host:
+            add = getattr(pending, "add_done_callback", None)
+            if callable(add):
+                add(lambda _future: self.board.wake.request_owner_wake())
         return pending
-
-    @staticmethod
-    def _host_focus(host: object) -> object:
-        """Which cell this host is showing, as its own front reports it."""
-
-        front = getattr(host, "front", None)
-        interaction = getattr(front, "interaction", None)
-        return getattr(interaction, "facet_focus_index", None)
-
-    def _settle_panel_focus(self, binding: PanelBinding) -> None:
-        """A cell focused on either surface is the panel's answer.
-
-        Zooming into a cell is looking at the same data more closely -- the
-        viewport beside it has always been mirrored -- so whichever surface
-        the operator double-clicked, both show it.  Read from the fronts the
-        beat already has rather than through a second subscription.
-
-        What counts is a CHANGE: a host that simply disagrees with the panel
-        may be the one still catching up with the last mirror, and treating
-        that as a fresh gesture makes the two surfaces chase each other.
-        """
-
-        hosts = (binding.host, binding.editor_host)
-        seen = tuple(
-            None if host is None else self._host_focus(host) for host in hosts
-        )
-        if seen == binding.focus_seen:
-            return
-        moved = next(
-            (
-                (host, value)
-                for host, value, before in zip(hosts, seen, binding.focus_seen)
-                if host is not None and value != before
-            ),
-            None,
-        )
-        binding.focus_seen = seen
-        if moved is None:
-            return
-        source, focus = moved
-        if focus == binding.state.focused_cell:
-            return
-        previous_selection = panel_selection_from_document(
-            binding.state.selector
-        )
-        self._remember_panel_view(binding, focused_cell=focus)
-        if previous_selection is not None and not binding.state.selector:
-            for target in hosts:
-                if target is None:
-                    continue
-                operation = _remove_panel_selection(
-                    target, previous_selection
-                )
-                if target is binding.host:
-                    self._present_when_done(binding, operation)
-        # Opening or closing a cell RESETS the view inside it -- the plot layer
-        # drops the viewport itself, because a range measured in the overview
-        # means nothing in one cell and the other way round.  The panel's
-        # remembered viewport is therefore void from this moment, and keeping
-        # it would paste a ghost range onto every host built afterwards.
-        binding.interaction_viewport = None
-        for host in hosts:
-            if host is None or host is source:
-                continue
-            operation = host.configure(facet_focus=focus)
-            if host is binding.host and operation is not None:
-                self._present_when_done(binding, operation)
 
     def _remember_panel_view(self, binding: PanelBinding, **changes: Any) -> None:
         """Write down how this panel is being looked at.
@@ -1523,8 +1475,13 @@ class ConsolePresenter:
         binding.state = replace(binding.state, **changes)
         self._publish_panel_state(binding)
 
-    def _present_panel_front(self, binding: PanelBinding, front: object) -> bool:
-        """Put one completed immutable front on the panel's staged widget.
+    def _present_panel_operation(
+        self,
+        binding: PanelBinding,
+        host: object,
+        operation: object,
+    ) -> bool:
+        """Put one completed host operation on the panel's staged widget.
 
         THE moment a card changes what it shows.  Mounting the new host first
         and presenting later meant the card went blank for however long the
@@ -1535,7 +1492,7 @@ class ConsolePresenter:
         no-op once the card already shows it.
         """
 
-        host = binding.host
+        front = getattr(operation, "front", None)
         if front is None or host is None:
             return False
         # A front belongs to the host that painted it.  Renders queued by a
@@ -1551,7 +1508,7 @@ class ConsolePresenter:
             return False
         try:
             self.view.show_panel(binding.panel_id, host)
-            return bool(present(binding.panel_id, front))
+            accepted = bool(present(binding.panel_id, front))
         except Exception as error:
             # A front can lose its surface between completion and this present
             # (the operator reconfigured meanwhile).  The next render against
@@ -1561,48 +1518,25 @@ class ConsolePresenter:
             self._report(
                 f"{binding.title}: {_error_text(error)}", severity="error"
             )
-            return False
-
-    def _present_panel_operation(
-        self,
-        binding: PanelBinding,
-        operation: object,
-    ) -> None:
-        """Present the exact front painted by one completed host operation."""
-
-        front = getattr(operation, "front", None)
-        if self._present_panel_front(binding, front):
-            binding.initial_presented = True
-            return
-        # Mounting the widget may immediately negotiate a different screen
-        # DPR.  That newer host front is handed to the staged widget by the Qt
-        # adapter; presenting the older operation then correctly returns
-        # False.  Confirm the latest front once so the beat does not retry the
-        # already-visible initial surface forever.
-        latest = getattr(binding.host, "front", None)
-        if latest is not None and latest is not front:
-            self._present_panel_front(binding, latest)
-            binding.initial_presented = True
-
-    def _present_mounted_front(self, binding: PanelBinding) -> None:
-        """Fill a just-mounted staged widget from the host's current front.
-
-        Console panel widgets stage their fronts, so a freshly shown panel
-        whose host has already rendered would otherwise stay blank -- and
-        silently ignore pointer events, which resolve no axes against an
-        empty front -- until the next beat noticed it.  This is only the
-        initial fill: live updates keep the board's same-shot batching.
-        """
-
-        host = binding.host
-        if host is None or binding.initial_presented:
-            return
-        front = getattr(host, "front", None)
-        if front is None:
-            return
-        # Only a present that actually drew counts as done: a refused one used
-        # to mark the panel filled and leave it blank for good.
-        binding.initial_presented = self._present_panel_front(binding, front)
+            accepted = False
+        if accepted:
+            return True
+        previous = binding.accepted_surface
+        if previous is not None and previous.host is not host:
+            try:
+                self.view.show_panel(binding.panel_id, previous.host)
+                old_front = getattr(previous.host, "front", None)
+                if old_front is not None:
+                    if not bool(present(binding.panel_id, old_front)):
+                        raise RuntimeError(
+                            "the previous accepted panel front was refused"
+                        )
+            except Exception as restore_error:
+                raise RuntimeError(
+                    "candidate presentation failed and the previous panel "
+                    "surface could not be restored"
+                ) from restore_error
+        return False
 
     def _present_when_done(self, binding: PanelBinding, operation: object) -> object:
         """Present a host operation's front once its worker completes.
@@ -1615,6 +1549,7 @@ class ConsolePresenter:
         add = getattr(operation, "add_done_callback", None)
         if not callable(add):
             return operation
+        host = binding.host
 
         def completed(future: object) -> None:
             try:
@@ -1624,11 +1559,87 @@ class ConsolePresenter:
                 # surface through the paths that already own them.
                 return
             self._enqueue_panel_interaction(
-                lambda: self._present_panel_operation(binding, result)
+                lambda: (
+                    None
+                    if host is None or binding.host is not host
+                    else self._present_panel_operation(binding, host, result)
+                )
             )
 
         add(completed)
         return operation
+
+    def _track_panel_configuration(
+        self,
+        binding: PanelBinding,
+        host: object,
+        pending: object,
+    ) -> None:
+        """Accept a pure interaction description without touching authored state."""
+
+        add = getattr(pending, "add_done_callback", None)
+        if not callable(add):
+            return
+
+        def completed(future: object) -> None:
+            def accept() -> None:
+                live = host is binding.host
+                current = (
+                    binding.accepted_surface
+                    if live
+                    else binding.frozen_data
+                    if host is binding.editor_host
+                    else None
+                )
+                if current is None:
+                    return
+                try:
+                    operation = future.result()
+                    target = replace(
+                        current.target,
+                        selector=binding.state.selector,
+                        classifier_thresholds=binding.state.classifier_thresholds,
+                        focused_cell=binding.state.focused_cell,
+                    )
+                    if live:
+                        if binding.port is None or binding.port.accept_configuration(
+                            operation, target
+                        ) is None:
+                            raise RuntimeError(
+                                "interactive plot front was not presented"
+                            )
+                    else:
+                        binding.frozen_data = replace(
+                            current,
+                            target=target,
+                            description=operation.value,
+                        )
+                    self._normalize_panel_interaction(binding)
+                    self._publish_panel_state(binding)
+                except Exception as error:
+                    self._report(
+                        f"cannot update {binding.state.title} interaction: "
+                        f"{_error_text(error)}",
+                        severity="error",
+                    )
+
+            self._enqueue_panel_interaction(accept)
+
+        add(completed)
+
+    @staticmethod
+    def _cancel_panel_configuration(binding: PanelBinding) -> None:
+        entry = binding.configuration
+        binding.configuration = None
+        if entry is None:
+            return
+        if entry[0] == "configure":
+            entry[1].cancel()
+            return
+        if entry[0] == "retarget":
+            _kind, _old_port, candidate_port, update, _target = entry
+            update.future.cancel()
+            candidate_port.close()
 
     def _stage_panel_host(
         self,
@@ -1636,23 +1647,19 @@ class ConsolePresenter:
         plot_input: object,
         value: object,
         publication: object,
+        *,
+        state: PanelState,
     ) -> tuple[object, object]:
         """Fully configure a replacement without changing the mounted panel."""
 
         del value
 
-        host = self._make_host(plot_input, binding.state)
-        staged = replace(
-            binding,
-            host=host,
-            bridge=None,
-            selections=None,
-            display_publication=publication,
-        )
+        host = self._make_host(plot_input, state)
         try:
             operation = self._match_host_to_panel(
-                staged,
+                binding,
                 host,
+                state=state,
                 restore_interaction=True,
                 interaction_input=plot_input,
             )
@@ -1665,17 +1672,10 @@ class ConsolePresenter:
         self,
         binding: PanelBinding,
         old_host: object,
-        host: object,
-        publication: object,
-        plot_input: object,
     ) -> None:
         """Swap one staged generation without throwing out of cohort accept."""
 
         errors: list[BaseException] = []
-        if binding.host is not old_host:
-            errors.append(
-                RuntimeError("panel host changed before replacement acceptance")
-            )
         for resource in (binding.selections, binding.bridge):
             if resource is None:
                 continue
@@ -1684,32 +1684,6 @@ class ConsolePresenter:
             except BaseException as error:
                 errors.append(error)
         binding.bridge = binding.selections = None
-        binding.host = host
-        binding.initial_presented = False
-        metadata, metadata_error = host.initial_state
-        if metadata_error is None and metadata is not None:
-            binding.accepted_display = metadata[0]
-        accepted_snapshot = getattr(plot_input, "snapshot", plot_input)
-        binding.parameter_surface = (
-            self._schema_projected_parameters(
-                binding,
-                accepted_snapshot,
-                self._RESOLVING_REASON,
-            )
-            or self._unbound_panel_parameters(binding.state)
-        )
-        # The detached staging binding already applied and awaited the whole
-        # PanelState.  Accept only installs that proven host; configuring it a
-        # second time here created extra fronts and could tear cohort accept.
-        binding.configuration = None
-        binding.display_publication = publication
-        # This host shows a new run, so Edit's frozen picture is now of the run
-        # that just ended -- said out loud, because the Edit tab's stale mark,
-        # its Save gate and its selection routing all read the projection.
-        try:
-            self._publish_panel_state(binding)
-        except BaseException as error:
-            errors.append(error)
         if old_host is not None:
             try:
                 self._retire_plot_host(old_host)
@@ -2008,6 +1982,25 @@ class ConsolePresenter:
                     return False
 
         signal = str(changes.get("signal", current.signal)).strip()
+        candidate_front = None
+        candidate_value = None
+        candidate_schema = None
+        if signal:
+            candidate_front = self.session.signal_plane.freeze()
+            candidate_value = candidate_front.value(signal)
+            if signal == current.signal and binding.accepted_surface is not None:
+                accepted_input = binding.accepted_surface.plot_input
+                accepted_snapshot = getattr(
+                    accepted_input,
+                    "snapshot",
+                    accepted_input,
+                )
+                candidate_schema = accepted_snapshot.block.schema
+            elif candidate_value is not None:
+                candidate_schema = (
+                    getattr(candidate_value, "canonical_schema", None)
+                    or candidate_value.snapshot.block.schema
+                )
         title = str(changes.get("title", current.title)).strip()
         if signal != current.signal and "title" not in changes:
             base_title = self._panel_kind_labels.get(current.kind, current.kind)
@@ -2064,14 +2057,54 @@ class ConsolePresenter:
             if name in changes:
                 values.update(dict(changes[name]))
             merged[name] = values
+        if "semantic" in changes and candidate_schema is not None:
+            base_state = replace(
+                current,
+                **{**merged, "semantic": {}},
+            )
+            base_spec = self._panel_resolved_spec(
+                binding,
+                base_state,
+                schema=candidate_schema,
+            )
+            if base_spec is None:
+                self._report(
+                    f"{panel_id}: this signal has no compatible plot specification",
+                    severity="error",
+                )
+                return False
+            patch_state = replace(
+                base_state,
+                semantic=dict(changes["semantic"]),
+                display={},
+            )
+            try:
+                _resolved, semantic, _display = project_panel_state(
+                    candidate_schema,
+                    base_spec,
+                    patch_state,
+                )
+            except (KeyError, TypeError, ValueError) as error:
+                self._report(
+                    f"{panel_id}: {_error_text(error)}",
+                    severity="error",
+                )
+                return False
+            merged["semantic"] = semantic
         try:
             desired_overlay = str(merged["overlay_signal"])
             projection_candidate = replace(
                 current,
                 **{**merged, "overlay_signal": ""},
             )
-            resolved_projection = self._panel_resolved_spec(
-                binding, projection_candidate
+            resolved_projection = (
+                None
+                if candidate_schema is None
+                else self._panel_resolved_spec(
+                    binding,
+                    projection_candidate,
+                    schema=candidate_schema,
+                )
             )
             if (
                 desired_overlay
@@ -2096,7 +2129,15 @@ class ConsolePresenter:
             # an INCOMPLETE state still passes -- fixed limits materialize
             # on the next configure.
             try:
-                resolved = self._panel_resolved_spec(binding, candidate)
+                resolved = (
+                    None
+                    if candidate_schema is None
+                    else self._panel_resolved_spec(
+                        binding,
+                        candidate,
+                        schema=candidate_schema,
+                    )
+                )
                 resolved_cell = (
                     semantic_spec(resolved).kind.value
                     if resolved is not None
@@ -2128,7 +2169,7 @@ class ConsolePresenter:
             candidate.overlay_signal
             and candidate.overlay_signal != current.overlay_signal
         ):
-            front = self.session.signal_plane.freeze()
+            front = candidate_front or self.session.signal_plane.freeze()
             publication = (
                 binding.display_publication
                 or front.publication(candidate.signal)
@@ -2149,14 +2190,6 @@ class ConsolePresenter:
                     severity="error",
                 )
                 return False
-        history_presence_changed = bool(candidate.signal) and (
-            (binding.history_lease is None)
-            != (self._panel_history_window(binding, candidate) is None)
-        )
-        presentation_window_changed = bool(candidate.signal) and (
-            self._panel_primary_window(binding, current)
-            != self._panel_primary_window(binding, candidate)
-        )
         needs_mount = (
             bool(candidate.signal)
             and (
@@ -2168,12 +2201,12 @@ class ConsolePresenter:
                 # accepting the state and keeping the old picture is a
                 # control that looks live and does nothing.
                 or candidate.cell_kind != current.cell_kind
-                # Entering/leaving source-index history changes the Dataset
-                # schema itself.  Reconfiguring the old host would leave a
-                # one-event Histogram carrying a phantom source-index, or ask
-                # an event-schema host to accept an indexed Dataset later.
-                or history_presence_changed
                 or binding.port is None
+                or binding.host is None
+                or (
+                    binding.configuration is not None
+                    and binding.configuration[0] == "retarget"
+                )
                 # A host that failed STARTUP is permanently unusable, and
                 # reconfiguring it re-raises the same reason forever.  The
                 # accepted state change -- the repair -- rebuilds instead.
@@ -2190,14 +2223,13 @@ class ConsolePresenter:
             binding.state = candidate
             binding.parameter_surface = self._unbound_panel_parameters(candidate)
             binding.frozen_data = None
-            binding.display_publication = None
             self._publish_panel_state(binding)
             self._refresh_console_projection()
             return True
 
         if needs_mount:
-            front = self.session.signal_plane.freeze()
-            value = front.value(candidate.signal)
+            front = candidate_front
+            value = candidate_value
             if value is None:
                 if candidate.signal != current.signal and binding.port is not None:
                     self._report(
@@ -2251,28 +2283,19 @@ class ConsolePresenter:
                 )
                 return True
 
-            accepted_before_release = binding.accepted_display
-            self._release_panel(binding)
             parameter_schema = (
                 getattr(value, "canonical_schema", None)
                 or value.snapshot.block.schema
             )
-            if history_presence_changed and candidate.signal == current.signal:
-                # Releasing the lease reconciled the mounted binding, but the
-                # candidate was authored before that transition.  Reconcile
-                # the candidate itself so assigning it below cannot resurrect
-                # a retired presentation-only field such as source index.
-                staged_binding = replace(
-                    binding,
-                    state=candidate,
-                    accepted_display=accepted_before_release,
+            publication = front.publication(candidate.signal)
+            if publication is None:
+                self._report(
+                    f"{candidate.signal} has no exact publication",
+                    severity="error",
                 )
-                self._reconcile_panel_semantic_schema(
-                    staged_binding, parameter_schema
-                )
-                candidate = staged_binding.state
+                return False
+            self._cancel_panel_configuration(binding)
             binding.state = candidate
-            binding.host = None
             binding.parameter_surface = (
                 self._schema_projected_parameters(
                     binding,
@@ -2281,33 +2304,44 @@ class ConsolePresenter:
                 )
                 or self._unbound_panel_parameters(candidate)
             )
-            binding.configuration = None
-            binding.port = self._make_panel_port(binding)
-            binding.initial_presented = False
-            binding.display_publication = None
-            self.view.show_panel(panel_id, None)
-            if (
-                binding.editor_open
-                and binding.frozen_data is not None
-                and not binding.frozen_stale
-            ):
-                try:
-                    self._replace_panel_editor_host(binding)
-                except Exception as error:
-                    self._report(
-                        f"cannot mount {binding.state.title} plot editor: "
-                        f"{_error_text(error)}",
-                        severity="error",
-                    )
+            candidate_port = self._make_panel_port(
+                binding,
+                target=candidate,
+                notify_presented=False,
+                sync_history=False,
+            )
+            try:
+                update = candidate_port.prepare(value, publication, front)
+                if update is None:
+                    raise RuntimeError("candidate panel produced no surface update")
+            except BaseException as error:
+                candidate_port.close()
+                self._report(
+                    f"{panel_id}: {_error_text(error)}",
+                    severity="error",
+                )
+                self._publish_panel_state(binding)
+                self._refresh_console_projection()
+                return True
+            old_port = binding.port
+            binding.configuration = (
+                "retarget",
+                old_port,
+                candidate_port,
+                update,
+                candidate,
+            )
+            update.future.add_done_callback(
+                lambda _future: self.board.wake.request_owner_wake()
+            )
             self._report(
                 f"{panel_id} is preparing {candidate.signal}", severity="task"
             )
         else:
             if candidate.interval_ms != current.interval_ms and binding.port is not None:
                 binding.port.set_display_interval(candidate.interval_ms)
-            self._sync_panel_history(binding, candidate)
+            binding.state = candidate
             if binding.host is None or binding.port is None:
-                binding.state = candidate
                 schema = self._panel_schema(binding)
                 binding.parameter_surface = (
                     (
@@ -2324,8 +2358,6 @@ class ConsolePresenter:
                 self._refresh_console_projection()
                 return True
             if plot_changed:
-                live_data: object = _UNCHANGED
-                editor_data: object = _UNCHANGED
                 # Both hosts already own the immutable Dataset they display. A
                 # history-window edit is a Plot projection over those bytes;
                 # Runtime's lease controls only what future publications retain.
@@ -2333,129 +2365,32 @@ class ConsolePresenter:
                 # raced generation replacement and tried to resurrect retired
                 # ROI/Fit publications.
                 live_overlay: object = _UNCHANGED
-                editor_overlay: object = _UNCHANGED
                 if (
                     self._paints_image_surfaces(binding, candidate)
                     and candidate.overlay_signal != current.overlay_signal
                 ):
                     live_overlay = None
-                    editor_overlay = None
-                    frozen = binding.frozen_data
-                    if frozen is not None:
-                        binding.frozen_data = replace(
-                            frozen,
-                            plot_input=frozen.snapshot,
-                            overlay={},
-                        )
-                binding.configuration = self._match_host_to_panel(
+                self._cancel_panel_configuration(binding)
+                pending = self._match_host_to_panel(
                     binding,
                     binding.host,
                     state=candidate,
-                    data=live_data,
                     overlay=live_overlay,
                     display_updates=changes.get("display", _UNCHANGED),
-                    present=True,
                     restore_interaction="semantic" in changes,
                 )
-                if (
-                    binding.editor_host is not None
-                    and getattr(binding.editor_host, "startup_failure", None)
-                    is None
-                ):
-                    binding.editor_accepted_display = None
-                    binding.editor_configuration = self._match_host_to_panel(
-                        binding,
-                        binding.editor_host,
-                        state=candidate,
-                        data=editor_data,
-                        overlay=editor_overlay,
-                        display_updates=changes.get("display", _UNCHANGED),
-                        restore_interaction="semantic" in changes,
-                    )
-            binding.state = candidate
-            self._remount_panel_editor(binding)
+                binding.configuration = (
+                    "configure",
+                    pending,
+                    True,
+                    candidate,
+                )
+            else:
+                self._remount_panel_editor(binding)
 
         self._publish_panel_state(binding)
-        if binding.port is not None and (
-            not binding.port.presentation_current
-            or plot_changed and binding.port.surface_busy
-            or presentation_window_changed
-        ):
-            # A representation replacement may already be rendering from an
-            # older PanelState.  Cancel that candidate and re-stage the same
-            # publication under the state accepted in this owner turn; an old
-            # host must never land after a newer semantic/display edit.
-            binding.port.invalidate_presentation()
-            if presentation_window_changed and binding.frozen_data is not None:
-                binding.frozen_data = None
-                self._release_panel_editor(binding)
-            self.board.invalidate_presentations((binding.panel_id,))
         self._refresh_console_projection()
         return True
-
-    @staticmethod
-    def _control_document(control: object) -> dict[str, object]:
-        """Project zlc_plot's frontend-neutral control into plain typed data."""
-
-        semantic = bool(getattr(control, "semantic", False))
-        choices: list[tuple[str, object]] = []
-        for choice in tuple(getattr(control, "choices", ())):
-            if semantic:
-                value, label = choice
-            else:
-                value, label = choice, str(choice).replace("_", " ").title()
-            choices.append((str(label), value))
-        kind = getattr(getattr(control, "kind", ""), "value", None)
-        return {
-            "key": str(getattr(control, "name")),
-            "label": str(getattr(control, "label")),
-            "kind": str(kind or getattr(control, "kind", "text")),
-            "value": getattr(control, "value", None),
-            "allow_none": bool(getattr(control, "allow_none", False)),
-            "choices": tuple(choices),
-            "minimum": getattr(control, "minimum", None),
-            "maximum": getattr(control, "maximum", None),
-            "step": getattr(control, "step", None),
-            "automatic": bool(getattr(control, "automatic", False)),
-            "unavailable_reason": str(
-                getattr(control, "unavailable_reason", "")
-            ),
-        }
-
-    @staticmethod
-    def _declared_only(
-        values: Mapping[str, object],
-        entries: Sequence[Mapping[str, object]],
-    ) -> dict[str, object]:
-        """The legal overlap while one authored vocabulary is being replaced.
-
-        A signal/cell transition may begin with the previous accepted display
-        bag.  Only names and values declared by the target host cross that
-        transaction; its successful description then replaces PanelState with
-        the complete new vocabulary, so no foreign compatibility state stays
-        behind.
-        """
-
-        rows = {str(entry["key"]): entry for entry in tuple(entries)}
-
-        def legal(entry: Mapping[str, object], value: object) -> bool:
-            # Declared-by-KEY is not enough: both vocabularies may declare
-            # the same fate row while offering different VERBS, and a value
-            # the current vocabulary never offers must not travel either --
-            # that is how a curve cell's 'group' rode the shared axis row
-            # into a histogram cell the moment the row itself was declared.
-            choices = tuple(entry.get("choices") or ())
-            if not choices:
-                return True
-            if value is None:
-                return bool(entry.get("allow_none"))
-            return any(value == choice for _label, choice in choices)
-
-        return {
-            str(name): value
-            for name, value in dict(values).items()
-            if str(name) in rows and legal(rows[str(name)], value)
-        }
 
     def _parameter_surface(
         self,
@@ -2474,7 +2409,7 @@ class ConsolePresenter:
 
         display_entries: list[dict[str, object]] = []
         for control in controls:
-            entry = self._control_document(control)
+            entry = control_document(control)
             display_entries.append(entry)
         return {
             "semantic": tuple(semantic),
@@ -2595,7 +2530,7 @@ class ConsolePresenter:
         return self._parameter_surface(
             controls,
             state,
-            semantic=_semantic_entries(description),
+            semantic=semantic_entries(description),
             fit_unavailable=str(reason),
             semantic_provisional=True,
         )
@@ -2621,19 +2556,26 @@ class ConsolePresenter:
                 else getattr(getattr(snapshot, "block", None), "schema", None)
             )
 
+        accepted = binding.accepted_surface
+        accepted_target = None if accepted is None else accepted.target
         shown = (
             None
-            if binding.port is None
-            else binding.port.presented_input()
+            if accepted is None
+            or getattr(accepted_target, "signal", None) != binding.state.signal
+            else accepted.plot_input
         )
         shown = getattr(shown, "snapshot", shown)
         schema = getattr(getattr(shown, "block", None), "schema", None)
         if schema is not None:
             return schema
         frozen = binding.frozen_data
-        if frozen is not None:
+        if frozen is not None and frozen.signal == binding.state.signal:
             return getattr(frozen.snapshot.block, "schema", None)
-        publication = binding.display_publication
+        publication = (
+            binding.display_publication
+            if getattr(accepted_target, "signal", None) == binding.state.signal
+            else None
+        )
         if publication is not None:
             schema = value_schema(publication.value(binding.state.signal))
             if schema is not None:
@@ -2664,41 +2606,113 @@ class ConsolePresenter:
             pass
         self.refresh_panel_editor(binding.panel_id)
 
-    def _parameter_surface_from_descriptions(
-        self,
-        state: PanelState,
-        display_description: object,
-        semantic_description: object,
-        models: Sequence[object],
-    ) -> Mapping[str, object]:
-        """Project already-resolved plot metadata without another host wait."""
-        return panel_surface_from_description(
-            state,
-            display_description,
-            semantic_description,
-            models,
-        )
-
-    @staticmethod
-    def _state_with_described_parameters(
-        state: PanelState,
-        surface: Mapping[str, object],
-    ) -> PanelState:
-        """Keep the exact zlc_plot-accepted configuration in PanelState."""
-        return panel_state_from_description(state, surface)
-
     def _settle_panel_hosts(self) -> None:
         """Project metadata and selectors only after each initial render finished."""
 
         for binding in tuple(self.panels.values()):
             host = binding.host
-            pending = binding.configuration
+            configuration_entry = binding.configuration
+            if (
+                configuration_entry is not None
+                and configuration_entry[0] == "retarget"
+            ):
+                (
+                    _kind,
+                    old_port,
+                    candidate_port,
+                    update,
+                    target,
+                ) = configuration_entry
+                if update.future.done():
+                    if binding.configuration is configuration_entry:
+                        binding.configuration = None
+                    swapped = False
+                    try:
+                        operation = update.future.result()
+                        normalized_target = panel_state_from_description(
+                            target,
+                            operation.value,
+                        )
+                        if binding.state not in (target, normalized_target):
+                            raise RuntimeError(
+                                "panel target changed while replacement rendered"
+                            )
+                        if not candidate_port.can_accept(update, operation):
+                            raise RuntimeError(
+                                "candidate panel surface is no longer current"
+                            )
+                        candidate_port.accept(update, operation)
+                        accepted = candidate_port.accepted_surface()
+                        if accepted is None:
+                            raise RuntimeError(
+                                "candidate panel front was not presented"
+                            )
+                        old_surface = (
+                            None if old_port is None else old_port.accepted_surface()
+                        )
+                        old_host = None if old_surface is None else old_surface.host
+                        binding.port = candidate_port
+                        swapped = True
+                        if old_port is not None:
+                            old_port.close()
+                        if old_host is not None and old_host is not accepted.host:
+                            self._retire_plot_host(old_host)
+                        host = binding.host
+                    except Exception as error:
+                        if not swapped:
+                            candidate_port.reject(update, error)
+                            candidate_port.close()
+                        else:
+                            self._panel_presented(binding, accepted)
+                        binding.reported_error = error
+                        self._report(
+                            f"{binding.panel_id}: {_error_text(error)}",
+                            severity="error",
+                        )
+                        self._degrade_panel_surface(binding, error)
+                    else:
+                        try:
+                            self._sync_panel_history(binding)
+                        except Exception as error:
+                            binding.reported_error = error
+                            self._report(
+                                f"{binding.panel_id}: {_error_text(error)}",
+                                severity="error",
+                            )
+                        self._panel_presented(binding, accepted)
+                configuration_entry = binding.configuration
+            if (
+                configuration_entry is not None
+                and configuration_entry[0] == "configure"
+            ):
+                (
+                    _kind,
+                    pending,
+                    normalize_state,
+                    configuration_target,
+                ) = configuration_entry
+            else:
+                pending = None
+                normalize_state = False
+                configuration_target = None
             if pending is not None and pending.done():
                 binding.configuration = None
                 if not pending.cancelled():
                     try:
                         operation = pending.result()
-                        description = operation.value
+                        accepted = (
+                            None
+                            if binding.port is None
+                            else binding.port.accept_configuration(
+                                operation,
+                                configuration_target,
+                            )
+                        )
+                        if accepted is None:
+                            raise RuntimeError(
+                                "configured plot front was not presented"
+                            )
+                        description = accepted.description
                     except Exception as error:
                         if binding.reported_error is not error:
                             binding.reported_error = error
@@ -2708,22 +2722,18 @@ class ConsolePresenter:
                             )
                             self._degrade_panel_surface(binding, error)
                     else:
-                        # A configure re-renders on the worker; its exact front
-                        # must reach the staged widget or the Setting edit is
-                        # invisible until the next data revision.
-                        self._present_panel_operation(binding, operation)
-                        surface = self._parameter_surface_from_descriptions(
-                            binding.state,
-                            description,
-                            description.semantics,
-                            description.fit_models,
-                        )
-                        binding.state = self._state_with_described_parameters(
-                            binding.state,
-                            surface,
-                        )
-                        binding.accepted_display = description
-                        binding.parameter_surface = surface
+                        assert description is not None
+                        if normalize_state:
+                            surface = panel_surface_from_description(
+                                binding.state,
+                                description,
+                            )
+                            binding.state = panel_state_from_description(
+                                binding.state,
+                                description,
+                            )
+                            binding.parameter_surface = surface
+                            self._sync_panel_history(binding)
                         if binding.interaction_viewport is not None:
                             binding.interaction_viewport = (
                                 None
@@ -2733,89 +2743,133 @@ class ConsolePresenter:
                                     description.viewport,
                                 )
                             )
+                        if normalize_state:
+                            self._normalize_panel_interaction(binding)
                         self._publish_panel_state(binding)
-            editor_pending = binding.editor_configuration
-            if editor_pending is not None and editor_pending.done():
-                binding.editor_configuration = None
-                if not editor_pending.cancelled():
-                    try:
-                        editor_operation = editor_pending.result()
-                        binding.editor_accepted_display = editor_operation.value
-                        self.refresh_panel_editor(binding.panel_id)
-                    except Exception as error:
-                        self._report(
-                            f"cannot update {binding.state.title} plot editor: "
-                            f"{_error_text(error)}",
-                            severity="error",
-                        )
-            if host is not None:
-                # Every beat, until this host's first pixels are up.  The
-                # shortcut that used to stand here -- "a staged batch will
-                # present it" -- declared the panel filled without drawing
-                # anything, and on data that has stopped publishing no batch
-                # was ever coming.
-                self._present_mounted_front(binding)
-                self._settle_panel_focus(binding)
-                presentation_current = bool(
-                    binding.port is None
-                    or binding.port.presentation_current
-                )
-                metadata, error = (
-                    host.initial_state
-                    if presentation_current
-                    else (None, None)
-                )
-                if metadata is not None or error is not None:
-                    if error is not None:
-                        if binding.reported_error is not error:
-                            binding.reported_error = error
-                            self._report(
-                                f"{binding.panel_id}: {_error_text(error)}",
-                                severity="error",
-                            )
-                            self._degrade_panel_surface(binding, error)
-                    else:
-                        assert metadata is not None
-                        display, models = metadata
-                        binding.accepted_display = display
-                        if binding.parameter_surface.get(
-                            "semantic_unavailable"
-                        ) or binding.parameter_surface.get(
-                            "semantic_provisional"
+                        frozen = binding.frozen_data
+                        if (
+                            normalize_state
+                            and frozen is not None
+                            and frozen.signal == binding.state.signal
+                            and _run_of(frozen.publication)
+                            == _run_of(binding.display_publication)
                         ):
-                            surface = self._parameter_surface_from_descriptions(
-                                binding.state,
-                                display,
-                                display.semantics,
-                                models,
+                            frozen_input = frozen.plot_input
+                            frozen_overlay = frozen.overlay
+                            if (
+                                frozen.target.overlay_signal
+                                != binding.state.overlay_signal
+                            ):
+                                frozen_input = frozen.snapshot
+                                frozen_overlay = {}
+                            candidate_frozen = replace(
+                                frozen,
+                                plot_input=frozen_input,
+                                target=binding.state,
+                                description=description,
+                                overlay=frozen_overlay,
                             )
-                            binding.parameter_surface = surface
-                            # The record comes into the plot's vocabulary the
-                            # moment that vocabulary is known: a panel restored
-                            # from a layout holds each choice in the document's
-                            # plain form until something can say which typed
-                            # choice it names, and that is this description.
-                            #
-                            # Only the record's OWN values are resolved.  Taking
-                            # the described values wholesale -- which is what
-                            # stood here -- imported the host's defaults for
-                            # every name, including ones the operator had just
-                            # changed while this first render was still in
-                            # flight: measured as a card showing the classifier
-                            # off while the record and the Edit tab both said
-                            # on.  What the panel asked for is described by the
-                            # panel's own configure, and reaches the record
-                            # through the one write-back above.
-                            # The successful description is the complete
-                            # current vocabulary; it replaces the transition
-                            # bag rather than preserving names from an older
-                            # cell kind.
-                            binding.state = self._state_with_described_parameters(
-                                binding.state,
-                                surface,
-                            )
-                            self._publish_panel_state(binding)
-                        self._apply_deriving(binding)
+                            if binding.editor_open:
+                                try:
+                                    self._replace_panel_editor_host(
+                                        binding,
+                                        frozen=candidate_frozen,
+                                    )
+                                except Exception as error:
+                                    self._report(
+                                        f"cannot update {binding.state.title} "
+                                        f"plot editor: {_error_text(error)}",
+                                        severity="error",
+                                    )
+                            else:
+                                binding.frozen_data = candidate_frozen
+            editor_entry = binding.editor_configuration
+            if editor_entry is not None:
+                (
+                    editor_host,
+                    editor_pending,
+                    normalize_editor_state,
+                    editor_target,
+                    editor_frozen,
+                ) = editor_entry
+            else:
+                editor_host = editor_pending = None
+                normalize_editor_state = False
+                editor_target = None
+                editor_frozen = None
+            if editor_pending is not None and editor_pending.done():
+                if binding.editor_configuration is editor_entry:
+                    binding.editor_configuration = None
+                try:
+                    if editor_pending.cancelled():
+                        raise RuntimeError("plot editor configuration was cancelled")
+                    editor_operation = editor_pending.result()
+                    description = editor_operation.value
+                    normalized_target = (
+                        panel_state_from_description(binding.state, description)
+                        if normalize_editor_state
+                        else editor_target
+                    )
+                    current_frozen = binding.frozen_data
+                    mount = getattr(self.view, "show_panel_editor", None)
+                    if (
+                        not binding.editor_open
+                        or editor_frozen is None
+                        or current_frozen is None
+                        or not _same_panel_plot_target(
+                            binding.state,
+                            editor_target,
+                        )
+                        or current_frozen.publication is not editor_frozen.publication
+                        or current_frozen.snapshot.ref != editor_frozen.snapshot.ref
+                        or not callable(mount)
+                    ):
+                        raise RuntimeError(
+                            "plot editor target is no longer current"
+                        )
+                    accepted_frozen = replace(
+                        editor_frozen,
+                        target=normalized_target,
+                        description=description,
+                    )
+                    selections = self._subscribe_editor_gestures(
+                        binding,
+                        editor_host,
+                        accepted_frozen,
+                    )
+                    old_host = binding.editor_host
+                    old_selections = binding.editor_selections
+                    try:
+                        mount(binding.panel_id, editor_host)
+                    except BaseException:
+                        selections.close()
+                        raise
+                    binding.editor_host = editor_host
+                    binding.editor_selections = selections
+                    binding.frozen_data = accepted_frozen
+                    if normalize_editor_state:
+                        binding.state = normalized_target
+                        binding.parameter_surface = panel_surface_from_description(
+                            normalized_target,
+                            description,
+                        )
+                        self._normalize_panel_interaction(binding)
+                        self._publish_panel_state(binding)
+                    if old_selections is not None:
+                        old_selections.close()
+                    if old_host is not None:
+                        self._retire_plot_host(old_host)
+                    self.refresh_panel_editor(binding.panel_id)
+                except Exception as error:
+                    if editor_host is not binding.editor_host:
+                        self._retire_plot_host(editor_host)
+                    self._report(
+                        f"cannot update {binding.state.title} plot editor: "
+                        f"{_error_text(error)}",
+                        severity="error",
+                    )
+            if host is not None:
+                self._apply_deriving(binding)
 
 
     def _direct_producer_node_id(self, signal: str) -> str | None:
@@ -2859,11 +2913,7 @@ class ConsolePresenter:
             "frozen_signal": None if frozen is None else frozen.signal,
             "frozen_publication": None if frozen is None else frozen.publication,
             "frozen_snapshot": None if frozen is None else frozen.snapshot,
-            "stale": bool(
-                binding.frozen_stale
-                or binding.editor_host is not None
-                and binding.editor_accepted_display is None
-            ),
+            "stale": bool(binding.frozen_stale),
             "producer_node_id": producer_node_id,
             "producer_logic": (
                 None
@@ -2891,7 +2941,11 @@ class ConsolePresenter:
                 self._panel_accepted_subject(binding)
             )
         )
-        fields.extend(tuple(binding.parameter_surface.get("fit_outputs", ())))
+        description = binding.accepted_display
+        if description is not None:
+            fields.extend(
+                fit_output_fields(description.fit, description.fit_models)
+            )
         return tuple(fields)
 
     def panel_publisher_editor_projection(
@@ -3009,7 +3063,16 @@ class ConsolePresenter:
             and getattr(binding.editor_host, "startup_failure", None) is None
         ):
             return
-        if binding.frozen_data is None or binding.frozen_stale:
+        frozen = binding.frozen_data
+        if (
+            frozen is None
+            or frozen.signal != binding.state.signal
+            or (
+                binding.display_publication is not None
+                and _run_of(frozen.publication)
+                != _run_of(binding.display_publication)
+            )
+        ):
             return
         try:
             self._replace_panel_editor_host(binding)
@@ -3020,56 +3083,45 @@ class ConsolePresenter:
                 severity="error",
             )
 
-    def _replace_panel_editor_host(self, binding: PanelBinding) -> object:
-        """Mount a new independent host for Edit's exact frozen plot input."""
+    def _replace_panel_editor_host(
+        self,
+        binding: PanelBinding,
+        *,
+        frozen: PanelFrozenData | None = None,
+    ) -> object:
+        """Stage Edit completely; its old accepted surface stays visible."""
 
-        frozen = binding.frozen_data
+        frozen = binding.frozen_data if frozen is None else frozen
         if frozen is None:
             raise RuntimeError(f"{binding.panel_id} has no frozen plot input")
-        plot_input = (
-            frozen.snapshot if frozen.plot_input is None else frozen.plot_input
-        )
+        plot_input = frozen.plot_input
         host = self._make_host(plot_input, binding.state)
 
-        mount = getattr(self.view, "show_panel_editor", None)
-        if not callable(mount):
-            host.close()
+        if not callable(getattr(self.view, "show_panel_editor", None)):
+            self._retire_plot_host(host)
             raise RuntimeError("this console cannot mount a Panel Edit plot surface")
-
-        old_host = binding.editor_host
-        old_selections = binding.editor_selections
-        old_accepted_display = binding.editor_accepted_display
-        binding.editor_host = host
-        binding.editor_accepted_display = None
-        binding.editor_selections = None
+        previous = binding.editor_configuration
+        if previous is not None:
+            previous_host, previous_pending, _normalize, _target, _frozen = previous
+            previous_pending.cancel()
+            if previous_host is not binding.editor_host:
+                self._retire_plot_host(previous_host)
         try:
-            mount(binding.panel_id, host)
-        except Exception:
-            binding.editor_host = old_host
-            binding.editor_accepted_display = old_accepted_display
-            binding.editor_selections = old_selections
-            host.close()
+            pending = self._match_host_to_panel(
+                binding,
+                host,
+                restore_interaction=True,
+                interaction_input=plot_input,
+            )
+        except BaseException:
+            self._retire_plot_host(host)
             raise
-        if old_selections is not None:
-            old_selections.close()
-        if old_host is not None:
-            self._retire_plot_host(old_host)
-        # Listening and showing are one act.  Waiting for the host's first
-        # description before subscribing left a window -- several beats wide,
-        # with the surface already on screen -- in which everything the
-        # operator did on it was heard by nobody.
-        binding.editor_selections = self._subscribe_editor_gestures(
-            binding, host, frozen
-        )
-        # The panel's configuration goes on it now; the models this host will
-        # offer are not needed to say what the panel already says, and its
-        # completion is reported through the same path as every other editor
-        # configure.
-        binding.editor_configuration = self._match_host_to_panel(
-            binding,
+        binding.editor_configuration = (
             host,
-            restore_interaction=True,
-            interaction_input=plot_input,
+            pending,
+            True,
+            binding.state,
+            frozen,
         )
         return host
 
@@ -3104,8 +3156,8 @@ class ConsolePresenter:
 
         source = PlotSelectionSource(
             host,
-            on_threshold=lambda thresholds: self._enqueue_panel_threshold(
-                panel_id, host, thresholds, frozen=frozen
+            on_threshold=lambda event: self._enqueue_panel_threshold(
+                panel_id, host, event, frozen=frozen
             ),
         )
         source.subscribe_observation(
@@ -3118,6 +3170,19 @@ class ConsolePresenter:
                 panel_id, host, frozen, observation
             )
         )
+        source.subscribe_focus_observation(
+            lambda focused_index, subject, generation, revision: (
+                self._enqueue_panel_focus(
+                    panel_id,
+                    host,
+                    focused_index,
+                    subject,
+                    generation,
+                    revision,
+                    frozen=frozen,
+                )
+            )
+        )
         return source
 
     def _release_panel_editor(self, binding: PanelBinding) -> None:
@@ -3125,14 +3190,19 @@ class ConsolePresenter:
 
         host = binding.editor_host
         selections = binding.editor_selections
+        pending_entry = binding.editor_configuration
         binding.editor_configuration = None
         binding.editor_host = None
-        binding.editor_accepted_display = None
         binding.editor_selections = None
         mount = getattr(self.view, "show_panel_editor", None)
         if callable(mount) and host is not None:
             mount(binding.panel_id, None)
         try:
+            if pending_entry is not None:
+                candidate, pending, _normalize, _target, _frozen = pending_entry
+                pending.cancel()
+                if candidate is not host:
+                    self._retire_plot_host(candidate)
             if selections is not None:
                 selections.close()
         finally:
@@ -3171,18 +3241,21 @@ class ConsolePresenter:
                 severity="warning",
             )
             return False
-        port = binding.port
-        shown_publication = (
-            None if port is None else port.presented_publication()
-        )
-        shown_input = None if port is None else port.presented_input()
+        surface = binding.accepted_surface
+        shown_publication = None if surface is None else surface.publication
+        shown_input = None if surface is None else surface.plot_input
         if shown_publication is publication and shown_input is not None:
             previous = binding.frozen_data
+            surface = binding.accepted_surface
+            if surface is None or surface.description is None:
+                return False
             frozen = self._panel_frozen_data(
                 binding,
-                snapshot=getattr(shown_input, "snapshot", shown_input),
                 publication=publication,
                 plot_input=shown_input,
+                event_records=surface.event_records,
+                target=binding.state,
+                description=surface.description,
             )
             binding.frozen_data = frozen
             binding.refresh_requested = False
@@ -3233,6 +3306,12 @@ class ConsolePresenter:
                 severity="warning",
             )
             return False
+        if binding.frozen_stale or frozen.signal != binding.state.signal:
+            self._report(
+                f"{panel_id} frozen surface is stale; Refresh it before Save",
+                severity="warning",
+            )
+            return False
         selected = str(selected).strip()
         if not selected:
             return False
@@ -3241,17 +3320,11 @@ class ConsolePresenter:
         # reads the live binding again, so Refresh/Edit cannot change a save
         # that is already archive-first in flight.
         state = binding.state
-        viewport = None
-        if binding.interaction_viewport is not None:
-            measured_on, remembered = binding.interaction_viewport
-            if measured_on == self._panel_view_identity(binding):
-                viewport = remembered
         def work() -> object:
             return _save_panel_figure(
                 selected,
                 state=state,
                 frozen=frozen,
-                viewport=viewport,
             )
 
         title = state.title
@@ -3319,8 +3392,8 @@ class ConsolePresenter:
     def _shown_snapshot(self, binding: PanelBinding) -> object | None:
         """The dataset this panel is drawing, live or frozen."""
 
-        presented_input = getattr(binding.port, "presented_input", None)
-        shown = presented_input() if callable(presented_input) else None
+        surface = binding.accepted_surface
+        shown = None if surface is None else surface.plot_input
         snapshot = getattr(shown, "snapshot", shown)
         if getattr(snapshot, "block", None) is not None:
             return snapshot
@@ -3328,35 +3401,9 @@ class ConsolePresenter:
             return binding.frozen_data.snapshot
         return None
 
-    def _panel_data_shape(
-        self,
-        binding: PanelBinding,
-        surface: Mapping[str, object],
-    ) -> dict[str, object]:
-        """What this panel is drawing, as facts a strip can lay out.
-
-        Two halves from their two owners, neither pre-formatted: the shape of
-        the dataset, as zlc_plot's one structure authority spells it, and the
-        axes this panel has PINNED to a coordinate -- the part that changes
-        under the operator's hands, read from the fate rows where the edit is
-        made rather than restated here.
-
-        A pinned axis is a fate row holding a number; every other fate is a
-        role the picture already shows.
-        """
-
-        snapshot = self._shown_snapshot(binding)
-        schema = getattr(getattr(snapshot, "block", None), "schema", None)
-        if schema is None:
-            schema = self._panel_schema(binding)
-        if schema is None:
-            return {"data_structure": (), "data_scope": ()}
-        return panel_data_shape(schema, surface)
-
     def _publish_panel_state(self, binding: PanelBinding) -> None:
-        """Push one accepted replacement to every view of the same state."""
+        """Purely project the current panel records to every view."""
 
-        self._normalize_panel_interaction(binding)
         surface = dict(binding.parameter_surface)
         science_locked = self._task_science_locked(binding)
         surface["science_locked"] = science_locked
@@ -3364,7 +3411,17 @@ class ConsolePresenter:
         for section in ("semantic", "display", "fit"):
             authored = dict(getattr(binding.state, section))
             declared = tuple(surface.get(section, ()))
-            legal = self._declared_only(authored, declared)
+            legal: dict[str, object] = {}
+            for field in declared:
+                key = str(field["key"])
+                if key not in authored:
+                    continue
+                value = authored[key]
+                choices = tuple(field.get("choices") or ())
+                if not choices or (
+                    value is None and bool(field.get("allow_none"))
+                ) or any(value == choice for _label, choice in choices):
+                    legal[key] = value
             surface[section] = tuple(
                 {
                     **dict(field),
@@ -3372,8 +3429,15 @@ class ConsolePresenter:
                 }
                 for field in declared
             )
-        # After the sections settle: the strip quotes the fates as accepted.
-        surface.update(self._panel_data_shape(binding, surface))
+        snapshot = self._shown_snapshot(binding)
+        schema = getattr(getattr(snapshot, "block", None), "schema", None)
+        if schema is None:
+            schema = self._panel_schema(binding)
+        surface.update(
+            {"data_structure": (), "data_scope": ()}
+            if schema is None
+            else panel_data_shape(schema, binding.accepted_display)
+        )
         binding.parameter_surface = surface
 
         set_projection = getattr(self.view, "set_panel_projection", None)
@@ -3400,12 +3464,10 @@ class ConsolePresenter:
         if binding.bridge is not None:
             binding.bridge.close()
         binding.bridge = binding.selections = None
-        binding.configuration = None
-        binding.accepted_display = None
+        self._cancel_panel_configuration(binding)
         binding.refresh_requested = False
         host = binding.host
         port = binding.port
-        binding.host = None
         binding.port = None
         if port is not None:
             port.close()
@@ -3561,6 +3623,7 @@ class ConsolePresenter:
         # canonical PanelState before a Fit click can read/configure it, and a
         # viewport or threshold must not wait for the periodic display beat.
         self._drain_panel_interactions()
+        self._settle_panel_hosts()
         self.board.commit(admit_new=not self._paused and not self._closing)
         self._report_panel_errors()
         if self._closing:
@@ -3751,7 +3814,7 @@ class ConsolePresenter:
         for binding in candidate.panels:
             self.panels[binding.panel_id] = binding
             self.view.add_panel(binding.panel_id, binding.state.title)
-            self._present_mounted_front(binding)
+            self.view.show_panel(binding.panel_id, None)
             self.view.set_panel_selectors_enabled(binding.panel_id, self._deriving)
             self._publish_panel_state(binding)
             self._apply_deriving(binding)
@@ -3884,11 +3947,8 @@ class ConsolePresenter:
             or not hasattr(binding.host, "subscribe_selection")
         ):
             return
-        metadata, error = binding.host.initial_state
-        if metadata is None and error is None:
+        if binding.accepted_display is None:
             return
-        if error is not None:
-            raise error
         initial_selection = panel_selection_from_document(binding.state.selector)
         initial_publication = None
         bridge_selection = (
@@ -3898,11 +3958,7 @@ class ConsolePresenter:
             else None
         )
         if bridge_selection is not None:
-            initial_publication = (
-                None
-                if binding.port is None
-                else binding.port.presented_publication()
-            )
+            initial_publication = binding.display_publication
             if initial_publication is None:
                 initial_publication = binding.display_publication
             if initial_publication is None:
@@ -3918,10 +3974,10 @@ class ConsolePresenter:
             # The panel's port holds a fit's exact parent publication
             # (pending or presented) at accept time; resolve lazily so a
             # port attached after this bridge still answers.
-            source_publication_for=lambda revision: (
+            source_publication_for=lambda generation, revision: (
                 None
                 if binding.port is None
-                else binding.port.publication_for_revision(revision)
+                else binding.port.publication_for_identity(generation, revision)
             ),
             request_owner_wake=self.board.wake.request_owner_wake,
             initial_selection=bridge_selection,
@@ -3935,13 +3991,25 @@ class ConsolePresenter:
                     publication,
                 )
             ),
-            on_threshold=lambda thresholds, host=binding.host: (
-                self._enqueue_panel_threshold(binding.panel_id, host, thresholds)
+            on_threshold=lambda event, host=binding.host: (
+                self._enqueue_panel_threshold(binding.panel_id, host, event)
             ),
         )
         binding.selections.subscribe_viewport_observation(
             lambda observation: self._enqueue_panel_viewport(
                 binding.panel_id, source_host, observation
+            )
+        )
+        binding.selections.subscribe_focus_observation(
+            lambda focused_index, subject, generation, revision: (
+                self._enqueue_panel_focus(
+                    binding.panel_id,
+                    source_host,
+                    focused_index,
+                    subject,
+                    generation,
+                    revision,
+                )
             )
         )
         binding.bridge.configure_outputs(binding.state.published_outputs)
@@ -3950,21 +4018,81 @@ class ConsolePresenter:
         self,
         panel_id: str,
         host: object,
-        thresholds: object,
+        observation: object,
         *,
         frozen: PanelFrozenData | None = None,
     ) -> None:
         self._enqueue_panel_interaction(
             lambda: self._settle_panel_threshold(
-                panel_id, host, thresholds, frozen=frozen
+                panel_id, host, observation, frozen=frozen
             )
         )
+
+    def _accepted_panel_interaction(
+        self,
+        binding: PanelBinding,
+        source: object,
+        observation: object | None,
+        *,
+        frozen: PanelFrozenData | None = None,
+        exact_subject: bool = True,
+        subject: object | None = None,
+        data_generation: object = None,
+        data_revision: object = None,
+    ) -> tuple[object, object] | None:
+        """Validate one gesture against its exact current surface."""
+
+        publication = None
+        plot_input = None
+        if source is binding.host:
+            surface = binding.accepted_surface
+            if surface is not None and surface.host is source:
+                publication = surface.publication
+                plot_input = surface.plot_input
+        elif (
+            source is binding.editor_host
+            and frozen is not None
+            and binding.frozen_data is not None
+            and binding.frozen_data.publication is frozen.publication
+            and binding.frozen_data.snapshot.ref == frozen.snapshot.ref
+            and not binding.frozen_stale
+        ):
+            publication = frozen.publication
+            plot_input = frozen.plot_input
+        if observation is None:
+            identity_matches = plot_identity_matches_plot_input(
+                plot_input,
+                data_generation,
+                data_revision,
+            )
+        else:
+            identity_matches = observation_matches_plot_input(
+                observation,
+                plot_input,
+            )
+            subject = getattr(observation, "subject", None)
+        if (
+            publication is None
+            or plot_input is None
+            or not identity_matches
+        ):
+            return None
+        description = self._panel_accepted_display(binding, source)
+        if (
+            description is None
+            or subject is None
+            or semantic_spec(description.spec).kind is not subject.plot_kind
+            or exact_subject
+            and description.selection_subject != subject
+        ):
+            return None
+        return publication, description
 
     def _settle_panel_threshold(
         self,
         panel_id: str,
         source: object,
-        thresholds: object,
+        observation: object,
         *,
         frozen: PanelFrozenData | None = None,
     ) -> None:
@@ -3981,36 +4109,22 @@ class ConsolePresenter:
         binding = self.panels.get(str(panel_id))
         if binding is None:
             return
-        if source is None:
+        accepted = self._accepted_panel_interaction(
+            binding,
+            source,
+            observation,
+            frozen=frozen,
+            exact_subject=False,
+        )
+        if accepted is None:
             return
-        if source is not binding.host and source is not binding.editor_host:
-            return
-        if source is binding.editor_host and (
-            binding.frozen_stale
-            or (frozen is not None and binding.frozen_data is not frozen)
+        _publication, description = accepted
+        if not accepts_classifier_thresholds(
+            description.spec,
+            description.display_state.values,
         ):
             return
-        if source is binding.host:
-            subject = (
-                None
-                if binding.port is None
-                else binding.port.presented_input()
-            )
-        else:
-            held = binding.frozen_data
-            subject = (
-                None
-                if held is None
-                else held.snapshot
-                if held.plot_input is None
-                else held.plot_input
-            )
-        spec = self._panel_accepted_spec(binding, source)
-        if spec is None or not accepts_classifier_thresholds(
-            spec, binding.state.display
-        ):
-            return
-        target = tuple(thresholds)
+        target = tuple(observation.classifier_thresholds)
         if binding.state.classifier_thresholds == target:
             return
         self._remember_panel_view(
@@ -4023,9 +4137,19 @@ class ConsolePresenter:
                 or (host is binding.editor_host and binding.frozen_stale)
             ):
                 continue
+            other = self._panel_accepted_display(binding, host)
+            if other is None or not accepts_classifier_thresholds(
+                other.spec,
+                other.display_state.values,
+            ):
+                continue
             operation = host.configure(classifier_thresholds=target)
-            if host is binding.host and operation is not None:
-                self._present_when_done(binding, operation)
+            self._track_panel_configuration(binding, host, operation)
+        self._track_panel_configuration(
+            binding,
+            source,
+            source.describe_display(),
+        )
 
     def _enqueue_panel_observation(
         self,
@@ -4079,6 +4203,29 @@ class ConsolePresenter:
             )
         )
 
+    def _enqueue_panel_focus(
+        self,
+        panel_id: str,
+        host: object,
+        focused_index: int | None,
+        subject: object,
+        data_generation: object,
+        data_revision: object,
+        *,
+        frozen: PanelFrozenData | None = None,
+    ) -> None:
+        self._enqueue_panel_interaction(
+            lambda: self._route_panel_focus(
+                panel_id,
+                host,
+                focused_index,
+                subject,
+                data_generation,
+                data_revision,
+                frozen=frozen,
+            )
+        )
+
     def _synchronize_panel_interaction(
         self,
         binding: PanelBinding,
@@ -4108,7 +4255,11 @@ class ConsolePresenter:
                 return _UNCHANGED
             binding.interaction_viewport = (self._panel_view_identity(binding), viewport)
             if other_host is not None:
-                mirror(_apply_panel_viewport(other_host, viewport))
+                self._track_panel_configuration(
+                    binding,
+                    other_host,
+                    other_host.configure(viewport=viewport),
+                )
             return _UNCHANGED
 
         if selection is None:
@@ -4139,48 +4290,77 @@ class ConsolePresenter:
         observation: object,
     ) -> None:
         binding = self.panels.get(str(panel_id))
-        if (
-            binding is None
-            or binding.host is not source
-            or binding.port is None
-        ):
-            return
-        publication = binding.port.publication_for_revision(
-            observation.data_revision
-        )
-        if publication is None or not self._publication_matches_observation(
-            publication, observation
-        ):
-            return
-        if observation.state is None:
-            return
-        subject = self._panel_accepted_subject(binding)
-        if (
-            subject is None
-            or not panel_selection_matches_subject(
-                observation.state, subject
-            )
-        ):
+        if binding is None or self._accepted_panel_interaction(
+            binding, source, observation
+        ) is None:
             return
         self._synchronize_panel_interaction(
             binding,
             binding.editor_host,
-            observation.state,
+            _UNCHANGED,
             observation.display,
         )
+        self._track_panel_configuration(
+            binding,
+            source,
+            source.describe_display(),
+        )
 
-    @staticmethod
-    def _publication_matches_observation(
-        publication: object,
-        observation: object,
-    ) -> bool:
-        event_ref = getattr(publication, "event_ref", None)
-        generation = getattr(event_ref, "generation", None)
-        generation = str(getattr(generation, "value", generation))
-        return bool(
-            generation == str(observation.data_generation)
-            and int(getattr(event_ref, "sequence", -1))
-            == int(observation.data_revision)
+    def _route_panel_focus(
+        self,
+        panel_id: str,
+        source: object,
+        focused_index: int | None,
+        subject: object,
+        data_generation: object,
+        data_revision: object,
+        *,
+        frozen: PanelFrozenData | None = None,
+    ) -> None:
+        binding = self.panels.get(str(panel_id))
+        if binding is None:
+            return
+        accepted = self._accepted_panel_interaction(
+            binding,
+            source,
+            None,
+            frozen=frozen,
+            exact_subject=False,
+            subject=subject,
+            data_generation=data_generation,
+            data_revision=data_revision,
+        )
+        if accepted is None or accepted[1].kind is not PlotKind.FACET_GRID:
+            return
+        focus = focused_index
+        if focus == binding.state.focused_cell:
+            return
+        previous = panel_selection_from_document(binding.state.selector)
+        changes: dict[str, object] = {"focused_cell": focus}
+        if previous is not None and not panel_selection_matches_subject(
+            previous,
+            subject,
+        ):
+            changes["selector"] = {}
+        binding.interaction_viewport = None
+        self._remember_panel_view(binding, **changes)
+        if "selector" in changes and binding.bridge is not None:
+            binding.bridge.clear_selection()
+        other = (
+            binding.editor_host if source is binding.host else binding.host
+        )
+        if other is not None and not (
+            other is binding.editor_host and binding.frozen_stale
+        ):
+            operation = other.configure(facet_focus=focus)
+            self._track_panel_configuration(binding, other, operation)
+        # Focus changes the accepted selection subject without changing the
+        # PlotSpec.  Refresh the existing description through the same
+        # configure-accept slots; no polling or parallel focus state remains.
+        self._track_panel_configuration(
+            binding,
+            source,
+            source.describe_display(),
         )
 
     def _apply_selection_observation(
@@ -4250,33 +4430,27 @@ class ConsolePresenter:
             binding is None
             or binding.host is not source
             or binding.bridge is not bridge
-            or binding.port is None
         ):
             return
-        held = binding.port.publication_for_revision(
-            observation.data_revision
+        accepted = self._accepted_panel_interaction(
+            binding, source, observation
         )
-        if (
-            held is not publication
-            or not self._publication_matches_observation(
-                publication, observation
-            )
+        if accepted is None or accepted[0] is not publication:
+            return
+        if not panel_selection_matches_subject(
+            observation.state, observation.subject
         ):
             return
-        if observation.change is not SelectionChange.REMOVED:
-            subject = self._panel_accepted_subject(binding)
-            if (
-                subject is None
-                or not panel_selection_matches_subject(
-                    observation.state, subject
-                )
-            ):
-                return
         self._apply_selection_observation(
             binding,
             observation,
             publication,
             other_host=binding.editor_host,
+        )
+        self._track_panel_configuration(
+            binding,
+            source,
+            source.describe_display(),
         )
 
     def _route_panel_editor_viewport(
@@ -4287,36 +4461,23 @@ class ConsolePresenter:
         observation: object,
     ) -> None:
         binding = self.panels.get(str(panel_id))
-        publication = frozen.publication
-        if (
-            binding is None
-            or binding.editor_host is not host
-            or binding.frozen_data is not frozen
-            or binding.frozen_stale
-            or publication is None
-            or not self._publication_matches_observation(
-                publication, observation
-            )
-        ):
-            return
-        if observation.state is None:
-            return
-        plot_input = frozen.plot_input or frozen.snapshot
-        subject = self._panel_selection_subject(
-            binding, host, plot_input=plot_input
-        )
-        if (
-            subject is None
-            or not panel_selection_matches_subject(
-                observation.state, subject
-            )
-        ):
+        if binding is None or self._accepted_panel_interaction(
+            binding,
+            host,
+            observation,
+            frozen=frozen,
+        ) is None:
             return
         self._synchronize_panel_interaction(
             binding,
             binding.host,
-            observation.state,
+            _UNCHANGED,
             observation.display,
+        )
+        self._track_panel_configuration(
+            binding,
+            host,
+            host.describe_display(),
         )
 
     def _route_panel_editor_observation(
@@ -4329,41 +4490,30 @@ class ConsolePresenter:
         """Accept a region only from this exact still-current Frozen input."""
 
         binding = self.panels.get(str(panel_id))
-        publication = frozen.publication
-        reference = getattr(frozen.snapshot, "ref", None)
-        if (
-            binding is None
-            or binding.editor_host is not host
-            or binding.frozen_data is not frozen
-            or binding.frozen_stale
-            or publication is None
-            or not self._publication_matches_observation(
-                publication, observation
-            )
-            or int(getattr(getattr(reference, "revision", None), "value", -1))
-            != int(observation.data_revision)
-            or str(getattr(getattr(reference, "stream_generation", None), "value", ""))
-            != str(observation.data_generation)
+        if binding is None:
+            return
+        accepted = self._accepted_panel_interaction(
+            binding,
+            host,
+            observation,
+            frozen=frozen,
+        )
+        if accepted is None or not panel_selection_matches_subject(
+            observation.state, observation.subject
         ):
             return
-        if observation.change is not SelectionChange.REMOVED:
-            plot_input = frozen.plot_input or frozen.snapshot
-            subject = self._panel_selection_subject(
-                binding, host, plot_input=plot_input
-            )
-            if (
-                subject is None
-                or not panel_selection_matches_subject(
-                    observation.state, subject
-                )
-            ):
-                return
+        publication, _description = accepted
         self._apply_selection_observation(
             binding,
             observation,
             publication,
             other_host=binding.host,
             expected_snapshot=frozen.snapshot,
+        )
+        self._track_panel_configuration(
+            binding,
+            host,
+            host.describe_display(),
         )
 
     def _route_exact_panel_selection(
@@ -4389,15 +4539,15 @@ class ConsolePresenter:
         snapshot = expected_snapshot
         if snapshot is None:
             binding = self.panels.get(str(panel_id))
-            port = None if binding is None else binding.port
+            surface = None if binding is None else binding.accepted_surface
             if (
-                port is None
-                or port.presented_publication() is not publication
+                surface is None
+                or surface.publication is not publication
             ):
                 raise RuntimeError(
                     f"{panel_id} selection is not on its accepted publication"
                 )
-            shown = port.presented_input()
+            shown = surface.plot_input
             snapshot = getattr(shown, "snapshot", shown)
         if (
             expected_snapshot is not None
@@ -4495,34 +4645,48 @@ class ConsolePresenter:
         snapshot = getattr(snapshot, "snapshot", snapshot)
         block = getattr(snapshot, "block", None)
         schema = getattr(block, "schema", None)
-        resolved = (
-            self._panel_accepted_spec(binding)
+        description = (
+            binding.accepted_display
             if state is None and subject is None
-            else self._panel_resolved_spec(
+            else None
+        )
+        if description is None:
+            resolved = self._panel_resolved_spec(
                 binding, selected, subject=snapshot
             )
-        )
+            display = selected.display
+            focused_cell = selected.focused_cell
+        else:
+            resolved = description.spec
+            display = description.display_state.values
+            focused_cell = description.facet_focus
         units = tuple(
-            (name, selected.display.get(name))
+            (name, display.get(name))
             for name in (
                 "x_display_unit",
                 "y_display_unit",
                 "facet_display_unit",
             )
-            if name in selected.display
+            if name in display
         )
         return (
             (
                 None
                 if snapshot is None
                 else getattr(
-                    getattr(snapshot, "ref", None), "generation", None
+                    getattr(
+                        getattr(snapshot, "ref", None),
+                        "stream_generation",
+                        None,
+                    ),
+                    "value",
+                    None,
                 )
             ),
             None if schema is None else getattr(schema, "fingerprint", None),
             resolved,
             units,
-            selected.focused_cell,
+            focused_cell,
         )
 
     def _report_panel_errors(self) -> None:
@@ -4813,8 +4977,10 @@ class ConsolePresenter:
         value = front.value(signal)
         if publication is None or value is None:
             raise RuntimeError("operator point review has no published image")
-        snapshot = self._presentation_snapshot(
-            signal, value, publication, primary_window=1
+        snapshot, _event_record = self._presentation_snapshot(
+            signal,
+            value,
+            publication,
         )
         geometry = publication.run_record.get(
             IMAGE_POINT_OVERLAY_GEOMETRY_RECORD

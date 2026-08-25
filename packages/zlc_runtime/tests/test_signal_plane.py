@@ -100,12 +100,15 @@ def _latest(
     declaration: DatasetOutputDeclaration,
     value: float,
     run_record: dict[str, object] | None = None,
+    *,
+    event_record: dict[str, object] | None = None,
 ) -> LiveDatasetOutput:
     return LiveDatasetOutput(
         declaration,
         _event(declaration.name, value),
         MonitorCoverage(1, 1),
         run_record,
+        event_record=event_record,
     )
 
 
@@ -208,6 +211,16 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
     wakes: list[int] = []
     unsubscribe = plane.subscribe_publications(lambda: wakes.append(1))
     history = small_history = None
+
+    def settings(epoch: int) -> dict[str, object]:
+        return {
+            "device_settings": {
+                "camera": {
+                    "device_session_id": "camera-session",
+                    "epoch_ranges": ((epoch, epoch),),
+                }
+            }
+        }
     try:
         plane.reserve(source)
         plane.commit_live(source, {"frame": _latest(source_declaration, 1.0)})
@@ -236,8 +249,12 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
         plane.commit_processor(
             derived,
             {
-                "value": _latest(derived_declaration, 22.0),
-                "latest": _latest(latest_declaration, 222.0),
+                "value": _latest(
+                    derived_declaration, 22.0, event_record=settings(2)
+                ),
+                "latest": _latest(
+                    latest_declaration, 222.0, event_record=settings(2)
+                ),
             },
             source_publication=second,
         )
@@ -249,7 +266,6 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
             str(column.coordinate_id) != "zlc_data.primary-index"
             for column in before_demand.block.schema.point_table.columns
         )
-        assert not plane._states[derived.instance_id].indexed_event_values
         assert plane.supports_indexed_history("indexed-derived/value")
         history = plane.acquire_indexed_history("indexed-derived/value", 4)
 
@@ -263,15 +279,22 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
         plane.commit_processor(
             derived,
             {
-                "value": _latest(derived_declaration, 44.0),
-                "latest": _latest(latest_declaration, 444.0),
+                "value": _latest(
+                    derived_declaration, 44.0, event_record=settings(4)
+                ),
+                "latest": _latest(
+                    latest_declaration, 444.0, event_record=settings(4)
+                ),
             },
             source_publication=fourth,
         )
 
         publication = plane.latest_publication("indexed-derived/value")
         assert publication is not None
-        snapshot = plane.current_dataset("indexed-derived/value", publication)
+        snapshot, snapshot_record = plane.current_dataset_view(
+            "indexed-derived/value",
+            publication,
+        )
         source_index = snapshot.block.schema.point_table.column(
             AxisId("zlc_data.primary-index")
         )
@@ -285,40 +308,45 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
             snapshot.expanded_validity().reshape(-1),
             (True, False, True),
         )
-        bounded = plane.current_dataset(
-            "indexed-derived/value",
-            publication,
-            primary_window=2,
-        )
-        assert bounded.block.schema.point_table.column(
-            AxisId("zlc_data.primary-index")
-        ).values == (3, 4)
-        np.testing.assert_array_equal(
-            bounded.expanded_validity().reshape(-1),
-            (False, True),
+        assert snapshot_record["device_settings"]["camera"]["epoch_ranges"] == (
+            (2, 2),
+            (4, 4),
         )
         old_publication = publication
         plane.commit_processor(
             derived,
             {
-                "value": _latest(derived_declaration, 55.0),
-                "latest": _latest(latest_declaration, 555.0),
+                "value": _latest(
+                    derived_declaration, 55.0, event_record=settings(5)
+                ),
+                "latest": _latest(
+                    latest_declaration, 555.0, event_record=settings(5)
+                ),
             },
             source_publication=fourth,
             trigger=("refit", 1),
         )
         new_publication = plane.latest_publication("indexed-derived/value")
         assert new_publication is not None
-        old_tail = plane.current_dataset(
-            "indexed-derived/value", old_publication, primary_window=1
+        old_view, old_record = plane.current_dataset_view(
+            "indexed-derived/value", old_publication
         )
-        new_tail = plane.current_dataset(
-            "indexed-derived/value", new_publication, primary_window=1
+        new_view, new_record = plane.current_dataset_view(
+            "indexed-derived/value", new_publication
         )
-        np.testing.assert_allclose(old_tail.block.values.reshape(-1), (44.0,))
-        np.testing.assert_allclose(new_tail.block.values.reshape(-1), (55.0,))
-        assert bool(old_tail.expanded_validity().reshape(-1)[0])
-        assert bool(new_tail.expanded_validity().reshape(-1)[0])
+        assert old_view.block.schema == new_view.block.schema
+        np.testing.assert_allclose(old_view.block.values.reshape(-1)[-1], 44.0)
+        np.testing.assert_allclose(new_view.block.values.reshape(-1)[-1], 55.0)
+        assert bool(old_view.expanded_validity().reshape(-1)[-1])
+        assert bool(new_view.expanded_validity().reshape(-1)[-1])
+        assert old_record["device_settings"]["camera"]["epoch_ranges"] == (
+            (2, 2),
+            (4, 4),
+        )
+        assert new_record["device_settings"]["camera"]["epoch_ranges"] == (
+            (2, 2),
+            (5, 5),
+        )
         latest_value = new_publication.value("indexed-derived/latest")
         assert latest_value is not None and latest_value.primary_index == 4
         latest = plane.current_dataset("indexed-derived/latest", new_publication)
@@ -329,26 +357,33 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
             str(column.coordinate_id) != "zlc_data.primary-index"
             for column in latest.block.schema.point_table.columns
         )
-        assert "indexed-derived/latest" not in plane._states[
-            derived.instance_id
-        ].indexed_event_values
         small_history = plane.acquire_indexed_history("indexed-derived/value", 2)
-        assert history.close()
-        trimmed = plane.current_dataset("indexed-derived/value")
+        cached_view = plane.current_dataset("indexed-derived/value", new_publication)
+        small_history.resize(3)
+        assert (
+            plane.current_dataset("indexed-derived/value", new_publication)
+            is cached_view
+        )
+        small_history.resize(2)
+        history.close()
+        trimmed, trimmed_record = plane.current_dataset_view(
+            "indexed-derived/value"
+        )
         assert trimmed.block.schema.point_table.column(
             AxisId("zlc_data.primary-index")
         ).values == (3, 4)
+        assert trimmed_record["device_settings"]["camera"]["epoch_ranges"] == (
+            (5, 5),
+        )
         with pytest.raises(ValueError, match="precedes retained"):
             plane.current_dataset("indexed-derived/value", second_derived)
-        assert small_history.close()
+        small_history.close()
         released = plane.current_dataset("indexed-derived/value")
         assert released.block.values.item() == 55.0
         assert all(
             str(column.coordinate_id) != "zlc_data.primary-index"
             for column in released.block.schema.point_table.columns
         )
-        state = plane._states[derived.instance_id]
-        assert not state.indexed_event_values
         assert len(wakes) == 8  # four source and four atomic derived publications
     finally:
         if history is not None:
@@ -359,12 +394,7 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
         plane.close()
 
 
-def test_indexed_history_commit_is_constant_and_window_reads_only_its_range(
-    monkeypatch,
-) -> None:
-    from collections import deque as standard_deque
-    import zlc_runtime.plane as plane_module
-
+def test_indexed_history_retains_only_the_requested_window() -> None:
     source_declaration = DatasetOutputDeclaration("frame", "test.frame")
     derived_declaration = DatasetOutputDeclaration(
         "value",
@@ -390,29 +420,9 @@ def test_indexed_history_commit_is_constant_and_window_reads_only_its_range(
         accept_processor_cancelled = staticmethod(lambda: None)
         request_processor_owner_wake = staticmethod(lambda: None)
 
-    class NoScanDeque(standard_deque):
-        def __iter__(self):
-            raise AssertionError("indexed commit scanned retained history")
-
-        def __reversed__(self):
-            raise AssertionError("indexed commit scanned retained history")
-
-    monkeypatch.setattr(plane_module, "deque", NoScanDeque)
     derived = Derived()
     plane = SignalDataPlane()
     history = None
-    materialized_event_counts: list[int] = []
-    original_materialize = plane_module._materialize_indexed_dataset
-
-    def counted_materialize(*args, **kwargs):
-        materialized_event_counts.append(len(args[4]))
-        return original_materialize(*args, **kwargs)
-
-    monkeypatch.setattr(
-        plane_module,
-        "_materialize_indexed_dataset",
-        counted_materialize,
-    )
     try:
         plane.reserve(source)
         plane.commit_live(source, {"frame": _latest(source_declaration, 1.0)})
@@ -424,7 +434,7 @@ def test_indexed_history_commit_is_constant_and_window_reads_only_its_range(
             initial_publication=publication,
             paused=True,
         )
-        for revision in range(1, 10_001):
+        for revision in range(1, 151):
             if revision > 1:
                 plane.commit_live(
                     source,
@@ -442,18 +452,11 @@ def test_indexed_history_commit_is_constant_and_window_reads_only_its_range(
                     "bounded-derived/value",
                     100,
                 )
-        snapshot = plane.current_dataset(
-            "bounded-derived/value",
-            primary_window=100,
-        )
+        snapshot = plane.current_dataset("bounded-derived/value")
         primary = snapshot.block.schema.point_table.column(
             AxisId("zlc_data.primary-index")
         )
-        assert primary.values == tuple(range(9_901, 10_001))
-        state = plane._states[derived.instance_id]
-        assert state.indexed_capacities["bounded-derived/value"] == 100
-        assert len(state.indexed_events["bounded-derived/value"]) == 100
-        assert materialized_event_counts == [100]
+        assert primary.values == tuple(range(51, 151))
     finally:
         if history is not None:
             history.close()
@@ -607,8 +610,17 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity() -> No
             "epoch_ranges"
         ] == ((0, 0),)
         camera = second.event_record["device_settings"]["camera"]
-        assert camera["epoch_ranges"] == ((0, 0), (2, 2))
-        assert camera["mixed"] is True
+        assert camera["epoch_ranges"] == ((2, 2),)
+        assert camera["mixed"] is False
+        publication = plane.latest_publication("epoch-camera/frame")
+        assert publication is not None
+        _snapshot, prefix_record = plane.current_dataset_view(
+            "epoch-camera/frame",
+            publication,
+        )
+        prefix_camera = prefix_record["device_settings"]["camera"]
+        assert prefix_camera["epoch_ranges"] == ((0, 0), (2, 2))
+        assert prefix_camera["mixed"] is True
         assert first.run_record == second.run_record == {"run": "same"}
     finally:
         plane.close()

@@ -175,19 +175,26 @@ class SelectionRange:
     axis: str
     lower: float
     upper: float
+    domain: str
     coordinate_frame: str | None = None
-    domain: str = "named"
 
     def __post_init__(self) -> None:
         domain = canonical_text(self.domain, "selection domain")
-        if domain not in {"named", "repeat", "point_row", "value"}:
+        if domain not in {
+            "repeat",
+            "point_row",
+            "point_coordinate",
+            "point_dimension",
+            "data",
+            "value",
+        }:
             raise ValueError(
-                "selection domain must be named, repeat, point_row, or value"
+                "selection domain must be an exact Dataset axis domain or value"
             )
         if not isinstance(self.axis, str):
             raise TypeError("selection axis must be text")
         axis = self.axis.strip()
-        if domain == "named":
+        if domain in {"point_coordinate", "point_dimension", "data"}:
             axis = canonical_text(axis, "selection axis")
         elif axis:
             raise ValueError("a structural selection range cannot carry an axis name")
@@ -211,9 +218,25 @@ class FacetCondition:
 
     axis: str
     value: int | float | str
+    domain: str
 
     def __post_init__(self) -> None:
-        axis = canonical_text(self.axis, "facet axis")
+        domain = canonical_text(self.domain, "facet domain")
+        if domain not in {
+            "point_row",
+            "point_coordinate",
+            "point_dimension",
+            "data",
+        }:
+            raise ValueError("facet domain must be an exact Dataset axis domain")
+        if not isinstance(self.axis, str):
+            raise TypeError("facet axis must be text")
+        axis = self.axis.strip()
+        if domain == "point_row":
+            if axis:
+                raise ValueError("a point-row facet cannot carry an AxisId")
+        else:
+            axis = canonical_text(axis, "facet axis")
         value = self.value
         if isinstance(value, bool):
             raise TypeError("facet value must not be bool")
@@ -225,6 +248,7 @@ class FacetCondition:
             raise TypeError("facet value must be text or a finite real number")
         object.__setattr__(self, "axis", axis)
         object.__setattr__(self, "value", value)
+        object.__setattr__(self, "domain", domain)
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,7 +282,15 @@ class SelectionState:
         facets = tuple(self.facets)
         if any(not isinstance(item, FacetCondition) for item in facets):
             raise TypeError("selection facets must contain FacetCondition values")
-        if len({item.axis for item in facets}) != len(facets):
+        if len({
+            (
+                "point"
+                if item.domain in {"point_coordinate", "point_dimension"}
+                else item.domain,
+                item.axis,
+            )
+            for item in facets
+        }) != len(facets):
             raise ValueError("selection facet axes must be unique")
         repeat_index = self.repeat_index
         if repeat_index is not None:
@@ -317,10 +349,13 @@ class FitEventValue:
     parameter_values: Mapping[str, np.ndarray]
     parameter_errors: Mapping[str, np.ndarray]
     success: np.ndarray
+    sample_axis_domain: str
+    sample_axis_id: str
     sample_axis_name: str
     sample_coordinates: np.ndarray
     sample_unit: str
     sample_labels: tuple[str, ...] | None
+    source_generation: str
     source_revision: int
     batch_revision: int
 
@@ -406,6 +441,33 @@ class FitEventValue:
         )
         if sample_count > 1 and not sample_axis_name:
             raise ValueError("a batch fit must have a sample_axis_name")
+        sample_axis_domain = canonical_text(
+            self.sample_axis_domain,
+            "fit sample_axis_domain",
+            empty=True,
+        )
+        sample_axis_id = canonical_text(
+            self.sample_axis_id,
+            "fit sample_axis_id",
+            empty=True,
+        )
+        domains = {
+            "repeat",
+            "point_row",
+            "point_coordinate",
+            "point_dimension",
+            "data",
+        }
+        is_batch = bool(sample_axis_name)
+        if is_batch and sample_axis_domain not in domains:
+            raise ValueError("a batch fit must declare its exact sample axis domain")
+        if not is_batch and (sample_axis_domain or sample_axis_id):
+            raise ValueError("a scalar fit must not declare a sample axis identity")
+        if sample_axis_domain in {"repeat", "point_row"}:
+            if sample_axis_id:
+                raise ValueError("a structural sample axis cannot carry an AxisId")
+        elif sample_axis_domain and not sample_axis_id:
+            raise ValueError("this sample axis domain requires an exact AxisId")
         sample_coordinates = _immutable_float_vector(
             self.sample_coordinates,
             "fit sample_coordinates",
@@ -440,10 +502,17 @@ class FitEventValue:
         object.__setattr__(self, "parameter_values", MappingProxyType(values))
         object.__setattr__(self, "parameter_errors", MappingProxyType(errors))
         object.__setattr__(self, "success", success)
+        object.__setattr__(self, "sample_axis_domain", sample_axis_domain)
+        object.__setattr__(self, "sample_axis_id", sample_axis_id)
         object.__setattr__(self, "sample_axis_name", sample_axis_name)
         object.__setattr__(self, "sample_coordinates", sample_coordinates)
         object.__setattr__(self, "sample_unit", sample_unit)
         object.__setattr__(self, "sample_labels", labels)
+        object.__setattr__(
+            self,
+            "source_generation",
+            canonical_text(self.source_generation, "fit source_generation"),
+        )
         object.__setattr__(
             self,
             "source_revision",
@@ -551,7 +620,9 @@ class SelectionBridge:
         selection_source: SelectionEventSource,
         *,
         bridge_id: str,
-        source_publication_for: Callable[[int], object | None] | None = None,
+        source_publication_for: (
+            Callable[[str, int], object | None] | None
+        ) = None,
         request_owner_wake: Callable[[], object] | None = None,
     ) -> None:
         if not isinstance(plane, SignalDataPlane):
@@ -571,7 +642,8 @@ class SelectionBridge:
         self._plane = plane
         self._source_signal = source_signal
         self._selection_source = selection_source
-        #: Resolves a fit's exact parent publication by data revision.  The
+        #: Resolves a fit's exact parent publication by data generation and
+        #: revision.  The
         #: renderer's panel port is the deterministic causal holder (the fit
         #: accepted inside that revision's own commit), so provenance comes
         #: from the presentation side, never from a plane retention window.
@@ -760,6 +832,7 @@ class SelectionBridge:
             with self._lock:
                 self._fit_event = None
                 self._fit_publication = None
+                self._last_fit_batch_revision = None
                 processor = self._fit_processor
                 self._fit_processor = None
             if processor is not None:
@@ -787,22 +860,36 @@ class SelectionBridge:
         # matches exactly.
         resolver = self._source_publication_for
         if publication is None and resolver is not None:
-            candidate = resolver(event.source_revision)
+            candidate = resolver(
+                event.source_generation,
+                event.source_revision,
+            )
             if candidate is not None and not isinstance(candidate, SignalPublication):
                 raise TypeError("source_publication_for must return SignalPublication or None")
             publication = candidate
         if publication is None:
             current = self._current_source_publication()
+            current_generation = None
             current_revision = None
             if current is not None:
                 value = current.value(self._source_signal)
                 if value is not None:
+                    current_generation = str(
+                        value.snapshot.ref.stream_generation.value
+                    )
                     current_revision = value.snapshot.ref.revision.value
-                    if current_revision == event.source_revision:
+                    if (
+                        current_generation == event.source_generation
+                        and current_revision == event.source_revision
+                    ):
                         publication = current
             if publication is None:
                 if (
-                    current_revision is not None
+                    current_generation is not None
+                    and current_generation != event.source_generation
+                ) or (
+                    current_generation == event.source_generation
+                    and current_revision is not None
                     and current_revision > event.source_revision
                 ):
                     # The panel already moved past this fit's shot: the fit
@@ -816,20 +903,33 @@ class SelectionBridge:
                 )
                 return
         source = publication.value(self._source_signal)
-        assert source is not None
+        if source is None:
+            raise RuntimeError("fit parent publication lacks its source signal")
+        if (
+            str(source.snapshot.ref.stream_generation.value)
+            != event.source_generation
+            or source.snapshot.ref.revision.value != event.source_revision
+        ):
+            raise RuntimeError("fit resolver returned another source identity")
         with self._lock:
             if self._closed or not self._started:
                 return
+            previous_event = self._fit_event
+            source_changed = bool(
+                previous_event is not None
+                and previous_event.source_generation != event.source_generation
+            )
             if accept_revision and (
-                self._last_fit_batch_revision is not None
+                not source_changed
+                and self._last_fit_batch_revision is not None
                 and event.batch_revision <= self._last_fit_batch_revision
             ):
                 self._record_error(
                     ValueError("fit batch_revision must increase for every accepted batch")
                 )
                 return
-            schema_changed = self._fit_event is not None and self._fit_schema_key(
-                self._fit_event
+            schema_changed = previous_event is not None and self._fit_schema_key(
+                previous_event
             ) != self._fit_schema_key(event)
             self._fit_event = event
             self._fit_publication = publication
@@ -840,7 +940,8 @@ class SelectionBridge:
             processor = self._fit_processor
             output_names = self._fit_output_names(event)
             if processor is not None and (
-                schema_changed
+                source_changed
+                or schema_changed
                 or tuple(
                     item.name for item in processor.dataset_output_declarations
                 )
@@ -1150,7 +1251,11 @@ class SelectionBridge:
                 trigger_revision = self._fit_trigger_revision
                 if event is None:
                     raise RuntimeError("SelectionBridge has no accepted fit event")
-                if snapshot.ref.revision.value != event.source_revision:
+                if (
+                    str(snapshot.ref.stream_generation.value)
+                    != event.source_generation
+                    or snapshot.ref.revision.value != event.source_revision
+                ):
                     raise _StaleFit(
                         "fit result is stale for the current source publication"
                     )
@@ -1332,6 +1437,8 @@ class SelectionBridge:
                 (name, event.parameter_units[name])
                 for name in event.parameter_names
             ),
+            event.sample_axis_domain,
+            event.sample_axis_id,
             event.sample_axis_name,
             tuple(float(value) for value in event.sample_coordinates),
             event.sample_unit,
@@ -1341,38 +1448,78 @@ class SelectionBridge:
     def _resolve_axis(
         self,
         schema: DatasetSchema,
-        name: str,
+        domain: str,
+        axis_id: str,
     ) -> tuple[AxisId, AxisSpec, str]:
+        """Resolve one exact Dataset axis domain without consulting a label."""
+
+        if domain == "repeat":
+            if axis_id:
+                raise ValueError("a repeat axis cannot carry an AxisId")
+            axis = schema.repeat_axis
+            return axis.axis_id, axis, "repeat"
+        if domain == "point_row":
+            if axis_id:
+                raise ValueError("a point-row axis cannot carry an AxisId")
+            axis = point_ordinal_axis(schema.point_table.row_count)
+            return axis.axis_id, axis, "point"
+
+        wanted = AxisId(canonical_text(axis_id, "selection axis id"))
+        topology = schema.grid_topology
+        present = {
+            "point_coordinate": any(
+                column.coordinate_id == wanted
+                for column in schema.point_table.columns
+            ),
+            "point_dimension": bool(
+                topology is not None and wanted in topology.dimension_ids
+            ),
+            "data": any(
+                axis.axis_id == wanted for axis in schema.cell_schema.data_axes
+            ),
+        }
+        if domain not in present:
+            raise ValueError(f"unsupported selection axis domain {domain!r}")
+        if not present[domain]:
+            raise ValueError(
+                f"{domain} AxisId {axis_id!r} is not present in the source snapshot"
+            )
+        expected_kind = "data" if domain == "data" else "point"
         matches = {
-            (axis_id, axis, kind)
-            for label, axis_id, axis, kind in axis_catalog(schema)
-            if label == name
+            (catalog_id, axis, kind)
+            for _label, catalog_id, axis, kind in axis_catalog(schema)
+            if catalog_id == wanted and kind == expected_kind
         }
         if len(matches) != 1:
             raise ValueError(
-                f"selection axis {name!r} is not uniquely present in the source snapshot"
+                f"{domain} AxisId {axis_id!r} is not uniquely present in the source snapshot"
             )
         return next(iter(matches))
 
     def _faceted_axis(
         self,
         schema: DatasetSchema,
-        sample_axis_name: str,
+        sample_axis_domain: str,
+        sample_axis_id: str,
     ) -> tuple[AxisSpec, str] | None:
         """The parent axis a fit was faceted over, when the parent declares it.
 
-        A fit names its sample axis by the same label the parent schema gives
-        that axis, so the fit's samples inherit their meaning -- their role --
-        from the axis they were cut along.  A scalar fit names no axis, and a
-        facet over the bare point ordinal names no parent axis either.
+        The fit carries the Plot facet's exact domain and AxisId; the display
+        label never participates in resolution.  A scalar fit names no axis,
+        and a facet over the bare point ordinal names no parent axis either.
         """
 
-        if not sample_axis_name:
+        if not sample_axis_domain:
             return None
-        try:
-            _axis_id, axis, kind = self._resolve_axis(schema, sample_axis_name)
-        except ValueError:
+        if sample_axis_domain == "repeat":
+            return schema.repeat_axis, "repeat"
+        if sample_axis_domain == "point_row":
             return None
+        _axis_id, axis, kind = self._resolve_axis(
+            schema,
+            sample_axis_domain,
+            sample_axis_id,
+        )
         return axis, kind
 
     def _build_selection(
@@ -1385,12 +1532,11 @@ class SelectionBridge:
                 raise ValueError(
                     "a measured-value selector has no upstream Dataset axis"
                 )
-            if value.domain == "repeat":
-                axis = schema.repeat_axis
-            elif value.domain == "point_row":
-                axis = point_ordinal_axis(schema.point_table.row_count)
-            else:
-                _axis_id, axis, _kind = self._resolve_axis(schema, value.axis)
+            _axis_id, axis, _kind = self._resolve_axis(
+                schema,
+                value.domain,
+                value.axis,
+            )
             frame = (
                 axis.coordinate_frame
                 if value.coordinate_frame is None
@@ -1408,11 +1554,11 @@ class SelectionBridge:
                 raise ValueError("image SelectionBridge requires a two-axis area")
             first, second = state.ranges
             def axis_kind(value: SelectionRange) -> str:
-                if value.domain == "repeat":
-                    return "repeat"
-                if value.domain == "point_row":
-                    return "point"
-                _axis_id, _axis, kind = self._resolve_axis(schema, value.axis)
+                _axis_id, _axis, kind = self._resolve_axis(
+                    schema,
+                    value.domain,
+                    value.axis,
+                )
                 return kind
 
             # An image has two axes in one domain: either two point quantities
@@ -1432,7 +1578,11 @@ class SelectionBridge:
             selection = Selection((range_term(selected),))
         terms = list(selection.terms)
         for facet in state.facets:
-            axis_id, axis, kind = self._resolve_axis(schema, facet.axis)
+            axis_id, axis, kind = self._resolve_axis(
+                schema,
+                facet.domain,
+                facet.axis,
+            )
             if isinstance(facet.value, str):
                 if kind != "point" or axis.coordinates is None:
                     raise ValueError(
@@ -1622,7 +1772,11 @@ class SelectionBridge:
         output: dict[str, LiveDatasetOutput] = {}
         source_schema = source.block.schema
         sample_count = int(event.success.size)
-        faceted = self._faceted_axis(source_schema, event.sample_axis_name)
+        faceted = self._faceted_axis(
+            source_schema,
+            event.sample_axis_domain,
+            event.sample_axis_id,
+        )
         if faceted is not None and faceted[1] == "repeat":
             # The fit was faceted over the REPEAT axis, so its samples ARE
             # repeats: same conditions measured again.  They keep the parent's
@@ -1647,10 +1801,11 @@ class SelectionBridge:
             # scalar fit, a point-row ordinal facet) has no role to inherit
             # and takes the point ordinal's own role.
             sample_name = event.sample_axis_name or "sample"
+            sample_axis_id = event.sample_axis_id or sample_name
             sample_role = SCAN_POINT if faceted is None else faceted[0].role
             point_columns = [
                 PointColumn(
-                    AxisId(sample_name),
+                    AxisId(sample_axis_id),
                     sample_name,
                     sample_role,
                     PointColumn.NUMERIC,

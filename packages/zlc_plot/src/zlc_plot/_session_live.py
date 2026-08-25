@@ -247,6 +247,7 @@ class LiveSessionMixin:
             raise TypeError("finalization must be a live-frame finalization token")
         if finalization.session_identity is not self._session_identity:
             raise ValueError("live-frame finalization belongs to another PlotSession")
+        self._emit_projection_focus_change(finalization.presentation)
         if finalization.fit_resolution is not None:
             self._resolve_fit_completion(finalization.fit_resolution)
 

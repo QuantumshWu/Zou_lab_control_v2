@@ -127,6 +127,9 @@ class SurfacePort(Protocol):
     @property
     def surface_busy(self) -> bool: ...
 
+    @property
+    def presentation_current(self) -> bool: ...
+
     def presented_front_refs(self) -> tuple[EventRef, ...]: ...
 
     def prepare(
@@ -645,9 +648,6 @@ class BoardScheduler:
             result[panel_id] = port
         return result
 
-    def _resolve_port(self, panel_id: str) -> SurfacePort | None:
-        return self._port_map().get(panel_id)
-
     def _blocked_surface_panels(
         self,
         ports: Sequence[SurfacePort],
@@ -934,7 +934,10 @@ class BoardScheduler:
             front_refs = SurfaceBatchArbiter._front_refs(port, front)
             if (
                 front_refs is None
-                or self._presented_front_refs(port) == front_refs
+                or (
+                    self._presented_front_refs(port) == front_refs
+                    and port.presentation_current
+                )
             ):
                 continue
             publication = front.publication(
