@@ -7,7 +7,12 @@ from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any
 
-from zlc_plot import PlotKind, describe_semantics, normalize_classifier_threshold_targets
+from zlc_plot import (
+    PlotKind,
+    describe_semantics,
+    normalize_classifier_threshold_targets,
+    normalize_fit_target,
+)
 from zlc_plot.semantics import composed_spec
 
 
@@ -17,12 +22,38 @@ __all__ = [
     "allows_image_overlay",
     "control_document",
     "fit_output_fields",
+    "merge_fit_target",
     "panel_data_shape",
     "panel_state_from_description",
     "panel_surface_from_description",
     "project_panel_state",
     "semantic_entries",
 ]
+
+
+def merge_fit_target(
+    current: Mapping[str, object],
+    changes: Mapping[str, object],
+) -> dict[str, object]:
+    """Merge one canonical fit edit, clearing model-specific old values."""
+
+    previous = dict(current)
+    edited = dict(changes)
+    if "model" in edited:
+        selected = edited["model"]
+        if selected is None or not str(selected).strip():
+            return {}
+        if str(selected) != str(previous.get("model") or ""):
+            previous = {
+                name: value
+                for name, value in previous.items()
+                if name in {"selector_kind", "options", "fit_all_facets"}
+            }
+    previous.update(edited)
+    for name in ("fixed", "initial", "bounds"):
+        if name in previous and not previous[name]:
+            previous.pop(name)
+    return normalize_fit_target(previous)
 
 
 def panel_data_shape(
@@ -129,16 +160,23 @@ def panel_surface_from_description(
     display = tuple(control_document(control) for control in controls)
     resolved_models = tuple(description.fit_models)
     accepted_fit = dict(description.fit)
-    current_model = accepted_fit.get("model")
+    accepted_model = accepted_fit.get("model")
     model_choices = [
         (str(model.display_name), str(model.model_id))
         for model in resolved_models
     ]
+    authored_model = state.fit.get("model")
+    current_model = (
+        authored_model
+        if authored_model is not None
+        and any(str(authored_model) == value for _label, value in model_choices)
+        else accepted_model
+    )
     if current_model is not None and not any(
         current_model == value for _label, value in model_choices
     ):
         model_choices.insert(0, (str(current_model), current_model))
-    fit = (
+    fit_fields = ([
         {
             "key": "model",
             "label": "Fit model",
@@ -150,7 +188,29 @@ def panel_surface_from_description(
             "maximum": None,
             "step": None,
         },
-    ) if resolved_models or current_model is not None else ()
+    ] if resolved_models or current_model is not None else [])
+    if current_model is not None:
+        fit_fields.append(
+            {
+                "key": "expression",
+                "label": "Parameters",
+                "kind": "text",
+                "value": (
+                    str(description.fit_expression)
+                    if accepted_model == current_model
+                    else ""
+                ),
+                "allow_none": True,
+                "choices": (),
+                "minimum": None,
+                "maximum": None,
+                "step": None,
+                "description": str(
+                    description.fit_expression_hints.get(str(current_model), "")
+                ),
+            }
+        )
+    fit = tuple(fit_fields)
     fit_outputs = fit_output_fields(accepted_fit, resolved_models)
 
     return {
@@ -159,7 +219,13 @@ def panel_surface_from_description(
         "fit": fit,
         "semantic_unavailable": "",
         "display_unavailable": "",
-        "fit_unavailable": "",
+        "fit_unavailable": (
+            ""
+            if accepted_model != current_model
+            or not description.fit_expression_error
+            else "Parameter expression ignored; automatic fit is active: "
+            + str(description.fit_expression_error)
+        ),
         "fit_outputs": fit_outputs,
         "semantic_provisional": False,
     }
@@ -207,6 +273,7 @@ def panel_state_from_description(
             if str(name) != "kind"
         },
         display=dict(description.display_state.values),
+        fit=dict(description.fit),
     )
 
 
@@ -413,7 +480,11 @@ class PanelState:
         object.__setattr__(self, "title", str(self.title))
         object.__setattr__(self, "semantic", _plain_state(self.semantic))
         object.__setattr__(self, "display", _plain_state(self.display))
-        object.__setattr__(self, "fit", _plain_state(self.fit))
+        object.__setattr__(
+            self,
+            "fit",
+            _plain_state(normalize_fit_target(self.fit)),
+        )
         published_outputs = {
             str(name): enabled
             for name, enabled in self.published_outputs.items()

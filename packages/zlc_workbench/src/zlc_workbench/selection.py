@@ -885,6 +885,7 @@ def _scalar_fit_value(result: object, source_generation: str) -> FitEventValue:
     success = bool(result.success)
     values = np.asarray(result.parameter_values, dtype=np.float64).reshape(-1)
     errors = np.asarray(result.standard_errors, dtype=np.float64).reshape(-1)
+    error_validity = dict(result.parameter_error_validity)
     return FitEventValue(
         parameter_names=names,
         parameter_units={name: units.get(name, "") for name in names},
@@ -893,7 +894,10 @@ def _scalar_fit_value(result: object, source_generation: str) -> FitEventValue:
             for index, name in enumerate(names)
         },
         parameter_errors={
-            name: np.array([errors[index]]) for index, name in enumerate(names)
+            name: np.array([
+                errors[index] if error_validity[name] else np.nan
+            ])
+            for index, name in enumerate(names)
         },
         success=np.array([success]),
         sample_axis_domain="",
@@ -919,28 +923,19 @@ def _batch_fit_value(batch: object, source_generation: str) -> FitEventValue:
     coordinates = batch.sample_coordinates
     if coordinates is None:
         raise _Unbridgeable("a facet fit batch without sample coordinates cannot be placed")
-
-    def _column(index: int, attribute: str) -> np.ndarray:
-        return np.array(
-            [
-                (
-                    np.nan
-                    if item is None or not item.success
-                    else float(np.asarray(getattr(item, attribute)).reshape(-1)[index])
-                )
-                for item in outcomes
-            ],
-            dtype=np.float64,
-        )
+    parameter_values = batch.parameter_values
+    parameter_errors = batch.parameter_errors
 
     return FitEventValue(
         parameter_names=names,
         parameter_units={name: units.get(name, "") for name in names},
         parameter_values={
-            name: _column(index, "parameter_values") for index, name in enumerate(names)
+            name: np.asarray(parameter_values[name], dtype=np.float64)
+            for name in names
         },
         parameter_errors={
-            name: _column(index, "standard_errors") for index, name in enumerate(names)
+            name: np.asarray(parameter_errors[name], dtype=np.float64)
+            for name in names
         },
         success=success,
         sample_axis_domain=str(batch.facet.domain.value),

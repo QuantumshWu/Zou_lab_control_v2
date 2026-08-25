@@ -1151,16 +1151,50 @@ def test_arming_a_fit_from_setting_reaches_the_panels_pixels(
         binding.panel_id, {"fit": {"model": fit_model}}
     )
 
+    changed = False
     deadline = time.monotonic() + 20.0
     while time.monotonic() < deadline:
         presenter.beat()
         latest = presenter.view.presented_fronts[-1][1].buffer.as_rgba()
         if latest.shape != before.shape or not np.array_equal(latest, before):
-            return
+            changed = True
+            break
         time.sleep(0.005)
-    raise AssertionError(
-        "the fit never reached the panel's presented pixels"
+    assert changed, "the fit never reached the panel's presented pixels"
+
+    _settle_panel_hosts(
+        presenter,
+        lambda: any(
+            field["key"] == "expression"
+            for field in binding.parameter_surface["fit"]
+        ),
     )
+    assert presenter.update_panel_state(
+        binding.panel_id,
+        {"fit": {"expression": "offset=0, amplitude=guess(1)"}},
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.state.fit.get("fixed") == {"offset": 0.0}
+        and binding.state.fit.get("initial") == {"amplitude": 1.0},
+    )
+
+    assert presenter.update_panel_state(
+        binding.panel_id,
+        {"fit": {"expression": "missing=1"}},
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: set(binding.state.fit) == {"model"}
+        and "automatic fit is active"
+        in binding.parameter_surface["fit_unavailable"],
+    )
+    expression = next(
+        field
+        for field in binding.parameter_surface["fit"]
+        if field["key"] == "expression"
+    )
+    assert expression["value"] == "missing=1"
 
 
 def test_a_saved_figure_contains_the_fit_it_was_saved_with(

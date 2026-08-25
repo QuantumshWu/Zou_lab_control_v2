@@ -37,6 +37,7 @@ from zlc_data.figure_archive import read_archive
 from .panel_catalog import GRID_CELL_KINDS, panel_kind_choices, task_console_fitting_spec
 from .panel_state import (
     PanelState,
+    merge_fit_target,
     panel_data_shape,
     panel_state_from_description,
     panel_surface_from_description,
@@ -402,15 +403,37 @@ class FigureViewerPresenter:
         }:
             section = next(iter(changes))
             updates = dict(changes[section])
+            fit_expression: object | None = None
+            if section == "fit" and "expression" in updates:
+                fit_expression = str(updates.pop("expression"))
+            candidate_values = (
+                merge_fit_target(dict(getattr(state, section)), updates)
+                if section == "fit"
+                else {**dict(getattr(state, section)), **updates}
+            )
+            fit_target = candidate_values
+            if section == "fit" and fit_expression is not None:
+                selected_model = candidate_values.get("model")
+                if selected_model is None or not str(selected_model).strip():
+                    self.view.set_panel_status(
+                        key,
+                        "Choose a fit model before entering parameters.",
+                        error=True,
+                    )
+                    return
+                fit_target = {
+                    name: value
+                    for name, value in candidate_values.items()
+                    if name not in {"fixed", "initial", "bounds"}
+                }
+                fit_target["expression"] = fit_expression
             configuration = (
                 {"semantic": updates}
                 if section == "semantic"
                 else {"parameters": updates}
                 if section == "display"
-                else {"fit": updates, "fit_live": False}
+                else {"fit": fit_target, "fit_live": False}
             )
-            candidate_values = dict(getattr(state, section))
-            candidate_values.update(updates)
             requested_state = replace(
                 state,
                 **{section: candidate_values},

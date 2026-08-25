@@ -849,6 +849,8 @@ class PanelCardView(FluentGroupBox):
                         label=field.label,
                         default=field.default,
                         required=field.required,
+                        unit=field.unit,
+                        description=field.description,
                         minimum=field.minimum,
                         maximum=field.maximum,
                         choices=field.choices,

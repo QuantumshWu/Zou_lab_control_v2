@@ -120,6 +120,8 @@ def parameter_form_spec(fields: object) -> FormSpec:
                 label=str(field.get("label") or _pretty_key(key)),
                 default=value,
                 required=not allow_none,
+                unit=str(field.get("unit") or ""),
+                description=str(field.get("description") or ""),
                 minimum=minimum,
                 maximum=maximum,
                 choices=choices,

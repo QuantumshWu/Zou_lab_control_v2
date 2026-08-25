@@ -1217,6 +1217,33 @@ card_semantic.activated.emit(1)
 card_fit = card._settings_form.widget_for('fit__model')
 card_fit.setCurrentIndex(1)
 card_fit.activated.emit(1)
+fit_state = dict(
+    state,
+    fit={'model': 'anisotropic_gaussian_center'},
+)
+fit_surface = dict(
+    surface,
+    fit=(
+        dict(
+            surface['fit'][0],
+            value='anisotropic_gaussian_center',
+        ),
+        {
+            'key': 'expression', 'label': 'Parameters', 'kind': 'text',
+            'value': '', 'allow_none': True, 'choices': (),
+            'minimum': None, 'maximum': None, 'step': None,
+            'description': 'name=value fixes; name=guess(value) initializes',
+        },
+    ),
+)
+handle.set_panel_projection('panel-1', fit_state, fit_surface)
+fit_expression = card._settings_form.widget_for('fit__expression')
+fit_expression.setText('center_x=10, radius_x=guess(4)')
+fit_expression.editingFinished.emit()
+assert ('state', 'panel-1', {
+    'fit': {'expression': 'center_x=10, radius_x=guess(4)'}
+}) in events
+handle.set_panel_projection('panel-1', state, surface)
 handle.open_panel_editor('panel-1', projection)
 editor = handle._panel_editors['panel-1']
 assert isinstance(editor.panel_form.widget_for('signal'), FluentTreeComboBox)
@@ -1255,6 +1282,20 @@ assert editor.parameter_forms['display'].spec.keys == (
     'colormap', 'show_colorbar'
 )
 assert editor.parameter_forms['fit'].spec.keys == ('model',)
+fit_projection = dict(
+    projection,
+    state=fit_state,
+    parameter_surface=fit_surface,
+)
+assert handle.update_panel_editor('panel-1', fit_projection)
+assert editor.parameter_forms['fit'].spec.keys == ('model', 'expression')
+editor_expression = editor.parameter_forms['fit'].widget_for('expression')
+editor_expression.setText('center_y=guess(12)')
+editor_expression.editingFinished.emit()
+assert ('state', 'panel-1', {
+    'fit': {'expression': 'center_y=guess(12)'}
+}) in events
+assert handle.update_panel_editor('panel-1', projection)
 locked_surface = dict(surface, science_locked=True)
 handle.set_panel_projection('panel-1', state, locked_surface)
 assert handle.update_panel_editor(

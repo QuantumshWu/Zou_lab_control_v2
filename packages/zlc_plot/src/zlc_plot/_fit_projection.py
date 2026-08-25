@@ -46,6 +46,8 @@ from .fit import (
     RegularImageFitInput,
     UnitRelation,
     _REGULAR_IMAGE_CAPABILITIES,
+    format_fit_expression,
+    parse_fit_expression,
 )
 from .kinds import AxisDomain, AxisRef
 from .primitives import PulseTimelineData
@@ -1730,7 +1732,8 @@ class FitProjection:
         )):
             value, unit = self._display_fit_parameter_value(spec, float(raw))
             error = None
-            if result.covariance_valid:
+            fixed = spec.name in result.fixed_parameters
+            if result.covariance_valid and not fixed:
                 error, _error_unit = self._display_fit_parameter_value(
                     spec,
                     float(result.standard_errors[index]),
@@ -1744,6 +1747,7 @@ class FitProjection:
                     value=value,
                     standard_error=error,
                     unit=unit,
+                    fixed=fixed,
                 )
             )
         return tuple(rows)
@@ -1768,8 +1772,7 @@ class FitProjection:
         if relation is UnitRelation.VALUE and self._is_histogram_plot():
             if solver_relation is not UnitRelation.VALUE:
                 raise ValueError("histogram count parameters require value solver units")
-            quantity = self._value_quantity()
-            return "" if quantity.canonical_unit.symbol == "1" else quantity.canonical_unit.symbol
+            return "count"
         if isinstance(self._spec, RollingPlot) and relation in {
             UnitRelation.AXIS_0,
             UnitRelation.INVERSE_AXIS_0,
@@ -1802,16 +1805,32 @@ class FitProjection:
         difference: bool = False,
         display_relation: UnitRelation | None = None,
     ) -> tuple[float, str]:
+        scale, offset, unit = self._fit_parameter_display_transform(
+            spec,
+            difference=difference,
+            display_relation=display_relation,
+        )
+        return float(value) * scale + offset, unit
+
+    def _fit_parameter_display_transform(
+        self,
+        spec: Any,
+        *,
+        difference: bool = False,
+        display_relation: UnitRelation | None = None,
+    ) -> tuple[float, float, str]:
+        """The one affine solver↔painted-unit transform for a parameter."""
+
         relation = spec.unit_relation if display_relation is None else display_relation
         solver_relation = spec.solver_unit_relation
         if relation is UnitRelation.RADIAN:
             if solver_relation is not UnitRelation.RADIAN:
                 raise ValueError("radian display requires a radian solver parameter")
-            return value, "rad"
+            return 1.0, 0.0, "rad"
         if relation is UnitRelation.VALUE and self._is_histogram_plot():
             if solver_relation is not UnitRelation.VALUE:
                 raise ValueError("histogram count parameters require value solver units")
-            return value, "count"
+            return 1.0, 0.0, "count"
         if isinstance(self._spec, RollingPlot) and relation in {
             UnitRelation.AXIS_0,
             UnitRelation.INVERSE_AXIS_0,
@@ -1821,44 +1840,168 @@ class FitProjection:
             # The rolling shot axis is a plain ordinal (canonical == display
             # == absolute shot index), so fit parameters cross unchanged.
             if relation is UnitRelation.INVERSE_AXIS_0:
-                return value, "1/point"
-            return value, "point"
+                return 1.0, 0.0, "1/point"
+            return 1.0, 0.0, "point"
 
         if relation is UnitRelation.INVERSE_AXIS_0:
             if solver_relation is not UnitRelation.INVERSE_AXIS_0:
                 raise ValueError("inverse-axis parameters cannot cross unit relations")
             quantity = self._fit_relation_quantity(UnitRelation.AXIS_0)
             if quantity is None:
-                return value, ""
+                return 1.0, 0.0, ""
             canonical_unit = quantity.canonical_unit
             display_unit = quantity.display_unit
-            converted = value * float(display_unit.scale) / float(canonical_unit.scale)
             registry = self._unit_registry or DEFAULT_UNITS
             inverse = registry.inverse_for(display_unit)
             if inverse is not None:
-                return converted, inverse.symbol
-            symbol = display_unit.symbol
-            return converted, "" if symbol == "1" else f"1/{symbol}"
+                unit = inverse.symbol
+            else:
+                symbol = display_unit.symbol
+                unit = "" if symbol == "1" else f"1/{symbol}"
+            return (
+                float(display_unit.scale) / float(canonical_unit.scale),
+                0.0,
+                unit,
+            )
 
         source_quantity = self._fit_relation_quantity(solver_relation)
         target_quantity = self._fit_relation_quantity(relation)
         if source_quantity is None or target_quantity is None:
-            return value, ""
+            return 1.0, 0.0, ""
         canonical_unit = source_quantity.canonical_unit
         display_unit = target_quantity.display_unit
         if not canonical_unit.compatible_with(display_unit):
             raise ValueError("fit parameter solver and display units are incompatible")
         if spec.affine_point and not difference:
-            converted = float(
-                np.asarray(
-                    canonical_unit.convert_value_to((value,), display_unit),
-                    dtype=float,
-                ).reshape(-1)[0]
-            )
+            zero, one = np.asarray(
+                canonical_unit.convert_value_to((0.0, 1.0), display_unit),
+                dtype=float,
+            ).reshape(-1)
+            scale = float(one - zero)
+            offset = float(zero)
         else:
-            converted = value * float(canonical_unit.scale) / float(display_unit.scale)
+            scale = float(canonical_unit.scale) / float(display_unit.scale)
+            offset = 0.0
+        if not math.isfinite(scale) or scale == 0.0 or not math.isfinite(offset):
+            raise ValueError("fit parameter unit transform is invalid")
         unit = "" if display_unit.symbol == "1" else display_unit.symbol
-        return converted, unit
+        return scale, offset, unit
+
+    def _canonical_fit_parameter_value(
+        self,
+        spec: Any,
+        value: float,
+    ) -> float:
+        """Convert one expression value from painted units to solver units."""
+
+        displayed = float(value)
+        if not math.isfinite(displayed):
+            raise ValueError("fit parameter expression values must be finite")
+        scale, offset, _unit = self._fit_parameter_display_transform(spec)
+        canonical = (displayed - offset) / scale
+        if not math.isfinite(canonical):
+            raise ValueError("fit parameter expression conversion is non-finite")
+        return canonical
+
+    def fit_expression_target(
+        self,
+        model: FitModelSpec,
+        expression: str,
+    ) -> dict[str, object]:
+        """Parse one compact display-unit expression into a canonical target."""
+
+        fixed_display, initial_display = parse_fit_expression(
+            expression,
+            model.parameter_names,
+        )
+        by_name = {parameter.name: parameter for parameter in model.parameters}
+
+        def canonical(values: Any) -> dict[str, float]:
+            result: dict[str, float] = {}
+            for name, displayed in values.items():
+                parameter = by_name[name]
+                converted = self._canonical_fit_parameter_value(
+                    parameter,
+                    displayed,
+                )
+                lower, upper = parameter.bounds
+                if not lower <= converted <= upper:
+                    raise ValueError(
+                        f"fit parameter {name!r} is outside its {parameter.domain.value} domain"
+                    )
+                result[name] = converted
+            return result
+
+        fixed = canonical(fixed_display)
+        initial = canonical(initial_display)
+        target: dict[str, object] = {"model": model.model_id}
+        if fixed:
+            target["fixed"] = fixed
+        if initial:
+            target["initial"] = initial
+        return target
+
+    def fit_expression_text(
+        self,
+        model: FitModelSpec,
+        target: Any,
+    ) -> str:
+        """Format a canonical fixed/initial target in current painted units."""
+
+        values = dict(target or {})
+        fixed = dict(values.get("fixed") or {})
+        initial_value = values.get("initial")
+        if initial_value is None:
+            initial: dict[str, float] = {}
+        elif isinstance(initial_value, dict):
+            initial = dict(initial_value)
+        elif hasattr(initial_value, "items"):
+            initial = dict(initial_value.items())
+        else:
+            sequence = tuple(initial_value)
+            if len(sequence) != len(model.parameters):
+                raise ValueError("fit initial sequence differs from model parameters")
+            initial = dict(zip(model.parameter_names, sequence, strict=True))
+        by_name = {parameter.name: parameter for parameter in model.parameters}
+
+        def displayed(source: dict[str, float]) -> dict[str, float]:
+            unknown = set(source) - set(by_name)
+            if unknown:
+                raise ValueError(
+                    f"fit target names unknown parameters: {sorted(unknown)}"
+                )
+            return {
+                name: self._display_fit_parameter_value(
+                    by_name[name],
+                    float(value),
+                )[0]
+                for name, value in source.items()
+            }
+
+        return format_fit_expression(
+            displayed(fixed),
+            displayed(initial),
+            model.parameter_names,
+        )
+
+    def fit_expression_hint(self, model: FitModelSpec) -> str:
+        """Compact grammar and current display units for one model."""
+
+        parameters = []
+        for parameter in model.parameters:
+            _value, unit = self._display_fit_parameter_value(parameter, 0.0)
+            parameters.append(
+                parameter.name if not unit else f"{parameter.name} [{unit}]"
+            )
+        anchored = (
+            " Amplitude/phase use the selected fit window's t0."
+            if "domain_anchored" in model.capabilities
+            else ""
+        )
+        return (
+            "name=value fixes exactly; name=guess(value) sets only the initial "
+            f"guess. Parameters: {', '.join(parameters)}.{anchored}"
+        )
 
     def _semantic_spec(self) -> Any:
         return semantic_spec(self._spec)

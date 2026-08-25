@@ -32,6 +32,7 @@ from zlc_workbench.apps.task_console import build_panel_host
 from zlc_workbench.panel_state import (
     PanelFrozenData,
     PanelState,
+    merge_fit_target,
     panel_state_from_description,
 )
 from zlc_workbench.session import ExperimentSession
@@ -41,6 +42,7 @@ from zlc_data import (
     AxisSpec,
     DatasetSchema,
     SITE,
+    SPATIAL_X,
     ValidityContract,
     ValueSchema,
     owned_snapshot_from_arrays,
@@ -105,6 +107,28 @@ def test_saved_panel_state_keeps_every_public_facet_cell_kind(cell_kind) -> None
 def test_panel_state_rejects_incomplete_or_historical_documents() -> None:
     with pytest.raises(ValueError, match="panel state fields differ"):
         PanelState.from_document({"signal": "frame", "site_overlay": "off"})
+    with pytest.raises(ValueError, match="unknown canonical fit fields"):
+        PanelState(
+            "frame",
+            "curve",
+            "2x2",
+            400,
+            "curve",
+            fit={"model": "exponential_decay", "expression": "offset=0"},
+        )
+    assert merge_fit_target(
+        {
+            "model": "gaussian_offset",
+            "fixed": {"center": 1.0},
+            "initial": {"sigma": 2.0},
+            "bounds": {"sigma": (0.1, 3.0)},
+            "selector_kind": "area",
+        },
+        {"model": "exponential_decay"},
+    ) == {
+        "model": "exponential_decay",
+        "selector_kind": "area",
+    }
 
 
 class _Signal:
@@ -680,6 +704,11 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
     """The archive is the redraw input; calibration is not reopened."""
 
     _old_path, snapshot = saved
+    x_axis = next(
+        axis
+        for axis in snapshot.block.schema.cell_schema.data_axes
+        if axis.role == SPATIAL_X
+    )
     state = PanelState(
         signal="@logic/occupancy/frame_judged",
         kind="image",
@@ -688,7 +717,11 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         title="site occupancy",
         semantic={"reduction": "mean"},
         display={"show_colorbar": False},
-        fit={"model": "anisotropic_gaussian_center", "live": False},
+        fit={
+            "model": "anisotropic_gaussian_center",
+            "fixed": {"center_x": (x_axis.size - 1) / 2.0},
+            "initial": {"radius_x": 10.0, "radius_y": 10.0},
+        },
         overlay_signal="@logic/occupancy/occupied",
     )
     source_schema = snapshot.block.schema
@@ -775,7 +808,6 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
             self.thresholds = tuple(classifier_thresholds)
             target = dict(fit or {})
             model = target.pop("model", None)
-            target.pop("live", None)
             self.fitted = (
                 None
                 if model is None
@@ -821,6 +853,8 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
 
         assert seen["recipe"]["parameters"]["show_colorbar"] is False
         assert seen["recipe"]["fit"]["model"] == "anisotropic_gaussian_center"
+        assert seen["recipe"]["fit"]["fixed"] == state.fit["fixed"]
+        assert seen["recipe"]["fit"]["initial"] == state.fit["initial"]
         assert seen["recipe"]["selectors"][0].kind is SelectorKind.AREA
         assert seen["recipe"]["size"] == "4x4"
         assert next(iter(view.panels.values()))["state"].size == "4x4"
@@ -851,6 +885,30 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         # And the authored appearance really is on the built host.
         described = host.describe_display().result().value
         assert described.display_state.values["show_colorbar"] is False
+
+        panel_id = real_presenter._active_panel_id
+        center_x = float(state.fit["fixed"]["center_x"])
+        real_presenter.update_panel(
+            panel_id,
+            {"fit": {"expression": f"center_x=guess({center_x})"}},
+        )
+        _wait_until(lambda: not real_presenter._busy)
+        active = _active_record(real_presenter)
+        assert active["state"].fit == {
+            "model": "anisotropic_gaussian_center",
+            "initial": {"center_x": center_x},
+        }
+
+        real_presenter.update_panel(
+            panel_id,
+            {"fit": {"expression": "missing=1"}},
+        )
+        _wait_until(lambda: not real_presenter._busy)
+        active = _active_record(real_presenter)
+        assert active["state"].fit == {
+            "model": "anisotropic_gaussian_center"
+        }
+        assert "automatic fit is active" in active["surface"]["fit_unavailable"]
     finally:
         _close_presenter(real_presenter)
 

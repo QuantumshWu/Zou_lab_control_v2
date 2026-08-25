@@ -16,6 +16,8 @@ from zlc_plot.fit import (
     _DeferredFitData,
     _FIT_RESULT_RAW,
     builtin_fit_models,
+    format_fit_expression,
+    parse_fit_expression,
 )
 
 
@@ -189,6 +191,171 @@ def test_fit_bounds_are_enforced() -> None:
         bounds={"center": (0.0, 0.1)},
     )
     assert 0.0 <= result.parameters["center"] <= 0.1
+
+
+def test_fixed_parameters_are_removed_from_the_solve_and_covariance(
+    monkeypatch,
+) -> None:
+    model = "gaussian_offset"
+    (x,), values, _expected = _anchor(model)
+    truth = {
+        name: float(value)
+        for name, value in _anchors()[model]["parameters"].items()
+    }
+    fit_module = import_module("zlc_plot.fit")
+    least_squares = fit_module.least_squares
+    solved_dimensions: list[int] = []
+
+    def observed_dimension(function, seed, **kwargs):
+        solved_dimensions.append(np.asarray(seed).size)
+        return least_squares(function, seed, **kwargs)
+
+    monkeypatch.setattr(fit_module, "least_squares", observed_dimension)
+    fixed = {"sigma": truth["sigma"], "center": truth["center"]}
+    result = FitEngine().fit(
+        model,
+        (x,),
+        values,
+        initial={"sigma": np.nan, "center": truth["center"] + 2.0},
+        fixed=fixed,
+    )
+
+    assert result.success
+    assert solved_dimensions == [2]
+    assert result.fixed_parameters == fixed
+    assert result.parameters["sigma"] == truth["sigma"]
+    assert result.parameters["center"] == truth["center"]
+    fixed_indices = (2, 3)
+    assert np.all(result.covariance[list(fixed_indices), :] == 0.0)
+    assert np.all(result.covariance[:, list(fixed_indices)] == 0.0)
+    assert np.all(result.standard_errors[list(fixed_indices)] == 0.0)
+    assert not result.parameter_error_validity["sigma"]
+    assert not result.parameter_error_validity["center"]
+    assert result.parameter_error_validity["amplitude"]
+    assert result.with_parameter_units({}).fixed_parameters == fixed
+    singular = result._clone(covariance_valid=False)
+    assert np.all(singular.standard_errors[list(fixed_indices)] == 0.0)
+    assert np.all(singular.covariance[list(fixed_indices), :] == 0.0)
+    assert np.all(singular.covariance[:, list(fixed_indices)] == 0.0)
+    assert np.isnan(singular.standard_errors[[0, 1]]).all()
+    forged_covariance = np.array(result.covariance, copy=True)
+    forged_errors = np.array(result.standard_errors, copy=True)
+    forged_covariance[fixed_indices[0], fixed_indices[0]] = 1.0
+    forged_errors[fixed_indices[0]] = 1.0
+    with pytest.raises(ValueError, match="fixed parameter covariance"):
+        result._clone(
+            covariance=forged_covariance,
+            standard_errors=forged_errors,
+        )
+
+
+def test_all_fixed_parameters_evaluate_without_an_initializer_or_solver(
+    monkeypatch,
+) -> None:
+    model = FitEngine().registry.get("gaussian_offset")
+    (x,), values, _expected = _anchor(model.model_id)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("an all-fixed fit must not initialize or optimize")
+
+    direct = replace(
+        model,
+        initializer=forbidden,
+        candidate_initializer=forbidden,
+        bounds_initializer=forbidden,
+    )
+    monkeypatch.setattr(import_module("zlc_plot.fit"), "least_squares", forbidden)
+    fixed = {
+        name: float(_anchors()[model.model_id]["parameters"][name])
+        for name in model.parameter_names
+    }
+    result = FitEngine().fit(direct, (x,), values, fixed=fixed)
+
+    assert result.success
+    assert result.message == "all parameters fixed"
+    assert result.parameters == fixed
+    assert result.fixed_parameters == fixed
+    assert np.all(result.covariance == 0.0)
+    assert np.all(result.standard_errors == 0.0)
+    assert result.covariance_valid
+    assert not any(result.parameter_error_validity.values())
+    np.testing.assert_allclose(result.fitted_values, values)
+
+
+def test_fixed_parameters_validate_domain_and_only_requested_bounds() -> None:
+    engine = FitEngine()
+    (x,), values, _expected = _anchor("exponential_decay")
+    expected_tau = float(
+        _anchors()["exponential_decay"]["parameters"]["decay_time"]
+    )
+    span = float(np.ptp(x))
+    fixed_tau = 4.0 * span
+
+    # The model's automatic upper bound is 10*span/3.  A fixed value is exact,
+    # not an optimizer variable, so only intrinsic and explicitly authored
+    # bounds constrain it.
+    result = engine.fit(
+        "exponential_decay",
+        (x,),
+        values,
+        fixed={"decay_time": fixed_tau},
+    )
+    assert result.parameters["decay_time"] == fixed_tau
+
+    for fixed, bounds, message in (
+        ({"missing": 1.0}, None, "unknown parameters"),
+        ({"decay_time": np.nan}, None, "finite"),
+        ({"decay_time": 0.0}, None, "intrinsic domain"),
+        (
+            {"decay_time": expected_tau},
+            {"decay_time": (expected_tau * 2.0, None)},
+            "requested bounds",
+        ),
+    ):
+        with pytest.raises((TypeError, ValueError), match=message):
+            engine.fit(
+                "exponential_decay",
+                (x,),
+                values,
+                fixed=fixed,
+                bounds=bounds,
+            )
+
+
+def test_fit_expression_is_strict_and_round_trips_in_parameter_order() -> None:
+    names = ("amplitude", "offset", "decay_time")
+    fixed, initial = parse_fit_expression(
+        "decay_time=guess(--2.5e0), amplitude=+-2.2, offset=-0",
+        names,
+    )
+    assert fixed == {"amplitude": -2.2, "offset": 0.0}
+    assert initial == {"decay_time": 2.5}
+    formatted = format_fit_expression(fixed, initial, names)
+    assert formatted == (
+        "amplitude=-2.2, offset=0, decay_time=guess(2.5)"
+    )
+    assert parse_fit_expression(formatted, names) == (fixed, initial)
+
+    for expression, message in (
+        ("amplitude=1+2", "numeric literals"),
+        ("amplitude=True", "numeric literals"),
+        ("amplitude=nan", "numeric literals"),
+        ("amplitude=float(1)", "only allows guess"),
+        ("amplitude=guess(1, 2)", "only allows guess"),
+        ("amplitude=1, amplitude=2", "repeats parameter"),
+        ("missing=1", "unknown parameter"),
+        ("amplitude=1\noffset=2", "one line"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            parse_fit_expression(expression, names)
+
+    with pytest.raises(ValueError, match="finite"):
+        format_fit_expression({"amplitude": np.inf}, {}, names)
+    assert format_fit_expression(
+        {"amplitude": 1.0},
+        {"amplitude": 2.0},
+        names,
+    ) == "amplitude=1.0"
 
 
 def test_fit_cancellation_is_checked_before_work() -> None:

@@ -18,6 +18,7 @@ from zlc_data.figure_archive import read_dataset, write_figure_archive
 from zlc_durable import atomic_write_file
 
 from .config import DEFAULTS
+from .fit_target import normalize_fit_target
 from .kinds import AxisDomain, AxisRef, PlotKind
 from .primitives import ImageFrame, ImagePointOverlay, PointStatus
 from .selectors import (
@@ -324,7 +325,7 @@ def encode_plot_recipe(
         "spec": _encode_plot_spec(spec), "parameters": _plain(complete_parameters), "size": selected_size,
         "viewport": _viewport_document(viewport),
         "classifier_thresholds": _plain(list(classifier_thresholds)), "facet_focus": facet_focus,
-        "fit": _plain({} if fit is None else fit),
+        "fit": _plain(normalize_fit_target(fit)),
         "selectors": _selectors_document(selectors),
         "overlay": overlay,
     }
@@ -346,7 +347,8 @@ def decode_plot_recipe(value: object) -> dict[str, object]:
         "spec": _decode_plot_spec(entry["spec"]), "parameters": dict(entry["parameters"]),
         "size": entry["size"], "viewport": _viewport(entry["viewport"]),
         "classifier_thresholds": tuple(thresholds), "facet_focus": focus,
-        "fit": dict(entry["fit"]), "selectors": _selectors(entry["selectors"]),
+        "fit": normalize_fit_target(entry["fit"]),
+        "selectors": _selectors(entry["selectors"]),
         "overlay": entry["overlay"],
     }
 
