@@ -567,9 +567,7 @@ class RenderPolicyConfig:
     height_bars_grid_line_pt: float = 1.0
     height_bars_grid_alpha: float = 0.1
     height_bars_z_fraction: float = 0.55
-    #: Small grids buy the cleanest fills; everything else still
-    #: anti-aliases at 2x (art first -- the drag path is the fast lane).
-    height_bars_supersample_few_bars: int = 1024
+    #: Grids this small draw their outlines as vector artists.
     height_bars_supersample_tiny_bars: int = 256
     #: The selection cage shares the grid's colour and width -- it is
     #: scene furniture -- and only its stronger alpha marks it out.

@@ -514,6 +514,8 @@ def test_scanline_engine_matches_the_reference_bit_for_bit() -> None:
          dict(azimuth_deg=40.0), 2, 300, 260),
         (rng.random((300, 500)), (0.0, 1.0), dict(azimuth_deg=-55.0),
          2, 240, 200),
+        (0.2 + 0.8 * rng.random((32, 32)), (0.0, 1.0),
+         dict(azimuth_deg=220.0, elevation_deg=60.0), 1, 300, 240),
     )
     previous = raster._ENGINE
     try:

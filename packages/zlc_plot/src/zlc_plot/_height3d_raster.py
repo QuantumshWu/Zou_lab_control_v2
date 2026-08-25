@@ -414,13 +414,13 @@ def render_height_bars(
         top_grid = rgb_grid
 
     if _scanline_selected():
-        # The numba scanline engine: one pixel written once per column
+        # The numba analytic engine: exact vertical coverage per column
         # walk, bit-identical to the reference materialization below by
         # the standing contract test.
-        from ._height3d_scanline import _materialize
+        from ._height3d_scanline import _edge_accent, _materialize
 
-        out = np.empty((render_h, render_w, 4), dtype=np.uint8)
-        id_plane = np.empty((render_h, render_w), dtype=np.int32)
+        out = np.empty((render_h // supersample, int(width), 4), dtype=np.uint8)
+        id_taps = np.empty((render_h // supersample, render_w), dtype=np.int32)
         bg32 = np.asarray(background_rgb, dtype=np.float32)
         _materialize(
             a_at,
@@ -448,12 +448,23 @@ def render_height_bars(
             np.float32(pane_high),
             np.float32(min(pane_low, 0.0)),
             bg32,
-            (bg32 * 255.0).astype(np.uint8),
+            np.int64(supersample),
+            np.int64(render_h),
             out,
-            id_plane,
+            id_taps,
             np.int64(min(32, (os.cpu_count() or 4) * 2)),
         )
+        if bar_edges and not dense_surface:
+            _edge_accent(
+                id_taps,
+                out,
+                np.int64(supersample),
+                np.float32(edge_darken),
+                np.float32(0.6 / supersample),
+            )
+        edges_pending = False
     else:
+        edges_pending = True
         k = np.arange(nx, dtype=np.float64)[:, None]
         m = np.arange(ny, dtype=np.float64)[:, None]
         t_cross_a = t_a0[None, :] + k / sa
@@ -622,157 +633,206 @@ def render_height_bars(
         full_lo = all_full_lo[keep]
         full_hi = all_full_hi[keep]
         ids = all_id[keep]
-        row_hi = np.clip((y_high - lo) * scale, 0.0, float(render_h)).astype(
-            np.int64
-        )
-        row_lo = np.clip((y_high - hi) * scale, 0.0, float(render_h)).astype(
-            np.int64
-        )
-        keep2 = row_hi > row_lo
+
+        # ---- analytic coverage: span bounds stay FLOAT.  q counts
+        # OUTPUT pixels (render rows / taps); a pixel's colour is the
+        # exact integral of the piecewise-linear span colours across it,
+        # so vertical anti-aliasing is analytic -- no row supersampling.
+        rr_top = np.clip((y_high - hi) * scale, 0.0, float(render_h))
+        rr_bot = np.clip((y_high - lo) * scale, 0.0, float(render_h))
+        keep2 = rr_bot > rr_top
         cols = cols[keep2]
-        row_lo = row_lo[keep2]
-        row_hi = row_hi[keep2]
+        rr_top = rr_top[keep2]
+        rr_bot = rr_bot[keep2]
         color_low = color_low[keep2]
         color_high = color_high[keep2]
         full_lo = full_lo[keep2]
         full_hi = full_hi[keep2]
         ids = ids[keep2]
 
-        # Gradient as intercept+slope in row space, from the UNCLIPPED face:
-        # colour(row) = A + s*row, with s = 0 for every constant span.
-        full_row_bottom = (y_high - full_lo) * scale   # larger row (z low end)
+        # Gradient as intercept+slope in RENDER row space, from the
+        # UNCLIPPED face: colour(row) = A + s*row.
+        full_row_bottom = (y_high - full_lo) * scale
         full_row_top = (y_high - full_hi) * scale
         span_height = np.maximum(full_row_bottom - full_row_top, 1e-6)
         slope = (color_low - color_high) / span_height[:, None]
         intercept = color_high - slope * full_row_top[:, None]
 
+        taps = supersample
+        out_h = render_h // taps
+        inv_taps = 1.0 / taps
+        q0 = rr_top * inv_taps
+        q1 = rr_bot * inv_taps
+        # value255(q) = A255 + S255 * q; a full pixel p averages to
+        # (A255 + 0.5*S255) + S255 * p -- the same two-plane prefix-sum
+        # shape as ever, now over OUTPUT rows.
+        s255 = slope * (255.0 * taps)
+        a255 = intercept * 255.0
+        a_mid = a255 + s255 * 0.5
+
+        c0 = np.ceil(q0)
+        c1 = np.floor(q1)
+        c0i = c0.astype(np.int64)
+        c1i = np.maximum(c1.astype(np.int64), c0i)
+        # top partial: pixel floor(q0), covered [q0, min(c0, q1))
+        p_top = np.floor(q0).astype(np.int64)
+        top_end = np.minimum(c0, q1)
+        f_top = np.maximum(top_end - q0, 0.0)
+        m_top = (q0 + top_end) * 0.5
+        # bottom partial: pixel floor(q1), covered [c1, q1), only when
+        # distinct from the top partial's pixel
+        p_bot = np.minimum(c1i, out_h - 1)
+        f_bot = np.where(c1 >= c0, q1 - c1, 0.0)
+        f_bot = np.maximum(f_bot, 0.0)
+        m_bot = (c1 + q1) * 0.5
+
         stride = render_w
-        flat_lo = row_lo * stride + cols
-        flat_hi = row_hi * stride + cols
-        plane = (render_h + 1) * stride
+        plane = (out_h + 1) * stride
+        flat_full0 = c0i * stride + cols
+        flat_full1 = c1i * stride + cols
         channel_index = np.concatenate([
-            flat_lo * 3,
-            flat_lo * 3 + 1,
-            flat_lo * 3 + 2,
-            flat_hi * 3,
-            flat_hi * 3 + 1,
-            flat_hi * 3 + 2,
+            flat_full0 * 3,
+            flat_full0 * 3 + 1,
+            flat_full0 * 3 + 2,
+            flat_full1 * 3,
+            flat_full1 * 3 + 1,
+            flat_full1 * 3 + 2,
         ])
-        intercept_weights = np.concatenate([
-            intercept[:, 0], intercept[:, 1], intercept[:, 2],
-            -intercept[:, 0], -intercept[:, 1], -intercept[:, 2],
-        ]).astype(np.float64) * 255.0
-        slope_weights = np.concatenate([
-            slope[:, 0], slope[:, 1], slope[:, 2],
-            -slope[:, 0], -slope[:, 1], -slope[:, 2],
-        ]).astype(np.float64) * 255.0
-        # The three scatter planes are independent of one another: fan the
-        # bincounts out over the pool (bit-identical -- no shared sums), and
-        # let each cast to its cumsum dtype in its own thread.
-        # For the id plane, ONE weighted bincount with +/- weights replaces
-        # two full planes; the ids are exact integers, so the merged
-        # summation order cannot change a value, and the cumsum runs in
-        # int32 -- a quarter of the float64 bytes, no rounding pass.
+        a_weights = np.concatenate([
+            a_mid[:, 0], a_mid[:, 1], a_mid[:, 2],
+            -a_mid[:, 0], -a_mid[:, 1], -a_mid[:, 2],
+        ]).astype(np.float64)
+        s_weights = np.concatenate([
+            s255[:, 0], s255[:, 1], s255[:, 2],
+            -s255[:, 0], -s255[:, 1], -s255[:, 2],
+        ]).astype(np.float64)
+        cov_index = np.concatenate([flat_full0, flat_full1])
+        ones = np.ones(cols.shape[0], dtype=np.float64)
+        cov_weights = np.concatenate([ones, -ones])
+        # partial extras: direct (post-prefix) contributions
+        flat_top = np.minimum(p_top, out_h - 1) * stride + cols
+        flat_bot = p_bot * stride + cols
+        part_top = f_top[:, None] * (a255 + s255 * m_top[:, None])
+        part_bot = f_bot[:, None] * (a255 + s255 * m_bot[:, None])
+        extra_index = np.concatenate([
+            flat_top * 3, flat_top * 3 + 1, flat_top * 3 + 2,
+            flat_bot * 3, flat_bot * 3 + 1, flat_bot * 3 + 2,
+        ])
+        extra_weights = np.concatenate([
+            part_top[:, 0], part_top[:, 1], part_top[:, 2],
+            part_bot[:, 0], part_bot[:, 1], part_bot[:, 2],
+        ]).astype(np.float64)
+        extra_cov_index = np.concatenate([flat_top, flat_bot])
+        extra_cov_weights = np.concatenate([f_top, f_bot])
+        # id: the span covering each pixel CENTRE
+        ic0 = np.ceil(q0 - 0.5).astype(np.int64)
+        ic1 = np.maximum(np.ceil(q1 - 0.5).astype(np.int64), ic0)
         id_weights = ids.astype(np.float64)
         futures = [
             _pool().submit(
-                lambda w: np.bincount(
-                    channel_index, weights=w, minlength=plane * 3
+                lambda idx, w, length: np.bincount(
+                    idx, weights=w, minlength=length
                 ).astype(np.float32),
-                weights,
+                *args,
             )
-            for weights in (intercept_weights, slope_weights)
+            for args in (
+                (channel_index, a_weights, plane * 3),
+                (channel_index, s_weights, plane * 3),
+                (extra_index, extra_weights, plane * 3),
+                (cov_index, cov_weights, plane),
+                (extra_cov_index, extra_cov_weights, plane),
+            )
         ]
         futures.append(_pool().submit(
             lambda: np.bincount(
-                np.concatenate([flat_lo, flat_hi]),
+                np.concatenate([ic0 * stride + cols, ic1 * stride + cols]),
                 weights=np.concatenate([id_weights, -id_weights]),
                 minlength=plane,
             ).astype(np.int32)
         ))
-        intercept_diff, slope_diff, id_diff = (f.result() for f in futures)
-        filled_full = np.empty((render_h + 1, stride * 3), dtype=np.float32)
-        _cumsum_axis0(intercept_diff.reshape(render_h + 1, stride * 3), filled_full)
-        filled = filled_full[:render_h].reshape(render_h, stride, 3)
-        slope_full = np.empty((render_h + 1, stride * 3), dtype=np.float32)
-        _cumsum_axis0(slope_diff.reshape(render_h + 1, stride * 3), slope_full)
-        slope_plane = slope_full[:render_h].reshape(render_h, stride, 3)
-        # Scale the slope plane by its row IN PLACE: the broadcast product
-        # would allocate a full extra colour plane per frame.
-        slope_plane *= np.arange(render_h, dtype=np.float32)[:, None, None]
+        (a_diff, s_diff, extra_rgb, cov_diff, extra_cov, id_diff) = (
+            f.result() for f in futures
+        )
+        filled_full = np.empty((out_h + 1, stride * 3), dtype=np.float32)
+        _cumsum_axis0(a_diff.reshape(out_h + 1, stride * 3), filled_full)
+        filled = filled_full[:out_h].reshape(out_h, stride, 3)
+        slope_full = np.empty((out_h + 1, stride * 3), dtype=np.float32)
+        _cumsum_axis0(s_diff.reshape(out_h + 1, stride * 3), slope_full)
+        slope_plane = slope_full[:out_h].reshape(out_h, stride, 3)
+        slope_plane *= np.arange(out_h, dtype=np.float32)[:, None, None]
         filled += slope_plane
-        id_plane_full = np.empty((render_h + 1, stride), dtype=np.int32)
-        _cumsum_axis0(id_diff.reshape(render_h + 1, stride), id_plane_full)
-        id_plane = id_plane_full[:render_h]
+        filled += extra_rgb.reshape(out_h + 1, stride, 3)[:out_h]
+        cov_full = np.empty((out_h + 1, stride), dtype=np.float32)
+        _cumsum_axis0(cov_diff.reshape(out_h + 1, stride), cov_full)
+        coverage = cov_full[:out_h]
+        coverage += extra_cov.reshape(out_h + 1, stride)[:out_h]
+        np.clip(coverage, 0.0, 1.0, out=coverage)
+        id_plane_full = np.empty((out_h + 1, stride), dtype=np.int32)
+        _cumsum_axis0(id_diff.reshape(out_h + 1, stride), id_plane_full)
+        id_taps = id_plane_full[:out_h]
 
-        covered = id_plane > 0
-        np.clip(filled, 0.0, 255.0, out=filled)
-        out = np.empty((render_h, render_w, 4), dtype=np.uint8)
-        out[..., :3] = filled
-        out[..., 3] = covered.astype(np.uint8) * np.uint8(255)
-        # Uncovered pixels carry the BACKGROUND colour, not black: the
-        # supersample average otherwise mixes black into the scene's border
-        # pixels and draws the pane silhouette as a faint dotted outline --
-        # the very closing border this scene must not have.
-        out[..., :3][~covered] = (
-            np.asarray(background_rgb, dtype=np.float32) * 255.0
-        ).astype(np.uint8)
+        # ---- horizontal: average the taps (sequential adds, exact
+        # mirror territory), then complete uncovered fractions with the
+        # background and convert once, round-half-up.
+        rgb_acc = np.zeros((out_h, width, 3), dtype=np.float32)
+        cov_acc = np.zeros((out_h, width), dtype=np.float32)
+        for tap in range(taps):
+            rgb_acc += filled[:, tap::taps, :]
+            cov_acc += coverage[:, tap::taps]
+        rgb_acc *= np.float32(1.0 / taps)
+        cov_acc *= np.float32(1.0 / taps)
+        background255 = (
+            np.asarray(background_rgb, dtype=np.float32) * np.float32(255.0)
+        )
+        rgb_acc += (
+            (np.float32(1.0) - cov_acc)[..., None] * background255[None, None]
+        )
+        np.clip(rgb_acc, 0.0, 255.0, out=rgb_acc)
+        out = np.empty((out_h, width, 4), dtype=np.uint8)
+        out[..., :3] = (rgb_acc + np.float32(0.5)).astype(np.uint8)
+        alpha = cov_acc * np.float32(255.0)
+        out[..., 3] = (alpha + np.float32(0.5)).astype(np.uint8)
 
-    covered = id_plane > 0
-    # ---- raster outlines from the id plane (mid-density grids only:
-    # small grids hand their outlines to vector chrome, dense grids are
-    # a lit continuous surface, and neither takes raster lines)
-    if bar_edges and not dense_surface:
-        edge = np.zeros((render_h, render_w), dtype=bool)
-        edge[:, 1:] |= (id_plane[:, 1:] != id_plane[:, :-1]) & (
-            covered[:, 1:] & covered[:, :-1]
-        )
-        edge[1:, :] |= (id_plane[1:, :] != id_plane[:-1, :]) & (
-            covered[1:, :] & covered[:-1, :]
-        )
-        for _ in range(supersample - 1):
-            edge[1:, :] |= edge[:-1, :]
-            edge[:, 1:] |= edge[:, :-1]
-        edge_rows, edge_cols = np.nonzero(edge)
-        edge_ids = id_plane[edge_rows, edge_cols]
-        left_ids = id_plane[edge_rows, np.maximum(edge_cols - 1, 0)]
-        up_ids = id_plane[np.maximum(edge_rows - 1, 0), edge_cols]
-        bar_edge = (edge_ids >= 4) | (left_ids >= 4) | (up_ids >= 4)
-        edge_rows = edge_rows[bar_edge]
-        edge_cols = edge_cols[bar_edge]
-        out[edge_rows, edge_cols, :3] = (
-            out[edge_rows, edge_cols, :3].astype(np.float32)
-            * np.float32(1.0 - edge_darken)
+    taps = supersample
+    out_h = render_h // taps
+    mid_tap = taps // 2
+    id_plane = np.ascontiguousarray(id_taps[:, mid_tap::taps])
+    # ---- raster edge accents from the tap-resolution id plane
+    # (mid-density grids only: small grids draw vector outlines, dense
+    # grids are a lit continuous surface).  A boundary darkens with a
+    # weight proportional to how much of the pixel it crosses.
+    if bar_edges and not dense_surface and edges_pending:
+        vertical = np.zeros(id_taps.shape, dtype=np.float32)
+        upper = id_taps[:-1]
+        lower = id_taps[1:]
+        vertical[1:] = (
+            (lower != upper)
+            & (lower > 0)
+            & (upper > 0)
+            & ((lower >= 4) | (upper >= 4))
+        ).astype(np.float32)
+        horizontal = np.zeros(id_taps.shape, dtype=np.float32)
+        left = id_taps[:, :-1]
+        right = id_taps[:, 1:]
+        horizontal[:, 1:] = (
+            (left != right)
+            & (left > 0)
+            & (right > 0)
+            & ((left >= 4) | (right >= 4))
+        ).astype(np.float32)
+        weight_taps = vertical + horizontal
+        weight = np.zeros((out_h, width), dtype=np.float32)
+        for tap in range(taps):
+            weight += weight_taps[:, tap::taps]
+        weight *= np.float32(0.6 / taps)
+        np.clip(weight, 0.0, 1.0, out=weight)
+        factor = np.float32(1.0) - np.float32(edge_darken) * weight
+        out[..., :3] = (
+            out[..., :3].astype(np.float32) * factor[..., None]
         ).astype(np.uint8)
 
     scene_id_plane = id_plane
-    if supersample > 1:
-        boxed = out.reshape(height, supersample, width, supersample, 4)
-        samples = supersample * supersample
-        averaged = np.empty((height, width, 4), dtype=np.uint8)
-
-        def _pool_rows(start: int, stop: int) -> None:
-            # Rows are independent: each block box-averages its slice
-            # alone, so the fan-out cannot change a single sum.
-            total = np.zeros((stop - start, width, 4), dtype=np.uint16)
-            for row_tap in range(supersample):
-                for column_tap in range(supersample):
-                    total += boxed[start:stop, row_tap, :, column_tap]
-            averaged[start:stop] = (
-                (total + samples // 2) // samples
-            ).astype(np.uint8)
-
-        workers = _pool()._max_workers
-        block = -(-height // workers)
-        futures = [
-            _pool().submit(_pool_rows, start, min(start + block, height))
-            for start in range(0, height, block)
-        ]
-        for future in futures:
-            future.result()
-        out = averaged
-        scene_id_plane = id_plane[::supersample, ::supersample]
-        scale = scale / supersample
+    scale = scale / taps
 
     scene = HeightBarScene(
         quadrant=quadrant,

@@ -3334,15 +3334,11 @@ class MatplotlibRenderer:
             heights.size <= policy.height_bars_supersample_tiny_bars
             and divisor == 1
         )
-        # Art first: every committed frame anti-aliases -- small grids at
-        # 3x (their fills are all shallow diagonal silhouettes), the rest
-        # at 2x.  The camera DRAG preview is the fast lane instead.
-        if divisor != 1:
-            supersample = 1
-        elif heights.size <= policy.height_bars_supersample_few_bars:
-            supersample = 3
-        else:
-            supersample = 2
+        # Vertical anti-aliasing is ANALYTIC (exact coverage), so the
+        # only sampling knob left is horizontal: three subcolumn taps on
+        # every committed frame, whatever the grid size.  The camera
+        # DRAG preview is the fast lane instead.
+        supersample = 1 if divisor != 1 else 3
         frame, scene = render_height_bars(
             heights,
             top_rgb,

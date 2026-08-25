@@ -240,15 +240,51 @@ if __name__ == "__main__":  # pragma: no cover
 
 
 @njit(cache=True, parallel=True, nogil=True)
+def _edge_accent(  # raster edge accents, mirroring the reference tail
+    id_taps,      # i32 (out_h, render_w) tap-resolution span ids
+    out,          # u8 (out_h, width, 4) composed pixels, darkened in place
+    taps,         # i64 horizontal taps per output pixel
+    edge_darken,  # f32
+    w6,           # f32 == np.float32(0.6 / taps)
+):
+    out_h = out.shape[0]
+    width = out.shape[1]
+    for col in prange(width):
+        for row in range(out_h):
+            weight = np.float32(0.0)
+            for tap in range(taps):
+                x = col * taps + tap
+                me = id_taps[row, x]
+                v = np.float32(0.0)
+                if row > 0:
+                    up = id_taps[row - 1, x]
+                    if me != up and me > 0 and up > 0 and (me >= 4 or up >= 4):
+                        v = np.float32(1.0)
+                h = np.float32(0.0)
+                if x > 0:
+                    lf = id_taps[row, x - 1]
+                    if me != lf and me > 0 and lf > 0 and (me >= 4 or lf >= 4):
+                        h = np.float32(1.0)
+                weight = weight + (v + h)
+            weight = weight * w6
+            if weight > np.float32(1.0):
+                weight = np.float32(1.0)
+            factor = np.float32(1.0) - edge_darken * weight
+            out[row, col, 0] = np.uint8(np.float32(out[row, col, 0]) * factor)
+            out[row, col, 1] = np.uint8(np.float32(out[row, col, 1]) * factor)
+            out[row, col, 2] = np.uint8(np.float32(out[row, col, 2]) * factor)
+
+
+@njit(cache=True, parallel=True, nogil=True)
 def _materialize(  # noqa: C901 - one kernel, mirrored from the reference
-    a_at,        # f64 (W,)
-    t_enter,     # f64 (W,)
-    t_exit,      # f64 (W,)
-    ia0_arr,     # f64 (W,)
-    ib0_arr,     # f64 (W,)
-    t_a0,        # f64 (W,)
-    t_b0,        # f64 (W,)
-    g0_arr,      # f32 (W,)
+    a_at,        # f64 (render_w,)
+    t_enter,     # f64 (render_w,)
+    t_exit,      # f64 (render_w,)
+    ia0_arr,     # f64 (render_w,)
+    ib0_arr,     # f64 (render_w,)
+    t_a0,        # f64 (render_w,)
+    t_b0,        # f64 (render_w,)
+    g0_arr,      # f32 (render_w,)
     z_top32,     # f32 (ny, nx)
     z_bot32,     # f32 (ny, nx)
     finite_grid, # bool (ny, nx)
@@ -262,36 +298,49 @@ def _materialize(  # noqa: C901 - one kernel, mirrored from the reference
     ca,          # f64
     se32,        # f32
     y_high,      # f64
-    scale,       # f64
+    scale,       # f64  (render-resolution scale)
     pane_high32, # f32
-    pane_low32,  # f32  (min(pane_low, 0) as f32)
-    background32,  # f32 (3,)
-    bg_u8,       # u8 (3,)
-    out,         # u8 (H, W, 4)  written
-    id_plane,    # i32 (H, W)    written
+    pane_low32,  # f32
+    background32,  # f32 (3,) background colour in 0..1
+    taps,        # i64  horizontal subcolumns per output pixel
+    render_h,    # i64  render rows (out_h * taps)
+    out,         # u8 (out_h, out_w, 4)   written
+    id_taps,     # i32 (out_h, render_w)  written
     n_chunks,    # i64
 ):
+    """Analytic-coverage materializer, mirroring the numpy reference.
+
+    Vertical anti-aliasing is exact: every span keeps FLOAT bounds and a
+    pixel integrates the piecewise-linear span colours crossing it.
+    Horizontal anti-aliasing samples ``taps`` subcolumns per output
+    pixel.  Accumulation order, every float32 conversion point and the
+    round-half-up conversion mirror the reference operation for
+    operation -- the standing parity test keeps them bit-equal.
+    """
+
     render_w = a_at.shape[0]
-    render_h = out.shape[0]
+    out_h = out.shape[0]
+    out_w = out.shape[1]
     ny = z_top32.shape[0]
     nx = z_top32.shape[1]
     S = nx + ny
     max_spans = 3 * S + 1
-    chunk = (render_w + n_chunks - 1) // n_chunks
+    chunk = (out_w + n_chunks - 1) // n_chunks
+    inv_taps64 = 1.0 / taps
+    t255 = 255.0 * taps
+    inv_taps32 = np.float32(1.0 / taps)
+    bg255_0 = background32[0] * np.float32(255.0)
+    bg255_1 = background32[1] * np.float32(255.0)
+    bg255_2 = background32[2] * np.float32(255.0)
     for chunk_index in prange(n_chunks):
-        c0 = chunk_index * chunk
-        c1 = min(c0 + chunk, render_w)
-        if c0 >= c1:
+        col0 = chunk_index * chunk
+        col1 = min(col0 + chunk, out_w)
+        if col0 >= col1:
             continue
-        # chunk-local scratch; the diff planes are zeroed once and every
-        # column re-zeroes only the rows it touched.
         sorted_t32 = np.empty(S, dtype=np.float32)
         is_b = np.empty(S, dtype=np.bool_)
         used = np.empty(S, dtype=np.bool_)
         seg_t0 = np.empty(S, dtype=np.float32)
-        # seg_t1 stays float64: the reference's np.clip has no out=, so
-        # its result is promoted and NEVER rounded back to float32 --
-        # g_hi, the watermark and every hi bound ride that precision.
         seg_t1 = np.empty(S, dtype=np.float64)
         seg_ca = np.empty(S, dtype=np.int64)
         seg_cb = np.empty(S, dtype=np.int64)
@@ -301,364 +350,460 @@ def _materialize(  # noqa: C901 - one kernel, mirrored from the reference
         seg_ghi = np.empty(S, dtype=np.float64)
         seg_wm = np.empty(S, dtype=np.float64)
         seg_ent = np.empty(S, dtype=np.bool_)
-        rec_rlo = np.empty(max_spans, dtype=np.int64)
-        rec_rhi = np.empty(max_spans, dtype=np.int64)
-        rec_int = np.empty((max_spans, 3), dtype=np.float64)
-        rec_slp = np.empty((max_spans, 3), dtype=np.float64)
+        rec_q0 = np.empty(max_spans, dtype=np.float64)
+        rec_q1 = np.empty(max_spans, dtype=np.float64)
+        rec_a = np.empty((max_spans, 3), dtype=np.float64)
+        rec_s = np.empty((max_spans, 3), dtype=np.float64)
         rec_id = np.empty(max_spans, dtype=np.int64)
-        diff_i = np.zeros((render_h + 1, 3), dtype=np.float64)
-        diff_s = np.zeros((render_h + 1, 3), dtype=np.float64)
-        diff_id = np.zeros(render_h + 1, dtype=np.int64)
-        for column in range(c0, c1):
-            enter = t_enter[column]
-            texit = t_exit[column]
-            ia0c = np.int64(ia0_arr[column])
-            ib0c = np.int64(ib0_arr[column])
-            ta0 = t_a0[column]
-            tb0 = t_b0[column]
-            g0c = g0_arr[column]
-            # ---- crossings: a slots by the closed form, b slots as the
-            # integer complement (permutation by construction).
-            for s in range(S):
-                used[s] = False
-                is_b[s] = False
-            for k in range(nx):
-                t_cross = ta0 + k / sa
-                before = np.ceil((t_cross - tb0) * ca)
-                if before < 0.0:
-                    before = 0.0
-                elif before > ny:
-                    before = np.float64(ny)
-                slot = k + np.int64(before)
-                sorted_t32[slot] = np.float32(t_cross)
-                used[slot] = True
-            cursor = 0
-            for m in range(ny):
-                while used[cursor]:
+        diff_a = np.zeros((out_h + 1, 3), dtype=np.float64)
+        diff_s = np.zeros((out_h + 1, 3), dtype=np.float64)
+        diff_cov = np.zeros(out_h + 1, dtype=np.float64)
+        extra_rgb = np.zeros((out_h + 1, 3), dtype=np.float64)
+        extra_cov = np.zeros(out_h + 1, dtype=np.float64)
+        diff_id = np.zeros(out_h + 1, dtype=np.int64)
+        rgb_acc = np.empty((out_h, 3), dtype=np.float32)
+        cov_acc = np.empty(out_h, dtype=np.float32)
+        for out_col in range(col0, col1):
+            for row in range(out_h):
+                rgb_acc[row, 0] = 0.0
+                rgb_acc[row, 1] = 0.0
+                rgb_acc[row, 2] = 0.0
+                cov_acc[row] = 0.0
+            for tap in range(taps):
+                column = out_col * taps + tap
+                enter = t_enter[column]
+                texit = t_exit[column]
+                ia0c = np.int64(ia0_arr[column])
+                ib0c = np.int64(ib0_arr[column])
+                ta0 = t_a0[column]
+                tb0 = t_b0[column]
+                g0c = g0_arr[column]
+                # ---- crossings: a slots by the closed form, b slots as
+                # the integer complement (permutation by construction).
+                for s in range(S):
+                    used[s] = False
+                    is_b[s] = False
+                for k in range(nx):
+                    t_cross = ta0 + k / sa
+                    before = np.ceil((t_cross - tb0) * ca)
+                    if before < 0.0:
+                        before = 0.0
+                    elif before > ny:
+                        before = np.float64(ny)
+                    slot = k + np.int64(before)
+                    sorted_t32[slot] = np.float32(t_cross)
+                    used[slot] = True
+                cursor = 0
+                for m in range(ny):
+                    while used[cursor]:
+                        cursor += 1
+                    sorted_t32[cursor] = np.float32(tb0 + m / ca)
+                    used[cursor] = True
+                    is_b[cursor] = True
                     cursor += 1
-                sorted_t32[cursor] = np.float32(tb0 + m / ca)
-                used[cursor] = True
-                is_b[cursor] = True
-                cursor += 1
-            # ---- segment sweep: bounds, cells, watermark, enter flags
-            previous32 = np.float32(enter)
-            running = np.float64(-np.inf)
-            before_b = 0
-            for s in range(S):
-                v0 = np.float64(previous32)
-                if v0 > texit:
-                    v0 = texit
-                seg_t0[s] = np.float32(v0)
-                v1 = np.float64(sorted_t32[s])
-                if v1 > texit:
-                    v1 = texit
-                seg_t1[s] = v1
-                previous32 = sorted_t32[s]
-                cell_ia = ia0c - (s - before_b)
-                cell_ib = ib0c + before_b
-                inside = (
-                    cell_ia >= 0
-                    and cell_ia < nx
-                    and cell_ib >= 0
-                    and cell_ib < ny
-                    and seg_t1[s] > np.float64(seg_t0[s])
-                )
-                cai = cell_ia
-                if cai < 0:
-                    cai = 0
-                elif cai > nx - 1:
-                    cai = nx - 1
-                cbi = cell_ib
-                if cbi < 0:
-                    cbi = 0
-                elif cbi > ny - 1:
-                    cbi = ny - 1
-                seg_ca[s] = cai
-                seg_cb[s] = cbi
-                seg_inside[s] = inside
-                ok = inside and finite_grid[cbi, cai]
-                seg_ok[s] = ok
-                seg_glo[s] = g0c + seg_t0[s] * se32
-                seg_ghi[s] = np.float64(g0c) + seg_t1[s] * np.float64(se32)
-                if s == 0:
-                    seg_ent[s] = (
-                        abs(a_at[column] - np.rint(a_at[column])) < 1e-9
+                # ---- segment sweep
+                previous32 = np.float32(enter)
+                running = np.float64(-np.inf)
+                before_b = 0
+                for s in range(S):
+                    v0 = np.float64(previous32)
+                    if v0 > texit:
+                        v0 = texit
+                    seg_t0[s] = np.float32(v0)
+                    v1 = np.float64(sorted_t32[s])
+                    if v1 > texit:
+                        v1 = texit
+                    seg_t1[s] = v1
+                    previous32 = sorted_t32[s]
+                    cell_ia = ia0c - (s - before_b)
+                    cell_ib = ib0c + before_b
+                    inside = (
+                        cell_ia >= 0
+                        and cell_ia < nx
+                        and cell_ib >= 0
+                        and cell_ib < ny
+                        and seg_t1[s] > np.float64(seg_t0[s])
                     )
-                else:
-                    seg_ent[s] = not is_b[s - 1]
-                seg_wm[s] = running
-                if ok:
-                    sil = seg_ghi[s] + np.float64(z_top32[cbi, cai])
-                    if sil > running:
-                        running = sil
-                if is_b[s]:
-                    before_b += 1
-            final_wm = running
-            # ---- span records in the reference's class-major order
-            count = 0
-            for s in range(S):  # side faces
-                cai = seg_ca[s]
-                cbi = seg_cb[s]
-                cell_top = z_top32[cbi, cai]
-                cell_bot = z_bot32[cbi, cai]
-                lo = np.float64(seg_glo[s] + cell_bot)
-                if lo < seg_wm[s]:
-                    lo = seg_wm[s]
-                if seg_ok[s]:
-                    hi = np.float64(seg_glo[s] + cell_top)
-                else:
-                    hi = np.float64(-np.inf)
-                if not hi > lo:
-                    continue
-                row_bottom = (y_high - lo) * scale
-                if row_bottom < 0.0:
-                    row_bottom = 0.0
-                elif row_bottom > render_h:
-                    row_bottom = np.float64(render_h)
-                row_top = (y_high - hi) * scale
-                if row_top < 0.0:
-                    row_top = 0.0
-                elif row_top > render_h:
-                    row_top = np.float64(render_h)
-                r_hi = np.int64(row_bottom)
-                r_lo = np.int64(row_top)
-                if not r_hi > r_lo:
-                    continue
-                full_lo = seg_glo[s] + cell_bot
-                full_hi = seg_glo[s] + cell_top
-                fr_bottom = (y_high - np.float64(full_lo)) * scale
-                fr_top = (y_high - np.float64(full_hi)) * scale
-                height = fr_bottom - fr_top
-                if height < 1e-6:
-                    height = 1e-6
-                if dense:
-                    shade = np.float32(1.0)
-                else:
-                    if seg_ent[s]:
-                        shade = shade_x
+                    cai = cell_ia
+                    if cai < 0:
+                        cai = 0
+                    elif cai > nx - 1:
+                        cai = nx - 1
+                    cbi = cell_ib
+                    if cbi < 0:
+                        cbi = 0
+                    elif cbi > ny - 1:
+                        cbi = ny - 1
+                    seg_ca[s] = cai
+                    seg_cb[s] = cbi
+                    seg_inside[s] = inside
+                    ok = inside and finite_grid[cbi, cai]
+                    seg_ok[s] = ok
+                    seg_glo[s] = g0c + seg_t0[s] * se32
+                    seg_ghi[s] = (
+                        np.float64(g0c) + seg_t1[s] * np.float64(se32)
+                    )
+                    if s == 0:
+                        seg_ent[s] = (
+                            abs(a_at[column] - np.rint(a_at[column])) < 1e-9
+                        )
                     else:
-                        shade = shade_y
-                positive = z_top32[cbi, cai] > np.float32(0.0)
-                for ch in range(3):
+                        seg_ent[s] = not is_b[s - 1]
+                    seg_wm[s] = running
+                    if ok:
+                        sil = seg_ghi[s] + np.float64(z_top32[cbi, cai])
+                        if sil > running:
+                            running = sil
+                    if is_b[s]:
+                        before_b += 1
+                final_wm = running
+                # ---- span records, class-major, keeping FLOAT bounds
+                count = 0
+                for s in range(S):  # side faces
+                    cai = seg_ca[s]
+                    cbi = seg_cb[s]
+                    cell_top = z_top32[cbi, cai]
+                    cell_bot = z_bot32[cbi, cai]
+                    lo = np.float64(seg_glo[s] + cell_bot)
+                    if lo < seg_wm[s]:
+                        lo = seg_wm[s]
+                    if seg_ok[s]:
+                        hi = np.float64(seg_glo[s] + cell_top)
+                    else:
+                        hi = np.float64(-np.inf)
+                    if not hi > lo:
+                        continue
+                    rr_top = (y_high - hi) * scale
+                    if rr_top < 0.0:
+                        rr_top = 0.0
+                    elif rr_top > render_h:
+                        rr_top = np.float64(render_h)
+                    rr_bot = (y_high - lo) * scale
+                    if rr_bot < 0.0:
+                        rr_bot = 0.0
+                    elif rr_bot > render_h:
+                        rr_bot = np.float64(render_h)
+                    if not rr_bot > rr_top:
+                        continue
+                    full_lo = seg_glo[s] + cell_bot
+                    full_hi = seg_glo[s] + cell_top
+                    fr_bottom = (y_high - np.float64(full_lo)) * scale
+                    fr_top = (y_high - np.float64(full_hi)) * scale
+                    height = fr_bottom - fr_top
+                    if height < 1e-6:
+                        height = 1e-6
                     if dense:
-                        c_hi = top_grid[cbi, cai, ch]
-                        c_lo = top_grid[cbi, cai, ch]
+                        shade = np.float32(1.0)
                     else:
-                        if positive:
-                            c_hi = rgb_grid[cbi, cai, ch] * shade
-                            c_lo = base_grid[cbi, cai, ch] * shade
+                        if seg_ent[s]:
+                            shade = shade_x
                         else:
-                            c_hi = base_grid[cbi, cai, ch] * shade
-                            c_lo = rgb_grid[cbi, cai, ch] * shade
-                    d = c_lo - c_hi
-                    slp = np.float64(d) / height
-                    rec_slp[count, ch] = slp
-                    rec_int[count, ch] = np.float64(c_hi) - slp * fr_top
-                rec_rlo[count] = r_lo
-                rec_rhi[count] = r_hi
-                rec_id[count] = (
-                    (seg_cb[s] * nx + seg_ca[s]) * 4
-                    + 4
-                    + 1
-                    + (1 if seg_ent[s] else 0)
-                )
-                count += 1
-            for s in range(S):  # top faces
-                cai = seg_ca[s]
-                cbi = seg_cb[s]
-                cell_top = z_top32[cbi, cai]
-                if seg_ok[s]:
-                    lo = np.float64(seg_glo[s] + cell_top)
-                else:
-                    lo = np.float64(np.inf)
-                if lo < seg_wm[s]:
-                    lo = seg_wm[s]
-                if seg_ok[s]:
-                    hi = seg_ghi[s] + np.float64(cell_top)
-                else:
-                    hi = np.float64(-np.inf)
-                if not hi > lo:
-                    continue
-                row_bottom = (y_high - lo) * scale
-                if row_bottom < 0.0:
-                    row_bottom = 0.0
-                elif row_bottom > render_h:
-                    row_bottom = np.float64(render_h)
-                row_top = (y_high - hi) * scale
-                if row_top < 0.0:
-                    row_top = 0.0
-                elif row_top > render_h:
-                    row_top = np.float64(render_h)
-                r_hi = np.int64(row_bottom)
-                r_lo = np.int64(row_top)
-                if not r_hi > r_lo:
-                    continue
-                fr_bottom = (y_high - lo) * scale
-                fr_top = (y_high - hi) * scale
-                height = fr_bottom - fr_top
-                if height < 1e-6:
-                    height = 1e-6
-                for ch in range(3):
-                    c_val = top_grid[cbi, cai, ch]
-                    d = c_val - c_val
-                    slp = np.float64(d) / height
-                    rec_slp[count, ch] = slp
-                    rec_int[count, ch] = np.float64(c_val) - slp * fr_top
-                rec_rlo[count] = r_lo
-                rec_rhi[count] = r_hi
-                rec_id[count] = (seg_cb[s] * nx + seg_ca[s]) * 4 + 4 + 3
-                count += 1
-            for s in range(S):  # floor
-                lo = np.float64(seg_glo[s])
-                if lo < seg_wm[s]:
-                    lo = seg_wm[s]
-                if seg_inside[s] and not seg_ok[s]:
-                    hi = seg_ghi[s]
-                else:
-                    hi = np.float64(-np.inf)
-                if not hi > lo:
-                    continue
-                row_bottom = (y_high - lo) * scale
-                if row_bottom < 0.0:
-                    row_bottom = 0.0
-                elif row_bottom > render_h:
-                    row_bottom = np.float64(render_h)
-                row_top = (y_high - hi) * scale
-                if row_top < 0.0:
-                    row_top = 0.0
-                elif row_top > render_h:
-                    row_top = np.float64(render_h)
-                r_hi = np.int64(row_bottom)
-                r_lo = np.int64(row_top)
-                if not r_hi > r_lo:
-                    continue
-                fr_bottom = (y_high - lo) * scale
-                fr_top = (y_high - hi) * scale
-                height = fr_bottom - fr_top
-                if height < 1e-6:
-                    height = 1e-6
-                for ch in range(3):
-                    c_val = background32[ch]
-                    slp = np.float64(c_val - c_val) / height
-                    rec_slp[count, ch] = slp
-                    rec_int[count, ch] = np.float64(c_val) - slp * fr_top
-                rec_rlo[count] = r_lo
-                rec_rhi[count] = r_hi
-                rec_id[count] = 1
-                count += 1
-            # pane span (float64 semantics, exactly as the reference's
-            # np.where(..., np.inf) upcast)
-            g_exit = g0c + np.float32(texit) * se32
-            pane_visible = texit > enter
-            if pane_visible:
-                pane_lo = np.float64(g_exit + pane_low32)
-                if pane_lo < final_wm:
-                    pane_lo = final_wm
-                pane_hi = np.float64(g_exit + pane_high32)
-            else:
-                pane_lo = np.inf
-                pane_hi = -np.inf
-            if pane_hi > pane_lo:
-                row_bottom = (y_high - pane_lo) * scale
-                if row_bottom < 0.0:
-                    row_bottom = 0.0
-                elif row_bottom > render_h:
-                    row_bottom = np.float64(render_h)
-                row_top = (y_high - pane_hi) * scale
-                if row_top < 0.0:
-                    row_top = 0.0
-                elif row_top > render_h:
-                    row_top = np.float64(render_h)
-                r_hi = np.int64(row_bottom)
-                r_lo = np.int64(row_top)
-                if r_hi > r_lo:
-                    fr_bottom = (y_high - pane_lo) * scale
-                    fr_top = (y_high - pane_hi) * scale
+                            shade = shade_y
+                    positive = z_top32[cbi, cai] > np.float32(0.0)
+                    for ch in range(3):
+                        if dense:
+                            c_hi = top_grid[cbi, cai, ch]
+                            c_lo = top_grid[cbi, cai, ch]
+                        else:
+                            if positive:
+                                c_hi = rgb_grid[cbi, cai, ch] * shade
+                                c_lo = base_grid[cbi, cai, ch] * shade
+                            else:
+                                c_hi = base_grid[cbi, cai, ch] * shade
+                                c_lo = rgb_grid[cbi, cai, ch] * shade
+                        d = c_lo - c_hi
+                        slp = np.float64(d) / height
+                        rec_s[count, ch] = slp
+                        rec_a[count, ch] = np.float64(c_hi) - slp * fr_top
+                    rec_q0[count] = rr_top * inv_taps64
+                    rec_q1[count] = rr_bot * inv_taps64
+                    rec_id[count] = (
+                        (seg_cb[s] * nx + seg_ca[s]) * 4
+                        + 4
+                        + 1
+                        + (1 if seg_ent[s] else 0)
+                    )
+                    count += 1
+                for s in range(S):  # top faces
+                    cai = seg_ca[s]
+                    cbi = seg_cb[s]
+                    cell_top = z_top32[cbi, cai]
+                    if seg_ok[s]:
+                        lo = np.float64(seg_glo[s] + cell_top)
+                    else:
+                        lo = np.float64(np.inf)
+                    if lo < seg_wm[s]:
+                        lo = seg_wm[s]
+                    if seg_ok[s]:
+                        hi = seg_ghi[s] + np.float64(cell_top)
+                    else:
+                        hi = np.float64(-np.inf)
+                    if not hi > lo:
+                        continue
+                    rr_top = (y_high - hi) * scale
+                    if rr_top < 0.0:
+                        rr_top = 0.0
+                    elif rr_top > render_h:
+                        rr_top = np.float64(render_h)
+                    rr_bot = (y_high - lo) * scale
+                    if rr_bot < 0.0:
+                        rr_bot = 0.0
+                    elif rr_bot > render_h:
+                        rr_bot = np.float64(render_h)
+                    if not rr_bot > rr_top:
+                        continue
+                    fr_bottom = (y_high - lo) * scale
+                    fr_top = (y_high - hi) * scale
+                    height = fr_bottom - fr_top
+                    if height < 1e-6:
+                        height = 1e-6
+                    for ch in range(3):
+                        c_val = top_grid[cbi, cai, ch]
+                        d = c_val - c_val
+                        slp = np.float64(d) / height
+                        rec_s[count, ch] = slp
+                        rec_a[count, ch] = np.float64(c_val) - slp * fr_top
+                    rec_q0[count] = rr_top * inv_taps64
+                    rec_q1[count] = rr_bot * inv_taps64
+                    rec_id[count] = (seg_cb[s] * nx + seg_ca[s]) * 4 + 4 + 3
+                    count += 1
+                for s in range(S):  # floor
+                    lo = np.float64(seg_glo[s])
+                    if lo < seg_wm[s]:
+                        lo = seg_wm[s]
+                    if seg_inside[s] and not seg_ok[s]:
+                        hi = seg_ghi[s]
+                    else:
+                        hi = np.float64(-np.inf)
+                    if not hi > lo:
+                        continue
+                    rr_top = (y_high - hi) * scale
+                    if rr_top < 0.0:
+                        rr_top = 0.0
+                    elif rr_top > render_h:
+                        rr_top = np.float64(render_h)
+                    rr_bot = (y_high - lo) * scale
+                    if rr_bot < 0.0:
+                        rr_bot = 0.0
+                    elif rr_bot > render_h:
+                        rr_bot = np.float64(render_h)
+                    if not rr_bot > rr_top:
+                        continue
+                    fr_bottom = (y_high - lo) * scale
+                    fr_top = (y_high - hi) * scale
                     height = fr_bottom - fr_top
                     if height < 1e-6:
                         height = 1e-6
                     for ch in range(3):
                         c_val = background32[ch]
                         slp = np.float64(c_val - c_val) / height
-                        rec_slp[count, ch] = slp
-                        rec_int[count, ch] = np.float64(c_val) - slp * fr_top
-                    rec_rlo[count] = r_lo
-                    rec_rhi[count] = r_hi
-                    rec_id[count] = 2
+                        rec_s[count, ch] = slp
+                        rec_a[count, ch] = np.float64(c_val) - slp * fr_top
+                    rec_q0[count] = rr_top * inv_taps64
+                    rec_q1[count] = rr_bot * inv_taps64
+                    rec_id[count] = 1
                     count += 1
-            # ---- scatter: all + contributions first, then all -, the
-            # reference bincount's per-slot summation order.
-            for record in range(count):
-                r = rec_rlo[record]
-                for ch in range(3):
-                    diff_i[r, ch] += rec_int[record, ch] * 255.0
-                    diff_s[r, ch] += rec_slp[record, ch] * 255.0
-                diff_id[r] += rec_id[record]
-            for record in range(count):
-                r = rec_rhi[record]
-                for ch in range(3):
-                    diff_i[r, ch] += -rec_int[record, ch] * 255.0
-                    diff_s[r, ch] += -rec_slp[record, ch] * 255.0
-                diff_id[r] += -rec_id[record]
-            # ---- the walk: float32 prefix sums exactly as cast-then-
-            # cumsum, one pixel written per row.
-            acc_i0 = np.float32(0.0)
-            acc_i1 = np.float32(0.0)
-            acc_i2 = np.float32(0.0)
-            acc_s0 = np.float32(0.0)
-            acc_s1 = np.float32(0.0)
-            acc_s2 = np.float32(0.0)
-            acc_id = np.int64(0)
-            for row in range(render_h):
-                acc_i0 += np.float32(diff_i[row, 0])
-                acc_i1 += np.float32(diff_i[row, 1])
-                acc_i2 += np.float32(diff_i[row, 2])
-                acc_s0 += np.float32(diff_s[row, 0])
-                acc_s1 += np.float32(diff_s[row, 1])
-                acc_s2 += np.float32(diff_s[row, 2])
-                acc_id += diff_id[row]
-                id_plane[row, column] = np.int32(acc_id)
-                if acc_id > 0:
-                    row32 = np.float32(row)
-                    v0 = acc_i0 + acc_s0 * row32
-                    if v0 < 0.0:
-                        v0 = np.float32(0.0)
-                    elif v0 > 255.0:
-                        v0 = np.float32(255.0)
-                    v1 = acc_i1 + acc_s1 * row32
-                    if v1 < 0.0:
-                        v1 = np.float32(0.0)
-                    elif v1 > 255.0:
-                        v1 = np.float32(255.0)
-                    v2 = acc_i2 + acc_s2 * row32
-                    if v2 < 0.0:
-                        v2 = np.float32(0.0)
-                    elif v2 > 255.0:
-                        v2 = np.float32(255.0)
-                    out[row, column, 0] = np.uint8(v0)
-                    out[row, column, 1] = np.uint8(v1)
-                    out[row, column, 2] = np.uint8(v2)
-                    out[row, column, 3] = np.uint8(255)
+                g_exit = g0c + np.float32(texit) * se32
+                pane_visible = texit > enter
+                if pane_visible:
+                    pane_lo = np.float64(g_exit + pane_low32)
+                    if pane_lo < final_wm:
+                        pane_lo = final_wm
+                    pane_hi = np.float64(g_exit + pane_high32)
                 else:
-                    out[row, column, 0] = bg_u8[0]
-                    out[row, column, 1] = bg_u8[1]
-                    out[row, column, 2] = bg_u8[2]
-                    out[row, column, 3] = np.uint8(0)
-            # ---- re-zero only the touched diff rows
-            for record in range(count):
-                r = rec_rlo[record]
-                diff_i[r, 0] = 0.0
-                diff_i[r, 1] = 0.0
-                diff_i[r, 2] = 0.0
-                diff_s[r, 0] = 0.0
-                diff_s[r, 1] = 0.0
-                diff_s[r, 2] = 0.0
-                diff_id[r] = 0
-                r = rec_rhi[record]
-                diff_i[r, 0] = 0.0
-                diff_i[r, 1] = 0.0
-                diff_i[r, 2] = 0.0
-                diff_s[r, 0] = 0.0
-                diff_s[r, 1] = 0.0
-                diff_s[r, 2] = 0.0
-                diff_id[r] = 0
+                    pane_lo = np.inf
+                    pane_hi = -np.inf
+                if pane_hi > pane_lo:
+                    rr_top = (y_high - pane_hi) * scale
+                    if rr_top < 0.0:
+                        rr_top = 0.0
+                    elif rr_top > render_h:
+                        rr_top = np.float64(render_h)
+                    rr_bot = (y_high - pane_lo) * scale
+                    if rr_bot < 0.0:
+                        rr_bot = 0.0
+                    elif rr_bot > render_h:
+                        rr_bot = np.float64(render_h)
+                    if rr_bot > rr_top:
+                        fr_bottom = (y_high - pane_lo) * scale
+                        fr_top = (y_high - pane_hi) * scale
+                        height = fr_bottom - fr_top
+                        if height < 1e-6:
+                            height = 1e-6
+                        for ch in range(3):
+                            c_val = background32[ch]
+                            slp = np.float64(c_val - c_val) / height
+                            rec_s[count, ch] = slp
+                            rec_a[count, ch] = (
+                                np.float64(c_val) - slp * fr_top
+                            )
+                        rec_q0[count] = rr_top * inv_taps64
+                        rec_q1[count] = rr_bot * inv_taps64
+                        rec_id[count] = 2
+                        count += 1
+                # ---- scatter, mirroring the reference's bincount slot
+                # order: every + entry before every - entry per plane.
+                for record in range(count):
+                    q0 = rec_q0[record]
+                    c0 = np.ceil(q0)
+                    c0i = np.int64(c0)
+                    for ch in range(3):
+                        s255 = rec_s[record, ch] * t255
+                        a_mid = rec_a[record, ch] * 255.0 + s255 * 0.5
+                        diff_a[c0i, ch] += a_mid
+                        diff_s[c0i, ch] += s255
+                    diff_cov[c0i] += 1.0
+                for record in range(count):
+                    q0 = rec_q0[record]
+                    q1 = rec_q1[record]
+                    c0i = np.int64(np.ceil(q0))
+                    c1i = np.int64(np.floor(q1))
+                    if c1i < c0i:
+                        c1i = c0i
+                    for ch in range(3):
+                        s255 = rec_s[record, ch] * t255
+                        a_mid = rec_a[record, ch] * 255.0 + s255 * 0.5
+                        diff_a[c1i, ch] += -a_mid
+                        diff_s[c1i, ch] += -s255
+                    diff_cov[c1i] += -1.0
+                # partial extras: all top contributions, then all bottom
+                for record in range(count):
+                    q0 = rec_q0[record]
+                    q1 = rec_q1[record]
+                    c0 = np.ceil(q0)
+                    p_top = np.int64(np.floor(q0))
+                    if p_top > out_h - 1:
+                        p_top = out_h - 1
+                    top_end = min(c0, q1)
+                    f_top = max(top_end - q0, 0.0)
+                    m_top = (q0 + top_end) * 0.5
+                    for ch in range(3):
+                        s255 = rec_s[record, ch] * t255
+                        a255 = rec_a[record, ch] * 255.0
+                        extra_rgb[p_top, ch] += f_top * (a255 + s255 * m_top)
+                    extra_cov[p_top] += f_top
+                for record in range(count):
+                    q0 = rec_q0[record]
+                    q1 = rec_q1[record]
+                    c0 = np.ceil(q0)
+                    c1 = np.floor(q1)
+                    c1i = np.int64(c1)
+                    if c1i > out_h - 1:
+                        c1i = out_h - 1
+                    if c1 >= c0:
+                        f_bot = q1 - c1
+                        if f_bot < 0.0:
+                            f_bot = 0.0
+                    else:
+                        f_bot = 0.0
+                    m_bot = (c1 + q1) * 0.5
+                    for ch in range(3):
+                        s255 = rec_s[record, ch] * t255
+                        a255 = rec_a[record, ch] * 255.0
+                        extra_rgb[c1i, ch] += f_bot * (a255 + s255 * m_bot)
+                    extra_cov[c1i] += f_bot
+                # id diffs at pixel-centre coverage
+                for record in range(count):
+                    ic0 = np.int64(np.ceil(rec_q0[record] - 0.5))
+                    diff_id[ic0] += rec_id[record]
+                for record in range(count):
+                    ic0 = np.int64(np.ceil(rec_q0[record] - 0.5))
+                    ic1 = np.int64(np.ceil(rec_q1[record] - 0.5))
+                    if ic1 < ic0:
+                        ic1 = ic0
+                    diff_id[ic1] += -rec_id[record]
+                # ---- the walk: float32 prefix sums exactly as the
+                # reference's cast-then-cumsum planes.
+                acc_a0 = np.float32(0.0)
+                acc_a1 = np.float32(0.0)
+                acc_a2 = np.float32(0.0)
+                acc_s0 = np.float32(0.0)
+                acc_s1 = np.float32(0.0)
+                acc_s2 = np.float32(0.0)
+                acc_c = np.float32(0.0)
+                acc_id = np.int64(0)
+                for row in range(out_h):
+                    acc_a0 += np.float32(diff_a[row, 0])
+                    acc_a1 += np.float32(diff_a[row, 1])
+                    acc_a2 += np.float32(diff_a[row, 2])
+                    acc_s0 += np.float32(diff_s[row, 0])
+                    acc_s1 += np.float32(diff_s[row, 1])
+                    acc_s2 += np.float32(diff_s[row, 2])
+                    acc_c += np.float32(diff_cov[row])
+                    acc_id += diff_id[row]
+                    id_taps[row, column] = np.int32(acc_id)
+                    row32 = np.float32(row)
+                    v0 = acc_a0 + acc_s0 * row32
+                    v0 = v0 + np.float32(extra_rgb[row, 0])
+                    v1 = acc_a1 + acc_s1 * row32
+                    v1 = v1 + np.float32(extra_rgb[row, 1])
+                    v2 = acc_a2 + acc_s2 * row32
+                    v2 = v2 + np.float32(extra_rgb[row, 2])
+                    c = acc_c + np.float32(extra_cov[row])
+                    if c < 0.0:
+                        c = np.float32(0.0)
+                    elif c > 1.0:
+                        c = np.float32(1.0)
+                    rgb_acc[row, 0] += v0
+                    rgb_acc[row, 1] += v1
+                    rgb_acc[row, 2] += v2
+                    cov_acc[row] += c
+                # ---- re-zero touched rows
+                for record in range(count):
+                    q0 = rec_q0[record]
+                    q1 = rec_q1[record]
+                    c0i = np.int64(np.ceil(q0))
+                    c1i = np.int64(np.floor(q1))
+                    if c1i < c0i:
+                        c1i = c0i
+                    p_top = np.int64(np.floor(q0))
+                    if p_top > out_h - 1:
+                        p_top = out_h - 1
+                    p_bot = c1i
+                    if p_bot > out_h - 1:
+                        p_bot = out_h - 1
+                    ic0 = np.int64(np.ceil(q0 - 0.5))
+                    ic1 = np.int64(np.ceil(q1 - 0.5))
+                    if ic1 < ic0:
+                        ic1 = ic0
+                    for row in (c0i, c1i, p_top, p_bot, ic0, ic1):
+                        diff_a[row, 0] = 0.0
+                        diff_a[row, 1] = 0.0
+                        diff_a[row, 2] = 0.0
+                        diff_s[row, 0] = 0.0
+                        diff_s[row, 1] = 0.0
+                        diff_s[row, 2] = 0.0
+                        diff_cov[row] = 0.0
+                        extra_rgb[row, 0] = 0.0
+                        extra_rgb[row, 1] = 0.0
+                        extra_rgb[row, 2] = 0.0
+                        extra_cov[row] = 0.0
+                        diff_id[row] = 0
+            # ---- combine taps, complete with background, convert once
+            for row in range(out_h):
+                r0 = rgb_acc[row, 0] * inv_taps32
+                r1 = rgb_acc[row, 1] * inv_taps32
+                r2 = rgb_acc[row, 2] * inv_taps32
+                c = cov_acc[row] * inv_taps32
+                remainder = np.float32(1.0) - c
+                r0 = r0 + remainder * bg255_0
+                r1 = r1 + remainder * bg255_1
+                r2 = r2 + remainder * bg255_2
+                if r0 < 0.0:
+                    r0 = np.float32(0.0)
+                elif r0 > 255.0:
+                    r0 = np.float32(255.0)
+                if r1 < 0.0:
+                    r1 = np.float32(0.0)
+                elif r1 > 255.0:
+                    r1 = np.float32(255.0)
+                if r2 < 0.0:
+                    r2 = np.float32(0.0)
+                elif r2 > 255.0:
+                    r2 = np.float32(255.0)
+                out[row, out_col, 0] = np.uint8(r0 + np.float32(0.5))
+                out[row, out_col, 1] = np.uint8(r1 + np.float32(0.5))
+                out[row, out_col, 2] = np.uint8(r2 + np.float32(0.5))
+                alpha = c * np.float32(255.0)
+                out[row, out_col, 3] = np.uint8(alpha + np.float32(0.5))
+
