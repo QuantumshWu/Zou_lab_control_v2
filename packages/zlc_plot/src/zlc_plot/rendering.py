@@ -1520,12 +1520,20 @@ class MatplotlibRenderer:
                 # alone, so the refresh runs when one of those moved (the
                 # axes is chrome-dirty, or the signature above changed) and
                 # the collected artists are replayed verbatim in between.
+                # An INVISIBLE artist paints nothing in a full draw, and
+                # visibility is as stable as the cached geometry itself:
+                # dropping them here (gridlines are off everywhere, most
+                # cells hide one tick side) removes a thousand no-op draw
+                # calls per composed frame without touching a pixel.
                 for tick in axis._update_ticks():
-                    entries.append((tick.gridline, axes, axis_z))
-                    entries.append((tick.tick1line, axes, axis_z))
-                    entries.append((tick.tick2line, axes, axis_z))
+                    for artist in (
+                        tick.gridline, tick.tick1line, tick.tick2line
+                    ):
+                        if artist.get_visible():
+                            entries.append((artist, axes, axis_z))
             for spine in axes.spines.values():
-                entries.append((spine, axes, spine.get_zorder()))
+                if spine.get_visible():
+                    entries.append((spine, axes, spine.get_zorder()))
             self._boundary_chrome_cache[id(axes)] = tuple(entries)
             for artist, owner, zorder in entries:
                 keyed(artist, owner, zorder)

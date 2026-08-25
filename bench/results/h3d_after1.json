@@ -1,0 +1,26 @@
+{
+  "results": [
+    {
+      "case": "facet64_curve_2M",
+      "points": 2048000,
+      "first_render_ms": 798.2,
+      "update_data": {
+        "n": 8,
+        "median_ms": 29.99,
+        "p90_ms": 31.03,
+        "best_ms": 28.89
+      }
+    },
+    {
+      "case": "facet64_image_2M",
+      "points": 2048000,
+      "first_render_ms": 586.9,
+      "update_data": {
+        "n": 8,
+        "median_ms": 37.29,
+        "p90_ms": 38.24,
+        "best_ms": 36.06
+      }
+    }
+  ]
+}
