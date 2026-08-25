@@ -29,10 +29,51 @@ so the walk never exceeds a few cells per pixel column.
 from __future__ import annotations
 
 import math
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
+
+_POOL: ThreadPoolExecutor | None = None
+
+
+def _pool() -> ThreadPoolExecutor:
+    global _POOL
+    if _POOL is None:
+        _POOL = ThreadPoolExecutor(
+            max_workers=min(8, os.cpu_count() or 1),
+            thread_name_prefix="h3d_cumsum",
+        )
+    return _POOL
+
+
+def _cumsum_axis0(diff: NDArray, out: NDArray) -> None:
+    """Column-parallel prefix sum along axis 0, bit-identical to numpy.
+
+    An axis-0 cumsum walks a non-contiguous stride element by element;
+    every column is independent, so column blocks fan out over threads
+    (numpy releases the GIL) without changing a single addition's order.
+    """
+
+    columns = diff.shape[1]
+    workers = _pool()._max_workers
+    if columns < 4096 or workers < 2:
+        np.cumsum(diff, axis=0, out=out)
+        return
+    block = -(-columns // workers)
+    futures = [
+        _pool().submit(
+            np.cumsum,
+            diff[:, start:start + block],
+            axis=0,
+            out=out[:, start:start + block],
+        )
+        for start in range(0, columns, block)
+    ]
+    for future in futures:
+        future.result()
 
 
 @dataclass(frozen=True, slots=True)
@@ -546,31 +587,44 @@ def render_height_bars(
         slope[:, 0], slope[:, 1], slope[:, 2],
         -slope[:, 0], -slope[:, 1], -slope[:, 2],
     ]).astype(np.float64) * 255.0
-    intercept_diff = np.bincount(
-        channel_index, weights=intercept_weights, minlength=plane * 3
-    ).astype(np.float32)
-    slope_diff = np.bincount(
-        channel_index, weights=slope_weights, minlength=plane * 3
-    ).astype(np.float32)
-    filled = np.cumsum(
-        intercept_diff.reshape(render_h + 1, stride, 3), axis=0
-    )[:render_h]
-    slope_plane = np.cumsum(
-        slope_diff.reshape(render_h + 1, stride, 3), axis=0
-    )[:render_h]
+    # The three scatter planes are independent of one another: fan the
+    # bincounts out over the pool (bit-identical -- no shared sums), and
+    # let each cast to its cumsum dtype in its own thread.
+    # For the id plane, ONE weighted bincount with +/- weights replaces
+    # two full planes; the ids are exact integers, so the merged
+    # summation order cannot change a value, and the cumsum runs in
+    # int32 -- a quarter of the float64 bytes, no rounding pass.
+    id_weights = ids.astype(np.float64)
+    futures = [
+        _pool().submit(
+            lambda w: np.bincount(
+                channel_index, weights=w, minlength=plane * 3
+            ).astype(np.float32),
+            weights,
+        )
+        for weights in (intercept_weights, slope_weights)
+    ]
+    futures.append(_pool().submit(
+        lambda: np.bincount(
+            np.concatenate([flat_lo, flat_hi]),
+            weights=np.concatenate([id_weights, -id_weights]),
+            minlength=plane,
+        ).astype(np.int32)
+    ))
+    intercept_diff, slope_diff, id_diff = (f.result() for f in futures)
+    filled_full = np.empty((render_h + 1, stride * 3), dtype=np.float32)
+    _cumsum_axis0(intercept_diff.reshape(render_h + 1, stride * 3), filled_full)
+    filled = filled_full[:render_h].reshape(render_h, stride, 3)
+    slope_full = np.empty((render_h + 1, stride * 3), dtype=np.float32)
+    _cumsum_axis0(slope_diff.reshape(render_h + 1, stride * 3), slope_full)
+    slope_plane = slope_full[:render_h].reshape(render_h, stride, 3)
     # Scale the slope plane by its row IN PLACE: the broadcast product
     # would allocate a full extra colour plane per frame.
     slope_plane *= np.arange(render_h, dtype=np.float32)[:, None, None]
     filled += slope_plane
-    id_weights = ids.astype(np.float64)
-    id_diff = np.bincount(
-        flat_lo, weights=id_weights, minlength=plane
-    ) - np.bincount(flat_hi, weights=id_weights, minlength=plane)
-    # The diffs are exact small integers: cumsum in int32 moves a
-    # quarter of the float64 bytes and needs no rounding after.
-    id_plane = np.cumsum(
-        id_diff.astype(np.int32).reshape(render_h + 1, stride), axis=0
-    )[:render_h]
+    id_plane_full = np.empty((render_h + 1, stride), dtype=np.int32)
+    _cumsum_axis0(id_diff.reshape(render_h + 1, stride), id_plane_full)
+    id_plane = id_plane_full[:render_h]
 
     covered = id_plane > 0
     np.clip(filled, 0.0, 255.0, out=filled)
@@ -614,12 +668,29 @@ def render_height_bars(
     scene_id_plane = id_plane
     if supersample > 1:
         boxed = out.reshape(height, supersample, width, supersample, 4)
-        total = np.zeros((height, width, 4), dtype=np.uint16)
-        for row_tap in range(supersample):
-            for column_tap in range(supersample):
-                total += boxed[:, row_tap, :, column_tap]
         samples = supersample * supersample
-        out = ((total + samples // 2) // samples).astype(np.uint8)
+        averaged = np.empty((height, width, 4), dtype=np.uint8)
+
+        def _pool_rows(start: int, stop: int) -> None:
+            # Rows are independent: each block box-averages its slice
+            # alone, so the fan-out cannot change a single sum.
+            total = np.zeros((stop - start, width, 4), dtype=np.uint16)
+            for row_tap in range(supersample):
+                for column_tap in range(supersample):
+                    total += boxed[start:stop, row_tap, :, column_tap]
+            averaged[start:stop] = (
+                (total + samples // 2) // samples
+            ).astype(np.uint8)
+
+        workers = _pool()._max_workers
+        block = -(-height // workers)
+        futures = [
+            _pool().submit(_pool_rows, start, min(start + block, height))
+            for start in range(0, height, block)
+        ]
+        for future in futures:
+            future.result()
+        out = averaged
         scene_id_plane = id_plane[::supersample, ::supersample]
         scale = scale / supersample
 
