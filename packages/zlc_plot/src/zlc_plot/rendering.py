@@ -3203,6 +3203,8 @@ class MatplotlibRenderer:
         the heatmap.
         """
 
+        import matplotlib
+
         from ._height3d_raster import HeightBarCamera, render_height_bars
 
         policy = self.style.render
@@ -3255,20 +3257,22 @@ class MatplotlibRenderer:
         # grids on small boxes.  A large box has small pixels already, and
         # supersampling it would quadruple the raster for nothing visible.
         few_bars = heights.size <= policy.height_bars_supersample_few_bars
-        supersample = (
-            2
-            if divisor == 1
-            and (
-                few_bars
-                or (
-                    heights.size
-                    <= policy.height_bars_supersample_bar_limit
-                    and box_w * box_h
-                    <= policy.height_bars_supersample_pixel_limit
-                )
-            )
-            else 1
+        vector_outlines = (
+            heights.size <= policy.height_bars_supersample_tiny_bars
+            and divisor == 1
         )
+        if divisor != 1:
+            supersample = 1
+        elif few_bars or (
+            heights.size <= policy.height_bars_supersample_bar_limit
+            and box_w * box_h <= policy.height_bars_supersample_pixel_limit
+        ):
+            # Fills and grids anti-alias fine at 2x; on small grids the
+            # OUTLINES -- where jaggies actually live -- are drawn as
+            # vector artists instead of raster pixels.
+            supersample = 2
+        else:
+            supersample = 1
         with np.errstate(invalid="ignore"):
             zero_code = int(
                 np.clip((0.0 - low) * (256.0 / (high - low)), 0.0, 255.0)
@@ -3291,8 +3295,15 @@ class MatplotlibRenderer:
             background_rgb=policy.height_bars_background_rgb,
             z_fraction=policy.height_bars_z_fraction,
             wall_ticks=policy.height_bars_wall_ticks,
+            line_px=(
+                float(matplotlib.rcParams["axes.linewidth"])
+                * float(axes.figure.dpi)
+                / 72.0
+            ),
+            bar_edges=not vector_outlines,
         )
         self._height_bars_scene_map = scene
+        self._height_bars_values = heights
         self._height_bars_axes_id = id(axes)
         finite_heights = heights[np.isfinite(heights)]
         lowest = float(finite_heights.min()) if finite_heights.size else 0.0
@@ -3329,6 +3340,9 @@ class MatplotlibRenderer:
         self._set_xlim(axes, 0.0, 1.0)
         self._set_ylim(axes, 0.0, 1.0)
         self._update_height_bars_chrome(axes, key, scene)
+        self._update_height_bars_outlines(
+            axes, key, scene, heights if vector_outlines else None
+        )
         return image, cmap
 
     def _height_bars_fraction(
@@ -3356,6 +3370,8 @@ class MatplotlibRenderer:
             artists = {"lines": None, "texts": []}
             self._artists[chrome_key] = artists
 
+        import matplotlib as _matplotlib
+
         segments_x: list[float] = []
         segments_y: list[float] = []
 
@@ -3366,7 +3382,20 @@ class MatplotlibRenderer:
             segments_y.extend((f0[1], f1[1], np.nan))
 
         wanted_texts: list[tuple[float, float, str, str, str]] = []
-        tick_px = 5.0 / max(scene.width, 1)
+        # The SAME chrome metrics every 2D panel runs under: tick length,
+        # tick pad and line width come from the style's rc context, in
+        # points, converted at this figure's dpi.
+        dots_per_point = float(axes.figure.dpi) / 72.0
+        tick_length_px = (
+            float(_matplotlib.rcParams["xtick.major.size"]) * dots_per_point
+        )
+        tick_pad_px = (
+            float(_matplotlib.rcParams["xtick.major.pad"]) * dots_per_point
+        )
+        label_gap_px = tick_length_px + tick_pad_px
+        tick_px = tick_length_px / max(scene.width, 1)
+        gap_px = label_gap_px / max(scene.width, 1)
+        gap_py = label_gap_px / max(scene.height, 1)
 
         # ---- z axis along the left pane's front edge, at ground (0, 0)
         z_low, z_high = scene.value_low, scene.value_high
@@ -3381,7 +3410,7 @@ class MatplotlibRenderer:
             segments_x.extend((f[0], f[0] - tick_px, np.nan))
             segments_y.extend((f[1], f[1], np.nan))
             wanted_texts.append(
-                (f[0] - 1.6 * tick_px, f[1], f"{tick:g}", "right", "center")
+                (f[0] - gap_px, f[1], f"{tick:g}", "right", "center")
             )
 
         # ---- base coordinate labels along the two front edges
@@ -3401,15 +3430,16 @@ class MatplotlibRenderer:
                     for v in np.linspace(0, count - 1, shown)
                 })
 
+            tick_py = tick_length_px / max(scene.height, 1)
             for column in picks(source_nx):
                 a, b = scene.fold_cell(0, column * scene.pool_x)
                 anchor = scene.project(a + 0.5, 0.0, base_value)
                 f = self._height_bars_fraction(scene, *anchor)
                 segments_x.extend((f[0], f[0], np.nan))
-                segments_y.extend((f[1], f[1] - 0.8 * tick_px, np.nan))
+                segments_y.extend((f[1], f[1] - tick_py, np.nan))
                 value = left + (column + 0.5) * (right - left) / source_nx
                 wanted_texts.append(
-                    (f[0], f[1] - 1.2 * tick_px, f"{value:g}", "center", "top")
+                    (f[0], f[1] - gap_py, f"{value:g}", "center", "top")
                 )
             # The y edge shares its far corner with the x edge's last
             # label; dropping y's endpoint keeps the corner readable.
@@ -3420,11 +3450,17 @@ class MatplotlibRenderer:
                 a, b = scene.fold_cell(row * scene.pool_y, 0)
                 anchor = scene.project(float(scene.nx), b + 0.5, base_value)
                 f = self._height_bars_fraction(scene, *anchor)
-                segments_x.extend((f[0], f[0] + 0.7 * tick_px, np.nan))
-                segments_y.extend((f[1], f[1] - 0.6 * tick_px, np.nan))
+                segments_x.extend((f[0], f[0] + 0.8 * tick_px, np.nan))
+                segments_y.extend((f[1], f[1] - 0.6 * tick_py, np.nan))
                 value = top_c + (row + 0.5) * (bottom - top_c) / source_ny
                 wanted_texts.append(
-                    (f[0] + tick_px, f[1] - tick_px, f"{value:g}", "left", "top")
+                    (
+                        f[0] + gap_px,
+                        f[1] - 0.7 * gap_py,
+                        f"{value:g}",
+                        "left",
+                        "top",
+                    )
                 )
 
         line = artists["lines"]
@@ -3433,7 +3469,7 @@ class MatplotlibRenderer:
                 [], [],
                 transform=axes.transAxes,
                 color=self.style.render.height_bars_axis_color,
-                linewidth=0.8,
+                linewidth=float(_matplotlib.rcParams["axes.linewidth"]),
                 zorder=6,
                 clip_on=False,
             )
@@ -3472,6 +3508,9 @@ class MatplotlibRenderer:
         cage = self._artists.get(f"{key}:h3d_cage")
         if cage is not None:
             cage.set_visible(False)
+        outline = self._artists.get(f"{key}:h3d_outlines")
+        if outline is not None:
+            outline.set_visible(False)
 
     def height_bars_pick(
         self, canvas_x: float, canvas_y: float
@@ -3510,6 +3549,154 @@ class MatplotlibRenderer:
             return None
         return row, column
 
+    def _height_bars_occluded_polyline(
+        self,
+        scene: Any,
+        edges: "np.ndarray",
+        cells: "np.ndarray",
+        top_values: "np.ndarray",
+        samples_per_edge: int = 24,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Sample 3D edges against the scene, NaN-ing occluded samples.
+
+        ``edges`` is (E, 2, 3) folded (a, b, value) endpoints; ``cells``
+        is (E,) the folded flat cell index each edge belongs to.  A
+        sample is hidden when its pixel shows a STRICTLY nearer bar, so
+        the polylines pass behind the geometry in front of them.
+        """
+
+        E = edges.shape[0]
+        fractions = np.linspace(0.0, 1.0, samples_per_edge)[None, :, None]
+        points = edges[:, 0:1, :] + (
+            edges[:, 1:2, :] - edges[:, 0:1, :]
+        ) * fractions  # (E, N, 3)
+        ga = points[..., 0]
+        gb = points[..., 1]
+        gz = points[..., 2]
+        sx = ga * scene.ca + gb * scene.sa
+        sy = (
+            -ga * scene.sa * scene.se
+            + gb * scene.ca * scene.se
+            + gz * scene.z_unit * scene.ce
+        )
+        px = (sx - scene.x_low) * scene.scale
+        py = (scene.y_high - sy) * scene.scale
+        columns = np.clip(px.astype(np.int64), 0, scene.width - 1)
+        rows = np.clip(py.astype(np.int64), 0, scene.height - 1)
+        face = scene.id_plane[rows, columns]
+        shown_cell = (face - 4) >> 2
+        shown_a = shown_cell % scene.nx
+        shown_b = shown_cell // scene.nx
+        depth_shown = -scene.sa * (shown_a + 0.5) + scene.ca * (shown_b + 0.5)
+        depth_sample = -scene.sa * ga + scene.ca * gb
+        own = shown_cell == cells[:, None]
+        # A FOREIGN bar hides a sample when it is strictly nearer.  The
+        # sample's OWN bar hides it only from behind: a back edge below
+        # the bar's visible top lies inside the body (drawing it made an
+        # x-ray wireframe); the top-back rim, at the top itself, shows.
+        centre_depth = (
+            -scene.sa * (cells[:, None] % scene.nx + 0.5)
+            + scene.ca * (cells[:, None] // scene.nx + 0.5)
+        )
+        behind_own = depth_sample > centre_depth + 1e-2
+        below_top = gz < top_values[:, None] - 1e-9
+        hidden = np.where(
+            own,
+            behind_own & below_top,
+            (face >= 4) & (depth_shown < depth_sample - 1e-2),
+        )
+        fx = px / max(scene.width, 1)
+        fy = 1.0 - py / max(scene.height, 1)
+        fx = np.where(hidden, np.nan, fx)
+        fy = np.where(hidden, np.nan, fy)
+        # One NaN column between edges keeps them separate polylines.
+        pad = np.full((E, 1), np.nan)
+        xs = np.concatenate([fx, pad], axis=1).ravel()
+        ys = np.concatenate([fy, pad], axis=1).ravel()
+        return xs, ys
+
+    def _height_bars_box_edges(
+        self, scene: Any, cells: "list[tuple[int, int]]",
+        z_low: "np.ndarray", z_high: "np.ndarray",
+        top_of_bar: "np.ndarray",
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """The 12 box edges of each cell -> ((E,2,3) points, (E,) cells)."""
+
+        edges = []
+        owners = []
+        tops = []
+        pixel_z = 1.0 / max(scene.z_unit * scene.ce * scene.scale, 1e-9)
+        for index, (row, column) in enumerate(cells):
+            a, b = scene.fold_cell(row, column)
+            low = float(z_low[index])
+            high = float(z_high[index])
+            corners = ((0, 0), (1, 0), (1, 1), (0, 1))
+            bottom = [(a + da, b + db, low) for da, db in corners]
+            top = [(a + da, b + db, high) for da, db in corners]
+            flat = b * scene.nx + a
+            bar_top = float(top_of_bar[index])
+            # A box flatter than a pixel keeps only its top rectangle:
+            # the bottom rectangle would double every plate outline.
+            flat_box = (high - low) < pixel_z
+            for i in range(4):
+                edges.append((top[i], top[(i + 1) % 4]))
+                owners.append(flat)
+                tops.append(bar_top)
+                if not flat_box:
+                    edges.append((bottom[i], bottom[(i + 1) % 4]))
+                    edges.append((bottom[i], top[i]))
+                    owners.extend((flat, flat))
+                    tops.extend((bar_top, bar_top))
+        return (
+            np.asarray(edges, dtype=np.float64),
+            np.asarray(owners, dtype=np.int64),
+            np.asarray(tops, dtype=np.float64),
+        )
+
+    def _update_height_bars_outlines(
+        self, axes: Any, key: str, scene: Any, heights: "np.ndarray | None"
+    ) -> None:
+        """Vector bar outlines for small grids: anti-aliased artist lines
+        at the style's axes line width, occluded like real geometry."""
+
+        import matplotlib as _matplotlib
+
+        outline = self._artists.get(f"{key}:h3d_outlines")
+        if heights is None:
+            if outline is not None:
+                outline.set_visible(False)
+            return
+        finite = np.isfinite(heights)
+        rows_grid, cols_grid = np.nonzero(finite)
+        if rows_grid.size == 0:
+            if outline is not None:
+                outline.set_visible(False)
+            return
+        values = np.clip(
+            heights[rows_grid, cols_grid], scene.value_low, scene.value_high
+        )
+        z_low = np.minimum(values, 0.0)
+        z_high = np.maximum(values, 0.0)
+        cells = list(zip(rows_grid.tolist(), cols_grid.tolist()))
+        edges, owners, tops = self._height_bars_box_edges(
+            scene, cells, z_low, z_high, z_high
+        )
+        xs, ys = self._height_bars_occluded_polyline(
+            scene, edges, owners, tops
+        )
+        if outline is None:
+            (outline,) = axes.plot(
+                [], [],
+                transform=axes.transAxes,
+                color=self.style.render.height_bars_axis_color,
+                linewidth=float(_matplotlib.rcParams["axes.linewidth"]),
+                zorder=6,
+                clip_on=False,
+            )
+            self._artists[f"{key}:h3d_outlines"] = outline
+        outline.set_data(xs, ys)
+        outline.set_visible(True)
+
     def _update_height_bars_cage(self, snapshot: Any) -> None:
         """A wireframe cage over the crosshair-selected bar, full z span.
 
@@ -3541,63 +3728,23 @@ class MatplotlibRenderer:
             if cage is not None:
                 cage.set_visible(False)
             return
-        a, b = scene.fold_cell(*cell)
-        z_low = min(scene.value_low, 0.0)
-        z_high = max(scene.value_high, 0.0)
-        corners = ((0, 0), (1, 0), (1, 1), (0, 1))
-        bottom = [(a + da, b + db, z_low) for da, db in corners]
-        top = [(a + da, b + db, z_high) for da, db in corners]
-        edges = (
-            [(bottom[i], bottom[(i + 1) % 4]) for i in range(4)]
-            + [(top[i], top[(i + 1) % 4]) for i in range(4)]
-            + [(bottom[i], top[i]) for i in range(4)]
+        z_low = np.asarray([min(scene.value_low, 0.0)])
+        z_high = np.asarray([max(scene.value_high, 0.0)])
+        values_grid = getattr(self, "_height_bars_values", None)
+        bar_value = 0.0
+        if values_grid is not None:
+            candidate = values_grid[cell[0], cell[1]]
+            if np.isfinite(candidate):
+                bar_value = float(
+                    np.clip(candidate, scene.value_low, scene.value_high)
+                )
+        bar_top = np.asarray([max(bar_value, 0.0)])
+        edges, owners, tops = self._height_bars_box_edges(
+            scene, [cell], z_low, z_high, bar_top
         )
-
-        id_plane = scene.id_plane
-        xs: list[float] = []
-        ys: list[float] = []
-        for start, end in edges:
-            p0 = scene.project(*start)
-            p1 = scene.project(*end)
-            length = max(abs(p1[0] - p0[0]), abs(p1[1] - p0[1]))
-            samples = max(int(length / 2.0), 4)
-            run_x: list[float] = []
-            run_y: list[float] = []
-            for index in range(samples + 1):
-                f = index / samples
-                ga = start[0] + (end[0] - start[0]) * f
-                gb = start[1] + (end[1] - start[1]) * f
-                gz = start[2] + (end[2] - start[2]) * f
-                px, py = scene.project(ga, gb, gz)
-                column = min(max(int(px), 0), scene.width - 1)
-                row = min(max(int(py), 0), scene.height - 1)
-                face = int(id_plane[row, column])
-                visible = True
-                if face >= 4:
-                    shown = (face - 4) // 4
-                    shown_a = shown % scene.nx
-                    shown_b = shown // scene.nx
-                    depth_shown = (
-                        -scene.sa * (shown_a + 0.5)
-                        + scene.ca * (shown_b + 0.5)
-                    )
-                    depth_sample = -scene.sa * ga + scene.ca * gb
-                    visible = depth_shown >= depth_sample - 1e-2
-                if visible:
-                    fx, fy = self._height_bars_fraction(scene, px, py)
-                    run_x.append(fx)
-                    run_y.append(fy)
-                elif run_x:
-                    xs.extend(run_x)
-                    ys.extend(run_y)
-                    xs.append(np.nan)
-                    ys.append(np.nan)
-                    run_x, run_y = [], []
-            if run_x:
-                xs.extend(run_x)
-                ys.extend(run_y)
-                xs.append(np.nan)
-                ys.append(np.nan)
+        xs, ys = self._height_bars_occluded_polyline(
+            scene, edges, owners, tops, samples_per_edge=48
+        )
 
         axes = self.primary_axes
         if cage is None:
@@ -3606,7 +3753,7 @@ class MatplotlibRenderer:
                 transform=axes.transAxes,
                 color=self.style.render.height_bars_cage_color,
                 alpha=self.style.render.height_bars_cage_alpha,
-                linewidth=1.6,
+                linewidth=self.style.artists.selector_line_width,
                 solid_capstyle="round",
                 zorder=7,
                 clip_on=False,

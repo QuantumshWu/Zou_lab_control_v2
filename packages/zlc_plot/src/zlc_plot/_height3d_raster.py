@@ -196,6 +196,8 @@ def render_height_bars(
     wall_ticks: int = 4,
     pool_pixels_per_cell: float = 2.0,
     edge_min_cell_px: float = 3.0,
+    line_px: float = 0.55,
+    bar_edges: bool = True,
 ) -> tuple[NDArray[np.uint8], HeightBarScene]:
     """Render the grid as boxes -> ((H, W, 4) uint8 RGBA, scene map).
 
@@ -206,8 +208,8 @@ def render_height_bars(
     background-coloured, carrying grid lines only.
     """
 
-    if supersample not in (1, 2):
-        raise ValueError("supersample must be 1 or 2")
+    if supersample not in (1, 2, 3, 4):
+        raise ValueError("supersample must be 1, 2, 3 or 4")
     render_w = int(width) * supersample
     render_h = int(height) * supersample
     if render_w < 8 or render_h < 8:
@@ -566,6 +568,9 @@ def render_height_bars(
     edge[1:, :] |= (id_plane[1:, :] != id_plane[:-1, :]) & (
         covered[1:, :] & covered[:-1, :]
     )
+    for _ in range(supersample - 1):
+        edge[1:, :] |= edge[:-1, :]
+        edge[:, 1:] |= edge[:, :-1]
     edge_rows, edge_cols = np.nonzero(edge)
     grid_color = (np.asarray(grid_rgb, dtype=np.float32) * 255.0).astype(
         np.uint8
@@ -576,10 +581,10 @@ def render_height_bars(
     left_ids = id_plane[edge_rows, np.maximum(edge_cols - 1, 0)]
     up_ids = id_plane[np.maximum(edge_rows - 1, 0), edge_cols]
     bar_edge = (edge_ids >= 4) | (left_ids >= 4) | (up_ids >= 4)
-    if dense_surface:
-        # Sub-3px bars: an outline per bar would ink the whole surface.
-        # The dense grid reads as a lit continuous surface instead; only
-        # the chrome boundaries (floor|pane seams) keep their grid line.
+    if dense_surface or not bar_edges:
+        # Sub-3px bars would ink the whole surface; a small grid hands
+        # its outlines to vector chrome instead.  Either way only the
+        # chrome boundaries (floor|pane seams) keep their grid line.
         chrome_rows = edge_rows[~bar_edge]
         chrome_cols = edge_cols[~bar_edge]
         out[chrome_rows, chrome_cols, :3] = grid_color[None, :]
@@ -604,11 +609,16 @@ def render_height_bars(
         b_coord = (pixel_sy * ux - pixel_x * uy) / det
         # Cell-boundary lines: on a dense (pooled) grid rule every POOLED
         # cell, which is the drawn geometry.
+        half_line = max(0.5 * line_px * supersample, 0.5)
         if dense_surface:
             floor_line = np.zeros(rows_map.shape, dtype=bool)
         else:
-            near_a = np.abs(a_coord - np.round(a_coord)) * scale * sa < 0.6
-            near_b = np.abs(b_coord - np.round(b_coord)) * scale * ca < 0.6
+            near_a = (
+                np.abs(a_coord - np.round(a_coord)) * scale * sa < half_line
+            )
+            near_b = (
+                np.abs(b_coord - np.round(b_coord)) * scale * ca < half_line
+            )
             floor_line = on_floor & (near_a | near_b)
         wall_line = np.zeros(rows_map.shape, dtype=bool)
         if wall_ticks > 0:
@@ -618,8 +628,8 @@ def render_height_bars(
             local_z = pixel_sy - base_y
             step = max((pane_high - pane_low) / (wall_ticks + 1), 1e-9)
             wall_line = (~on_floor) & (
-                np.abs(local_z - np.round(local_z / step) * step) * 1.0
-                < 0.6 / scale
+                np.abs(local_z - np.round(local_z / step) * step) * scale
+                < half_line
             )
             # Vertical pane rules continue the floor grid up the panes,
             # the reference figure's look.  Which pane a column's far
@@ -642,23 +652,23 @@ def render_height_bars(
                     pane_of_pixel, scale * ca, scale * sa
                 )
                 vertical = (~on_floor) & (
-                    np.abs(along - np.round(along)) * along_scale < 0.6
+                    np.abs(along - np.round(along)) * along_scale < half_line
                 )
                 wall_line |= vertical
         chosen = floor_line | wall_line
         out[rows_map[chosen], cols_map[chosen], :3] = grid_color[None, :]
 
     scene_id_plane = id_plane
-    if supersample == 2:
-        boxed = out.reshape(height, 2, width, 2, 4)
-        total = boxed[:, 0, :, 0].astype(np.uint16)
-        total += boxed[:, 0, :, 1]
-        total += boxed[:, 1, :, 0]
-        total += boxed[:, 1, :, 1]
-        out = ((total + 2) >> 2).astype(np.uint8)
-        scene_id_plane = id_plane[::2, ::2]
-        scale = scale / 2.0
-        x_low = x_low  # unchanged: scale already halved for pixel mapping
+    if supersample > 1:
+        boxed = out.reshape(height, supersample, width, supersample, 4)
+        total = np.zeros((height, width, 4), dtype=np.uint16)
+        for row_tap in range(supersample):
+            for column_tap in range(supersample):
+                total += boxed[:, row_tap, :, column_tap]
+        samples = supersample * supersample
+        out = ((total + samples // 2) // samples).astype(np.uint8)
+        scene_id_plane = id_plane[::supersample, ::supersample]
+        scale = scale / supersample
 
     scene = HeightBarScene(
         quadrant=quadrant,

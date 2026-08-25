@@ -571,6 +571,7 @@ class RenderPolicyConfig:
     #: Grids this small always anti-alias, whatever the box size: a
     #: tomography panel is a handful of boxes and jaggies dominate it.
     height_bars_supersample_few_bars: int = 1024
+    height_bars_supersample_tiny_bars: int = 256
     height_bars_cage_color: str = "#5f6368"
     height_bars_cage_alpha: float = 0.65
     #: While the camera is being dragged the raster renders at 1/divisor
