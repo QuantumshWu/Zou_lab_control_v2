@@ -11,6 +11,7 @@ from zlc_plot import (
     PlotKind,
     describe_semantics,
     normalize_classifier_threshold_targets,
+    normalize_fit_target,
 )
 from zlc_plot.semantics import composed_spec
 
@@ -18,14 +19,83 @@ from zlc_plot.semantics import composed_spec
 __all__ = [
     "PanelFrozenData",
     "PanelState",
-    "draws_image_surfaces",
+    "allows_image_overlay",
+    "control_document",
+    "fit_output_fields",
+    "merge_fit_target",
+    "panel_data_shape",
     "panel_state_from_description",
     "panel_surface_from_description",
     "project_panel_state",
+    "semantic_entries",
 ]
 
 
-def _semantic_entries(description: object) -> tuple[dict[str, object], ...]:
+def merge_fit_target(
+    current: Mapping[str, object],
+    changes: Mapping[str, object],
+) -> dict[str, object]:
+    """Merge one canonical fit edit, clearing model-specific old values."""
+
+    previous = dict(current)
+    edited = dict(changes)
+    if "model" in edited:
+        selected = edited["model"]
+        if selected is None or not str(selected).strip():
+            return {}
+        if str(selected) != str(previous.get("model") or ""):
+            previous = {
+                name: value
+                for name, value in previous.items()
+                if name in {"selector_kind", "options", "fit_all_facets"}
+            }
+    previous.update(edited)
+    for name in ("fixed", "initial", "bounds"):
+        if name in previous and not previous[name]:
+            previous.pop(name)
+    return normalize_fit_target(previous)
+
+
+def panel_data_shape(
+    schema: object,
+    description: object | None,
+) -> dict[str, object]:
+    """Canonical three-part Dataset shape plus accepted typed scope fates."""
+
+    from zlc_plot.semantics import (
+        is_scope_fate,
+        schema_structure,
+        scope_coordinate_from_fate,
+    )
+    from zlc_data import LATEST_COORDINATE
+
+    def pinned_text(field: object) -> str:
+        value = getattr(field, "value", None)
+        for choice_value, label in tuple(getattr(field, "choices", ())):
+            if choice_value == value:
+                return str(label).removeprefix("= ")
+        coordinate = scope_coordinate_from_fate(value)
+        if coordinate is LATEST_COORDINATE:
+            return "Latest"
+        if coordinate is None:
+            return "(null)"
+        if isinstance(coordinate, (int, float)):
+            return f"{coordinate:g}"
+        return str(coordinate)
+
+    semantics = None if description is None else getattr(description, "semantics", None)
+    pinned = tuple(
+        (str(field.label), pinned_text(field))
+        for field in tuple(getattr(semantics, "fields", ()))
+        if str(field.name).startswith("fate:") and is_scope_fate(field.value)
+    )
+    return {
+        "data_structure": schema_structure(schema),
+        "data_scope": pinned,
+    }
+
+
+def semantic_entries(description: object) -> tuple[dict[str, object], ...]:
     return tuple(
         {
             "key": str(field.name),
@@ -45,57 +115,68 @@ def _semantic_entries(description: object) -> tuple[dict[str, object], ...]:
     )
 
 
+def control_document(control: object) -> dict[str, object]:
+    """One frontend-neutral Plot control row for every Workbench view."""
+
+    semantic = bool(getattr(control, "semantic", False))
+    choices: list[tuple[str, object]] = []
+    for choice in tuple(getattr(control, "choices", ())):
+        if semantic:
+            value, label = choice
+        else:
+            value, label = choice, str(choice).replace("_", " ").title()
+        choices.append((str(label), value))
+    kind = getattr(getattr(control, "kind", ""), "value", None)
+    return {
+        "key": str(getattr(control, "name")),
+        "label": str(getattr(control, "label")),
+        "kind": str(kind or getattr(control, "kind", "text")),
+        "value": getattr(control, "value", None),
+        "allow_none": bool(getattr(control, "allow_none", False)),
+        "choices": tuple(choices),
+        "minimum": getattr(control, "minimum", None),
+        "maximum": getattr(control, "maximum", None),
+        "step": getattr(control, "step", None),
+        "automatic": bool(getattr(control, "automatic", False)),
+        "unavailable_reason": str(
+            getattr(control, "unavailable_reason", "")
+        ),
+    }
+
+
 def panel_surface_from_description(
     state: "PanelState",
-    display_description: object,
-    semantic_description: object,
-    models: object,
+    description: object,
 ) -> dict[str, object]:
     """Project one resolved plot description for Setting and Edit consumers."""
 
     from zlc_plot.ui import parameter_controls
 
     controls = parameter_controls(
-        display_description.parameter_schema,
-        display_description.display_state.values,
-        choice_overrides=display_description.parameter_choices,
+        description.parameter_schema,
+        description.display_state.values,
+        choice_overrides=description.parameter_choices,
     )
-    display = tuple(
-        {
-            "key": str(control.name),
-            "label": str(control.label),
-            "kind": str(getattr(control.kind, "value", control.kind)),
-            "value": control.value,
-            "allow_none": bool(control.allow_none),
-            "choices": tuple(
-                (str(label), value)
-                if bool(getattr(control, "semantic", False))
-                else (str(value).replace("_", " ").title(), value)
-                for value, label in (
-                    tuple(control.choices)
-                    if bool(getattr(control, "semantic", False))
-                    else tuple((value, value) for value in control.choices)
-                )
-            ),
-            "minimum": control.minimum,
-            "maximum": control.maximum,
-            "step": control.step,
-            "automatic": bool(control.automatic),
-            "unavailable_reason": str(control.unavailable_reason),
-        }
-        for control in controls
-    )
-    resolved_models = tuple(models)
-    current_model = state.fit.get("model")
+    display = tuple(control_document(control) for control in controls)
+    resolved_models = tuple(description.fit_models)
+    accepted_fit = dict(description.fit)
+    accepted_model = accepted_fit.get("model")
     model_choices = [
         (str(model.display_name), str(model.model_id))
         for model in resolved_models
     ]
+    authored_model = state.fit.get("model")
+    current_model = (
+        authored_model
+        if authored_model is not None
+        and any(str(authored_model) == value for _label, value in model_choices)
+        else accepted_model
+    )
     if current_model is not None and not any(
         current_model == value for _label, value in model_choices
     ):
         model_choices.insert(0, (str(current_model), current_model))
-    fit = (
+    fit_fields = ([
         {
             "key": "model",
             "label": "Fit model",
@@ -107,9 +188,58 @@ def panel_surface_from_description(
             "maximum": None,
             "step": None,
         },
-    ) if resolved_models or current_model is not None else ()
+    ] if resolved_models or current_model is not None else [])
+    if current_model is not None:
+        fit_fields.append(
+            {
+                "key": "expression",
+                "label": "Parameters",
+                "kind": "text",
+                "value": (
+                    str(description.fit_expression)
+                    if accepted_model == current_model
+                    else ""
+                ),
+                "allow_none": True,
+                "choices": (),
+                "minimum": None,
+                "maximum": None,
+                "step": None,
+                "description": str(
+                    description.fit_expression_hints.get(str(current_model), "")
+                ),
+            }
+        )
+    fit = tuple(fit_fields)
+    fit_outputs = fit_output_fields(accepted_fit, resolved_models)
+
+    return {
+        "semantic": semantic_entries(description.semantics),
+        "display": display,
+        "fit": fit,
+        "semantic_unavailable": "",
+        "display_unavailable": "",
+        "fit_unavailable": (
+            ""
+            if accepted_model != current_model
+            or not description.fit_expression_error
+            else "Parameter expression ignored; automatic fit is active: "
+            + str(description.fit_expression_error)
+        ),
+        "fit_outputs": fit_outputs,
+        "semantic_provisional": False,
+    }
+
+
+def fit_output_fields(
+    fit: Mapping[str, object],
+    models: object,
+) -> tuple[tuple[str, str], ...]:
+    """Publisher fields declared by the accepted selected fit model."""
+
+    current_model = fit.get("model")
     fit_outputs: list[tuple[str, str]] = []
-    for model in resolved_models:
+    for model in tuple(models):
         if str(model.model_id) != str(current_model):
             continue
         for parameter in tuple(model.parameters):
@@ -120,38 +250,31 @@ def panel_surface_from_description(
             )
             fit_outputs.extend(((name, label), (f"{name}_err", f"{label} error")))
         break
-    return {
-        "semantic": _semantic_entries(semantic_description),
-        "display": display,
-        "fit": fit,
-        "semantic_unavailable": "",
-        "display_unavailable": "",
-        "fit_unavailable": "",
-        "fit_outputs": tuple(fit_outputs),
-        "semantic_provisional": False,
-    }
+    return tuple(fit_outputs)
 
 
 def panel_state_from_description(
     state: "PanelState",
-    surface: Mapping[str, object],
+    description: object,
 ) -> "PanelState":
     """Keep the exact zlc_plot-accepted values in the shared PanelState."""
 
-    semantic_values = {
-        str(entry["key"]): entry.get("value")
-        for entry in tuple(surface.get("semantic", ()))
-    }
-    semantic = {
-        name: semantic_values.get(name, value)
-        for name, value in state.semantic.items()
-    }
-    display = dict(state.display)
-    display.update({
-        str(entry["key"]): entry.get("value")
-        for entry in tuple(surface.get("display", ()))
-    })
-    return replace(state, semantic=semantic, display=display)
+    # Semantic state is the complete assignment of the ONE currently
+    # accepted vocabulary.  Keeping only keys that happened to be authored
+    # left defaults absent, while keeping foreign keys across cell kinds made
+    # misspellings indistinguishable from old vocabulary.  A successful Plot
+    # description is the exact current table and replaces it wholesale.
+    return replace(
+        state,
+        size=str(description.size),
+        semantic={
+            str(name): value
+            for name, value in description.semantics.values.items()
+            if str(name) != "kind"
+        },
+        display=dict(description.display_state.values),
+        fit=dict(description.fit),
+    )
 
 
 def _state_value(value: Any) -> Any:
@@ -170,6 +293,21 @@ def _plain_state(values: Mapping[str, Any]) -> Mapping[str, Any]:
     """Deep-own one panel-state mapping without a parallel mutable tree."""
 
     return _state_value(values)
+
+
+def _validated_selector_document(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    from .selection import (
+        panel_selection_document,
+        panel_selection_from_document,
+    )
+
+    incoming = dict(value)
+    if not incoming:
+        return _plain_state({})
+    selection = panel_selection_from_document(incoming)
+    if selection is None:
+        raise ValueError("non-empty panel selector decoded as empty")
+    return _plain_state(panel_selection_document(selection))
 
 
 def _document_value(value: Any) -> Any:
@@ -218,12 +356,11 @@ def project_panel_state(
     """What this panel MEANS on ``spec``: the composed spec and the two bags
     that spec will accept.
 
-    A panel's records are the complete assignment of whatever vocabulary it
-    last settled under, and an operator crossing vocabularies -- a changed
-    kind, a changed facet cell kind -- is doing something legal.  So a name
-    the new vocabulary never declared is not an error and not a value: it
-    stays in the panel's bag, so switching back restores it, and it is not
-    offered to a spec that has no field for it.
+    A panel's record is the complete assignment of its current vocabulary.
+    Signal and cell-kind transitions clear their old semantic assignment at
+    the Console owner.  Within that current vocabulary, unknown names and
+    illegal values are errors rather than compatibility state to be silently
+    ignored.
 
     THE projection, for every consumer.  It used to exist only at the mount,
     and only for the appearance bag: the semantic bag was handed over whole,
@@ -238,60 +375,49 @@ def project_panel_state(
     if not isinstance(state, PanelState):
         raise TypeError("state must be PanelState")
     candidate = spec
-    semantic: dict[str, Any] = {}
     saved_values = dict(state.semantic)
-    # The kind comes first and alone: it decides which vocabulary the rest of
-    # the record is even spoken in.
     if "kind" in saved_values:
-        description = describe_semantics(schema, candidate)
-        saved_kind = saved_values.pop("kind")
-        if description.declares("kind"):
-            value = restore_semantic_choice(description, "kind", saved_kind)
-            candidate = composed_spec(schema, candidate, {"kind": value})
-            semantic["kind"] = value
+        raise ValueError("PanelState semantic cannot override its fixed plot kind")
     # Everything else is ONE edit.  Applied one field at a time, a record can
     # describe a plot that no order of gestures can reach -- a grid whose
     # facet and cell x trade places collides with itself either way round --
     # and the panel silently came back as something else.
     description = describe_semantics(schema, candidate)
-    wanted = {
-        str(name): restore_semantic_choice(description, str(name), saved)
-        for name, saved in saved_values.items()
-        if description.declares(str(name))
-    }
+    wanted: dict[str, object] = {}
+    for name, saved in saved_values.items():
+        key = str(name)
+        if not description.declares(key):
+            raise KeyError(key)
+        value = restore_semantic_choice(description, key, saved)
+        field = description.field(key)
+        if not any(value == choice for choice in field.choice_values):
+            raise ValueError(
+                f"semantic field {key!r} value is outside this plot vocabulary"
+            )
+        wanted[key] = value
     if wanted:
-        try:
-            candidate = composed_spec(schema, candidate, wanted)
-            semantic.update(wanted)
-        except Exception:
-            # The record was written in another vocabulary and does not
-            # describe a plot this one can be: an image cell cannot take the
-            # curve cell's single axis and keep its own y, and the whole edit
-            # is refused as a collision.  The operator asked for this kind, so
-            # the kind wins: whatever still composes is kept, and the rest
-            # stays in the bag for the way back.  One at a time only here --
-            # the whole edit is the rule, this is what is left when the whole
-            # edit cannot exist at all.
-            for name, value in wanted.items():
-                try:
-                    trial = composed_spec(schema, candidate, {name: value})
-                except Exception:
-                    continue
-                candidate = trial
-                semantic[name] = value
+        # One state, one composition.  A contradictory table is rejected as a
+        # table; applying the subset that happened to iterate first invented a
+        # valid-looking spec the operator never authored.
+        candidate = composed_spec(schema, candidate, wanted)
+    semantic = {
+        str(name): value
+        for name, value in describe_semantics(schema, candidate).values.items()
+        if str(name) != "kind"
+    }
     parameters = parameter_schema_for(
-        candidate, style=DEFAULTS.style
+        candidate,
+        style=DEFAULTS.style,
     ).declared_subset(dict(state.display))
     return candidate, semantic, parameters
 
 
-def draws_image_surfaces(kind: str, cell_kind: str) -> bool:
-    """Whether the surfaces this declaration paints are images.
+def allows_image_overlay(kind: str, cell_kind: str) -> bool:
+    """Whether an unbound authored identity may legally carry an overlay.
 
-    A FacetGrid is a layout: its CELLS are the pictures, so a grid of image
-    cells paints images and may carry the site overlay.  An empty cell kind
-    means the data decides, and a camera cycle decides image -- offering the
-    overlay there is what lets an operator annotate frame_0 | frame_1 at all.
+    Empty FacetGrid cell kind means the data has not decided yet, so admission
+    must allow an overlay draft.  The resolved Plot capability projected to UI
+    later decides whether the field is actually offered/applied.
     """
 
     if kind == PlotKind.IMAGE.value:
@@ -354,7 +480,11 @@ class PanelState:
         object.__setattr__(self, "title", str(self.title))
         object.__setattr__(self, "semantic", _plain_state(self.semantic))
         object.__setattr__(self, "display", _plain_state(self.display))
-        object.__setattr__(self, "fit", _plain_state(self.fit))
+        object.__setattr__(
+            self,
+            "fit",
+            _plain_state(normalize_fit_target(self.fit)),
+        )
         published_outputs = {
             str(name): enabled
             for name, enabled in self.published_outputs.items()
@@ -369,7 +499,11 @@ class PanelState:
             "published_outputs",
             _plain_state(published_outputs),
         )
-        object.__setattr__(self, "selector", _plain_state(self.selector))
+        object.__setattr__(
+            self,
+            "selector",
+            _validated_selector_document(self.selector),
+        )
         object.__setattr__(
             self,
             "classifier_thresholds",
@@ -386,7 +520,7 @@ class PanelState:
                 raise ValueError("only a FacetGrid panel can open one cell")
         object.__setattr__(self, "focused_cell", focused_cell)
         overlay_signal = str(self.overlay_signal).strip()
-        if overlay_signal and not draws_image_surfaces(kind, cell_kind):
+        if overlay_signal and not allows_image_overlay(kind, cell_kind):
             raise ValueError(
                 "only a panel that paints image surfaces can select an overlay"
             )
@@ -492,14 +626,17 @@ class PanelState:
 class PanelFrozenData:
     """The exact data revision shown in Edit, independent of ``PanelState``."""
 
-    signal: str
     publication: object | None
-    snapshot: object
-    plot_input: object | None = None
+    plot_input: object
+    target: PanelState
+    description: object
     lineage: Mapping[str, Any] = field(default_factory=dict)
     overlay: Mapping[str, Any] = field(default_factory=dict)
-    #: The coherent freeze this panel was frozen FROM.  Edit shows one exact
-    #: moment, and a panel may read more than one signal of it (an image and
-    #: the judgement annotating it), so the moment -- not one publication of
-    #: it -- is what has to be kept.
-    front: object | None = None
+
+    @property
+    def snapshot(self) -> object:
+        return getattr(self.plot_input, "snapshot", self.plot_input)
+
+    @property
+    def signal(self) -> str:
+        return self.target.signal

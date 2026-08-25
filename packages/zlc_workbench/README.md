@@ -61,12 +61,18 @@ semantics: Logic shape, live Panel, Edit/Refresh/Save, selector, fit and overlay
 all use the accepted canonical full Dataset for that publication. Event chunks
 remain internal to acquisition and exact processors. Scope/reduction/fate only
 change how the canonical Dataset is drawn; they never switch the data source.
+Panel semantic keys encode the exact `AxisRef` domain/id, never its display
+label, and scoped coordinates remain tagged latest/value records so text such
+as `"latest"` cannot change meaning.
 Ordinary Monitor signals, including Occupancy results, remain latest-event
 views and keep the camera cycle's frame geometry. A capable derived output
 exposes a Runtime-owned source-index Dataset only while a panel's generic
 fate/window target holds a bounded history lease. Recording starts at that
 panel's current event, never backfills earlier shots, and stops when the last
-such panel closes; generic
+such panel closes. Runtime is the only cross-publication history owner; an
+event/indexed representation change advances one signal-level presentation
+epoch, invalidates every Panel bound to that signal and remounts them from the
+same current publication without inventing a scientific revision. Generic
 primary-index fate/window chooses latest or history and every skipped/failed
 source index remains invalid rather than disappearing. Canonical assembly and companion
 projection run on the board-owned presentation worker at panel cadence, not in
@@ -85,20 +91,26 @@ complete PanelState. This distinction lets Plot's one transition owner clear
 Fixed color bounds when Tight/Normal is selected and prevents a window edit from
 asking Runtime to rematerialize a publication whose generation has retired.
 
-Plot hosts are the native event authority for committed Area, viewport,
-coordinate threshold and facet focus. Their immutable event is queued to the
-Workbench owner turn, which acknowledges it into `PanelState` and mirrors it to
-the other host before later display/fit configuration may read that state. A
-standing host is never overwritten by the briefly stale owner mirror that its
-own gesture is still updating. Fit selection has one order: committed Area (or
-explicit x-range), then viewport, then the full range.
+`PanelState` is the authored target; the exact `DisplayDescription.spec` returned
+by a successful host transaction is the accepted Live/Frozen/Viewer contract.
+Rejected targets remain repairable but never become capability or interaction
+truth. Plot hosts emit selector/viewport observations carrying the exact Dataset
+generation and revision that produced them. TaskConsole Console is the only
+interaction owner: it verifies that identity and the accepted spec, advances the
+panel-owned interaction sequence, then writes `PanelState`, publishes a
+derivation or mirrors the state to the other host. Views only project this state,
+and a standing host is never overwritten by the briefly stale owner mirror that
+its own gesture is still updating. Fit selection has one order: committed Area
+(or explicit x-range), then viewport, then the full range.
 
 Classifier choices are stored together as coordinate-addressed targets
 (`axis domain/id + canonical coordinate`, or structural repeat row), not a
 facet-index vector or a last-edited annotation. Plot strictly remaps every
-target to the current facets; duplicate or missing coordinates are rejected
-instead of guessed. Live, Edit, replacement hosts, layout restore and Figure
-Viewer all consume that same plural `PanelState.classifier_thresholds` truth.
+target to the accepted facets; duplicate targets are rejected, while targets
+whose coordinates no longer exist after a legal semantic replacement are
+cleared instead of being kept by position or blocking the edit. Live, Edit,
+replacement hosts, layout restore and FigureViewer all consume the same
+accepted Plot contract and plural `PanelState.classifier_thresholds` truth.
 
 Image overlay candidates are selected only by the neutral
 `IMAGE_POINT_OVERLAY_CONTRACT`. The geometry and numeric/bool status Dataset

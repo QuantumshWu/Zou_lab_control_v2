@@ -21,7 +21,7 @@ from __future__ import annotations
 import os
 import time
 from concurrent.futures import Future
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -38,6 +38,8 @@ from zlc_atom.nodes.camera_measurement.measurement import (
 from zlc_data import (
     REPEAT,
     SCAN_POINT,
+    SPATIAL_X,
+    SPATIAL_Y,
     AxisId,
     AxisSpec,
     BlockId,
@@ -55,14 +57,16 @@ from zlc_data import (
 from zlc_runtime.dataset import MonitorCoverage
 from zlc_runtime.dataset_output import DatasetOutputDeclaration, LiveDatasetOutput
 from zlc_runtime.plane import SignalDataPlane
+from zlc_runtime import SelectionChange as RuntimeSelectionChange
 from zlc_runtime import SelectionRange, SelectionState
 from zlc_workbench.selection import (
     PlotSelectionSource,
     attach_selection_bridge,
     panel_plot_selectors,
     panel_selection_document,
+    panel_selection_derives_signal,
     panel_selection_from_document,
-    subscribe_committed_selection,
+    panel_selection_matches_subject,
 )
 from zlc_workbench.session import ExperimentSession
 from pulse_fixtures import CAMERA_WINDOWS, PULSE_NAME, write_ordinary_pulse
@@ -79,7 +83,7 @@ def test_selection_subscription_install_and_close_never_wait_for_plot_worker() -
     host = SimpleNamespace(subscribe_selection=lambda _listener: pending)
     source = PlotSelectionSource(host)
 
-    unsubscribe = source.subscribe_selection(lambda *_payload: None)
+    unsubscribe = source.subscribe_observation(lambda _observation: None)
     unsubscribe()
     pending.set_result(lambda: released.append(True))
 
@@ -121,11 +125,12 @@ def image_panel(frames):
 
     plot = pytest.importorskip("zlc_plot")
     _signal, snapshot = frames
+    axes = {axis.role: axis for axis in snapshot.block.schema.cell_schema.data_axes}
     host = plot.RasterPlotHost.from_plot(
         snapshot,
         plot.ImagePlot(
-            plot.AxisRef.data("spatial-x"),
-            plot.AxisRef.data("spatial-y"),
+            plot.AxisRef.data(str(axes[SPATIAL_X].axis_id)),
+            plot.AxisRef.data(str(axes[SPATIAL_Y].axis_id)),
         ),
     )
     try:
@@ -179,21 +184,47 @@ def _commit_x_range(host, low: float, high: float) -> None:
     _emit(host, __import__("zlc_plot").SelectionChange.COMMITTED, operation.value)
 
 
+def _commit_observation(bridge, observation, publication) -> None:
+    if observation.change is RuntimeSelectionChange.REMOVED:
+        bridge.clear_selection()
+    elif panel_selection_derives_signal(observation.state):
+        bridge.commit_selection(
+            observation.state,
+            source_publication=publication,
+        )
+    else:
+        bridge.clear_selection()
+
+
 def test_a_committed_box_publishes_a_signal_cut_from_the_drawn_axes(
     session, frames, image_panel
 ) -> None:
-    signal, _snapshot = frames
+    signal, snapshot = frames
+    axes = {axis.role: axis for axis in snapshot.block.schema.cell_schema.data_axes}
+    routed: list[tuple[object, object, object]] = []
     bridge, source = attach_selection_bridge(
-        session.signal_plane, image_panel, signal, bridge_id="panel-1"
+        session.signal_plane,
+        image_panel,
+        signal,
+        bridge_id="panel-1",
+        on_observation=lambda *payload: routed.append(payload),
     )
+    seen: list = []
+    source.subscribe_observation(seen.append)
     try:
         _draw_area(image_panel)
         assert source.last_error is None, source.last_error
-        selection = source.selector_data("area")
+        assert seen
+        selection = seen[-1].state
         assert [entry.axis for entry in selection.ranges] == [
-            "spatial-x",
-            "spatial-y",
+            str(axes[SPATIAL_X].axis_id),
+            str(axes[SPATIAL_Y].axis_id),
         ]
+        assert session.signal_plane.latest_publication(
+            "@logic/panel-1/roi_frame"
+        ) is None
+        assert len(routed) == 1
+        _commit_observation(*routed.pop())
         assert session.signal_plane.latest_publication(
             "@logic/panel-1/roi_frame"
         ) is not None
@@ -207,11 +238,11 @@ def test_only_numbers_cross_the_boundary(image_panel) -> None:
 
     source = PlotSelectionSource(image_panel)
     seen: list = []
-    source.subscribe_selection(lambda _change, state: seen.append(state))
+    source.subscribe_observation(seen.append)
     try:
         _draw_area(image_panel)
         assert seen, f"a committed box reported nothing: {source.last_error}"
-        state = seen[-1]
+        state = seen[-1].state
         assert state.plot_kind == "image"
         assert state.selector_kind == "area"
         for entry in state.ranges:
@@ -236,12 +267,10 @@ def test_an_unfinished_drag_derives_nothing(image_panel) -> None:
         SelectorKind,
         SelectorState,
     )
-    from zlc_runtime.selection_bridge import SelectionChange as RuntimeChange
-
     thresholds: list[object] = []
     source = PlotSelectionSource(image_panel, on_threshold=thresholds.append)
     seen: list = []
-    source.subscribe_selection(lambda change, _state: seen.append(change))
+    source.subscribe_observation(seen.append)
     try:
         state = SelectorState(
             SelectorKind.AREA,
@@ -252,60 +281,28 @@ def test_an_unfinished_drag_derives_nothing(image_panel) -> None:
             _emit(image_panel, change, state)
         assert seen == []
         _emit(image_panel, SelectionChange.COMMITTED, state)
-        assert seen == [RuntimeChange.COMMITTED]
+        assert [observation.change for observation in seen] == [
+            RuntimeSelectionChange.COMMITTED
+        ]
     finally:
         source.close()
 
 
-def test_the_state_the_bridge_re_reads_tracks_an_unfinished_drag(image_panel) -> None:
-    """Intermediate positions do not derive, but they are not ignored either.
-
-    The bridge re-reads the current selector when a commit arrives and refuses
-    a disagreement.  If this only tracked commits, that re-read would answer
-    with a stale box after any drag that moved.
-    """
-
-    from zlc_plot._session_state import SelectionChange
-    from zlc_plot.selectors import (
-        NumericRange,
-        RectangleRange,
-        SelectorKind,
-        SelectorState,
-    )
-
-    source = PlotSelectionSource(image_panel)
-    source.subscribe_selection(lambda *_args: None)
-    try:
-        moved = SelectorState(
-            SelectorKind.AREA,
-            RectangleRange(NumericRange(3.0, 9.0), NumericRange(2.0, 7.0)),
-            revision=2,
-        )
-        _emit(image_panel, SelectionChange.UPDATED, moved)
-        current = source.selector_data("area")
-        assert (current.ranges[0].lower, current.ranges[0].upper) == (3.0, 9.0)
-    finally:
-        source.close()
-
-
-def test_a_gesture_that_cannot_be_carried_says_why(frames) -> None:
-    """A histogram's bounds cut values, so there is no axis to select on.
-
-    zlc_plot swallows exceptions raised inside an application callback so that
-    one bad observer cannot disable the others.  A raise here would therefore
-    be invisible, and the operator would see a box that derives nothing and
-    explains nothing.
-    """
+def test_a_histogram_value_range_remains_a_panel_local_selector(frames) -> None:
+    """It drives Fit/restore even though it has no upstream Dataset axis."""
 
     plot = pytest.importorskip("zlc_plot")
     _signal, snapshot = frames
     host = plot.RasterPlotHost.from_plot(snapshot, plot.HistogramPlot())
     source = PlotSelectionSource(host)
-    source.subscribe_selection(lambda *_args: None)
+    seen: list = []
+    source.subscribe_observation(seen.append)
     try:
-        host.set_x_selector(1.0, 3.0).result()
-        assert source.last_error is not None
-        assert "upstream axis" in str(source.last_error)
+        _commit_x_range(host, 1.0, 3.0)
+        assert seen
+        state = seen[-1].state
+        assert state.ranges[0].domain == "value"
+        assert source.last_error is None
     finally:
         source.close()
         host.close()
@@ -323,12 +320,16 @@ def test_a_point_selector_is_a_readout_not_an_error(image_panel) -> None:
     thresholds: list[object] = []
     source = PlotSelectionSource(image_panel, on_threshold=thresholds.append)
     derived: list = []
-    source.subscribe_selection(lambda _change, state: derived.append(state))
+    source.subscribe_observation(derived.append)
     try:
         image_panel.set_threshold_selector(2.0).result()
         image_panel.set_crosshair_selector(2.0, 3.0).result()
         assert derived == []
-        assert thresholds == [()]
+        assert len(thresholds) == 1
+        assert thresholds[0].classifier_thresholds == ()
+        description = image_panel.describe_display().result().value
+        assert thresholds[0].subject == description.selection_subject
+        assert thresholds[0].data_generation is not None
         assert source.last_error is None
     finally:
         source.close()
@@ -341,16 +342,21 @@ def test_removing_the_selector_retires_what_it_derived(
 
     signal, _snapshot = frames
     bridge, source = attach_selection_bridge(
-        session.signal_plane, image_panel, signal, bridge_id="panel-1"
+        session.signal_plane,
+        image_panel,
+        signal,
+        bridge_id="panel-1",
+        on_observation=_commit_observation,
     )
+    seen: list = []
+    source.subscribe_observation(seen.append)
     try:
         _draw_area(image_panel)
         assert session.signal_plane.latest_publication(
             "@logic/panel-1/roi_frame"
         ) is not None
         image_panel.remove_selector(SelectorKind.AREA).result()
-        with pytest.raises(KeyError):
-            source.selector_data("area")
+        assert seen[-1].change is RuntimeSelectionChange.REMOVED
         assert session.signal_plane.latest_publication(
             "@logic/panel-1/roi_frame"
         ) is None
@@ -364,7 +370,7 @@ def test_closing_releases_every_subscription(image_panel) -> None:
 
     source = PlotSelectionSource(image_panel)
     seen: list = []
-    source.subscribe_selection(lambda *args: seen.append(args))
+    source.subscribe_observation(seen.append)
     source.close()
     _draw_area(image_panel)
     assert seen == []
@@ -422,7 +428,11 @@ def test_every_derived_signal_can_be_drawn_by_the_panel_that_derived_it(
     plot = pytest.importorskip("zlc_plot")
     signal, _snapshot = frames
     bridge, source = attach_selection_bridge(
-        session.signal_plane, image_panel, signal, bridge_id="panel-1"
+        session.signal_plane,
+        image_panel,
+        signal,
+        bridge_id="panel-1",
+        on_observation=_commit_observation,
     )
     try:
         _draw_area(image_panel)
@@ -455,11 +465,12 @@ def test_frozen_editor_subscription_reports_commits_without_a_runtime_bridge(
     """Panel Edit translates one answer and owns only a host subscription."""
 
     seen: list = []
-    source = subscribe_committed_selection(image_panel, seen.append)
+    source = PlotSelectionSource(image_panel)
+    source.subscribe_observation(seen.append)
     try:
         _draw_area(image_panel)
         assert len(seen) == 1
-        assert seen[0].selector_kind == "area"
+        assert seen[0].state.selector_kind == "area"
     finally:
         source.close()
 
@@ -575,12 +586,21 @@ def _plane_for(snapshot: OwnedSnapshot, front_signals: set[str]):
     plane.commit_live(source_node, {"frame": output})
     plane.freeze()
     plane.set_front_signals({"camera/frame", *front_signals})
-    return plane, source_node
+    published = plane.latest_publication("camera/frame")
+    assert published is not None
+    return plane, source_node, published.value("camera/frame").snapshot
 
 
 @pytest.mark.parametrize(
     ("domain", "axis"),
-    (("repeat", ""), ("point_row", ""), ("named", "detuning")),
+    (
+        ("repeat", ""),
+        ("point_row", ""),
+        ("point_coordinate", "detuning"),
+        ("point_dimension", "detuning"),
+        ("data", "detuning"),
+        ("value", ""),
+    ),
 )
 def test_panel_selection_roundtrip_keeps_every_axis_domain(domain, axis) -> None:
     selection = SelectionState(
@@ -665,21 +685,28 @@ def test_a_box_on_a_focused_scan_heatmap_cell_publishes_the_focused_subgrid() ->
     assert isinstance(cell, plot.ImagePlot), cell
     spec = plot.FacetGridPlot(plot.AxisRef.repeat(), cell)
 
-    plane, source_node = _plane_for(
+    plane, source_node, snapshot = _plane_for(
         snapshot, {"@logic/panel-1/roi_frame", "@logic/panel-1/roi_mean"}
     )
     host = plot.RasterPlotHost.from_plot(snapshot, spec, size="4x4")
     bridge = source = None
     try:
         bridge, source = attach_selection_bridge(
-            plane, host, "camera/frame", bridge_id="panel-1"
+            plane,
+            host,
+            "camera/frame",
+            bridge_id="panel-1",
+            on_observation=_commit_observation,
         )
+        seen: list = []
+        source.subscribe_observation(seen.append)
         front, transform = _focused_cell_front(host, 1)
         _gesture_area(host, front, transform)
 
         assert source.last_error is None, source.last_error
         assert bridge.last_error is None, bridge.last_error
-        selection = source.selector_data("area")
+        assert seen
+        selection = seen[-1].state
         # The focused cell crosses structurally: repeat row 1, no named axis.
         assert selection.repeat_index == 1
         assert selection.facets == ()
@@ -738,7 +765,7 @@ def test_an_area_on_a_plain_curve_panel_derives_an_x_range() -> None:
     )
     source = PlotSelectionSource(host)
     committed: list = []
-    source.subscribe_selection(lambda _change, state: committed.append(state))
+    source.subscribe_observation(committed.append)
     try:
         front = host.wait_for_front(20.0)
         transform = next(
@@ -747,7 +774,7 @@ def test_an_area_on_a_plain_curve_panel_derives_an_x_range() -> None:
         _gesture_area(host, front, transform)
         assert source.last_error is None, source.last_error
         assert committed, "a committed box reported nothing"
-        state = committed[-1]
+        state = committed[-1].state
         assert state.plot_kind == "curve"
         assert state.selector_kind == "x_range"
         assert [entry.axis for entry in state.ranges] == ["detuning"]
@@ -776,7 +803,7 @@ def test_public_selection_event_carries_repeat_and_named_panel_scope() -> None:
                 plot.AxisRef.point_dimension("bias_x"),
                 scope=((plot.AxisRef.point_dimension("grad"), 20.0),),
             ),
-            (("grad", 20.0),),
+            (("grad", 20.0, "point_dimension"),),
             None,
         ),
     )
@@ -786,19 +813,35 @@ def test_public_selection_event_carries_repeat_and_named_panel_scope() -> None:
         public_host = SimpleNamespace(subscribe_selection=host.subscribe_selection)
         source = PlotSelectionSource(public_host)
         committed: list = []
-        source.subscribe_selection(
-            lambda _change, state: committed.append(state)
-        )
+        source.subscribe_observation(committed.append)
         try:
             host.wait_for_front(20.0)
             _commit_x_range(host, -0.5, 0.5)
             assert source.last_error is None, source.last_error
             assert committed
-            state = committed[-1]
-            assert tuple((item.axis, item.value) for item in state.facets) == (
-                expected_facets
-            )
+            state = committed[-1].state
+            assert tuple(
+                (item.axis, item.value, item.domain) for item in state.facets
+            ) == expected_facets
             assert state.repeat_index == expected_repeat
+            assert panel_selection_matches_subject(
+                state, committed[-1].subject
+            )
+            if state.facets:
+                facet = state.facets[0]
+                wrong = replace(
+                    state,
+                    facets=(
+                        type(facet)(
+                            facet.axis,
+                            facet.value,
+                            "point_coordinate",
+                        ),
+                    ),
+                )
+                assert not panel_selection_matches_subject(
+                    wrong, committed[-1].subject
+                )
         finally:
             source.close()
             host.close()
@@ -816,30 +859,35 @@ def test_structural_curve_axes_select_the_source_rows_without_a_fake_name() -> N
     )
 
     for axis, domain, expected in cases:
-        plane, source_node = _plane_for(
+        plane, source_node, presented = _plane_for(
             snapshot, {"@logic/panel-1/roi_mean"}
         )
-        host = plot.RasterPlotHost.from_plot(snapshot, plot.CurvePlot(axis))
+        host = plot.RasterPlotHost.from_plot(presented, plot.CurvePlot(axis))
         bridge = source = None
         try:
             bridge, source = attach_selection_bridge(
-                plane, host, "camera/frame", bridge_id="panel-1"
+                plane,
+                host,
+                "camera/frame",
+                bridge_id="panel-1",
+                on_observation=_commit_observation,
             )
             host.wait_for_front(20.0)
             viewports: list = []
-            source.subscribe_viewport(
-                lambda state, _display: viewports.append(state)
-            )
+            source.subscribe_viewport_observation(viewports.append)
             host.set_viewport(
                 plot.NumericRange(1.0, 2.0),
                 plot.NumericRange(-1.0, 20.0),
             ).result(timeout=15)
-            assert viewports and viewports[-1].ranges[0].domain == domain
+            assert (
+                viewports
+                and viewports[-1].subject.x == axis
+                and viewports[-1].subject.x.domain.value == domain
+            )
             _commit_x_range(host, 1.0, 2.0)
 
             assert source.last_error is None, source.last_error
             assert bridge.last_error is None, bridge.last_error
-            assert source.selector_data("x_range").ranges[0].domain == domain
             derived = _wait_published(plane, "@logic/panel-1/roi_mean")
             np.testing.assert_array_equal(derived.snapshot.block.values, expected)
         finally:
@@ -852,8 +900,8 @@ def test_structural_curve_axes_select_the_source_rows_without_a_fake_name() -> N
             plane.close()
 
 
-def test_rolling_history_is_not_claimed_as_an_upstream_point_axis() -> None:
-    """Rolling x belongs to plot history, so it derives nothing and is no error."""
+def test_rolling_viewport_survives_without_claiming_an_upstream_axis() -> None:
+    """Rolling cannot derive an ROI, but its viewport remains panel truth."""
 
     plot = pytest.importorskip("zlc_plot")
     snapshot = _curve_scan_snapshot()
@@ -861,8 +909,8 @@ def test_rolling_history_is_not_claimed_as_an_upstream_point_axis() -> None:
     source = PlotSelectionSource(host)
     seen: list = []
     viewports: list = []
-    source.subscribe_selection(lambda *_args: seen.append(True))
-    source.subscribe_viewport(lambda *_args: viewports.append(True))
+    source.subscribe_observation(seen.append)
+    source.subscribe_viewport_observation(viewports.append)
     try:
         host.wait_for_front(20.0)
         host.set_viewport(
@@ -871,7 +919,10 @@ def test_rolling_history_is_not_claimed_as_an_upstream_point_axis() -> None:
         ).result(timeout=15)
         _commit_x_range(host, 0.0, 1.0)
         assert seen == []
-        assert viewports == []
+        assert viewports
+        assert viewports[-1].subject.plot_kind is plot.PlotKind.ROLLING
+        assert viewports[-1].subject.x is None
+        assert viewports[-1].display is not None
         assert source.last_error is None
     finally:
         source.close()
@@ -888,21 +939,42 @@ def test_an_area_on_a_focused_curve_facet_cell_carries_the_cell() -> None:
         plot.AxisRef.repeat(), plot.CurvePlot(x=plot.AxisRef.point("detuning"))
     )
     host = plot.RasterPlotHost.from_plot(snapshot, spec, size="4x4")
-    public_host = SimpleNamespace(subscribe_selection=host.subscribe_selection)
+    public_host = SimpleNamespace(
+        subscribe_selection=host.subscribe_selection,
+        subscribe_facet_focus=host.subscribe_facet_focus,
+    )
     source = PlotSelectionSource(public_host)
     committed: list = []
-    source.subscribe_selection(lambda _change, state: committed.append(state))
+    focused: list = []
+    source.subscribe_observation(committed.append)
+    source.subscribe_focus_observation(
+        lambda index, subject, generation, revision: focused.append(
+            (index, subject, generation, revision)
+        )
+    )
     try:
         front, transform = _focused_cell_front(host, 1)
+        assert len(focused) == 1
+        assert focused[0][0] == 1
+        assert focused[0][1].repeat_index == 1
+        assert focused[0][2:] == ("curve-generation", 1)
         _gesture_area(host, front, transform)
         assert source.last_error is None, source.last_error
         assert committed, "a committed box reported nothing"
-        state = committed[-1]
+        state = committed[-1].state
         assert state.selector_kind == "x_range"
         assert [entry.axis for entry in state.ranges] == ["detuning"]
         assert state.repeat_index == 1
         assert state.facets == ()
         assert panel_plot_selectors(state, facet_index=1)[0].facet_index == 1
+
+        host.configure(facet_focus=0).result(timeout=15)
+        assert len(focused) == 1
+        host.show_facet_overview().result(timeout=15)
+        assert len(focused) == 2
+        assert focused[-1][0] is None
+        assert focused[-1][1].repeat_index is None
+        assert focused[-1][2:] == ("curve-generation", 1)
     finally:
         source.close()
         host.close()
@@ -935,14 +1007,21 @@ def test_a_box_on_a_focused_frame_cell_derives_only_that_frame(
     bridge = source = None
     try:
         bridge, source = attach_selection_bridge(
-            session.signal_plane, host, signal, bridge_id="panel-1"
+            session.signal_plane,
+            host,
+            signal,
+            bridge_id="panel-1",
+            on_observation=_commit_observation,
         )
+        seen: list = []
+        source.subscribe_observation(seen.append)
         front, transform = _focused_cell_front(host, 1)
         _gesture_area(host, front, transform)
 
         assert source.last_error is None, source.last_error
         assert bridge.last_error is None, bridge.last_error
-        selection = source.selector_data("area")
+        assert seen
+        selection = seen[-1].state
         assert selection.repeat_index is None
         assert [facet.axis for facet in selection.facets] == [
             frame_column.coordinate_id.value

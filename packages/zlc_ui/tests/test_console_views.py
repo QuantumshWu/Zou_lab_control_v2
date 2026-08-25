@@ -930,6 +930,7 @@ state = {
     'overlay_signal': '@logic/occ/site_overlay',
 }
 surface = {
+    'paints_images': True,
     'semantic': ({
         'key': 'x', 'label': 'X axis', 'kind': 'choice', 'value': 'sensor_x',
         'allow_none': False,
@@ -955,6 +956,11 @@ surface = {
          'minimum': None, 'maximum': None, 'step': None,
          'automatic': False,
          'unavailable_reason': 'Choose Fixed color limits to edit.'},
+        {'key': 'color_max', 'label': 'Color maximum', 'kind': 'number',
+         'value': None, 'allow_none': True, 'choices': (),
+         'minimum': None, 'maximum': None, 'step': None,
+         'automatic': False,
+         'unavailable_reason': 'Choose Fixed color limits to edit.'},
         {'key': 'colormap', 'label': 'Colormap', 'kind': 'choice',
          'value': 'viridis', 'allow_none': False,
          'choices': (('Viridis', 'viridis'), ('Magma', 'magma')),
@@ -973,6 +979,7 @@ surface = {
 handle.set_panel_projection('panel-1', state, surface)
 card = handle._cards['panel-1']
 blank_surface = {
+    'paints_images': False,
     'semantic': (), 'display': (), 'fit': (),
     'semantic_unavailable': '', 'display_unavailable': '',
     'fit_unavailable': '',
@@ -1066,7 +1073,10 @@ assert layout_probe.requests == 0, (
 compact_surface = dict(
     surface,
     semantic=(),
-    display=(surface['display'][0], surface['display'][1], surface['display'][4]),
+    display=tuple(
+        field for field in surface['display']
+        if field['key'] in {'title', 'x_label', 'colormap'}
+    ),
     fit=(),
 )
 handle.set_panel_projection('panel-1', state, compact_surface)
@@ -1207,6 +1217,33 @@ card_semantic.activated.emit(1)
 card_fit = card._settings_form.widget_for('fit__model')
 card_fit.setCurrentIndex(1)
 card_fit.activated.emit(1)
+fit_state = dict(
+    state,
+    fit={'model': 'anisotropic_gaussian_center'},
+)
+fit_surface = dict(
+    surface,
+    fit=(
+        dict(
+            surface['fit'][0],
+            value='anisotropic_gaussian_center',
+        ),
+        {
+            'key': 'expression', 'label': 'Parameters', 'kind': 'text',
+            'value': '', 'allow_none': True, 'choices': (),
+            'minimum': None, 'maximum': None, 'step': None,
+            'description': 'name=value fixes; name=guess(value) initializes',
+        },
+    ),
+)
+handle.set_panel_projection('panel-1', fit_state, fit_surface)
+fit_expression = card._settings_form.widget_for('fit__expression')
+fit_expression.setText('center_x=10, radius_x=guess(4)')
+fit_expression.editingFinished.emit()
+assert ('state', 'panel-1', {
+    'fit': {'expression': 'center_x=10, radius_x=guess(4)'}
+}) in events
+handle.set_panel_projection('panel-1', state, surface)
 handle.open_panel_editor('panel-1', projection)
 editor = handle._panel_editors['panel-1']
 assert isinstance(editor.panel_form.widget_for('signal'), FluentTreeComboBox)
@@ -1241,10 +1278,24 @@ assert handle.update_panel_editor('panel-1', projection)
 assert not editor._producer_editor.start_button.isVisible()
 assert editor.parameter_forms['semantic'].spec.keys == ('x',)
 assert editor.parameter_forms['display'].spec.keys == (
-    'title', 'x_label', 'x_display_unit', 'color_min',
+    'title', 'x_label', 'x_display_unit', 'color_min', 'color_max',
     'colormap', 'show_colorbar'
 )
 assert editor.parameter_forms['fit'].spec.keys == ('model',)
+fit_projection = dict(
+    projection,
+    state=fit_state,
+    parameter_surface=fit_surface,
+)
+assert handle.update_panel_editor('panel-1', fit_projection)
+assert editor.parameter_forms['fit'].spec.keys == ('model', 'expression')
+editor_expression = editor.parameter_forms['fit'].widget_for('expression')
+editor_expression.setText('center_y=guess(12)')
+editor_expression.editingFinished.emit()
+assert ('state', 'panel-1', {
+    'fit': {'expression': 'center_y=guess(12)'}
+}) in events
+assert handle.update_panel_editor('panel-1', projection)
 locked_surface = dict(surface, science_locked=True)
 handle.set_panel_projection('panel-1', state, locked_surface)
 assert handle.update_panel_editor(
@@ -1307,8 +1358,12 @@ else:
     raise AssertionError('fixed color limits must not have independent Auto switches')
 assert not color_min_edit.isEnabled()
 fixed_display = tuple(
-    dict(field, value=0, unavailable_reason='')
-    if field['key'] == 'color_min' else field
+    dict(
+        field,
+        value=0 if field['key'] == 'color_min' else 10,
+        unavailable_reason='',
+    )
+    if field['key'] in {'color_min', 'color_max'} else field
     for field in surface['display']
 )
 fixed_surface = dict(surface, display=fixed_display)
@@ -1318,6 +1373,13 @@ handle.update_panel_editor(
 )
 color_min_edit = editor.parameter_forms['display'].widget_for('color_min')
 assert color_min_edit.isEnabled() and color_min_edit.text() == '0'
+color_max_edit = editor.parameter_forms['display'].widget_for('color_max')
+assert color_max_edit.isEnabled() and color_max_edit.text() == '10'
+color_min_edit.setText('12')
+color_max_edit.setText('20')
+assert ('state', 'panel-1', {
+    'display': {'color_max': 20, 'color_min': 12}
+}) in events
 semantic_combo = editor.parameter_forms['semantic'].widget_for('x')
 semantic_combo.setCurrentIndex(1)
 semantic_combo.activated.emit(1)
@@ -1887,6 +1949,13 @@ try:
                 'interval_ms': 100, 'title': 'Card', 'semantic': {},
                 'display': {}, 'fit': {}, 'overlay_signal': overlay_signal,
             }
+            projected_surface = dict(
+                surface,
+                paints_images=(
+                    kind == 'image'
+                    or (kind == 'facet_grid' and cell_kind in {'', 'image'})
+                ),
+            )
             card = tested_module.PanelCardView('panel-1', 'Card', owner)
             card.set_size_choices(('1x2', '2x2', '1x4'), '2x2')
             card.set_cell_kind_choices(('curve', 'image', 'histogram'))
@@ -1894,7 +1963,7 @@ try:
                 groups, current=state['signal'],
                 overlay_groups=overlays, overlay_current=overlay_signal,
             )
-            card.set_panel_projection(state, surface)
+            card.set_panel_projection(state, projected_surface)
             card.show()
             app.processEvents()
             spec_keys = set(card._form_spec().keys)
@@ -1913,7 +1982,7 @@ try:
                 'overlay_signal_options': overlays,
                 'interval_choices': (100, 200, 400, 800),
                 'size_choices': ('1x2', '2x2', '1x4'),
-                'parameter_surface': surface, 'save_directory': '.',
+                'parameter_surface': projected_surface, 'save_directory': '.',
                 'frozen_signal': state['signal'],
                 'frozen_publication': None, 'frozen_snapshot': None,
                 'stale': False, 'producer_node_id': '',

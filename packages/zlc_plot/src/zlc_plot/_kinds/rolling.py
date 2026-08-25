@@ -14,27 +14,16 @@ def render(renderer: Any, payload: Any, state: Any, *, axes: Any, key: str) -> N
 
 
 def build_payload(projection: Any, view: Any, state: Any) -> None:
-    # Accumulation is a projection-layer concern shared with every other kind
-    # that looks back.  Importing it lazily keeps the closed kind registry
-    # independent of FitProjection's implementation.
-    from .._fit_projection import accumulate_history
-
     spec = projection._spec
-    # The retained history is capped by memory policy only; the display
-    # window is applied inside ``_rolling_payload``.  Persisting the display
-    # slice here once made shrinking the window destructive and enlarging it
-    # inert, because the truncated cache doubled as the permanent record.
     uncertainty = (
         bool(state["uncertainty"]) and spec.reduction is Reduction.MEAN
     )
-    projection._rolling_history_cache = accumulate_history(
-        projection,
-        view,
+    history = view.rolling_history_samples(
         group=spec.group,
         aggregation=spec.reduction,
     )
     projection._payload = projection._rolling_payload(
-        projection._rolling_history_cache,
+        history,
         window=int(state["window"]),
         cumulative=(
             bool(state["cumulative"]) and spec.reduction is Reduction.MEAN

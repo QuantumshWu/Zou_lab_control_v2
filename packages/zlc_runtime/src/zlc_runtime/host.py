@@ -1001,7 +1001,7 @@ class NodeHost:
             self._error = "processor publication lost its selected input signal"
             raise RuntimeError(self._error)
         if not self._data_plane.is_generation_live(self._source_signal):
-            snapshot = self._data_plane.current_dataset(
+            snapshot, event_record = self._data_plane.current_dataset_view(
                 self._source_signal,
                 publication,
             )
@@ -1011,7 +1011,7 @@ class NodeHost:
                 None,
                 run_record=publication.run_record,
                 primary_index=source.primary_index,
-                event_record=publication.event_record,
+                event_record=event_record,
             )
             self._processor_path = "frozen"
             self._start_frozen_processor(publication, self._terminal_source)

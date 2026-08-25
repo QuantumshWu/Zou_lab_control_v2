@@ -205,7 +205,7 @@ def test_short_timeline_is_valid_once_but_rejected_before_a_seam() -> None:
     scan.open()
     # Point 0 spans 3 ticks and may hand off to a 2-tick final point.  That
     # final point needs no boundary cache in a two-cycle finite run.
-    scan.load(scanned, rows=((2,), (1,)))
+    scan.load(scanned, rows=((1,), (0,)))
     scan.fire(cycles=2)
     assert scan.wait_done(1.0) is not None
     before = list(scan_transport.write_batches)
@@ -391,20 +391,21 @@ def test_applied_state_round_trip_and_gui_sync() -> None:
     transport = MemoryRegisterTransport(geom=geom, auto_done=True)
     streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
-    streamer.load(program, source=source, rows=((1,),))
+    rows = ((-1,), (0,), (1,))
+    streamer.load(program, source=source, rows=rows)
 
     loaded = streamer.applied()
     assert loaded is not None
     assert loaded.program == program
     assert loaded.source == source
-    assert loaded.rows == ((1,),)
+    assert loaded.rows == rows
     assert loaded.cycles == 1
     assert loaded.loaded_at > 0
 
     streamer.fire(cycles=None)
     state = streamer.applied()
     assert state is not None
-    assert state.rows == ((1,),)
+    assert state.rows == rows
     assert state.cycles is None
     with pytest.raises(FrozenInstanceError):
         state.cycles = 2
@@ -417,7 +418,14 @@ def test_applied_state_round_trip_and_gui_sync() -> None:
     assert echoed_source is not None
     rebuilt = compile_sequence(echoed_source, geom, 50e6)
     assert pack_program(rebuilt, geom) == pack_program(state.program, geom)
-    assert pack_scan_rows(echoed_rows, geom, 0, 0) == pack_scan_rows(((1,),), geom, 0, 0)
+    packed = pack_scan_rows(echoed_rows, geom, 0, 0, len(rows))
+    assert packed == pack_scan_rows(rows, geom, 0, 0, len(rows))
+    remainder = pack_scan_rows(echoed_rows, geom, 1, 1, len(rows))
+    slot_words = (
+        [packed[key] for key in sorted(packed)][:: geom.num_slots]
+        + [remainder[key] for key in sorted(remainder)][:: geom.num_slots]
+    )
+    assert slot_words == [0xFFFFFFFF, 0, 1]
 
 
 def test_applied_state_tracks_scan_table_and_survives_done_and_safe() -> None:
@@ -522,7 +530,7 @@ def test_runtime_slot_rows_reject_colliding_affine_edges() -> None:
     streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
     with pytest.raises(ValueError, match="edge ticks"):
-        streamer.load(program, rows=((0,),))
+        streamer.load(program, rows=((-2,),))
 
 
 def test_safe_readback_uses_stable_status_and_zero_clock_mask() -> None:

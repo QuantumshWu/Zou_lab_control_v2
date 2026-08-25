@@ -43,7 +43,7 @@ from .selectors import (
     _classifier_threshold_key,
     normalize_classifier_threshold_targets,
 )
-from .specs import FacetGridPlot, HistogramPlot
+from .specs import accepts_classifier_thresholds, FacetGridPlot
 
 if TYPE_CHECKING:
     from .session import PlotSession
@@ -216,7 +216,14 @@ class FitSessionMixin:
                 **self._facet_batch_geometry(projection, cells),
             )
             result = self._stamp_fit_batch_revision(failed)
-            return FitEvent(result, None, (), "", result.overlays)
+            return FitEvent(
+                result,
+                projection.data_generation,
+                None,
+                (),
+                "",
+                result.overlays,
+            )
 
         count = len(model.parameters)
         invalid = np.full(count, np.nan, dtype=np.float64)
@@ -235,7 +242,13 @@ class FitSessionMixin:
             covariance_valid=False,
             parameter_units=units,
         )
-        return FitEvent(self._stamp_fit_batch_revision(failed), None, (), "")
+        return FitEvent(
+            self._stamp_fit_batch_revision(failed),
+            projection.data_generation,
+            None,
+            (),
+            "",
+        )
 
     def publish_live_fit_gap(
         self,
@@ -429,6 +442,7 @@ class FitSessionMixin:
         model: str | FitModelSpec,
         *,
         selector_kind: SelectorKind | None = None,
+        fixed: Mapping[str, float] | None = None,
         initial: Mapping[str, float] | Sequence[float] | None = None,
         bounds: Mapping[str, tuple[float | None, float | None]] | None = None,
         options: FitOptions | None = None,
@@ -444,9 +458,12 @@ class FitSessionMixin:
             raise TypeError("fit_all_facets must be bool")
         if fit_all_facets and live:
             raise ValueError("fit_all_facets cannot be a live fit")
+        self._fit_expression_draft = ""
+        self._fit_expression_error = ""
         started = self._begin_fit_request(
             model,
             selector_kind=selector_kind,
+            fixed=fixed,
             initial=initial,
             bounds=bounds,
             options=options,
@@ -478,6 +495,7 @@ class FitSessionMixin:
         model: str | FitModelSpec,
         *,
         selector_kind: SelectorKind | None = None,
+        fixed: Mapping[str, float] | None = None,
         initial: Mapping[str, float] | Sequence[float] | None = None,
         bounds: Mapping[str, tuple[float | None, float | None]] | None = None,
         options: FitOptions | None = None,
@@ -490,10 +508,13 @@ class FitSessionMixin:
             raise TypeError("fit_all_facets must be bool")
         if fit_all_facets and live:
             raise ValueError("fit_all_facets cannot be a live fit")
+        self._fit_expression_draft = ""
+        self._fit_expression_error = ""
         logical_completion: Future[FitResult | FacetFitBatchResult] = Future()
         started = self._begin_fit_request(
             model,
             selector_kind=selector_kind,
+            fixed=fixed,
             initial=initial,
             bounds=bounds,
             options=options,
@@ -524,7 +545,8 @@ class FitSessionMixin:
             raise TypeError("fit live must be bool")
         values = dict(target)
         model = values.pop("model", None)
-        values.pop("live", None)
+        expression_marker = object()
+        expression = values.pop("expression", expression_marker)
 
         def clear_current() -> None:
             with self._lock:
@@ -533,17 +555,19 @@ class FitSessionMixin:
                 self.clear_fit()
 
         if model is None or str(model).strip() == "":
+            self._fit_expression_draft = ""
+            self._fit_expression_error = ""
             clear_current()
             return None
 
-        if not isinstance(model, FitModelSpec):
-            try:
-                self._fit_engine.registry.get(str(model))
-            except ValueError:
-                clear_current()
-                return None
+        model_spec = (
+            model
+            if isinstance(model, FitModelSpec)
+            else self._fit_engine.registry.get(str(model))
+        )
 
         selector_kind = values.pop("selector_kind", None)
+        fixed = values.pop("fixed", None)
         initial = values.pop("initial", None)
         bounds = values.pop("bounds", None)
         options = values.pop("options", None)
@@ -556,9 +580,51 @@ class FitSessionMixin:
             selector_kind, SelectorKind
         ):
             selector_kind = SelectorKind(str(selector_kind))
+        previous = self._live_fit_request
+        previous_model = (
+            (
+                None
+                if self._accepted_fit is None
+                else self._accepted_fit.request.model.model_id
+            )
+            if previous is None
+            else previous.model.model_id
+        )
+        if expression is not expression_marker:
+            raw_expression = str(expression)
+            try:
+                expression_target = self._projected.fit_expression_target(
+                    model_spec,
+                    raw_expression,
+                )
+            except (KeyError, TypeError, ValueError, OverflowError) as error:
+                # An optional override can be wrong without turning off the
+                # model the operator asked to keep fitting.  Keep the draft
+                # visible, but solve this request with the model's automatic
+                # initializer and bounds.
+                self._fit_expression_draft = raw_expression
+                self._fit_expression_error = str(error) or type(error).__name__
+                fixed = None
+                initial = None
+                bounds = None
+            else:
+                fixed = expression_target.get("fixed")
+                initial = expression_target.get("initial")
+                bounds = None
+                self._fit_expression_error = ""
+                self._fit_expression_draft = ""
+        elif (
+            previous_model != model_spec.model_id
+            or fixed is not None
+            or initial is not None
+            or bounds is not None
+        ):
+            self._fit_expression_draft = ""
+            self._fit_expression_error = ""
         prepared = self._prepare_fit_request(
-            model,
+            model_spec,
             selector_kind=selector_kind,
+            fixed=fixed,
             initial=initial,
             bounds=bounds,
             options=options,
@@ -575,6 +641,7 @@ class FitSessionMixin:
         started = self._begin_fit_request(
             prepared.model,
             selector_kind=None,
+            fixed=None,
             initial=None,
             bounds=None,
             options=None,
@@ -601,6 +668,7 @@ class FitSessionMixin:
         projection: FitProjection,
         model: FitModelSpec,
         *,
+        fixed: Mapping[str, float] | None,
         initial: Mapping[str, float] | Sequence[float] | None,
         bounds: Mapping[str, tuple[float | None, float | None]] | None,
         options: FitOptions | None,
@@ -657,6 +725,7 @@ class FitSessionMixin:
                     projection,
                     model,
                     selection,
+                    fixed=fixed,
                     initial=initial,
                     bounds=bounds,
                     options=options,
@@ -710,6 +779,7 @@ class FitSessionMixin:
         model: str | FitModelSpec,
         *,
         selector_kind: SelectorKind | None,
+        fixed: Mapping[str, float] | None,
         initial: Mapping[str, float] | Sequence[float] | None,
         bounds: Mapping[str, tuple[float | None, float | None]] | None,
         options: FitOptions | None,
@@ -730,6 +800,7 @@ class FitSessionMixin:
             request = self._prepare_fit_request(
                 model,
                 selector_kind=selector_kind,
+                fixed=fixed,
                 initial=initial,
                 bounds=bounds,
                 options=options,
@@ -921,13 +992,21 @@ class FitSessionMixin:
         model: str | FitModelSpec,
         *,
         selector_kind: SelectorKind | None,
+        fixed: Mapping[str, float] | None,
         initial: Mapping[str, float] | Sequence[float] | None,
         bounds: Mapping[str, tuple[float | None, float | None]] | None,
-        options: FitOptions | None,
+        options: FitOptions | Mapping[str, object] | None,
     ) -> _LiveFitRequest:
         model_spec = self._resolve_fit_model(model)
+        if isinstance(options, Mapping):
+            options = FitOptions(**dict(options))
         if options is not None and not isinstance(options, FitOptions):
-            raise TypeError("options must be FitOptions or None")
+            raise TypeError("options must be FitOptions, a mapping, or None")
+        if fixed is not None and not isinstance(fixed, Mapping):
+            raise TypeError("fixed must be a parameter mapping or None")
+        frozen_fixed = None if fixed is None else MappingProxyType(
+            {str(name): float(value) for name, value in fixed.items()}
+        )
         frozen_initial: Mapping[str, float] | tuple[float, ...] | None
         if initial is None:
             frozen_initial = None
@@ -964,6 +1043,7 @@ class FitSessionMixin:
         return _LiveFitRequest(
             model_spec,
             selector_kind,
+            frozen_fixed,
             frozen_initial,
             frozen_bounds,
             options,
@@ -986,6 +1066,7 @@ class FitSessionMixin:
             batch, _selections = self._fit_facet_batch(
                 started.projection,
                 started.request.model,
+                fixed=started.request.fixed,
                 initial=started.request.initial,
                 bounds=started.request.bounds,
                 options=started.request.options,
@@ -1013,6 +1094,7 @@ class FitSessionMixin:
             started.projection,
             started.request.model,
             selection,
+            fixed=started.request.fixed,
             initial=started.request.initial,
             bounds=started.request.bounds,
             options=started.request.options,
@@ -1066,6 +1148,7 @@ class FitSessionMixin:
         model: FitModelSpec,
         selection: FitSelection,
         *,
+        fixed: Mapping[str, float] | None,
         initial: Mapping[str, float] | Sequence[float] | None,
         bounds: Mapping[str, tuple[float | None, float | None]] | None,
         options: FitOptions | None,
@@ -1086,6 +1169,7 @@ class FitSessionMixin:
                 model,
                 regular,
                 data_revision=selection.data_revision,
+                fixed=fixed,
                 initial=initial,
                 warm_start=warm_start,
                 bounds=bounds,
@@ -1100,6 +1184,7 @@ class FitSessionMixin:
                 observation_sigma=selection.observation_sigma,
                 selected_indices=selection.selected_indices,
                 data_revision=selection.data_revision,
+                fixed=fixed,
                 initial=initial,
                 warm_start=warm_start,
                 bounds=bounds,
@@ -1119,9 +1204,9 @@ class FitSessionMixin:
         )
 
     def _threshold_classifier_enabled(self) -> bool:
-        return bool(
-            isinstance(self._semantic_spec, HistogramPlot)
-            and self.display_state.values.get("threshold_classifier", False)
+        return accepts_classifier_thresholds(
+            self._spec,
+            self.display_state.values,
         )
 
     def _authored_classifier_result(
@@ -1249,6 +1334,7 @@ class FitSessionMixin:
             batch, _selections = self._fit_facet_batch(
                 projection,
                 model,
+                fixed=None,
                 initial=None,
                 bounds=None,
                 options=None,
@@ -1269,6 +1355,7 @@ class FitSessionMixin:
                 projection,
                 model,
                 selection,
+                fixed=None,
                 initial=None,
                 bounds=None,
                 options=None,
@@ -1425,6 +1512,8 @@ class FitSessionMixin:
     def _set_classifier_thresholds_state(
         self,
         thresholds: object,
+        *,
+        discard_unmatched: bool = False,
     ) -> None:
         if not self._threshold_classifier_enabled():
             raise RuntimeError("threshold classifier is not enabled")
@@ -1450,6 +1539,8 @@ class FitSessionMixin:
             identity = _classifier_threshold_key(target)
             index = expected.get(identity)
             if index is None:
+                if discard_unmatched:
+                    continue
                 raise ValueError(
                     "classifier threshold target does not match a current distribution"
                 )
@@ -1489,10 +1580,19 @@ class FitSessionMixin:
         except KeyError:
             pass
 
-    def _classifier_threshold_targets_state(self) -> tuple[Mapping[str, object], ...]:
+    def _classifier_threshold_targets_state(
+        self,
+        *,
+        settled: bool = False,
+    ) -> tuple[Mapping[str, object], ...]:
         facet_grid = isinstance(self._spec, FacetGridPlot)
         targets: list[Mapping[str, object]] = []
-        for index, value in enumerate(self._classifier_thresholds):
+        values = (
+            self._classifier_thresholds_settled()
+            if settled
+            else self._classifier_thresholds
+        )
+        for index, value in enumerate(values):
             if value is None:
                 continue
             target = dict(
@@ -1734,6 +1834,8 @@ class FitSessionMixin:
                 overlays=overlays,
                 selections=selections,
                 context_generation=started.context_generation,
+                source_generation=projection.data_generation,
+                request=started.request,
             ),
             selections,
         )
@@ -1841,6 +1943,7 @@ class FitSessionMixin:
         if isinstance(accepted.result, FacetFitBatchResult):
             return FitEvent(
                 accepted.result,
+                accepted.source_generation,
                 None,
                 (),
                 "",
@@ -1851,6 +1954,7 @@ class FitSessionMixin:
             raise RuntimeError("single fit acceptance has no overlay or selection")
         return FitEvent(
             accepted.result,
+            accepted.source_generation,
             accepted.selection,
             overlay.parameter_display,
             overlay.formula,
@@ -1905,6 +2009,8 @@ class FitSessionMixin:
                     self._fit_request_generation,
                     self._fit_context_generation,
                     self._accepted_fit,
+                    self._fit_expression_draft,
+                    self._fit_expression_error,
                 )
                 fit_cancel = self._fit_cancel
                 live_fit_cancel = self._live_fit_cancel
@@ -1913,6 +2019,8 @@ class FitSessionMixin:
                 self._fit_request_generation += 1
                 self._fit_warm_starts.clear()
                 self._live_fit_request = None
+                self._fit_expression_draft = ""
+                self._fit_expression_error = ""
                 self._fit_context_generation += 1
                 withdrawn = self._clear_fit_presentation()
                 # Un-arming touches only fit state: an in-flight data-frame
@@ -1931,6 +2039,8 @@ class FitSessionMixin:
                         self._fit_request_generation,
                         self._fit_context_generation,
                         self._accepted_fit,
+                        self._fit_expression_draft,
+                        self._fit_expression_error,
                     ) = previous
                 try:
                     self._render_current(

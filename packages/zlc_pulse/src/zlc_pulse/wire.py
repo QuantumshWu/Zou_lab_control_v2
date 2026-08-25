@@ -434,7 +434,14 @@ def scan_bank_words(rows, p: StreamerParams, chunk_index: int,
         row = base + off * p.scan_words
         for j in range(p.num_slots):
             val = point[j] if j < slot_count else 0
-            words[row + j] = _checked_unsigned(val, p.tick_width, f"scan row {idx} slot {j}")
+            words[row + j] = _to_unsigned(
+                _checked_signed(
+                    val,
+                    p.tick_width,
+                    f"scan row {idx} slot {j}",
+                ),
+                p.tick_width,
+            )
     return words
 
 def pack_program(program, params: StreamerParams | None = None) -> dict[int, int]:

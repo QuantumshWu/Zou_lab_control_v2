@@ -25,7 +25,6 @@ from .assets import HELVETICA_LIGHT_FAMILY, helvetica_light_path
 from .raster import (
     RasterFront,
     RasterPlotHost,
-    _axis_at_normalized,
 )
 from .selectors import SelectorState
 
@@ -35,6 +34,44 @@ if TYPE_CHECKING:
 
 class BackendUnavailableError(RuntimeError):
     """An explicitly requested optional frontend is not installed/configured."""
+
+
+def _axis_at_normalized(
+    front: "RasterFront",
+    x: float,
+    y: float,
+    *,
+    tolerance_px: float = 0.0,
+) -> "AxisTransform | None":
+    """Resolve the axis under -- or nearest within tolerance of -- a pointer.
+
+    The widget is the one place a pointer meets a painted front, so this is
+    the one resolution there is.  What you can SEE you can grab: a guide
+    painted ON an axes boundary (the autoscaled colour-limit guides sit
+    exactly at the distribution rail's edges) spills its visible linewidth
+    outside the box, so the box test extends by the same handle radius
+    every other grab already uses.  Where expanded boxes would overlap --
+    the gaps between an image, its rail and its colorbar -- the NEAREST
+    axis wins; a press inside an axes box is distance zero and behaves
+    exactly as before.
+    """
+
+    width, height = front.logical_size
+    scale_x = float(max(1, int(width)))
+    scale_y = float(max(1, int(height)))
+    best = None
+    best_distance = float("inf")
+    for axis in front.interaction.axes:
+        left, top, right, bottom = axis.bounds
+        outside_x = max(left - x, x - right, 0.0) * scale_x
+        outside_y = max(top - y, y - bottom, 0.0) * scale_y
+        distance = max(outside_x, outside_y)
+        if distance == 0.0:
+            return axis
+        if distance <= float(tolerance_px) and distance < best_distance:
+            best = axis
+            best_distance = distance
+    return best
 
 
 def _complete_cleanup(callbacks: tuple[Callable[[], object], ...]) -> None:

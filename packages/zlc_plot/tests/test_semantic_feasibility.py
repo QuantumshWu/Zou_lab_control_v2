@@ -226,7 +226,12 @@ def test_user_can_reach_a_single_mean_line_on_grouped_data() -> None:
         assert AxisRef.repeat() in description.axes_offering("group")
 
         session.replace_spec(
-            updated_spec(schema, spec, "fate:site", "reduce")
+            updated_spec(
+                schema,
+                spec,
+                dict(description.fate_rows)[AxisRef.data("site")],
+                "reduce",
+            )
         )
         assert len(session._payload.series) == 1
         np.testing.assert_allclose(
@@ -338,10 +343,12 @@ def test_updated_spec_is_the_single_composition_authority() -> None:
     switched = updated_spec(schema, facet, "kind", PlotKind.CURVE)
     assert switched.kind is PlotKind.CURVE
 
-    cell_edit = updated_spec(schema, facet, "x", AxisRef.point("row"))
+    cell_edit = updated_spec(schema, facet, "x", AxisRef.point("col"))
     assert isinstance(cell_edit, FacetGridPlot)
-    assert cell_edit.cell.x == AxisRef.point("row")
+    assert cell_edit.cell.x == AxisRef.point("col")
     assert cell_edit.facet == facet.facet
+    with pytest.raises(ValueError, match="one physical axis"):
+        updated_spec(schema, facet, "x", AxisRef.point("row"))
 
     description = describe_semantics(schema, facet)
     repeat_fate = dict(description.fate_rows)[AxisRef.repeat()]

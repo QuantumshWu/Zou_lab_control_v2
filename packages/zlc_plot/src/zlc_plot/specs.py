@@ -14,6 +14,13 @@ from enum import Enum
 from functools import partial
 from typing import ClassVar, TypeAlias
 
+from zlc_data import (
+    CoordinateScalar,
+    CoordinateSelector,
+    LATEST_COORDINATE,
+    canonical_coordinate_scalar,
+)
+
 from ._validation import finite_real, integer, text
 from .kinds import AxisRef, PlotKind
 from .parameters import ParameterSchema, ParameterSpec, RenderEffect
@@ -163,31 +170,55 @@ class PlotLabels:
 #: that.  It is a fate an axis can be given, exactly like being x or being
 #: grouped by, which is why it lives on the specification and not among the
 #: display parameters: it changes WHAT is plotted, not how it looks.
-ScopeTerm: TypeAlias = tuple[AxisRef, float | str]
+ScopeTerm: TypeAlias = tuple[AxisRef, CoordinateScalar | CoordinateSelector]
+
+
+def _require_distinct_axes(
+    roles: tuple[tuple[str, AxisRef | None], ...],
+    scope: tuple[ScopeTerm, ...],
+) -> None:
+    used: dict[tuple[object, str | None], str] = {}
+    for name, axis in roles:
+        if axis is None:
+            continue
+        identity = axis.physical_identity
+        previous = used.get(identity)
+        if previous is not None:
+            raise ValueError(
+                f"one physical axis cannot be both {previous} and {name}"
+            )
+        used[identity] = name
+    for axis, _coordinate in scope:
+        identity = axis.physical_identity
+        previous = used.get(identity)
+        if previous is not None:
+            raise ValueError(
+                f"one physical axis cannot be both {previous} and scope"
+            )
+        used[identity] = "scope"
 
 
 def _validated_scope(value: object) -> tuple[ScopeTerm, ...]:
     if not isinstance(value, tuple):
         raise TypeError("scope must be a tuple of (AxisRef, value) pairs")
     terms: list[ScopeTerm] = []
-    seen: set[AxisRef] = set()
+    seen: set[tuple[object, str | None]] = set()
     for term in value:
         if not isinstance(term, tuple) or len(term) != 2:
             raise TypeError("each scope term must be an (AxisRef, value) pair")
         axis, coordinate = term
         if not isinstance(axis, AxisRef):
             raise TypeError("scope term axis must be AxisRef")
-        if coordinate != "latest" and (
-            isinstance(coordinate, bool)
-            or not isinstance(coordinate, (int, float))
-        ):
-            raise TypeError("scope term value must be a real coordinate or 'latest'")
-        if axis in seen:
-            raise ValueError(f"axis {axis!r} is scoped twice")
-        seen.add(axis)
-        terms.append(
-            (axis, "latest" if coordinate == "latest" else float(coordinate))
+        coordinate = (
+            LATEST_COORDINATE
+            if coordinate is LATEST_COORDINATE
+            else canonical_coordinate_scalar(coordinate, "scope coordinate")
         )
+        identity = axis.physical_identity
+        if identity in seen:
+            raise ValueError(f"axis {axis!r} is scoped twice")
+        seen.add(identity)
+        terms.append((axis, coordinate))
     return tuple(terms)
 
 
@@ -205,13 +236,13 @@ class CurvePlot:
             raise TypeError("CurvePlot.x must be AxisRef")
         if self.group is not None and not isinstance(self.group, AxisRef):
             raise TypeError("CurvePlot.group must be AxisRef or None")
-        if self.group == self.x:
-            raise ValueError("CurvePlot.group must differ from x")
         if not isinstance(self.reduction, Reduction):
             raise TypeError("CurvePlot.reduction must be Reduction")
         if not isinstance(self.labels, PlotLabels):
             raise TypeError("CurvePlot.labels must be PlotLabels")
-        object.__setattr__(self, "scope", _validated_scope(self.scope))
+        scope = _validated_scope(self.scope)
+        _require_distinct_axes((("x", self.x), ("group", self.group)), scope)
+        object.__setattr__(self, "scope", scope)
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,13 +257,13 @@ class ImagePlot:
     def __post_init__(self) -> None:
         if not isinstance(self.x, AxisRef) or not isinstance(self.y, AxisRef):
             raise TypeError("ImagePlot x and y must be AxisRef")
-        if self.x == self.y:
-            raise ValueError("ImagePlot x and y must be different axes")
         if not isinstance(self.reduction, Reduction):
             raise TypeError("ImagePlot.reduction must be Reduction")
         if not isinstance(self.labels, PlotLabels):
             raise TypeError("ImagePlot.labels must be PlotLabels")
-        object.__setattr__(self, "scope", _validated_scope(self.scope))
+        scope = _validated_scope(self.scope)
+        _require_distinct_axes((("x", self.x), ("y", self.y)), scope)
+        object.__setattr__(self, "scope", scope)
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,7 +283,9 @@ class HistogramPlot:
     def __post_init__(self) -> None:
         if not isinstance(self.labels, PlotLabels):
             raise TypeError("HistogramPlot.labels must be PlotLabels")
-        object.__setattr__(self, "scope", _validated_scope(self.scope))
+        scope = _validated_scope(self.scope)
+        _require_distinct_axes((), scope)
+        object.__setattr__(self, "scope", scope)
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,7 +303,9 @@ class RollingPlot:
             raise TypeError("RollingPlot.reduction must be Reduction")
         if not isinstance(self.labels, PlotLabels):
             raise TypeError("RollingPlot.labels must be PlotLabels")
-        object.__setattr__(self, "scope", _validated_scope(self.scope))
+        scope = _validated_scope(self.scope)
+        _require_distinct_axes((("group", self.group),), scope)
+        object.__setattr__(self, "scope", scope)
 
 
 CellPlot: TypeAlias = CurvePlot | ImagePlot | HistogramPlot
@@ -298,14 +333,21 @@ class FacetGridPlot:
             raise TypeError("FacetGrid cells must be CurvePlot, ImagePlot or HistogramPlot")
         if not isinstance(self.labels, PlotLabels):
             raise TypeError("FacetGridPlot.labels must be PlotLabels")
-        object.__setattr__(self, "scope", _validated_scope(self.scope))
-        used = {
-            getattr(self.cell, "x", None),
-            getattr(self.cell, "y", None),
-            getattr(self.cell, "group", None),
-        }
-        if self.facet in used:
-            raise ValueError("facet source cannot also be a cell axis or group")
+        if self.cell.scope:
+            raise ValueError(
+                "FacetGrid cell.scope is invalid; scope belongs to FacetGridPlot"
+            )
+        scope = _validated_scope(self.scope)
+        _require_distinct_axes(
+            (
+                ("facet", self.facet),
+                ("x", getattr(self.cell, "x", None)),
+                ("y", getattr(self.cell, "y", None)),
+                ("group", getattr(self.cell, "group", None)),
+            ),
+            scope,
+        )
+        object.__setattr__(self, "scope", scope)
 
 
 @dataclass(frozen=True, slots=True)
@@ -697,6 +739,54 @@ def validate_authored_display(
     _validate_authored_conflicts(state)
 
 
+def accepts_classifier_thresholds(
+    spec: PlotSpec,
+    display: Mapping[str, object],
+) -> bool:
+    """Whether this exact accepted plot vocabulary owns classifier levels."""
+
+    if not isinstance(display, Mapping):
+        raise TypeError("display must be a mapping")
+    return bool(
+        isinstance(semantic_spec(spec), HistogramPlot)
+        and display.get("threshold_classifier") is True
+    )
+
+
+def paints_image_surface(spec: PlotSpec) -> bool:
+    """Whether the resolved plot (including a FacetGrid cell) paints images."""
+
+    return semantic_spec(spec).kind is PlotKind.IMAGE
+
+
+def history_window_requirement(
+    spec: PlotSpec,
+    display: Mapping[str, object],
+) -> int | None:
+    """Bounded source-index history this accepted view actually requests.
+
+    A primary-index ``latest`` scope is only a projection rule for an indexed
+    Dataset that already exists.  Ordinary Curve/Image panels acquire that
+    scope automatically while some real history consumer is alive, so treating
+    it as demand would make those panels keep Runtime history alive forever.
+    Resource demand comes only from a vocabulary that exposes a bounded
+    history window; scope then decides how that already-retained Dataset is
+    projected.
+    """
+
+    if not isinstance(display, Mapping):
+        raise TypeError("display must be a mapping")
+    semantic = semantic_spec(spec)
+    if not isinstance(semantic, (RollingPlot, HistogramPlot)):
+        return None
+    window = display.get("window")
+    if type(window) is not int or window <= 0:
+        return None
+    if isinstance(semantic, HistogramPlot) and window == 1:
+        return None
+    return window
+
+
 @dataclass(frozen=True, slots=True)
 class _ParameterSchemaContext:
     """The semantic facts that change a display-parameter schema."""
@@ -898,13 +988,16 @@ def parameter_schema_for_kind(
 
 
 __all__ = [
+    "accepts_classifier_thresholds",
     "CellPlot",
     "CurvePlot",
     "FacetGridPlot",
     "HistogramPlot",
+    "history_window_requirement",
     "ImagePlot",
     "PlotLabels",
     "PlotSpec",
+    "paints_image_surface",
     "PulseTimelinePlot",
     "Reduction",
     "RelimMode",

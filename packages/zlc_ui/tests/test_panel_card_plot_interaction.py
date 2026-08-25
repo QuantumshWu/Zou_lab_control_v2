@@ -342,6 +342,7 @@ projection = {
     'fit': {}, 'overlay_signal': '',
 }
 surface = {
+    'paints_images': True,
     'data_structure': (
         (('repeat', 20),),
         (('field.x', 10), ('field.y', 10), ('field.z', 10)),

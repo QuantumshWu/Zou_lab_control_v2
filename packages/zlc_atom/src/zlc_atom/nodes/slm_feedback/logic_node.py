@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from zlc_pulse import PulseSequence
-from zlc_plot import Reduction
+from zlc_plot import AxisRef, Reduction
+from zlc_plot.semantics import fate_field_name
 
 from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
 from zlc_atom.devices.slm.solver import load_science_context
@@ -186,7 +187,7 @@ LOGIC_NODE = LogicNodeDescriptor(
             CAMERA_FRAMES_OUTPUT,
             "image",
             semantic={
-                "fate:repeat": "reduce",
+                fate_field_name(AxisRef.repeat()): "reduce",
                 "reduction": Reduction.MEAN,
             },
             producer="camera",
@@ -195,12 +196,18 @@ LOGIC_NODE = LogicNodeDescriptor(
         NodePreviewSpec(
             SITE_SIGNAL_HISTORY_OUTPUT,
             "curve",
-            semantic={"fate:candidate": "x", "fate:Site": "group"},
+            semantic={
+                fate_field_name(AxisRef.point("slm_feedback.candidate")): "x",
+                fate_field_name(AxisRef.data("calibration.site")): "group",
+            },
         ),
         NodePreviewSpec(
             TARGET_SHARE_HISTORY_OUTPUT,
             "curve",
-            semantic={"fate:candidate": "x", "fate:Site": "group"},
+            semantic={
+                fate_field_name(AxisRef.point("slm_feedback.candidate")): "x",
+                fate_field_name(AxisRef.data("calibration.site")): "group",
+            },
         ),
     ),
     artifact_outputs=(

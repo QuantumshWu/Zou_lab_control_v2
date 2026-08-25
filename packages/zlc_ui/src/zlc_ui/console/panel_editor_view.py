@@ -42,10 +42,9 @@ from zlc_ui.form import (
 )
 
 from ._panel_projection import (
-    decode_parameter_value,
-    draws_image_surfaces,
     interval_form_field,
     panel_state_document,
+    parameter_edit_values,
     parameter_fields,
     parameter_form_spec,
     parameter_form_values,
@@ -275,6 +274,10 @@ class PanelEditorView(QtWidgets.QWidget):
         self._state = state
         self._signal_groups = tuple(incoming.get("signal_options") or ())
         self._overlay_groups = tuple(incoming.get("overlay_signal_options") or ())
+        surface = incoming.get("parameter_surface")
+        paints_images = bool(
+            isinstance(surface, Mapping) and surface.get("paints_images")
+        )
         self.title_label.setText(state["title"] or self.panel_id)
         kind_text = state["kind"].replace("_", " ") or "automatic"
         if state["cell_kind"]:
@@ -299,7 +302,7 @@ class PanelEditorView(QtWidgets.QWidget):
                 required=True,
             ),
         ]
-        if draws_image_surfaces(state):
+        if paints_images:
             fields.append(FormFieldProps(
                 "overlay_signal",
                 "keyed_choice",
@@ -334,9 +337,8 @@ class PanelEditorView(QtWidgets.QWidget):
         }
         if live:
             values["interval_ms"] = state["interval_ms"]
-        if draws_image_surfaces(state):
+        if paints_images:
             values["overlay_signal"] = state["overlay_signal"]
-        surface = incoming.get("parameter_surface")
         self._science_locked = bool(
             isinstance(surface, Mapping) and surface.get("science_locked")
         )
@@ -528,15 +530,15 @@ class PanelEditorView(QtWidgets.QWidget):
 
     def _mapping_value_changed(self, section: str, key: str) -> None:
         try:
-            raw = self.parameter_forms[section].read_value(key)
-            declared = self._parameter_fields[section].get(key)
-            if declared is None:
-                raise KeyError(key)
-            value = decode_parameter_value(declared, raw)
+            values = parameter_edit_values(
+                self._parameter_fields[section].values(),
+                key,
+                self.parameter_forms[section].read_value,
+            )
         except (KeyError, TypeError, ValueError) as error:
             self.snapshot_label.setText(str(error))
             return
-        self.state_changed.emit({section: {key: value}})
+        self.state_changed.emit({section: values})
 
     def _update_producer(self, projection: object) -> None:
         if not isinstance(projection, Mapping):

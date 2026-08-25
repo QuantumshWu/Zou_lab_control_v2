@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from zlc_plot import (
     AxisRef,
@@ -15,7 +16,13 @@ from zlc_plot import (
     Reduction,
     describe_semantics,
 )
-from zlc_plot.semantics import axis_size, updated_spec
+from zlc_plot.semantics import (
+    axis_size,
+    composed_spec,
+    fate_field_name,
+    scope_fate,
+    updated_spec,
+)
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
 from zlc_plot._kinds import HANDLERS
 from zlc_plot.selectors import NumericRange, RectangleRange
@@ -71,11 +78,11 @@ def test_a_pinned_axis_narrows_everything_the_panel_shows() -> None:
     row = next(
         field
         for field in describe_semantics(schema, HistogramPlot()).fields
-        if field.name == "fate:row"
+        if field.name == fate_field_name(AxisRef.point("row"))
     )
-    assert (1.0, "= 1") in row.choices
+    assert (scope_fate(1.0), "= 1") in row.choices
 
-    spec = updated_spec(schema, HistogramPlot(), row.name, 1.0)
+    spec = updated_spec(schema, HistogramPlot(), row.name, scope_fate(1.0))
     assert spec.scope == ((AxisRef.point("row"), 1.0),)
 
     session = PlotSession(snapshot, spec)
@@ -171,6 +178,110 @@ def test_axis_size_measures_every_semantic_axis_domain() -> None:
     scanned = _snapshot().block.schema
     assert axis_size(scanned, AxisRef.repeat()) == 2
     assert axis_size(scanned, AxisRef.point("x")) == 4
+
+
+def test_equal_display_names_keep_distinct_stable_fate_keys() -> None:
+    """A human label may repeat; the exact AxisRef remains the row identity."""
+
+    from zlc_data import AxisId, AxisSpec, COMPONENT
+
+    left = AxisRef.data("channel.left")
+    right = AxisRef.data("channel.right")
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns({"sample": (0.0, 1.0)}),
+        data_axes=(
+            AxisSpec(AxisId("channel.left"), "channel", COMPONENT, 2),
+            AxisSpec(AxisId("channel.right"), "channel", COMPONENT, 3),
+        ),
+    )
+
+    description = describe_semantics(
+        schema,
+        CurvePlot(AxisRef.point("sample")),
+    )
+    rows = dict(description.fate_rows)
+    assert rows[left] == fate_field_name(left)
+    assert rows[right] == fate_field_name(right)
+    assert rows[left] != rows[right]
+    assert description.field(rows[left]).label == "channel"
+    assert description.field(rows[right]).label == "channel"
+    assert scope_fate(2.0) not in description.field(rows[left]).choice_values
+    assert scope_fate(2.0) in description.field(rows[right]).choice_values
+
+
+def test_exact_data_axis_id_wins_over_another_axis_name() -> None:
+    """Declaration order cannot redirect an exact id through a name alias."""
+
+    from zlc_data import AxisId, AxisSpec, COMPONENT
+    from zlc_plot.data_view import DataView
+
+    target = AxisRef.data("axis.target")
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns({"sample": (0.0,)}),
+        data_axes=(
+            AxisSpec(AxisId("axis.other"), "axis.target", COMPONENT, 2),
+            AxisSpec(AxisId("axis.target"), "selected", COMPONENT, 3),
+        ),
+    )
+    snapshot = DatasetSnapshot(
+        schema,
+        np.arange(6.0).reshape(1, 1, 2, 3),
+        revision=0,
+    )
+
+    assert axis_size(schema, target) == 3
+    series = DataView(snapshot).curve(target).series[0]
+    assert series.x.label == "selected"
+    np.testing.assert_array_equal(series.x.canonical, np.arange(3.0))
+    with pytest.raises(ValueError, match="no exact data axis"):
+        DataView(snapshot).curve(AxisRef.data("selected"))
+    session = PlotSession(
+        snapshot,
+        HistogramPlot(scope=((target, 1),)),
+    )
+    try:
+        assert int(np.sum(session._payload.counts)) == 2
+    finally:
+        session.close()
+
+
+def test_categorical_scope_values_do_not_collide_with_fate_tokens() -> None:
+    """Text coordinates named x/reduce/latest remain coordinates, not verbs."""
+
+    from zlc_data import LATEST_COORDINATE
+
+    ref = AxisRef.point("mode")
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns({"mode": ("x", "reduce", "latest")}),
+    )
+    description = describe_semantics(schema, HistogramPlot())
+    field = description.field(fate_field_name(ref))
+    scoped_choices = {
+        label: value
+        for value, label in field.choices
+        if str(label).startswith("= ")
+    }
+    assert scoped_choices == {
+        "= x": scope_fate("x"),
+        "= reduce": scope_fate("reduce"),
+        "= latest": scope_fate("latest"),
+    }
+    assert scope_fate("latest") != scope_fate(LATEST_COORDINATE)
+
+    for coordinate in ("x", "reduce", "latest"):
+        selected = updated_spec(
+            schema,
+            HistogramPlot(),
+            field.name,
+            scope_fate(coordinate),
+        )
+        assert selected.scope == ((ref, coordinate),)
+        assert describe_semantics(schema, selected).fate(ref) == scope_fate(
+            coordinate
+        )
 
 
 def test_series_x_and_group_choices_exclude_degenerate_axes() -> None:
@@ -278,11 +389,11 @@ def test_a_camera_cycle_names_its_rows_frames_and_nothing_else() -> None:
     from data_factory import PointTopology
 
     camera = describe_semantics(_camera_frame_schema(), CurvePlot(AxisRef.point("frame")))
-    assert [name.removeprefix('fate:') for _ref, name in camera.fate_rows] == [
-        "repeat",
-        "frame",
-        "spatial-y",
-        "spatial-x",
+    assert [ref for ref, _name in camera.fate_rows] == [
+        AxisRef.repeat(),
+        AxisRef.point("frame"),
+        AxisRef.data("spatial-y"),
+        AxisRef.data("spatial-x"),
     ]
 
     scan = DatasetSchema.create(
@@ -291,9 +402,9 @@ def test_a_camera_cycle_names_its_rows_frames_and_nothing_else() -> None:
         dtype=np.float64,
     )
     curve = describe_semantics(scan, CurvePlot(AxisRef.point("detuning")))
-    assert [name.removeprefix("fate:") for _ref, name in curve.fate_rows][:2] == [
-        "repeat",
-        "detuning",
+    assert [ref for ref, _name in curve.fate_rows][:2] == [
+        AxisRef.repeat(),
+        AxisRef.point("detuning"),
     ]
 
 
@@ -335,8 +446,67 @@ def test_a_two_dimensional_scan_reports_the_fate_its_panel_applies() -> None:
     )
     description = describe_semantics(schema, spec)
     assert description.fate(AxisRef.point_rows()) == "facet"
-    assert [name.removeprefix('fate:') for _ref, name in description.fate_rows][0] == "repeat"
-    assert "fate:coil_x" in [name for _ref, name in description.fate_rows]
+    assert description.fate_rows[0][0] == AxisRef.repeat()
+    assert fate_field_name(AxisRef.point_dimension("coil_x")) in [
+        name for _ref, name in description.fate_rows
+    ]
+    with pytest.raises(KeyError):
+        composed_spec(
+            schema,
+            spec,
+            {fate_field_name(AxisRef.point("coil_x")): "x"},
+        )
+
+
+def test_a_whole_fate_table_moves_dense_image_roles_to_scan_axes_atomically() -> None:
+    """Settling the old dense axes cannot overwrite pending scan-axis roles."""
+
+    import itertools
+
+    from data_factory import PointTopology
+
+    domain = np.arange(10.0)
+    rows = tuple(itertools.product(domain, domain, domain))
+    table = PointTable.from_columns({
+        "field.x": [row[0] for row in rows],
+        "field.y": [row[1] for row in rows],
+        "field.z": [row[2] for row in rows],
+    })
+    topology = PointTopology.from_cartesian(
+        tuple(
+            Axis.create(name, values=domain)
+            for name in ("field.x", "field.y", "field.z")
+        ),
+        point_table=table,
+    )
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=20),
+        table,
+        point_topology=topology,
+        data_axes=(Axis.create("pair", size=3), Axis.create("site", size=35)),
+        dtype=np.float64,
+    )
+    initial = FacetGridPlot(
+        AxisRef.point_dimension("field.x"),
+        ImagePlot(AxisRef.data("site"), AxisRef.data("pair")),
+    )
+    fates = {
+        fate_field_name(AxisRef.point_dimension("field.y")): "y",
+        fate_field_name(AxisRef.point_dimension("field.z")): "x",
+        fate_field_name(AxisRef.data("pair")): "reduce",
+        fate_field_name(AxisRef.data("site")): "reduce",
+    }
+
+    selected = composed_spec(schema, initial, fates)
+    assert selected == composed_spec(
+        schema, initial, dict(reversed(tuple(fates.items())))
+    ), "a fate table must not depend on row iteration order"
+    assert selected.facet == AxisRef.point_dimension("field.x")
+    assert selected.cell.x == AxisRef.point_dimension("field.z")
+    assert selected.cell.y == AxisRef.point_dimension("field.y")
+    description = describe_semantics(schema, selected)
+    assert description.fate(AxisRef.data("pair")) == "reduce"
+    assert description.fate(AxisRef.data("site")) == "reduce"
 
 
 def test_a_scan_dimension_of_a_long_sweep_still_offers_its_scope() -> None:
@@ -390,7 +560,10 @@ def test_a_scan_dimension_of_a_long_sweep_still_offers_its_scope() -> None:
     description = describe_semantics(schema, CurvePlot(AxisRef.point("ax")))
     for dimension in ("ay", "az"):
         field = next(
-            item for item in description.fields if item.name == f"fate:{dimension}"
+            item
+            for item in description.fields
+            if item.name
+            == fate_field_name(AxisRef.point_dimension(dimension))
         )
         pins = [label for _value, label in field.choices if str(label).startswith("= ")]
         assert len(pins) == 10, (

@@ -6,7 +6,6 @@ import time
 
 import numpy as np
 import pytest
-import zlc_runtime.selection_bridge as selection_bridge_module
 
 from zlc_data import (
     READOUT_EVENT,
@@ -64,21 +63,14 @@ class _Source:
 
 class _Events:
     def __init__(self) -> None:
-        self.current: SelectionState | None = None
-        self._selection_callbacks = []
         self._fit_callbacks = []
-
-    def subscribe_selection(self, callback):
-        self._selection_callbacks.append(callback)
-
-        def unsubscribe() -> None:
-            if callback in self._selection_callbacks:
-                self._selection_callbacks.remove(callback)
-
-        return unsubscribe
+        self._bridge: SelectionBridge | None = None
 
     def subscribe_fit(self, callback):
         self._fit_callbacks.append(callback)
+        owner = getattr(callback, "__self__", None)
+        if isinstance(owner, SelectionBridge):
+            self._bridge = owner
 
         def unsubscribe() -> None:
             if callback in self._fit_callbacks:
@@ -86,15 +78,19 @@ class _Events:
 
         return unsubscribe
 
-    def selector_data(self, _kind: str) -> SelectionState:
-        if self.current is None:
-            raise RuntimeError("no current selection")
-        return self.current
-
     def emit_selection(self, change: SelectionChange, state: SelectionState) -> None:
-        self.current = state
-        for callback in tuple(self._selection_callbacks):
-            callback(change, state)
+        bridge = self._bridge
+        if bridge is None:
+            raise RuntimeError("selection test bridge has not started")
+        if change in {SelectionChange.ADDED, SelectionChange.UPDATED}:
+            return
+        if change is SelectionChange.REMOVED:
+            bridge.clear_selection()
+            return
+        publication = bridge._plane.latest_publication(bridge._source_signal)
+        if publication is None:
+            raise RuntimeError("selection test source has no publication")
+        bridge.commit_selection(state, source_publication=publication)
 
     def emit_fit(self, event: FitEventValue | None) -> None:
         for callback in tuple(self._fit_callbacks):
@@ -144,6 +140,38 @@ def _source_setup(
     plane.commit_live(source, state)
     initial = plane.freeze()
     return plane, source, None, state, initial
+
+
+def _source_generation(plane: SignalDataPlane) -> str:
+    publication = plane.latest_publication("camera/frame")
+    assert publication is not None
+    value = publication.value("camera/frame")
+    assert value is not None
+    return str(value.snapshot.ref.stream_generation.value)
+
+
+def _scalar_fit_event(
+    plane: SignalDataPlane,
+    value: float,
+    error: float,
+    batch_revision: int,
+) -> FitEventValue:
+    return FitEventValue(
+        parameter_names=("x0",),
+        parameter_units={"x0": "pixel"},
+        parameter_values={"x0": np.asarray([value])},
+        parameter_errors={"x0": np.asarray([error])},
+        success=np.asarray([True]),
+        sample_axis_domain="",
+        sample_axis_id="",
+        sample_axis_name="",
+        sample_coordinates=np.asarray([0.0]),
+        sample_unit="",
+        sample_labels=None,
+        source_generation=_source_generation(plane),
+        source_revision=1,
+        batch_revision=batch_revision,
+    )
 
 
 def _finite_source_setup(
@@ -286,7 +314,6 @@ def test_image_area_materializes_closed_roi_and_mean_with_lineage() -> None:
         plane,
         "camera/frame",
         events,
-        events,
         bridge_id="image",
     )
     bridge.start()
@@ -294,8 +321,8 @@ def test_image_area_materializes_closed_roi_and_mean_with_lineage() -> None:
         "image",
         "area",
         (
-            SelectionRange("x", 0.0, 1.0),
-            SelectionRange("y", 20.0, 30.0),
+            SelectionRange("x", 0.0, 1.0, domain="data"),
+            SelectionRange("y", 20.0, 30.0, domain="data"),
         ),
         revision=1,
     )
@@ -322,7 +349,7 @@ def test_image_area_catalog_statistics_and_publication_choice_share_one_owner() 
     values = np.arange(12, dtype=np.float64).reshape(1, 1, 4, 3)
     plane, source, _slot, _state, _initial = _source_setup(schema, values)
     events = _Events()
-    derived = {name for name, _label in selection_output_catalog("image")}
+    derived = {name for name, _label in selection_output_catalog("area")}
     assert derived == {
         "roi_frame",
         "roi_mean",
@@ -334,14 +361,14 @@ def test_image_area_catalog_statistics_and_publication_choice_share_one_owner() 
     plane.set_front_signals(
         {"camera/frame", *(f"@logic/image/{name}" for name in derived)}
     )
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="image")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="image")
     bridge.start()
     selection = SelectionState(
         "image",
         "area",
         (
-            SelectionRange("x", -1.0, 2.0),
-            SelectionRange("y", 10.0, 30.0),
+            SelectionRange("x", -1.0, 2.0, domain="data"),
+            SelectionRange("y", 10.0, 30.0, domain="data"),
         ),
         revision=1,
     )
@@ -382,18 +409,24 @@ def test_selection_commit_republishes_same_source_and_source_revision_follows() 
     plane, source, slot, state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/image/roi_mean"})
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="image")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="image")
     bridge.start()
     first_state = SelectionState(
         "image",
         "area",
-        (SelectionRange("x", -1.0, 0.0), SelectionRange("y", 10.0, 20.0)),
+        (
+            SelectionRange("x", -1.0, 0.0, domain="data"),
+            SelectionRange("y", 10.0, 20.0, domain="data"),
+        ),
         revision=1,
     )
     second_state = SelectionState(
         "image",
         "area",
-        (SelectionRange("x", 1.0, 2.0), SelectionRange("y", 20.0, 30.0)),
+        (
+            SelectionRange("x", 1.0, 2.0, domain="data"),
+            SelectionRange("y", 20.0, 30.0, domain="data"),
+        ),
         revision=2,
     )
     try:
@@ -436,7 +469,6 @@ def test_close_does_not_wait_for_selection_materialization_or_publish_stale(
         plane,
         "camera/frame",
         events,
-        events,
         bridge_id="close-race",
     )
     bridge.start()
@@ -449,8 +481,8 @@ def test_close_does_not_wait_for_selection_materialization_or_publish_stale(
         "image",
         "area",
         (
-            SelectionRange("x", 0.0, 1.0),
-            SelectionRange("y", 20.0, 30.0),
+            SelectionRange("x", 0.0, 1.0, domain="data"),
+            SelectionRange("y", 20.0, 30.0, domain="data"),
         ),
         revision=1,
     )
@@ -543,7 +575,6 @@ def test_selection_derives_from_the_canonical_repeat_prefix_not_the_event_chunk(
         plane,
         "camera/frame",
         events,
-        events,
         bridge_id="repeats",
     )
     bridge.start()
@@ -551,8 +582,8 @@ def test_selection_derives_from_the_canonical_repeat_prefix_not_the_event_chunk(
         "image",
         "area",
         (
-            SelectionRange("x", -1.0, 2.0),
-            SelectionRange("y", 10.0, 30.0),
+            SelectionRange("x", -1.0, 2.0, domain="data"),
+            SelectionRange("y", 10.0, 30.0, domain="data"),
         ),
         revision=1,
     )
@@ -631,15 +662,14 @@ def test_restored_selection_starts_on_displayed_prefix_then_catches_live_latest(
         plane,
         "camera/frame",
         events,
-        events,
         bridge_id="restored-prefix",
     )
     selection = SelectionState(
         "image",
         "area",
         (
-            SelectionRange("x", -1.0, 2.0),
-            SelectionRange("y", 10.0, 30.0),
+            SelectionRange("x", -1.0, 2.0, domain="data"),
+            SelectionRange("y", 10.0, 30.0, domain="data"),
         ),
         revision=1,
     )
@@ -725,7 +755,6 @@ def test_delayed_selection_of_publication_n_never_reads_publication_n_plus_one(
         plane,
         "camera/frame",
         events,
-        events,
         bridge_id="exact-prefix",
     )
     bridge.start()
@@ -733,8 +762,8 @@ def test_delayed_selection_of_publication_n_never_reads_publication_n_plus_one(
         "image",
         "area",
         (
-            SelectionRange("x", -1.0, 2.0),
-            SelectionRange("y", 10.0, 30.0),
+            SelectionRange("x", -1.0, 2.0, domain="data"),
+            SelectionRange("y", 10.0, 30.0, domain="data"),
         ),
         revision=1,
     )
@@ -802,13 +831,13 @@ def test_curve_range_and_facet_condition_select_point_rows_inclusive() -> None:
     plane, source, _slot, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/curve/roi_mean"})
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="curve")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="curve")
     bridge.start()
     selection = SelectionState(
         "curve",
         "x_range",
-        (SelectionRange("x", 0.0, 3.0),),
-        (FacetCondition("facet", 1.0),),
+        (SelectionRange("x", 0.0, 3.0, domain="point_coordinate"),),
+        (FacetCondition("facet", 1.0, "point_coordinate"),),
         revision=1,
     )
     try:
@@ -840,23 +869,11 @@ def test_fit_event_publishes_parameter_and_error_scalars() -> None:
     plane.set_front_signals(
         {"camera/frame", "@logic/fit/x0", "@logic/fit/x0_err"}
     )
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="fit")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="fit")
     bridge.start()
     try:
         events.emit_fit(
-            FitEventValue(
-                parameter_names=("x0",),
-                parameter_units={"x0": "pixel"},
-                parameter_values={"x0": np.asarray([2.5])},
-                parameter_errors={"x0": np.asarray([0.1])},
-                success=np.asarray([True]),
-                sample_axis_name="",
-                sample_coordinates=np.asarray([0.0]),
-                sample_unit="",
-                sample_labels=None,
-                source_revision=1,
-                batch_revision=1,
-            )
+            _scalar_fit_event(plane, 2.5, 0.1, 1)
         )
         front = plane.freeze()
         parameter = front.value("@logic/fit/x0")
@@ -882,25 +899,13 @@ def test_fit_event_publishes_parameter_and_error_scalars() -> None:
             SelectionState(
                 "curve",
                 "x_range",
-                (SelectionRange("x", 0.0, 1.0),),
+                (SelectionRange("x", 0.0, 1.0, domain="point_coordinate"),),
                 revision=1,
             ),
         )
         assert plane.freeze().value("@logic/fit/x0") is not None
         events.emit_fit(
-            FitEventValue(
-                parameter_names=("x0",),
-                parameter_units={"x0": "pixel"},
-                parameter_values={"x0": np.asarray([3.5])},
-                parameter_errors={"x0": np.asarray([0.2])},
-                success=np.asarray([True]),
-                sample_axis_name="",
-                sample_coordinates=np.asarray([0.0]),
-                sample_unit="",
-                sample_labels=None,
-                source_revision=1,
-                batch_revision=2,
-            )
+            _scalar_fit_event(plane, 3.5, 0.2, 2)
         )
         second_front = plane.freeze()
         second_parameter = second_front.value("@logic/fit/x0")
@@ -915,6 +920,7 @@ def test_fit_event_publishes_parameter_and_error_scalars() -> None:
 
 
 def _batch_fit_event(
+    plane: SignalDataPlane,
     *,
     source_revision: int,
     batch_revision: int = 1,
@@ -940,10 +946,13 @@ def _batch_fit_event(
             "width": np.asarray([0.05, np.nan, 0.07]),
         },
         success=np.asarray([True, False, True]),
+        sample_axis_domain="point_row",
+        sample_axis_id="",
         sample_axis_name="facet",
         sample_coordinates=coordinates,
         sample_unit=unit,
         sample_labels=labels,
+        source_generation=_source_generation(plane),
         source_revision=source_revision,
         batch_revision=batch_revision,
     )
@@ -963,25 +972,11 @@ def test_a_withdrawn_fit_takes_its_outputs_with_it() -> None:
     plane, _source, _slot, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/fit/x0", "@logic/fit/x0_err"})
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="fit")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="fit")
     bridge.start()
     try:
         def emit(x0: float, batch_revision: int) -> None:
-            events.emit_fit(
-                FitEventValue(
-                    parameter_names=("x0",),
-                    parameter_units={"x0": "pixel"},
-                    parameter_values={"x0": np.asarray([x0])},
-                    parameter_errors={"x0": np.asarray([0.1])},
-                    success=np.asarray([True]),
-                    sample_axis_name="",
-                    sample_coordinates=np.asarray([0.0]),
-                    sample_unit="",
-                    sample_labels=None,
-                    source_revision=1,
-                    batch_revision=batch_revision,
-                )
-            )
+            events.emit_fit(_scalar_fit_event(plane, x0, 0.1, batch_revision))
 
         emit(2.5, 1)
         assert plane.freeze().value("@logic/fit/x0") is not None
@@ -1013,10 +1008,12 @@ def test_fit_event_batch_publishes_vectors_with_units_validity_and_lineage() -> 
             "@logic/batch/width_err",
         }
     )
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="batch")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="batch")
     bridge.start()
     try:
-        events.emit_fit(_batch_fit_event(source_revision=1))
+        events.emit_fit(
+            _batch_fit_event(plane, source_revision=1)
+        )
         front = plane.freeze()
         for name in ("center", "center_err", "width", "width_err"):
             signal = front.value(f"@logic/batch/{name}")
@@ -1075,10 +1072,11 @@ def test_fit_event_batch_text_samples_use_numeric_indices_and_preserve_labels() 
     plane.set_front_signals(
         {"camera/frame", "@logic/text/center", "@logic/text/center_err"}
     )
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="text")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="text")
     bridge.start()
     try:
         event = _batch_fit_event(
+            plane,
             source_revision=1,
             text_samples=True,
         )
@@ -1098,17 +1096,25 @@ def test_fit_event_batch_text_samples_use_numeric_indices_and_preserve_labels() 
         _close(bridge, plane, source)
 
 
-def _single_cell_facet_event(*, source_revision: int, batch_revision: int) -> FitEventValue:
+def _single_cell_facet_event(
+    plane: SignalDataPlane,
+    *,
+    source_revision: int,
+    batch_revision: int,
+) -> FitEventValue:
     return FitEventValue(
         parameter_names=("center",),
         parameter_units={"center": "pixel"},
         parameter_values={"center": np.asarray([4.0])},
         parameter_errors={"center": np.asarray([0.25])},
         success=np.asarray([True]),
+        sample_axis_domain="point_row",
+        sample_axis_id="",
         sample_axis_name="facet",
         sample_coordinates=np.asarray([42.0]),
         sample_unit="V",
         sample_labels=None,
+        source_generation=_source_generation(plane),
         source_revision=source_revision,
         batch_revision=batch_revision,
     )
@@ -1122,10 +1128,16 @@ def test_single_cell_facet_is_a_valid_vector_fit() -> None:
     plane.set_front_signals(
         {"camera/frame", "@logic/one/center", "@logic/one/center_err"}
     )
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="one")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="one")
     bridge.start()
     try:
-        events.emit_fit(_single_cell_facet_event(source_revision=1, batch_revision=1))
+        events.emit_fit(
+            _single_cell_facet_event(
+                plane,
+                source_revision=1,
+                batch_revision=1,
+            )
+        )
         front = plane.freeze()
         value = front.value("@logic/one/center")
         error = front.value("@logic/one/center_err")
@@ -1138,84 +1150,13 @@ def test_single_cell_facet_is_a_valid_vector_fit() -> None:
         _close(bridge, plane, source)
 
 
-def test_scalar_and_single_cell_facet_use_the_same_vector_materializer(monkeypatch) -> None:
-    original = SelectionBridge._materialize_fit_vector
-    calls: dict[str, list[str]] = {"sample": [], "facet": []}
-
-    def spy(self, source, fit_source_ref, name, values, schema, validity, contract_id, coverage):
-        axis_name = schema.point_table.columns[0].name
-        calls[axis_name].append(name)
-        return original(
-            self,
-            source,
-            fit_source_ref,
-            name,
-            values,
-            schema,
-            validity,
-            contract_id,
-            coverage,
-        )
-
-    monkeypatch.setattr(SelectionBridge, "_materialize_fit_vector", spy)
-
-    scalar_plane, scalar_source, _slot, _state, scalar_initial = _source_setup(
-        _curve_schema(), np.zeros((1, 5, 1), dtype=np.float64)
-    )
-    scalar_events = _Events()
-    scalar_bridge = SelectionBridge(
-        scalar_plane,
-        "camera/frame",
-        scalar_events,
-        scalar_events,
-        bridge_id="scalar-path",
-    )
-    facet_plane, facet_source, _slot, _state, facet_initial = _source_setup(
-        _curve_schema(), np.zeros((1, 5, 1), dtype=np.float64)
-    )
-    facet_events = _Events()
-    facet_bridge = SelectionBridge(
-        facet_plane,
-        "camera/frame",
-        facet_events,
-        facet_events,
-        bridge_id="facet-path",
-    )
-    try:
-        scalar_bridge._materialize_fit_outputs(
-            scalar_initial.value("camera/frame").snapshot,
-            FitEventValue(
-                parameter_names=("center",),
-                parameter_units={"center": "pixel"},
-                parameter_values={"center": np.asarray([1.0])},
-                parameter_errors={"center": np.asarray([0.1])},
-                success=np.asarray([True]),
-                sample_axis_name="",
-                sample_coordinates=np.asarray([0.0]),
-                sample_unit="",
-                sample_labels=None,
-                source_revision=1,
-                batch_revision=1,
-            ),
-        )
-        facet_bridge._materialize_fit_outputs(
-            facet_initial.value("camera/frame").snapshot,
-            _single_cell_facet_event(source_revision=1, batch_revision=1),
-        )
-        assert calls["sample"] == ["center", "center_err"]
-        assert calls["sample"] == calls["facet"]
-    finally:
-        _close(scalar_bridge, scalar_plane, scalar_source)
-        _close(facet_bridge, facet_plane, facet_source)
-
-
 def test_late_stale_fit_failure_cannot_withdraw_newer_batch(monkeypatch) -> None:
     schema = _curve_schema()
     values = np.zeros((1, 5, 1), dtype=np.float64)
     plane, source, slot, state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/race/center"})
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="race")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="race")
     bridge.start()
     gate = Event()
     original_evaluate = bridge._evaluate_processor
@@ -1227,7 +1168,9 @@ def test_late_stale_fit_failure_cannot_withdraw_newer_batch(monkeypatch) -> None
 
     monkeypatch.setattr(bridge, "_evaluate_processor", delayed_evaluate)
     try:
-        events.emit_fit(_batch_fit_event(source_revision=1, batch_revision=1))
+        events.emit_fit(
+            _batch_fit_event(plane, source_revision=1, batch_revision=1)
+        )
         processor = bridge._fit_processor
         assert processor is not None
 
@@ -1239,7 +1182,9 @@ def test_late_stale_fit_failure_cannot_withdraw_newer_batch(monkeypatch) -> None
         _commit_source(plane, source, state)
         plane.freeze()
 
-        events.emit_fit(_batch_fit_event(source_revision=2, batch_revision=2))
+        events.emit_fit(
+            _batch_fit_event(plane, source_revision=2, batch_revision=2)
+        )
         bridge._accept_processor_failure(processor, _StaleFit(1))
         front = plane.freeze()
         newer = front.value("@logic/race/center")
@@ -1256,44 +1201,20 @@ def test_late_stale_fit_failure_cannot_withdraw_newer_batch(monkeypatch) -> None
         _close(bridge, plane, source)
 
 
-def test_fit_contract_fields_and_exports_are_exact() -> None:
-    assert tuple(FitEventValue.__dataclass_fields__) == (
-        "parameter_names",
-        "parameter_units",
-        "parameter_values",
-        "parameter_errors",
-        "success",
-        "sample_axis_name",
-        "sample_coordinates",
-        "sample_unit",
-        "sample_labels",
-        "source_revision",
-        "batch_revision",
-    )
-    assert tuple(selection_bridge_module.__all__) == (
-        "FacetCondition",
-        "FitEventValue",
-        "SelectionBridge",
-        "SelectionChange",
-        "SelectionDataReader",
-        "SelectionEventSource",
-        "SelectionRange",
-        "SelectionState",
-        "selection_output_catalog",
-    )
-    assert not hasattr(selection_bridge_module, "FitParameter")
-
-
-def test_fit_event_batch_revision_is_retained_across_source_updates() -> None:
+def test_fit_batch_revision_is_retained_within_source_and_resets_on_restart() -> None:
     schema = _curve_schema()
     values = np.zeros((1, 5, 1), dtype=np.float64)
     plane, source, slot, state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/revision/center"})
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="revision")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="revision")
     bridge.start()
     try:
-        first_event = _batch_fit_event(source_revision=1, batch_revision=1)
+        first_event = _batch_fit_event(
+            plane,
+            source_revision=1,
+            batch_revision=1,
+        )
         events.emit_fit(first_event)
         first = plane.freeze().value("@logic/revision/center")
         assert first is not None
@@ -1318,11 +1239,39 @@ def test_fit_event_batch_revision_is_retained_across_source_updates() -> None:
             for item in plane.describe_signals()
             if item.owner_id.startswith("revision:fit:")
         ) == first_names
-        events.emit_fit(_batch_fit_event(source_revision=2, batch_revision=2))
+        events.emit_fit(
+            _batch_fit_event(plane, source_revision=2, batch_revision=2)
+        )
         front = _wait_for_signal(plane, "@logic/revision/center", 2)
         second = front.value("@logic/revision/center")
         assert second is not None
         assert second.snapshot.ref.revision.value > first.snapshot.ref.revision.value
+
+        previous_generation = _source_generation(plane)
+        plane.retire(source)
+        plane.begin_generation(source)
+        state["frame"] = LiveDatasetOutput(
+            state["frame"].declaration,
+            _snapshot("restarted-frame", 1, schema, values + 2.0),
+            MonitorCoverage(1, 5),
+        )
+        _commit_source(plane, source, state)
+        restarted_source = plane.latest_publication("camera/frame")
+        assert restarted_source is not None
+        assert _source_generation(plane) != previous_generation
+        events.emit_fit(
+            _batch_fit_event(plane, source_revision=1, batch_revision=1)
+        )
+        restarted_front = plane.freeze()
+        restarted = restarted_front.value("@logic/revision/center")
+        restarted_publication = restarted_front.publication(
+            "@logic/revision/center"
+        )
+        assert restarted is not None and restarted_publication is not None
+        assert restarted.snapshot.ref.revision.value == 1
+        assert restarted_publication.direct_parent_refs == (
+            restarted_source.event_ref,
+        )
     finally:
         _close(bridge, plane, source)
 
@@ -1346,22 +1295,28 @@ def test_a_trailing_fit_publishes_against_the_exact_shot_it_fitted() -> None:
 
     # The port's role in miniature: it holds every publication it staged or
     # presented, keyed by the data revision the renderer saw.
-    held: dict[int, object] = {}
+    held: dict[tuple[str, int], object] = {}
 
     def remember_current() -> None:
         publication = plane.latest_publication("camera/frame")
         assert publication is not None
         value = publication.value("camera/frame")
         assert value is not None
-        held[value.snapshot.ref.revision.value] = publication
+        held[
+            (
+                str(value.snapshot.ref.stream_generation.value),
+                value.snapshot.ref.revision.value,
+            )
+        ] = publication
 
     bridge = SelectionBridge(
         plane,
         "camera/frame",
         events,
-        events,
         bridge_id="trail",
-        source_publication_for=lambda revision: held.get(revision),
+        source_publication_for=lambda generation, revision: held.get(
+            (generation, revision)
+        ),
     )
     bridge.start()
     try:
@@ -1377,7 +1332,9 @@ def test_a_trailing_fit_publishes_against_the_exact_shot_it_fitted() -> None:
         plane.freeze()
         remember_current()
 
-        events.emit_fit(_batch_fit_event(source_revision=1, batch_revision=1))
+        events.emit_fit(
+            _batch_fit_event(plane, source_revision=1, batch_revision=1)
+        )
         assert bridge.last_error is None
         front = plane.freeze()
         published = front.value("@logic/trail/center")
@@ -1387,62 +1344,20 @@ def test_a_trailing_fit_publishes_against_the_exact_shot_it_fitted() -> None:
         assert parent_ref.sequence == 1  # camera@1: the shot it was fitted on
 
         # The next shot's fit follows normally against camera@2.
-        events.emit_fit(_batch_fit_event(source_revision=2, batch_revision=2))
+        events.emit_fit(
+            _batch_fit_event(plane, source_revision=2, batch_revision=2)
+        )
         assert bridge.last_error is None
         second = plane.freeze().publication("@logic/trail/center")
         assert second.direct_parent_refs[0].sequence == 2
 
         # A revision no panel ever held reports, not silently vanishes.
-        events.emit_fit(_batch_fit_event(source_revision=77, batch_revision=3))
+        events.emit_fit(
+            _batch_fit_event(plane, source_revision=77, batch_revision=3)
+        )
         assert bridge.last_error is not None
     finally:
         _close(bridge, plane, source)
-
-
-def test_fit_event_value_freezes_batch_inputs_and_rejects_invalid_tables() -> None:
-    values = np.asarray([1.0, np.nan])
-    errors = np.asarray([0.1, np.nan])
-    success = np.asarray([True, False])
-    event = FitEventValue(
-        parameter_names=("center",),
-        parameter_units={"center": "pixel"},
-        parameter_values={"center": values},
-        parameter_errors={"center": errors},
-        success=success,
-        sample_axis_name="facet",
-        sample_coordinates=np.asarray([0.0, 1.0]),
-        sample_unit="",
-        sample_labels=("a", "b"),
-        source_revision=1,
-        batch_revision=1,
-    )
-    values[0] = 99.0
-    errors[0] = 99.0
-    success[0] = False
-    assert event.parameter_values["center"][0] == 1.0
-    assert event.parameter_errors["center"][0] == 0.1
-    assert bool(event.success[0]) is True
-    with pytest.raises(ValueError):
-        event.parameter_values["center"][0] = 4.0
-    with pytest.raises(ValueError):
-        event.success[0] = False
-    with pytest.raises(TypeError):
-        event.parameter_values["other"] = np.asarray([1.0, 2.0])
-
-    with pytest.raises(ValueError, match="match value length"):
-        FitEventValue(
-            parameter_names=("center",),
-            parameter_units={"center": "pixel"},
-            parameter_values={"center": np.asarray([1.0, 2.0])},
-            parameter_errors={"center": np.asarray([0.1])},
-            success=np.asarray([True, False]),
-            sample_axis_name="facet",
-            sample_coordinates=np.asarray([0.0, 1.0]),
-            sample_unit="",
-            sample_labels=None,
-            source_revision=1,
-            batch_revision=1,
-        )
 
 
 def test_added_and_updated_selection_events_do_not_publish() -> None:
@@ -1451,12 +1366,12 @@ def test_added_and_updated_selection_events_do_not_publish() -> None:
     plane, source, _slot, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/curve/roi_mean"})
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="curve")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="curve")
     bridge.start()
     state = SelectionState(
         "curve",
         "x_range",
-        (SelectionRange("x", 1.0, 3.0),),
+        (SelectionRange("x", 1.0, 3.0, domain="point_coordinate"),),
         revision=1,
     )
     try:
@@ -1466,7 +1381,7 @@ def test_added_and_updated_selection_events_do_not_publish() -> None:
             SelectionState(
                 "curve",
                 "x_range",
-                (SelectionRange("x", 0.0, 4.0),),
+                (SelectionRange("x", 0.0, 4.0, domain="point_coordinate"),),
                 revision=2,
             ),
         )
@@ -1481,12 +1396,12 @@ def test_removed_selection_retires_derived_signals_and_unknown_axis_is_loud() ->
     plane, source, _slot, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/curve/roi_mean"})
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="curve")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="curve")
     bridge.start()
     selection = SelectionState(
         "curve",
         "x_range",
-        (SelectionRange("x", 1.0, 3.0),),
+        (SelectionRange("x", 1.0, 3.0, domain="point_coordinate"),),
         revision=1,
     )
     try:
@@ -1495,13 +1410,20 @@ def test_removed_selection_retires_derived_signals_and_unknown_axis_is_loud() ->
         events.emit_selection(SelectionChange.REMOVED, selection)
         plane.freeze()
         assert plane.latest_publication("@logic/curve/roi_mean") is None
-        with pytest.raises(ValueError, match="not uniquely present"):
+        with pytest.raises(ValueError, match="not present"):
             events.emit_selection(
                 SelectionChange.COMMITTED,
                 SelectionState(
                     "curve",
                     "x_range",
-                    (SelectionRange("missing", 0.0, 1.0),),
+                    (
+                        SelectionRange(
+                            "missing",
+                            0.0,
+                            1.0,
+                            domain="point_coordinate",
+                        ),
+                    ),
                     revision=2,
                 ),
             )
@@ -1529,7 +1451,7 @@ def test_a_box_on_a_finished_run_is_answered_once() -> None:
     assert not plane.is_generation_live("camera/frame")
 
     events = _Events()
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="frozen")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="frozen")
     bridge.start()
     try:
         events.emit_selection(
@@ -1537,7 +1459,10 @@ def test_a_box_on_a_finished_run_is_answered_once() -> None:
             SelectionState(
                 "image",
                 "area",
-                (SelectionRange("x", 0.0, 1.0), SelectionRange("y", 20.0, 30.0)),
+                (
+                    SelectionRange("x", 0.0, 1.0, domain="data"),
+                    SelectionRange("y", 20.0, 30.0, domain="data"),
+                ),
                 revision=1,
             ),
         )
@@ -1570,7 +1495,7 @@ def test_a_second_box_on_a_finished_run_replaces_the_first() -> None:
     )
     _seal_source(plane, source, state_map["frame"])
     events = _Events()
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="frozen")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="frozen")
     bridge.start()
     try:
         for revision, upper in ((1, 1.0), (2, 2.0)):
@@ -1580,8 +1505,8 @@ def test_a_second_box_on_a_finished_run_replaces_the_first() -> None:
                     "image",
                     "area",
                     (
-                        SelectionRange("x", 0.0, upper),
-                        SelectionRange("y", 20.0, 30.0),
+                        SelectionRange("x", 0.0, upper, domain="data"),
+                        SelectionRange("y", 20.0, 30.0, domain="data"),
                     ),
                     revision=revision,
                 ),
@@ -1611,7 +1536,7 @@ def test_the_plane_can_say_who_is_producing_what() -> None:
     plane, source, _slot, _state, _initial = _source_setup(schema, values)
     plane.set_front_signals({"camera/frame", "@logic/topology/roi_frame"})
     events = _Events()
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="topology")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="topology")
     bridge.start()
     try:
         described = {item.name: item for item in plane.describe_signals()}
@@ -1627,7 +1552,10 @@ def test_the_plane_can_say_who_is_producing_what() -> None:
             SelectionState(
                 "image",
                 "area",
-                (SelectionRange("x", 0.0, 1.0), SelectionRange("y", 20.0, 30.0)),
+                (
+                    SelectionRange("x", 0.0, 1.0, domain="data"),
+                    SelectionRange("y", 20.0, 30.0, domain="data"),
+                ),
                 revision=1,
             ),
         )
@@ -1651,7 +1579,10 @@ def test_the_plane_can_say_who_is_producing_what() -> None:
             SelectionState(
                 "image",
                 "area",
-                (SelectionRange("x", 0.0, 2.0), SelectionRange("y", 20.0, 30.0)),
+                (
+                    SelectionRange("x", 0.0, 2.0, domain="data"),
+                    SelectionRange("y", 20.0, 30.0, domain="data"),
+                ),
                 revision=2,
             ),
         )
@@ -1745,7 +1676,6 @@ def test_selection_derives_from_incremental_scan_points_in_the_canonical_grid() 
         plane,
         "camera/frame",
         events,
-        events,
         bridge_id="point-prefix",
     )
     bridge.start()
@@ -1753,8 +1683,8 @@ def test_selection_derives_from_incremental_scan_points_in_the_canonical_grid() 
         "image",
         "area",
         (
-            SelectionRange("grad", 10.0, 30.0),
-            SelectionRange("bias_x", -1.0, 1.0),
+            SelectionRange("grad", 10.0, 30.0, domain="point_dimension"),
+            SelectionRange("bias_x", -1.0, 1.0, domain="point_dimension"),
         ),
         revision=1,
     )
@@ -1811,7 +1741,7 @@ def test_image_area_over_grid_dimensions_cuts_the_point_rows() -> None:
     plane.set_front_signals(
         {"camera/frame", "@logic/grid/roi_frame", "@logic/grid/roi_mean"}
     )
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="grid")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="grid")
     bridge.start()
     try:
         events.emit_selection(
@@ -1820,8 +1750,12 @@ def test_image_area_over_grid_dimensions_cuts_the_point_rows() -> None:
                 "image",
                 "area",
                 (
-                    SelectionRange("grad", 15.0, 25.0),
-                    SelectionRange("bias_x", -0.5, 1.5),
+                    SelectionRange(
+                        "grad", 15.0, 25.0, domain="point_dimension"
+                    ),
+                    SelectionRange(
+                        "bias_x", -0.5, 1.5, domain="point_dimension"
+                    ),
                 ),
                 revision=1,
             ),
@@ -1864,7 +1798,7 @@ def test_repeat_index_narrows_a_grid_cut_to_the_focused_repeat() -> None:
     plane.set_front_signals(
         {"camera/frame", "@logic/focus/roi_frame", "@logic/focus/roi_mean"}
     )
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="focus")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="focus")
     bridge.start()
     try:
         events.emit_selection(
@@ -1873,8 +1807,12 @@ def test_repeat_index_narrows_a_grid_cut_to_the_focused_repeat() -> None:
                 "image",
                 "area",
                 (
-                    SelectionRange("grad", 15.0, 25.0),
-                    SelectionRange("bias_x", -0.5, 0.5),
+                    SelectionRange(
+                        "grad", 15.0, 25.0, domain="point_dimension"
+                    ),
+                    SelectionRange(
+                        "bias_x", -0.5, 0.5, domain="point_dimension"
+                    ),
                 ),
                 repeat_index=1,
                 revision=1,
@@ -1899,8 +1837,12 @@ def test_repeat_index_narrows_a_grid_cut_to_the_focused_repeat() -> None:
                     "image",
                     "area",
                     (
-                        SelectionRange("grad", 15.0, 25.0),
-                        SelectionRange("bias_x", -0.5, 0.5),
+                    SelectionRange(
+                        "grad", 15.0, 25.0, domain="point_dimension"
+                    ),
+                    SelectionRange(
+                        "bias_x", -0.5, 0.5, domain="point_dimension"
+                    ),
                     ),
                     repeat_index=7,
                     revision=2,
@@ -1918,7 +1860,7 @@ def test_grid_dimensions_resolve_without_matching_point_columns() -> None:
     plane, source, _slot, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/bare/roi_mean"})
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="bare")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="bare")
     bridge.start()
     try:
         events.emit_selection(
@@ -1927,8 +1869,12 @@ def test_grid_dimensions_resolve_without_matching_point_columns() -> None:
                 "image",
                 "area",
                 (
-                    SelectionRange("grad", 15.0, 25.0),
-                    SelectionRange("bias_x", -0.5, 1.5),
+                    SelectionRange(
+                        "grad", 15.0, 25.0, domain="point_dimension"
+                    ),
+                    SelectionRange(
+                        "bias_x", -0.5, 1.5, domain="point_dimension"
+                    ),
                 ),
                 revision=1,
             ),
@@ -1980,7 +1926,7 @@ def test_frames_on_point_axis_keep_deriving_and_facet_by_frame() -> None:
     plane.set_front_signals(
         {"camera/frame", "@logic/frames/roi_frame", "@logic/frames/roi_mean"}
     )
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="frames")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="frames")
     bridge.start()
     try:
         events.emit_selection(
@@ -1989,8 +1935,8 @@ def test_frames_on_point_axis_keep_deriving_and_facet_by_frame() -> None:
                 "image",
                 "area",
                 (
-                    SelectionRange("x", 1.0, 3.0),
-                    SelectionRange("y", 1.0, 2.0),
+                    SelectionRange("x", 1.0, 3.0, domain="data"),
+                    SelectionRange("y", 1.0, 2.0, domain="data"),
                 ),
                 revision=1,
             ),
@@ -2008,10 +1954,10 @@ def test_frames_on_point_axis_keep_deriving_and_facet_by_frame() -> None:
                 "image",
                 "area",
                 (
-                    SelectionRange("x", 1.0, 3.0),
-                    SelectionRange("y", 1.0, 2.0),
+                    SelectionRange("x", 1.0, 3.0, domain="data"),
+                    SelectionRange("y", 1.0, 2.0, domain="data"),
                 ),
-                (FacetCondition("frame", 1.0),),
+                (FacetCondition("frame", 1.0, "point_coordinate"),),
                 revision=2,
             ),
         )
@@ -2043,7 +1989,7 @@ def test_roi_mean_keeps_one_value_per_frame_point() -> None:
     plane.set_front_signals(
         {"camera/frame", "@logic/mean/roi_frame", "@logic/mean/roi_mean"}
     )
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="mean")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="mean")
     bridge.start()
     try:
         events.emit_selection(
@@ -2052,8 +1998,8 @@ def test_roi_mean_keeps_one_value_per_frame_point() -> None:
                 "image",
                 "area",
                 (
-                    SelectionRange("x", 1.0, 3.0),
-                    SelectionRange("y", 1.0, 2.0),
+                    SelectionRange("x", 1.0, 3.0, domain="data"),
+                    SelectionRange("y", 1.0, 2.0, domain="data"),
                 ),
                 revision=1,
             ),
@@ -2097,7 +2043,7 @@ def test_roi_mean_invalidity_is_per_point_not_pooled() -> None:
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/partial/roi_mean"})
     bridge = SelectionBridge(
-        plane, "camera/frame", events, events, bridge_id="partial"
+        plane, "camera/frame", events, bridge_id="partial"
     )
     bridge.start()
     try:
@@ -2107,8 +2053,8 @@ def test_roi_mean_invalidity_is_per_point_not_pooled() -> None:
                 "image",
                 "area",
                 (
-                    SelectionRange("x", 1.0, 3.0),
-                    SelectionRange("y", 1.0, 2.0),
+                    SelectionRange("x", 1.0, 3.0, domain="data"),
+                    SelectionRange("y", 1.0, 2.0, domain="data"),
                 ),
                 revision=1,
             ),
@@ -2126,6 +2072,7 @@ def test_roi_mean_invalidity_is_per_point_not_pooled() -> None:
 
 
 def _frame_faceted_fit(
+    plane: SignalDataPlane,
     sample_axis_name: str,
     sample_coordinates: np.ndarray,
     *,
@@ -2133,16 +2080,21 @@ def _frame_faceted_fit(
     batch_revision: int = 1,
 ) -> FitEventValue:
     count = int(sample_coordinates.size)
+    sample_domain = "repeat" if sample_axis_name == "cycle" else "point_coordinate"
+    sample_axis_id = "" if sample_domain == "repeat" else sample_axis_name
     return FitEventValue(
         parameter_names=("center",),
         parameter_units={"center": "pixel"},
         parameter_values={"center": np.arange(count, dtype=np.float64)},
         parameter_errors={"center": np.full(count, 0.5)},
         success=np.ones(count, dtype=np.bool_),
+        sample_axis_domain=sample_domain,
+        sample_axis_id=sample_axis_id,
         sample_axis_name=sample_axis_name,
         sample_coordinates=sample_coordinates,
         sample_unit="",
         sample_labels=None,
+        source_generation=_source_generation(plane),
         source_revision=source_revision,
         batch_revision=batch_revision,
     )
@@ -2163,12 +2115,16 @@ def test_a_faceted_fit_takes_its_sample_role_from_the_axis_it_was_cut_along() ->
         {"camera/frame", "@logic/perframe/center", "@logic/perframe/center_err"}
     )
     bridge = SelectionBridge(
-        plane, "camera/frame", events, events, bridge_id="perframe"
+        plane, "camera/frame", events, bridge_id="perframe"
     )
     bridge.start()
     try:
         events.emit_fit(
-            _frame_faceted_fit("frame", np.asarray([0.0, 1.0, 2.0]))
+            _frame_faceted_fit(
+                plane,
+                "frame",
+                np.asarray([0.0, 1.0, 2.0]),
+            )
         )
         value = plane.freeze().value("@logic/perframe/center")
         assert value is not None, bridge.last_error
@@ -2191,11 +2147,17 @@ def test_a_scan_faceted_fit_still_publishes_a_scan_point_column() -> None:
         {"camera/frame", "@logic/perscan/center", "@logic/perscan/center_err"}
     )
     bridge = SelectionBridge(
-        plane, "camera/frame", events, events, bridge_id="perscan"
+        plane, "camera/frame", events, bridge_id="perscan"
     )
     bridge.start()
     try:
-        events.emit_fit(_frame_faceted_fit("x", np.asarray([0.0, 1.0, 2.0])))
+        events.emit_fit(
+            _frame_faceted_fit(
+                plane,
+                "x",
+                np.asarray([0.0, 1.0, 2.0]),
+            )
+        )
         value = plane.freeze().value("@logic/perscan/center")
         assert value is not None, bridge.last_error
         (column,) = value.snapshot.block.schema.point_table.columns
@@ -2220,11 +2182,17 @@ def test_a_repeat_faceted_fit_keeps_the_repeat_identity() -> None:
         {"camera/frame", "@logic/percycle/center", "@logic/percycle/center_err"}
     )
     bridge = SelectionBridge(
-        plane, "camera/frame", events, events, bridge_id="percycle"
+        plane, "camera/frame", events, bridge_id="percycle"
     )
     bridge.start()
     try:
-        events.emit_fit(_frame_faceted_fit("cycle", np.asarray([0.0, 1.0])))
+        events.emit_fit(
+            _frame_faceted_fit(
+                plane,
+                "cycle",
+                np.asarray([0.0, 1.0]),
+            )
+        )
         value = plane.freeze().value("@logic/percycle/center")
         assert value is not None, bridge.last_error
         fit_schema = value.snapshot.block.schema
@@ -2249,7 +2217,7 @@ def test_a_mixed_kind_image_area_is_refused_loudly() -> None:
     plane, source, _slot, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals({"camera/frame", "@logic/mixed/roi_mean"})
-    bridge = SelectionBridge(plane, "camera/frame", events, events, bridge_id="mixed")
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="mixed")
     bridge.start()
     try:
         with pytest.raises(ValueError, match="both be"):
@@ -2259,8 +2227,10 @@ def test_a_mixed_kind_image_area_is_refused_loudly() -> None:
                     "image",
                     "area",
                     (
-                        SelectionRange("x", 1.0, 3.0),
-                        SelectionRange("frame", 0.0, 1.0),
+                        SelectionRange("x", 1.0, 3.0, domain="data"),
+                        SelectionRange(
+                            "frame", 0.0, 1.0, domain="point_coordinate"
+                        ),
                     ),
                     revision=1,
                 ),

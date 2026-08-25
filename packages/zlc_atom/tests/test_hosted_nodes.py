@@ -147,9 +147,12 @@ def test_camera_descriptor_maps_image_area_to_sensor_roi_draft() -> None:
         selector_kind="area",
         ranges=(
             SelectionRange(
-                "camera_measurement.frames.2.spatial-x", 1.2, 5.8
+                "camera_measurement.frames.2.spatial-x",
+                1.2,
+                5.8,
+                domain="data",
             ),
-            SelectionRange("spatial-y", -3.2, 6.0),
+            SelectionRange("spatial-y", -3.2, 6.0, domain="data"),
         ),
     )
 
@@ -200,7 +203,9 @@ def test_camera_descriptor_maps_image_area_to_sensor_roi_draft() -> None:
         SelectionState(
             plot_kind="image",
             selector_kind="x_range",
-            ranges=(SelectionRange("spatial-x", 1.0, 3.0),),
+            ranges=(
+                SelectionRange("spatial-x", 1.0, 3.0, domain="data"),
+            ),
         ),
         draft=draft,
         context={

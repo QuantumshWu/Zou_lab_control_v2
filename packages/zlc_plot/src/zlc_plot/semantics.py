@@ -13,7 +13,14 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping, TypeAlias
 
 from ._kinds import HANDLERS, default_spec, handler_for
-from zlc_data import AxisId, DatasetSchema, point_ordinal_axis
+from .data_contract import resolve_axis
+from zlc_data import (
+    LATEST_COORDINATE,
+    CoordinateScalar,
+    CoordinateSelector,
+    DatasetSchema,
+    canonical_coordinate_scalar,
+)
 from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
 from .kinds import AxisDomain, AxisRef, PlotKind
 from .layout import DEFAULT_LAYOUT, PlotLayoutConfig
@@ -233,30 +240,7 @@ def axis_size(schema: DatasetSchema, ref: AxisRef) -> int:
 
     if not isinstance(schema, DatasetSchema):
         raise TypeError("schema must be DatasetSchema")
-    if not isinstance(ref, AxisRef):
-        raise TypeError("ref must be AxisRef")
-    if ref.domain is AxisDomain.REPEAT:
-        return int(schema.repeat_axis.size)
-    if ref.domain in {AxisDomain.POINT_ROW, AxisDomain.POINT_COORDINATE}:
-        # A point column spans the point rows; the row ordinal is the same
-        # domain under its degenerate name.
-        return int(schema.point_table.row_count)
-    if ref.domain is AxisDomain.POINT_DIMENSION:
-        assert ref.axis_id is not None
-        if schema.grid_topology is not None:
-            for axis_id, domain in zip(
-                schema.grid_topology.dimension_ids,
-                schema.grid_topology.coordinate_domains,
-                strict=True,
-            ):
-                if str(axis_id) == ref.axis_id:
-                    return int(len(domain))
-        raise KeyError(ref.axis_id)
-    assert ref.domain is AxisDomain.DATA and ref.axis_id is not None
-    for axis in schema.cell_schema.data_axes:
-        if str(axis.axis_id) == ref.axis_id or axis.name == ref.axis_id:
-            return int(axis.size)
-    raise KeyError(ref.axis_id)
+    return resolve_axis(schema, ref).size
 
 
 #: One dataset's shape, grouped the way a reader reads it: the repeats, then
@@ -291,10 +275,20 @@ def schema_structure(schema: DatasetSchema) -> SchemaStructure:
             )
         ]
     else:
-        points = [
-            (str(column.name), int(schema.point_table.row_count))
-            for column in schema.point_table.columns
-        ]
+        columns = tuple(schema.point_table.columns)
+        # Without topology, every point column is a coordinate over the SAME
+        # physical row dimension.  Printing one ``row_count`` per column turns
+        # 100 rows carrying (x, y) into a fictional 100×100 geometry.
+        points = (
+            []
+            if not columns
+            else [
+                (
+                    str(columns[0].name) if len(columns) == 1 else "point",
+                    int(schema.point_table.row_count),
+                )
+            ]
+        )
     # Exactly three brackets: (repeat) x (points) x (cell payload).  A cell
     # axis carrying a point-domain EVENT role -- the frame axis a producer
     # declares without a point column -- is still a fact about WHEN within one
@@ -342,35 +336,7 @@ def schema_summary(schema: DatasetSchema) -> str:
 def _axis_label(schema: DatasetSchema, ref: AxisRef) -> str:
     """Return the only human label authority for a schema axis reference."""
 
-    if ref.domain is AxisDomain.POINT_ROW:
-        # The point domain as a whole, under the one name zlc_data gives it.
-        return point_ordinal_axis(schema.point_table.row_count).name
-    if ref.domain is AxisDomain.REPEAT:
-        axis = schema.repeat_axis
-    elif ref.domain is AxisDomain.POINT_COORDINATE:
-        assert ref.axis_id is not None
-        axis = schema.point_table.column(AxisId(ref.axis_id))
-    elif ref.domain is AxisDomain.POINT_DIMENSION:
-        assert ref.axis_id is not None and schema.grid_topology is not None
-        # A dimension and the column that carries it are one axis, and the
-        # column is where its human name lives; the raw id ('scan.coil_x')
-        # is what a producer wires with, not what an operator reads.
-        for column in schema.point_table.columns:
-            if str(column.coordinate_id) == ref.axis_id:
-                return str(column.name)
-        return str(ref.axis_id)
-    elif ref.domain is AxisDomain.DATA:
-        assert ref.axis_id is not None
-        axis = next(
-            axis
-            for axis in schema.cell_schema.data_axes
-            if str(axis.axis_id) == ref.axis_id or axis.name == ref.axis_id
-        )
-    else:  # pragma: no cover - AxisDomain is exhaustive for AxisRef
-        raise ValueError(f"unsupported semantic axis domain: {ref.domain!r}")
-    # The choice names an axis identity, not a quantity: display units belong
-    # to rendered axis labels, never to the selector text.
-    return str(axis.name)
+    return resolve_axis(schema, ref).label
 
 
 #: The vocabulary of what can become of one axis.  Exactly one of these is
@@ -397,10 +363,6 @@ _ROLE_LABELS = {
 FATE_REDUCE = "reduce"
 FATE_POOL = "pool"
 
-#: A scope row is named after the axis it pins, so a saved panel restores
-#: the same rows by name even as the kind changes underneath them.
-SCOPE_PREFIX = "scope:"
-
 #: An axis with more coordinates than this gets no scope row.  A dropdown of
 #: two thousand pixel rows is not an editor, and truncating one silently would
 #: claim a coverage it does not have; those axes are cut with a box selector,
@@ -408,12 +370,57 @@ SCOPE_PREFIX = "scope:"
 SCOPE_CHOICE_LIMIT = 256
 
 
-def scope_field_name(label: str) -> str:
-    return f"{SCOPE_PREFIX}{label}"
+_SCOPE_VALUE_TAG = "scope-value"
+_SCOPE_LATEST_TAG = "scope-latest"
 
 
-def fate_field_name(label: str) -> str:
-    return f"{FATE_PREFIX}{label}"
+def scope_fate(
+    coordinate: CoordinateScalar | CoordinateSelector,
+) -> tuple[object, ...]:
+    """Tagged fate value for one pinned coordinate (or Runtime latest)."""
+
+    if coordinate is LATEST_COORDINATE:
+        return (_SCOPE_LATEST_TAG,)
+    return (
+        _SCOPE_VALUE_TAG,
+        canonical_coordinate_scalar(coordinate, "scope coordinate"),
+    )
+
+
+def is_scope_fate(value: object) -> bool:
+    if not isinstance(value, (tuple, list)):
+        return False
+    tagged = tuple(value)
+    return bool(
+        tagged == (_SCOPE_LATEST_TAG,)
+        or len(tagged) == 2 and tagged[0] == _SCOPE_VALUE_TAG
+    )
+
+
+def scope_coordinate_from_fate(
+    value: object,
+) -> CoordinateScalar | CoordinateSelector:
+    """Decode one tagged pin without confusing text coordinates with verbs."""
+
+    if not isinstance(value, (tuple, list)):
+        raise TypeError("scope fate must be a tagged sequence")
+    tagged = tuple(value)
+    if tagged == (_SCOPE_LATEST_TAG,):
+        return LATEST_COORDINATE
+    if len(tagged) == 2 and tagged[0] == _SCOPE_VALUE_TAG:
+        return canonical_coordinate_scalar(tagged[1], "scope coordinate")
+    raise ValueError("scope fate tag is invalid")
+
+
+def fate_field_name(ref: AxisRef) -> str:
+    """Stable machine key for one exact AxisRef; labels are display-only."""
+
+    if not isinstance(ref, AxisRef):
+        raise TypeError("fate field axis must be AxisRef")
+    suffix = ref.domain.value
+    if ref.axis_id is not None:
+        suffix += f":{ref.axis_id}"
+    return f"{FATE_PREFIX}{suffix}"
 
 
 def _default_fate(spec: PlotSpec) -> str:
@@ -449,11 +456,13 @@ def _fate_of(spec: PlotSpec, ref: AxisRef) -> object:
         return "facet"
     scope = _scope_terms(spec)
     if ref in scope:
-        return scope[ref]
+        return scope_fate(scope[ref])
     return _default_fate(spec)
 
 
-def _scope_terms(spec: PlotSpec) -> dict[AxisRef, float | str]:
+def _scope_terms(
+    spec: PlotSpec,
+) -> dict[AxisRef, CoordinateScalar | CoordinateSelector]:
     return dict(getattr(spec, "scope", ()))
 
 
@@ -463,13 +472,23 @@ def _role_holder(spec: PlotSpec, role: str) -> AxisRef | None:
     return getattr(semantic_spec(spec), role, None)
 
 
-def _scope_axis(schema: DatasetSchema | None, label: str) -> AxisRef:
-    if schema is None:
-        raise KeyError(scope_field_name(label))
-    for ref in axis_choices_for_schema(schema):
-        if _axis_label(schema, ref) == label:
-            return ref
-    raise KeyError(scope_field_name(label))
+def _fate_row_axes(
+    schema: DatasetSchema,
+    spec: PlotSpec,
+    offered_axes: tuple[AxisRef, ...] | None = None,
+) -> tuple[AxisRef, ...]:
+    """The one exact editable row for each physical source axis."""
+
+    axes = axis_choices_for_schema(schema) if offered_axes is None else offered_axes
+    used_axes = _axes_used_by(spec)
+    preferred = {axis.physical_identity: axis for axis in used_axes}
+    listed: dict[tuple[str, str | None], AxisRef] = {}
+    for offered in axes:
+        identity = offered.physical_identity
+        listed.setdefault(identity, preferred.pop(identity, offered))
+    for used in used_axes:
+        listed.setdefault(used.physical_identity, used)
+    return tuple(listed.values())
 
 
 def _scope_coordinates(
@@ -482,50 +501,54 @@ def _scope_coordinates(
     box instead -- see SCOPE_CHOICE_LIMIT.
     """
 
-    from zlc_data.snapshot_projection import axis_catalog
-
-    label = _axis_label(schema, ref)
-    axis = next(
-        (spec for name, _id, spec, _kind in axis_catalog(schema) if name == label),
-        None,
-    )
-    if axis is None:
-        # The point-row ordinal is an addressing scheme, not a declared axis.
-        size = schema.point_table.row_count
-        values: tuple[float, ...] = tuple(float(index) for index in range(size))
-        labels: tuple[str, ...] | None = None
-    elif axis.coordinates is None:
-        values = tuple(
-            float(axis.index_origin + index) for index in range(axis.size)
-        )
-        labels = axis.coordinate_labels
-    else:
-        values = tuple(float(value) for value in axis.coordinates)
-        labels = axis.coordinate_labels
+    resolved = resolve_axis(schema, ref)
+    label = resolved.label
+    values = resolved.coordinates
+    labels = resolved.coordinate_labels
     # The pinnable coordinates are the DISTINCT ones, judged after the
     # dedup: a scan dimension lists one value per ROW, so a ten-coordinate
     # sweep of a thousand rows arrived here as a thousand values and the
     # size cap refused the very axis a scope exists for.  A labelled axis
     # pins by the name the operator reads everywhere else -- "0-1", "box"
     # -- not by its bare numeric identity.
-    first_labels: dict[float, str] = {}
+    first_labels: dict[CoordinateScalar, str] = {}
     for index, value in enumerate(values):
-        if value not in first_labels:
+        coordinate = canonical_coordinate_scalar(value, f"{label} coordinate")
+        if coordinate not in first_labels:
             if len(first_labels) >= SCOPE_CHOICE_LIMIT + 1:
                 break
-            first_labels[value] = (
-                labels[index] if labels is not None else f"{value:g}"
+            first_labels[coordinate] = (
+                labels[index]
+                if labels is not None
+                else "(null)"
+                if coordinate is None
+                else f"{coordinate:g}"
+                if isinstance(coordinate, (int, float))
+                else str(coordinate)
             )
     if len(first_labels) < 2 or len(first_labels) > SCOPE_CHOICE_LIMIT:
         choices: tuple[SemanticChoice, ...] = ()
     else:
-        choices = tuple(first_labels.items())
+        choices = tuple(
+            (scope_fate(value), text) for value, text in first_labels.items()
+        )
     if (
         ref.domain is AxisDomain.POINT_COORDINATE
         and ref.axis_id == PRIMARY_INDEX_AXIS_ID.value
     ):
-        return (("latest", "Latest"), *choices)
+        return ((scope_fate(LATEST_COORDINATE), "Latest"), *choices)
     return choices or None
+
+
+def _scope_choice_label(value: object) -> str:
+    coordinate = scope_coordinate_from_fate(value)
+    if coordinate is LATEST_COORDINATE:
+        return "Latest"
+    if coordinate is None:
+        return "(null)"
+    if isinstance(coordinate, (int, float)):
+        return f"{coordinate:g}"
+    return str(coordinate)
 
 
 def _kind_label(kind: PlotKind) -> str:
@@ -549,8 +572,10 @@ def _choice_pairs(
 
 
 def _without(values: Iterable[AxisRef], excluded: Iterable[AxisRef]) -> tuple[AxisRef, ...]:
-    blocked = set(excluded)
-    return tuple(value for value in values if value not in blocked)
+    blocked = {value.physical_identity for value in excluded}
+    return tuple(
+        value for value in values if value.physical_identity not in blocked
+    )
 
 
 def _field_names(spec: PlotSpec) -> tuple[str, ...]:
@@ -613,78 +638,166 @@ def composed_spec(
     # the new kind's default.  Dropping it there would silently widen the
     # panel back to the whole signal.
     scope = _scope_terms(spec)
-    for name in tuple(rest):
-        if not name.startswith(SCOPE_PREFIX):
-            continue
-        value = rest.pop(name)
-        axis = _scope_axis(schema, name[len(SCOPE_PREFIX) :])
-        if value is None:
-            scope.pop(axis, None)
-        else:
-            scope[axis] = "latest" if value == "latest" else float(value)
-    # A fate row says what becomes of ONE axis; the roles are what the plot
-    # kinds are written in.  Translating here means the collision rules, the
-    # facet routing and the labels all stay in one place and the table is a
-    # way of SAYING the edit rather than a second way of composing it.
+    # Kind establishes the vocabulary against which the WHOLE fate table is
+    # interpreted.  Applying fates to the old kind and rebasing afterwards
+    # made one saved table mean two different specifications.
+    if "kind" in rest:
+        kind = rest.pop("kind")
+        if not isinstance(kind, PlotKind):
+            raise TypeError("semantic kind value must be PlotKind")
+        if kind is not spec.kind:
+            candidate = default_spec(schema, kind)
+            if candidate is None:
+                raise ValueError(
+                    f"{kind.value} has no unambiguous default for this dataset"
+                )
+
+    # A fate table is ONE assignment, not a sequence of role edits.  First
+    # resolve every row against the same base candidate, then assign roles.
+    # The former loop repaired each vacated role while later rows were still
+    # pending: ``field.y -> y, pair -> reduce`` therefore put pair back on y,
+    # and a 10x10 scan silently returned to the default 35x3 site image.
+    fate_values: dict[AxisRef, object] = {}
+    if schema is None:
+        fate_rows: dict[str, AxisRef] = {}
+    else:
+        row_spec = candidate
+        terms = tuple(scope.items())
+        if terms != tuple(_scope_terms(candidate).items()):
+            row_spec = replace(candidate, scope=terms)
+        fate_rows = {
+            fate_field_name(axis): axis
+            for axis in _fate_row_axes(schema, row_spec)
+        }
     for name in tuple(rest):
         if not name.startswith(FATE_PREFIX):
             continue
         value = rest.pop(name)
-        axis = _scope_axis(schema, name[len(FATE_PREFIX) :])
-        previous = _fate_of(spec, axis)
-        scope.pop(axis, None)
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            scope[axis] = float(value)
-            role_now = previous if previous in ROLE_FATES else None
-        elif value == "latest":
-            scope[axis] = "latest"
-            role_now = previous if previous in ROLE_FATES else None
-        elif value in (FATE_REDUCE, FATE_POOL):
-            role_now = previous if previous in ROLE_FATES else None
-        elif value in ROLE_FATES:
-            role_now = None
-            # Whoever held this role takes what this axis was: two axes
-            # trading places is ONE gesture, and making the operator vacate a
-            # role first would mean passing through a state with no x.
-            displaced = _role_holder(spec, str(value))
-            rest[str(value)] = axis
-            if displaced is not None and displaced != axis:
-                if previous in ROLE_FATES:
-                    rest[str(previous)] = displaced
-                elif previous == "latest":
-                    scope[displaced] = "latest"
-                elif isinstance(previous, (int, float)):
-                    scope[displaced] = float(previous)
-        else:
-            raise ValueError(f"unknown fate {value!r} for axis {name!r}")
-        if role_now in OPTIONAL_ROLES:
-            rest[role_now] = None
-        elif role_now is not None:
-            # The axis has left a role the kind still needs filled.  The
-            # repair is the kind's own default for this dataset, which is
-            # deterministic and is what an operator sees when they add the
-            # panel in the first place.
-            fallback = default_spec(schema, candidate.kind)
-            preferred = None if fallback is None else _role_holder(fallback, role_now)
+        try:
+            axis = fate_rows[name]
+        except KeyError as error:
+            raise KeyError(name) from error
+        fate_values[axis] = value
+        for scoped in tuple(scope):
+            if scoped.physical_identity == axis.physical_identity:
+                scope.pop(scoped)
+
+    if fate_values:
+        declared_roles = tuple(
+            role for role in ROLE_FATES if role in _field_names(candidate)
+        )
+        current_roles = {
+            role: _role_holder(candidate, role) for role in declared_roles
+        }
+        desired_roles = dict(current_roles)
+        role_targets: dict[str, AxisRef] = {}
+        edited_identities = {
+            axis.physical_identity for axis in fate_values
+        }
+
+        for axis, value in fate_values.items():
+            if is_scope_fate(value):
+                scope[axis] = scope_coordinate_from_fate(value)
+            elif value in (FATE_REDUCE, FATE_POOL):
+                pass
+            elif value in ROLE_FATES:
+                role = str(value)
+                if role not in declared_roles:
+                    raise ValueError(
+                        f"{candidate.kind.value} has no {role!r} fate"
+                    )
+                previous_target = role_targets.get(role)
+                if (
+                    previous_target is not None
+                    and previous_target.physical_identity != axis.physical_identity
+                ):
+                    raise ValueError(
+                        f"fate {role!r} is assigned to more than one axis"
+                    )
+                role_targets[role] = axis
+            else:
+                raise ValueError(f"unknown fate {value!r} for axis {axis!r}")
+
+        # Every explicitly edited axis first leaves its old role.  No required
+        # role is repaired until all new role targets are known.
+        for role, holder in tuple(desired_roles.items()):
+            if (
+                isinstance(holder, AxisRef)
+                and holder.physical_identity in edited_identities
+            ):
+                desired_roles[role] = None
+
+        for role, axis in role_targets.items():
+            for other, holder in tuple(desired_roles.items()):
+                if (
+                    other != role
+                    and isinstance(holder, AxisRef)
+                    and holder.physical_identity == axis.physical_identity
+                ):
+                    desired_roles[other] = None
+            desired_roles[role] = axis
+
+        # A single row can still trade two occupied roles in one gesture.  If
+        # both rows were authored, their explicit targets already decide the
+        # result and no inferred swap is allowed to overwrite them.
+        for role, axis in role_targets.items():
+            previous_role = next(
+                (
+                    name
+                    for name, holder in current_roles.items()
+                    if isinstance(holder, AxisRef)
+                    and holder.physical_identity == axis.physical_identity
+                ),
+                None,
+            )
+            displaced = current_roles.get(role)
+            if (
+                previous_role is not None
+                and previous_role != role
+                and previous_role not in role_targets
+                and displaced is not None
+                and displaced.physical_identity not in edited_identities
+            ):
+                desired_roles[previous_role] = displaced
+
+        # Only now repair a genuinely unfilled required role.  Explicitly
+        # reduced/pinned axes are excluded: choosing Reduced must not be
+        # silently undone by the repair it was meant to accompany.
+        fallback = default_spec(schema, candidate.kind)
+        blocked = {
+            axis.physical_identity
+            for axis, value in fate_values.items()
+            if value not in ROLE_FATES
+        }
+        for role in declared_roles:
+            if desired_roles[role] is not None:
+                continue
+            if role in OPTIONAL_ROLES:
+                continue
+            preferred = None if fallback is None else _role_holder(fallback, role)
             taken = {
-                _role_holder(spec, other)
-                for other in ROLE_FATES
-                if other != role_now
+                holder.physical_identity
+                for other, holder in desired_roles.items()
+                if other != role and holder is not None
             }
-            taken.add(axis)
             replacement = next(
                 (
                     ref
                     for ref in (preferred, *axis_choices_for_schema(schema))
-                    if ref is not None and ref not in taken
+                    if ref is not None
+                    and ref.physical_identity not in taken
+                    and ref.physical_identity not in blocked
                 ),
                 None,
             )
             if replacement is None:
                 raise ValueError(
-                    f"{role_now} cannot be vacated: this dataset offers no other axis for it"
+                    f"{role} cannot be vacated: this dataset offers no other axis for it"
                 )
-            rest[role_now] = replacement
+            desired_roles[role] = replacement
+
+        for role in declared_roles:
+            rest[role] = desired_roles[role]
 
     def _settled(candidate: PlotSpec) -> PlotSpec:
         """Attach the scope to the FINISHED candidate and repair the conflict.
@@ -697,32 +810,25 @@ def composed_spec(
         """
 
         pinned = dict(scope)
-        roles = {
-            getattr(semantic_spec(candidate), name, None)
-            for name in ("x", "y", "group")
+        role_identities = {
+            axis.physical_identity
+            for axis in (
+                getattr(semantic_spec(candidate), name, None)
+                for name in ("x", "y", "group")
+            )
+            if isinstance(axis, AxisRef)
         }
-        roles.add(getattr(candidate, "facet", None))
+        facet = getattr(candidate, "facet", None)
+        if isinstance(facet, AxisRef):
+            role_identities.add(facet.physical_identity)
         for axis in tuple(pinned):
-            if axis in roles:
+            if axis.physical_identity in role_identities:
                 pinned.pop(axis)
         terms = tuple(pinned.items())
         if terms != tuple(_scope_terms(candidate).items()):
             candidate = replace(candidate, scope=terms)
         return replace(candidate, labels=merge_labels(spec, candidate))
 
-    if "kind" in rest:
-        # The kind rebases everything: the other choices land on ITS default.
-        kind = rest.pop("kind")
-        if not isinstance(kind, PlotKind):
-            raise TypeError("semantic kind value must be PlotKind")
-        if kind is not spec.kind:
-            candidate = default_spec(schema, kind)
-            if candidate is None:
-                raise ValueError(
-                    f"{kind.value} has no unambiguous default for this dataset"
-                )
-        if not rest:
-            return _settled(candidate)
     if not rest:
         return _settled(candidate)
     unknown = tuple(name for name in rest if name not in _field_names(candidate))
@@ -915,14 +1021,11 @@ def describe_semantics(
     # omit that row: it reports the axis as reduced while the panel gives
     # every row its own cell, and fate() raises for the spec's own facet.
     #
-    # Deduplicated by the row each ref would BE, not by the ref: one axis can
-    # be spelled by its id or by its name, and a table is one row per axis.
-    listed: dict[str, AxisRef] = {}
-    for candidate in (*axes, *_axes_used_by(spec)):
-        listed.setdefault(fate_field_name(_axis_label(schema, candidate)), candidate)
-    for ref in listed.values():
+    # Deduplicated by physical source: a same-id PointColumn and topology
+    # dimension are two coordinate views of one point axis, hence one row.
+    for ref in _fate_row_axes(schema, spec, axes):
         label = _axis_label(schema, ref)
-        name = fate_field_name(label)
+        name = fate_field_name(ref)
         current = _fate_of(spec, ref)
         offered: list[SemanticChoice] = [(default_fate, f"({default_label})")]
         for role in roles:
@@ -938,6 +1041,14 @@ def describe_semantics(
         pins = _scope_coordinates(schema, ref)
         if pins is not None:
             offered.extend((value, f"= {text}") for value, text in pins)
+        if is_scope_fate(current) and not any(
+            current == value for value, _label in offered
+        ):
+            # A saved/programmatic scope may name a coordinate on an axis too
+            # large for a dropdown.  The current truth remains visible and can
+            # be moved back to a role; the editor still does not fabricate a
+            # truncated list of alternative coordinates.
+            offered.append((current, f"= {_scope_choice_label(current)}"))
         fields.append(SemanticField(name, label, current, tuple(offered), True))
         fate_rows.append((ref, name))
     if "reduction" in declared:
@@ -976,7 +1087,11 @@ __all__ = [
     "axis_choices_for_schema",
     "axis_size",
     "describe_semantics",
+    "fate_field_name",
+    "is_scope_fate",
     "schema_structure",
     "schema_summary",
+    "scope_coordinate_from_fate",
+    "scope_fate",
     "updated_spec",
 ]

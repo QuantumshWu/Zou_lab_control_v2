@@ -17,6 +17,7 @@ from zlc_plot import (
     ensure_qt5_application,
 )
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from zlc_plot.semantics import fate_field_name
 
 
 def _session() -> PlotSession:
@@ -55,7 +56,9 @@ def test_offscreen_semantic_combos_use_unique_labeled_choices() -> None:
         # One row per axis: the row is NAMED after the axis and its options
         # are what can become of it, the first being what it already is when
         # nobody gave it a role.
-        scan = panel.semantic_editor("fate:scan")
+        scan = panel.semantic_editor(
+            fate_field_name(AxisRef.point("scan"))
+        )
         assert scan.itemText(0) == "(reduced)"
         assert "X axis" in tuple(scan.itemText(index) for index in range(scan.count()))
     finally:

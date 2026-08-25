@@ -9,10 +9,10 @@ from typing import TYPE_CHECKING, Callable, Mapping
 
 from zlc_data import SelectionChange
 
-from ._fit_projection import FitProjection, FitSelection, RollingHistoryPoint
+from ._fit_projection import FitProjection, FitSelection
 from ._fit_scene import FitOverlay
 from ._selector_scene import ColorLimitCandidate
-from .selectors import RectangleRange, SelectorKind, SelectorState
+from .selectors import RectangleRange, SelectorKind, SelectorState, _SelectorController
 from .primitives import ImagePointOverlay
 
 
@@ -32,6 +32,7 @@ class FitEvent:
     """Exact result: live after solve/before raster, manual after overlay."""
 
     result: "FitResult | FacetFitBatchResult"
+    source_generation: str
     selection: FitSelection | None
     display_parameters: tuple["FitParameterDisplay", ...]
     formula: str
@@ -42,6 +43,7 @@ class FitEvent:
 class _LiveFitRequest:
     model: "FitModelSpec"
     selector_kind: SelectorKind | None
+    fixed: Mapping[str, float] | None
     initial: Mapping[str, float] | tuple[float, ...] | None
     bounds: Mapping[str, tuple[float | None, float | None]] | None
     options: "FitOptions" | None
@@ -134,11 +136,13 @@ class _FitResolution:
     error: Exception | None = None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class _AcceptedFit(_ResolvedFit):
     """One atomically accepted fit result and its painted presentation."""
 
-    context_generation: int = 0
+    context_generation: int
+    source_generation: str
+    request: _LiveFitRequest
 
 @dataclass(frozen=True, slots=True)
 class _ProjectionPresentation:
@@ -146,6 +150,8 @@ class _ProjectionPresentation:
 
     committed_projection: FitProjection
     previous_projection: FitProjection
+    previous_selector_controller: _SelectorController
+    previous_fit_warm_starts: dict[tuple[int, str, int | None], object]
     previous_image_overlay: ImagePointOverlay | None
     previous_accepted_fit: _AcceptedFit | None
     previous_classifier_results: tuple["FitResult | None", ...]
@@ -157,7 +163,6 @@ class _ProjectionPresentation:
     previous_focused_facet_index: int | None
     previous_facet_focus_index: int | None
     previous_viewport: RectangleRange | None
-    previous_rolling_history: tuple[RollingHistoryPoint, ...]
     previous_layout_revision: int
     previous_plan: "SurfacePlan"
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from zlc_plot import PlotKind, fitting_spec, updated_spec
 from zlc_plot.semantics import axis_choices_for_schema, axis_size
+from zlc_plot.specs import semantic_spec
 
 
 __all__ = ["fitting_panel_spec"]
@@ -27,8 +28,7 @@ def _dense_series_x(schema: object, spec: object) -> object:
     second spec-editing path exists here.
     """
 
-    cell = getattr(spec, "cell", None)
-    semantic = cell if cell is not None else spec
+    semantic = semantic_spec(spec)
     if getattr(semantic, "kind", None) is not PlotKind.CURVE:
         return spec
     x = getattr(semantic, "x", None)

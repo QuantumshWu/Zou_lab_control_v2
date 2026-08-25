@@ -46,6 +46,7 @@ from .endpoint import (  # noqa: E402
 )
 from .scan import (  # noqa: E402
     api_parameter_columns_for,
+    prepare_scan_application,
     resolve_scan_point,
     scan_columns_for,
     scan_rows_from_wire,
@@ -98,6 +99,7 @@ __all__ = [
     "resolve_api_parameters",
     "pulse_field_value",
     "api_parameter_columns_for",
+    "prepare_scan_application",
     "scan_columns_for",
     "scan_table_template",
     "validate_scan_table",

@@ -177,8 +177,7 @@ def test_formal_console_panel_state_and_histogram_edits_are_atomic(workspace) ->
         binding = presenter.panels[panel_id]
         settle(
             lambda: binding.host is not None
-            and binding.initial_presented
-            and binding.port.presented_publication() is not None
+            and binding.port.accepted_surface() is not None
             and bool(binding.parameter_surface.get("display"))
         )
         # Drain the one possible Qt DPR negotiation before measuring title work.
@@ -204,7 +203,6 @@ def test_formal_console_panel_state_and_histogram_edits_are_atomic(workspace) ->
         histogram = presenter.panels[histogram_id]
         settle(
             lambda: histogram.host is not None
-            and histogram.initial_presented
             and bool(histogram.parameter_surface.get("display"))
         )
         view.panel_edit_requested.emit(histogram_id)
@@ -223,13 +221,14 @@ def test_formal_console_panel_state_and_histogram_edits_are_atomic(workspace) ->
             {"density": False},
         ):
             previous = histogram.host.front.identity.sequence
-            previous_editor = histogram.editor_host.front.identity.sequence
+            previous_editor = histogram.editor_host
             view.panel_state_changed.emit(histogram_id, {"display": patch})
             settle(
                 lambda: histogram.configuration is None
                 and histogram.editor_configuration is None
                 and histogram.host.front.identity.sequence > previous
-                and histogram.editor_host.front.identity.sequence > previous_editor
+                and histogram.editor_host is not previous_editor
+                and histogram.editor_host.front is not None
                 and all(
                     histogram.state.display.get(name) == value
                     for name, value in patch.items()
@@ -526,8 +525,11 @@ def test_formal_panel_save_keeps_qt_live_and_close_waits_for_archive_and_render(
     from PyQt5 import QtCore, QtTest
     from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
     from zlc_ui.qt import ensure_qt_app
-    from zlc_workbench.apps.task_console import create_window
-    from zlc_workbench.panel_state import PanelFrozenData
+    from zlc_workbench.apps.task_console import build_panel_host, create_window
+    from zlc_workbench.panel_state import (
+        PanelFrozenData,
+        panel_state_from_description,
+    )
     import zlc_workbench.panel_save as panel_save_module
     import zlc_plot.figure_artifact as figure_module
 
@@ -557,9 +559,23 @@ def test_formal_panel_save_keeps_qt_live_and_close_waits_for_archive_and_render(
     binding.state = replace(
         binding.state,
         signal="formal/save",
-        fit={"model": "gaussian_offset"},
     )
-    binding.frozen_data = PanelFrozenData(binding.state.signal, None, snapshot)
+    frozen_host = build_panel_host(snapshot, binding.state)
+    try:
+        description = frozen_host.configure(
+            fit=binding.state.fit,
+            fit_live=False,
+        ).result().value
+    finally:
+        frozen_host.close()
+    frozen_target = panel_state_from_description(binding.state, description)
+    binding.state = frozen_target
+    binding.frozen_data = PanelFrozenData(
+        None,
+        snapshot,
+        frozen_target,
+        description,
+    )
     writer_started = Event()
     writer_release = Event()
     configure_started = Event()
@@ -578,9 +594,10 @@ def test_formal_panel_save_keeps_qt_live_and_close_waits_for_archive_and_render(
     monkeypatch.setattr(figure_module, "atomic_write_file", gated_write)
 
     def configure(**configuration):
-        assert configuration["fit"] == {"model": "gaussian_offset"}
+        assert configuration["fit"] == {}
         configure_started.set()
         assert configure_release.wait(5.0)
+        return SimpleNamespace(value=description)
 
     def save(path):
         assert archive.exists(), "render started before archive commit"
@@ -601,7 +618,7 @@ def test_formal_panel_save_keeps_qt_live_and_close_waits_for_archive_and_render(
     try:
         assert presenter.save_panel_figure(binding.panel_id, str(target)) is True
         assert presenter.save_panel_figure(binding.panel_id, str(target)) is False
-        assert writer_started.wait(2.0)
+        assert configure_started.wait(2.0)
         window.close()
         assert window.is_visible(), "pending Panel Save was reported closed"
         _wait_qt(
@@ -611,12 +628,12 @@ def test_formal_panel_save_keeps_qt_live_and_close_waits_for_archive_and_render(
         )
         assert beats, "the Console lifecycle beat stopped during Panel Save"
 
-        writer_release.set()
-        assert configure_started.wait(2.0)
-        assert archive.exists()
-        assert window.is_visible()
         configure_release.set()
+        assert writer_started.wait(2.0)
+        assert window.is_visible()
+        writer_release.set()
         assert save_started.wait(2.0)
+        assert archive.exists()
         assert window.is_visible()
         save_release.set()
         _wait_qt(application, lambda: not window.is_visible())
@@ -805,10 +822,11 @@ assert catalog == (
     ('Measurement: Camera Measurement', ('logic', 'camera_measurement')),
     ('Measurement: Seamless Scan', ('logic', 'seamless_scan')),
     ('Measurement: Stepped Scan', ('logic', 'stepped_scan')),
-        ('Processor: Occupancy', ('logic', 'occupancy')),
-        ('Task: Calibration', ('logic', 'calibration')),
-        ('Task: Slm Feedback', ('logic', 'slm_feedback')),
-        ('Task: Temperature', ('logic', 'temperature')),
+    ('Processor: Frame Survival', ('logic', 'frame_survival')),
+    ('Processor: Occupancy', ('logic', 'occupancy')),
+    ('Task: Calibration', ('logic', 'calibration')),
+    ('Task: Slm Feedback', ('logic', 'slm_feedback')),
+    ('Task: Temperature', ('logic', 'temperature')),
 )
 facet_index = next(
     index for index in range(view._view.kind_combo.count())
@@ -923,7 +941,7 @@ print('TASK_TAKEOVER_PREVIEW_OK')
     assert "TASK_TAKEOVER_PREVIEW_OK" in completed.stdout
 
 
-def test_calibration_terminal_writes_six_figure_pairs_without_report_panels(
+def test_calibration_terminal_writes_seven_figure_pairs_without_report_panels(
     workspace,
 ) -> None:
     """The Task owns its files; Workbench only owns the live preview."""
@@ -999,7 +1017,10 @@ artifact_row = presenter.logic['calibration'].artifact_results[0]
 artifact_path = Path(artifact_row['path'])
 run_root = artifact_path.parents[1]
 figure_root = run_root / 'figures'
-stems = ('site_map', 'fidelity', 'box', 'psf', 'uniform_psf', 'psf_kernels')
+stems = (
+    'site_map', 'actual_fidelity', 'gaussian_fidelity',
+    'box', 'psf', 'uniform_psf', 'psf_kernels',
+)
 expected_report_files = {
     figure_root / f'{stem}{suffix}'
     for stem in stems

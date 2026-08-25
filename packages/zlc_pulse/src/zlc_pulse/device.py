@@ -706,10 +706,9 @@ class PulseStreamer:
         require_outer_seam: bool = False,
     ) -> None:
         # A value the multiplier cannot hold is refused, not wrapped.  The host
-        # and the board now agree about what a wrapped value plays, which means
-        # they agree on something nobody asked for: a duration slot is in ticks,
-        # so a period approaching a second at 50 MHz is already past the
-        # operand width and would come back as a few microseconds.
+        # and the board now agree about what a wrapped value plays.  Duration
+        # slots are signed deltas around a full-width base, so this limits the
+        # scan span rather than the absolute period.
         width = slot_operand_width()
         limit = 1 << (width - 1)
         for index, value in enumerate(row):
@@ -723,8 +722,16 @@ class PulseStreamer:
             evaluate_affine_tick(base, coeffs, row, program.scan_coeff_frac_bits)
             for base, coeffs in zip(program.ticks, program.tick_slot_coeffs)
         )
-        if effective[0] != 0 or any(right <= left for left, right in zip(effective, effective[1:])):
-            raise ValueError("slot row makes compiled edge ticks collide or move before time zero")
+        tick_limit = 1 << self.geom.tick_width
+        if (
+            effective[0] != 0
+            or any(value < 0 or value >= tick_limit for value in effective)
+            or any(right <= left for left, right in zip(effective, effective[1:]))
+        ):
+            raise ValueError(
+                "slot row makes compiled edge ticks collide or leave the "
+                "unsigned hardware tick range"
+            )
         loop_start = evaluate_affine_tick(
             program.ticks[program.loop_start_index],
             program.tick_slot_coeffs[program.loop_start_index],

@@ -130,8 +130,8 @@ def _facet_axis(schema: Any, cell: Any) -> AxisRef | None:
         # others; the Setting table lets the operator reassign them.  The
         # flattened point-row ordinal is not another scientific axis.  Using
         # it here created a phantom ``point`` fate, turned a 10x10x10 scan into
-        # 1000 cells, and left ``scope:point`` behind when the operator tried
-        # to reduce it.
+        # 1000 cells, and left a phantom point-row restriction behind when
+        # the operator tried to reduce it.
         return AxisRef.point_dimension(live[0])
     return None
 

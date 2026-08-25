@@ -60,44 +60,7 @@ if TYPE_CHECKING:
 
 
 ValueT = TypeVar("ValueT")
-EventT = TypeVar("EventT")
 _UNSET = object()
-
-
-def _axis_at_normalized(
-    front: "RasterFront",
-    x: float,
-    y: float,
-    *,
-    tolerance_px: float = 0.0,
-) -> AxisTransform | None:
-    """Resolve the axis under -- or nearest within tolerance of -- a pointer.
-
-    What you can SEE you can grab: a guide painted ON an axes boundary
-    (the autoscaled colour-limit guides sit exactly at the distribution
-    rail's edges) spills its visible linewidth outside the box, so the
-    box test extends by the same handle radius every other grab already
-    uses.  Where expanded boxes would overlap -- the gaps between an
-    image, its rail and its colorbar -- the NEAREST axis wins; a press
-    inside an axes box is distance zero and behaves exactly as before.
-    """
-
-    width, height = front.logical_size
-    scale_x = float(max(1, int(width)))
-    scale_y = float(max(1, int(height)))
-    best: AxisTransform | None = None
-    best_distance = float("inf")
-    for axis in front.interaction.axes:
-        left, top, right, bottom = axis.bounds
-        outside_x = max(left - x, x - right, 0.0) * scale_x
-        outside_y = max(top - y, y - bottom, 0.0) * scale_y
-        distance = max(outside_x, outside_y)
-        if distance == 0.0:
-            return axis
-        if distance <= float(tolerance_px) and distance < best_distance:
-            best = axis
-            best_distance = distance
-    return best
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,7 +227,6 @@ class RasterFront:
     logical_dpi: float
     device_pixel_ratio: float
     interaction: RasterInteractionMap
-    source_revisions: tuple[int, ...]
 
     def __post_init__(self) -> None:
         if not isinstance(self.identity, RasterIdentity):
@@ -288,21 +250,6 @@ class RasterFront:
             raise ValueError("device pixel ratio must be positive")
         if not isinstance(self.interaction, RasterInteractionMap):
             raise TypeError("front interaction must be RasterInteractionMap")
-        revisions = tuple(self.source_revisions)
-        if not revisions:
-            raise ValueError("front source_revisions cannot be empty")
-        if any(
-            isinstance(value, bool)
-            or not isinstance(value, (int, np.integer))
-            or int(value) < 0
-            for value in revisions
-        ):
-            raise TypeError("front source_revisions must contain non-negative integers")
-        # Ties are legal: a seeded rolling history carries one sample per
-        # repeat of the same source revision.  Only regressions are invalid.
-        if any(left > right for left, right in zip(revisions, revisions[1:])):
-            raise ValueError("front source_revisions must be non-decreasing")
-        object.__setattr__(self, "source_revisions", tuple(int(value) for value in revisions))
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,7 +281,7 @@ class _DataFrame:
 
     data: object
     revision: int | None
-    completion: Future["RasterOperation[None]"]
+    completion: Future["RasterOperation[DisplayDescription]"]
     started_at: float = 0.0
     cancel: Event = field(default_factory=Event)
     stage: str = "latest"
@@ -707,9 +654,9 @@ class RasterPlotHost:
 
     def _subscribe_session_event(
         self,
-        callback: Callable[[EventT], object],
+        callback: Callable[..., object],
         install: Callable[
-            ["PlotSession", Callable[[EventT], object]],
+            ["PlotSession", Callable[..., object]],
             Callable[[], None],
         ],
     ) -> Future[RasterOperation[Callable[[], Future[RasterOperation[None]]]]]:
@@ -750,6 +697,17 @@ class RasterPlotHost:
         return self._subscribe_session_event(
             callback,
             lambda session, listener: session.subscribe_viewport(listener),
+        )
+
+    def subscribe_facet_focus(
+        self,
+        callback: Callable[[int | None, object, str | None, int], object],
+    ) -> Future[RasterOperation[Callable[[], Future[RasterOperation[None]]]]]:
+        """Install a committed FacetGrid focus callback on the raster worker."""
+
+        return self._subscribe_session_event(
+            callback,
+            lambda session, listener: session.subscribe_facet_focus(listener),
         )
 
     def subscribe_fit(
@@ -948,7 +906,7 @@ class RasterPlotHost:
         data: object,
         *,
         revision: int | None = None,
-    ) -> Future[RasterOperation[None]]:
+    ) -> Future[RasterOperation["DisplayDescription"]]:
         """Present one data frame as a complete pair through the pipeline.
 
         The frame travels prepare (projection, off-worker) -> solve (armed
@@ -978,7 +936,7 @@ class RasterPlotHost:
     def update_image_frame(
         self,
         frame: "ImageFrame",
-    ) -> Future[RasterOperation[None]]:
+    ) -> Future[RasterOperation["DisplayDescription"]]:
         """Present one complete image frame through the pair pipeline."""
 
         return self._enqueue_data_frame(frame, None)
@@ -989,10 +947,10 @@ class RasterPlotHost:
         self,
         data: object,
         revision: int | None,
-    ) -> Future[RasterOperation[None]]:
+    ) -> Future[RasterOperation["DisplayDescription"]]:
         if revision is None:
             revision = _plot_input_revision(data)
-        completion: Future[RasterOperation[None]] = Future()
+        completion: Future[RasterOperation["DisplayDescription"]] = Future()
         frame = _DataFrame(
             data,
             revision,
@@ -1201,10 +1159,11 @@ class RasterPlotHost:
     ) -> None:
         accepted: list[object] = []
 
-        def stage_commit() -> None:
+        def stage_commit() -> "DisplayDescription":
             if frame.cancel.is_set():
                 raise _FrameSuperseded("live frame was cancelled before commit")
-            finalization = self._require_session().commit_live_frame(
+            session = self._require_session()
+            finalization = session.commit_live_frame(
                 prepared,
                 solved,
             )
@@ -1213,9 +1172,10 @@ class RasterPlotHost:
                     "live frame superseded before presentation"
                 )
             if frame.cancel.is_set():
-                self._require_session().abort_live_frame(finalization)
+                session.abort_live_frame(finalization)
                 raise _FrameSuperseded("live frame was cancelled during commit")
             accepted.append(finalization)
+            return session.describe_display()
 
         def published() -> None:
             if accepted:
@@ -1243,7 +1203,7 @@ class RasterPlotHost:
 
     def _on_frame_committed(
         self,
-        dispatched: Future[RasterOperation[None]],
+        dispatched: Future[RasterOperation["DisplayDescription"]],
         frame: _DataFrame,
     ) -> None:
         try:
@@ -1260,7 +1220,7 @@ class RasterPlotHost:
         self,
         frame: _DataFrame,
         *,
-        operation: RasterOperation[None] | None = None,
+        operation: RasterOperation["DisplayDescription"] | None = None,
         error: BaseException | None = None,
         cancelled: bool = False,
     ) -> None:
@@ -1788,6 +1748,7 @@ class RasterPlotHost:
         model: str | "FitModelSpec",
         *,
         selector_kind: SelectorKind | None = None,
+        fixed: Mapping[str, float] | None = None,
         initial: Mapping[str, float] | tuple[float, ...] | None = None,
         bounds: Mapping[str, tuple[float | None, float | None]] | None = None,
         options: "FitOptions | None" = None,
@@ -1824,6 +1785,7 @@ class RasterPlotHost:
             lambda: self._require_session().fit_async(
                 model,
                 selector_kind=selector_kind,
+                fixed=fixed,
                 initial=initial,
                 bounds=bounds,
                 options=options,
@@ -1936,24 +1898,6 @@ class RasterPlotHost:
                     raise RuntimeError(
                         "the painted pointer front belongs to another raster host"
                     )
-                if selected_action == "press":
-                    current_front = self.front
-                    if current_front is None:
-                        raise RuntimeError("raster host has no current pointer front")
-                    # A live frame may have been promoted after the browser/Qt
-                    # event was sampled.  The press is still valid: resolve
-                    # its transform and selector hit map from the latest
-                    # complete front instead of rejecting the gesture.
-                    effective_identity = current_front.identity
-                    effective_axes = _axis_at_normalized(
-                        current_front,
-                        x_value,
-                        y_value,
-                        tolerance_px=(
-                            session._defaults.interaction.selector_handle_radius_px
-                        ),
-                    )
-                    effective_interaction = current_front.interaction
                 revisions = session.revisions
                 plan = session.surface_plan
                 if (
@@ -2030,7 +1974,10 @@ class RasterPlotHost:
             coalesce_key="viewport",
         )
 
-    def focus_facet(self, index: int) -> Future[RasterOperation[None]]:
+    def focus_facet(
+        self,
+        index: int,
+    ) -> Future[RasterOperation[None]]:
         """Open one cell of this FacetGrid, by the thing that identifies it.
 
         Its INDEX.  This used to take a pixel-geometry handle (an identity
@@ -2056,11 +2003,14 @@ class RasterPlotHost:
             coalesce_key="facet-presentation",
         )
 
-    def show_facet_overview(self) -> Future[RasterOperation[None]]:
+    def show_facet_overview(
+        self,
+    ) -> Future[RasterOperation[None]]:
         """Return a focused FacetGrid front to its complete overview."""
 
         return self._dispatch_session(
-            lambda: self._require_session().show_facet_overview(),
+            lambda: self._require_session().show_facet_overview(
+            ),
             _mode=_DispatchMode.PUBLISH,
             coalesce_key="facet-presentation",
         )
@@ -2317,7 +2267,6 @@ class RasterPlotHost:
                 color_limits=color_limits,
                 facet_focus_index=facet_focus_index,
             ),
-            source_revisions=session._raster_source_revisions_snapshot(),
         )
 
     def _promote(self, front: RasterFront) -> bool:

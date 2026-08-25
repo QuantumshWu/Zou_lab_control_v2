@@ -8,6 +8,7 @@ axes whose labels and display units belong to the plot layer.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,8 +25,10 @@ from zlc_data import (
     PointColumn,
     PointTable,
     expand_snapshot_validity,
+    point_ordinal_axis,
 )
 
+from .kinds import AxisDomain, AxisRef
 from .units import DEFAULT_UNITS, Unit, UnitRegistry, resolve_unit
 
 
@@ -69,14 +72,6 @@ def schema_shape(schema: DatasetSchema) -> tuple[int, ...]:
 
 def schema_repeat_count(schema: DatasetSchema) -> int:
     return int(schema.repeat_axis.size)
-
-
-def schema_point_count(schema: DatasetSchema) -> int:
-    return int(schema.point_table.row_count)
-
-
-def schema_data_axes(schema: DatasetSchema) -> tuple[AxisSpec, ...]:
-    return tuple(schema.cell_schema.data_axes)
 
 
 def schema_value_unit(schema: DatasetSchema, registry: UnitRegistry) -> Unit:
@@ -156,22 +151,26 @@ def _resolve_annotation(annotation: str | None, registry: UnitRegistry) -> Unit:
     return resolve_unit(annotation or "1", registry)
 
 
-def implicit_coordinates(axis: AxisSpec) -> tuple[Any, ...]:
-    if axis.coordinates is not None:
-        return tuple(axis.coordinates)
-    return tuple(axis.index_origin + index for index in range(axis.size))
-
-
 @dataclass(frozen=True, slots=True)
-class AxisDescriptor:
-    """Presentation descriptor derived from one role-axis declaration."""
+class ResolvedAxis:
+    """One exact schema-axis contract, before any full-sample broadcast.
+
+    Data projection, semantic authoring and interaction identity all resolve
+    through this object.  It contains only producer metadata and one tensor
+    dimension; the potentially large ``(R, P, *D)`` coordinate planes remain
+    a :class:`DataView` concern.
+    """
 
     axis_id: AxisId
     name: str
     size: int
-    coordinates: tuple[Any, ...]
+    coordinates: Sequence[Any]
+    dimension: int
     unit_annotation: str | None = None
+    coordinate_frame: str | None = None
     coordinate_labels: tuple[str, ...] | None = None
+    declared_domain: bool = True
+    topology_position: int | None = None
 
     @property
     def label(self) -> str:
@@ -180,96 +179,132 @@ class AxisDescriptor:
     def canonical_unit(self, registry: UnitRegistry) -> Unit:
         return _resolve_annotation(self.unit_annotation, registry)
 
+    def source_indices(self, schema: DatasetSchema) -> NDArray[np.int64]:
+        """Indices selecting this axis coordinate at each source row."""
 
-def descriptor_from_axis(axis: AxisSpec) -> AxisDescriptor:
-    if not isinstance(axis, AxisSpec):
-        raise TypeError("axis must be zlc_data.AxisSpec")
-    return AxisDescriptor(
-        axis.axis_id,
-        axis.name,
-        int(axis.size),
-        implicit_coordinates(axis),
-        axis.unit,
-        axis.coordinate_labels,
-    )
-
-
-def descriptor_from_point_column(column: PointColumn) -> AxisDescriptor:
-    if not isinstance(column, PointColumn):
-        raise TypeError("column must be zlc_data.PointColumn")
-    return AxisDescriptor(
-        column.coordinate_id,
-        column.name,
-        len(column.values),
-        tuple(column.values),
-        column.unit,
-        column.coordinate_labels,
-    )
+        if not isinstance(schema, DatasetSchema):
+            raise TypeError("schema must be zlc_data.DatasetSchema")
+        if self.topology_position is None:
+            return np.arange(self.size, dtype=np.int64)
+        topology = schema.grid_topology
+        if topology is None:
+            raise KeyError(self.axis_id)
+        return np.fromiter(
+            (
+                cell[self.topology_position]
+                for cell in topology.row_to_cell
+            ),
+            dtype=np.int64,
+            count=len(topology.row_to_cell),
+        )
 
 
-def descriptor_from_topology(
-    topology: GridTopology,
-    position: int,
-    *,
-    point_table: PointTable | None = None,
-) -> AxisDescriptor:
-    if not isinstance(topology, GridTopology):
-        raise TypeError("topology must be zlc_data.GridTopology")
-    axis_id = topology.dimension_ids[position]
-    unit: str | None = None
-    name = str(axis_id)
-    coordinate_labels: tuple[str, ...] | None = None
-    # W-round GridTopology intentionally stores geometry, not presentation
-    # annotations.  When the producer also carries the dimension in its
-    # PointTable, reuse that column's unit and label; otherwise the plotting
-    # layer correctly treats the topology coordinate as dimensionless.
-    if point_table is not None:
+def resolve_axis(schema: DatasetSchema, ref: AxisRef) -> ResolvedAxis:
+    """Resolve an exact :class:`AxisRef` against one schema.
+
+    Human labels never participate.  Point coordinates and topology
+    dimensions may share an ``AxisId`` as two views of the same physical point
+    domain, but callers must choose the exact domain they intend.
+    """
+
+    if not isinstance(schema, DatasetSchema):
+        raise TypeError("schema must be zlc_data.DatasetSchema")
+    if not isinstance(ref, AxisRef):
+        raise TypeError("ref must be AxisRef")
+
+    def dense_axis(axis: AxisSpec, dimension: int) -> ResolvedAxis:
+        coordinates: Sequence[Any] = (
+            axis.coordinates
+            if axis.coordinates is not None
+            else range(axis.index_origin, axis.index_origin + axis.size)
+        )
+        return ResolvedAxis(
+            axis.axis_id,
+            axis.name,
+            int(axis.size),
+            coordinates,
+            dimension,
+            axis.unit,
+            None
+            if axis.coordinate_frame is None
+            else str(axis.coordinate_frame),
+            axis.coordinate_labels,
+        )
+
+    if ref.domain is AxisDomain.REPEAT:
+        return dense_axis(schema.repeat_axis, 0)
+    if ref.domain is AxisDomain.POINT_ROW:
+        return dense_axis(point_ordinal_axis(schema.point_table.row_count), 1)
+    assert ref.axis_id is not None
+    axis_id = AxisId(ref.axis_id)
+    if ref.domain is AxisDomain.POINT_COORDINATE:
+        column = schema.point_table.column(axis_id)
+        return ResolvedAxis(
+            column.coordinate_id,
+            column.name,
+            len(column.values),
+            column.values,
+            1,
+            column.unit,
+            None
+            if column.coordinate_frame is None
+            else str(column.coordinate_frame),
+            column.coordinate_labels,
+            declared_domain=False,
+        )
+    if ref.domain is AxisDomain.POINT_DIMENSION:
+        topology = schema.grid_topology
+        if topology is None:
+            raise KeyError(axis_id)
         try:
-            column = point_column(point_table, axis_id)
-        except (KeyError, TypeError):
+            position = topology.dimension_ids.index(axis_id)
+        except ValueError as error:
+            raise KeyError(axis_id) from error
+        name = str(axis_id)
+        unit: str | None = None
+        frame: str | None = None
+        labels: tuple[str, ...] | None = None
+        try:
+            column = schema.point_table.column(axis_id)
+        except KeyError:
             pass
         else:
             name = column.name
             unit = column.unit
+            frame = (
+                None
+                if column.coordinate_frame is None
+                else str(column.coordinate_frame)
+            )
             if column.coordinate_labels is not None:
                 label_by_coordinate = dict(
                     zip(column.values, column.coordinate_labels, strict=True)
                 )
-                coordinate_labels = tuple(
+                labels = tuple(
                     label_by_coordinate[value]
                     for value in topology.coordinate_domains[position]
                 )
-    return AxisDescriptor(
-        axis_id,
-        name,
-        len(topology.coordinate_domains[position]),
-        tuple(topology.coordinate_domains[position]),
-        unit,
-        coordinate_labels,
-    )
-
-
-def point_column(table: PointTable, axis_id: AxisId) -> PointColumn:
-    if not isinstance(table, PointTable):
-        raise TypeError("table must be zlc_data.PointTable")
-    if isinstance(axis_id, str):
-        axis_id = AxisId(axis_id)
-    return table.column(axis_id)
-
-
-def topology_position(topology: GridTopology, axis_id: AxisId) -> int:
-    if not isinstance(topology, GridTopology):
-        raise TypeError("topology must be zlc_data.GridTopology")
-    if isinstance(axis_id, str):
-        axis_id = AxisId(axis_id)
-    try:
-        return topology.dimension_ids.index(axis_id)
-    except ValueError as exc:
-        raise KeyError(axis_id) from exc
+        return ResolvedAxis(
+            axis_id,
+            name,
+            len(topology.coordinate_domains[position]),
+            topology.coordinate_domains[position],
+            1,
+            unit,
+            frame,
+            labels,
+            topology_position=position,
+        )
+    if ref.domain is AxisDomain.DATA:
+        for position, axis in enumerate(schema.cell_schema.data_axes):
+            if axis.axis_id == axis_id:
+                return dense_axis(axis, 2 + position)
+        raise KeyError(axis_id)
+    raise KeyError(ref)
 
 
 __all__ = [
-    "AxisDescriptor",
+    "ResolvedAxis",
     "AxisId",
     "AxisSpec",
     "DEFAULT_UNITS",
@@ -280,16 +315,10 @@ __all__ = [
     "PointTable",
     "Unit",
     "UnitRegistry",
-    "descriptor_from_axis",
-    "descriptor_from_point_column",
-    "descriptor_from_topology",
-    "implicit_coordinates",
     "live_grid_dimensions",
-    "point_column",
     "resolve_unit",
-    "schema_data_axes",
+    "resolve_axis",
     "schema_equal",
-    "schema_point_count",
     "schema_repeat_count",
     "schema_shape",
     "schema_value_unit",
@@ -298,5 +327,4 @@ __all__ = [
     "snapshot_schema",
     "snapshot_validity",
     "snapshot_values",
-    "topology_position",
 ]

@@ -153,10 +153,44 @@ class CompiledProgram:
         object.__setattr__(self, "bus_segments", tuple(self.bus_segments))
         object.__setattr__(self, "bus_delays", tuple(self.bus_delays))
         object.__setattr__(self, "channel_delays", tuple(int(value) for value in channel_delays))
+        # Prove the derived scan-unit metadata now, while malformed programs
+        # can still be refused at their construction boundary.
+        self._duration_tick_scales()
 
     @property
     def slot_count(self) -> int:
         return len(self.slot_kinds)
+
+    def _duration_tick_scales(self) -> tuple[int, ...]:
+        quantum = 1 << int(self.scan_coeff_frac_bits)
+        result: list[int] = []
+        for index, kind in enumerate(self.slot_kinds):
+            if kind == FIELD_DAC:
+                result.append(1)
+                continue
+            coefficients = {
+                row[index]
+                for row in self.tick_slot_coeffs
+                if row[index]
+            }
+            if self.loop_end_slot_coeffs[index]:
+                coefficients.add(self.loop_end_slot_coeffs[index])
+            if (
+                not coefficients
+                or any(value <= 0 or value % quantum for value in coefficients)
+                or len({value // quantum for value in coefficients}) != 1
+            ):
+                raise ValueError(
+                    "duration slot coefficients do not describe one tick scale"
+                )
+            result.append(next(iter(coefficients)) // quantum)
+        return tuple(result)
+
+    @property
+    def slot_tick_scales(self) -> tuple[int, ...]:
+        """Wire tick quanta, derived from the affine coefficients themselves."""
+
+        return self._duration_tick_scales()
 
     @property
     def digest(self) -> str:
@@ -202,6 +236,14 @@ def slot_operand_width() -> int:
     return SLOT_OPERAND_WIDTH
 
 
+def maximum_duration_tick_scale(params: StreamerParams) -> int:
+    """Largest whole-tick duration coefficient the deployed Q format holds."""
+
+    if not isinstance(params, StreamerParams):
+        raise TypeError("params must be StreamerParams")
+    return ((1 << (params.coeff_width - 1)) - 1) >> params.coeff_frac_bits
+
+
 def narrow_slot_operand(value: int) -> int:
     """One slot value as the board's multiplier will see it.
 
@@ -221,11 +263,10 @@ def narrow_slot_operand(value: int) -> int:
 def evaluate_affine_tick(base: int, coefficients: Sequence[int], point: Sequence[int], frac_bits: int) -> int:
     """The tick one edge lands on for one scan point, as the BOARD computes it.
 
-    The slot operand is narrowed the way the RTL narrows it.  Without that, the
-    host and the board agreed only while every slot value happened to fit 25
-    signed bits -- and a duration slot is in ticks, so a period approaching a
-    second at 50 MHz is already past it.  The host then predicted one schedule,
-    validated it, accepted it, and the board played another.
+    The slot operand is narrowed the way the RTL narrows it.  Duration slots
+    carry signed tick deltas around a full-width nominal base; DAC slots carry
+    their offset-binary code.  Values outside the multiplier width are refused
+    before this function is used for a hardware application.
     """
 
     return int(base) + (
@@ -244,8 +285,8 @@ def _slot_index(sequence: PulseSequence) -> dict[PulseFieldRef, int]:
 def _default_slot_value(sequence: PulseSequence, slot: PulseSlot) -> int:
     ref = slot.field_ref
     if ref.kind == FIELD_DURATION:
-        period = sequence.period_by_id[ref.period_id]
-        return exact_ticks(period.duration, period.unit, sequence.time_step_ns, "slot duration")
+        # Duration slots are signed deltas around the period's full-width base.
+        return 0
     if ref.kind == FIELD_DAC:
         period = sequence.period_by_id[ref.period_id]
         step = next(item for item in period.analog_steps if item.port == ref.port)
@@ -260,18 +301,33 @@ def _nominal_slot_row(sequence: PulseSequence) -> tuple[int, ...]:
     return tuple(_default_slot_value(sequence, slot) for slot in sequence.slots)
 
 
-def _period_starts(sequence: PulseSequence, binding: Mapping[PulseFieldRef, int], frac_bits: int) -> list[tuple[int, tuple[int, ...]]]:
-    scale = 1 << frac_bits
+def _period_starts(
+    sequence: PulseSequence,
+    binding: Mapping[PulseFieldRef, int],
+    frac_bits: int,
+    slot_tick_scales: Sequence[int],
+) -> list[tuple[int, tuple[int, ...]]]:
+    coefficient_scale = 1 << frac_bits
     zeros = tuple(0 for _ in sequence.slots)
     starts: list[tuple[int, tuple[int, ...]]] = [(0, zeros)]
     for period in sequence.periods:
         selector = binding.get(PulseFieldRef(FIELD_DURATION, period.period_id))
+        nominal = exact_ticks(
+            period.duration,
+            period.unit,
+            sequence.time_step_ns,
+            "period duration",
+        )
         if selector is None:
-            base = exact_ticks(period.duration, period.unit, sequence.time_step_ns, "period duration")
+            base = nominal
             coeff = zeros
         else:
-            base = 0
-            coeff = tuple(scale if index == selector else 0 for index in range(sequence.slot_count))
+            base = nominal
+            tick_scale = int(slot_tick_scales[selector])
+            coeff = tuple(
+                coefficient_scale * tick_scale if index == selector else 0
+                for index in range(sequence.slot_count)
+            )
         starts.append((
             starts[-1][0] + base,
             tuple(left + right for left, right in zip(starts[-1][1], coeff)),
@@ -416,7 +472,13 @@ def _delay_values(sequence: PulseSequence) -> tuple[tuple[int, ...], tuple[Targe
     return tuple(channels), buses
 
 
-def compile_sequence(sequence: PulseSequence, geom: StreamerParams, clock_hz: float) -> CompiledProgram:
+def compile_sequence(
+    sequence: PulseSequence,
+    geom: StreamerParams,
+    clock_hz: float,
+    *,
+    slot_tick_scales: Sequence[int] | None = None,
+) -> CompiledProgram:
     """Compile once; slot rows are data written later by the device API."""
 
     if not isinstance(sequence, PulseSequence):
@@ -445,8 +507,34 @@ def compile_sequence(sequence: PulseSequence, geom: StreamerParams, clock_hz: fl
     if Fraction(str(sequence.time_step_ns)) * Fraction(str(clock_hz)) != 1_000_000_000:
         raise ValueError("sequence time_step_ns does not match the compiler clock_hz")
     frac_bits = params.coeff_frac_bits if sequence.slots else 0
+    selected_slot_scales = (
+        (1,) * sequence.slot_count
+        if slot_tick_scales is None
+        else tuple(slot_tick_scales)
+    )
+    if (
+        len(selected_slot_scales) != sequence.slot_count
+        or any(type(value) is not int or value < 1 for value in selected_slot_scales)
+    ):
+        raise ValueError("slot_tick_scales must contain one positive integer per slot")
+    if any(
+        slot.kind != FIELD_DURATION and scale != 1
+        for slot, scale in zip(sequence.slots, selected_slot_scales, strict=True)
+    ):
+        raise ValueError("DAC slot tick scale must remain 1")
+    maximum_tick_scale = maximum_duration_tick_scale(params) if sequence.slots else 1
+    if any(value > maximum_tick_scale for value in selected_slot_scales):
+        raise ValueError(
+            f"slot tick scale exceeds the {params.coeff_width}-bit Q{frac_bits} "
+            f"coefficient range ({maximum_tick_scale})"
+        )
     binding = _slot_index(sequence)
-    starts = _period_starts(sequence, binding, frac_bits)
+    starts = _period_starts(
+        sequence,
+        binding,
+        frac_bits,
+        selected_slot_scales,
+    )
     reference = _nominal_slot_row(sequence)
     ticks, masks, coeffs = _effective_rows(sequence, starts, frac_bits, reference)
     clk_enable = 0
@@ -520,6 +608,7 @@ __all__ = [
     "TargetBusSegment",
     "compile_sequence",
     "evaluate_affine_tick",
+    "maximum_duration_tick_scale",
     "narrow_slot_operand",
     "slot_operand_width",
 ]

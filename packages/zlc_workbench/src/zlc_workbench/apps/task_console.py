@@ -78,15 +78,11 @@ def build_panel_host(plot_input, state):
     function, so a divergence between what the app builds and what the tests
     build cannot exist.
 
-    The panel's stored appearance (``state.display``) is the COMPLETE
-    configuration of whatever vocabulary the panel last settled under --
-    ``_state_with_described_parameters`` rewrites it wholesale so a saved
-    panel reproduces its exact look.  A changed kind or cell kind mounts a
-    spec with a DIFFERENT vocabulary, and the plot schema refuses unknown
-    names by design (a misspelling must never silently run defaults).  The
-    mount therefore takes the intersection: shared names keep their authored
-    values, foreign names stay behind in the bag until the next settle
-    rewrites it in the new vocabulary.
+    The panel's stored appearance (``state.display``) is the complete current
+    vocabulary.  During a kind/cell transition the mount takes only the legal
+    intersection with the target vocabulary; the first successful description
+    then replaces the transition bag wholesale.  Unknown names never reach a
+    host and never survive as compatibility state.
     """
 
     import zlc_plot as plot

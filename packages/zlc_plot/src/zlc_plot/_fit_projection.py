@@ -5,7 +5,6 @@ from __future__ import annotations
 from copy import copy
 from dataclasses import dataclass, replace
 from enum import Enum
-from numbers import Integral
 from types import MappingProxyType
 from typing import Any, Callable
 
@@ -14,13 +13,14 @@ import math
 import numpy as np
 
 from zlc_data import BlockId, DatasetRevisionRef, OwnedSnapshot
-from zlc_data.axis import point_ordinal_axis
 from zlc_data.snapshot_projection import restrict_snapshot, value_selection
 
 from .data_contract import (
     DEFAULT_UNITS,
     UnitRegistry,
     resolve_unit,
+    resolve_axis,
+    snapshot_generation,
     snapshot_revision,
 )
 
@@ -46,6 +46,8 @@ from .fit import (
     RegularImageFitInput,
     UnitRelation,
     _REGULAR_IMAGE_CAPABILITIES,
+    format_fit_expression,
+    parse_fit_expression,
 )
 from .kinds import AxisDomain, AxisRef
 from .primitives import PulseTimelineData
@@ -84,56 +86,12 @@ class FitScope(str, Enum):
     ALL = "all"
 
 
-#: How many history points survive between revisions.  Retention is a memory
-#: bound, deliberately independent of the ``window`` display parameter: the
-#: window selects what is SHOWN, so enlarging it mid-run must immediately
-#: reveal history that was already measured.
-RETAINED_HISTORY_LIMIT = 100_000
-
-#: How many bytes of pooled values the session's history may hold.
-#:
-#: History is what a window looks back over, so it has to keep the VALUES a
-#: revision pooled, not just the scalar a rolling trace plots.  A scoped panel
-#: keeps a handful of numbers per shot; an unscoped image panel would keep a
-#: whole frame, and a hundred of those is gigabytes.  The oldest values are
-#: released first, which is what a window over the LAST n shots wants anyway,
-#: and every point keeps its scalar sample regardless -- those are tiny, and a
-#: rolling trace must not develop holes.
-HISTORY_VALUE_BUDGET_BYTES = 64 << 20
-
-
-@dataclass(frozen=True, slots=True)
-class RollingHistoryPoint:
-    """One successfully projected source revision in the session's history.
-
-    ``shot_index`` is the absolute shot number: the seeded history counts
-    0..R-1 and every appended revision takes the next integer.  The point
-    owns it because the window cache truncates the history, so position in
-    the list cannot recover the absolute axis.
-
-    ``values`` is everything that shot pooled, already restricted by whatever
-    the panel is scoped to, or None once the memory budget has released it.
-    A distribution windowed over the last n shots is the concatenation of
-    these; the rolling trace uses ``sample`` and never needs them.
-    """
-
-    sample: RollingSample
-    shot_index: int
-    values: np.ndarray | None = None
-    #: (n, sum, sum of squares) of everything this shot pooled -- three
-    #: floats computed while ``values`` is still in hand, surviving the
-    #: memory budget that releases the samples themselves.  The cumulative
-    #: trace runs on these, so its running mean weights every shot by what
-    #: it actually pooled.
-    pooled_moments: tuple[float, float, float] | None = None
-
-
 def _cumulative_trace(
-    history: tuple[RollingHistoryPoint, ...],
+    history: tuple[RollingSample, ...],
     key: tuple,
     start: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Running mean and standard error over the FULL history, then sliced.
+    """Running mean and standard error over retained Runtime history, then sliced.
 
     Ungrouped, each shot contributes everything it pooled (its stored
     moments), so shots pooling different sample counts weigh in correctly.
@@ -146,17 +104,34 @@ def _cumulative_trace(
     sums = np.zeros(total, dtype=float)
     squares = np.zeros(total, dtype=float)
     ungrouped = key == ()
-    for index, point in enumerate(history):
-        if ungrouped and point.pooled_moments is not None:
-            n[index], sums[index], squares[index] = point.pooled_moments
-            continue
+    for index, sample in enumerate(history):
         try:
-            source_index = point.sample.group_keys.index(key)
+            source_index = sample.group_keys.index(key)
         except ValueError:
             continue
-        if bool(point.sample.valid[source_index]):
-            value = float(point.sample.values[source_index])
-            n[index], sums[index], squares[index] = 1.0, value, value * value
+        if bool(sample.valid[source_index]):
+            value = float(sample.values[source_index])
+            if ungrouped:
+                count = float(sample.counts[source_index])
+                if count <= 0.0:
+                    continue
+                sem = (
+                    np.nan
+                    if sample.sem is None
+                    else float(sample.sem[source_index])
+                )
+                mean_square = value * value
+                if count > 1.0 and np.isfinite(sem):
+                    mean_square += sem * sem * (count - 1.0)
+                n[index] = count
+                sums[index] = count * value
+                squares[index] = count * mean_square
+            else:
+                n[index], sums[index], squares[index] = (
+                    1.0,
+                    value,
+                    value * value,
+                )
     running_n = np.cumsum(n)
     running_sum = np.cumsum(sums)
     running_squares = np.cumsum(squares)
@@ -170,143 +145,6 @@ def _cumulative_trace(
     valid = (running_n > 0.0) & np.isfinite(mean)
     mean = np.where(valid, mean, np.nan)
     return mean[start:], sem[start:], valid[start:]
-
-
-def _moments_of(values: np.ndarray | None) -> tuple[float, float, float] | None:
-    if values is None:
-        return None
-    flat = np.asarray(values, dtype=float).reshape(-1)
-    if not flat.size:
-        return (0.0, 0.0, 0.0)
-    # Sum first: a finite total proves the pool holds no NaN/inf, and the
-    # hole-free pool then takes BLAS ``dot`` for its square sum -- one
-    # fused multithreaded pass, no 16 MB ``square`` temporary, no
-    # isfinite scan.  Any non-finite value (in the data, or overflowing
-    # the dot) drops to the masked path below.
-    total = float(np.sum(flat, dtype=np.float64))
-    if math.isfinite(total):
-        squares = float(np.dot(flat, flat))
-        if math.isfinite(squares):
-            return (float(flat.size), total, squares)
-    # Masked sums, never a gather: copying the finite subset of a
-    # camera-sized pool cost more than the three moments themselves.
-    finite = np.isfinite(flat)
-    count = int(np.count_nonzero(finite))
-    if not count:
-        return (0.0, 0.0, 0.0)
-    return (
-        float(count),
-        float(np.sum(flat, where=finite, dtype=np.float64)),
-        float(np.sum(np.square(flat), where=finite, dtype=np.float64)),
-    )
-
-
-def accumulate_history(
-    projection: Any,
-    view: Any,
-    *,
-    group: AxisRef | None,
-    aggregation: Any,
-) -> tuple[RollingHistoryPoint, ...]:
-    """This session's history of the signal, extended by the current revision.
-
-    ONE owner for what history is and when it grows, because both kinds that
-    look back -- a rolling trace and a windowed distribution -- must look back
-    over the same shots.  History is not repeats: repeats are what one
-    publication carries, and a publication that carries R of them contributes
-    R shots to the history exactly once, when it seeds it.
-    """
-
-    if view.has_primary_index:
-        samples = view.rolling_history_samples(
-            group=group,
-            aggregation=aggregation,
-        )
-        pools = view.pooled_values_by_repeat()
-        return _within_value_budget(
-            [
-                RollingHistoryPoint(
-                    sample, sample.revision, values, _moments_of(values)
-                )
-                for sample, values in zip(samples, pools, strict=True)
-            ][-RETAINED_HISTORY_LIMIT:]
-        )
-    history = list(projection._context.rolling_history)
-    if not history:
-        # The first revision seeds the full shot history from the repeat
-        # axis: a static snapshot is a complete record, and a live session
-        # starts with its seed data instead of a single point.
-        pooled = view.pooled_values_by_repeat()
-        history.extend(
-            RollingHistoryPoint(sample, shot_index, values, _moments_of(values))
-            for shot_index, (sample, values) in enumerate(
-                zip(
-                    view.rolling_history_samples(
-                        group=group,
-                        aggregation=aggregation,
-                    ),
-                    pooled,
-                    strict=True,
-                )
-            )
-        )
-    elif history[-1].sample.revision != projection._revision:
-        appended = view.pooled_values()
-        moments = _moments_of(appended)
-        # The ungrouped MEAN sample IS the moments: deriving it here keeps
-        # ONE pass over the pool where rolling_sample would run the same
-        # sums again on the same bytes.
-        if group is None and aggregation is Reduction.MEAN and moments:
-            count, total, squares = moments
-            mean = total / count if count else math.nan
-            sem = _sem_from_moments(
-                np.asarray([mean], dtype=np.float64),
-                np.asarray(
-                    [squares / count if count else math.nan],
-                    dtype=np.float64,
-                ),
-                np.asarray([int(count)], dtype=np.int64),
-            )
-            sample = RollingSample(
-                revision=projection._revision,
-                generation=view.samples.generation,
-                values=np.asarray([mean], dtype=np.float64),
-                valid=np.asarray([count > 0 and math.isfinite(mean)]),
-                group_keys=((),),
-                sem=sem,
-            )
-        else:
-            sample = view.rolling_sample(
-                group=group, aggregation=aggregation
-            )
-        history.append(
-            RollingHistoryPoint(
-                sample,
-                history[-1].shot_index + 1,
-                appended,
-                moments,
-            )
-        )
-    return _within_value_budget(history[-RETAINED_HISTORY_LIMIT:])
-
-
-def _within_value_budget(
-    history: list[RollingHistoryPoint],
-) -> tuple[RollingHistoryPoint, ...]:
-    """Release the OLDEST pooled values until the retained bytes fit."""
-
-    budget = HISTORY_VALUE_BUDGET_BYTES
-    kept: list[RollingHistoryPoint] = []
-    for point in reversed(history):
-        values = point.values
-        if values is None:
-            kept.append(point)
-            continue
-        budget -= int(values.nbytes)
-        kept.append(point if budget >= 0 else replace(point, values=None))
-    kept.reverse()
-    return tuple(kept)
-
 
 def _broadcast_all_true(mask: np.ndarray) -> bool:
     """True for a stride-0 broadcast plane that is constant True."""
@@ -353,7 +191,6 @@ class FitSelection:
     selector_kind: SelectorKind | None = None
     regular_image: RegularImageFitInput | None = None
     _authority: FitAuthority | None = None
-    source_revisions: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.scope, FitScope):
@@ -406,15 +243,6 @@ class FitSelection:
                 raise TypeError("fit selector_kind must be SelectorKind or None")
             if selector_kind not in _FIT_SELECTOR_KINDS:
                 raise ValueError("crosshair selectors cannot define a fit")
-        revisions = tuple(self.source_revisions) or (self.data_revision,)
-        if any(
-            isinstance(value, bool)
-            or not isinstance(value, Integral)
-            or int(value) < 0
-            for value in revisions
-        ):
-            raise TypeError("fit source_revisions must contain non-negative integers")
-        object.__setattr__(self, "source_revisions", tuple(int(value) for value in revisions))
 
     @property
     def sample_count(self) -> int:
@@ -458,7 +286,6 @@ class ProjectionContext:
     selector_snapshot: SelectorSnapshot
     viewport: RectangleRange | None = None
     focused_facet_index: int | None = None
-    rolling_history: tuple[RollingHistoryPoint, ...] = ()
 
     def selector_state(self, kind: SelectorKind) -> SelectorState:
         if not isinstance(kind, SelectorKind):
@@ -599,12 +426,14 @@ class FitProjection:
         return self._revision
 
     @property
-    def data(self) -> OwnedSnapshot | PulseTimelineData:
-        return self._data
+    def data_generation(self) -> str:
+        if not isinstance(self._data, OwnedSnapshot):
+            raise RuntimeError("data generation requires an OwnedSnapshot")
+        return snapshot_generation(self._data)
 
     @property
-    def rolling_history(self) -> tuple[RollingHistoryPoint, ...]:
-        return tuple(getattr(self, "_rolling_history_cache", self._context.rolling_history))
+    def data(self) -> OwnedSnapshot | PulseTimelineData:
+        return self._data
 
     @property
     def viewport(self) -> RectangleRange | None:
@@ -697,17 +526,24 @@ class FitProjection:
             return self._data
         source = self._data
         schema = source.block.schema
-        terms: dict[str, object] = {}
+        terms: dict[object, object] = {}
+        identity: list[tuple[str, str, object]] = []
         for ref, value in scope:
-            if ref.domain is AxisDomain.REPEAT:
-                label = schema.repeat_axis.name
-            elif ref.domain is AxisDomain.POINT_ROW:
-                label = point_ordinal_axis(schema.point_table.row_count).name
-            else:
-                label = str(ref.axis_id)
-            terms[label] = value
-        digest = ",".join(f"{label}={value!r}" for label, value in sorted(terms.items()))
-        key = (source.ref.block_id, source.ref.revision, digest)
+            resolved = resolve_axis(schema, ref)
+            terms[resolved.axis_id] = value
+            identity.append(
+                (ref.domain.value, str(ref.axis_id or ""), value)
+            )
+        digest = ",".join(
+            f"{domain}:{axis_id}={value!r}"
+            for domain, axis_id, value in sorted(identity)
+        )
+        key = (
+            source.ref.block_id,
+            source.ref.stream_generation,
+            source.ref.revision,
+            digest,
+        )
         if self._scoped_cache is not None and self._scoped_cache[0] == key:
             return self._scoped_cache[1]
 
@@ -777,7 +613,7 @@ class FitProjection:
 
     def _rolling_payload(
         self,
-        history: tuple[RollingHistoryPoint, ...],
+        history: tuple[RollingSample, ...],
         *,
         window: int,
         cumulative: bool = False,
@@ -786,11 +622,11 @@ class FitProjection:
         """Build one history series per optional rolling group.
 
         ``cumulative`` replaces every point with the running mean of all
-        shots up to it; ``uncertainty`` draws the band -- the running
+        retained shots up to it; ``uncertainty`` draws the band -- the running
         standard error on a cumulative trace, each shot's own pooled
-        standard error on the plain one.  The window stays purely a
-        DISPLAY frame -- the accumulation always starts at shot zero, so
-        shrinking the view never changes the numbers.
+        standard error on the plain one.  The window selects the displayed
+        tail; data older than Runtime's active bounded retention is never
+        reconstructed by Plot.
         """
 
         if window <= 0:
@@ -800,21 +636,27 @@ class FitProjection:
         if not visible:
             raise ValueError("rolling history cannot be empty")
         keys: list[tuple[AxisValue, ...]] = []
-        for point in visible:
-            for key in point.sample.group_keys:
+        for sample in visible:
+            for key in sample.group_keys:
                 if key not in keys:
                     keys.append(key)
         # x is the absolute shot index each history point owns, so the axis
         # slides forward as the window fills instead of counting negative
         # "shots ago".
+        start = len(history) - visible_size
         x_values = np.asarray(
-            [point.shot_index for point in visible], dtype=float
+            [
+                sample.source_index
+                if sample.source_index is not None
+                else index
+                for index, sample in enumerate(visible, start=start)
+            ],
+            dtype=float,
         )
         unit = self._view.samples.value.display_unit
         canonical_unit = self._view.samples.value.canonical_unit
         x_unit = resolve_unit("1", DEFAULT_UNITS)
         series: list[CurveSeries] = []
-        start = len(history) - visible_size
         for key in keys:
             canonical_values = np.full(visible_size, np.nan, dtype=float)
             valid = np.zeros(visible_size, dtype=np.bool_)
@@ -827,19 +669,19 @@ class FitProjection:
                     sem = running_sem
             else:
                 point_sem = np.full(visible_size, np.nan, dtype=float)
-                for index, point in enumerate(visible):
+                for index, sample in enumerate(visible):
                     try:
-                        source_index = point.sample.group_keys.index(key)
+                        source_index = sample.group_keys.index(key)
                     except ValueError:
                         continue
-                    if bool(point.sample.valid[source_index]):
+                    if bool(sample.valid[source_index]):
                         canonical_values[index] = float(
-                            point.sample.values[source_index]
+                            sample.values[source_index]
                         )
                         valid[index] = True
-                        if point.sample.sem is not None:
+                        if sample.sem is not None:
                             point_sem[index] = float(
-                                point.sample.sem[source_index]
+                                sample.sem[source_index]
                             )
                 if uncertainty:
                     sem = point_sem
@@ -873,12 +715,11 @@ class FitProjection:
                 )
             )
         return CurveData(
-            revision=visible[-1].sample.revision,
-            generation=visible[-1].sample.generation,
+            revision=visible[-1].revision,
+            generation=visible[-1].generation,
             x_ref=AxisRef.point_rows(),
             group_by=(() if self._spec.group is None else (self._spec.group,)),
             series=tuple(series),
-            source_revisions=tuple(point.shot_index for point in visible),
         )
 
     def _histogram_bins(
@@ -886,47 +727,45 @@ class FitProjection:
         view: Any,
         state: DisplayState,
         *,
-        pooled: np.ndarray | None = None,
+        history_values: np.ndarray | None = None,
+        history_valid: np.ndarray | None = None,
     ) -> np.ndarray:
         """Return stable display-unit edges for one histogram projection.
 
-        ``pooled`` is the window's pool when there is one: the domain has to
-        cover what is actually being binned, and this revision alone is a
-        different set of numbers from the last hundred shots.
+        The optional history arrays are the zero-copy window selected by
+        DataView: the domain has to cover what is actually being binned, and
+        this revision alone is a different set of numbers from the last
+        hundred shots.
         """
 
         count = int(state["bin_count"])
         samples = view.samples
-        if pooled is None:
+        if history_values is None:
             canonical = np.asarray(samples.value.canonical)
             valid = np.asarray(samples.valid_mask, dtype=bool)
         else:
-            canonical = np.asarray(pooled)
-            valid = None
+            if history_valid is None:
+                raise ValueError("history validity is required with history values")
+            canonical = np.asarray(history_values)
+            valid = np.asarray(history_valid, dtype=bool)
         integral = canonical.dtype.kind in "biu"
         if integral:
-            has_values = bool(canonical.size) and (
-                valid is None or bool(np.any(valid))
-            )
+            has_values = bool(canonical.size) and bool(np.any(valid))
             if has_values:
-                if valid is None:
-                    data_low = float(np.min(canonical))
-                    data_high = float(np.max(canonical))
-                else:
-                    limits = (
-                        (True, False)
-                        if canonical.dtype.kind == "b"
-                        else (
-                            np.iinfo(canonical.dtype).max,
-                            np.iinfo(canonical.dtype).min,
-                        )
+                limits = (
+                    (True, False)
+                    if canonical.dtype.kind == "b"
+                    else (
+                        np.iinfo(canonical.dtype).max,
+                        np.iinfo(canonical.dtype).min,
                     )
-                    data_low = float(
-                        np.min(canonical, where=valid, initial=limits[0])
-                    )
-                    data_high = float(
-                        np.max(canonical, where=valid, initial=limits[1])
-                    )
+                )
+                data_low = float(
+                    np.min(canonical, where=valid, initial=limits[0])
+                )
+                data_high = float(
+                    np.max(canonical, where=valid, initial=limits[1])
+                )
             # The edge helper only needs the dtype to choose integer-aligned
             # bins once exact native min/max have been found.
             edge_values = np.empty(
@@ -1361,7 +1200,6 @@ class FitProjection:
             facet_index=facet_index,
             selector_kind=None if active is None else active.kind,
             _authority=authority,
-            source_revisions=payload.source_revisions,
         )
 
     def _histogram_fit_selection(
@@ -1428,7 +1266,6 @@ class FitProjection:
             facet_index=facet_index,
             selector_kind=None if active is None else active.kind,
             _authority=authority,
-            source_revisions=payload.source_revisions,
         )
 
     def _regular_image_fit_selection(
@@ -1479,7 +1316,6 @@ class FitProjection:
             selector_kind=None if active is None else active.kind,
             regular_image=regular,
             _authority=authority,
-            source_revisions=payload.source_revisions,
         )
 
     def _image_fit_selection(
@@ -1539,7 +1375,6 @@ class FitProjection:
             facet_index=facet_index,
             selector_kind=None if active is None else active.kind,
             _authority=authority,
-            source_revisions=payload.source_revisions,
         )
 
     def _image_fit_domain(
@@ -1897,7 +1732,8 @@ class FitProjection:
         )):
             value, unit = self._display_fit_parameter_value(spec, float(raw))
             error = None
-            if result.covariance_valid:
+            fixed = spec.name in result.fixed_parameters
+            if result.covariance_valid and not fixed:
                 error, _error_unit = self._display_fit_parameter_value(
                     spec,
                     float(result.standard_errors[index]),
@@ -1911,6 +1747,7 @@ class FitProjection:
                     value=value,
                     standard_error=error,
                     unit=unit,
+                    fixed=fixed,
                 )
             )
         return tuple(rows)
@@ -1935,8 +1772,7 @@ class FitProjection:
         if relation is UnitRelation.VALUE and self._is_histogram_plot():
             if solver_relation is not UnitRelation.VALUE:
                 raise ValueError("histogram count parameters require value solver units")
-            quantity = self._value_quantity()
-            return "" if quantity.canonical_unit.symbol == "1" else quantity.canonical_unit.symbol
+            return "count"
         if isinstance(self._spec, RollingPlot) and relation in {
             UnitRelation.AXIS_0,
             UnitRelation.INVERSE_AXIS_0,
@@ -1969,16 +1805,32 @@ class FitProjection:
         difference: bool = False,
         display_relation: UnitRelation | None = None,
     ) -> tuple[float, str]:
+        scale, offset, unit = self._fit_parameter_display_transform(
+            spec,
+            difference=difference,
+            display_relation=display_relation,
+        )
+        return float(value) * scale + offset, unit
+
+    def _fit_parameter_display_transform(
+        self,
+        spec: Any,
+        *,
+        difference: bool = False,
+        display_relation: UnitRelation | None = None,
+    ) -> tuple[float, float, str]:
+        """The one affine solver↔painted-unit transform for a parameter."""
+
         relation = spec.unit_relation if display_relation is None else display_relation
         solver_relation = spec.solver_unit_relation
         if relation is UnitRelation.RADIAN:
             if solver_relation is not UnitRelation.RADIAN:
                 raise ValueError("radian display requires a radian solver parameter")
-            return value, "rad"
+            return 1.0, 0.0, "rad"
         if relation is UnitRelation.VALUE and self._is_histogram_plot():
             if solver_relation is not UnitRelation.VALUE:
                 raise ValueError("histogram count parameters require value solver units")
-            return value, "count"
+            return 1.0, 0.0, "count"
         if isinstance(self._spec, RollingPlot) and relation in {
             UnitRelation.AXIS_0,
             UnitRelation.INVERSE_AXIS_0,
@@ -1988,44 +1840,168 @@ class FitProjection:
             # The rolling shot axis is a plain ordinal (canonical == display
             # == absolute shot index), so fit parameters cross unchanged.
             if relation is UnitRelation.INVERSE_AXIS_0:
-                return value, "1/point"
-            return value, "point"
+                return 1.0, 0.0, "1/point"
+            return 1.0, 0.0, "point"
 
         if relation is UnitRelation.INVERSE_AXIS_0:
             if solver_relation is not UnitRelation.INVERSE_AXIS_0:
                 raise ValueError("inverse-axis parameters cannot cross unit relations")
             quantity = self._fit_relation_quantity(UnitRelation.AXIS_0)
             if quantity is None:
-                return value, ""
+                return 1.0, 0.0, ""
             canonical_unit = quantity.canonical_unit
             display_unit = quantity.display_unit
-            converted = value * float(display_unit.scale) / float(canonical_unit.scale)
             registry = self._unit_registry or DEFAULT_UNITS
             inverse = registry.inverse_for(display_unit)
             if inverse is not None:
-                return converted, inverse.symbol
-            symbol = display_unit.symbol
-            return converted, "" if symbol == "1" else f"1/{symbol}"
+                unit = inverse.symbol
+            else:
+                symbol = display_unit.symbol
+                unit = "" if symbol == "1" else f"1/{symbol}"
+            return (
+                float(display_unit.scale) / float(canonical_unit.scale),
+                0.0,
+                unit,
+            )
 
         source_quantity = self._fit_relation_quantity(solver_relation)
         target_quantity = self._fit_relation_quantity(relation)
         if source_quantity is None or target_quantity is None:
-            return value, ""
+            return 1.0, 0.0, ""
         canonical_unit = source_quantity.canonical_unit
         display_unit = target_quantity.display_unit
         if not canonical_unit.compatible_with(display_unit):
             raise ValueError("fit parameter solver and display units are incompatible")
         if spec.affine_point and not difference:
-            converted = float(
-                np.asarray(
-                    canonical_unit.convert_value_to((value,), display_unit),
-                    dtype=float,
-                ).reshape(-1)[0]
-            )
+            zero, one = np.asarray(
+                canonical_unit.convert_value_to((0.0, 1.0), display_unit),
+                dtype=float,
+            ).reshape(-1)
+            scale = float(one - zero)
+            offset = float(zero)
         else:
-            converted = value * float(canonical_unit.scale) / float(display_unit.scale)
+            scale = float(canonical_unit.scale) / float(display_unit.scale)
+            offset = 0.0
+        if not math.isfinite(scale) or scale == 0.0 or not math.isfinite(offset):
+            raise ValueError("fit parameter unit transform is invalid")
         unit = "" if display_unit.symbol == "1" else display_unit.symbol
-        return converted, unit
+        return scale, offset, unit
+
+    def _canonical_fit_parameter_value(
+        self,
+        spec: Any,
+        value: float,
+    ) -> float:
+        """Convert one expression value from painted units to solver units."""
+
+        displayed = float(value)
+        if not math.isfinite(displayed):
+            raise ValueError("fit parameter expression values must be finite")
+        scale, offset, _unit = self._fit_parameter_display_transform(spec)
+        canonical = (displayed - offset) / scale
+        if not math.isfinite(canonical):
+            raise ValueError("fit parameter expression conversion is non-finite")
+        return canonical
+
+    def fit_expression_target(
+        self,
+        model: FitModelSpec,
+        expression: str,
+    ) -> dict[str, object]:
+        """Parse one compact display-unit expression into a canonical target."""
+
+        fixed_display, initial_display = parse_fit_expression(
+            expression,
+            model.parameter_names,
+        )
+        by_name = {parameter.name: parameter for parameter in model.parameters}
+
+        def canonical(values: Any) -> dict[str, float]:
+            result: dict[str, float] = {}
+            for name, displayed in values.items():
+                parameter = by_name[name]
+                converted = self._canonical_fit_parameter_value(
+                    parameter,
+                    displayed,
+                )
+                lower, upper = parameter.bounds
+                if not lower <= converted <= upper:
+                    raise ValueError(
+                        f"fit parameter {name!r} is outside its {parameter.domain.value} domain"
+                    )
+                result[name] = converted
+            return result
+
+        fixed = canonical(fixed_display)
+        initial = canonical(initial_display)
+        target: dict[str, object] = {"model": model.model_id}
+        if fixed:
+            target["fixed"] = fixed
+        if initial:
+            target["initial"] = initial
+        return target
+
+    def fit_expression_text(
+        self,
+        model: FitModelSpec,
+        target: Any,
+    ) -> str:
+        """Format a canonical fixed/initial target in current painted units."""
+
+        values = dict(target or {})
+        fixed = dict(values.get("fixed") or {})
+        initial_value = values.get("initial")
+        if initial_value is None:
+            initial: dict[str, float] = {}
+        elif isinstance(initial_value, dict):
+            initial = dict(initial_value)
+        elif hasattr(initial_value, "items"):
+            initial = dict(initial_value.items())
+        else:
+            sequence = tuple(initial_value)
+            if len(sequence) != len(model.parameters):
+                raise ValueError("fit initial sequence differs from model parameters")
+            initial = dict(zip(model.parameter_names, sequence, strict=True))
+        by_name = {parameter.name: parameter for parameter in model.parameters}
+
+        def displayed(source: dict[str, float]) -> dict[str, float]:
+            unknown = set(source) - set(by_name)
+            if unknown:
+                raise ValueError(
+                    f"fit target names unknown parameters: {sorted(unknown)}"
+                )
+            return {
+                name: self._display_fit_parameter_value(
+                    by_name[name],
+                    float(value),
+                )[0]
+                for name, value in source.items()
+            }
+
+        return format_fit_expression(
+            displayed(fixed),
+            displayed(initial),
+            model.parameter_names,
+        )
+
+    def fit_expression_hint(self, model: FitModelSpec) -> str:
+        """Compact grammar and current display units for one model."""
+
+        parameters = []
+        for parameter in model.parameters:
+            _value, unit = self._display_fit_parameter_value(parameter, 0.0)
+            parameters.append(
+                parameter.name if not unit else f"{parameter.name} [{unit}]"
+            )
+        anchored = (
+            " Amplitude/phase use the selected fit window's t0."
+            if "domain_anchored" in model.capabilities
+            else ""
+        )
+        return (
+            "name=value fixes exactly; name=guess(value) sets only the initial "
+            f"guess. Parameters: {', '.join(parameters)}.{anchored}"
+        )
 
     def _semantic_spec(self) -> Any:
         return semantic_spec(self._spec)

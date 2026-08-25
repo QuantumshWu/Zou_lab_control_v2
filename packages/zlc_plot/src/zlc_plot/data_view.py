@@ -9,7 +9,7 @@ tensor dimension here.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import math
 from numbers import Integral
 from typing import Any, TypeAlias
@@ -18,20 +18,22 @@ import warnings
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from zlc_data import OwnedSnapshot
+from zlc_data import (
+    CoordinateScalar,
+    DatasetSchema,
+    LATEST_COORDINATE,
+    OwnedSnapshot,
+    canonical_coordinate_scalar,
+)
 from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
 
 from .data_contract import (
     DEFAULT_UNITS,
     Unit,
     UnitRegistry,
-    descriptor_from_axis,
-    descriptor_from_point_column,
-    descriptor_from_topology,
-    point_column,
+    ResolvedAxis,
+    resolve_axis,
     resolve_unit,
-    schema_data_axes,
-    schema_point_count,
     schema_repeat_count,
     schema_shape,
     schema_value_unit,
@@ -40,11 +42,19 @@ from .data_contract import (
     snapshot_schema,
     snapshot_validity,
     snapshot_values,
-    topology_position,
 )
 
-from .kinds import AxisDomain, AxisRef
-from .specs import CurvePlot, FacetGridPlot, HistogramPlot, ImagePlot, Reduction
+from .kinds import AxisDomain, AxisRef, PlotKind
+from .specs import (
+    CurvePlot,
+    FacetGridPlot,
+    HistogramPlot,
+    ImagePlot,
+    PlotSpec,
+    Reduction,
+    RollingPlot,
+    semantic_spec,
+)
 
 
 class DataViewError(ValueError):
@@ -57,6 +67,81 @@ class AxisResolutionError(DataViewError):
 
 class TopologyRequiredError(AxisResolutionError):
     """A point-dimension request has no producer-declared topology."""
+
+
+@dataclass(frozen=True, slots=True)
+class SelectionSubject:
+    """Exact upstream quantities cut by one accepted plot projection."""
+
+    plot_kind: PlotKind
+    x: AxisRef | None
+    y: AxisRef | None
+    x_coordinate_frame: str | None = None
+    y_coordinate_frame: str | None = None
+    scope: tuple[tuple[AxisRef, CoordinateScalar], ...] = ()
+    repeat_index: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.plot_kind, PlotKind):
+            raise TypeError("selection subject plot_kind must be PlotKind")
+        for name in ("x", "y"):
+            ref = getattr(self, name)
+            if ref is not None and not isinstance(ref, AxisRef):
+                raise TypeError(
+                    f"selection subject {name} must be AxisRef or None"
+                )
+            frame = getattr(self, f"{name}_coordinate_frame")
+            if frame is not None and (
+                not isinstance(frame, str) or not frame.strip()
+            ):
+                raise TypeError(
+                    f"selection subject {name} coordinate frame must be "
+                    "non-empty text or None"
+                )
+            if ref is None and frame is not None:
+                raise ValueError(
+                    f"selection subject {name} coordinate frame requires an axis"
+                )
+        if not isinstance(self.scope, tuple):
+            raise TypeError("selection subject scope must be a tuple")
+        normalized_scope: list[tuple[AxisRef, CoordinateScalar]] = []
+        for term in self.scope:
+            if not isinstance(term, tuple) or len(term) != 2:
+                raise TypeError(
+                    "selection subject scope entries must be "
+                    "(AxisRef, coordinate) pairs"
+                )
+            ref, coordinate = term
+            if not isinstance(ref, AxisRef):
+                raise TypeError("selection subject scope axis must be AxisRef")
+            if ref.domain is AxisDomain.REPEAT:
+                raise ValueError(
+                    "selection subject repeat scope belongs in repeat_index"
+                )
+            normalized_scope.append(
+                (
+                    ref,
+                    canonical_coordinate_scalar(
+                        coordinate,
+                        "selection subject scope coordinate",
+                    ),
+                )
+            )
+        repeat_index = self.repeat_index
+        if repeat_index is not None:
+            if isinstance(repeat_index, bool) or not isinstance(
+                repeat_index, Integral
+            ):
+                raise TypeError(
+                    "selection subject repeat_index must be an integer or None"
+                )
+            repeat_index = int(repeat_index)
+            if repeat_index < 0:
+                raise ValueError(
+                    "selection subject repeat_index cannot be negative"
+                )
+        object.__setattr__(self, "scope", tuple(normalized_scope))
+        object.__setattr__(self, "repeat_index", repeat_index)
 
 
 def _readonly(values: ArrayLike, *, dtype: Any | None = None) -> NDArray[Any]:
@@ -72,18 +157,6 @@ def _readonly(values: ArrayLike, *, dtype: Any | None = None) -> NDArray[Any]:
 def _require_same_shape(left: NDArray[Any], right: NDArray[Any], what: str) -> None:
     if left.shape != right.shape:
         raise ValueError(f"{what} arrays must have identical shapes")
-
-
-def _source_revisions(values: Iterable[int], revision: int) -> tuple[int, ...]:
-    revisions = tuple(values) or (revision,)
-    if any(
-        isinstance(value, bool)
-        or not isinstance(value, Integral)
-        or int(value) < 0
-        for value in revisions
-    ):
-        raise TypeError("source_revisions must contain non-negative integers")
-    return tuple(int(value) for value in revisions)
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +252,8 @@ class RollingSample:
     generation: str
     values: NDArray[Any] | ArrayLike
     valid: NDArray[np.bool_] | ArrayLike
+    counts: NDArray[np.int64] | ArrayLike
+    source_index: int | None = None
     group_keys: tuple[tuple[AxisValue, ...], ...] = ()
     #: Standard error of each MEAN entry over what this shot pooled, or
     #: None when uncertainty was not requested.  Canonical-only, like the
@@ -188,8 +263,24 @@ class RollingSample:
     def __post_init__(self) -> None:
         values = _readonly(self.values)
         valid = _readonly(self.valid, dtype=np.bool_)
-        if values.ndim != 1 or valid.shape != values.shape:
-            raise ValueError("rolling sample values and validity must be one-dimensional")
+        counts = _readonly(self.counts, dtype=np.int64)
+        source_index = self.source_index
+        if source_index is not None and (
+            isinstance(source_index, bool)
+            or not isinstance(source_index, Integral)
+            or int(source_index) < 0
+        ):
+            raise TypeError("rolling source_index must be non-negative or None")
+        if (
+            values.ndim != 1
+            or valid.shape != values.shape
+            or counts.shape != values.shape
+        ):
+            raise ValueError(
+                "rolling sample values, validity, and counts must be one-dimensional"
+            )
+        if np.any(counts < 0):
+            raise ValueError("rolling sample counts cannot be negative")
         keys = tuple(tuple(item) for item in self.group_keys)
         if len(keys) != values.size:
             raise ValueError("rolling sample group keys must match value count")
@@ -200,6 +291,12 @@ class RollingSample:
             object.__setattr__(self, "sem", sem)
         object.__setattr__(self, "values", values)
         object.__setattr__(self, "valid", valid)
+        object.__setattr__(self, "counts", counts)
+        object.__setattr__(
+            self,
+            "source_index",
+            None if source_index is None else int(source_index),
+        )
         object.__setattr__(self, "group_keys", keys)
 
 
@@ -260,7 +357,6 @@ class CurveData:
     x_ref: AxisRef
     group_by: tuple[AxisRef, ...]
     series: tuple[CurveSeries, ...]
-    source_revisions: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         group_by = tuple(self.group_by)
@@ -269,10 +365,8 @@ class CurveData:
             raise TypeError("group_by must contain AxisRef objects")
         if any(not isinstance(item, CurveSeries) for item in series):
             raise TypeError("series must contain CurveSeries objects")
-        revisions = _source_revisions(self.source_revisions, self.revision)
         object.__setattr__(self, "group_by", group_by)
         object.__setattr__(self, "series", series)
-        object.__setattr__(self, "source_revisions", revisions)
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,7 +379,6 @@ class ImageData:
     y: QuantityArray
     z: QuantityArray
     valid: NDArray[np.bool_] | ArrayLike
-    source_revisions: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         valid = _readonly(self.valid, dtype=np.bool_)
@@ -295,11 +388,6 @@ class ImageData:
         if self.z.canonical.shape != expected or valid.shape != expected:
             raise ValueError("image z and validity do not match its coordinate grid")
         object.__setattr__(self, "valid", valid)
-        object.__setattr__(
-            self,
-            "source_revisions",
-            _source_revisions(self.source_revisions, self.revision),
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,7 +397,6 @@ class HistogramData:
     edges: QuantityArray
     centers: QuantityArray
     counts: NDArray[np.int64] | ArrayLike
-    source_revisions: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         counts = _readonly(self.counts, dtype=np.int64)
@@ -320,11 +407,6 @@ class HistogramData:
         if self.centers.canonical.size != counts.size:
             raise ValueError("histogram centers and counts must have equal length")
         object.__setattr__(self, "counts", counts)
-        object.__setattr__(
-            self,
-            "source_revisions",
-            _source_revisions(self.source_revisions, self.revision),
-        )
 
 
 FacetPayload: TypeAlias = CurveData | ImageData | HistogramData
@@ -349,7 +431,6 @@ class FacetData:
     generation: str
     spec: FacetGridPlot
     cells: tuple[FacetCell, ...]
-    source_revisions: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         cells = tuple(self.cells)
@@ -371,14 +452,6 @@ class FacetData:
         ):
             raise ValueError("facet cell revisions must match their FacetData revision")
         object.__setattr__(self, "cells", cells)
-        revisions = _source_revisions(self.source_revisions, self.revision)
-        if any(
-            tuple(getattr(cell.payload, "source_revisions", (self.revision,)))
-            != revisions
-            for cell in cells
-        ):
-            raise ValueError("facet cells must share FacetData source revisions")
-        object.__setattr__(self, "source_revisions", revisions)
 
 
 @dataclass(frozen=True)
@@ -398,16 +471,20 @@ class _FactoredPlanes:
 
 
 @dataclass(frozen=True, slots=True)
-class _ResolvedAxis:
+class _ProjectedAxis:
+    contract: ResolvedAxis
     coordinate: CoordinateArray
     domain_canonical: NDArray[Any]
     domain_display: NDArray[Any]
     coordinate_labels: tuple[str, ...] | None
-    declared_domain: bool
-    #: Which tensor dimension this axis IS, as the resolver worked it out.
-    #: Recomputing it elsewhere by a different rule is what put a supported way
-    #: of naming an axis onto the slow path.
-    dimension: int
+
+    @property
+    def declared_domain(self) -> bool:
+        return self.contract.declared_domain
+
+    @property
+    def dimension(self) -> int:
+        return self.contract.dimension
 
 
 class _Domain:
@@ -529,7 +606,7 @@ class DataView:
         self._axis_display_units = overrides
         self._unit_registry = registry
         self._unit_registry_revision = registry.revision
-        self._axis_cache: dict[AxisRef, _ResolvedAxis] = {}
+        self._axis_cache: dict[AxisRef, _ProjectedAxis] = {}
         self._flat_cache: dict[
             AxisRef,
             tuple[NDArray[Any], NDArray[np.int64]],
@@ -587,6 +664,160 @@ class DataView:
 
     def coordinate(self, ref: AxisRef) -> CoordinateArray:
         return self._resolve(ref).coordinate
+
+    @staticmethod
+    def _coordinate_index(
+        schema: DatasetSchema,
+        ref: AxisRef,
+        coordinate: CoordinateScalar,
+    ) -> int:
+        """Resolve one unique source ordinal without materializing a sample plane."""
+
+        found: int | None = None
+        for index, candidate in enumerate(resolve_axis(schema, ref).coordinates):
+            if candidate != coordinate:
+                continue
+            if found is not None:
+                found = -1
+                break
+            found = index
+        if found is None or found < 0:
+            raise ValueError(
+                f"selection subject {ref!r} coordinate {coordinate!r} "
+                "is not uniquely present"
+            )
+        return found
+
+    def selection_subject(
+        self,
+        spec: PlotSpec,
+        payload: CurveData | ImageData | HistogramData | FacetData,
+        *,
+        facet_index: int | None = None,
+        source_schema: DatasetSchema | None = None,
+    ) -> SelectionSubject:
+        """Interaction identity of this already accepted view and payload.
+
+        The payload proves which axes were actually projected; this DataView's
+        exact axis contract supplies frames and resolved scope coordinates.
+        No schema-only caller can manufacture a subject for a projection that
+        was never accepted.
+        """
+
+        if not isinstance(
+            spec,
+            (CurvePlot, ImagePlot, HistogramPlot, RollingPlot, FacetGridPlot),
+        ):
+            raise TypeError("selection subject requires a dataset PlotSpec")
+        if not isinstance(
+            payload,
+            (CurveData, ImageData, HistogramData, FacetData),
+        ):
+            raise TypeError("selection subject requires an accepted plot payload")
+        # The session hands over its current accepted view/payload pair.
+        selected_payload: CurveData | ImageData | HistogramData
+        if isinstance(spec, FacetGridPlot):
+            if not isinstance(payload, FacetData) or payload.spec != spec:
+                raise ValueError("selection subject payload differs from FacetGrid spec")
+            if not payload.cells:
+                raise ValueError("selection subject FacetGrid has no accepted cells")
+            selected_payload = payload.cells[0].payload
+        else:
+            if isinstance(payload, FacetData):
+                raise ValueError("standalone selection subject received FacetData")
+            selected_payload = payload
+        if (
+            selected_payload.revision != self._samples.revision
+            or selected_payload.generation != self._samples.generation
+        ):
+            raise ValueError(
+                "selection subject payload differs from its accepted DataView"
+            )
+
+        semantic = semantic_spec(spec)
+        if isinstance(semantic, CurvePlot):
+            if not isinstance(selected_payload, CurveData):
+                raise ValueError("accepted curve spec and payload differ")
+            x_ref, y_ref = selected_payload.x_ref, None
+            if x_ref != semantic.x:
+                raise ValueError("accepted curve payload has the wrong x axis")
+        elif isinstance(semantic, ImagePlot):
+            if not isinstance(selected_payload, ImageData):
+                raise ValueError("accepted image spec and payload differ")
+            x_ref, y_ref = selected_payload.x_ref, selected_payload.y_ref
+            if (x_ref, y_ref) != (semantic.x, semantic.y):
+                raise ValueError("accepted image payload has the wrong axes")
+        else:
+            if isinstance(semantic, HistogramPlot) and not isinstance(
+                selected_payload, HistogramData
+            ):
+                raise ValueError("accepted histogram spec and payload differ")
+            # Histogram x is the measured value and Rolling x is a plot-owned
+            # history ordinal.  Neither is an upstream axis.
+            x_ref = y_ref = None
+
+        x_frame = (
+            None
+            if x_ref is None
+            else self._resolve(x_ref).contract.coordinate_frame
+        )
+        y_frame = (
+            None
+            if y_ref is None
+            else self._resolve(y_ref).contract.coordinate_frame
+        )
+        original = self._schema if source_schema is None else source_schema
+        if not isinstance(original, DatasetSchema):
+            raise TypeError("source_schema must be DatasetSchema or None")
+        scope: list[tuple[AxisRef, CoordinateScalar]] = []
+        repeat_index: int | None = None
+        for ref, authored in getattr(spec, "scope", ()):
+            coordinate = (
+                canonical_coordinate_scalar(
+                    self._resolve(ref).contract.coordinates[-1],
+                    "selection subject scope coordinate",
+                )
+                if authored is LATEST_COORDINATE
+                else canonical_coordinate_scalar(
+                    authored,
+                    "selection subject scope coordinate",
+                )
+            )
+            if ref.domain is AxisDomain.REPEAT:
+                repeat_index = self._coordinate_index(original, ref, coordinate)
+            else:
+                scope.append((ref, coordinate))
+
+        if facet_index is not None:
+            if isinstance(facet_index, bool) or not isinstance(
+                facet_index, Integral
+            ):
+                raise TypeError("facet_index must be an integer or None")
+            if not isinstance(payload, FacetData):
+                raise ValueError("facet_index requires an accepted FacetData payload")
+            selected_index = int(facet_index)
+            if not 0 <= selected_index < len(payload.cells):
+                raise ValueError("facet_index is outside the accepted facet payload")
+            coordinate = canonical_coordinate_scalar(
+                payload.cells[selected_index].facet_value_canonical,
+                "selection subject facet coordinate",
+            )
+            if spec.facet.domain is AxisDomain.REPEAT:
+                repeat_index = self._coordinate_index(
+                    original, spec.facet, coordinate
+                )
+            else:
+                scope.append((spec.facet, coordinate))
+
+        return SelectionSubject(
+            semantic.kind,
+            x_ref,
+            y_ref,
+            x_frame,
+            y_frame,
+            tuple(scope),
+            repeat_index,
+        )
 
     def validate_curve(
         self,
@@ -709,7 +940,7 @@ class DataView:
     def _dense_curve_data(
         self,
         x: AxisRef,
-        x_resolved: "_ResolvedAxis",
+        x_resolved: "_ProjectedAxis",
         values: NDArray[Any],
         usable: NDArray[np.bool_],
         aggregation: Reduction,
@@ -1592,8 +1823,8 @@ class DataView:
         self,
         x: AxisRef,
         y: AxisRef,
-        x_resolved: "_ResolvedAxis",
-        y_resolved: "_ResolvedAxis",
+        x_resolved: "_ProjectedAxis",
+        y_resolved: "_ProjectedAxis",
         values: NDArray[Any],
         usable: NDArray[np.bool_],
         aggregation: Reduction,
@@ -1830,22 +2061,81 @@ class DataView:
         self,
         *,
         bins: int | Sequence[float],
+        values: NDArray[Any] | None = None,
+        valid: NDArray[np.bool_] | None = None,
     ) -> HistogramData:
         """Distribution of every acquired value: the whole box is the pool."""
 
+        if (values is None) != (valid is None):
+            raise ValueError("histogram history values and validity must appear together")
         return self._histogram_from_values(
             bins,
-            self._samples.value.canonical,
-            valid=self._samples.valid_mask,
+            self._samples.value.canonical if values is None else values,
+            valid=self._samples.valid_mask if valid is None else valid,
         )
+
+    def history_values(
+        self, window: int
+    ) -> tuple[NDArray[Any], NDArray[np.bool_]]:
+        """Return the last accepted history cells without binning policy."""
+
+        if isinstance(window, bool) or not isinstance(window, Integral):
+            raise TypeError("history window must be an integer")
+        window = int(window)
+        if window <= 0:
+            raise ValueError("history window must be positive")
+        values = self._samples.value.canonical
+        validity = self._samples.valid_mask
+        if self.has_primary_index:
+            column = self._schema.point_table.column(PRIMARY_INDEX_AXIS_ID)
+            ordered: list[int] = []
+            seen: set[int] = set()
+            for value in column.values:
+                if isinstance(value, bool) or not isinstance(value, Integral):
+                    raise TypeError(
+                        "primary-index coordinates must be integer source indices"
+                    )
+                source_index = int(value)
+                if source_index < 0:
+                    raise ValueError(
+                        "primary-index source indices must be non-negative"
+                    )
+                if not ordered or ordered[-1] != source_index:
+                    if source_index in seen or (
+                        ordered and source_index < ordered[-1]
+                    ):
+                        raise ValueError(
+                            "primary-index source indices must form ordered cells"
+                        )
+                    ordered.append(source_index)
+                    seen.add(source_index)
+            source_indices = tuple(ordered[-window:])
+            selected = np.isin(
+                np.asarray(column.values, dtype=object),
+                np.asarray(source_indices, dtype=object),
+            )
+            point_mask = np.reshape(
+                selected,
+                (1, selected.size, *([1] * (values.ndim - 2))),
+            )
+            point_mask = np.broadcast_to(point_mask, values.shape)
+            valid = (
+                point_mask
+                if _stride_zero_all_true(validity)
+                else np.asarray(validity, dtype=np.bool_) & point_mask
+            )
+            pooled_values = values
+        else:
+            count = min(window, max(1, schema_repeat_count(self._schema)))
+            pooled_values = values[-count:]
+            valid = validity[-count:]
+        return pooled_values, valid
 
     def pooled_values(self) -> NDArray[Any]:
         """Every value this revision would pool, in canonical units.
 
-        What a histogram of this revision alone is built from -- and therefore
-        what a window over several revisions accumulates.  Canonical, because
-        two revisions are only comparable in the unit the data is stored in;
-        the display conversion happens once, where the edges are made.
+        Canonical values for one whole-revision rolling reduction.  The
+        display conversion happens only after the reduction.
         """
 
         cached = self._pooled_cache
@@ -1865,62 +2155,6 @@ class DataView:
         self._pooled_cache = pooled
         return pooled
 
-    def pooled_values_by_repeat(self) -> tuple[NDArray[Any], ...]:
-        """The values each repeat of this revision would pool, oldest first.
-
-        A publication that carries R repeats carries R shots, and history
-        counts shots -- so a snapshot seeding a window contributes one entry
-        per repeat, exactly as :meth:`rolling_history_samples` reduces one per
-        repeat.  A snapshot without repeats degenerates to the single pool.
-        """
-
-        flat_valid = self._samples.valid_mask.reshape(-1)
-        flat_values = self._samples.value.canonical.reshape(-1)
-        repeats = schema_repeat_count(self._schema)
-        if not self.has_primary_index:
-            if repeats <= 1:
-                return (self.pooled_values(),)
-            block = flat_values.size // repeats
-            return tuple(
-                flat_values[start : start + block][
-                    flat_valid[start : start + block]
-                ]
-                for start in range(0, flat_values.size, block)
-            )
-        positions = self._all_positions()
-        primary = self._domain(self._primary_index_ref(), positions)
-        return tuple(
-            flat_values[
-                positions[
-                    flat_valid[positions] & (primary.codes == index)
-                ]
-            ]
-            for index in range(primary.size)
-        )
-
-    def histogram_of(
-        self,
-        values: NDArray[Any],
-        *,
-        bins: int | Sequence[float],
-        source_revisions: Sequence[int] = (),
-    ) -> HistogramData:
-        """Distribution of values pooled elsewhere -- a window over revisions.
-
-        The pool is the caller's; the binning, the units and the labels are
-        this revision's, so a windowed distribution is the same picture as an
-        unwindowed one with more in it.  ``source_revisions`` records which
-        revisions actually contributed, so a window that reached fewer shots
-        than it asked for says so rather than looking full.
-        """
-
-        data = self._histogram_from_values(bins, np.asarray(values))
-        if not len(source_revisions):
-            return data
-        return replace(
-            data, source_revisions=tuple(int(item) for item in source_revisions)
-        )
-
     def validate_rolling(self, group: AxisRef | None) -> None:
         """Check a rolling projection without computing it (see validate_curve)."""
 
@@ -1937,10 +2171,8 @@ class DataView:
     ) -> RollingSample:
         """Reduce one source revision to scalar values for rolling history.
 
-        The MEAN's standard error is ALWAYS computed alongside: a rolling
-        sample is cached as history, and whether the operator is showing
-        the band is a display choice that must never decide what the cache
-        contains -- a band flipped on later must reach every retained shot.
+        The MEAN's standard error and count are always computed alongside;
+        whether the operator shows the band is only a display choice.
         """
 
         self.validate_rolling(group)
@@ -1988,6 +2220,7 @@ class DataView:
                 generation=self._samples.generation,
                 values=np.asarray([value], dtype=np.float64),
                 valid=np.asarray([pooled.size > 0 and np.isfinite(value)]),
+                counts=np.asarray([pooled.size], dtype=np.int64),
                 group_keys=((),),
                 sem=sem,
             )
@@ -2027,6 +2260,7 @@ class DataView:
             generation=self._samples.generation,
             values=values,
             valid=valid,
+            counts=counts,
             group_keys=keys,
             sem=sem,
         )
@@ -2109,6 +2343,7 @@ class DataView:
                     generation=self._samples.generation,
                     values=values,
                     valid=valid,
+                    counts=counts,
                     group_keys=keys,
                     sem=sem,
                 )
@@ -2172,10 +2407,12 @@ class DataView:
             valid = (counts > 0) & np.isfinite(values)
             samples.append(
                 RollingSample(
-                    revision=int(source.canonical),
+                    revision=self._samples.revision,
                     generation=self._samples.generation,
                     values=values,
                     valid=valid,
+                    counts=counts,
+                    source_index=int(source.canonical),
                     group_keys=keys,
                     sem=sem,
                 )
@@ -2314,8 +2551,8 @@ class DataView:
             if spec.facet.domain is AxisDomain.POINT_DIMENSION:
                 topology = self._schema.grid_topology
                 assert topology is not None  # _resolve proved the topology
-                assert spec.facet.axis_id is not None
-                position = topology_position(topology, spec.facet.axis_id)
+                position = resolved.contract.topology_position
+                assert position is not None
                 return len({cell[position] for cell in topology.row_to_cell})
             return int(resolved.domain_canonical.size)
         positions = self._all_positions()
@@ -2771,97 +3008,31 @@ class DataView:
             )
         return domain
 
-    def _resolve(self, ref: AxisRef) -> _ResolvedAxis:
+    def _resolve(self, ref: AxisRef) -> _ProjectedAxis:
         if not isinstance(ref, AxisRef):
             raise TypeError("axis reference must be AxisRef")
         cached = self._axis_cache.get(ref)
         if cached is not None:
             return cached
         schema = self._schema
-        dimension: int
-        declared_domain = True
-        if ref.domain is AxisDomain.REPEAT:
-            descriptor = descriptor_from_axis(schema.repeat_axis)
-            source_coordinates = np.asarray(descriptor.coordinates)
-            source_indices = np.arange(descriptor.size, dtype=np.int64)
-            domain_canonical = source_coordinates
-            label = descriptor.label
-            dimension = 0
-        elif ref.domain is AxisDomain.POINT_ROW:
-            descriptor = None
-            source_coordinates = np.arange(schema_point_count(schema), dtype=np.int64)
-            source_indices = source_coordinates
-            domain_canonical = source_coordinates
-            label = "Point row"
-            dimension = 1
-        elif ref.domain is AxisDomain.POINT_COORDINATE:
-            assert ref.axis_id is not None
-            try:
-                descriptor = descriptor_from_point_column(
-                    point_column(schema.point_table, ref.axis_id)
-                )
-            except KeyError as exc:
-                raise AxisResolutionError(
-                    f"PointTable has no coordinate {ref.axis_id!r}"
-                ) from exc
-            source_coordinates = np.asarray(descriptor.coordinates)
-            source_indices = np.arange(schema_point_count(schema), dtype=np.int64)
-            domain_canonical = source_coordinates
-            declared_domain = False
-            label = descriptor.label
-            dimension = 1
-        elif ref.domain is AxisDomain.POINT_DIMENSION:
-            assert ref.axis_id is not None
-            topology = schema.grid_topology
-            if topology is None:
+        try:
+            contract = resolve_axis(schema, ref)
+        except KeyError as exc:
+            if (
+                ref.domain is AxisDomain.POINT_DIMENSION
+                and schema.grid_topology is None
+            ):
                 raise TopologyRequiredError(
-                    f"point dimension {ref.axis_id!r} requires producer-declared GridTopology"
-                )
-            try:
-                topology_index = topology_position(topology, ref.axis_id)
-            except KeyError as exc:
-                raise AxisResolutionError(
-                    f"GridTopology has no dimension {ref.axis_id!r}"
+                    f"point dimension {ref.axis_id!r} requires "
+                    "producer-declared GridTopology"
                 ) from exc
-            descriptor = descriptor_from_topology(
-                topology,
-                topology_index,
-                point_table=schema.point_table,
-            )
-            source_indices = np.asarray(
-                [cell[topology_index] for cell in topology.row_to_cell],
-                dtype=np.int64,
-            )
-            domain_canonical = np.asarray(descriptor.coordinates)
-            source_coordinates = domain_canonical[source_indices]
-            label = descriptor.label
-            dimension = 1
-        elif ref.domain is AxisDomain.DATA:
-            assert ref.axis_id is not None
-            try:
-                data_index, axis = next(
-                    (index, axis)
-                    for index, axis in enumerate(schema_data_axes(schema))
-                    if str(axis.axis_id) == ref.axis_id or axis.name == ref.axis_id
-                )
-            except StopIteration as exc:
-                raise AxisResolutionError(
-                    f"dataset has no data axis {ref.axis_id!r}"
-                ) from exc
-            descriptor = descriptor_from_axis(axis)
-            source_coordinates = np.asarray(descriptor.coordinates)
-            source_indices = np.arange(descriptor.size, dtype=np.int64)
-            domain_canonical = source_coordinates
-            label = descriptor.label
-            dimension = 2 + data_index
-        else:  # defensive if AxisDomain grows without a resolver
-            raise AxisResolutionError(f"unsupported axis domain: {ref.domain!r}")
-
-        canonical_unit = (
-            DEFAULT_UNITS.resolve("1")
-            if descriptor is None
-            else descriptor.canonical_unit(self._unit_registry)
-        )
+            raise AxisResolutionError(
+                f"dataset has no exact {ref.domain.value} axis {ref.axis_id!r}"
+            ) from exc
+        domain_canonical = np.asarray(contract.coordinates)
+        source_indices = contract.source_indices(schema)
+        source_coordinates = domain_canonical[source_indices]
+        canonical_unit = contract.canonical_unit(self._unit_registry)
         default_display = canonical_unit
         requested_display = self._axis_display_units.get(ref)
         display_unit = (
@@ -2874,9 +3045,11 @@ class DataView:
         display_source = canonical_unit.convert_value_to(source_coordinates, display_unit)
         display_domain = canonical_unit.convert_value_to(domain_canonical, display_unit)
         shape = schema_shape(schema)
-        canonical_full = _broadcast_1d(source_coordinates, dimension, shape)
-        display_full = _broadcast_1d(display_source, dimension, shape)
-        index_full = _broadcast_1d(source_indices, dimension, shape)
+        canonical_full = _broadcast_1d(
+            source_coordinates, contract.dimension, shape
+        )
+        display_full = _broadcast_1d(display_source, contract.dimension, shape)
+        index_full = _broadcast_1d(source_indices, contract.dimension, shape)
         coordinate = CoordinateArray(
             ref=ref,
             canonical=canonical_full,
@@ -2884,17 +3057,14 @@ class DataView:
             indices=index_full,
             canonical_unit=canonical_unit,
             display_unit=display_unit,
-            label=label,
+            label=contract.label,
         )
-        resolved = _ResolvedAxis(
+        resolved = _ProjectedAxis(
+            contract=contract,
             coordinate=coordinate,
             domain_canonical=_readonly(domain_canonical),
             domain_display=_readonly(display_domain),
-            coordinate_labels=(
-                None if descriptor is None else descriptor.coordinate_labels
-            ),
-            declared_domain=declared_domain,
-            dimension=dimension,
+            coordinate_labels=contract.coordinate_labels,
         )
         self._axis_cache[ref] = resolved
         return resolved
@@ -3132,7 +3302,7 @@ def _masked_leading_reduce(
 
 
 def _axis_coordinate_labels(
-    resolved: "_ResolvedAxis",
+    resolved: "_ProjectedAxis",
     canonical: NDArray[Any],
 ) -> tuple[str, ...] | None:
     """The declared display name of every plotted coordinate, in plot order.
@@ -3326,6 +3496,7 @@ __all__ = [
     "HistogramData",
     "ImageData",
     "RollingSample",
+    "SelectionSubject",
     "QuantityArray",
     "SampleProjection",
     "TopologyRequiredError",

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
+from zlc_data import LATEST_COORDINATE
 from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
 from ..kinds import PlotKind
 from ..kinds import AxisRef
@@ -53,7 +54,7 @@ def _with_primary_index_default(schema: Any, candidate: Any) -> Any:
     scopes = tuple(getattr(candidate, "scope", ()))
     if primary in used or any(ref == primary for ref, _value in scopes):
         return candidate
-    return replace(candidate, scope=(*scopes, (primary, "latest")))
+    return replace(candidate, scope=(*scopes, (primary, LATEST_COORDINATE)))
 
 
 def handler_for(spec: Any) -> KindHandler:

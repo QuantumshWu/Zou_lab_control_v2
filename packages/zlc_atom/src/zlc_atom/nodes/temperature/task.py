@@ -223,7 +223,14 @@ class TemperatureTask:
         # view of it.
         return (SCAN_OUTPUT, SURVIVAL_OUTPUT)
 
-    def _judge(self, value: object, *, row: int, visit: int) -> dict[str, object]:
+    def _judge(
+        self,
+        value: object,
+        *,
+        row: int,
+        visit: int,
+        point_rows: tuple[tuple[float, ...], ...],
+    ) -> dict[str, object]:
         """One landed cycle: which sites held an atom, and which held it still.
 
         Asked while the cycle is still a cycle.  Once the scan has written it
@@ -246,6 +253,7 @@ class TemperatureTask:
         eligible = valid[0] & valid[1] & occupied[0]
         survival = np.where(eligible, occupied[1].astype("<f8"), np.nan)
         self._written += 1
+        t_off = tuple(float(point[0]) for point in point_rows)
         event = snapshot_from_array(
             survival[None, None, :],
             producer=self.instance_id,
@@ -265,8 +273,8 @@ class TemperatureTask:
                 size=self._repeats,
             ),
             point_table=PointTable(
-                len(self._t_off),
-                (self._point_column(),),
+                len(t_off),
+                (self._point_column(t_off),),
             ),
         )
         return {
@@ -275,7 +283,7 @@ class TemperatureTask:
                 event,
                 DatasetCoverage(
                     written_cells=self._written,
-                    total_cells=self._repeats * len(self._t_off),
+                    total_cells=self._repeats * len(t_off),
                 ),
                 canonical_schema=canonical,
                 cell_origin=(visit, row),
@@ -302,7 +310,8 @@ class TemperatureTask:
             out=np.full(loaded.shape, np.nan, dtype="<f8"),
             where=loaded > 0,
         )
-        seconds = _seconds(self._t_off, self._port.unit)
+        t_off = self._point_values(snapshot)
+        seconds = _seconds(t_off, self._port.unit)
         return {
             "t_off_seconds": [float(value) for value in seconds],
             "loaded_pairs": [int(value) for value in loaded],
@@ -323,7 +332,7 @@ class TemperatureTask:
             (0.0,),
         )
 
-    def _point_column(self) -> PointColumn:
+    def _point_column(self, values: tuple[float, ...]) -> PointColumn:
         """The release times, as the point axis every output shares."""
 
         return PointColumn(
@@ -331,11 +340,24 @@ class TemperatureTask:
             T_OFF_PARAMETER,
             SCAN_POINT,
             PointColumn.NUMERIC,
-            tuple(float(value) for value in self._t_off),
+            tuple(float(value) for value in values),
             unit=self._port.unit or None,
         )
 
-    def _run_record(self, curve: dict[str, object]) -> dict[str, object]:
+    @staticmethod
+    def _point_values(snapshot: OwnedSnapshot) -> tuple[float, ...]:
+        column = next(
+            column
+            for column in snapshot.block.schema.point_table.columns
+            if column.coordinate_id == AxisId("temperature.t_off")
+        )
+        return tuple(float(value) for value in column.values)
+
+    def _run_record(
+        self,
+        curve: dict[str, object],
+        scan_record: dict[str, object],
+    ) -> dict[str, object]:
         return {
             "node": self.instance_id,
             "parameters": {
@@ -355,7 +377,7 @@ class TemperatureTask:
                 ),
             },
             "named_devices": dict(self._devices),
-            "scan": self._scan.run_record(),
+            "scan": dict(scan_record),
             "camera": self._camera.run_record,
             "curve": dict(curve),
         }
@@ -435,11 +457,15 @@ class TemperatureTask:
                 context, status, error
             )
         )
-        self._scan.acquire(context, on_point=self._judge)
+        _scan_dataset, scan_record = self._scan.acquire(
+            context,
+            on_point=self._judge,
+        )
         context.report_progress("Reading survival")
         survival = context.current_dataset(SURVIVAL_OUTPUT.name)
         curve = self._curve(survival)
-        record = self._run_record(curve)
+        record = self._run_record(curve, scan_record)
+        t_off = self._point_values(survival)
         context.report_progress("Saving survival")
         if context.cancel_requested():
             raise RuntimeError("the temperature task was cancelled")
@@ -448,7 +474,7 @@ class TemperatureTask:
             "format": TEMPERATURE_ARTIFACT_CONTRACT,
             "t_off": {
                 "unit": self._port.unit,
-                "values": [float(value) for value in self._t_off],
+                "values": list(t_off),
             },
             "run_record": record,
         }
@@ -467,7 +493,7 @@ class TemperatureTask:
         summary = {
             "format": "zlc.temperature.summary",
             "exposure_seconds": self._exposure_seconds,
-            "points": len(self._t_off),
+            "points": len(t_off),
             "repeats": self._repeats,
             "curve": curve,
         }

@@ -52,11 +52,16 @@ class _RenderHost:
     def complete(self, index: int = -1) -> None:
         future = self.futures[index]
         front = SimpleNamespace(sequence=len(self.rendered))
-        future.set_result(SimpleNamespace(value=None, front=front))
+        future.set_result(
+            SimpleNamespace(
+                value=SimpleNamespace(spec=self.host_id),
+                front=front,
+            )
+        )
 
 
 def _stage_on(host):
-    def replace_host(plot_input, _value, _publication):
+    def replace_host(plot_input, _value, _publication, _target):
         return host, host.update_data(plot_input)
 
     return replace_host
@@ -121,7 +126,8 @@ def _shot_of(port: PlotPanelPort) -> object | None:
     shot exactly when these resolve to one ``EventRef``.
     """
 
-    publication = port.presented_publication()
+    surface = port.accepted_surface()
+    publication = None if surface is None else surface.publication
     if publication is None:
         return None
     parents = tuple(publication.direct_parent_refs)
@@ -144,7 +150,9 @@ def _bench_board(bench: _Bench):
         display_interval_ms=100,
         submit_projection=board.submit_projection,
         replace_host=_stage_on(frame_host),
-        present=lambda operation: presents.append(("panel-frame", operation.front)),
+        present=lambda _host, operation: (
+            presents.append(("panel-frame", operation.front)) or True
+        ),
     )
     occupancy_port = PlotPanelPort(
         "panel-occupancy",
@@ -152,7 +160,9 @@ def _bench_board(bench: _Bench):
         display_interval_ms=100,
         submit_projection=board.submit_projection,
         replace_host=_stage_on(occupancy_host),
-        present=lambda operation: presents.append(("panel-occupancy", operation.front)),
+        present=lambda _host, operation: (
+            presents.append(("panel-occupancy", operation.front)) or True
+        ),
     )
     ports.extend((frame_port, occupancy_port))
     return board, frame_host, occupancy_host, frame_port, occupancy_port, presents

@@ -16,7 +16,8 @@ thing, and it was the way that could not tell you the board refuses 0.
 from __future__ import annotations
 
 from zlc_pulse import PulseSequence
-from zlc_plot import Reduction
+from zlc_plot import AxisRef, Reduction
+from zlc_plot.semantics import fate_field_name
 
 from zlc_atom.authoring import AuthoringChoice, AuthoringField, AuthoringSchema
 from zlc_atom.nodes._framework.descriptor import (
@@ -196,9 +197,9 @@ LOGIC_NODE = LogicNodeDescriptor(
             SURVIVAL_OUTPUT,
             "curve",
             semantic={
-                "fate:t_off": "x",
-                "fate:repeat": "reduce",
-                "fate:Site": "reduce",
+                fate_field_name(AxisRef.point("temperature.t_off")): "x",
+                fate_field_name(AxisRef.repeat()): "reduce",
+                fate_field_name(AxisRef.data("calibration.site")): "reduce",
                 "reduction": Reduction.MEAN,
             },
         ),

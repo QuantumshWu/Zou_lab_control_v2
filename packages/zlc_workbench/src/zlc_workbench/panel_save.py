@@ -9,10 +9,7 @@ from typing import Any
 
 import numpy as np
 from zlc_plot import save_figure_artifact
-from zlc_plot.selectors import RectangleRange
-
-from .panel_catalog import task_console_fitting_spec
-from .panel_state import PanelFrozenData, PanelState, project_panel_state
+from .panel_state import PanelFrozenData, PanelState
 
 
 __all__ = ["PanelFigureFiles", "capture_run_chain", "save_panel_figure"]
@@ -54,6 +51,7 @@ def capture_run_chain(
     signal_plane: object,
     publication: object | None,
     *,
+    event_records: Mapping[object, object] | None = None,
     resolve_device_settings: object | None = None,
 ) -> dict[str, object]:
     """Capture the exact causal DAG rooted at one displayed publication."""
@@ -65,6 +63,7 @@ def capture_run_chain(
         raise TypeError("signal plane cannot resolve exact parent publications")
     identities: dict[int, str] = {}
     nodes: dict[str, dict[str, object]] = {}
+    exact_records = {} if event_records is None else dict(event_records)
 
     def visit(current: object) -> str:
         identity = id(current)
@@ -80,11 +79,18 @@ def capture_run_chain(
             "parents": [visit(parent) for parent in parents],
             "signals": [str(name) for name in getattr(current, "signals", {})],
             "record": _plain(getattr(current, "run_record", {})),
-            "event_record": _plain(getattr(current, "event_record", {})),
+            "event_record": _plain(
+                exact_records.get(
+                    current,
+                    getattr(current, "event_record", {}),
+                )
+            ),
         }
         return node_id
 
     root = visit(publication)
+    if any(id(current) not in identities for current in exact_records):
+        raise ValueError("exact event record lies outside the captured lineage")
     ordered = [nodes[key] for key in identities.values()]
     result: dict[str, object] = {
         "root": root,
@@ -102,51 +108,33 @@ def capture_run_chain(
     return result
 
 
-def _recipe(
-    state: PanelState,
-    frozen: PanelFrozenData,
-    viewport: RectangleRange | None,
-) -> tuple[object, dict[str, object]]:
-    plot_input = frozen.snapshot if frozen.plot_input is None else frozen.plot_input
-    snapshot = getattr(plot_input, "snapshot", plot_input)
-    spec = task_console_fitting_spec(
-        snapshot.block.schema, state.kind, state.cell_kind
-    )
-    if spec is None:
-        raise ValueError(f"{state.signal!r} cannot be drawn as {state.kind!r}")
-    spec, _semantic, parameters = project_panel_state(
-        snapshot.block.schema, spec, state
-    )
-    return plot_input, {
-        "spec": spec,
-        "parameters": parameters,
-        "size": state.size,
-        "viewport": viewport,
-        "classifier_thresholds": state.classifier_thresholds,
-        "facet_focus": state.focused_cell,
-        "fit": state.fit,
-    }
-
-
 def save_panel_figure(
     base_path: str | Path,
     *,
     state: PanelState,
     frozen: PanelFrozenData,
-    viewport: RectangleRange | None,
 ) -> PanelFigureFiles:
     """Adapt one frozen panel to the shared archive-first Figure writer."""
 
-    plot_input, recipe = _recipe(state, frozen, viewport)
+    if state.signal != frozen.signal:
+        raise ValueError("Panel Save target differs from its frozen surface")
+    description = frozen.description
     image, archive = save_figure_artifact(
         base_path,
-        plot_input=plot_input,
+        plot_input=frozen.plot_input,
+        spec=description.spec,
+        parameters=description.display_state.values,
+        size=description.size,
+        viewport=description.viewport,
+        classifier_thresholds=description.classifier_thresholds,
+        facet_focus=description.facet_focus,
+        fit=description.fit,
+        selectors=description.selectors,
         lineage=frozen.lineage,
         source={
-            "signal": state.signal,
+            "signal": frozen.signal,
             "title": state.title,
             **dict(frozen.overlay),
         },
-        **recipe,
     )
     return PanelFigureFiles(image, archive)

@@ -49,6 +49,11 @@ def _operation_value(operation):
     return getattr(resolved, "value", resolved)
 
 
+def _accepted(port, field):
+    surface = port.accepted_surface()
+    return None if surface is None else getattr(surface, field)
+
+
 class _Signal:
     """A Qt signal's shape, without Qt."""
 
@@ -512,7 +517,7 @@ def _settle_panel_hosts(presenter, predicate=lambda: True) -> None:
 
 
 def test_camera_restart_drains_the_old_generation_before_replacement(
-    presenter, session
+    presenter, session, monkeypatch
 ) -> None:
     """Restart must not retire a publication still travelling to its Panel."""
 
@@ -538,7 +543,7 @@ def test_camera_restart_drains_the_old_generation_before_replacement(
         if (
             len(presenter.panels) == 1
             and (panel := next(iter(presenter.panels.values()))).port is not None
-            and panel.port.presented_publication() is not None
+            and _accepted(panel.port, "publication") is not None
         ):
             break
         time.sleep(0.005)
@@ -548,8 +553,31 @@ def test_camera_restart_drains_the_old_generation_before_replacement(
         session.signal_plane.latest_publication(signal),
     )
     panel = next(iter(presenter.panels.values()))
-    shown = panel.port.presented_publication()
+    shown = _accepted(panel.port, "publication")
     assert shown is not None
+    crosshair = panel.host.set_crosshair_selector(2.0, 3.0).result().value
+    crosshair_description = panel.host.describe_display().result()
+    assert crosshair in crosshair_description.value.selectors
+    assert panel.port.accept_configuration(
+        crosshair_description,
+        panel.state,
+    ) is not None
+    configured_selectors: list[tuple[object, ...]] = []
+    make_plot_host = presenter._make_host
+
+    def recording_host(plot_input, state):
+        host = make_plot_host(plot_input, state)
+        configure = host.configure
+
+        def record_configuration(**configuration):
+            if "selectors" in configuration:
+                configured_selectors.append(tuple(configuration["selectors"]))
+            return configure(**configuration)
+
+        monkeypatch.setattr(host, "configure", record_configuration)
+        return host
+
+    monkeypatch.setattr(presenter, "_make_host", recording_host)
 
     # Hold the board's sole projection worker, then put one old-generation
     # publication behind it.  This makes the real race deterministic: the
@@ -602,11 +630,16 @@ def test_camera_restart_drains_the_old_generation_before_replacement(
     _settle_panel_hosts(
         presenter,
         lambda: (
-            (publication := panel.port.presented_publication()) is not None
+            (publication := _accepted(panel.port, "publication")) is not None
             and publication.event_ref.generation == replacement.generation
         ),
     )
     assert panel.port.last_error is None
+    assert configured_selectors and crosshair in configured_selectors[-1]
+    restored_crosshair = panel.host.selector_state(
+        SelectorKind.CROSSHAIR
+    ).result().value
+    assert restored_crosshair.value == crosshair.value
     assert not any(
         "another signal generation" in text
         for _severity, text in presenter.view.status
@@ -917,16 +950,22 @@ def test_changing_the_cell_kind_rebuilds_the_plot_host(
             binding.panel_id, {"cell_kind": cell_kind}
         ) is True
         assert binding.state.cell_kind == cell_kind
-        _settle_panel_hosts(presenter, lambda: binding.host is not None)
+        _settle_panel_hosts(
+            presenter,
+            lambda: binding.host is not None and binding.host is not previous_host,
+        )
         assert binding.host is not None
         assert binding.host is not previous_host, (
             "the plot host must be rebuilt for the new cell kind"
         )
-        # The rebuilt host must actually COME UP: a lazy startup failure
-        # ("unknown display parameter(s) ...") surfaces at the settle, as a
-        # reported error and a panel that never describes itself.
-        binding.state = replace(binding.state, display={})
-        _settle_panel_hosts(presenter, lambda: bool(binding.state.display))
+        # The rebuilt host must actually COME UP with the description returned
+        # by its accepted configure operation.  Console no longer repopulates
+        # state later from the host's initial-metadata cache.
+        _settle_panel_hosts(
+            presenter,
+            lambda: binding.accepted_display is not None
+            and bool(binding.state.display),
+        )
         assert binding.reported_error is None, binding.reported_error
         assert binding.state.display, (
             f"the {cell_kind} host never settled; it likely failed to start"
@@ -935,7 +974,40 @@ def test_changing_the_cell_kind_rebuilds_the_plot_host(
     # Both directions of the vocabulary change: whatever the data decided
     # first, each switch crosses into names the other cells do not declare.
     _switch("histogram", first_host)
-    _switch("image", binding.host)
+    histogram_host = binding.host
+    assert histogram_host is not None
+    assert presenter.update_panel_state(
+        binding.panel_id,
+        {"display": {"threshold_classifier": True}},
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.configuration is None
+        and binding.state.display.get("threshold_classifier") is True,
+    )
+    threshold_events = []
+    release_threshold = histogram_host.subscribe_selection(
+        threshold_events.append
+    ).result().value
+    histogram_host.set_threshold_selector(1.0).result()
+    presenter.commit_surfaces()
+    assert binding.state.classifier_thresholds
+    assert threshold_events
+
+    _switch("image", histogram_host)
+    assert binding.state.classifier_thresholds == (), (
+        "histogram interaction leaked into image cells"
+    )
+    # A callback already queued by the retired histogram host is stale; it
+    # cannot repopulate state after the image host has been accepted.
+    presenter._settle_panel_threshold(
+        binding.panel_id, histogram_host, threshold_events[-1]
+    )
+    assert binding.state.classifier_thresholds == ()
+    release_threshold()
+    assert presenter.edit_panel(binding.panel_id)
+    _settle_panel_hosts(presenter, lambda: binding.editor_host is not None)
+    assert binding.editor_host.startup_failure is None
 
 
 def test_a_blank_panel_can_be_wired_after_a_signal_publishes(
@@ -959,6 +1031,7 @@ def test_a_blank_panel_can_be_wired_after_a_signal_publishes(
         presenter,
         lambda: bool(binding.parameter_surface["fit"]),
     )
+    _settle_panel_hosts(presenter, lambda: binding.editor_host is not None)
     first_host = binding.host
     first_editor_host = binding.editor_host
     assert first_editor_host is not None
@@ -990,6 +1063,13 @@ def test_a_blank_panel_can_be_wired_after_a_signal_publishes(
 
     assert presenter.update_panel_state(
         binding.panel_id, {"display": {"title": "Camera image"}}
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: (
+            binding.configuration is None
+            and binding.editor_configuration is None
+        ),
     )
     described = _operation_value(binding.host.describe_display())
     assert described.display_state.values["title"] == "Camera image"
@@ -1023,6 +1103,22 @@ def test_a_blank_panel_can_be_wired_after_a_signal_publishes(
     }
     assert presenter.view.panel_editors[binding.panel_id]["state"]["signal"] == signal
 
+    # A rejected authored target may remain editable while the old accepted
+    # host keeps presenting data.  Refresh must freeze that accepted target,
+    # not relabel its old pixels with the rejected draft.
+    surface = binding.accepted_surface
+    assert surface is not None
+    binding.editor_open = False
+    binding.state = replace(
+        binding.state,
+        display={**binding.state.display, "title": "not accepted"},
+    )
+    binding.refresh_requested = True
+    presenter._panel_presented(binding, surface)
+    assert binding.frozen_data is not None
+    assert binding.frozen_data.target is surface.target
+    assert binding.frozen_stale
+
 
 def test_arming_a_fit_from_setting_reaches_the_panels_pixels(
     presenter, session
@@ -1055,16 +1151,50 @@ def test_arming_a_fit_from_setting_reaches_the_panels_pixels(
         binding.panel_id, {"fit": {"model": fit_model}}
     )
 
+    changed = False
     deadline = time.monotonic() + 20.0
     while time.monotonic() < deadline:
         presenter.beat()
         latest = presenter.view.presented_fronts[-1][1].buffer.as_rgba()
         if latest.shape != before.shape or not np.array_equal(latest, before):
-            return
+            changed = True
+            break
         time.sleep(0.005)
-    raise AssertionError(
-        "the fit never reached the panel's presented pixels"
+    assert changed, "the fit never reached the panel's presented pixels"
+
+    _settle_panel_hosts(
+        presenter,
+        lambda: any(
+            field["key"] == "expression"
+            for field in binding.parameter_surface["fit"]
+        ),
     )
+    assert presenter.update_panel_state(
+        binding.panel_id,
+        {"fit": {"expression": "offset=0, amplitude=guess(1)"}},
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.state.fit.get("fixed") == {"offset": 0.0}
+        and binding.state.fit.get("initial") == {"amplitude": 1.0},
+    )
+
+    assert presenter.update_panel_state(
+        binding.panel_id,
+        {"fit": {"expression": "missing=1"}},
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: set(binding.state.fit) == {"model"}
+        and "automatic fit is active"
+        in binding.parameter_surface["fit_unavailable"],
+    )
+    expression = next(
+        field
+        for field in binding.parameter_surface["fit"]
+        if field["key"] == "expression"
+    )
+    assert expression["value"] == "missing=1"
 
 
 def test_a_saved_figure_contains_the_fit_it_was_saved_with(
@@ -1083,7 +1213,10 @@ def test_a_saved_figure_contains_the_fit_it_was_saved_with(
     )
     assert presenter.edit_panel(binding.panel_id)
     _settle_panel_hosts(
-        presenter, lambda: bool(binding.parameter_surface.get("fit"))
+        presenter,
+        lambda: bool(binding.parameter_surface.get("fit"))
+        and binding.editor_host is not None
+        and not binding.frozen_stale,
     )
     fit_model = next(
         value for _label, value in binding.parameter_surface["fit"][0]["choices"]
@@ -1096,6 +1229,12 @@ def test_a_saved_figure_contains_the_fit_it_was_saved_with(
 
     assert presenter.update_panel_state(
         binding.panel_id, {"fit": {"model": fit_model}}
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.configuration is None
+        and binding.editor_configuration is None
+        and not binding.frozen_stale,
     )
     fitted = tmp_path / "fitted.png"
     assert presenter.save_panel_figure(binding.panel_id, str(fitted)) is True
@@ -1218,6 +1357,7 @@ def test_a_wedged_display_state_cannot_lock_the_editor_that_repairs_it(
         binding.panel_id,
         {"display": {"color_min": 0.0, "color_max": 10.0}},
     ) is True
+    _settle_panel_hosts(presenter, lambda: binding.editor_host is not None)
     assert binding.editor_host is not None, (
         "the accepted repair must mount Edit's plot surface"
     )
@@ -1250,7 +1390,14 @@ def test_plot_materialized_fixed_limits_become_the_panel_state(
 
     natural = _operation_value(binding.host.resolved_color_limits())
     huge = float(natural.high) + max(1.0, abs(float(natural.high))) * 1000.0
+    assert presenter.edit_panel(binding.panel_id)
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.editor_host is not None
+        and binding.editor_configuration is None,
+    )
     for mode in ("tight", "normal"):
+        presented_before = len(presenter.view.presented_fronts)
         assert presenter.update_panel_state(
             binding.panel_id,
             {
@@ -1261,9 +1408,18 @@ def test_plot_materialized_fixed_limits_become_the_panel_state(
                 }
             },
         )
-        _settle_panel_hosts(presenter, lambda: binding.configuration is None)
+        _settle_panel_hosts(
+            presenter,
+            lambda: binding.configuration is None
+            and binding.editor_configuration is None
+            and len(presenter.view.presented_fronts) > presented_before,
+        )
         fixed = _operation_value(binding.host.resolved_color_limits())
         assert float(fixed.high) == huge
+        frozen_fixed = _operation_value(
+            binding.editor_host.resolved_color_limits()
+        )
+        assert frozen_fixed == fixed
 
         assert presenter.update_panel_state(
             binding.panel_id,
@@ -1398,6 +1554,16 @@ def test_panel_publisher_edit_owns_stable_output_selection(
     restored = LayoutDocument.from_tree(tree).panels[0]
     assert restored.published_outputs == binding.state.published_outputs
 
+    histogram = presenter.add_panel(
+        node.signal_key("frames"), snapshot, kind="histogram"
+    )
+    _settle_panel_hosts(
+        presenter, lambda: histogram.accepted_display is not None
+    )
+    assert presenter._panel_publisher_fields(histogram) == (), (
+        "a value-domain Histogram range has no upstream Dataset ROI outputs"
+    )
+
 
 def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
     presenter, session, monkeypatch
@@ -1442,7 +1608,7 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
             main.host is not None
             and main.bridge is not None
             and main.port is not None
-            and main.port.presented_publication() is not None
+            and _accepted(main.port, "publication") is not None
             and bool(main.parameter_surface.get("fit"))
         ),
     )
@@ -1502,7 +1668,7 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
         lambda: (
             rolling.host is not None
             and rolling.port is not None
-            and rolling.port.presented_publication() is not None
+            and _accepted(rolling.port, "publication") is not None
         ),
     )
     assert rolling.history_lease is not None
@@ -1547,7 +1713,7 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
         np.asarray([[False]]),
     )
     assert np.isnan(failed_value.snapshot.block.values).all()
-    shown_main = main.port.presented_publication()
+    shown_main = _accepted(main.port, "publication")
     assert shown_main is not None
     assert failed_source.event_ref not in session.signal_plane.publication_roots(
         shown_main
@@ -1568,7 +1734,7 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
     _settle_panel_hosts(
         presenter,
         lambda: (
-            (shown := rolling.port.presented_publication()) is not None
+            (shown := _accepted(rolling.port, "publication")) is not None
             and recovered_source.event_ref
             in session.signal_plane.publication_roots(shown)
         ),
@@ -1576,10 +1742,18 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
 
     rolling_session = rolling.host._session
     validity = np.asarray(rolling_session._payload.series[0].valid)
-    revisions = rolling_session._payload.source_revisions
-    assert revisions == tuple(range(revisions[0], revisions[-1] + 1))
-    gap_index = revisions.index(failed_source.event_ref.sequence)
-    recovered_index = revisions.index(recovered_source.event_ref.sequence)
+    def rolling_indices() -> tuple[int, ...]:
+        return tuple(
+            int(value)
+            for value in rolling.host._session._payload.series[0].x.canonical
+        )
+
+    source_indices = rolling_indices()
+    assert source_indices == tuple(
+        range(source_indices[0], source_indices[-1] + 1)
+    )
+    gap_index = source_indices.index(failed_source.event_ref.sequence)
+    recovered_index = source_indices.index(recovered_source.event_ref.sequence)
     assert not validity[gap_index]
     assert validity[recovered_index]
     previous_valid = int(np.flatnonzero(validity[:gap_index])[-1])
@@ -1595,7 +1769,6 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
     saved_truth = session.signal_plane.current_dataset(
         fit_signal,
         frozen.publication,
-        primary_window=100,
     )
     assert frozen.snapshot.ref == saved_truth.ref
     np.testing.assert_array_equal(
@@ -1607,22 +1780,29 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
     assert np.isfinite(plotted[[previous_valid, recovered_index]]).all()
     assert np.isnan(plotted[previous_valid + 1 : recovered_index]).all()
 
-    # Runtime demand follows the window.  The mounted Plot may still reproject
-    # history it already owns; it never asks Runtime to resurrect an old
-    # publication, and the cache disappears with this consumer.
-    shown_before_edit = rolling.port.presented_publication()
+    # Runtime is the only history owner. Shrinking the active maximum releases
+    # older excess; widening cannot resurrect data Runtime deliberately freed.
+    shown_before_edit = _accepted(rolling.port, "publication")
+    frozen_before_edit = rolling.frozen_data
     assert presenter.update_panel_state(
         rolling.panel_id,
         {"display": {"window": 2}},
+    )
+    assert _accepted(rolling.port, "publication") is shown_before_edit
+    assert rolling.frozen_data is frozen_before_edit
+    assert rolling.port.presentation_current, (
+        "the old accepted surface remains current until configure accepts"
     )
     _settle_panel_hosts(
         presenter,
         lambda: (
             rolling.configuration is None
-            and rolling.host._session._payload.source_revisions == revisions[-2:]
+            and rolling.port.presentation_current
+            and rolling_indices() == source_indices[-2:]
         ),
     )
-    assert rolling.port.presented_publication() is shown_before_edit
+    retained_indices = source_indices[-2:]
+    assert _accepted(rolling.port, "publication") is shown_before_edit
     assert presenter.update_panel_state(
         rolling.panel_id,
         {"display": {"window": 100}},
@@ -1631,29 +1811,39 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
         presenter,
         lambda: (
             rolling.configuration is None
-            and rolling.host._session._payload.source_revisions == revisions
+            and rolling.port.presentation_current
+            and rolling_indices() == retained_indices
         ),
+    )
+    from zlc_data import LATEST_COORDINATE
+    from zlc_plot import AxisRef
+    from zlc_plot.semantics import fate_field_name, scope_fate
+
+    primary_fate = fate_field_name(
+        AxisRef.point("zlc_data.primary-index")
     )
     assert presenter.update_panel_state(
         rolling.panel_id,
-        {"semantic": {"fate:source index": "latest"}},
+        {"semantic": {primary_fate: scope_fate(LATEST_COORDINATE)}},
     )
     _settle_panel_hosts(
         presenter,
         lambda: (
             rolling.configuration is None
-            and rolling.host._session._payload.source_revisions == revisions[-1:]
+            and rolling.port.presentation_current
+            and rolling_indices() == retained_indices[-1:]
         ),
     )
     assert presenter.update_panel_state(
         rolling.panel_id,
-        {"semantic": {"fate:source index": "reduce"}},
+        {"semantic": {primary_fate: "reduce"}},
     )
     _settle_panel_hosts(
         presenter,
         lambda: (
             rolling.configuration is None
-            and rolling.host._session._payload.source_revisions == revisions
+            and rolling.port.presentation_current
+            and rolling_indices() == retained_indices
         ),
     )
     lease = rolling.history_lease
@@ -1747,21 +1937,20 @@ def test_roi_histogram_window_growth_waits_for_current_signal_generation(
         lambda: (
             histogram.host is not None
             and histogram.port is not None
-            and histogram.port.presented_publication() is not None
+            and _accepted(histogram.port, "publication") is not None
         ),
     )
-    shown = histogram.port.presented_publication()
+    shown = _accepted(histogram.port, "publication")
+    one_shot_port = histogram.port
     assert shown is not None
-    assert histogram.history_lease is not None
-    assert histogram.history_lease.window == 1
-    assert histogram.host._session._history == ()
-    retained = session.signal_plane.current_dataset(roi_signal)
-    primary = next(
-        column
-        for column in retained.block.schema.point_table.columns
-        if str(column.coordinate_id) == "zlc_data.primary-index"
+    assert histogram.history_lease is None, (
+        "a one-shot Histogram consumes the current event, not history"
     )
-    assert len(tuple(dict.fromkeys(primary.values))) == 1
+    retained = session.signal_plane.current_dataset(roi_signal)
+    assert all(
+        str(column.coordinate_id) != "zlc_data.primary-index"
+        for column in retained.block.schema.point_table.columns
+    )
 
     # Re-committing the Area intentionally replaces the selection-derived
     # generation.  Pause prevents the board from swapping the Histogram host,
@@ -1781,7 +1970,7 @@ def test_roi_histogram_window_growth_waits_for_current_signal_generation(
         if candidate is not None:
             current_roi = candidate
     assert current_roi.event_ref.generation != first_roi.event_ref.generation
-    assert histogram.port.presented_publication() is shown
+    assert _accepted(histogram.port, "publication") is shown
 
     assert presenter.update_panel_state(
         histogram.panel_id,
@@ -1794,7 +1983,9 @@ def test_roi_histogram_window_growth_waits_for_current_signal_generation(
             and histogram.state.display["window"] == 100
         ),
     )
-    assert histogram.port.presented_publication() is shown
+    assert histogram.port is one_shot_port
+    assert _accepted(histogram.port, "publication") is shown
+    assert not histogram.port.presentation_current
     assert histogram.history_lease is not None
     assert histogram.history_lease.window == 100
     assert histogram.port.last_error is None
@@ -1807,11 +1998,67 @@ def test_roi_histogram_window_growth_waits_for_current_signal_generation(
     _settle_panel_hosts(
         presenter,
         lambda: (
-            (accepted := histogram.port.presented_publication()) is not None
+            (accepted := _accepted(histogram.port, "publication")) is not None
             and accepted.event_ref.generation == current_roi.event_ref.generation
         ),
     )
     assert histogram.port.last_error is None
+
+    # History is signal-global but never owned by an ordinary Image.  It may
+    # consume the current indexed representation while Histogram is alive;
+    # releasing the last real history demand must invalidate and rebuild this
+    # second panel too, instead of feeding indexed data into its event host.
+    companion = presenter.add_panel(
+        roi_signal,
+        current_roi.value(roi_signal).snapshot,
+        kind="image",
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: companion.port is not None
+        and _accepted(companion.port, "publication") is not None
+        and companion.host is not None,
+    )
+    assert companion.history_lease is None
+
+    indexed_port = histogram.port
+    assert presenter.update_panel_state(
+        histogram.panel_id,
+        {"display": {"window": 1}},
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: (
+            histogram.port is indexed_port
+            and histogram.port.presentation_current
+            and _accepted(histogram.port, "publication") is not None
+            and histogram.host is not None
+            and companion.port.presentation_current
+            and _accepted(companion.port, "publication") is not None
+            and histogram.history_lease is None
+        ),
+    )
+    assert histogram.history_lease is None
+    latest = session.signal_plane.current_dataset(roi_signal)
+    assert all(
+        str(column.coordinate_id) != "zlc_data.primary-index"
+        for column in latest.block.schema.point_table.columns
+    )
+    for panel in (histogram, companion):
+        accepted_input = _accepted(panel.port, "plot_input")
+        accepted_snapshot = getattr(
+            accepted_input,
+            "snapshot",
+            accepted_input,
+        )
+        assert all(
+            str(column.coordinate_id) != "zlc_data.primary-index"
+            for column in accepted_snapshot.block.schema.point_table.columns
+        )
+    assert all(
+        str(entry["label"]) != "source index"
+        for entry in histogram.parameter_surface["semantic"]
+    )
 
 
 def test_committed_selection_outputs_enter_the_real_occupancy_input(
@@ -2060,10 +2307,9 @@ def test_show_panel_mounts_after_the_async_canonical_front_is_ready(
         node, snapshot = _one_shot(session)
         binding = presenter.add_panel(node.signal_key("frames"), snapshot)
         assert binding.host is None
-        assert binding.initial_presented is False
         _settle_panel_hosts(
             presenter,
-            lambda: binding.host is not None and binding.initial_presented,
+            lambda: binding.accepted_surface is not None,
         )
         presented = [
             front
@@ -2153,6 +2399,7 @@ def test_retargeting_a_panel_keeps_its_place_and_releases_the_old_host(
     frozen = presenter.view.panel_editors[first.panel_id]["frozen_snapshot"]
     assert frozen is not snapshot
     assert frozen.block.schema == snapshot.block.schema
+    _settle_panel_hosts(presenter, lambda: first.editor_host is not None)
     old_editor_host = first.editor_host
     assert old_editor_host is not None and old_editor_host is not old_host
 
@@ -2164,8 +2411,12 @@ def test_retargeting_a_panel_keeps_its_place_and_releases_the_old_host(
 
     binding = presenter.panels[first.panel_id]
     assert binding.signal == other.signal_key("frames")
+    if binding.host is old_host:
+        _settle_panel_hosts(
+            presenter,
+            lambda: binding.host is not None and binding.host is not old_host,
+        )
     assert binding.host is not old_host
-    _settle_panel_hosts(presenter, lambda: binding.host is not None)
     assert presenter.view.cards[0] is card, "the card lost its place on the board"
     editor = presenter.view.panel_editors[first.panel_id]
     assert editor["stale"] is True
@@ -2177,7 +2428,9 @@ def test_retargeting_a_panel_keeps_its_place_and_releases_the_old_host(
     _settle_panel_hosts(
         presenter,
         lambda: binding.frozen_data is not None
-        and binding.frozen_data.signal == other.signal_key("frames"),
+        and binding.frozen_data.signal == other.signal_key("frames")
+        and binding.editor_configuration is None
+        and binding.frozen_data.description is not None,
     )
     editor = presenter.view.panel_editors[first.panel_id]
     assert editor["stale"] is False
@@ -2216,10 +2469,14 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
     )
     _settle_panel_hosts(presenter, lambda: panel.host is not None)
     assert presenter.edit_panel(panel.panel_id)
+    _settle_panel_hosts(presenter, lambda: panel.editor_host is not None)
     first_editor_host = panel.editor_host
     assert first_editor_host is not None
     _settle_panel_hosts(
-        presenter, lambda: panel.editor_selections is not None
+        presenter,
+        lambda: panel.editor_selections is not None
+        and panel.frozen_data is not None
+        and panel.frozen_data.description is not None,
     )
     assert presenter.view.selectors is False
     from zlc_ui.qt import ensure_qt_app
@@ -2301,7 +2558,10 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
     second_editor_host = panel.editor_host
     assert second_editor_host is not None and second_editor_host is not first_editor_host
     _settle_panel_hosts(
-        presenter, lambda: panel.editor_selections is not None
+        presenter,
+        lambda: panel.editor_selections is not None
+        and panel.frozen_data is not None
+        and panel.frozen_data.description is not None,
     )
     assert panel.state.selector == {}
     with pytest.raises(KeyError):
@@ -2322,7 +2582,7 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
     assert presenter.logic[second_id].draft.values == area_draft
 
     second_editor_host.remove_selector(SelectorKind.AREA).result()
-    presenter.beat()
+    _settle_panel_hosts(presenter, lambda: panel.state.selector == {})
     # The panel's own record holds it now, so a removed selector is a
     # panel that has none written down -- and a saved board has none either.
     assert panel.state.selector == {}
@@ -2558,6 +2818,7 @@ def test_panel_edit_surface_comes_from_the_current_plot_host(presenter, session)
     assert "anisotropic_gaussian_center" in fit_choices.values()
 
     presenter.edit_panel(binding.panel_id)
+    _settle_panel_hosts(presenter, lambda: binding.editor_host is not None)
     projection = presenter.view.panel_editors[binding.panel_id]
     assert projection["parameter_surface"] is binding.parameter_surface
     assert binding.editor_host is not None
@@ -2574,7 +2835,10 @@ def test_panel_edit_surface_comes_from_the_current_plot_host(presenter, session)
     )
     _settle_panel_hosts(
         presenter,
-        lambda: binding.configuration is None,
+        lambda: (
+            binding.configuration is None
+            and binding.editor_configuration is None
+        ),
     )
     assert binding.state.display["colormap"] == colormap
     description = _operation_value(binding.host.describe_display())
@@ -2642,7 +2906,7 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
         {
             "semantic": {semantic_key: semantic_value},
             "display": {"show_colorbar": False},
-            "fit": {"model": "gaussian"},
+            "fit": {"model": "radial_gaussian_center"},
             "overlay_signal": "",
         },
     )
@@ -2672,9 +2936,9 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
         "signal": signal, "title": "camera", "kind": "image",
         "cell_kind": "",
         "size": "4x4", "interval_ms": 800,
-        "semantic": {semantic_key: str(semantic_value)},
+        "semantic": first.state.document()["semantic"],
         "display": authored_display,
-        "fit": {"model": "gaussian"}, "overlay_signal": "",
+        "fit": {"model": "radial_gaussian_center"}, "overlay_signal": "",
         "published_outputs": {},
         "selector": {},
         "classifier_thresholds": [],
@@ -2736,9 +3000,12 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
     assert restored[0].kind == "image"
     assert restored[0].size == "4x4"
     assert restored[0].port.display_interval_ms == 800
-    assert restored[0].state.semantic == {semantic_key: semantic_value}
+    assert (
+        restored[0].state.document()["semantic"]
+        == document["panels"][0]["semantic"]
+    )
     assert restored[0].state.display == authored_display
-    assert restored[0].state.fit == {"model": "gaussian"}
+    assert restored[0].state.fit == {"model": "radial_gaussian_center"}
     assert restored[0].state.overlay_signal == ""
     assert restored[0].panel_id != first.panel_id, "an id is never handed out twice"
     restored_logic = presenter.logic[logic_id]
@@ -3000,6 +3267,10 @@ def test_a_running_task_freezes_logic_identity_but_not_panels(
         def published_signals(self) -> tuple[str, ...]:
             return ("@logic/calibration/capture_preview",)
 
+        @property
+        def operator_request(self):
+            return None
+
         def shutdown(self) -> None:
             self.running = False
 
@@ -3069,21 +3340,14 @@ def test_a_running_task_freezes_logic_identity_but_not_panels(
         preview.panel_id,
         {"roi": True},
     )
-    preview.port = object()
     presenter.set_deriving(True)
     assert presenter.view._cards[preview.panel_id].selectors_enabled is True
-    threshold = {
-        "value": 1.0,
-        "scope": (),
-        "repeat_index": None,
-    }
-    presenter._settle_panel_threshold(preview.panel_id, None, (threshold,))
-    assert preview.state.classifier_thresholds == (threshold,)
     viewport = object()
-    presenter._route_panel_selection(
-        preview.panel_id,
-        object(),
-        viewport=viewport,
+    presenter._synchronize_panel_interaction(
+        preview,
+        None,
+        None,
+        viewport,
     )
     assert preview.interaction_viewport[1] is viewport
     preview.port = None
@@ -3239,7 +3503,7 @@ def test_finite_repeat_mount_and_axis_change_never_materialize_on_owner(
     )
     assert description.shape[:2] == (30, CAMERA_WINDOWS)
 
-    original = session.signal_plane.current_dataset
+    original = session.signal_plane.current_dataset_view
     entered = Event()
     projection_release = Event()
     projection_threads: list[int] = []
@@ -3250,7 +3514,11 @@ def test_finite_repeat_mount_and_axis_change_never_materialize_on_owner(
         assert projection_release.wait(10.0)
         return original(name, publication)
 
-    monkeypatch.setattr(session.signal_plane, "current_dataset", blocked_current)
+    monkeypatch.setattr(
+        session.signal_plane,
+        "current_dataset_view",
+        blocked_current,
+    )
     binding = presenter.add_blank_panel("facet_grid")
     assert presenter.update_panel_state(binding.panel_id, {"signal": signal})
     presenter.beat()
@@ -3264,7 +3532,7 @@ def test_finite_repeat_mount_and_axis_change_never_materialize_on_owner(
         lambda: binding.host is not None
         and bool(binding.parameter_surface.get("semantic")),
     )
-    shown = binding.port.presented_input()
+    shown = _accepted(binding.port, "plot_input")
     snapshot = getattr(shown, "snapshot", shown)
     assert snapshot.block.values.shape[:2] == (30, CAMERA_WINDOWS)
     assert np.all(snapshot.expanded_validity()[:1])
@@ -3293,7 +3561,7 @@ def test_finite_repeat_mount_and_axis_change_never_materialize_on_owner(
     )
     assert binding.host is host
     assert binding.display_publication is publication
-    assert binding.port.presented_input() is shown
+    assert _accepted(binding.port, "plot_input") is shown
 
     capture_release.set()
     capture_thread.join(10.0)
@@ -3301,9 +3569,9 @@ def test_finite_repeat_mount_and_axis_change_never_materialize_on_owner(
     latest = session.signal_plane.latest_publication(signal)
     _settle_panel_hosts(
         presenter,
-        lambda: binding.port.presented_publication() is latest,
+        lambda: _accepted(binding.port, "publication") is latest,
     )
-    finished = binding.port.presented_input()
+    finished = _accepted(binding.port, "plot_input")
     finished_snapshot = getattr(finished, "snapshot", finished)
     assert finished_snapshot.block.values.shape[:2] == (30, CAMERA_WINDOWS)
     assert np.all(finished_snapshot.expanded_validity())
@@ -3432,7 +3700,7 @@ def test_partial_grid_points_mount_and_reproject_one_canonical_snapshot(
         lambda: binding.host is not None
         and bool(binding.parameter_surface.get("semantic")),
     )
-    shown = binding.port.presented_input()
+    shown = _accepted(binding.port, "plot_input")
     snapshot = getattr(shown, "snapshot", shown)
     assert snapshot.block.schema.grid_topology == canonical.grid_topology
     assert snapshot.block.values.shape == (1, 4, 1)
@@ -3468,15 +3736,15 @@ def test_partial_grid_points_mount_and_reproject_one_canonical_snapshot(
     )
     assert binding.host is host
     assert binding.display_publication is publication
-    assert binding.port.presented_input() is shown
+    assert _accepted(binding.port, "plot_input") is shown
 
     commit_point(1, 20.0)
     latest = session.signal_plane.latest_publication(signal)
     _settle_panel_hosts(
         presenter,
-        lambda: binding.port.presented_publication() is latest,
+        lambda: _accepted(binding.port, "publication") is latest,
     )
-    updated = binding.port.presented_input()
+    updated = _accepted(binding.port, "plot_input")
     updated_snapshot = getattr(updated, "snapshot", updated)
     assert binding.host is host
     assert updated_snapshot.block.schema.grid_topology == canonical.grid_topology
@@ -3601,9 +3869,12 @@ def test_a_facet_grid_panel_of_frames_carries_the_occupancy_overlay(
     front = session.signal_plane.freeze()
     judged = front.value(judged_signal)
     publication = front.publication(judged_signal)
-    assert judged is not None and publication is not None, (
-        presenter.logic[occupancy_id].host.observation
-    )
+    status_publication = front.publication(status_signal)
+    assert (
+        judged is not None
+        and publication is not None
+        and status_publication is not None
+    ), presenter.logic[occupancy_id].host.observation
 
     other_camera, _ = _one_shot(session, producer="other-camera")
     other_id = presenter.add_logic(
@@ -3684,6 +3955,29 @@ def test_a_facet_grid_panel_of_frames_carries_the_occupancy_overlay(
     )
     assert frame.overlay.point_ids == site_ids
     assert binding.frozen_data.overlay == {"overlay_signal": status_signal}
+    lineage = binding.frozen_data.lineage
+    nodes = {node["id"]: node for node in lineage["nodes"]}
+    saved_events = {
+        (
+            node["event"]["stream"],
+            node["event"]["generation"],
+            node["event"]["sequence"],
+        )
+        for node in nodes.values()
+    }
+
+    def event_identity(selected) -> tuple[str, str, int]:
+        ref = selected.event_ref
+        return ref.stream_id.value, ref.generation.value, ref.sequence
+
+    assert event_identity(publication) in saved_events
+    assert event_identity(status_publication) in saved_events
+    root_event = nodes[lineage["root"]]["event"]
+    assert (
+        root_event["stream"],
+        root_event["generation"],
+        root_event["sequence"],
+    ) == event_identity(status_publication)
 
 
 def test_a_card_stops_wearing_an_error_once_the_panel_has_drawn_again(
@@ -3842,17 +4136,33 @@ def test_a_cell_kind_change_is_not_refused_by_the_previous_kinds_assignments(
         presenter,
         lambda: binding.host is not None
         and binding.configuration is None
-        and binding.state.semantic.get(row) == "pool",
+        and not binding.parameter_surface.get("semantic_provisional", True),
+    )
+    settled = next(
+        entry["value"]
+        for entry in binding.parameter_surface["semantic"]
+        if str(entry["key"]) == row
+    )
+    assert settled != "group"
+    assert binding.state.semantic.get(row) == settled, dict(
+        binding.state.semantic
     )
     assert binding.state.cell_kind == "histogram"
-    # An axis row is a question BOTH kinds answer, so the histogram's answer
-    # for that axis -- pooled, which is what a distribution does to every axis
-    # it is given -- is what the record now holds.  The record says what the
-    # panel IS; it does not carry an answer the current kind contradicts.
-    assert binding.state.semantic.get(row) == "pool"
+    # The outer grid may legitimately own this row as its facet.  Whatever the
+    # resolved histogram vocabulary says is the one current record; the old
+    # curve-only Group answer cannot remain authoritative.
     assert presenter.update_panel_state(binding.panel_id, {"cell_kind": "curve"})
-    _settle_panel_hosts(presenter, lambda: binding.state.cell_kind == "curve")
-    assert binding.state.semantic.get(row) in {"pool", "reduce"}
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.state.cell_kind == "curve"
+        and not binding.parameter_surface.get("semantic_provisional", True),
+    )
+    curve_settled = next(
+        entry["value"]
+        for entry in binding.parameter_surface["semantic"]
+        if str(entry["key"]) == row
+    )
+    assert binding.state.semantic.get(row) == curve_settled
     assert binding.reported_error is None
 
 
@@ -3865,8 +4175,8 @@ def test_a_cell_kind_change_survives_a_shared_name_it_cannot_honour(
     there; the image cell paints that axis up its own side, so taking it as
     x collides -- "ImagePlot x and y must be different axes" -- and the whole
     record was refused as one edit.  The operator asked for an image cell, so
-    the image cell wins: what still composes is kept and the rest waits in the
-    bag for the way back.
+    the image cell wins: only the legal overlap crosses the transaction and
+    the accepted image description replaces the old vocabulary.
     """
 
     node, snapshot = _one_shot(session, producer="camera_measurement")
@@ -3885,7 +4195,7 @@ def test_a_cell_kind_change_survives_a_shared_name_it_cannot_honour(
         (
             str(entry["key"])
             for entry in binding.parameter_surface["semantic"]
-            if str(entry["key"]) == "fate:spatial-y"
+            if str(entry["label"]) == "spatial-y"
             and any(value == "x" for _label, value in tuple(entry["choices"]))
         ),
         None,
@@ -3946,24 +4256,32 @@ def test_a_panel_that_crossed_vocabularies_still_configures_and_saves(
         for _severity, text in presenter.view.status
     ), presenter.view.status
 
-    _settle_panel_hosts(presenter, lambda: binding.frozen_data is not None)
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.configuration is None and binding.host is not None,
+    )
+    assert presenter.refresh_panel_snapshot(binding.panel_id)
+    _settle_panel_hosts(presenter, lambda: not binding.frozen_stale)
     assert presenter.save_panel_figure(
         binding.panel_id, str(tmp_path / "crossed")
     ) is True, presenter.view.status
     _wait_for_panel_save(presenter, tmp_path / "crossed.png")
 
-    # And the authored appearance survived the crossing, so going back shows
-    # what the operator chose rather than the default.  The panel must have
-    # SETTLED under the other vocabulary first: that settle is what used to
-    # replace the record with the description and delete the rest of it.
+    # Settling the new vocabulary deletes the previous kind's hidden display
+    # bag.  Returning to Image uses its current defaults; there is no per-kind
+    # appearance owner waiting behind the visible Curve state.
     _settle_panel_hosts(
         presenter,
         lambda: binding.state.cell_kind == "curve"
         and bool(binding.parameter_surface.get("display")),
     )
     assert presenter.update_panel_state(binding.panel_id, {"cell_kind": "image"})
-    _settle_panel_hosts(presenter, lambda: binding.state.cell_kind == "image")
-    assert binding.state.display.get("show_colorbar") is False
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.state.cell_kind == "image"
+        and binding.state.display.get("show_colorbar") is True,
+    )
+    assert binding.state.display.get("show_colorbar") is True
 
 
 def test_a_panel_says_what_kind_of_data_it_is_drawing(presenter, session) -> None:
@@ -3977,7 +4295,11 @@ def test_a_panel_says_what_kind_of_data_it_is_drawing(presenter, session) -> Non
     sentence here that the strip would have to take apart again.
     """
 
-    from zlc_plot.semantics import schema_structure
+    from zlc_plot.semantics import (
+        is_scope_fate,
+        schema_structure,
+        scope_coordinate_from_fate,
+    )
 
     node, snapshot = _one_shot(session)
     signal = node.signal_key("frames")
@@ -4001,7 +4323,7 @@ def test_a_panel_says_what_kind_of_data_it_is_drawing(presenter, session) -> Non
         for field in binding.parameter_surface["semantic"]
         if str(field["key"]).startswith("fate:")
         for _label, value in tuple(field["choices"])
-        if isinstance(value, (int, float)) and not isinstance(value, bool)
+        if is_scope_fate(value)
     )
     assert presenter.update_panel_state(
         binding.panel_id, {"semantic": {str(fate["key"]): pinned}}
@@ -4010,7 +4332,7 @@ def test_a_panel_says_what_kind_of_data_it_is_drawing(presenter, session) -> Non
         presenter,
         lambda: bool(binding.parameter_surface.get("data_scope")),
     )
-    number = float(pinned)
+    number = float(scope_coordinate_from_fate(pinned))
     pinned_text = (
         str(int(number)) if number.is_integer() else f"{number:g}"
     )
@@ -4075,7 +4397,7 @@ def test_restored_live_selector_answers_displayed_shot_before_plane_latest(
             lambda: (
                 original.host is not None
                 and original.port is not None
-                and original.port.presented_publication() is displayed
+                and _accepted(original.port, "publication") is displayed
                 and original.host.initial_state[0] is not None
             ),
         )
@@ -4088,6 +4410,7 @@ def test_restored_live_selector_answers_displayed_shot_before_plane_latest(
                     str(x_axis.axis_id),
                     float(x_axis.coordinate_at(4)),
                     float(x_axis.coordinate_at(10)),
+                    domain="data",
                     coordinate_frame=(
                         None
                         if x_axis.coordinate_frame is None
@@ -4098,6 +4421,7 @@ def test_restored_live_selector_answers_displayed_shot_before_plane_latest(
                     str(y_axis.axis_id),
                     float(y_axis.coordinate_at(3)),
                     float(y_axis.coordinate_at(8)),
+                    domain="data",
                     coordinate_frame=(
                         None
                         if y_axis.coordinate_frame is None
@@ -4120,13 +4444,13 @@ def test_restored_live_selector_answers_displayed_shot_before_plane_latest(
             lambda: (
                 binding.host is not None
                 and binding.port is not None
-                and binding.port.presented_publication() is displayed
+                and _accepted(binding.port, "publication") is displayed
                 and binding.host.initial_state[0] is not None
             ),
         )
 
         latest = next_publication(displayed)
-        assert binding.port.presented_publication() is displayed
+        assert _accepted(binding.port, "publication") is displayed
         assert session.signal_plane.latest_publication(signal) is latest
 
         monkeypatch.setattr(presenter, "_apply_deriving", apply_deriving)
@@ -4438,7 +4762,11 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
         owned_snapshot_from_arrays,
     )
     from zlc_atom.nodes.scan.dataset import scan_dataset_schema
-    from zlc_plot.semantics import schema_structure
+    from zlc_plot.semantics import (
+        is_scope_fate,
+        schema_structure,
+        scope_coordinate_from_fate,
+    )
     from zlc_runtime import (
         DatasetCoverage,
         DatasetOutputDeclaration,
@@ -4539,3 +4867,197 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     assert presenter.view.panel_parameter_surfaces[
         refused.panel_id
     ]["data_structure"] == expected
+
+    # The real large-map geometry that exposed the second half of this bug:
+    # a dense 3x35 result is deliberately moved off the image axes so the
+    # three scan dimensions become facet/y/x.  The whole fate table must land
+    # atomically and a terminal Frozen host must reproduce the same limits.
+    map_dimensions = (10, 10, 10)
+    map_cells = tuple(np.ndindex(*map_dimensions))
+    map_site = AxisSpec(
+        AxisId("map.site"), "site", SITE, 35, tuple(range(35))
+    )
+    map_cell_schema = ValueSchema(
+        (pair, map_site),
+        ValidityContract.components(pair.axis_id, map_site.axis_id),
+        np.dtype("<f8"),
+        "1",
+    )
+    map_event_schema = DatasetSchema(
+        event_repeat, PointTable(1, ()), None, map_cell_schema
+    )
+    map_canonical = scan_dataset_schema(
+        map_event_schema,
+        tuple(
+            tuple(float(value) for value in cell) for cell in map_cells
+        ),
+        tuple((name, "") for name in names),
+        visits=20,
+    )
+    map_event = owned_snapshot_from_arrays(
+        map_event_schema,
+        np.ones((1, 1, pair.size, map_site.size)),
+        1,
+        stream_generation="exact-map-panel",
+    )
+    map_signal = "scan-map/survival"
+    map_node = SimpleNamespace(
+        instance_id="scan-map",
+        dataset_output_declarations=(declaration,),
+        signal_key=lambda name: f"scan-map/{name}",
+    )
+    session.signal_plane.reserve(map_node)
+    session.signal_plane.commit_live(
+        map_node,
+        {
+            "survival": LiveDatasetOutput(
+                declaration,
+                map_event,
+                DatasetCoverage(
+                    1,
+                    map_canonical.repeat_axis.size * len(map_cells),
+                ),
+                canonical_schema=map_canonical,
+                cell_origin=(0, 0),
+            )
+        },
+    )
+    map_publication = session.signal_plane.freeze().publication(map_signal)
+    mapped = presenter.add_panel(
+        map_signal,
+        map_event,
+        title="mapped survival",
+        kind="facet_grid",
+        initial_publication=map_publication,
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: mapped.host is not None
+        and mapped.frozen_data is not None
+        and not mapped.parameter_surface.get("semantic_provisional", True),
+    )
+    from zlc_plot import AxisRef, NumericRange
+    from zlc_plot.selectors import RectangleRange
+
+    from zlc_plot.semantics import fate_field_name
+
+    scan_fates = {
+        fate_field_name(AxisRef.point_dimension("scan.field.y")): "y",
+        fate_field_name(AxisRef.point_dimension("scan.field.z")): "x",
+        fate_field_name(AxisRef.data("survival.pair")): "reduce",
+        fate_field_name(AxisRef.data("map.site")): "reduce",
+    }
+    offered_fates = {
+        str(entry["key"]): tuple(
+            value for _label, value in entry["choices"]
+        )
+        for entry in mapped.parameter_surface["semantic"]
+    }
+    assert all(
+        value in offered_fates.get(name, ())
+        for name, value in scan_fates.items()
+    ), offered_fates
+    mapped.interaction_viewport = (
+        presenter._panel_view_identity(mapped),
+        RectangleRange(
+            NumericRange(0.0, 1.0),
+            NumericRange(0.0, 1.0),
+        ),
+    )
+    from zlc_runtime import SelectionRange, SelectionState
+    from zlc_workbench.selection import panel_selection_document
+
+    mapped.state = replace(
+        mapped.state,
+        selector=panel_selection_document(SelectionState(
+            plot_kind="image",
+            selector_kind="area",
+            ranges=(
+                SelectionRange("map.site", 0.0, 10.0, domain="data"),
+                SelectionRange(
+                    "survival.pair", 0.0, 2.0, domain="data"
+                ),
+            ),
+        )),
+    )
+    assert presenter.update_panel_state(
+        mapped.panel_id, {"semantic": scan_fates}
+    )
+    scan_configuration = mapped.configuration
+    assert scan_configuration is not None
+    _settle_panel_hosts(
+        presenter,
+        lambda: mapped.configuration is None
+        and mapped.accepted_display is not None,
+    )
+    scan_description = mapped.accepted_display
+    assert scan_description.semantics.x == AxisRef.point_dimension(
+        "scan.field.z"
+    )
+    assert scan_description.semantics.y == AxisRef.point_dimension(
+        "scan.field.y"
+    )
+    assert all(
+        mapped.state.semantic.get(name) == value
+        for name, value in scan_fates.items()
+    ), dict(mapped.state.semantic)
+    assert mapped.interaction_viewport is None, (
+        "a viewport measured on pair/site was retained on field.z/field.y"
+    )
+    assert mapped.state.selector == {}, (
+        "a selector measured on pair/site was retained on field.z/field.y"
+    )
+    live_snapshot = _accepted(mapped.port, "plot_input")
+    assert live_snapshot.block.schema.fingerprint == map_canonical.fingerprint
+    assert live_snapshot.block.values.shape == (20, 1000, 3, 35)
+    assert (
+        mapped.frozen_data.snapshot.block.schema.fingerprint
+        == map_canonical.fingerprint
+    )
+    live_description = _operation_value(mapped.host.describe_display())
+    assert live_description.semantics.facet == AxisRef.point_dimension(
+        "scan.field.x"
+    )
+    assert live_description.semantics.x == AxisRef.point_dimension(
+        "scan.field.z"
+    )
+    assert live_description.semantics.y == AxisRef.point_dimension(
+        "scan.field.y"
+    )
+    assert (
+        live_description.limits.x.low,
+        live_description.limits.x.high,
+        live_description.limits.y.low,
+        live_description.limits.y.high,
+    ) == (-0.5, 9.5, -0.5, 9.5)
+
+    assert presenter.edit_panel(mapped.panel_id)
+    _settle_panel_hosts(
+        presenter,
+        lambda: mapped.editor_host is not None
+        and mapped.editor_configuration is None,
+    )
+    frozen_description = _operation_value(
+        mapped.editor_host.describe_display()
+    )
+    assert frozen_description.semantics == live_description.semantics
+    assert frozen_description.limits == live_description.limits
+
+    assert session.signal_plane.seal_committed(map_node, cut_short=True)
+    assert presenter.close_panel_editor(mapped.panel_id)
+    _settle_panel_hosts(presenter)
+    assert presenter.edit_panel(mapped.panel_id)
+    _settle_panel_hosts(
+        presenter,
+        lambda: mapped.editor_host is not None
+        and mapped.editor_configuration is None,
+    )
+    terminal_description = _operation_value(
+        mapped.editor_host.describe_display()
+    )
+    assert (
+        mapped.frozen_data.snapshot.block.schema.fingerprint
+        == map_canonical.fingerprint
+    )
+    assert terminal_description.semantics == live_description.semantics
+    assert terminal_description.limits == live_description.limits

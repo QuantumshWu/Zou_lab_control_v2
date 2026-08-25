@@ -7,6 +7,9 @@
 固定尺寸、static/live session，以及 Notebook canvas / PyQt5 QImage adapter。
 
 外部代码只通过公开 API 提交数据、修改显示参数、读取 selector/fit 结果或嵌入 canvas。Notebook 和 GUI 使用同一个 `PlotSession` 语义。
+轴与semantic字段只认`AxisRef(domain, axis_id)`稳定key；axis label是显示文本，不能作为
+持久化或表单identity。Scope使用tagged latest或tagged typed coordinate value；因此文本坐标
+`"latest"`仍是普通坐标，不会被解释成selector。Figure recipe使用同一tagged grammar。
 顶层 `zlc_plot` facade 只放常规使用路径；模型注册、参数 schema、底层 raster
 mapping 等扩展接口分别位于 `zlc_plot.fit`、`zlc_plot.parameters`、
 `zlc_plot.raster`、`zlc_plot.ui` 和 `zlc_plot.layout`，避免把扩展作者 API
@@ -109,6 +112,8 @@ session.set_size("2x4")
 
 每种 selector 最多存在一个；再次设置同一种 kind 会原子更新它。Fit 的唯一默认范围优先级是 `AREA > X_RANGE > viewport > all`；`selector_kind=` 也可显式绑定 Area 或 X-range。Distribution 的 `threshold_classifier` 是独立的显示/分类功能：启用后自行求出初始最优 threshold，绘制左右 Gaussian、总和、可拖动 threshold 线以及当前 L/R population 和 fidelity。普通 `bimodal_gaussian` fit 不会创建、移动或清除 classifier，classifier 也不写普通 fit 状态。所有具有数值 fit 语义的 plot kind 共用一条 `FitSelection -> FitEngine -> overlay/presentation` 生命周期：Curve/Rolling 使用当前 DataView 的第一条 painted series，Histogram 使用当前 painted bin centers/counts，Image 使用当前 painted scalar field，FacetGrid 只把输入投影委托给当前 focused cell 的 Curve/Histogram/Image 语义。group、reduction 与 valid mask 只在 DataView 中评估一次，selector/viewport 随后筛选实际显示的 projection；Fit 不会另建 raw tensor mask/reduction 路径。Rolling 还会限制在当前可见 window。selector/viewport 只决定参数估计使用的样本，成功的拟合曲线仍覆盖当前完整显示域，并以当前显示单位写出公式、参数值和 `±` 不确定度。`FitResult` 保存 canonical 参数、covariance 和 data revision；live data的`FitEvent`在exact solve接受后即可发布给Rolling等数据消费者，不等待较慢的owner raster，但主Panel仍只把`data@N + fit@N`画进同一个atomic front；显式manual `fit()`仍在accepted overlay transaction后通知。Area/X 拖动中的 draft 默认每 30 ms 只更新视觉场景；selector、viewport、unit 和 resize 不会启动拟合，旧 overlay 保持稳定并在上下文变化时标为 lagging。只有显式调用 `fit()`，或 live fit 已 armed 且出现新的 data revision，才会求解并原子替换完整结果。Image 的 color-limit handles 属于显示色阶控制，不是 data selector；拖动时 handles、色阶与 raster preview 跟随指针节拍实时更新（只重着色图像像素，不触碰 chrome），释放时提交精确终值。删除由 `selector_kind=` 显式绑定的 selector 会取消并关闭该 live fit；自动选择的 live fit 则按相同优先级继续。Histogram 只对 count projection 执行 fit；启用 `density` 或 `cumulative` 时必须先切回 count。普通数据的 Selector API 提供 canonical/display range；只有显式调用 `selector_data()` 时才从调用当时的最新 snapshot 计算 mask、indices、坐标、数据值和 revision；crosshair 只返回显示坐标中距离光标最近的一个有效样本。PulseTimeline 返回 `PulseTimelineSelectionData`（与所选时间范围相交的 blocks、analog traces、scan regions、DAC segments 与 repeat markers）。selection event 本身不切片或缓存数据。
 
+Panel的单行Fit表达式使用当前显示单位：`amplitude=2`把参数精确固定并从优化自由度移除，`decay_time=guess(5)`只替换初始猜测；省略参数即保持Auto。PanelState与Figure只保存canonical `fixed`/`initial` mappings。表达式无效时忽略这份optional override、继续同model自动fit并显示warning；fixed参数显示为`(fixed)`且没有估计误差。
+
 `session.fit_models` 与 `plot_host.fit_models()` 只返回当前 plot 语义和坐标单位都兼容的模型，并把该语义的默认模型排在第一位。Curve/Rolling 提供 Lorentzian、Gaussian with offset、symmetric Lorentzian doublet、damped sine 和 exponential decay；Histogram 提供 bimodal 与 single Gaussian；Image 仅在 x/y 坐标量纲兼容时提供 radial Gaussian center；PulseTimeline 不伪造可用的数值 fit。
 
 Live fit 的唯一自动触发源是宿主的通用 indexed-derived signal。只有真实Rolling/Histogram等history consumer取得window lease后，Runtime才从当时的current event开始记录；lease区间内每个Measurement primary index都在同一个普通Dataset中有value或invalid cell，之前的shot不回填。`display_interval`只控制Surface deadline。Host只保留一个active pair和一个latest完整输入，中间输入不排FIFO；现有Raster worker的active deadline超过1秒会loud发布invalid、取消该solve并继续latest。任何window/history按lease内source index连续，cadence skip与solver failure都显示为invalid/NaN，但只有后者是错误。主Panel的commit仍把`data@N + fit@N`原子画进同一front。
@@ -160,6 +165,10 @@ control 管线。拥有完整表单状态的宿主一次调用
 display mapping、size、Image overlay 和 fit choice；宿主不判断原位更新还是重排。
 `zlc_plot` 比较当前状态、合并 `RenderEffect`，并保留同一个 Figure。
 `replace_spec()` 仍供已经拥有完整 typed `PlotSpec` 的代码直接使用。
+调用方提交的是authored target；`describe_display()`返回的`DisplayDescription.spec`才是
+本次成功transaction实际接受的spec。Live、Frozen/Edit和FigureViewer都必须以这个accepted
+spec判断classifier、selector、overlay、viewport与其它resolved capability，不能用尚未接受的
+target猜当前pixels。
 
 参数 schema 用 `RenderEffect` flags 声明每个修改真正失效的投影、geometry、style、
 axis transform、text/chrome、overlay 或 layout。一次 transaction 合并所有 effects，
@@ -234,6 +243,9 @@ GUI 可从 `plot_host.fit_models()` 读取 session 的公开 fit catalogue，把
 geometry；`plot_host.selector_data(SelectorKind.AREA)` 才在显式调用时从最新 snapshot 物化 mask、
 indices、coordinates 和 values。GUI 因而不需要维护第二份 selector range，也不会为了
 显示范围提前切片数据。
+Selector与viewport callback都携产生该observation的Dataset generation和revision；应用只有在
+它仍匹配当前accepted presentation时才能接受。`zlc_plot`不持久化应用interaction truth，也不
+把host-local selector revision当成跨Live/Frozen surfaces的共同时钟。
 
 Pulse preview 或嵌套 scroll area 可调用 `widget.set_interaction_enabled(False)`；这只关闭 adapter input transport，不重建 Figure/host，也不停止 live、resize、DPR 或参数更新。需要 same-shot group display 时，各 widget 使用 `auto_present=False`，应用按自己的 causal shot identity 等齐各 host 返回的 `RasterOperation.front`，再在 Qt owner thread 调用每个 widget 的 `present_front(front)`。`zlc_plot` 不用恰好相等的 revision 猜测 same-shot；join 仍属于应用。`front.identity` 同时携带 dataset generation/revision 和 Image overlay revision 供应用核对。
 
@@ -315,7 +327,7 @@ Notebook 和 Qt 都消费同一个 `SurfacePlan`。宿主窗口或浏览器区�
 ## 持久化与应用边界
 
 - `zlc_data.save_npz/load_npz` 持有科学数据 snapshot 的 NPZ 格式。
-- 当前已经显示的 Edit-tab snapshot 直接使用 immutable `widget.presented_front`；它包含准确的 RGBA、surface identity 与 interaction transform，不触发重绘。需要独立交互或 local fit 的 Edit surface，则由应用用冻结的 `zlc_data.OwnedSnapshot`、原 `PlotSpec` 和应用持有的 authored parameters 创建另一个 `RasterPlotHost`。这与 live panel 隔离，且不需要复制运行中 session 或恢复异步句柄。
+- 当前已经显示的 Edit-tab snapshot 直接使用 immutable `widget.presented_front`；它包含准确的 RGBA、surface identity 与 interaction transform，不触发重绘。需要独立交互或 local fit 的 Edit surface，则由应用用冻结的`zlc_data.OwnedSnapshot`和Live host已接受的`DisplayDescription.spec`、normalized parameters创建另一个`RasterPlotHost`；不得从未接受的authored target重猜。这与live panel隔离，且不需要复制运行中session或恢复异步句柄。
 - `zlc_data`拥有Figure NPZ grammar，`zlc_durable`拥有原子路径发布；`zlc_plot`拥有
   exact Plot recipe与archive-first/render-second公共流程。设备配置、Logic route、
   实验workflow与项目文件仍由上层应用持有，不建立第二套项目格式。

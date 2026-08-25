@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from zlc_plot import PlotKind
+from zlc_plot.specs import semantic_spec
 
 from .panel_spec import fitting_panel_spec
 
@@ -133,7 +134,6 @@ def task_console_fitting_spec(
         requested_cell if definition.kind is PlotKind.FACET_GRID else "",
     )
     if spec is not None and requested_cell:
-        actual = getattr(getattr(spec, "cell", None), "kind", None)
-        if str(getattr(actual, "value", actual)) != requested_cell:
+        if semantic_spec(spec).kind.value != requested_cell:
             raise ValueError("FacetGrid resolver returned another cell kind")
     return spec

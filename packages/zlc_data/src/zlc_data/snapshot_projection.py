@@ -12,6 +12,7 @@ from .axis import (
     SCAN_POINT,
     AxisId,
     AxisSpec,
+    LATEST_COORDINATE,
     canonical_coordinate_scalar,
     point_ordinal_axis,
 )
@@ -484,7 +485,7 @@ def value_selection(
         axis = matches[0][2]
         coordinate = (
             axis.coordinate_at(axis.size - 1)
-            if value == "latest"
+            if value is LATEST_COORDINATE
             else canonical_coordinate_scalar(value, f"axis {axis.axis_id} coordinate")
         )
         if axis.coordinates is None:

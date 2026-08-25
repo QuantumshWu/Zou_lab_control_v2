@@ -51,7 +51,10 @@ state = {
     'interval_ms': 400, 'title': 'Camera frame', 'semantic': {}, 'display': {},
     'fit': {}, 'overlay_signal': '',
 }
-surface = {'semantic': (), 'display': (), 'fit': (), 'data_structure': (), 'data_scope': ()}
+surface = {
+    'semantic': (), 'display': (), 'fit': (),
+    'data_structure': (), 'data_scope': (), 'paints_images': True,
+}
 view.set_panel_projection('saved-panel-1', state, surface)
 first = QtWidgets.QLabel("first"); second = QtWidgets.QLabel("second")
 view.set_panel_surface('saved-panel-1', first); view.set_panel_surface('saved-panel-1', second)
@@ -94,6 +97,7 @@ assert editor.snapshot_group.isHidden()
 assert editor.interaction_group.isHidden()
 assert editor.producer_group.isHidden()
 assert editor.save_group.isHidden()
+view.close(); app.processEvents()
 """
     )
 

@@ -12,6 +12,8 @@ could therefore only ever run once.
 
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 import pytest
 
@@ -22,7 +24,7 @@ from zlc_runtime.dataset_output import (
     LiveDatasetOutput,
 )
 from zlc_runtime.plane import SignalDataPlane
-from zlc_runtime.streams import StreamEndedEarly
+from zlc_runtime.streams import SourceGenerationEnded, StreamEndedEarly
 
 from _snapshots import snapshot
 
@@ -231,6 +233,156 @@ def test_begin_generation_on_an_untouched_generation_is_the_same_run() -> None:
         # is the caller state machine's job, which is why NodeHost has _active.
         assert plane.begin_generation(node) == first
     finally:
+        plane.close()
+
+
+def test_concurrent_generation_starters_share_one_installed_successor() -> None:
+    plane = SignalDataPlane()
+    node = _Producer()
+    release_cancel = threading.Event()
+    release_work = threading.Event()
+    results: list[object] = []
+    retired: list[frozenset[str]] = []
+    errors: list[BaseException] = []
+
+    class Dependent:
+        def __init__(self, identity: str, *, busy: bool) -> None:
+            self.instance_id = identity
+            self.declaration = DatasetOutputDeclaration("value", "test.value")
+            self.busy = busy
+            self.entered = threading.Event()
+            self.cancelled = threading.Event()
+            self.cancel_count = 0
+            self.wake = threading.Event()
+
+        @property
+        def dataset_output_declarations(self):
+            return (self.declaration,)
+
+        def signal_key(self, name: str) -> str:
+            return f"@logic/{self.instance_id}/{name}"
+
+        validate_processor_source = staticmethod(lambda _source: None)
+
+        def evaluate_processor(self, *_args):
+            if not self.busy:
+                raise AssertionError("paused processor must not evaluate")
+            self.entered.set()
+            assert release_work.wait(2.0)
+            return {"value": object()}
+
+        accept_processor_result = staticmethod(
+            lambda *_args: (_ for _ in ()).throw(
+                AssertionError("cancelled result must not be accepted")
+            )
+        )
+        accept_processor_failure = staticmethod(
+            lambda error: (_ for _ in ()).throw(error)
+        )
+
+        def accept_processor_cancelled(self) -> None:
+            self.cancel_count += 1
+            self.cancelled.set()
+            if not self.busy:
+                assert release_cancel.wait(2.0)
+
+        def request_processor_owner_wake(self) -> None:
+            self.wake.set()
+
+    gate = Dependent("cleanup-gate", busy=False)
+    busy = Dependent("cleanup-busy", busy=True)
+    try:
+        plane.begin_generation(node)
+        plane.commit_live(
+            node,
+            {"frames": _commit(node, revision=1, total=1, origin=0)},
+        )
+        publication = plane.latest_publication(node.signal_key("frames"))
+        assert publication is not None
+        plane.attach_latest_only_processor(
+            gate,
+            source_name=node.signal_key("frames"),
+            initial_publication=publication,
+            paused=True,
+        )
+        plane.attach_latest_only_processor(
+            busy,
+            source_name=node.signal_key("frames"),
+            initial_publication=publication,
+        )
+        assert busy.entered.wait(2.0)
+        assert plane.seal_committed(node)
+
+        def start_successor() -> None:
+            try:
+                results.append(plane.begin_generation(node))
+            except BaseException as error:
+                errors.append(error)
+
+        def withdraw_dependent() -> None:
+            try:
+                retired.append(plane.retire(gate))
+            except BaseException as error:
+                errors.append(error)
+
+        leader = threading.Thread(target=start_successor)
+        follower = threading.Thread(target=start_successor)
+        dependent_withdraw = threading.Thread(target=withdraw_dependent)
+        leader.start()
+        assert gate.cancelled.wait(2.0)
+        follower.start()
+        dependent_withdraw.start()
+        follower.join(0.05)
+        dependent_withdraw.join(0.05)
+        assert follower.is_alive() and dependent_withdraw.is_alive()
+        with pytest.raises(SourceGenerationEnded, match="retired"):
+            plane.commit_live(
+                node,
+                {"frames": _commit(node, revision=2, total=1, origin=0)},
+            )
+        release_cancel.set()
+        leader.join(2.0)
+        follower.join(2.0)
+        dependent_withdraw.join(2.0)
+
+        assert not leader.is_alive() and not follower.is_alive()
+        assert not dependent_withdraw.is_alive()
+        assert not errors
+        assert len(results) == 2
+        assert results[0] == results[1]
+        assert retired == [frozenset()]
+
+        next_value = plane.commit_live(
+            node,
+            {"frames": _commit(node, revision=2, total=1, origin=0)},
+        )[node.signal_key("frames")]
+        next_publication = plane.latest_publication(node.signal_key("frames"))
+        assert next_publication is not None
+        assert next_value.snapshot.ref.stream_generation == results[0]
+
+        with pytest.raises(RuntimeError, match="already active"):
+            plane.attach_latest_only_processor(
+                busy,
+                source_name=node.signal_key("frames"),
+                initial_publication=next_publication,
+                paused=True,
+            )
+
+        release_work.set()
+        assert busy.wake.wait(2.0)
+        plane.freeze()
+        assert busy.cancelled.is_set()
+        assert gate.cancel_count == busy.cancel_count == 1
+
+        plane.attach_latest_only_processor(
+            busy,
+            source_name=node.signal_key("frames"),
+            initial_publication=next_publication,
+            paused=True,
+        )
+    finally:
+        release_cancel.set()
+        release_work.set()
         plane.close()
 
 

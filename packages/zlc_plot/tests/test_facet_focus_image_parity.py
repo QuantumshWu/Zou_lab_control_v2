@@ -31,7 +31,7 @@ from zlc_data import SITE, SPATIAL_X, SPATIAL_Y, ValidityContract, ValueSchema
 from zlc_plot import AxisRef, CurvePlot, FacetGridPlot, ImagePlot, PlotSession
 from zlc_plot._kinds.image import default_spec as image_default
 from zlc_plot.config import DEFAULTS
-from zlc_plot.selectors import CrosshairPoint
+from zlc_plot.selectors import CrosshairPoint, NumericRange
 
 
 def _frame_axes() -> tuple:
@@ -563,11 +563,34 @@ def test_a_scoped_image_draws_the_point_it_shows() -> None:
         size="4x4",
     )
     try:
+        selection_events = []
+        scoped.subscribe_selection(selection_events.append)
         scoped.update_image_overlay(overlay)
+        scoped.set_area_selector(
+            NumericRange(1.0, 3.0),
+            NumericRange(1.0, 3.0),
+        )
         scoped.rgba()
         assert _drawn_statuses(scoped, "image:points") == (
             "EMPTY",
             "OCCUPIED",
+        )
+        from zlc_data import owned_snapshot_from_arrays
+
+        restarted = owned_snapshot_from_arrays(
+            snapshot.block.schema,
+            snapshot.block.values + 100.0,
+            snapshot.ref.revision,
+            block_id=snapshot.ref.block_id,
+            stream_generation="scoped-restart",
+        )
+        scoped.update_data(restarted)
+        assert scoped.data_generation == "scoped-restart"
+        assert scoped.image_overlay is None
+        assert scoped.selectors == ()
+        assert selection_events[-1].change.value == "removed"
+        assert selection_events[-1].data_generation == str(
+            snapshot.ref.stream_generation.value
         )
     finally:
         scoped.close()

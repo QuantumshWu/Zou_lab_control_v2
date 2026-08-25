@@ -29,7 +29,7 @@ from zlc_plot.fit import (
 from zlc_plot.raster import RasterBuffer, RasterPlotHost
 from zlc_plot.rendering import MatplotlibRenderer
 from zlc_plot._axis_transform import canvas_physical_size
-from zlc_plot.selectors import NumericRange, SelectorState
+from zlc_plot.selectors import CrosshairPoint, NumericRange, SelectorState
 from zlc_plot.ui import ControlKind
 
 
@@ -207,7 +207,7 @@ def test_close_cancels_queued_tasks() -> None:
         host.close(timeout=10)
 
 
-def test_press_relocates_to_latest_front_after_live_revision() -> None:
+def test_press_rejects_a_front_that_was_not_presented_after_live_revision() -> None:
     schema = DatasetSchema.create(
         Axis.create("repeat", size=1),
         PointTable.from_columns({"x": [0.0, 1.0, 2.0]}),
@@ -219,23 +219,25 @@ def test_press_relocates_to_latest_front_after_live_revision() -> None:
     host = RasterPlotHost.from_plot(first_data, CurvePlot(AxisRef.point("x")))
     try:
         stale = host.wait_for_front(timeout=10)
-        host.update_data(next_data).result(timeout=10)
+        before = host.describe_display().result(timeout=10).value
+        updated = host.update_data(next_data).result(timeout=10)
         latest = host.front
         assert latest is not None
+        assert updated.front is latest
+        assert updated.value == host.describe_display().result(timeout=10).value
+        assert updated.value.limits != before.limits
         assert latest.identity.sequence > stale.identity.sequence
 
-        operation = host._pointer_event(
-            "press",
-            0.45,
-            0.45,
-            button=1,
-            identity=stale.identity,
-            axes=stale.interaction.axes[0],
-            interaction=stale.interaction,
-        ).result(timeout=10)
-
-        assert operation.value.candidate is not None
-        assert operation.value.role == "main"
+        with pytest.raises(RuntimeError, match="session-compatible"):
+            host._pointer_event(
+                "press",
+                0.45,
+                0.45,
+                button=1,
+                identity=stale.identity,
+                axes=stale.interaction.axes[0],
+                interaction=stale.interaction,
+            ).result(timeout=10)
     finally:
         host.close(timeout=10)
 
@@ -649,20 +651,64 @@ def test_complete_configuration_fits_clears_and_noops_as_one_front(
         }
         desired = dict(
             parameters={"title": "Atomic"},
-            selectors=(),
+            selectors=(
+                SelectorState(
+                    SelectorKind.CROSSHAIR,
+                    CrosshairPoint(1.0, 2.0),
+                ),
+            ),
             viewport=None,
             facet_focus=None,
         )
         fitted = host.configure(fit=fit_target, **desired).result(timeout=30)
         assert fitted.front.identity.sequence == initial.identity.sequence + 1
+        assert fitted.value.selectors == desired["selectors"]
         assert solve_count == 1
 
         unchanged = host.configure(fit=fit_target, **desired).result(timeout=30)
         assert unchanged.front is fitted.front
         assert solve_count == 1
 
+        overlapping = host.configure(
+            fit={
+                "model": "gaussian_offset",
+                "fixed": {"center": 0.3},
+                "initial": {"center": 1.5, "sigma": 0.9},
+            },
+            **desired,
+        ).result(timeout=30)
+        assert overlapping.value.fit_expression == (
+            "sigma=guess(0.9), center=0.3"
+        )
+
+        expressed = host.configure(
+            fit={
+                "model": "gaussian_offset",
+                "expression": "center=0.3, sigma=guess(0.9)",
+            },
+            **desired,
+        ).result(timeout=30)
+        assert expressed.value.fit["fixed"] == {"center": 0.3}
+        assert expressed.value.fit["initial"] == {"sigma": 0.9}
+        assert expressed.value.fit_expression == (
+            "sigma=guess(0.9), center=0.3"
+        )
+        assert expressed.value.fit_expression_error == ""
+
+        automatic = host.configure(
+            fit={
+                "model": "gaussian_offset",
+                "expression": "missing=1",
+            },
+            **desired,
+        ).result(timeout=30)
+        assert automatic.value.fit == {"model": "gaussian_offset"}
+        assert automatic.value.fit_expression == "missing=1"
+        assert "unknown parameter" in automatic.value.fit_expression_error
+        assert automatic.front is not expressed.front
+
         cleared = host.configure(fit={}, **desired).result(timeout=30)
-        assert cleared.front.identity.sequence == fitted.front.identity.sequence + 1
+        assert cleared.front.identity.sequence == automatic.front.identity.sequence + 1
 
         clear_noop = host.configure(fit={}, **desired).result(timeout=30)
         assert clear_noop.front is cleared.front
@@ -1193,7 +1239,7 @@ def test_axis_resolution_grabs_what_is_visible() -> None:
     from types import SimpleNamespace
 
     from zlc_plot._axis_transform import AxisTransform
-    from zlc_plot.raster import _axis_at_normalized
+    from zlc_plot.backends import _axis_at_normalized
 
     def transform(role, left, top, right, bottom):
         return AxisTransform(

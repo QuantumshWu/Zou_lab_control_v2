@@ -477,6 +477,14 @@ result = curve_session.fit("gaussian_offset")
 future = curve_session.fit_async("gaussian_offset")
 ```
 
+`fit(..., fixed={"offset": 0.0}, initial={"sigma": 1.0})` uses two distinct
+semantics: `fixed` parameters are removed from the optimizer exactly, while
+`initial` only replaces the corresponding starting guess. The Panel editor
+projects the same contract as one display-unit expression: `offset=0,
+sigma=guess(1)`. Invalid optional expression text falls back to the selected
+model's automatic fit and reports a warning; it is never persisted into the
+canonical Panel/Figure fit target.
+
 `FitModelSpec.targets` declares whether a model fits a `SERIES`, `HISTOGRAM` or
 `IMAGE` projection, and `default_for` marks a target default. A registry permits
 at most one default per target; the built-in registry supplies one for all three.

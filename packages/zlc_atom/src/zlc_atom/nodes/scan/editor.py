@@ -97,8 +97,8 @@ class _AxisRow(QtWidgets.QWidget):
         else:
             port = self._ports[0] if self._ports else None
             if port is not None:
-                self.start_spin.setValue(port.lo)
-                self.stop_spin.setValue(port.hi)
+                self.start_spin.setValue(port.seed_lo)
+                self.stop_spin.setValue(port.seed_hi)
             self.points_spin.setValue(5)
 
         self.port_combo.currentIndexChanged[int].connect(self._port_changed)
@@ -122,6 +122,13 @@ class _AxisRow(QtWidgets.QWidget):
         self._custom_values = None
         self.custom_label.setText("")
         self._apply_port_limits()
+        port = next(
+            (p for p in self._ports if p.port == self.port_combo.currentData()),
+            None,
+        )
+        if port is not None:
+            self.start_spin.setValue(port.seed_lo)
+            self.stop_spin.setValue(port.seed_hi)
         self.edited.emit()
 
     def _spins_edited(self) -> None:

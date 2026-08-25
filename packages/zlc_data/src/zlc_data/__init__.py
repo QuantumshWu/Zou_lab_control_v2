@@ -12,7 +12,11 @@ from .axis import (
     AxisId,
     AxisRoleId,
     AxisSpec,
+    CoordinateScalar,
+    CoordinateSelector,
     CoordinateFrameId,
+    LATEST_COORDINATE,
+    canonical_coordinate_scalar,
     point_ordinal_axis,
 )
 from .schema import (
@@ -100,6 +104,10 @@ __all__ = [
     "COMPONENT",
     "CellValidity",
     "CoordinateFrameId",
+    "CoordinateScalar",
+    "CoordinateSelector",
+    "LATEST_COORDINATE",
+    "canonical_coordinate_scalar",
     "point_ordinal_axis",
     "DataBlock",
     "DatasetComponentValidity",

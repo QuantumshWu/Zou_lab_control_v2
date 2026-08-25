@@ -19,13 +19,12 @@ independently; there is no cross-run global counter.
 
 from __future__ import annotations
 
-from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 import math
 import threading
 from types import MappingProxyType
-from typing import Callable, Iterable, Mapping, Protocol, runtime_checkable
+from typing import Callable, Iterable, Mapping, Protocol, TypeAlias, runtime_checkable
 import uuid
 from weakref import WeakKeyDictionary
 
@@ -283,7 +282,14 @@ class IndexedHistoryLease:
     fabricates events that were not retained under an earlier demand.
     """
 
-    __slots__ = ("_closed", "_plane", "_signal_name", "_token", "_window")
+    __slots__ = (
+        "_closed",
+        "_acquisition_transition",
+        "_plane",
+        "_signal_name",
+        "_token",
+        "_window",
+    )
 
     def __init__(
         self,
@@ -291,11 +297,13 @@ class IndexedHistoryLease:
         signal_name: str,
         token: object,
         window: int,
+        transition: tuple[bool, bool, bool],
     ) -> None:
         self._plane = plane
         self._signal_name = signal_name
         self._token = token
         self._window = window
+        self._acquisition_transition = transition
         self._closed = False
 
     @property
@@ -310,25 +318,32 @@ class IndexedHistoryLease:
     def closed(self) -> bool:
         return self._closed
 
-    def resize(self, window: int) -> None:
+    @property
+    def acquisition_transition(self) -> tuple[bool, bool, bool]:
+        """The exact effect of creating this lease."""
+
+        return self._acquisition_transition
+
+    def resize(self, window: int) -> tuple[bool, bool, bool]:
         if self._closed:
             raise RuntimeError("indexed history lease is closed")
-        selected = self._plane._resize_indexed_history_lease(
+        selected, transition = self._plane._resize_indexed_history_lease(
             self._signal_name,
             self._token,
             window,
         )
         self._window = selected
+        return transition
 
-    def close(self) -> bool:
+    def close(self) -> tuple[bool, bool, bool] | None:
         if self._closed:
-            return False
-        released = self._plane._release_indexed_history_lease(
+            return None
+        transition = self._plane._release_indexed_history_lease(
             self._signal_name,
             self._token,
         )
         self._closed = True
-        return released
+        return transition
 
 
 @dataclass(frozen=True, eq=False)
@@ -689,10 +704,8 @@ def _materialize_indexed_dataset(
     first_index: int,
     latest_index: int,
     capacity: int,
-    window: int | None,
 ) -> OwnedSnapshot:
-    retained = capacity if window is None else min(capacity, window)
-    start = max(first_index, latest_index - retained + 1)
+    start = max(first_index, latest_index - capacity + 1)
     indices = tuple(range(start, latest_index + 1))
     schema = _indexed_schema(event_schema, indices)
     values = np.zeros(schema.physical_shape, dtype=event_schema.cell_schema.dtype)
@@ -717,6 +730,123 @@ def _materialize_indexed_dataset(
         validity=validity,
         block_id=BlockId(f"{signal_name}.indexed"),
         stream_generation=generation,
+    )
+
+
+_IndexedHistory: TypeAlias = tuple[
+    dict[int, tuple[int, OwnedSnapshot, Mapping[str, object]]],
+    int,
+    int,
+    tuple[int, OwnedSnapshot, Mapping[str, object]] | None,
+]
+
+
+def _validate_indexed_event(
+    history: _IndexedHistory,
+    event: OwnedSnapshot,
+    primary_index: int,
+) -> None:
+    events, _first_index, _capacity, _materialized = history
+    current_schema = next(iter(events.values()))[1].block.schema
+    if event.block.schema != current_schema:
+        raise ValueError(
+            "indexed Processor event schema changed inside one generation"
+        )
+    if events and primary_index < next(reversed(events)):
+        raise RuntimeError(
+            "indexed Processor source primary index moved backwards"
+        )
+
+
+def _update_indexed_history(
+    history: _IndexedHistory | None,
+    value: SignalValue,
+    sequence: int,
+    demand: int,
+    event_record: Mapping[str, object] | None = None,
+) -> tuple[_IndexedHistory, bool]:
+    primary_index = value.primary_index
+    if primary_index is None:
+        raise RuntimeError("indexed signal lost its source primary index")
+    event = value.snapshot
+    selected_record = value.event_record if event_record is None else event_record
+    if history is None:
+        return (
+            (
+                {primary_index: (sequence, event, selected_record)},
+                primary_index,
+                min(demand, _indexed_capacity(event)),
+                None,
+            ),
+            True,
+        )
+    _validate_indexed_event(history, event, primary_index)
+    events, first_index, _capacity, materialized = history
+    current = events.get(primary_index)
+    changed = current is None or current[0] != sequence
+    if changed:
+        events[primary_index] = (
+            sequence,
+            event,
+            selected_record,
+        )
+    capacity = min(demand, _indexed_capacity(event))
+    previous_first = first_index
+    first_index = max(first_index, primary_index - capacity + 1)
+    while events and next(iter(events)) < first_index:
+        events.pop(next(iter(events)))
+    changed = changed or first_index != previous_first
+    return (
+        (events, first_index, capacity, None if changed else materialized),
+        changed,
+    )
+
+
+def _indexed_materialization_input(
+    history: _IndexedHistory,
+    *,
+    signal_name: str,
+    generation: StreamGenerationId,
+    sequence: int,
+    value: SignalValue,
+) -> tuple[OwnedSnapshot, Mapping[str, object]] | tuple[tuple, Mapping[str, object]]:
+    events, first_index, capacity, cached = history
+    if cached is not None and cached[0] == sequence:
+        return cached[1], cached[2]
+    primary_index = value.primary_index
+    if primary_index is None:
+        raise RuntimeError("indexed signal lost its source primary index")
+    if primary_index < first_index:
+        raise ValueError("publication precedes retained indexed history")
+    start = max(first_index, primary_index - capacity + 1)
+    selected_events = []
+    selected_records = []
+    for index in range(start, primary_index + 1):
+        if index == primary_index:
+            selected_events.append((index, value.snapshot))
+            held = events.get(index)
+            selected_records.append(
+                held[2]
+                if held is not None and held[0] == sequence
+                else value.event_record
+            )
+            continue
+        held = events.get(index)
+        if held is not None and held[0] <= sequence:
+            selected_events.append((index, held[1]))
+            selected_records.append(held[2])
+    return (
+        (
+            signal_name,
+            generation,
+            sequence,
+            next(iter(events.values()))[1].block.schema,
+            tuple(selected_events),
+            first_index,
+            primary_index,
+            capacity,
+        ),
+        _freeze_run_record(_merge_event_records(selected_records)),
     )
 
 
@@ -764,21 +894,15 @@ class _GenerationState:
         ],
     ] = field(default_factory=dict)
     occupied_cells: dict[str, np.ndarray] = field(default_factory=dict)
-    materialized: dict[str, tuple[int, OwnedSnapshot]] = field(default_factory=dict)
-    indexed_event_schemas: dict[str, DatasetSchema] = field(default_factory=dict)
-    indexed_events: dict[str, deque[int]] = field(default_factory=dict)
-    indexed_event_values: dict[
+    materialized: dict[
         str,
-        dict[int, tuple[int, OwnedSnapshot, Mapping[str, object]]],
+        tuple[int, OwnedSnapshot, Mapping[str, object]],
     ] = field(default_factory=dict)
-    indexed_first_indices: dict[str, int] = field(default_factory=dict)
-    indexed_capacities: dict[str, int] = field(default_factory=dict)
-    indexed_materialized: dict[
-        str,
-        tuple[int, int | None, OwnedSnapshot],
-    ] = field(default_factory=dict)
+    indexed_history: dict[str, _IndexedHistory] = field(default_factory=dict)
     committed_run_record: Mapping[str, object] | None = None
     sealing: bool = False
+    processor_cleanup_complete: bool = False
+    publication_stream_cleaned: bool = False
 
 
 @dataclass(slots=True)
@@ -807,12 +931,15 @@ class _LatestOnlyProcessorLane:
     any node callback, for the same reason the plane releases its own.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, processor_cancelled: Callable[[object], None]) -> None:
+        if not callable(processor_cancelled):
+            raise TypeError("processor_cancelled must be callable")
         self._executor = ThreadPoolExecutor(
             thread_name_prefix="signal-latest-processor",
         )
         self._lock = threading.Lock()
         self._processors: dict[str, _ProcessorEntry] = {}
+        self._processor_cancelled = processor_cancelled
         self._closed = False
 
     @staticmethod
@@ -913,6 +1040,11 @@ class _LatestOnlyProcessorLane:
                 self._fail_processor(entry, error)
                 continue
             with self._lock:
+                if (
+                    self._processors.get(_node_instance_id(entry.node)) is not entry
+                    or entry.cancel_requested
+                ):
+                    continue
                 entry.last_publication = publication
                 entry.pending_publication = publication
                 failure = self._start_processor_locked(entry)
@@ -924,6 +1056,8 @@ class _LatestOnlyProcessorLane:
             entries = tuple(self._processors.values())
         for entry in entries:
             with self._lock:
+                if self._processors.get(_node_instance_id(entry.node)) is not entry:
+                    continue
                 work = entry.work_future
                 finished = work is not None and work.done()
                 publication = entry.work_publication
@@ -1013,13 +1147,22 @@ class _LatestOnlyProcessorLane:
 
     def _fail_processor(self, entry: _ProcessorEntry, error: Exception) -> None:
         with self._lock:
-            self._processors.pop(_node_instance_id(entry.node), None)
+            key = _node_instance_id(entry.node)
+            if self._processors.get(key) is not entry:
+                return
+            self._processors.pop(key)
         entry.node.accept_processor_failure(error)
 
     def _cancelled_processor(self, entry: _ProcessorEntry) -> None:
         with self._lock:
-            self._processors.pop(_node_instance_id(entry.node), None)
-        entry.node.accept_processor_cancelled()
+            key = _node_instance_id(entry.node)
+            if self._processors.get(key) is not entry:
+                return
+            self._processors.pop(key)
+        try:
+            entry.node.accept_processor_cancelled()
+        finally:
+            self._processor_cancelled(entry.node)
 
     def _wake_processor(self, node: object) -> None:
         if not self._closed:
@@ -1042,13 +1185,17 @@ class SignalDataPlane:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._lane = _LatestOnlyProcessorLane()
+        self._generation_ready = threading.Condition(self._lock)
+        self._lane = _LatestOnlyProcessorLane(
+            self._processor_cleanup_completed,
+        )
         self._publication_issuer = object()
         self._publication_parents: WeakKeyDictionary[
             SignalPublication,
             tuple[SignalPublication, ...],
         ] = WeakKeyDictionary()
         self._states: dict[str, _GenerationState] = {}
+        self._starting: set[str] = set()
         self._indexed_history_demands: dict[str, dict[object, int]] = {}
         self._front_signals: frozenset[str] = frozenset()
         self._membership_changed = False
@@ -1099,6 +1246,13 @@ class SignalDataPlane:
                 declaration is not None and declaration.index_by_source
             )
 
+    def indexed_history_active(self, signal_name: str) -> bool:
+        """Whether any consumer currently owns this signal's indexed view."""
+
+        name = canonical_text(signal_name, "signal name")
+        with self._lock:
+            return bool(self._indexed_history_demands.get(name))
+
     def acquire_indexed_history(
         self,
         signal_name: str,
@@ -1120,24 +1274,17 @@ class SignalDataPlane:
                 raise ValueError(
                     f"signal {name!r} does not declare source-index history"
                 )
-            demands = self._indexed_history_demands.setdefault(name, {})
-            demands[token] = selected
-            try:
-                self._refresh_indexed_history_locked(state, name)
-            except BaseException:
-                demands.pop(token, None)
-                if not demands:
-                    self._indexed_history_demands.pop(name, None)
-                self._refresh_indexed_history_locked(state, name)
-                raise
-        return IndexedHistoryLease(self, name, token, selected)
+            transition = self._set_indexed_history_demand_locked(
+                name, token, selected
+            )
+        return IndexedHistoryLease(self, name, token, selected, transition)
 
     def _resize_indexed_history_lease(
         self,
         signal_name: str,
         token: object,
         window: int,
-    ) -> int:
+    ) -> tuple[int, tuple[bool, bool, bool]]:
         selected = self._indexed_history_window(window)
         with self._lock:
             if self._closed:
@@ -1145,113 +1292,101 @@ class SignalDataPlane:
             demands = self._indexed_history_demands.get(signal_name)
             if demands is None or token not in demands:
                 raise RuntimeError("indexed history lease is not active")
-            previous = demands[token]
-            demands[token] = selected
-            state = self._state_for_signal_locked(signal_name)
-            try:
-                if state is not None:
-                    self._refresh_indexed_history_locked(state, signal_name)
-            except BaseException:
-                demands[token] = previous
-                if state is not None:
-                    self._refresh_indexed_history_locked(state, signal_name)
-                raise
-        return selected
+            transition = self._set_indexed_history_demand_locked(
+                signal_name, token, selected
+            )
+        return selected, transition
 
     def _release_indexed_history_lease(
         self,
         signal_name: str,
         token: object,
-    ) -> bool:
+    ) -> tuple[bool, bool, bool] | None:
         with self._lock:
             demands = self._indexed_history_demands.get(signal_name)
             if demands is None or token not in demands:
-                return False
-            previous = demands.pop(token)
-            if not demands:
-                self._indexed_history_demands.pop(signal_name, None)
-            state = self._state_for_signal_locked(signal_name)
-            try:
-                if state is not None:
-                    self._refresh_indexed_history_locked(state, signal_name)
-            except BaseException:
-                self._indexed_history_demands.setdefault(signal_name, {})[
-                    token
-                ] = previous
-                if state is not None:
-                    self._refresh_indexed_history_locked(state, signal_name)
-                raise
-            return True
+                return None
+            return self._set_indexed_history_demand_locked(
+                signal_name, token, None
+            )
 
     def _indexed_history_demand_locked(self, signal_name: str) -> int | None:
         demands = self._indexed_history_demands.get(signal_name)
         return None if not demands else max(demands.values())
 
-    @staticmethod
-    def _drop_indexed_history_locked(
-        state: _GenerationState,
-        signal_name: str,
-    ) -> None:
-        state.indexed_event_schemas.pop(signal_name, None)
-        state.indexed_events.pop(signal_name, None)
-        state.indexed_event_values.pop(signal_name, None)
-        state.indexed_first_indices.pop(signal_name, None)
-        state.indexed_capacities.pop(signal_name, None)
-        state.indexed_materialized.pop(signal_name, None)
-
-    def _refresh_indexed_history_locked(
+    def _set_indexed_history_demand_locked(
         self,
-        state: _GenerationState,
         signal_name: str,
-    ) -> None:
-        """Apply the active maximum demand without retaining older excess."""
+        token: object,
+        selected: int | None,
+    ) -> tuple[bool, bool, bool]:
+        demands = self._indexed_history_demands.setdefault(signal_name, {})
+        previous = demands.get(token)
+        old_demand = self._indexed_history_demand_locked(signal_name)
+        if selected is None:
+            demands.pop(token)
+        else:
+            demands[token] = selected
+        if not demands:
+            self._indexed_history_demands.pop(signal_name)
+        new_demand = self._indexed_history_demand_locked(signal_name)
+        state = self._state_for_signal_locked(signal_name)
+        try:
+            return self._update_indexed_history_locked(
+                state, signal_name, old_demand, new_demand
+            )
+        except BaseException:
+            restored = self._indexed_history_demands.setdefault(signal_name, {})
+            if previous is None:
+                restored.pop(token, None)
+            else:
+                restored[token] = previous
+            if not restored:
+                self._indexed_history_demands.pop(signal_name)
+            self._update_indexed_history_locked(
+                state, signal_name, new_demand, old_demand
+            )
+            raise
 
-        demand = self._indexed_history_demand_locked(signal_name)
+    def _update_indexed_history_locked(
+        self,
+        state: _GenerationState | None,
+        signal_name: str,
+        old_demand: int | None,
+        new_demand: int | None,
+    ) -> tuple[bool, bool, bool]:
+        """Apply one effective lease transition without inventing old events."""
+
+        old_active = bool(state and signal_name in state.indexed_history)
+        if old_demand == new_demand:
+            return old_active, False, False
+        if state is None:
+            return False, False, False
         declaration = state.declarations.get(signal_name)
         if (
-            demand is None
+            new_demand is None
             or declaration is None
             or not declaration.index_by_source
             or state.publication is None
         ):
-            self._drop_indexed_history_locked(state, signal_name)
-            return
-        value = state.publication.value(signal_name)
-        if value is None or not isinstance(value.coverage, MonitorCoverage):
-            self._drop_indexed_history_locked(state, signal_name)
-            return
-        if value.primary_index is None:
-            raise RuntimeError("indexed signal lost its source primary index")
-        event = value.snapshot
-        event_schema = event.block.schema
-        previous_schema = state.indexed_event_schemas.get(signal_name)
-        if previous_schema is not None and previous_schema != event_schema:
-            raise ValueError(
-                "indexed Processor event schema changed inside one generation"
-            )
-        capacity = min(demand, _indexed_capacity(event))
-        primary_index = value.primary_index
-        sequence = state.publication.event_ref.sequence
-        indices = state.indexed_events.setdefault(signal_name, deque())
-        event_values = state.indexed_event_values.setdefault(signal_name, {})
-        if not indices or indices[-1] != primary_index:
-            if indices and primary_index < indices[-1]:
-                raise RuntimeError(
-                    "indexed Processor source primary index moved backwards"
+            data_changed = state.indexed_history.pop(signal_name, None) is not None
+        else:
+            value = state.publication.value(signal_name)
+            if value is None or not isinstance(value.coverage, MonitorCoverage):
+                data_changed = (
+                    state.indexed_history.pop(signal_name, None) is not None
                 )
-            indices.append(primary_index)
-        event_values[primary_index] = (sequence, event, value.event_record)
-        first_index = state.indexed_first_indices.get(
-            signal_name,
-            primary_index,
-        )
-        start = max(first_index, primary_index - capacity + 1)
-        while indices and indices[0] < start:
-            event_values.pop(indices.popleft(), None)
-        state.indexed_event_schemas[signal_name] = event_schema
-        state.indexed_first_indices[signal_name] = start
-        state.indexed_capacities[signal_name] = capacity
-        state.indexed_materialized.pop(signal_name, None)
+            else:
+                history = state.indexed_history.get(signal_name)
+                history, data_changed = _update_indexed_history(
+                    history,
+                    value,
+                    state.publication.event_ref.sequence,
+                    new_demand,
+                )
+                state.indexed_history[signal_name] = history
+        new_active = signal_name in state.indexed_history
+        return new_active, old_active != new_active, data_changed
 
     def set_front_signals(self, signal_names) -> None:
         """Set the connected continuous signal set whose front must be coherent."""
@@ -1292,10 +1427,19 @@ class SignalDataPlane:
         output_names: tuple[str, ...],
     ) -> None:
         for name in output_names:
-            state = self._state_for_signal_locked(name)
-            if state is not None and state.owner_id != owner_id:
+            conflict = next(
+                (
+                    candidate
+                    for candidate in self._states.values()
+                    if not candidate.retired
+                    and name in candidate.output_names
+                    and candidate.owner_id != owner_id
+                ),
+                None,
+            )
+            if conflict is not None:
                 raise RuntimeError(
-                    f"signal {name!r} is already owned by {state.owner_id!r}"
+                    f"signal {name!r} is already owned by {conflict.owner_id!r}"
                 )
 
     @staticmethod
@@ -1307,10 +1451,37 @@ class SignalDataPlane:
     def _drop_state_locked(self, state: _GenerationState) -> None:
         if self._states.get(state.owner_id) is not state:
             return
+        if (
+            state.retired
+            and state.kind == "processor"
+            and state.node is not None
+            and not state.processor_cleanup_complete
+        ):
+            return
         self._states.pop(state.owner_id)
         state.retired = True
         state.publication = None
         state.failure = None
+
+    def _processor_cleanup_completed(self, node: object) -> None:
+        """Release a retired route only after its lane entry is truly gone."""
+
+        owner_id = _node_instance_id(node)
+        with self._lock:
+            state = self._states.get(owner_id)
+            if state is None or state.node is not node:
+                return
+            state.processor_cleanup_complete = True
+            if state.retired and owner_id not in self._starting:
+                self._drop_state_locked(state)
+                self._membership_changed = True
+            self._generation_ready.notify_all()
+
+    def _wait_for_start_locked(self, owner_id: str) -> None:
+        while owner_id in self._starting and not self._closed:
+            self._generation_ready.wait()
+        if self._closed:
+            raise RuntimeError("signal data plane is closed")
 
     def _install_state_locked(
         self,
@@ -1432,8 +1603,7 @@ class SignalDataPlane:
         owner_id = _node_instance_id(node)
         output_names, bare_names = self._node_route_names(node)
         with self._lock:
-            if self._closed:
-                raise RuntimeError("signal data plane is closed")
+            self._wait_for_start_locked(owner_id)
             existing = self._states.get(owner_id)
             if existing is not None:
                 if (
@@ -1473,14 +1643,64 @@ class SignalDataPlane:
         """
 
         owner_id = _node_instance_id(node)
+        output_names, bare_names = self._node_route_names(node)
+        retired: tuple[_GenerationState, ...] = ()
         with self._lock:
-            if self._closed:
-                raise RuntimeError("signal data plane is closed")
+            self._wait_for_start_locked(owner_id)
             existing = self._states.get(owner_id)
-            finished = existing is not None and (existing.retired or existing.terminal)
-        if finished:
-            self._withdraw_owner(owner_id)
-        return self.reserve(node)
+            if existing is not None and not (
+                existing.retired or existing.terminal
+            ):
+                if (
+                    existing.kind == "producer"
+                    and existing.node is node
+                    and existing.publication is None
+                    and existing.output_names == output_names
+                    and dict(existing.bare_names) == dict(bare_names)
+                ):
+                    return existing.generation
+                raise RuntimeError("producer generation is already active")
+            if existing is None:
+                return self._install_state_locked(
+                    owner_id=owner_id,
+                    kind="producer",
+                    output_names=output_names,
+                    bare_names=bare_names,
+                    node=node,
+                ).generation
+            retired = self._reserve_retirement_closure_locked(
+                owner_id,
+            )
+            retiring_owners = tuple(state.owner_id for state in retired)
+        try:
+            errors = self._cleanup_retired_states(retired)
+        except BaseException as error:
+            errors = (error,)
+        with self._lock:
+            try:
+                if errors:
+                    self._membership_changed = True
+                elif self._closed:
+                    errors = (RuntimeError("signal data plane is closed"),)
+                else:
+                    for candidate in retired:
+                        self._drop_state_locked(candidate)
+                    state = self._install_state_locked(
+                        owner_id=owner_id,
+                        kind="producer",
+                        output_names=output_names,
+                        bare_names=bare_names,
+                        node=node,
+                    )
+            finally:
+                self._starting.difference_update(retiring_owners)
+                self._generation_ready.notify_all()
+        if errors:
+            raise BaseExceptionGroup(
+                "previous signal generation cleanup failed",
+                list(errors),
+            )
+        return state.generation
 
     @staticmethod
     def _declarations_by_bare(
@@ -1702,15 +1922,7 @@ class SignalDataPlane:
                 if route_source.primary_index is not None
                 else source_publication.event_ref.sequence
             )
-            indexed_updates: dict[
-                str,
-                tuple[
-                    DatasetSchema,
-                    OwnedSnapshot,
-                    int,
-                    int,
-                ],
-            ] = {}
+            indexed_updates: dict[str, tuple[OwnedSnapshot, int]] = {}
 
             for qualified in state.output_names:
                 bare = state.bare_names[qualified]
@@ -1731,33 +1943,10 @@ class SignalDataPlane:
                     and isinstance(output.coverage, MonitorCoverage)
                     and history_demand is not None
                 ):
-                    event_schema = event.block.schema
-                    previous_event_schema = state.indexed_event_schemas.get(qualified)
-                    if (
-                        previous_event_schema is not None
-                        and previous_event_schema != event_schema
-                    ):
-                        raise ValueError(
-                            "indexed Processor event schema changed inside one generation"
-                        )
-                    indices = state.indexed_events.get(qualified)
-                    if indices and primary_index < indices[-1]:
-                        raise RuntimeError(
-                            "indexed Processor source primary index moved backwards"
-                        )
-                    first_index = state.indexed_first_indices.get(
-                        qualified, primary_index
-                    )
-                    capacity = state.indexed_capacities.get(
-                        qualified,
-                        min(history_demand, _indexed_capacity(event)),
-                    )
-                    indexed_updates[qualified] = (
-                        event_schema,
-                        event,
-                        first_index,
-                        capacity,
-                    )
+                    history = state.indexed_history.get(qualified)
+                    if history is not None:
+                        _validate_indexed_event(history, event, primary_index)
+                    indexed_updates[qualified] = (event, history_demand)
                 if qualified in exact_qualified:
                     schema = output.canonical_schema
                     origin = output.cell_origin
@@ -1824,28 +2013,6 @@ class SignalDataPlane:
                     event_record=event_record,
                 )
 
-            materialized_event_records: list[Mapping[str, object]] = [event_record]
-            if exact_qualified and state.publication is not None:
-                materialized_event_records.append(state.publication.event_record)
-            for qualified, (_schema, _event, first_index, capacity) in (
-                indexed_updates.items()
-            ):
-                start = max(first_index, primary_index - capacity + 1)
-                held = state.indexed_event_values.get(qualified, {})
-                materialized_event_records.extend(
-                    value[2]
-                    for index, value in held.items()
-                    if start <= index <= primary_index and value[0] <= sequence
-                )
-            materialized_event_record = _freeze_run_record(
-                _merge_event_records(materialized_event_records)
-            )
-            if not _run_records_equal(materialized_event_record, event_record):
-                values = {
-                    name: replace(value, event_record=materialized_event_record)
-                    for name, value in values.items()
-                }
-
             parents = () if source_publication is None else (source_publication,)
             publication = self._publish_locked(
                 state,
@@ -1868,26 +2035,15 @@ class SignalDataPlane:
             state.canonical_schemas = MappingProxyType(canonical_schemas)
             state.occupied_cells = occupied_cells
             state.committed_run_record = run_record
-            for qualified, (
-                event_schema,
-                event,
-                first_index,
-                capacity,
-            ) in indexed_updates.items():
-                state.indexed_event_schemas[qualified] = event_schema
-                indices = state.indexed_events.setdefault(qualified, deque())
-                event_values = state.indexed_event_values.setdefault(qualified, {})
-                if indices and indices[-1] == primary_index:
-                    event_values[primary_index] = (sequence, event, event_record)
-                else:
-                    indices.append(primary_index)
-                    event_values[primary_index] = (sequence, event, event_record)
-                start = max(first_index, primary_index - capacity + 1)
-                while indices and indices[0] < start:
-                    event_values.pop(indices.popleft(), None)
-                state.indexed_first_indices[qualified] = start
-                state.indexed_capacities[qualified] = capacity
-                state.indexed_materialized.pop(qualified, None)
+            for qualified, (event, history_demand) in indexed_updates.items():
+                history = state.indexed_history.get(qualified)
+                state.indexed_history[qualified] = _update_indexed_history(
+                    history,
+                    publication.signals[qualified],
+                    sequence,
+                    history_demand,
+                    None if history is None else event_record,
+                )[0]
             if source_publication is not None:
                 state.last_parent_sequence = source_publication.event_ref.sequence
                 state.last_parent_trigger = trigger
@@ -1916,26 +2072,16 @@ class SignalDataPlane:
                 continue
         return result
 
-    def current_dataset(
+    def current_dataset_view(
         self,
         signal_name: str,
         publication: SignalPublication | None = None,
-        *,
-        primary_window: int | None = None,
-    ) -> OwnedSnapshot:
-        """Materialize one exact finite prefix or active bounded indexed view.
-
-        ``primary_window`` limits a lease-backed view; reading is never an
-        implicit subscription and therefore cannot create or backfill history.
-        """
-
-        if primary_window is not None and (
-            type(primary_window) is not int or primary_window <= 0
-        ):
-            raise TypeError("primary_window must be a positive integer or None")
+    ) -> tuple[OwnedSnapshot, Mapping[str, object]]:
+        """Materialize one Dataset and the exact event record it contains."""
         name = canonical_text(signal_name, "signal name")
         indexed_input = None
         finite_input = None
+        materialized_record: Mapping[str, object] | None = None
         with self._lock:
             state = self._state_for_signal_locked(name)
             if state is None or state.retired:
@@ -1955,54 +2101,20 @@ class SignalDataPlane:
             if value is None:
                 raise ValueError("publication does not contain the selected signal")
             sequence = selected.event_ref.sequence
-            if name in state.indexed_event_schemas:
-                if value.primary_index is None:
-                    raise RuntimeError("indexed signal lost its source primary index")
-                cached = state.indexed_materialized.get(name)
-                if (
-                    cached is not None
-                    and cached[0] == sequence
-                    and cached[1] == primary_window
-                ):
-                    return cached[2]
-                capacity = state.indexed_capacities[name]
-                retained = (
-                    capacity
-                    if primary_window is None
-                    else min(capacity, primary_window)
+            history = state.indexed_history.get(name)
+            if history is not None:
+                indexed_result = _indexed_materialization_input(
+                    history,
+                    signal_name=name,
+                    generation=state.generation,
+                    sequence=sequence,
+                    value=value,
                 )
-                first_index = state.indexed_first_indices[name]
-                if value.primary_index < first_index:
-                    raise ValueError(
-                        "publication precedes retained indexed history"
-                    )
-                start = max(
-                    first_index,
-                    value.primary_index - retained + 1,
-                )
-                event_values = state.indexed_event_values[name]
-                selected_events: list[tuple[int, OwnedSnapshot]] = []
-                for primary_index in range(start, value.primary_index + 1):
-                    if primary_index == value.primary_index:
-                        selected_events.append((primary_index, value.snapshot))
-                        continue
-                    held = event_values.get(primary_index)
-                    if held is not None and held[0] <= sequence:
-                        selected_events.append((primary_index, held[1]))
-                events = tuple(selected_events)
-                indexed_input = (
-                    name,
-                    state.generation,
-                    sequence,
-                    state.indexed_event_schemas[name],
-                    events,
-                    first_index,
-                    value.primary_index,
-                    capacity,
-                    primary_window,
-                )
+                if isinstance(indexed_result[0], OwnedSnapshot):
+                    return indexed_result
+                indexed_input, materialized_record = indexed_result
             elif state.exact_outputs is None or name not in state.exact_outputs:
-                return value.snapshot
+                return value.snapshot, value.event_record
             else:
                 if not any(
                     commit_sequence == sequence
@@ -2013,11 +2125,20 @@ class SignalDataPlane:
                     raise ValueError("publication is not a canonical commit of this run")
                 cached = state.materialized.get(name)
                 if cached is not None and cached[0] == sequence:
-                    return cached[1]
+                    return cached[1], cached[2]
                 finite_input = self._materialization_input_locked(
                     state,
                     name,
                     sequence,
+                )
+                materialized_record = _freeze_run_record(
+                    _merge_event_records(
+                        value.event_record
+                        for commit_sequence, value, _origin, _parents in (
+                            state.commit_chunks[name]
+                        )
+                        if commit_sequence <= sequence
+                    )
                 )
         snapshot = (
             _materialize_indexed_dataset(*indexed_input)
@@ -2027,12 +2148,21 @@ class SignalDataPlane:
         with self._lock:
             if self._states.get(state.owner_id) is state and not state.retired:
                 if indexed_input is not None:
-                    cached = state.indexed_materialized.get(name)
-                    if cached is None or cached[0] <= sequence:
-                        state.indexed_materialized[name] = (
-                            sequence,
-                            primary_window,
-                            snapshot,
+                    history = state.indexed_history.get(name)
+                    if history is not None:
+                        events, first_index, capacity, current = history
+                        if current is None or current[0] <= sequence:
+                            assert materialized_record is not None
+                            current = (
+                                sequence,
+                                snapshot,
+                                materialized_record,
+                            )
+                        state.indexed_history[name] = (
+                            events,
+                            first_index,
+                            capacity,
+                            current,
                         )
                 else:
                     cached = state.materialized.get(name)
@@ -2040,8 +2170,22 @@ class SignalDataPlane:
                     # prefixes.  A later materialization must not be displaced by
                     # an older request that happened to finish afterwards.
                     if cached is None or cached[0] <= sequence:
-                        state.materialized[name] = (sequence, snapshot)
-        return snapshot
+                        state.materialized[name] = (
+                            sequence,
+                            snapshot,
+                            materialized_record,
+                        )
+        assert materialized_record is not None
+        return snapshot, materialized_record
+
+    def current_dataset(
+        self,
+        signal_name: str,
+        publication: SignalPublication | None = None,
+    ) -> OwnedSnapshot:
+        """Materialize one exact finite prefix or active indexed Dataset."""
+
+        return self.current_dataset_view(signal_name, publication)[0]
 
     def seal_committed(self, node: object, *, cut_short: bool = False) -> bool:
         """Seal one commit generation without publishing a duplicate full event."""
@@ -2053,13 +2197,19 @@ class SignalDataPlane:
         state = None
         sequence = 0
         retain_latest_monitor = False
-        materialized: dict[str, tuple[int, OwnedSnapshot]] = {}
+        materialized: dict[
+            str,
+            tuple[int, OwnedSnapshot, Mapping[str, object]],
+        ] = {}
         pending: dict[
             str,
             tuple[
-                DatasetSchema,
-                StreamGenerationId,
-                tuple[tuple[OwnedSnapshot, tuple[int, int]], ...],
+                tuple[
+                    DatasetSchema,
+                    StreamGenerationId,
+                    tuple[tuple[OwnedSnapshot, tuple[int, int]], ...],
+                ],
+                Mapping[str, object],
             ],
         ] = {}
         with self._lock:
@@ -2091,10 +2241,21 @@ class SignalDataPlane:
                     if cached is not None and cached[0] == sequence:
                         materialized[name] = cached
                     else:
-                        pending[name] = self._materialization_input_locked(
-                            state,
-                            name,
-                            sequence,
+                        pending[name] = (
+                            self._materialization_input_locked(
+                                state,
+                                name,
+                                sequence,
+                            ),
+                            _freeze_run_record(
+                                _merge_event_records(
+                                    value.event_record
+                                    for commit_sequence, value, _origin, _parents in (
+                                        state.commit_chunks[name]
+                                    )
+                                    if commit_sequence <= sequence
+                                )
+                            ),
                         )
             else:
                 producer = state.publication_stream
@@ -2114,10 +2275,11 @@ class SignalDataPlane:
             self._withdraw_owner(owner_id)
             return False
         try:
-            for name, inputs in pending.items():
+            for name, (inputs, event_record) in pending.items():
                 materialized[name] = (
                     sequence,
                     self._materialize_dataset(name, sequence, *inputs),
+                    event_record,
                 )
         except BaseException:
             with self._lock:
@@ -2807,46 +2969,64 @@ class SignalDataPlane:
         self._membership_changed = True
         return publication
 
-    def _retirement_closure_locked(
+    def _reserve_retirement_closure_locked(
         self,
         root_owner_id: str,
     ) -> tuple[_GenerationState, ...]:
-        root = self._states.get(root_owner_id)
-        if root is None or root.retired:
-            return ()
-        selected = {(root.owner_id, root.generation)}
-        changed = True
-        while changed:
-            changed = False
-            for state in self._states.values():
-                reference = self._generation_ref(state)
-                source_ref = (
-                    None
-                    if state.source_owner_id is None
-                    else (state.source_owner_id, state.source_generation)
-                )
-                if state.retired or reference in selected:
-                    continue
-                if source_ref in selected:
-                    selected.add(reference)
-                    changed = True
-        states = tuple(
-            state
-            for state in self._states.values()
-            if self._generation_ref(state) in selected
-        )
-        for state in states:
-            self._drop_state_locked(state)
-        self._membership_changed = True
-        return states
+        """Atomically retire and reserve one owner plus all descendants."""
+
+        while True:
+            root = self._states.get(root_owner_id)
+            if root is None:
+                return ()
+            selected = {(root.owner_id, root.generation)}
+            changed = True
+            while changed:
+                changed = False
+                for state in self._states.values():
+                    reference = self._generation_ref(state)
+                    source_ref = (
+                        None
+                        if state.source_owner_id is None
+                        else (state.source_owner_id, state.source_generation)
+                    )
+                    if reference not in selected and source_ref in selected:
+                        selected.add(reference)
+                        changed = True
+            states = tuple(
+                state
+                for state in self._states.values()
+                if self._generation_ref(state) in selected
+            )
+            owners = {state.owner_id for state in states}
+            if not self._starting.intersection(owners):
+                self._starting.update(owners)
+                for state in states:
+                    state.retired = True
+                self._membership_changed = True
+                return states
+            self._generation_ready.wait()
+            if self._closed:
+                raise RuntimeError("signal data plane is closed")
 
     def _withdraw_owner(self, owner_id: str) -> frozenset[str]:
         with self._lock:
-            states = self._retirement_closure_locked(owner_id)
+            self._wait_for_start_locked(owner_id)
+            states = self._reserve_retirement_closure_locked(owner_id)
+            retiring_owners = tuple(state.owner_id for state in states)
         retired_names = frozenset(
             name for state in states for name in state.output_names
         )
-        errors = self._cleanup_retired_states(states)
+        try:
+            errors = self._cleanup_retired_states(states)
+        except BaseException as error:
+            errors = (error,)
+        with self._lock:
+            if not errors:
+                for state in states:
+                    self._drop_state_locked(state)
+            self._starting.difference_update(retiring_owners)
+            self._generation_ready.notify_all()
         if errors:
             raise BaseExceptionGroup(
                 "signal generation cleanup failed",
@@ -2858,28 +3038,37 @@ class SignalDataPlane:
         self,
         states: tuple[_GenerationState, ...],
     ) -> tuple[BaseException, ...]:
-        producers = []
+        errors = []
         for state in states:
-            if state.kind == "processor" and state.node is not None:
+            producer = state.publication_stream
+            if producer is not None and not state.publication_stream_cleaned:
+                try:
+                    producer.fail(SourceFailed("signal generation retired"))
+                except (SourceFailed, StreamEndedEarly):
+                    state.publication_stream_cleaned = True
+                except BaseException as error:
+                    errors.append(error)
+                else:
+                    state.publication_stream_cleaned = True
+            if (
+                state.kind == "processor"
+                and state.node is not None
+                and not state.processor_cleanup_complete
+            ):
                 # Routing retirement and execution retirement are distinct.
                 # Keep a cancelled entry lane-owned until its prepare/work
                 # Future completes so the node receives exactly one terminal
                 # acknowledgement from ``_cancelled_processor``.
-                self._lane.cancel_processor(state.node)
-            if state.publication_stream is not None:
-                producers.append(state.publication_stream)
-        errors = []
-        seen_producers = set()
-        for producer in producers:
-            if id(producer) in seen_producers:
-                continue
-            seen_producers.add(id(producer))
-            try:
-                producer.fail(SourceFailed("signal generation retired"))
-            except StreamEndedEarly:
-                pass
-            except BaseException as error:
-                errors.append(error)
+                try:
+                    idle = self._lane.cancel_processor(state.node)
+                except BaseException as error:
+                    errors.append(error)
+                else:
+                    # An absent or idle entry is already terminal.  A busy
+                    # entry remains a routing tombstone until the lane invokes
+                    # ``_processor_cleanup_completed`` after the Future ends.
+                    if idle:
+                        state.processor_cleanup_complete = True
         return tuple(errors)
 
     def retire(self, node: object) -> frozenset[str]:
@@ -2921,13 +3110,17 @@ class SignalDataPlane:
         with self._lock:
             front = self._build_front_locked()
             self._front = front
-            self._membership_changed = False
+            # The first lock cleared the work it captured.  A commit while
+            # ``route`` ran has since set this flag again; clearing it here
+            # would lose that publication and its latest-only processor wake.
             return front
 
     def close(self) -> None:
         with self._lock:
             if self._closed:
                 return
+            while self._starting:
+                self._generation_ready.wait()
             self._closed = True
             states = tuple(self._states.values())
             self._states.clear()

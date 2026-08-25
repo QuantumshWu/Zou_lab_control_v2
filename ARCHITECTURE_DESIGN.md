@@ -49,6 +49,9 @@
 - Snapshot restriction必须对values、validity、coordinates、labels和coordinate frame执行同一projection。
 - Validity入口只接受明确bool contract，不做numeric truthiness转换。
 - Selection按AxisId和typed coordinate唯一解析；重名或不可唯一映射必须拒绝。
+- Plot轴身份只用`AxisRef(domain, axis_id)`稳定key；label只用于显示，不进入
+  semantic field identity。Scope在内存、PanelState与Figure recipe中都使用tagged
+  `latest`或tagged typed coordinate value，文本坐标`"latest"`不得被当作控制字。
 - 同一run/content revision不可代表不同内容；EventRef只表达causal publication，不代替content identity。
 
 ### 3.2 Figure archive
@@ -58,8 +61,8 @@
 - Reader在解释内容前严格验证format、required members、shape、duplicates和non-finite metadata。
 - 未知metadata类型拒绝，不自动字符串化。
 - Figure只使用稳定`zlc.figure`格式，无数字版本；reader只接受当前完整grammar，其它root或缺失字段均loud拒绝。
-- Figure NPZ是可重绘的数据真相，包含typed Dataset、exact PlotSpec、完整normalized parameters、overlay、viewport和exact causal lineage graph；PNG只是同stem preview。
-- FigureViewer按保存的recipe恢复typed plot input，并和TaskConsole使用同一个Plot host/configure路径；不得按array shape重新猜plot kind。一个immutable archive可在同一Monitor board增加多个共享`PanelCardView`，默认panel恢复exact recipe，operator新增的其它plot kind只从同一typed Dataset schema重新compose。每个panel的Setting、可关闭Edit tab、size/signal/cell kind/display/fit均复用TaskConsole现有owner；saved/static Edit不显示live cadence、producer、snapshot refresh或第二套Save controls。Lineage以root、event nodes和direct parent IDs保存，并投影成可展开的真实树。
+- Figure NPZ是可重绘的数据真相，包含typed Dataset、exact PlotSpec、完整normalized parameters、overlay、viewport、selectors、facet focus、classifier、fit和exact causal lineage graph；PNG只是同stem preview。
+- FigureViewer按保存的recipe恢复typed plot input，并和TaskConsole Live/Frozen使用同一个Plot host/configure与accepted `DisplayDescription.spec` contract；不得按array shape重新猜plot kind。一个immutable archive可在同一Monitor board增加多个共享`PanelCardView`，默认panel恢复exact recipe，operator新增的其它plot kind只从同一typed Dataset schema重新compose。每个panel的Setting、可关闭Edit tab、size/signal/cell kind/display/fit均复用TaskConsole现有owner；saved/static Edit不显示live cadence、producer、snapshot refresh或第二套Save controls。Lineage以root、event nodes和direct parent IDs保存，并投影成可展开的真实树。
 - Dataset/Figure encoder只写caller-owned binary IO；路径原子发布唯一属于`zlc_durable`。
 
 ### 3.3 Durable paths
@@ -88,12 +91,13 @@ Node new chunk
 - Camera使用chunked append，避免每次复制全部历史；Scan按固定point geometry增长。
 - 未写位置invalid；coverage只描述实际写入extent。
 - Finite exact signal的event view只用于commit与exact Processor；所有UI/display consumer必须使用同一publication对应的canonical current view，从第一次publication起报告完整authored physical shape，未来位置invalid。
-- 普通Monitor signal没有finite canonical extent，UI显示latest complete event；Processor不得仅因“derived”就增加科学轴。输出契约的`index_by_source`只声明history能力；只有真实consumer按window取得lease后，Runtime才从当时的current event开始建立带通用`primary-index`的bounded ordinary Dataset，并按全部active leases的最大window保留、在最后一个lease释放时立即归零。lease之前的event不回填、不伪造；所有Plot读取同一Dataset且不建立Plot-kind、Fit或Workbench专用history lane。Occupancy exact处理每个camera cycle，但其公开Monitor几何仍是当前cycle的`frame`，不得再叠一层source index。
+- 普通Monitor signal没有finite canonical extent，UI显示latest complete event；Processor不得仅因“derived”就增加科学轴。输出契约的`index_by_source`只声明history能力；只有真实consumer按window取得lease后，Runtime才从当时的current event开始建立带通用`primary-index`的bounded ordinary Dataset，并按全部active leases的最大window保留、在最后一个lease释放时立即归零。lease之前的event不回填、不伪造；Runtime是唯一跨publication history owner，所有Plot读取同一Dataset且不建立Plot-kind、Fit或Workbench专用history lane。history event/indexed表示切换即推进该signal的presentation epoch并使全部consumer重新投影，即使scientific publication未变；该epoch不冒充run generation或content revision。Occupancy exact处理每个camera cycle，但其公开Monitor几何仍是当前cycle的`frame`，不得再叠一层source index。
 - `scope/reduction/fate`只决定怎样投影canonical view，绝不决定选择event还是canonical；同一publication不能因Panel semantic不同代表两份不同数据truth。
 - Incremental placement沿repeat与point rows；多维scan/grid通过point table与grid topology表达。一个cell payload原子完整发布，不新增cell-internal tile/slice streaming contract。
 - Canonical display materialization只在实际display consumer到期时合并/cache，并在Qt owner thread之外执行；不得让producer每commit强制复制full prefix，也不得因Panel存在与否改变采集结果。
 - Live Panel、Panel Edit/Refresh/Save、selector、fit input和overlay必须从同一accepted canonical presentation snapshot投影；无法唯一对齐即拒绝。
 - Panel的title shape与Setting semantic都只能读取同一publication的canonical current Dataset，不得读取最后event chunk冒充完整signal。title结构固定为`(repeat) × (point/scan geometry) × (cell payload)`三组；例如Survival field scan显示`(20) × (10×10×10) × (3×35)`。GridTopology已命名scan axes时不得再暴露flattened `point` ordinal；多维FacetGrid默认facet最外层真实scan axis，其余轴保持可编辑的Reduced。即使当前projection因FacetGrid 64-cell上限等原因拒绝，错误只标记不可用的presentation/fit，完整canonical scan-axis fate仍必须留在Setting中供operator修复。live publication未改变PanelState或authoring字段域时不得reconcile Setting form；Plot kind是Add Panel时确定的panel identity，不进入Setting通用表单，FacetGrid仅暴露可变的Cell kind。
+- Panel host accept后的Setting/PanelState metadata必须继续读取该publication的`canonical_schema`，不得在像素已使用canonical Dataset后又用最后event chunk schema覆盖fate vocabulary。一个表单提交的全部fate rows是一次原子axis-role assignment：先确定全部x/y/group/facet目标，再处理Reduced/Pooled/scope及真正空缺的required role；结果不得依赖row迭代顺序或中间冲突。
 - Occupancy的SITE是每个`(repeat, point)` cell内原子完整的data axis；overlay不得另存site history。Occupancy只发布通用bool/numeric status signal，点是否可读由该Dataset自身validity表达；XY geometry与adapter contract由`zlc_plot`中立层拥有，Workbench只按contract路由signal且不得import Occupancy。只有scope/facet唯一选中一个cell时才能显示离散状态；对多个cells做reduce/pool时不得私自发明共识状态，未定义则显示UNKNOWN/隐藏。
 - UI freeze只读取已提交状态，不调用plugin materializer。
 - Stop/Final不受Panel、freeze或Processor订阅影响。
@@ -139,13 +143,25 @@ Node new chunk
 - `display_interval`只控制Surface刷新deadline，不决定active history lease内的Measurement primary index是否存在。Runtime只在lease起点之后为indexed-derived Dataset写value或invalid；昂贵Surface计算同一same-shot group只允许一个active，并在忙时只保留Plane latest完整输入，中间indices仍以invalid存在而不排完整frame。
 - Panel只原子呈现`data@N + fit@N`。
 - Fit selection唯一优先级是committed Area ROI（或显式X-range）→viewport→full range；FacetGrid selector必须保留所属focused cell identity，任何PanelState重放不得把ROI降级成viewport/full。
-- FitResult携带source parent/revision；任何history/window投影按Measurement primary index连续，未计算、失败或timeout的位置invalid/NaN，window长度按source indices而非成功结果计数。
+- Fit参数编辑只有一个紧凑表达式：`name=value`表示该参数精确固定、从优化自由度中移除；`name=guess(value)`只替换初始猜测。表达式使用当前painted单位，PanelState、accepted description和Figure只保存canonical `fixed`/`initial` mappings，不保存第二份原始文本。语法/参数/domain错误只忽略该optional override并继续同model全自动fit，同时保留可修的临时draft和loud warning；不得用窄bounds伪装fixed。model切换清除旧model的fixed/initial。Curve、Rolling、Histogram、Image与Facet cells共用这一contract；fixed参数不报告估计误差，DOF/covariance只按free参数计算。
+- FitResult携带source parent/generation/revision；任何history/window投影按Measurement primary index连续，未计算、失败或timeout的位置invalid/NaN，window长度按source indices而非成功结果计数。
 - Fit计算在后台worker；Qt owner thread不等待Future或执行fit。
 - Active Fit超过1秒必须loud标记该source index invalid并从Plane latest继续；不得积累完整frame FIFO，也不得永久锁住Panel、Qt、Stop或close。普通cadence/backpressure跳过计算的indices同样invalid但不是solver failure；raw Runtime data始终完整。
 
 ### 5.2 Performance与state
 
 - PanelState一次应用是幂等transaction；no-op产生0 solve、0 render、0 front。
+- `PanelState`是可编辑、可在拒绝后继续修复的authored target；只有Plot成功接受后返回的
+  完整`DisplayDescription`才是当前Live/Frozen/Viewer pixels的accepted truth，其`spec`也是
+  capability、selector、classifier、overlay和viewport判断的唯一依据。拒绝的target不得
+  覆盖accepted truth。
+- Plot selector与viewport observation都携产生它们的exact Dataset generation和revision；
+  TaskConsole Console是唯一interaction owner，核对当前accepted publication/spec后才写入
+  PanelState、发布derivation或镜像到另一host。Plot host只产生gesture observation，View只
+  投影；retired/stale/non-classifier回调不得写回，selector不得跨semantic plot kind。
+  Viewport identity还包含Dataset schema fingerprint、accepted spec、display coordinate units和
+  focused cell；相同shape但不同axis roles绝不共享数值范围。Live configure接受的新viewport
+  必须写回此identity，Frozen/Edit/Viewer只能重放仍匹配的范围。
 - ImagePlot及FacetGrid的image cell统一使用`nearest`像素呈现；interpolation不是Parameter、PanelState、Figure recipe或UI字段，任何Logic/Task不得另行设置。
 - Title/layout等非plot变化不得re-fit。
 - 删除重复configure/clear/replay与多front handoff。
@@ -189,6 +205,8 @@ Node new chunk
 - `RepeatRegion`只表达timeline内部loop。
 - Cycle/shot、scan sweep和Dataset repeat是独立事实。
 - 一个finite execution入口表达N cycles；actual played values进入Dataset coordinates和run record。
+- Hardware duration scan的绝对period由32-bit nominal tick base保存；25-bit signed slot只携相对nominal的delta，不得冒充约335 ms的绝对period上限。Host按整张scan table选择能覆盖它的最小整数tick scale，scale受现有signed Q8 coefficient约束且DAC恒为1；不为扩大范围修改RTL multiplier宽度。
+- 同一次application的compiler、wire table、readback、Pulse Editor Run/Sync/Hold/Step与Seamless Dataset共用一个量化结果。Dataset coordinates和run record记录实际played values；若所需分辨率使两个不同authored points坍缩为同一点，必须在碰device前loud拒绝。
 
 ### 7.2 Camera
 

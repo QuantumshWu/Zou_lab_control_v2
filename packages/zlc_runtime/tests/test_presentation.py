@@ -93,6 +93,7 @@ class _Port:
         self.display_interval_ms = interval
         self.presented = None
         self.presented_refs: tuple[EventRef, ...] = ()
+        self.presentation_current = True
         self.fail_prepare = fail_prepare
         self.acceptable = True
         self.updates = []
@@ -103,9 +104,6 @@ class _Port:
         self.finished = []
         self.waiting = []
         self.futures = []
-
-    def presented_publication(self):
-        return self.presented
 
     def presented_front_refs(self):
         return self.presented_refs
@@ -542,6 +540,31 @@ def test_due_panel_stages_on_the_next_publication_wake_without_advancing_clock()
     scheduler.stage_owed()
     assert len(port.updates) == 2
     assert port.updates[-1].publication is newest.publication("camera/frame")
+
+
+def test_explicit_presentation_debt_restages_an_unchanged_screen_front() -> None:
+    front = _front("camera/frame", sequence=1)
+    publication = front.publication("camera/frame")
+    assert publication is not None
+    plane = _Plane(front)
+    port = _Port("camera", "camera/frame")
+    port.presented = publication
+    port.presented_refs = (publication.event_ref,)
+    port.presentation_current = False
+    arbiter = SurfaceBatchArbiter(_Sink())
+    scheduler = BoardScheduler(
+        plane,
+        HarmonicClock((100, 200)),
+        arbiter,
+        lambda: (port,),
+    )
+
+    scheduler.invalidate_presentations((port.panel_id,))
+    scheduler.stage_owed()
+
+    assert len(port.updates) == 1
+    assert port.updates[0].publication is publication
+    assert port.presented_refs == (publication.event_ref,)
 
 
 def test_two_views_of_one_signal_flip_together_as_one_cohort() -> None:

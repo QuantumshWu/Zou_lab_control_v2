@@ -29,7 +29,7 @@ from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementNode,
     CameraMeasurementRequest,
 )
-from zlc_runtime.plane import SignalDataPlane
+from zlc_runtime.plane import SignalDataPlane, SignalFront
 from zlc_runtime.streams import EventRef
 from zlc_runtime.presentation import (
     BoardScheduler,
@@ -76,27 +76,36 @@ def _without_deadlock(work, *, timeout: float = 2.0):
     return result
 
 
-def _ready(value=None):
+def _operation(spec: str = "test"):
+    return SimpleNamespace(value=SimpleNamespace(spec=spec))
+
+
+def _ready(spec: str = "initial"):
     from concurrent.futures import Future
 
     future = Future()
-    future.set_result(value)
+    future.set_result(_operation(spec))
     return future
 
 
 def _initial_then(host, later=None):
     first = True
 
-    def replace_host(plot_input, value, publication):
+    def replace_host(plot_input, value, publication, target):
         nonlocal first
         if first:
             first = False
             return host, _ready()
         if later is None:
             raise AssertionError("test did not declare a generation replacement")
-        return later(plot_input, value, publication)
+        return later(plot_input, value, publication, target)
 
     return replace_host
+
+
+def _accepted(port, field):
+    surface = port.accepted_surface()
+    return None if surface is None else getattr(surface, field)
 
 
 def _mount(port, value, publication, front):
@@ -104,7 +113,7 @@ def _mount(port, value, publication, front):
     assert update is not None
     operation = update.future.result(timeout=10.0)
     assert port.accept(update, operation)
-    assert port.presented_publication() is publication
+    assert _accepted(port, "publication") is publication
     return update
 
 
@@ -127,6 +136,43 @@ def _advanced(value, publication, signal: str, step: int = 1):
         signals={**publication.signals, signal: advanced_value},
     )
     return advanced_value, advanced_publication
+
+
+def _regenerated(value, publication, signal: str, generation: str):
+    stream_generation = type(value.snapshot.ref.stream_generation)(generation)
+    snapshot = replace(
+        value.snapshot,
+        ref=replace(
+            value.snapshot.ref,
+            stream_generation=stream_generation,
+        ),
+    )
+    regenerated_value = replace(value, snapshot=snapshot)
+    regenerated_publication = replace(
+        publication,
+        event_ref=replace(
+            publication.event_ref,
+            generation=StreamGenerationId(generation),
+        ),
+        signals={**publication.signals, signal: regenerated_value},
+    )
+    return regenerated_value, regenerated_publication, SignalFront(
+        {signal: regenerated_value},
+        {},
+        {signal: regenerated_publication},
+    )
+
+
+def _camera_image_spec(plot, value, *, labels=None):
+    axes = {
+        str(axis.name): str(axis.axis_id)
+        for axis in value.snapshot.block.schema.cell_schema.data_axes
+    }
+    return plot.ImagePlot(
+        plot.AxisRef.data(axes["spatial-x"]),
+        plot.AxisRef.data(axes["spatial-y"]),
+        labels=plot.PlotLabels() if labels is None else labels,
+    )
 
 
 class _ClosingHost:
@@ -189,9 +235,9 @@ def test_the_scheduler_drives_a_real_plotting_host(live_bench) -> None:
 
     host = plot.RasterPlotHost.from_plot(
         value.snapshot,
-        plot.ImagePlot(
-            plot.AxisRef.data("spatial-x"),
-            plot.AxisRef.data("spatial-y"),
+        _camera_image_spec(
+            plot,
+            value,
             labels=plot.PlotLabels("live", "x", "y"),
         ),
     )
@@ -228,13 +274,13 @@ def test_the_scheduler_drives_a_real_plotting_host(live_bench) -> None:
             # The owner thread drains what the tick staged; a Qt shim would do
             # this on the GUI thread when its wake fires.
             arbiter.drain(lambda panel_id: port if panel_id == port.panel_id else None)
-            presented = port.presented_publication()
+            presented = _accepted(port, "publication")
             if presented is not None:
                 break
             time.sleep(0.05)
 
         assert presented is not None, (
-            f"the board never committed a surface; panel missing={port.missing}"
+            f"the board never committed a surface; panel error={port.last_error}"
         )
 
         models = host.fit_models().result(timeout=10).value
@@ -253,7 +299,7 @@ def test_the_scheduler_drives_a_real_plotting_host(live_bench) -> None:
             arbiter.drain(
                 lambda panel_id: port if panel_id == port.panel_id else None
             )
-            presented = port.presented_publication()
+            presented = _accepted(port, "publication")
             if (
                 armed.done()
                 and presented is not None
@@ -287,9 +333,9 @@ def test_a_panel_refuses_a_surface_prepared_for_a_different_host(live_bench) -> 
     publication = plane.latest_publication(signal)
     assert publication is not None
 
-    spec = plot.ImagePlot(
-        plot.AxisRef.data("spatial-x"),
-        plot.AxisRef.data("spatial-y"),
+    spec = _camera_image_spec(
+        plot,
+        value,
         labels=plot.PlotLabels("live", "x", "y"),
     )
     host = plot.RasterPlotHost.from_plot(value.snapshot, spec)
@@ -311,15 +357,15 @@ def test_a_panel_refuses_a_surface_prepared_for_a_different_host(live_bench) -> 
         import dataclasses
 
         stale = dataclasses.replace(update, host_token=other.host_id)
-        assert not port.can_accept(stale, None)
-        assert not port.accept(stale, None)
-        assert port.presented_publication() is publication
+        assert not port.can_accept(stale, operation)
+        assert not port.accept(stale, operation)
+        assert _accepted(port, "publication") is publication
     finally:
         host.close()
         other.close()
 
 
-def test_publication_for_revision_resolves_bare_integer_revisions(
+def test_publication_for_identity_requires_generation_and_bare_revision(
     live_bench,
 ) -> None:
     """A fit event names its parent by bare int; snapshots carry DatasetRevision.
@@ -338,8 +384,20 @@ def test_publication_for_revision_resolves_bare_integer_revisions(
     value = front.value(signal)
     publication = front.publication(signal)
     assert value is not None and publication is not None
+    publication = replace(
+        publication,
+        event_ref=replace(
+            publication.event_ref,
+            generation=StreamGenerationId("causal-publication-generation"),
+            sequence=publication.event_ref.sequence + 123,
+        ),
+    )
+    front = SignalFront({signal: value}, {}, {signal: publication})
     revision_object = value.snapshot.block.revision
     revision_number = value.snapshot.ref.revision.value
+    generation = value.snapshot.ref.stream_generation
+    assert publication.event_ref.generation != generation
+    assert publication.event_ref.sequence != revision_number
     assert not isinstance(revision_object, int)
 
     host = SimpleNamespace(host_id=object())
@@ -349,20 +407,21 @@ def test_publication_for_revision_resolves_bare_integer_revisions(
         signal,
         display_interval_ms=100,
         submit_projection=_submit_now,
-        replace_host=lambda _input, _value, _publication: (host, rendered),
+        replace_host=lambda _input, _value, _publication, _target: (host, rendered),
     )
     update = port.prepare(value, publication, front)
     assert update is not None
 
     # Pending: the bare integer the fit event carries must resolve.
-    assert port.publication_for_revision(revision_number) is publication
-    assert port.publication_for_revision(revision_object) is publication
-    assert port.publication_for_revision(revision_number + 999) is None
+    assert port.publication_for_identity(generation, revision_number) is publication
+    assert port.publication_for_identity(generation, revision_object) is publication
+    assert port.publication_for_identity("another-run", revision_number) is None
+    assert port.publication_for_identity(generation, revision_number + 999) is None
 
     # Presented: same identity rule after the batch accepted the update.
-    rendered.set_result("mounted")
+    rendered.set_result(_operation("identity"))
     assert port.accept(update, update.future.result(timeout=0))
-    assert port.publication_for_revision(revision_number) is publication
+    assert port.publication_for_identity(generation, revision_number) is publication
 
 
 def test_closing_a_port_cancels_queued_projection(live_bench) -> None:
@@ -405,11 +464,11 @@ def test_close_does_not_wait_for_initial_host_staging(live_bench) -> None:
     staged = SimpleNamespace(host_id=object())
     retired: list[object] = []
 
-    def replace_host(_input, _value, _publication):
+    def replace_host(_input, _value, _publication, _target):
         entered.set()
         assert release.wait(5.0)
         rendered = Future()
-        rendered.set_result(None)
+        rendered.set_result(_operation("closing"))
         return staged, rendered
 
     projector = ThreadPoolExecutor(max_workers=1)
@@ -450,10 +509,13 @@ def test_close_does_not_wait_for_running_projection(live_bench) -> None:
     entered = Event()
     release = Event()
 
-    def project_input(plot_value, _publication, _front):
+    def project_input(plot_value, _publication, _front, _target):
         entered.set()
         assert release.wait(5.0)
-        return plot_value.snapshot
+        return (
+            plot_value.snapshot,
+            ((_publication, plot_value.event_record),),
+        )
 
     rendered = Future()
     projector = ThreadPoolExecutor(max_workers=1)
@@ -468,7 +530,7 @@ def test_close_does_not_wait_for_running_projection(live_bench) -> None:
             display_interval_ms=100,
             project_input=project_input,
             submit_projection=projector.submit,
-            replace_host=lambda _input, _value, _publication: (host, rendered),
+            replace_host=lambda _input, _value, _publication, _target: (host, rendered),
         )
         update = port.prepare(value, publication, front)
         assert update is not None and entered.wait(5.0)
@@ -491,7 +553,7 @@ def test_already_completed_render_does_not_reenter_state_lock(live_bench) -> Non
     publication = front.publication(signal)
     assert value is not None and publication is not None
     rendered = Future()
-    operation = object()
+    operation = _operation("update")
     rendered.set_result(operation)
     host = SimpleNamespace(
         host_id=object(),
@@ -529,9 +591,9 @@ def test_already_completed_replacement_does_not_reenter_state_lock(
     old = SimpleNamespace(host_id=object())
     replacement = SimpleNamespace(host_id=object())
     rendered = Future()
-    operation = object()
+    operation = _operation("replacement")
     rendered.set_result(operation)
-    later = lambda _input, _value, _publication: (replacement, rendered)
+    later = lambda _input, _value, _publication, _target: (replacement, rendered)
     port = PlotPanelPort(
         "panel",
         signal,
@@ -540,21 +602,21 @@ def test_already_completed_replacement_does_not_reenter_state_lock(
         replace_host=_initial_then(old, later),
     )
     _mount(port, value, publication, front)
-    restarted = replace(
+    restarted_value, restarted, restarted_front = _regenerated(
+        value,
         publication,
-        event_ref=EventRef(
-            publication.event_ref.stream_id,
-            StreamGenerationId("completed-replacement"),
-            publication.event_ref.sequence,
-        ),
+        signal,
+        "completed-replacement",
     )
 
-    update = _without_deadlock(lambda: port.prepare(value, restarted, front))
+    update = _without_deadlock(
+        lambda: port.prepare(restarted_value, restarted, restarted_front)
+    )
 
     assert update is not None
     assert update.future.result(timeout=0) is operation
     assert port.accept(update, operation)
-    assert port.host is replacement
+    assert _accepted(port, "host") is replacement
 
 
 def test_companion_only_change_updates_overlay_and_composite_currency(
@@ -600,16 +662,22 @@ def test_companion_only_change_updates_overlay_and_composite_currency(
         update_data=lambda _input: (_ for _ in ()).throw(
             AssertionError("companion-only change redrew unchanged data")
         ),
-        update_image_overlay=lambda overlay: (
-            overlay_calls.append(overlay) or completion
+        configure=lambda **changes: (
+            overlay_calls.append(changes["image_overlay"]) or completion
         ),
     )
 
-    def project(primary, _publication, exact_front):
+    def project(primary, _publication, exact_front, _target):
         companion_publication = exact_front.publication(companion)
-        return ImageFrame(
-            primary.snapshot,
-            ImagePointOverlay.empty(companion_publication.event_ref.sequence),
+        return (
+            ImageFrame(
+                primary.snapshot,
+                ImagePointOverlay.empty(companion_publication.event_ref.sequence),
+            ),
+            (
+                (_publication, primary.event_record),
+                (companion_publication, companion_value.event_record),
+            ),
         )
 
     port = PlotPanelPort(
@@ -618,7 +686,7 @@ def test_companion_only_change_updates_overlay_and_composite_currency(
         display_interval_ms=100,
         submit_projection=_submit_now,
         replace_host=_initial_then(host),
-        companion_signals=lambda: (companion,),
+        companion_signals=lambda _target: (companion,),
         project_input=project,
     )
     _mount(port, value, publication, first_front)
@@ -630,8 +698,9 @@ def test_companion_only_change_updates_overlay_and_composite_currency(
     update = port.prepare(value, publication, second_front)
     assert update is not None
     assert len(overlay_calls) == 1
-    completion.set_result("overlay")
-    assert port.accept(update, "overlay")
+    completion.set_result(_operation("overlay"))
+    operation = update.future.result(timeout=0)
+    assert port.accept(update, operation)
     assert port.presented_front_refs() == (
         publication.event_ref,
         second_companion.event_ref,
@@ -675,18 +744,18 @@ def test_a_completed_render_skipped_with_its_cohort_is_never_restaged(
         replace_host=_initial_then(host),
     )
     _mount(port, value, publication, front)
-    shown = port.presented_publication()
+    shown = _accepted(port, "publication")
     next_value, next_publication = _advanced(value, publication, signal)
     update = port.prepare(next_value, next_publication, front)
     assert update is not None
 
     # The render completed (the host holds the revision), then the whole
     # cohort was abandoned: the decision is final for this revision.
-    renders[-1].set_result(object())
+    renders[-1].set_result(_operation("skipped"))
     update.future.result(timeout=0)
     port.finish_unpresented(update)
     assert port.prepare(next_value, next_publication, front) is None
-    assert port.presented_publication() is shown
+    assert _accepted(port, "publication") is shown
     assert port.last_error is None
 
 
@@ -768,10 +837,7 @@ def test_frames_outpacing_the_render_worker_are_skipped_without_an_error(
 
     host = plot.RasterPlotHost.from_plot(
         value.snapshot,
-        plot.ImagePlot(
-            plot.AxisRef.data("spatial-x"),
-            plot.AxisRef.data("spatial-y"),
-        ),
+        _camera_image_spec(plot, value),
     )
     try:
         port = PlotPanelPort(
@@ -807,7 +873,7 @@ def test_frames_outpacing_the_render_worker_are_skipped_without_an_error(
 
         deadline = time.monotonic() + 10.0
         while (
-            port.presented_publication() is not newest.publication(signal)
+            _accepted(port, "publication") is not newest.publication(signal)
             and time.monotonic() < deadline
         ):
             arbiter.drain(
@@ -818,7 +884,7 @@ def test_frames_outpacing_the_render_worker_are_skipped_without_an_error(
         assert port.last_error is None, (
             f"a coalesced frame became an error: {port.last_error!r}"
         )
-        assert port.presented_publication() is newest.publication(signal)
+        assert _accepted(port, "publication") is newest.publication(signal)
     finally:
         host.close()
 
@@ -885,10 +951,10 @@ def test_same_snapshot_terminal_reanchors_pending_and_presented_identity(
     presented: list[object] = []
     port = None
 
-    def on_presented(selected: object, plot_input: object) -> None:
-        presented.append(selected)
-        assert port.presented_publication() is selected
-        assert port.presented_input() is plot_input
+    def on_presented(surface: object) -> None:
+        presented.append(surface.publication)
+        assert _accepted(port, "publication") is surface.publication
+        assert _accepted(port, "plot_input") is surface.plot_input
 
     port = PlotPanelPort(
         "panel-1",
@@ -914,9 +980,9 @@ def test_same_snapshot_terminal_reanchors_pending_and_presented_identity(
     assert _without_deadlock(lambda: port.prepare(final_value, final, front)) is None
     assert calls == [snapshot], "terminal identity must reuse the pending render"
 
-    completion.set_result(object())
-    assert port.accept(update, object()) is True
-    assert port.presented_publication() is final
+    completion.set_result(_operation("terminal"))
+    assert port.accept(update, update.future.result(timeout=0)) is True
+    assert _accepted(port, "publication") is final
     assert port.presented_front_refs() == (final.event_ref,)
     assert presented[-1] is final
 
@@ -927,7 +993,7 @@ def test_same_snapshot_terminal_reanchors_pending_and_presented_identity(
     assert _without_deadlock(
         lambda: port.prepare(final_value, terminal_record, front)
     ) is None
-    assert port.presented_publication() is terminal_record
+    assert _accepted(port, "publication") is terminal_record
     assert calls == [snapshot], "identity-only reanchor must not redraw pixels"
 
 
@@ -943,23 +1009,20 @@ def test_a_new_generation_replaces_the_plot_host_even_at_the_same_revision(
     value = front.value(signal)
     publication = front.publication(signal)
     assert value is not None and publication is not None
-    spec = plot.ImagePlot(
-        plot.AxisRef.data("spatial-x"),
-        plot.AxisRef.data("spatial-y"),
-    )
+    spec = _camera_image_spec(plot, value)
     first = plot.RasterPlotHost.from_plot(value.snapshot, spec)
     replacements: list[object] = []
     accepted: list[tuple[object, object]] = []
 
-    def replace_host(plot_input, _value, _publication):
+    def replace_host(plot_input, _value, _publication, _target):
         host = plot.RasterPlotHost.from_plot(plot_input, spec)
         replacements.append(host)
         return host, host.configure()
 
     try:
-        def accepted_replacement(old, new, _publication, _input):
+        def accepted_replacement(old):
             if old is not None:
-                accepted.append((old, new))
+                accepted.append((old, replacements[-1]))
 
         port = PlotPanelPort(
             "panel-1",
@@ -970,28 +1033,72 @@ def test_a_new_generation_replaces_the_plot_host_even_at_the_same_revision(
             accept_host=accepted_replacement,
         )
         _mount(port, value, publication, front)
-        restarted = replace(
+        restarted_value, restarted, restarted_front = _regenerated(
+            value,
             publication,
-            event_ref=EventRef(
-                publication.event_ref.stream_id,
-                StreamGenerationId("replacement-run"),
-                publication.event_ref.sequence,
-            ),
+            signal,
+            "replacement-run",
         )
-        update = port.prepare(value, restarted, front)
+        update = port.prepare(restarted_value, restarted, restarted_front)
         assert update is not None
         assert len(replacements) == 1
-        assert port.host is first
-        assert port.presented_publication() is publication
+        assert _accepted(port, "host") is first
+        assert _accepted(port, "publication") is publication
         operation = update.future.result(timeout=10.0)
         assert port.accept(update, operation)
         assert accepted == [(first, replacements[0])]
-        assert port.host is replacements[0]
-        assert port.presented_publication() is restarted
+        assert _accepted(port, "host") is replacements[0]
+        assert _accepted(port, "publication") is restarted
     finally:
         first.close()
         for host in replacements:
             host.close()
+
+
+def test_atomic_surface_advances_only_after_its_front_is_presented(
+    live_bench,
+) -> None:
+    plane, node, _sequencer, _monitor = live_bench
+    signal = node.signal_key("frames")
+    front = plane.freeze()
+    value = front.value(signal)
+    publication = front.publication(signal)
+    assert value is not None and publication is not None
+
+    second = SimpleNamespace(spec="second")
+    shown = _ClosingHost("shown")
+    debt: list[str] = []
+    refuse = [False]
+
+    port = PlotPanelPort(
+        "panel",
+        signal,
+        display_interval_ms=100,
+        submit_projection=_submit_now,
+        replace_host=lambda *_args: (
+            shown,
+            _ready("first"),
+        ),
+        present=lambda _target, _operation: not refuse[0],
+        invalidate=debt.append,
+    )
+    _mount(port, value, publication, front)
+    assert port.accepted_surface().description.spec == "first"
+
+    operation = SimpleNamespace(value=second)
+    accepted = port.accept_configuration(operation, object())
+
+    assert accepted is port.accepted_surface()
+    assert accepted.description is second
+
+    previous = accepted
+    refuse[0] = True
+    assert port.accept_configuration(
+        SimpleNamespace(value=SimpleNamespace(spec="third")), object()
+    ) is None
+    assert port.accepted_surface() is previous
+    assert port.accepted_surface().description is second
+    assert debt == ["panel"]
 
 
 def test_two_panel_generation_replacements_wait_for_one_cohort_accept(
@@ -1006,18 +1113,11 @@ def test_two_panel_generation_replacements_wait_for_one_cohort_accept(
     value = front.value(signal)
     publication = front.publication(signal)
     assert value is not None and publication is not None
-    restarted = replace(
+    restarted_value, restarted, restarted_front = _regenerated(
+        value,
         publication,
-        event_ref=EventRef(
-            publication.event_ref.stream_id,
-            StreamGenerationId("cohort-replacement-run"),
-            publication.event_ref.sequence,
-        ),
-    )
-    restarted_front = SignalFront(
-        {signal: value},
-        {},
-        {signal: restarted},
+        signal,
+        "cohort-replacement-run",
     )
 
     old = (_ClosingHost("old-a"), _ClosingHost("old-b"))
@@ -1026,7 +1126,7 @@ def test_two_panel_generation_replacements_wait_for_one_cohort_accept(
     accepted: list[str] = []
 
     def stage(name: str):
-        def create(_input, _value, _publication):
+        def create(_input, _value, _publication, _target):
             host = _ClosingHost(name)
             future = Future()
             staged.append(host)
@@ -1042,8 +1142,8 @@ def test_two_panel_generation_replacements_wait_for_one_cohort_accept(
             display_interval_ms=100,
             submit_projection=_submit_now,
             replace_host=_initial_then(old[0], stage("new-a")),
-            accept_host=lambda previous, new, _pub, _input: (
-                accepted.append(new.host_id) if previous is not None else None
+            accept_host=lambda previous: (
+                accepted.append("new-a") if previous is not None else None
             ),
         ),
         PlotPanelPort(
@@ -1052,8 +1152,8 @@ def test_two_panel_generation_replacements_wait_for_one_cohort_accept(
             display_interval_ms=100,
             submit_projection=_submit_now,
             replace_host=_initial_then(old[1], stage("new-b")),
-            accept_host=lambda previous, new, _pub, _input: (
-                accepted.append(new.host_id) if previous is not None else None
+            accept_host=lambda previous: (
+                accepted.append("new-b") if previous is not None else None
             ),
         ),
     )
@@ -1063,17 +1163,17 @@ def test_two_panel_generation_replacements_wait_for_one_cohort_accept(
     channels = SimpleNamespace(request_owner_wake=lambda: None)
     arbiter = SurfaceBatchArbiter(channels)
     assert arbiter.enqueue_group(ports, restarted_front)
-    assert tuple(port.host for port in ports) == old
+    assert tuple(_accepted(port, "host") for port in ports) == old
     assert not accepted
 
-    completions[0].set_result("a")
+    completions[0].set_result(_operation("new-a"))
     arbiter.drain(lambda panel_id: ports[0] if panel_id == "a" else ports[1])
-    assert tuple(port.host for port in ports) == old
+    assert tuple(_accepted(port, "host") for port in ports) == old
     assert not accepted
 
-    completions[1].set_result("b")
+    completions[1].set_result(_operation("new-b"))
     arbiter.drain(lambda panel_id: ports[0] if panel_id == "a" else ports[1])
-    assert tuple(host.host_id for host in (port.host for port in ports)) == (
+    assert tuple(host.host_id for host in (_accepted(port, "host") for port in ports)) == (
         "new-a",
         "new-b",
     )
@@ -1093,18 +1193,11 @@ def test_two_panel_replacement_staging_failure_swaps_neither_host(
     value = front.value(signal)
     publication = front.publication(signal)
     assert value is not None and publication is not None
-    restarted = replace(
+    restarted_value, restarted, restarted_front = _regenerated(
+        value,
         publication,
-        event_ref=EventRef(
-            publication.event_ref.stream_id,
-            StreamGenerationId("failed-cohort-replacement"),
-            publication.event_ref.sequence,
-        ),
-    )
-    restarted_front = SignalFront(
-        {signal: value},
-        {},
-        {signal: restarted},
+        signal,
+        "failed-cohort-replacement",
     )
 
     old = (_ClosingHost("old-a"), _ClosingHost("old-b"))
@@ -1119,11 +1212,11 @@ def test_two_panel_replacement_staging_failure_swaps_neither_host(
             submit_projection=_submit_now,
             replace_host=_initial_then(
                 previous,
-                lambda _input, _value, _publication, replacement=replacement,
+                lambda _input, _value, _publication, _target, replacement=replacement,
                 completion=completion: (replacement, completion),
             ),
-            accept_host=lambda mounted, new, _pub, _input: (
-                accepted.append(new.host_id) if mounted is not None else None
+            accept_host=lambda mounted, replacement=replacement: (
+                accepted.append(replacement.host_id) if mounted is not None else None
             ),
         )
         for panel_id, previous, replacement, completion in zip(
@@ -1139,11 +1232,11 @@ def test_two_panel_replacement_staging_failure_swaps_neither_host(
     channels = SimpleNamespace(request_owner_wake=lambda: None)
     arbiter = SurfaceBatchArbiter(channels)
     assert arbiter.enqueue_group(ports, restarted_front)
-    completions[0].set_result("ready")
+    completions[0].set_result(_operation("ready"))
     completions[1].set_exception(RuntimeError("configuration failed"))
     arbiter.drain(lambda panel_id: ports[0] if panel_id == "a" else ports[1])
 
-    assert tuple(port.host for port in ports) == old
+    assert tuple(_accepted(port, "host") for port in ports) == old
     assert not accepted
     assert all(host.closed for host in staged)
 
@@ -1161,19 +1254,17 @@ def test_abandoned_generation_replacement_closes_only_the_staged_host(
     value = front.value(signal)
     publication = front.publication(signal)
     assert value is not None and publication is not None
-    restarted = replace(
+    restarted_value, restarted, restarted_front = _regenerated(
+        value,
         publication,
-        event_ref=EventRef(
-            publication.event_ref.stream_id,
-            StreamGenerationId("abandoned-replacement-run"),
-            publication.event_ref.sequence,
-        ),
+        signal,
+        "abandoned-replacement-run",
     )
 
     old = _ClosingHost("old")
     staged = _ClosingHost("staged")
     completion = Future()
-    later = lambda _input, _value, _publication: (staged, completion)
+    later = lambda _input, _value, _publication, _target: (staged, completion)
     port = PlotPanelPort(
         "panel",
         signal,
@@ -1182,15 +1273,15 @@ def test_abandoned_generation_replacement_closes_only_the_staged_host(
         replace_host=_initial_then(old, later),
     )
     _mount(port, value, publication, front)
-    update = port.prepare(value, restarted, front)
+    update = port.prepare(restarted_value, restarted, restarted_front)
     assert update is not None
-    completion.set_result("ready")
+    completion.set_result(_operation("ready"))
     if ending == "finish":
         port.finish_unpresented(update)
     else:
         port.reject(update, RuntimeError("staged render failed"))
-    assert port.host is old
-    assert port.presented_publication() is publication
+    assert _accepted(port, "host") is old
+    assert _accepted(port, "publication") is publication
     assert not old.closed
     assert staged.closed
 
@@ -1206,19 +1297,17 @@ def test_releasing_port_cancels_pending_replacement_without_swapping_host(
     value = front.value(signal)
     publication = front.publication(signal)
     assert value is not None and publication is not None
-    restarted = replace(
+    restarted_value, restarted, restarted_front = _regenerated(
+        value,
         publication,
-        event_ref=EventRef(
-            publication.event_ref.stream_id,
-            StreamGenerationId("removed-panel-replacement"),
-            publication.event_ref.sequence,
-        ),
+        signal,
+        "removed-panel-replacement",
     )
 
     old = _ClosingHost("shown")
     staged = _ClosingHost("staged")
     operation = Future()
-    later = lambda _input, _value, _publication: (staged, operation)
+    later = lambda _input, _value, _publication, _target: (staged, operation)
     port = PlotPanelPort(
         "panel",
         signal,
@@ -1227,15 +1316,15 @@ def test_releasing_port_cancels_pending_replacement_without_swapping_host(
         replace_host=_initial_then(old, later),
     )
     _mount(port, value, publication, front)
-    update = port.prepare(value, restarted, front)
+    update = port.prepare(restarted_value, restarted, restarted_front)
     assert update is not None
 
     port.close()
 
     assert operation.cancelled()
     assert staged.closed
-    assert port.host is old
-    assert port.presented_publication() is publication
+    assert _accepted(port, "host") is old
+    assert _accepted(port, "publication") is publication
     assert not old.closed
 
 
@@ -1251,20 +1340,17 @@ def test_board_close_releases_pending_generation_replacement(
     value = front.value(signal)
     publication = front.publication(signal)
     assert value is not None and publication is not None
-    restarted = replace(
+    restarted_value, restarted, restarted_front = _regenerated(
+        value,
         publication,
-        event_ref=EventRef(
-            publication.event_ref.stream_id,
-            StreamGenerationId("closed-board-replacement"),
-            publication.event_ref.sequence,
-        ),
+        signal,
+        "closed-board-replacement",
     )
-    restarted_front = SignalFront({signal: value}, {}, {signal: restarted})
 
     old = _ClosingHost("shown")
     staged = _ClosingHost("staged")
     operation = Future()
-    later = lambda _input, _value, _publication: (staged, operation)
+    later = lambda _input, _value, _publication, _target: (staged, operation)
     port = PlotPanelPort(
         "panel",
         signal,
@@ -1282,8 +1368,8 @@ def test_board_close_releases_pending_generation_replacement(
 
     assert operation.cancelled()
     assert staged.closed
-    assert port.host is old
-    assert port.presented_publication() is publication
+    assert _accepted(port, "host") is old
+    assert _accepted(port, "publication") is publication
     assert not old.closed
 
 
@@ -1298,20 +1384,18 @@ def test_staged_host_that_cannot_close_immediately_uses_retired_host_path(
     value = front.value(signal)
     publication = front.publication(signal)
     assert value is not None and publication is not None
-    restarted = replace(
+    restarted_value, restarted, restarted_front = _regenerated(
+        value,
         publication,
-        event_ref=EventRef(
-            publication.event_ref.stream_id,
-            StreamGenerationId("retired-staged-host"),
-            publication.event_ref.sequence,
-        ),
+        signal,
+        "retired-staged-host",
     )
 
     staged = SimpleNamespace(host_id="staged")
     operation = Future()
     retired: list[object] = []
     old = SimpleNamespace(host_id="shown")
-    later = lambda _input, _value, _publication: (staged, operation)
+    later = lambda _input, _value, _publication, _target: (staged, operation)
     port = PlotPanelPort(
         "panel",
         signal,
@@ -1321,12 +1405,12 @@ def test_staged_host_that_cannot_close_immediately_uses_retired_host_path(
         retire_host=retired.append,
     )
     _mount(port, value, publication, front)
-    assert port.prepare(value, restarted, front) is not None
+    assert port.prepare(restarted_value, restarted, restarted_front) is not None
 
     port.close()
 
     assert retired == [staged]
-    assert port.host is old
+    assert _accepted(port, "host") is old
 
 
 def test_the_wake_coalesces_so_a_burst_costs_one_turn() -> None:

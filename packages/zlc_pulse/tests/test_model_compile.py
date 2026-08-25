@@ -15,6 +15,7 @@ from zlc_pulse import (
     RepeatRegion,
     compile_sequence,
 )
+from zlc_pulse.compile import evaluate_affine_tick
 from zlc_pulse.model import PulseFieldRef
 from zlc_pulse.schedule import trigger_times, trigger_windows
 from zlc_pulse.wire import StreamerParams
@@ -60,10 +61,38 @@ def test_slot_compile_changes_only_affine_data_and_dac_selectors() -> None:
         _sequence(slots=(slot,)),
         StreamerParams(max_edges=8, bank_size=2),
         50e6,
+        slot_tick_scales=(2,),
     )
     assert program.slot_kinds == ("duration",)
+    assert program.slot_tick_scales == (2,)
     assert program.slot_count == 1
-    assert program.tick_slot_coeffs[1][0] != 0
+    assert program.tick_slot_coeffs[1][0] == 2 << program.scan_coeff_frac_bits
+    assert evaluate_affine_tick(
+        program.ticks[1],
+        program.tick_slot_coeffs[1],
+        (1,),
+        program.scan_coeff_frac_bits,
+    ) == 3
+    with np.testing.assert_raises_regex(ValueError, "coefficient range"):
+        compile_sequence(
+            _sequence(slots=(slot,)),
+            StreamerParams(max_edges=8, bank_size=2),
+            50e6,
+            slot_tick_scales=(128,),
+        )
+    dac_slot = PulseSlot(
+        "dac",
+        PulseFieldRef("dac", "p0", "dac"),
+        "value",
+        "dac_value",
+    )
+    with np.testing.assert_raises_regex(ValueError, "DAC slot tick scale"):
+        compile_sequence(
+            _sequence(slots=(dac_slot,)),
+            StreamerParams(max_edges=8, bank_size=2),
+            50e6,
+            slot_tick_scales=(2,),
+        )
 
 
 def test_negative_bus_delay_shifts_every_driven_ttl_lane() -> None:
