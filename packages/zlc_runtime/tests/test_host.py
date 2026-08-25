@@ -944,3 +944,72 @@ def test_exact_processor_receives_each_event_chunk_not_cumulative_history() -> N
     finally:
         host.shutdown()
         plane.close()
+
+
+def test_an_exact_processor_starts_on_an_armed_silent_source() -> None:
+    """The bench flow behind a scan over a derived signal.
+
+    Camera armed, pulse stopped: the source generation is live with ZERO
+    publications.  The processor must genuinely start -- reserving its own
+    derived generation, which is what a scan's armed-source gate reads --
+    and the first frame, fired later by the scan's own pulse, must be its
+    first exact input.
+    """
+
+    source_declaration = DatasetOutputDeclaration("frame", "test.frame")
+    derived_declaration = DatasetOutputDeclaration("derived", "test.derived")
+    source = _Source("armed-source", source_declaration)
+    plane = SignalDataPlane()
+    plane.begin_generation(source)
+    seen: list[float] = []
+
+    class Processor:
+        def evaluate(self, value: SignalValue):
+            seen.append(float(value.snapshot.block.values[0, 0, 0]))
+            return {
+                "derived": _finite_output(
+                    derived_declaration,
+                    value=float(len(seen)),
+                    total=2,
+                    origin=len(seen) - 1,
+                    written=len(seen),
+                )
+            }
+
+    wake = Event()
+    host = _host(
+        Processor(),
+        plane,
+        wake,
+        instance_id="armed-processor",
+        kind="processor",
+        outputs=(derived_declaration,),
+        source=source.signal_key("frame"),
+        delivery="exact",
+    )
+    try:
+        host.start()
+        assert host.observation.phase == "running"
+        # The derived generation is live BEFORE any source frame exists:
+        # this is the fact a scan's armed-source gate reads.
+        assert plane.is_generation_live(host.signal_key("derived"))
+        assert seen == []
+        for origin, value in enumerate((4.0, 6.0)):
+            plane.commit_live(
+                source,
+                {
+                    "frame": _finite_output(
+                        source_declaration,
+                        value=value,
+                        total=2,
+                        origin=origin,
+                        written=origin + 1,
+                    )
+                },
+            )
+        plane.seal_committed(source)
+        assert _wait(host, wake).phase == "done"
+        assert seen == [4.0, 6.0]
+    finally:
+        host.shutdown()
+        plane.close()

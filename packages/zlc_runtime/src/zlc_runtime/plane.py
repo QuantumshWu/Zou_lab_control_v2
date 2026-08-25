@@ -2313,8 +2313,17 @@ class SignalDataPlane:
         signal_name: str,
         *,
         replay: bool = True,
-    ) -> tuple[SignalPublication, FollowTap[SignalPublication]]:
-        """Return the current event and an ordered replay/future payload tap."""
+    ) -> tuple[SignalPublication | None, FollowTap[SignalPublication]]:
+        """Return the current event and an ordered replay/future payload tap.
+
+        An ARMED generation that has not published yet is followable: an
+        externally triggered camera chain publishes nothing until something
+        fires its triggers, and a consumer that will itself cause the first
+        frame must be able to subscribe to that silence.  The baseline is
+        None exactly then.  A signal with no reserved generation at all is
+        unknown here, and a finished one stays a loud
+        ``SourceGenerationEnded``.
+        """
 
         if type(replay) is not bool:
             raise TypeError("replay must be bool")
@@ -2324,8 +2333,8 @@ class SignalDataPlane:
             if self._closed:
                 raise RuntimeError("signal data plane is closed")
             state = self._state_for_signal_locked(name)
-            if state is None or state.publication is None:
-                raise LookupError(f"signal {name!r} has no current publication")
+            if state is None:
+                raise LookupError(f"signal {name!r} has no reserved generation")
             if state.retired or state.terminal:
                 raise SourceGenerationEnded(
                     f"signal {name!r} generation is not live"
@@ -2541,26 +2550,43 @@ class SignalDataPlane:
         node: object,
         *,
         source_name: str,
-        source_publication: SignalPublication,
+        source_publication: SignalPublication | None,
     ) -> FollowTap[SignalPublication]:
-        """Bind one Processor to the current exact publication and its future events."""
+        """Bind one Processor to the current exact publication and its future events.
+
+        ``source_publication`` None binds to an ARMED source that has not
+        published yet: the replay starts empty (or from whatever committed
+        in the race between the caller's snapshot and this bind -- still
+        this generation's stream, delivered exactly) and the first commit
+        is the first input.  Non-None stays the exactness anchor it was.
+        """
 
         source_name = canonical_text(source_name, "processor source name")
-        if not isinstance(source_publication, SignalPublication):
-            raise TypeError("Follow Processor requires an exact SignalPublication")
-        source = source_publication.value(source_name)
-        if source is None:
-            raise ValueError("Follow Processor publication has no selected signal")
+        if source_publication is not None:
+            if not isinstance(source_publication, SignalPublication):
+                raise TypeError(
+                    "Follow Processor requires an exact SignalPublication"
+                )
+            source = source_publication.value(source_name)
+            if source is None:
+                raise ValueError(
+                    "Follow Processor publication has no selected signal"
+                )
         owner_id = _node_instance_id(node)
         output_names, bare_names = self._node_route_names(node)
         with self._lock:
             if self._closed:
                 raise RuntimeError("signal data plane is closed")
-            self._require_issued_publication_locked(source_publication)
+            if source_publication is not None:
+                self._require_issued_publication_locked(source_publication)
             source_state = self._state_for_signal_locked(source_name)
+            if source_state is None:
+                raise SourceGenerationEnded(
+                    "Follow Processor source is not live"
+                )
             if (
-                source_state is None
-                or source_state.publication is not source_publication
+                source_publication is not None
+                and source_state.publication is not source_publication
             ):
                 raise SourceGenerationEnded(
                     "Follow Processor source is not the exact current publication"

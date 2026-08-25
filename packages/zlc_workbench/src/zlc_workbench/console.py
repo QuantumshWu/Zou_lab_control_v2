@@ -4311,12 +4311,16 @@ class ConsolePresenter:
             if source
             else None
         )
+        armed = bool(source) and self.session.signal_plane.is_generation_live(
+            source
+        )
         return (
             binding.draft_revision,
             id(self.session.installation),
             int(getattr(self.session.installation, "revision", 0)),
             source_options,
             publication is not None,
+            armed,
         )
 
     def _finalize_logic_binding(
@@ -4616,7 +4620,12 @@ class ConsolePresenter:
         signal = str(getattr(finalization, "source_signal", "") or "")
         if not signal:
             return False
-        return self.session.signal_plane.latest_publication(signal) is None
+        plane = self.session.signal_plane
+        # An ARMED silent source is attachable now; only a source that is
+        # neither publishing nor armed leaves the processor following.
+        return plane.latest_publication(
+            signal
+        ) is None and not plane.is_generation_live(signal)
 
     def _follow_processor_sources(self) -> None:
         """Complete standing processor Starts whose source is alive again."""
@@ -4651,11 +4660,12 @@ class ConsolePresenter:
             if not signal:
                 continue
             plane = self.session.signal_plane
-            if plane.latest_publication(signal) is None:
-                continue
             if not plane.is_generation_live(signal):
-                # The retained tail of a finished run: a frozen pass already
-                # answered it, and re-running forever would spin.
+                # Not armed, or the retained tail of a finished run: a
+                # frozen pass already answered the latter, and re-running
+                # forever would spin.  An armed source needs no publication
+                # to be followed -- the follower's own start may be what
+                # causes the first one.
                 continue
             if not self.start_logic(binding.node_id):
                 # A start the source's own lifecycle refused -- it ended or

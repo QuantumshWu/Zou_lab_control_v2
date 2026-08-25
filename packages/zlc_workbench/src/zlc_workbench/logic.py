@@ -404,11 +404,22 @@ def finalize_logic_draft(
                 # Nothing on the plane under that name yet: a processor
                 # follows, it does not fail.
                 source_absent = True
-        elif signal_plane.latest_publication(source) is None:
-            if processor_kind:
+        elif processor_kind:
+            if signal_plane.latest_publication(
+                source
+            ) is None and not signal_plane.is_generation_live(source):
+                # Nothing published and nothing armed: a processor follows,
+                # it does not fail.  An ARMED silent source starts now.
                 source_absent = True
-            else:
-                issues.append(f"{source!r} has not published a Dataset yet")
+        elif not signal_plane.is_generation_live(source):
+            # A measurement watches FUTURE publications, so what it needs is
+            # an armed producer, not an existing Dataset: an externally
+            # triggered chain publishes nothing until the measurement's own
+            # pulse fires the first trigger.
+            issues.append(
+                f"{source!r} has no armed producer -- start the measurement "
+                "chain that publishes it (its pulse may stay stopped)"
+            )
     elif source:
         issues.append(f"{descriptor.api_name} has no Dataset source input")
 

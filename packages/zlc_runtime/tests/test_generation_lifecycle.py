@@ -345,3 +345,44 @@ def test_current_dataset_rejects_a_same_sequence_publication_from_the_old_run() 
             plane.current_dataset(node.signal_key("frames"), old_publication)
     finally:
         plane.close()
+
+
+def test_an_armed_silent_generation_is_followable() -> None:
+    """An armed chain that has not published yet accepts a follower.
+
+    An externally triggered camera publishes nothing until something fires
+    its triggers; a consumer that will itself cause the first frame (a scan
+    firing its own pulse) must be able to subscribe to that silence.  The
+    baseline is None exactly then, the first commit arrives through the
+    tap, and retiring the generation stays loud.
+    """
+
+    from zlc_runtime.streams import SourceFailed
+
+    plane = SignalDataPlane()
+    node = _Producer()
+    try:
+        plane.begin_generation(node)
+        baseline, tap = plane.follow_publications(
+            node.signal_key("frames"), replay=False
+        )
+        assert baseline is None
+        plane.commit_live(
+            node,
+            {"frames": _commit(node, revision=7, total=2, origin=0)},
+        )
+        first = tap.next(1.0)
+        assert first.event_ref.sequence == 1
+        plane.retire(node)
+        with pytest.raises(SourceFailed):
+            tap.next(1.0)
+        # A retired generation leaves no state behind: following it
+        # again is following an unknown signal.
+        with pytest.raises(LookupError):
+            plane.follow_publications(
+                node.signal_key("frames"), replay=False
+            )
+        with pytest.raises(LookupError):
+            plane.follow_publications("nobody:frames", replay=False)
+    finally:
+        plane.close()

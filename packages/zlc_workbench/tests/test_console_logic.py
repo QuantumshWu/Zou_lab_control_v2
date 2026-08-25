@@ -1275,3 +1275,41 @@ def test_reading_in_photoelectrons_is_offered_only_when_the_camera_can(
     projection = presenter.logic_editor_projection(node_id)
     assert projection["form_values"][PHOTOELECTRONS] is False
     assert projection["can_start"] is True
+
+
+def test_an_armed_silent_source_admits_a_scan_draft(session) -> None:
+    """A measurement watches FUTURE publications, so admission asks for an
+    ARMED producer, not an existing Dataset: an externally triggered chain
+    publishes nothing until the scan's own pulse fires the first trigger.
+    A source that is neither publishing nor armed stays refused, naming
+    the chain the operator must start."""
+
+    catalog = LogicCatalog()
+    descriptor = catalog.get("seamless_scan")
+    signal = "@logic/camera/frames"
+
+    def finalized(*, armed: bool):
+        plane = SimpleNamespace(
+            latest_publication=lambda _name: None,
+            is_generation_live=lambda _name: armed,
+            describe_signals=lambda: (),
+        )
+        return finalize_logic_draft(
+            descriptor,
+            LogicDraft(source_signal=signal),
+            installation=session.installation,
+            signal_plane=plane,
+            workspace=session.workspace,
+            source_options=(signal,),
+        )
+
+    source_issues = [
+        text for text in finalized(armed=True).issues if signal in text
+    ]
+    assert source_issues == []
+    dead_issues = [
+        text for text in finalized(armed=False).issues if signal in text
+    ]
+    assert dead_issues and all(
+        "no armed producer" in text for text in dead_issues
+    )

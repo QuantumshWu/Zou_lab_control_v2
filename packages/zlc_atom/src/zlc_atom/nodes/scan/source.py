@@ -25,7 +25,7 @@ point, and close at the end.
 from __future__ import annotations
 
 from zlc_runtime import SignalValue
-from zlc_runtime.streams import StreamEndedEarly
+from zlc_runtime.streams import SourceGenerationEnded, StreamEndedEarly
 
 
 def check_cancelled(context: object) -> None:
@@ -64,6 +64,33 @@ def wait_for_board(sequencer: object, context: object) -> None:
         return
 
 
+def watched_signal_source(
+    signal_plane: object,
+    source_signal: str,
+) -> "PublishedSignalSource":
+    """The armed-signal gate both scan engines start from.
+
+    A scan takes each point's value from a signal somebody else runs, so
+    that chain must be ARMED -- a live generation -- but not necessarily
+    publishing yet: an externally triggered camera publishes nothing until
+    this scan's own pulse fires, and zero frames before the first trigger
+    is exactly the aligned start.  What stays refused is a chain that is
+    not running at all, named so the operator starts it -- the scan never
+    starts anybody's camera and never judges frame alignment; both facts
+    belong to the chain's owner and to the trigger wiring.
+    """
+
+    name = str(source_signal)
+    if not signal_plane.is_generation_live(name):
+        raise ValueError(
+            f"the scan watches {name!r} for each point's value, and its "
+            "producer chain is not armed on this bench -- start the "
+            "measurement that publishes it (its pulse may stay stopped: "
+            "the scan fires its own)"
+        )
+    return PublishedSignalSource(signal_plane, name)
+
+
 class PublishedSignalSource:
     """The point's value is the next publication of a signal somebody runs.
 
@@ -79,23 +106,32 @@ class PublishedSignalSource:
         self,
         signal_plane: object,
         signal_name: str,
-        generation: object,
     ) -> None:
         self.signal_plane = signal_plane
         self.signal_name = str(signal_name)
-        self._generation = generation
         self._tap = None
 
     def open(self, context: object, *, cycles: int) -> None:
-        """Subscribe before the board is loaded, so nothing played is missed."""
+        """Subscribe before the board is loaded, so nothing played is missed.
+
+        The generation followed is whatever is armed NOW.  It need not have
+        published: an externally triggered chain publishes nothing until
+        this scan's own pulse fires its first trigger, and that silence is
+        the cleanest possible start -- frame one IS point one.  A
+        generation that ends afterwards stays loud through the tap's
+        ``StreamEndedEarly``.
+        """
 
         del context, cycles
-        baseline, tap = self.signal_plane.follow_publications(
-            self.signal_name,
-            replay=False,
-        )
-        if baseline.event_ref.generation != self._generation:
-            raise RuntimeError("the source signal restarted before the scan began")
+        try:
+            _baseline, tap = self.signal_plane.follow_publications(
+                self.signal_name,
+                replay=False,
+            )
+        except SourceGenerationEnded:
+            raise RuntimeError(
+                "the source signal's generation ended before the scan began"
+            ) from None
         self._tap = tap
 
     def _require_tap(self):
@@ -163,4 +199,4 @@ class PublishedSignalSource:
         return {"source_signal": self.signal_name}
 
 
-__all__ = ["PublishedSignalSource"]
+__all__ = ["PublishedSignalSource", "watched_signal_source"]
