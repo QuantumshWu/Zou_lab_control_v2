@@ -1748,7 +1748,6 @@ class RasterPlotHost:
         model: str | "FitModelSpec",
         *,
         selector_kind: SelectorKind | None = None,
-        fixed: Mapping[str, float] | None = None,
         initial: Mapping[str, float] | tuple[float, ...] | None = None,
         bounds: Mapping[str, tuple[float | None, float | None]] | None = None,
         options: "FitOptions | None" = None,
@@ -1785,7 +1784,6 @@ class RasterPlotHost:
             lambda: self._require_session().fit_async(
                 model,
                 selector_kind=selector_kind,
-                fixed=fixed,
                 initial=initial,
                 bounds=bounds,
                 options=options,

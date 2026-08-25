@@ -84,7 +84,6 @@ from .fit import (
     FitOptions,
     FitParameterDisplay,
     FitResult,
-    normalize_fit_target,
 )
 from .kinds import AxisRef, PlotKind
 from ._kinds import handler_for
@@ -168,7 +167,7 @@ _CONFIGURATION_STATE_NAMES = (
     "_viewport", "_focused_facet_index", "_facet_focus_index", "_accepted_fit",
     "_classifier_results", "_classifier_overlays", "_classifier_thresholds",
     "_classifier_gaussian_components",
-    "_fit_expression_draft", "_fit_expression_error",
+    "_fit_expression_failure",
     "_layout_revision", "_size", "_fit_context_generation",
     "_fit_request_generation", "_fit_batch_revision", "_fit_cancel",
     "_live_fit_cancel", "_live_fit_request", "_live_fit_future",
@@ -213,7 +212,6 @@ class DisplayDescription:
     fit: Mapping[str, object]
     fit_models: tuple[FitModelSpec, ...]
     fit_expression: str
-    fit_expression_hints: Mapping[str, str]
     fit_expression_error: str
 
     def __post_init__(self) -> None:
@@ -261,12 +259,6 @@ class DisplayDescription:
             raise TypeError("display description facet_focus must be non-negative")
         if not isinstance(self.fit, Mapping):
             raise TypeError("display description fit must be a mapping")
-        for name in (
-            "fit_expression",
-            "fit_expression_error",
-        ):
-            if not isinstance(getattr(self, name), str):
-                raise TypeError(f"display description {name} must be text")
         object.__setattr__(self, "selectors", selectors)
         object.__setattr__(self, "classifier_thresholds", thresholds)
         object.__setattr__(
@@ -274,30 +266,12 @@ class DisplayDescription:
             "facet_focus",
             None if focus is None else int(focus),
         )
-        object.__setattr__(
-            self,
-            "fit",
-            MappingProxyType(normalize_fit_target(self.fit)),
-        )
+        object.__setattr__(self, "fit", MappingProxyType(dict(self.fit)))
         if self.selection_subject.plot_kind is not semantic_spec(self.spec).kind:
             raise ValueError(
                 "display description selection subject differs from its semantic spec"
             )
-        models = tuple(self.fit_models)
-        if not isinstance(self.fit_expression_hints, Mapping):
-            raise TypeError("display description fit_expression_hints must be a mapping")
-        hints = {
-            str(model): str(hint)
-            for model, hint in self.fit_expression_hints.items()
-        }
-        if set(hints) != {model.model_id for model in models}:
-            raise ValueError("fit expression hints must describe every fit model")
-        object.__setattr__(self, "fit_models", models)
-        object.__setattr__(
-            self,
-            "fit_expression_hints",
-            MappingProxyType(hints),
-        )
+        object.__setattr__(self, "fit_models", tuple(self.fit_models))
         parameter_choices = {
             str(name): tuple(values)
             for name, values in self.parameter_choices.items()
@@ -517,8 +491,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             raise TypeError("fit_engine must be FitEngine or None")
         self._fit_engine = fit_engine or FitEngine()
         self._accepted_fit: _AcceptedFit | None = None
-        self._fit_expression_draft = ""
-        self._fit_expression_error = ""
+        self._fit_expression_failure: tuple[str, str] | None = None
         self._classifier_results: tuple[FitResult | None, ...] = ()
         self._classifier_overlays = ()
         self._classifier_thresholds: tuple[float | None, ...] = ()
@@ -958,6 +931,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             accepted = self._accepted_fit
             fit: dict[str, object] = {}
             fit_expression = ""
+            fit_expression_error = ""
             if accepted is not None:
                 request = accepted.request
                 fit["model"] = str(request.model.model_id)
@@ -975,10 +949,19 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                             )
                         )
                     )
-                if request.fixed is not None:
-                    fit["fixed"] = dict(request.fixed)
                 if request.bounds is not None:
                     fit["bounds"] = dict(request.bounds)
+                    fixed = {
+                        name: pair[0]
+                        for name, pair in request.bounds.items()
+                        if pair[0] is not None and pair[0] == pair[1]
+                    }
+                    if fixed:
+                        fit["fixed"] = fixed
+                        for name in fixed:
+                            fit["bounds"].pop(name)
+                        if not fit["bounds"]:
+                            fit.pop("bounds")
                 if request.options is not None:
                     fit["options"] = {
                         "loss": request.options.loss,
@@ -988,15 +971,13 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     }
                 if request.all_facets:
                     fit["fit_all_facets"] = True
-                fit_expression = (
-                    self._fit_expression_draft
-                    if self._fit_expression_error
-                    else self._projected.fit_expression_text(
-                        request.model,
-                        fit,
+                failure = self._fit_expression_failure
+                if failure is None:
+                    fit_expression = self._projected.fit_expression_text(
+                        request.model, fit
                     )
-                )
-            fit_models = self.fit_models
+                else:
+                    fit_expression, fit_expression_error = failure
             return DisplayDescription(
                 kind=self._spec.kind,
                 spec=self._spec,
@@ -1019,13 +1000,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 ),
                 facet_focus=self._facet_focus_index,
                 fit=fit,
-                fit_models=fit_models,
+                fit_models=self.fit_models,
                 fit_expression=fit_expression,
-                fit_expression_hints={
-                    model.model_id: self._projected.fit_expression_hint(model)
-                    for model in fit_models
-                },
-                fit_expression_error=self._fit_expression_error,
+                fit_expression_error=fit_expression_error,
             )
 
     def describe_semantics(self) -> SemanticDescription:

@@ -11,7 +11,6 @@ from zlc_plot import (
     PlotKind,
     describe_semantics,
     normalize_classifier_threshold_targets,
-    normalize_fit_target,
 )
 from zlc_plot.semantics import composed_spec
 
@@ -22,7 +21,7 @@ __all__ = [
     "allows_image_overlay",
     "control_document",
     "fit_output_fields",
-    "merge_fit_target",
+    "fit_edit_targets",
     "panel_data_shape",
     "panel_state_from_description",
     "panel_surface_from_description",
@@ -31,29 +30,26 @@ __all__ = [
 ]
 
 
-def merge_fit_target(
+def fit_edit_targets(
     current: Mapping[str, object],
     changes: Mapping[str, object],
-) -> dict[str, object]:
-    """Merge one canonical fit edit, clearing model-specific old values."""
+) -> tuple[dict[str, object], dict[str, object] | None]:
+    """Return canonical state and optional transient expression request."""
 
-    previous = dict(current)
     edited = dict(changes)
-    if "model" in edited:
-        selected = edited["model"]
-        if selected is None or not str(selected).strip():
-            return {}
-        if str(selected) != str(previous.get("model") or ""):
-            previous = {
-                name: value
-                for name, value in previous.items()
-                if name in {"selector_kind", "options", "fit_all_facets"}
-            }
-    previous.update(edited)
-    for name in ("fixed", "initial", "bounds"):
-        if name in previous and not previous[name]:
-            previous.pop(name)
-    return normalize_fit_target(previous)
+    expression = edited.pop("expression", None)
+    merged = dict(current)
+    if "model" in edited and edited["model"] != merged.get("model"):
+        for name in ("fixed", "initial", "bounds", "options"):
+            merged.pop(name, None)
+    merged.update(edited)
+    if not str(merged.get("model") or "").strip():
+        if expression is not None:
+            raise ValueError("choose a fit model before entering parameters")
+        return {}, None
+    if expression is None:
+        return merged, None
+    return merged, {**merged, "expression": str(expression)}
 
 
 def panel_data_shape(
@@ -160,18 +156,11 @@ def panel_surface_from_description(
     display = tuple(control_document(control) for control in controls)
     resolved_models = tuple(description.fit_models)
     accepted_fit = dict(description.fit)
-    accepted_model = accepted_fit.get("model")
+    current_model = accepted_fit.get("model")
     model_choices = [
         (str(model.display_name), str(model.model_id))
         for model in resolved_models
     ]
-    authored_model = state.fit.get("model")
-    current_model = (
-        authored_model
-        if authored_model is not None
-        and any(str(authored_model) == value for _label, value in model_choices)
-        else accepted_model
-    )
     if current_model is not None and not any(
         current_model == value for _label, value in model_choices
     ):
@@ -195,19 +184,13 @@ def panel_surface_from_description(
                 "key": "expression",
                 "label": "Parameters",
                 "kind": "text",
-                "value": (
-                    str(description.fit_expression)
-                    if accepted_model == current_model
-                    else ""
-                ),
+                "value": str(description.fit_expression),
                 "allow_none": True,
                 "choices": (),
                 "minimum": None,
                 "maximum": None,
                 "step": None,
-                "description": str(
-                    description.fit_expression_hints.get(str(current_model), "")
-                ),
+                "description": "name=value fixes; name=guess(value) sets the initial guess",
             }
         )
     fit = tuple(fit_fields)
@@ -221,8 +204,7 @@ def panel_surface_from_description(
         "display_unavailable": "",
         "fit_unavailable": (
             ""
-            if accepted_model != current_model
-            or not description.fit_expression_error
+            if not description.fit_expression_error
             else "Parameter expression ignored; automatic fit is active: "
             + str(description.fit_expression_error)
         ),
@@ -480,11 +462,7 @@ class PanelState:
         object.__setattr__(self, "title", str(self.title))
         object.__setattr__(self, "semantic", _plain_state(self.semantic))
         object.__setattr__(self, "display", _plain_state(self.display))
-        object.__setattr__(
-            self,
-            "fit",
-            _plain_state(normalize_fit_target(self.fit)),
-        )
+        object.__setattr__(self, "fit", _plain_state(self.fit))
         published_outputs = {
             str(name): enabled
             for name, enabled in self.published_outputs.items()

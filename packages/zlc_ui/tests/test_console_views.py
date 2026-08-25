@@ -1289,12 +1289,6 @@ fit_projection = dict(
 )
 assert handle.update_panel_editor('panel-1', fit_projection)
 assert editor.parameter_forms['fit'].spec.keys == ('model', 'expression')
-editor_expression = editor.parameter_forms['fit'].widget_for('expression')
-editor_expression.setText('center_y=guess(12)')
-editor_expression.editingFinished.emit()
-assert ('state', 'panel-1', {
-    'fit': {'expression': 'center_y=guess(12)'}
-}) in events
 assert handle.update_panel_editor('panel-1', projection)
 locked_surface = dict(surface, science_locked=True)
 handle.set_panel_projection('panel-1', state, locked_surface)

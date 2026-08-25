@@ -669,18 +669,6 @@ def test_complete_configuration_fits_clears_and_noops_as_one_front(
         assert unchanged.front is fitted.front
         assert solve_count == 1
 
-        overlapping = host.configure(
-            fit={
-                "model": "gaussian_offset",
-                "fixed": {"center": 0.3},
-                "initial": {"center": 1.5, "sigma": 0.9},
-            },
-            **desired,
-        ).result(timeout=30)
-        assert overlapping.value.fit_expression == (
-            "sigma=guess(0.9), center=0.3"
-        )
-
         expressed = host.configure(
             fit={
                 "model": "gaussian_offset",
@@ -704,7 +692,7 @@ def test_complete_configuration_fits_clears_and_noops_as_one_front(
         ).result(timeout=30)
         assert automatic.value.fit == {"model": "gaussian_offset"}
         assert automatic.value.fit_expression == "missing=1"
-        assert "unknown parameter" in automatic.value.fit_expression_error
+        assert "fit parameter" in automatic.value.fit_expression_error
         assert automatic.front is not expressed.front
 
         cleared = host.configure(fit={}, **desired).result(timeout=30)

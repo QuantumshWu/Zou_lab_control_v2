@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import ast
 from dataclasses import dataclass, field, replace
 from enum import Enum
-import keyword as _keyword
 import math
 from numbers import Real
 import threading
@@ -20,7 +18,6 @@ from scipy.signal import find_peaks
 
 from ._validation import finite_real as _finite_real
 from ._validation import integer, text as _text
-from .fit_target import normalize_fit_target
 from .kinds import AxisRef
 
 if TYPE_CHECKING:
@@ -53,119 +50,6 @@ _COUNT_FLOOR = 1e-9
 _REGULAR_IMAGE_CAPABILITIES = frozenset(
     {"regular_image_radial", "regular_image_separable"}
 )
-
-
-def _fit_expression_number(node: ast.AST) -> float:
-    sign = 1.0
-    while isinstance(node, ast.UnaryOp) and isinstance(
-        node.op,
-        (ast.UAdd, ast.USub),
-    ):
-        if isinstance(node.op, ast.USub):
-            sign = -sign
-        node = node.operand
-    if (
-        not isinstance(node, ast.Constant)
-        or isinstance(node.value, bool)
-        or not isinstance(node.value, (int, float))
-    ):
-        raise ValueError("fit expression values must be numeric literals")
-    value = sign * float(node.value)
-    if not math.isfinite(value):
-        raise ValueError("fit expression values must be finite")
-    return 0.0 if value == 0.0 else value
-
-
-def parse_fit_expression(
-    expression: str,
-    parameter_names: Sequence[str],
-) -> tuple[Mapping[str, float], Mapping[str, float]]:
-    """Parse strict ``name=value`` / ``name=guess(value)`` fit authoring."""
-
-    if not isinstance(expression, str):
-        raise TypeError("fit expression must be text")
-    if "\n" in expression or "\r" in expression:
-        raise ValueError("fit expression must occupy one line")
-    names = tuple(_text(name, "fit expression parameter name") for name in parameter_names)
-    if (
-        len(names) != len(set(names))
-        or any(not name.isidentifier() or _keyword.iskeyword(name) for name in names)
-    ):
-        raise ValueError(
-            "fit expression parameter names must be unique identifiers"
-        )
-    source = expression.strip()
-    if not source:
-        return MappingProxyType({}), MappingProxyType({})
-    try:
-        parsed = ast.parse(f"_fit_({source})", mode="eval").body
-    except SyntaxError as error:
-        raise ValueError("invalid fit expression") from error
-    if (
-        not isinstance(parsed, ast.Call)
-        or not isinstance(parsed.func, ast.Name)
-        or parsed.func.id != "_fit_"
-        or parsed.args
-    ):
-        raise ValueError("fit expression must contain keyword assignments")
-    fixed: dict[str, float] = {}
-    initial: dict[str, float] = {}
-    allowed = set(names)
-    for keyword in parsed.keywords:
-        name = keyword.arg
-        if name is None:
-            raise ValueError("fit expression does not accept ** expansion")
-        if name not in allowed:
-            raise ValueError(f"fit expression names unknown parameter {name!r}")
-        if name in fixed or name in initial:
-            raise ValueError(f"fit expression repeats parameter {name!r}")
-        node = keyword.value
-        target = fixed
-        if isinstance(node, ast.Call):
-            if (
-                not isinstance(node.func, ast.Name)
-                or node.func.id != "guess"
-                or len(node.args) != 1
-                or node.keywords
-            ):
-                raise ValueError("fit expression only allows guess(value)")
-            target = initial
-            node = node.args[0]
-        target[name] = _fit_expression_number(node)
-    return MappingProxyType(fixed), MappingProxyType(initial)
-
-
-def format_fit_expression(
-    fixed: Mapping[str, float],
-    initial: Mapping[str, float],
-    parameter_names: Sequence[str],
-) -> str:
-    """Format one canonical fit expression in stable model-parameter order."""
-
-    if not isinstance(fixed, Mapping) or not isinstance(initial, Mapping):
-        raise TypeError("fit expression fixed and initial values must be mappings")
-    names = tuple(_text(name, "fit expression parameter name") for name in parameter_names)
-    if (
-        len(names) != len(set(names))
-        or any(not name.isidentifier() or _keyword.iskeyword(name) for name in names)
-    ):
-        raise ValueError(
-            "fit expression parameter names must be unique identifiers"
-        )
-    unknown = (set(fixed) | set(initial)) - set(names)
-    if unknown:
-        raise ValueError(f"fit expression names unknown parameters: {sorted(unknown)}")
-    def literal(value: object, name: str) -> str:
-        number = _finite_real(value, f"fit expression parameter {name!r}")
-        return "0" if number == 0.0 else repr(number)
-
-    terms = []
-    for name in names:
-        if name in fixed:
-            terms.append(f"{name}={literal(fixed[name], name)}")
-        elif name in initial:
-            terms.append(f"{name}=guess({literal(initial[name], name)})")
-    return ", ".join(terms)
 
 
 class FitCancelled(RuntimeError):
@@ -208,7 +92,6 @@ class FitParameterDisplay:
     value: float
     standard_error: float | None = None
     unit: str = ""
-    fixed: bool = False
 
     def __post_init__(self) -> None:
         for field_name in ("name", "label"):
@@ -232,8 +115,6 @@ class FitParameterDisplay:
             "unit",
             _text(self.unit, "fit parameter unit", allow_empty=True),
         )
-        if not isinstance(self.fixed, bool):
-            raise TypeError("fit parameter fixed must be bool")
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,8 +137,6 @@ class FitParameterSpec:
 
     def __post_init__(self) -> None:
         name = _text(self.name, "fit parameter name")
-        if not name.isidentifier() or _keyword.iskeyword(name):
-            raise ValueError("fit parameter name must be a Python identifier")
         if not isinstance(self.unit_relation, UnitRelation):
             raise TypeError("unit_relation must be UnitRelation")
         if not isinstance(self.domain, ParameterDomain):
@@ -830,7 +709,7 @@ class FitResult:
     covariance_valid: bool = True
     parameter_units: Mapping[str, str] = field(default_factory=dict)
     batch_revision: int = 0
-    fixed_parameters: Mapping[str, float] = field(default_factory=dict)
+    fixed_parameter_names: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.model, FitModelSpec):
@@ -843,28 +722,8 @@ class FitResult:
             raise ValueError("fit parameter/error shapes disagree with model")
         if covariance.shape != (count, count):
             raise ValueError("fit covariance shape disagrees with model")
-        if not isinstance(self.fixed_parameters, Mapping):
-            raise TypeError("fixed_parameters must be a mapping")
-        fixed_parameters = {
-            _text(name, "fixed fit parameter name"): _finite_real(
-                value,
-                f"fixed fit parameter {name!r}",
-            )
-            for name, value in self.fixed_parameters.items()
-        }
-        unknown_fixed = set(fixed_parameters) - set(self.model.parameter_names)
-        if unknown_fixed:
-            raise ValueError(
-                f"fixed fit parameters name unknown parameters: {sorted(unknown_fixed)}"
-            )
-        fixed_indices = tuple(
-            self.model.parameter_index(name) for name in fixed_parameters
-        )
-        for name, index in zip(fixed_parameters, fixed_indices, strict=True):
-            if float(parameters[index]) != fixed_parameters[name]:
-                raise ValueError(
-                    f"fixed fit parameter {name!r} differs from its result value"
-                )
+        fixed_names = tuple(self.fixed_parameter_names)
+        fixed_indices = tuple(self.model.parameter_index(name) for name in fixed_names)
         if not isinstance(self.covariance_valid, (bool, np.bool_)):
             raise TypeError("covariance_valid must be bool")
         covariance_valid = bool(self.covariance_valid)
@@ -878,14 +737,6 @@ class FitResult:
                 raise ValueError("valid fit variances and standard errors cannot be negative")
             if not np.allclose(errors**2, diagonal, rtol=1e-10, atol=1e-15):
                 raise ValueError("standard errors must agree with fit covariance")
-            if fixed_indices and (
-                np.any(errors[list(fixed_indices)] != 0.0)
-                or np.any(covariance[list(fixed_indices), :] != 0.0)
-                or np.any(covariance[:, list(fixed_indices)] != 0.0)
-            ):
-                raise ValueError(
-                    "fixed parameter covariance rows, columns, and errors must be zero"
-                )
         else:
             covariance = np.full((count, count), np.nan, dtype=np.float64)
             errors = np.full(count, np.nan, dtype=np.float64)
@@ -933,11 +784,7 @@ class FitResult:
             object.__setattr__(self, "selected_indices", _readonly(indices))
         object.__setattr__(self, "source_revision", source_revision)
         object.__setattr__(self, "batch_revision", batch_revision)
-        object.__setattr__(
-            self,
-            "fixed_parameters",
-            MappingProxyType(fixed_parameters),
-        )
+        object.__setattr__(self, "fixed_parameter_names", fixed_names)
         object.__setattr__(
             self,
             "message",
@@ -995,7 +842,7 @@ class FitResult:
     def parameter_error_validity(self) -> Mapping[str, bool]:
         valid = bool(self.success and self.covariance_valid)
         return MappingProxyType({
-            name: valid and name not in self.fixed_parameters
+            name: valid and name not in self.fixed_parameter_names
             for name in self.parameter_names
         })
 
@@ -1046,7 +893,7 @@ class FitResult:
             "covariance_valid": self.covariance_valid,
             "parameter_units": self.parameter_units,
             "batch_revision": self.batch_revision,
-            "fixed_parameters": self.fixed_parameters,
+            "fixed_parameter_names": self.fixed_parameter_names,
         }
         values.update(overrides)
         return FitResult(**values)
@@ -1372,7 +1219,7 @@ class FacetFitBatchResult:
                         fit is None
                         or not fit.success
                         or not fit.covariance_valid
-                        or name in fit.fixed_parameters
+                        or name in fit.fixed_parameter_names
                     )
                     else float(fit.standard_errors[index])
                     for fit in self.results
@@ -1408,7 +1255,6 @@ class FitEngine:
         initial: Mapping[str, float] | Sequence[float] | None = None,
         warm_start: Mapping[str, float] | Sequence[float] | None = None,
         bounds: Mapping[str, tuple[float | None, float | None]] | None = None,
-        fixed: Mapping[str, float] | None = None,
         options: FitOptions | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> FitResult:
@@ -1444,7 +1290,6 @@ class FitEngine:
                 initial=initial,
                 warm_start=warm_start,
                 bounds=bounds,
-                fixed=fixed,
                 options=opts,
                 cancelled=cancelled,
             )
@@ -1482,28 +1327,6 @@ class FitEngine:
                 sigma = sigma[finite]
         if _DOMAIN_ANCHORED in spec.capabilities:
             spec = spec.anchored_at(float(np.min(coords[0])))
-        fixed_values = _fixed_parameter_values(spec, fixed, bounds)
-        fixed_indices = tuple(
-            index
-            for index, parameter in enumerate(spec.parameters)
-            if parameter.name in fixed_values
-        )
-        free_indices = tuple(
-            index for index in range(len(spec.parameters)) if index not in fixed_indices
-        )
-        if values.size <= len(free_indices):
-            raise ValueError("fit requires more finite observations than free parameters")
-
-        def expand_parameters(free: Sequence[float]) -> np.ndarray:
-            free_values = np.asarray(free, dtype=np.float64).reshape(-1)
-            if free_values.shape != (len(free_indices),):
-                raise ValueError("free fit parameter count differs from the fixed request")
-            complete = np.empty(len(spec.parameters), dtype=np.float64)
-            if free_indices:
-                complete[np.asarray(free_indices, dtype=np.int64)] = free_values
-            for index in fixed_indices:
-                complete[index] = fixed_values[spec.parameters[index].name]
-            return complete
         counted_observations = spec.targets == (FitTarget.HISTOGRAM,)
         solver_coords, solver_values = coords, values
         weight_roots: np.ndarray | None = None
@@ -1564,38 +1387,6 @@ class FitEngine:
             )
             return np.copysign(np.sqrt(deviance), expected - observed)
 
-        if not free_indices:
-            check()
-            complete = expand_parameters(())
-            fitted = spec.evaluate(coords, complete).reshape(-1)
-            if fitted.shape != values.shape or not np.all(np.isfinite(fitted)):
-                raise RuntimeError("fixed fit evaluation is non-finite")
-            residuals = values - fitted
-            if counted_observations:
-                quality = poisson_deviance(fitted, values)
-            elif weight_roots is not None and not binned_statistics:
-                quality = residuals * weight_roots
-            else:
-                quality = residuals
-            rss = float(np.dot(quality, quality))
-            reduced = float(rss / max(values.size, 1))
-            count = len(spec.parameters)
-            return FitResult(
-                spec,
-                complete,
-                np.zeros(count, dtype=np.float64),
-                np.zeros((count, count), dtype=np.float64),
-                fitted,
-                residuals,
-                indices,
-                data_revision,
-                True,
-                "all parameters fixed",
-                reduced,
-                covariance_valid=True,
-                fixed_parameters=fixed_values,
-            )
-
         default_bounds = (
             spec.bounds_initializer(solver_coords, solver_values)
             if spec.bounds_initializer is not None
@@ -1622,33 +1413,56 @@ class FitEngine:
                         and lower[index] < floor < upper[index]
                     ):
                         lower[index] = floor
+        fixed_names, free_indices = _fixed_parameter_partition(spec, bounds)
+        if values.size <= len(free_indices):
+            raise ValueError("fit requires more finite observations than free parameters")
+        if not free_indices:
+            fitted = spec.evaluate(coords, lower).reshape(-1)
+            if fitted.shape != values.shape or not np.all(np.isfinite(fitted)):
+                raise RuntimeError("fixed fit evaluation is non-finite")
+            residuals = values - fitted
+            quality = (
+                poisson_deviance(fitted, values)
+                if counted_observations
+                else residuals if weight_roots is None else residuals * weight_roots
+            )
+            count = len(spec.parameters)
+            return FitResult(
+                spec, lower, np.zeros(count), np.zeros((count, count)),
+                fitted, residuals, indices, data_revision, True,
+                "all parameters fixed", float(np.dot(quality, quality) / values.size),
+                fixed_parameter_names=fixed_names,
+            )
+        free_index = np.asarray(free_indices, dtype=np.int64)
+
+        def expand_parameters(free: Sequence[float]) -> np.ndarray:
+            complete = lower.copy()
+            complete[free_index] = free
+            return complete
+
         complete_seeds = _initial_candidates(
             spec,
             solver_coords,
             solver_values,
             initial,
             warm_start,
-            fixed_values,
         )
         low_inside = np.nextafter(lower, upper)
         high_inside = np.nextafter(upper, lower)
         prepared_seeds: list[np.ndarray] = []
         seen_seeds: set[bytes] = set()
         for complete_seed in complete_seeds:
-            free_seed = np.asarray(complete_seed, dtype=np.float64)[
-                list(free_indices)
-            ]
+            free_seed = np.asarray(complete_seed, dtype=np.float64)[free_index]
             free_seed = np.minimum(
-                np.maximum(free_seed, low_inside[list(free_indices)]),
-                high_inside[list(free_indices)],
+                np.maximum(free_seed, low_inside[free_index]),
+                high_inside[free_index],
             )
             key = free_seed.tobytes()
             if key not in seen_seeds:
                 seen_seeds.add(key)
                 prepared_seeds.append(free_seed)
         seeds = tuple(prepared_seeds)
-        free_lower = lower[list(free_indices)]
-        free_upper = upper[list(free_indices)]
+        free_lower, free_upper = lower[free_index], upper[free_index]
         # A histogram's observations are COUNTS, and counts have their own
         # likelihood.  Fitted as though every bin were equally certain, a tall
         # peak outvotes a sparse one by the ratio of their heights, so the
@@ -1691,7 +1505,7 @@ class FitEngine:
             jacobian = spec.evaluate_jacobian(
                 solver_coords,
                 expand_parameters(parameters),
-            )[:, list(free_indices)]
+            )[:, free_index]
             if not np.all(np.isfinite(jacobian)):
                 raise FloatingPointError("analytic fit jacobian is non-finite")
             if not counted_observations:
@@ -1791,16 +1605,11 @@ class FitEngine:
             _rss = float(np.dot(weighted, weighted))
         reduced = float(_rss / degrees)
         free_covariance, covariance_valid = _covariance(solved.jac, reduced)
-        covariance = np.zeros(
-            (len(spec.parameters), len(spec.parameters)),
-            dtype=np.float64,
-        )
-        if covariance_valid:
-            covariance[np.ix_(free_indices, free_indices)] = free_covariance
-        errors = (
-            np.sqrt(np.maximum(np.diag(covariance), 0.0))
-            if covariance_valid
-            else np.full(len(spec.parameters), np.nan, dtype=np.float64)
+        covariance, errors = _expand_fixed_covariance(
+            len(spec.parameters),
+            free_indices,
+            free_covariance,
+            covariance_valid,
         )
         return FitResult(
             spec,
@@ -1815,7 +1624,7 @@ class FitEngine:
             solved.message,
             reduced,
             covariance_valid=covariance_valid,
-            fixed_parameters=fixed_values,
+            fixed_parameter_names=fixed_names,
         )
 
 
@@ -1877,6 +1686,7 @@ def _solver_bounds(
             raise ValueError(f"{label} name unknown parameters: {sorted(unknown)}")
     for parameter in model.parameters:
         low, high = parameter.bounds
+        exact = False
         source = (
             requested
             if requested is not None and parameter.name in requested
@@ -1884,51 +1694,54 @@ def _solver_bounds(
         )
         if source is not None and parameter.name in source:
             source_low, source_high = source[parameter.name]
+            exact = (
+                source is requested
+                and source_low is not None
+                and source_high is not None
+                and float(source_low) == float(source_high)
+            )
             if source_low is not None:
                 low = max(low, float(source_low))
             if source_high is not None:
                 high = min(high, float(source_high))
-        if not low < high:
+        if low > high or (low == high and not exact):
             raise ValueError(f"empty bounds for parameter {parameter.name!r}")
         lower.append(low)
         upper.append(high)
     return np.asarray(lower), np.asarray(upper)
 
 
-def _fixed_parameter_values(
+def _fixed_parameter_partition(
     model: FitModelSpec,
-    fixed: Mapping[str, float] | None,
-    requested_bounds: Mapping[str, tuple[float | None, float | None]] | None,
-) -> Mapping[str, float]:
-    """Normalize exact parameters against their intrinsic and authored domain."""
-
-    if fixed is None:
-        return MappingProxyType({})
-    if not isinstance(fixed, Mapping):
-        raise TypeError("fixed must be a parameter mapping or None")
-    unknown = set(fixed) - set(model.parameter_names)
-    if unknown:
-        raise ValueError(f"fixed values name unknown parameters: {sorted(unknown)}")
-    requested_lower, requested_upper = _solver_bounds(
-        model,
-        None,
-        requested_bounds,
+    bounds: Mapping[str, tuple[float | None, float | None]] | None,
+) -> tuple[tuple[str, ...], tuple[int, ...]]:
+    fixed_names = {
+        name
+        for name, pair in (bounds or {}).items()
+        if pair[0] is not None and pair[1] is not None and pair[0] == pair[1]
+    }
+    return (
+        tuple(name for name in model.parameter_names if name in fixed_names),
+        tuple(
+            index
+            for index, name in enumerate(model.parameter_names)
+            if name not in fixed_names
+        ),
     )
-    normalized: dict[str, float] = {}
-    for name, raw_value in fixed.items():
-        value = _finite_real(raw_value, f"fixed fit parameter {name!r}")
-        index = model.parameter_index(name)
-        intrinsic_low, intrinsic_high = model.parameters[index].bounds
-        if not intrinsic_low <= value <= intrinsic_high:
-            raise ValueError(
-                f"fixed fit parameter {name!r} is outside its intrinsic domain"
-            )
-        if not requested_lower[index] <= value <= requested_upper[index]:
-            raise ValueError(
-                f"fixed fit parameter {name!r} is outside its requested bounds"
-            )
-        normalized[name] = value
-    return MappingProxyType(normalized)
+
+
+def _expand_fixed_covariance(
+    parameter_count: int,
+    free_indices: Sequence[int],
+    free_covariance: np.ndarray,
+    covariance_valid: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    covariance = np.zeros((parameter_count, parameter_count), dtype=np.float64)
+    if not covariance_valid:
+        return covariance, np.full(parameter_count, np.nan, dtype=np.float64)
+    if free_indices:
+        covariance[np.ix_(free_indices, free_indices)] = free_covariance
+    return covariance, np.sqrt(np.maximum(np.diag(covariance), 0.0))
 
 
 def _initial_values(
@@ -1936,7 +1749,6 @@ def _initial_values(
     coordinates: ArrayTuple,
     values: np.ndarray,
     initial: Mapping[str, float] | Sequence[float] | None,
-    fixed: Mapping[str, float] | None = None,
 ) -> np.ndarray:
     if initial is None:
         seed = np.asarray(model.initializer(coordinates, values), dtype=np.float64).reshape(-1)
@@ -1949,13 +1761,7 @@ def _initial_values(
         seed = np.asarray([defaults[name] for name in model.parameter_names], dtype=np.float64)
     else:
         seed = np.asarray(initial, dtype=np.float64).reshape(-1)
-    if seed.shape != (len(model.parameters),):
-        raise ValueError("fit initializer returned invalid parameter values")
-    if fixed:
-        seed = seed.copy()
-    for name, value in (fixed or {}).items():
-        seed[model.parameter_index(name)] = value
-    if not np.all(np.isfinite(seed)):
+    if seed.shape != (len(model.parameters),) or not np.all(np.isfinite(seed)):
         raise ValueError("fit initializer returned invalid parameter values")
     return seed
 
@@ -1966,19 +1772,10 @@ def _initial_candidates(
     values: np.ndarray,
     initial: Mapping[str, float] | Sequence[float] | None,
     warm_start: Mapping[str, float] | Sequence[float] | None = None,
-    fixed: Mapping[str, float] | None = None,
 ) -> tuple[np.ndarray, ...]:
     if warm_start is not None:
-        seeds = [_initial_values(model, coordinates, values, warm_start, fixed)]
-        seeds.extend(
-            _initial_candidates(
-                model,
-                coordinates,
-                values,
-                initial,
-                fixed=fixed,
-            )
-        )
+        seeds = [_initial_values(model, coordinates, values, warm_start)]
+        seeds.extend(_initial_candidates(model, coordinates, values, initial))
         unique: list[np.ndarray] = []
         seen: set[bytes] = set()
         for seed in seeds:
@@ -1988,14 +1785,14 @@ def _initial_candidates(
                 unique.append(seed)
         return tuple(unique)
     if initial is not None or model.candidate_initializer is None:
-        return (_initial_values(model, coordinates, values, initial, fixed),)
+        return (_initial_values(model, coordinates, values, initial),)
     candidates = tuple(model.candidate_initializer(coordinates, values))
     if not candidates:
         raise ValueError("fit initializer returned no candidates")
     unique: list[np.ndarray] = []
     seen: set[bytes] = set()
     for candidate in candidates:
-        seed = _initial_values(model, coordinates, values, candidate, fixed)
+        seed = _initial_values(model, coordinates, values, candidate)
         key = seed.tobytes()
         if key not in seen:
             seen.add(key)
@@ -3185,7 +2982,4 @@ __all__ = [
     "UnitRelation",
     "builtin_fit_models",
     "default_fit_registry",
-    "format_fit_expression",
-    "normalize_fit_target",
-    "parse_fit_expression",
 ]

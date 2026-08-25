@@ -85,7 +85,7 @@ from .panel_state import (
     PanelState,
     control_document,
     fit_output_fields,
-    merge_fit_target,
+    fit_edit_targets,
     panel_state_from_description,
     panel_data_shape,
     panel_surface_from_description,
@@ -212,8 +212,6 @@ class PanelBinding:
     #: zlc_plot control plane.  This is editor metadata, not a second authored
     #: state; accepted values still live only in ``state``.
     parameter_surface: Mapping[str, object] = field(default_factory=dict)
-    #: Last optional expression warning shown; never part of PanelState.
-    fit_expression_error: str = ""
     #: Monotonic across both Live and Edit hosts.  Plot selector revisions are
     #: host-local, so two surfaces can both emit revision 1; Runtime bridge
     #: triggers need the panel's single canonical sequence instead.
@@ -1127,16 +1125,6 @@ class ConsolePresenter:
             and _same_panel_plot_target(surface.target, binding.state)
         )
         if describes_current_target:
-            expression_error = str(
-                description.fit_expression_error or ""
-            )
-            if expression_error and expression_error != binding.fit_expression_error:
-                self._report(
-                    f"{binding.state.title}: parameter expression ignored; "
-                    f"automatic fit is active: {expression_error}",
-                    severity="warning",
-                )
-            binding.fit_expression_error = expression_error
             accepted_state = panel_state_from_description(
                 binding.state,
                 description,
@@ -1332,7 +1320,6 @@ class ConsolePresenter:
         state: PanelState | None = None,
         overlay: object = _UNCHANGED,
         display_updates: object = _UNCHANGED,
-        fit_override: object = _UNCHANGED,
         restore_interaction: bool = False,
         interaction_input: object = _UNCHANGED,
     ) -> object:
@@ -1440,11 +1427,7 @@ class ConsolePresenter:
             "semantic": semantic,
             "parameters": display,
             "size": panel_state.size,
-            "fit": (
-                dict(panel_state.fit)
-                if fit_override is _UNCHANGED
-                else dict(fit_override)
-            ),
+            "fit": dict(panel_state.fit),
             "fit_live": True,
         }
         if restore_interaction:
@@ -1946,20 +1929,7 @@ class ConsolePresenter:
         if binding is None:
             return False
         changes = dict(patch)
-        fit_expression_update: object = _UNCHANGED
-        if "fit" in changes:
-            if not isinstance(changes["fit"], Mapping):
-                self._report(
-                    f"{panel_id}: fit update must be an object",
-                    severity="error",
-                )
-                return False
-            fit_changes = dict(changes["fit"])
-            fit_expression_update = fit_changes.pop(
-                "expression",
-                _UNCHANGED,
-            )
-            changes["fit"] = fit_changes
+        fit_override: object = _UNCHANGED
         allowed = {
             "signal",
             "kind",
@@ -2087,12 +2057,22 @@ class ConsolePresenter:
                 else dict(getattr(current, name))
             )
             if name in changes:
-                values = (
-                    merge_fit_target(values, dict(changes[name]))
-                    if name == "fit"
-                    else {**values, **dict(changes[name])}
-                )
+                try:
+                    if name == "fit":
+                        values, transient = fit_edit_targets(
+                            values, dict(changes[name])
+                        )
+                        if transient is not None:
+                            fit_override = transient
+                    else:
+                        values.update(dict(changes[name]))
+                except (TypeError, ValueError) as error:
+                    self._report(
+                        f"{panel_id}: {_error_text(error)}", severity="error"
+                    )
+                    return False
             merged[name] = values
+        fit_expression_update = fit_override is not _UNCHANGED
         if "semantic" in changes and candidate_schema is not None:
             base_state = replace(
                 current,
@@ -2156,21 +2136,6 @@ class ConsolePresenter:
         except Exception as error:
             self._report(f"{panel_id}: {_error_text(error)}", severity="error")
             return False
-        fit_override: object = _UNCHANGED
-        if fit_expression_update is not _UNCHANGED:
-            selected_model = candidate.fit.get("model")
-            if selected_model is None or not str(selected_model).strip():
-                self._report(
-                    f"{panel_id}: choose a fit model before entering parameters",
-                    severity="warning",
-                )
-                return False
-            fit_override = {
-                name: value
-                for name, value in candidate.fit.items()
-                if name not in {"fixed", "initial", "bounds"}
-            }
-            fit_override["expression"] = str(fit_expression_update)
         if "display" in changes:
             # What no host could ever accept must never be STORED: an
             # inverted limit pair used to pass through here, fail the host
@@ -2215,7 +2180,7 @@ class ConsolePresenter:
                 "fit",
                 "overlay_signal",
             )
-        ) or fit_expression_update is not _UNCHANGED
+        ) or fit_expression_update
         if (
             candidate.overlay_signal
             and candidate.overlay_signal != current.overlay_signal
@@ -2267,7 +2232,7 @@ class ConsolePresenter:
         if (
             candidate == current
             and not needs_mount
-            and fit_expression_update is _UNCHANGED
+            and not fit_expression_update
         ):
             return False
         if not candidate.signal:
@@ -2429,10 +2394,13 @@ class ConsolePresenter:
                 pending = self._match_host_to_panel(
                     binding,
                     binding.host,
-                    state=candidate,
+                    state=(
+                        candidate
+                        if fit_override is _UNCHANGED
+                        else replace(candidate, fit=fit_override)
+                    ),
                     overlay=live_overlay,
                     display_updates=changes.get("display", _UNCHANGED),
-                    fit_override=fit_override,
                     restore_interaction="semantic" in changes,
                 )
                 binding.configuration = (

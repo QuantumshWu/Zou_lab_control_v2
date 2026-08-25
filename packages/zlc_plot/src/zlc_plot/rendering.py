@@ -5967,17 +5967,12 @@ class MatplotlibRenderer:
 
     @staticmethod
     def _fit_parameter_line(parameter: Any) -> str:
-        unit = f" {parameter.unit}" if parameter.unit else ""
-        if parameter.fixed:
-            return (
-                f"{parameter.label} = {_fit_parameter_value_text(parameter)}"
-                f"{unit} (fixed)"
-            )
         uncertainty = (
             "n/a"
             if parameter.standard_error is None
             else _compact_engineering(parameter.standard_error)
         )
+        unit = f" {parameter.unit}" if parameter.unit else ""
         return (
             f"{parameter.label} = {_fit_parameter_value_text(parameter)} "
             f"± {uncertainty}{unit}"

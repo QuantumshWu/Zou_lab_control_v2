@@ -43,7 +43,6 @@ class FitEvent:
 class _LiveFitRequest:
     model: "FitModelSpec"
     selector_kind: SelectorKind | None
-    fixed: Mapping[str, float] | None
     initial: Mapping[str, float] | tuple[float, ...] | None
     bounds: Mapping[str, tuple[float | None, float | None]] | None
     options: "FitOptions" | None

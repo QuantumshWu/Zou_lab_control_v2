@@ -34,7 +34,8 @@ from .fit import (
     RegularImageFitInput,
     _covariance_from_information,
     _DeferredFitData,
-    _fixed_parameter_values,
+    _expand_fixed_covariance,
+    _fixed_parameter_partition,
     _initial_candidates,
     _initial_values,
     _solver_bounds,
@@ -821,7 +822,6 @@ def fit_regular_separable_image(
     initial: Mapping[str, float] | Sequence[float] | None,
     warm_start: Mapping[str, float] | Sequence[float] | None,
     bounds: Mapping[str, tuple[float | None, float | None]] | None,
-    fixed: Mapping[str, float] | None,
     options: FitOptions,
     cancelled: Callable[[], bool] | None,
 ) -> FitResult:
@@ -840,73 +840,8 @@ def fit_regular_separable_image(
     data, index_origin = _crop_to_valid_bounds(data, check)
     context = _ImageContext(data, check)
     summary = _regular_image_summary(context)
-    fixed_values = _fixed_parameter_values(model, fixed, bounds)
-    fixed_indices = tuple(
-        index
-        for index, parameter in enumerate(model.parameters)
-        if parameter.name in fixed_values
-    )
-    free_indices = tuple(
-        index
-        for index in range(len(model.parameters))
-        if index not in fixed_indices
-    )
-    if summary.count <= len(free_indices):
-        raise ValueError(
-            "fit requires more finite observations than free parameters"
-        )
-    free_index = np.asarray(free_indices, dtype=np.int64)
-    fixed_index = np.asarray(fixed_indices, dtype=np.int64)
     loss = options.loss
     full_scale = summary.scale if loss == "linear" else 1.0
-
-    if not free_indices:
-        parameters = np.asarray(
-            tuple(fixed_values[parameter.name] for parameter in model.parameters),
-            dtype=np.float64,
-        )
-        if summary.all_valid and loss == "linear":
-            final_cost, _gradient = _regular_image_linear_objective(
-                kernel, context, summary, parameters
-            )
-            normalized_rss = 2.0 * final_cost
-        else:
-            _cost, _gradient, normalized_rss, _information = (
-                _regular_image_striped_objective(
-                    kernel,
-                    context,
-                    parameters,
-                    full_scale,
-                    loss,
-                    False,
-                )
-            )
-        result_parameters = parameters.copy()
-        deferred = _DeferredFitData(
-            lambda: _regular_image_result_arrays(
-                kernel,
-                data,
-                result_parameters,
-                summary.count,
-                index_origin,
-            )
-        )
-        count = len(model.parameters)
-        return FitResult(
-            model,
-            parameters,
-            np.zeros(count, dtype=np.float64),
-            np.zeros((count, count), dtype=np.float64),
-            deferred,
-            deferred,
-            deferred,
-            data_revision,
-            True,
-            "all parameters fixed",
-            float(normalized_rss / summary.count * full_scale**2),
-            covariance_valid=True,
-            fixed_parameters=fixed_values,
-        )
 
     proxy = _regular_image_subsample(
         data, check, _REGULAR_IMAGE_SAMPLE_LIMIT, context.float_observations()
@@ -953,38 +888,24 @@ def fit_regular_separable_image(
         default_bounds[name] = (floor, high)
     lower, upper = _solver_bounds(model, default_bounds, bounds)
     lower_inside, upper_inside = np.nextafter(lower, upper), np.nextafter(upper, lower)
-    free_lower = lower[free_index]
-    free_upper = upper[free_index]
-    free_lower_inside = lower_inside[free_index]
-    free_upper_inside = upper_inside[free_index]
+    fixed_names, free_indices = _fixed_parameter_partition(model, bounds)
+    if summary.count <= len(free_indices):
+        raise ValueError("fit requires more finite observations than free parameters")
+    free_index = np.asarray(free_indices, dtype=np.int64)
 
     def expand_parameters(free: Sequence[float]) -> np.ndarray:
-        values = np.asarray(free, dtype=np.float64).reshape(-1)
-        if values.shape != (len(free_indices),):
-            raise ValueError(
-                "free fit parameter count differs from the fixed request"
-            )
-        complete = np.empty(len(model.parameters), dtype=np.float64)
-        if free_indices:
-            complete[free_index] = values
-        for index in fixed_indices:
-            complete[index] = fixed_values[model.parameters[index].name]
+        complete = lower.copy()
+        complete[free_index] = free
         return complete
 
     def prepare_parameters(parameters: Sequence[float]) -> np.ndarray:
-        complete = np.asarray(parameters, dtype=np.float64).reshape(-1).copy()
-        if complete.shape != (len(model.parameters),):
+        incoming = np.asarray(parameters, dtype=np.float64).reshape(-1)
+        if incoming.shape != (len(model.parameters),):
             raise ValueError("fit initializer returned invalid parameter values")
-        if fixed_indices:
-            complete[fixed_index] = tuple(
-                fixed_values[model.parameters[index].name]
-                for index in fixed_indices
-            )
-        if free_indices:
-            complete[free_index] = np.minimum(
-                np.maximum(complete[free_index], free_lower_inside),
-                free_upper_inside,
-            )
+        complete = expand_parameters(incoming[free_index])
+        complete[free_index] = np.clip(
+            complete[free_index], lower_inside[free_index], upper_inside[free_index]
+        )
         return complete
 
     value_range = _value_range(seed_values)
@@ -1031,8 +952,6 @@ def fit_regular_separable_image(
         parameters: np.ndarray,
     ):
         parameters = prepare_parameters(parameters)
-        if not free_indices:
-            return _SolverStatus(True, "all parameters fixed"), parameters
         parameter_scale = np.maximum(
             np.abs(parameters[free_index]), natural_scale[free_index]
         )
@@ -1050,8 +969,8 @@ def fit_regular_separable_image(
             jac=True,
             bounds=tuple(
                 zip(
-                    free_lower / parameter_scale,
-                    free_upper / parameter_scale,
+                    lower[free_index] / parameter_scale,
+                    upper[free_index] / parameter_scale,
                 )
             ),
             options=solver_options,
@@ -1071,8 +990,6 @@ def fit_regular_separable_image(
     def gradient_converged(parameters: np.ndarray, gradient: np.ndarray) -> bool:
         """Exact first-order convergence test in the solver's scaled space."""
 
-        if not free_indices:
-            return True
         parameter_scale = np.maximum(
             np.abs(parameters[free_index]), natural_scale[free_index]
         )
@@ -1111,8 +1028,8 @@ def fit_regular_separable_image(
             candidate = current.copy()
             candidate[free_index] = np.clip(
                 current[free_index] + step,
-                free_lower_inside,
-                free_upper_inside,
+                lower_inside[free_index],
+                upper_inside[free_index],
             )
             try:
                 candidate_cost, candidate_gradient = full_objective(candidate)
@@ -1221,24 +1138,19 @@ def fit_regular_separable_image(
             )
         degrees = max(summary.count - len(free_indices), 1)
         normalized_reduced = normalized_rss / degrees
-        count = len(model.parameters)
-        covariance = np.zeros((count, count), dtype=np.float64)
-        errors = np.zeros(count, dtype=np.float64)
         if free_indices:
             free_covariance, covariance_valid = _covariance_from_information(
                 information[np.ix_(free_index, free_index)],
                 normalized_reduced,
                 summary.count,
             )
-            if covariance_valid:
-                covariance[np.ix_(free_index, free_index)] = free_covariance
-                errors[free_index] = np.sqrt(
-                    np.maximum(np.diag(free_covariance), 0.0)
-                )
-            else:
-                errors.fill(np.nan)
+            covariance, errors = _expand_fixed_covariance(
+                len(model.parameters), free_indices, free_covariance, covariance_valid
+            )
         else:
             covariance_valid = True
+            covariance = np.zeros((len(model.parameters),) * 2)
+            errors = np.zeros(len(model.parameters))
         result_data, result_count = data, summary.count
         result_parameters = np.asarray(parameters, dtype=np.float64).copy()
         deferred = _DeferredFitData(
@@ -1263,23 +1175,16 @@ def fit_regular_separable_image(
             status.message,
             float(normalized_reduced * full_scale**2),
             covariance_valid=covariance_valid,
-            fixed_parameters=fixed_values,
+            fixed_parameter_names=fixed_names,
         )
 
     def solve_from_cold_seeds() -> tuple[np.ndarray, _SolverStatus, float]:
         """Moment-seeded proxy search refined through the subsample ladder."""
 
-        seeds = tuple(
-            prepare_parameters(seed)
-            for seed in _initial_candidates(
-                model,
-                seed_coordinates,
-                seed_values,
-                initial,
-                None,
-                fixed=fixed_values,
-            )
-        )
+        seeds = tuple(map(
+            prepare_parameters,
+            _initial_candidates(model, seed_coordinates, seed_values, initial, None),
+        ))
         if initial is None:
             strongest = max(abs(float(seed[0])) for seed in seeds)
             seeds = tuple(
@@ -1323,18 +1228,18 @@ def fit_regular_separable_image(
                 return parameters, status, cost
         return refined
 
+    if not free_indices:
+        cost, _gradient = full_objective(lower)
+        return build_result(
+            lower, _SolverStatus(True, "all parameters fixed"), cost
+        )
+
     warm_candidate: tuple[np.ndarray, _SolverStatus, float] | None = None
     if warm_start is not None:
         try:
-            warm = prepare_parameters(
-                _initial_values(
-                    model,
-                    seed_coordinates,
-                    seed_values,
-                    warm_start,
-                    fixed_values,
-                ),
-            )
+            warm = prepare_parameters(_initial_values(
+                model, seed_coordinates, seed_values, warm_start
+            ))
             warm_cost, warm_gradient = full_objective(warm)
             if not math.isfinite(warm_cost) or not np.all(
                 np.isfinite(warm_gradient)

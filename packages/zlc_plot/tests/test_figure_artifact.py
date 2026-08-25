@@ -51,38 +51,12 @@ def test_plot_recipe_round_trip_keeps_view_and_rejects_unknown_fields() -> None:
         size="4x4",
         viewport=viewport,
         selectors=selectors,
-        fit={
-            "model": "exponential_decay",
-            "fixed": {"offset": 0.0},
-            "initial": {"decay_time": 2.0},
-        },
     )
     decoded = decode_plot_recipe(document)
     assert decoded["viewport"] == viewport
     assert decoded["selectors"] == selectors
     assert decoded["parameters"]["show_grid"] is True
-    assert decoded["fit"] == {
-        "model": "exponential_decay",
-        "fixed": {"offset": 0.0},
-        "initial": {"decay_time": 2.0},
-    }
     assert set(decoded["parameters"]) > {"show_grid"}
 
     with pytest.raises(ValueError, match="plot recipe fields differ"):
         decode_plot_recipe({**document, "unexpected": True})
-    with pytest.raises(ValueError, match="unknown canonical fit fields"):
-        encode_plot_recipe(
-            CurvePlot(AxisRef.point("x")),
-            parameters={},
-            size="2x2",
-            fit={"model": "exponential_decay", "expression": "offset=0"},
-        )
-    invalid_fit = {
-        **document,
-        "fit": {
-            "model": "exponential_decay",
-            "expression": "offset=0",
-        },
-    }
-    with pytest.raises(ValueError, match="unknown canonical fit fields"):
-        decode_plot_recipe(invalid_fit)
