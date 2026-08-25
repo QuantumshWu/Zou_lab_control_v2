@@ -739,6 +739,7 @@ class MatplotlibRenderer:
         self._selector_topologies: dict[SceneKind, tuple[object, ...]] = {}
         self._selector_candidate: SelectorState | None = None
         self._color_limit_candidate: ColorLimitCandidate | None = None
+        self._height_bars_calls: dict[str, tuple] = {}
         self._selector_gesture_kind: SceneKind | None = None
         self._last_selectors = SelectorSnapshot(())
         self._fit_artists: list[Any] = []
@@ -3244,6 +3245,13 @@ class MatplotlibRenderer:
 
         from ._height3d_raster import HeightBarCamera, render_height_bars
 
+        # The colour-limit preview re-renders the scene with candidate
+        # limits (a clim drag moves bar HEIGHTS too -- the z axis and the
+        # colorbar are one scale), so the call that painted it is kept.
+        self._height_bars_calls[key] = (
+            axes, values, valid, extent, state, cmap_name, cmap,
+            valid_identity,
+        )
         policy = self.style.render
         if axes.axison:
             # The 2D ticks and spines say nothing about a 3D scene.
@@ -5706,6 +5714,25 @@ class MatplotlibRenderer:
         image = self._active_image_artist()
         if image is None:
             raise TypeError("color-limit preview requires an Image")
+        if self._height_bars_scene:
+            # The 2D fast path below re-gathers HEATMAP pixels, which for
+            # the 3D scene would paint a stale heatmap over it (and with
+            # no cached planes would change nothing until release).  The
+            # scene's own render is the recolour: candidate limits move
+            # both the colours and the bar heights they anchor.
+            stashed = self._height_bars_calls.get(key)
+            if stashed is not None:
+                axes, values, valid, extent, state, cmap_name, cmap, vid = (
+                    stashed
+                )
+                with style_context(self.style):
+                    self._update_height_bars_artist(
+                        axes, values, valid, extent, state, key,
+                        (float(selected[0]), float(selected[1])),
+                        cmap_name, cmap, valid_identity=vid,
+                    )
+                    image.set_clim(float(selected[0]), float(selected[1]))
+                return
         with style_context(self.style):
             limits = (float(selected[0]), float(selected[1]))
             prepared = self._artists.get(f"{key}:prepared_current")
