@@ -586,11 +586,18 @@ def test_a_scoped_image_draws_the_point_it_shows() -> None:
         )
         scoped.update_data(restarted)
         assert scoped.data_generation == "scoped-restart"
+        # The overlay is DATA-derived and dies with its run; the area
+        # selector is the OPERATOR's and survives a same-geometry
+        # restart -- the axes still name the same world, and wiping the
+        # table per run erased the marker every shot boundary.
         assert scoped.image_overlay is None
-        assert scoped.selectors == ()
-        assert selection_events[-1].change.value == "removed"
-        assert selection_events[-1].data_generation == str(
-            snapshot.ref.stream_generation.value
+        from zlc_plot.selectors import SelectorKind
+
+        assert [state.kind for state in scoped.selectors] == [
+            SelectorKind.AREA
+        ]
+        assert not any(
+            event.change.value == "removed" for event in selection_events
         )
     finally:
         scoped.close()

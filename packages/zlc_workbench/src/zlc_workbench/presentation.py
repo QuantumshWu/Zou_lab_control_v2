@@ -54,6 +54,27 @@ def _revision_of(snapshot: object) -> object | None:
     return getattr(getattr(snapshot, "ref", None), "revision", None)
 
 
+def _schema_fingerprint_of(carrier: object) -> str | None:
+    """The dataset GEOMETRY a publication or plot input describes."""
+
+    snapshot = getattr(carrier, "snapshot", carrier)
+    block = getattr(snapshot, "block", None)
+    schema = getattr(block, "schema", None)
+    if schema is None:
+        return None
+    fingerprint = getattr(schema, "fingerprint", None)
+    if callable(fingerprint):
+        fingerprint = fingerprint()
+    return None if fingerprint is None else str(fingerprint)
+
+
+def _same_geometry(left: str | None, right: str | None) -> bool:
+    """UNKNOWN geometry is not the same geometry: only two provable
+    fingerprints suppress a generation replacement."""
+
+    return left is not None and left == right
+
+
 def _generation_of(snapshot: object) -> object | None:
     snapshot = getattr(snapshot, "snapshot", snapshot)
     ref = getattr(snapshot, "ref", None)
@@ -405,6 +426,10 @@ class PlotPanelPort:
             replacing_generation = (
                 surface is not None
                 and publication_generation != shown_generation
+                and not _same_geometry(
+                    _schema_fingerprint_of(publication),
+                    _schema_fingerprint_of(surface.plot_input),
+                )
             )
             replacing_presentation = (
                 surface is None
@@ -539,9 +564,23 @@ class PlotPanelPort:
                     if surface is None
                     else _generation_of(surface.plot_input)
                 )
+                # A new RUN with the SAME geometry keeps its host: the
+                # session's own projection replacement absorbs the new
+                # generation, so the mounted widget, the operator's
+                # in-flight gesture and every subscription survive the
+                # shot boundary.  Rebuilding the host per generation tore
+                # a drag apart whenever a shot landed mid-gesture -- the
+                # mouse stayed grabbed by a widget whose host had been
+                # retired, and the drag went dead until release.
                 replace_current_host = (
                     surface is None
-                    or publication_generation != shown_generation
+                    or (
+                        publication_generation != shown_generation
+                        and not _same_geometry(
+                            _schema_fingerprint_of(plot_input),
+                            _schema_fingerprint_of(surface.plot_input),
+                        )
+                    )
                     or presentation_epoch != surface.presentation_epoch
                 )
                 shown_revision = (

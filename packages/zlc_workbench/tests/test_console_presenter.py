@@ -635,7 +635,10 @@ def test_camera_restart_drains_the_old_generation_before_replacement(
         ),
     )
     assert panel.port.last_error is None
-    assert configured_selectors and crosshair in configured_selectors[-1]
+    # The stronger property arrived with stable hosts: a same-geometry
+    # replacement run keeps the panel host, so the crosshair never needs
+    # a configure replay -- it simply SURVIVES in place.
+    assert not configured_selectors
     restored_crosshair = panel.host.selector_state(
         SelectorKind.CROSSHAIR
     ).result().value
@@ -5166,10 +5169,12 @@ def test_the_operator_viewport_survives_a_same_geometry_run(
     _one_shot(session, producer="cm")
     _settle_panel_hosts(
         presenter,
-        lambda: panel.host is not None
-        and panel.host is not first_host
-        and panel.configuration is None,
+        lambda: panel.host is not None and panel.configuration is None,
     )
+    # The stronger property landed on the way: a SAME-GEOMETRY run keeps
+    # its host entirely, so the view (and any in-flight gesture) never
+    # even needs replaying.
+    assert panel.host is first_host
     viewport = panel.host.describe_display().result(
         timeout=10
     ).value.viewport

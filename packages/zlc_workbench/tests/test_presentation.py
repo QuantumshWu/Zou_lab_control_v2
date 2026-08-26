@@ -138,7 +138,9 @@ def _advanced(value, publication, signal: str, step: int = 1):
     return advanced_value, advanced_publication
 
 
-def _regenerated(value, publication, signal: str, generation: str):
+def _regenerated(
+    value, publication, signal: str, generation: str, *, reshaped: bool = True
+):
     stream_generation = type(value.snapshot.ref.stream_generation)(generation)
     snapshot = replace(
         value.snapshot,
@@ -147,6 +149,25 @@ def _regenerated(value, publication, signal: str, generation: str):
             stream_generation=stream_generation,
         ),
     )
+    if reshaped:
+        # A DIFFERENT geometry: only a run whose schema fingerprint moved
+        # replaces the panel host; a same-geometry run updates in place.
+        block = snapshot.block
+        schema = replace(
+            block.schema,
+            repeat_axis=replace(
+                block.schema.repeat_axis,
+                name=str(block.schema.repeat_axis.name) + "-r",
+            ),
+        )
+        snapshot = replace(
+            snapshot,
+            block=replace(block, schema=schema),
+            ref=replace(
+                snapshot.ref,
+                schema_fingerprint=schema.fingerprint,
+            ),
+        )
     regenerated_value = replace(value, snapshot=snapshot)
     regenerated_publication = replace(
         publication,
@@ -997,10 +1018,16 @@ def test_same_snapshot_terminal_reanchors_pending_and_presented_identity(
     assert calls == [snapshot], "identity-only reanchor must not redraw pixels"
 
 
-def test_a_new_generation_replaces_the_plot_host_even_at_the_same_revision(
+def test_a_new_generation_replaces_the_host_only_when_the_geometry_moved(
     live_bench,
 ) -> None:
-    """Revision orders one run; generation separates two runs both at one."""
+    """Revision orders one run; generation separates two runs both at one.
+
+    A new run whose schema fingerprint MOVED replaces the host.  A run
+    with the same geometry updates the mounted host in place -- tearing
+    the host down per shot destroyed the operator's in-flight gesture
+    whenever a shot landed mid-drag.
+    """
 
     plot = pytest.importorskip("zlc_plot")
     plane, node, _sequencer, _monitor = live_bench

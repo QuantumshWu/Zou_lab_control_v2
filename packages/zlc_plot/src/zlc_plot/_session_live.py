@@ -10,7 +10,12 @@ from typing import TYPE_CHECKING, Callable
 from zlc_data import OwnedSnapshot
 from zlc_data.snapshot_projection import indexed_schemas_compatible
 
-from .data_contract import schema_equal, snapshot_revision, snapshot_schema
+from .data_contract import (
+    schema_equal,
+    snapshot_generation,
+    snapshot_revision,
+    snapshot_schema,
+)
 
 from ._fit_projection import FitProjection
 from ._session_state import (
@@ -81,7 +86,19 @@ class LiveSessionMixin:
                         or indexed_schemas_compatible(previous_schema, next_schema)
                     ):
                         raise ValueError("data schema must remain exactly constant")
-                if selected_revision <= self.data_revision:
+                generation_changed = (
+                    isinstance(data, OwnedSnapshot)
+                    and str(snapshot_generation(data))
+                    != str(self.data_generation)
+                )
+                if (
+                    not generation_changed
+                    and selected_revision <= self.data_revision
+                ):
+                    # A new RUN restarts its revisions; within one run they
+                    # are strictly monotonic.  This pipeline only ever saw
+                    # one run per host while generations replaced hosts, so
+                    # the guard predates cross-run frames.
                     raise ValueError(
                         "data revision must increase: "
                         f"{selected_revision} <= {self.data_revision}"
@@ -202,12 +219,21 @@ class LiveSessionMixin:
                 ):
                     return None
                 revision = prepared.projection.data_revision
-                if revision <= self.data_revision:
+                generation_changed = str(
+                    getattr(prepared.projection, "data_generation", None)
+                ) != str(self.data_generation)
+                if not generation_changed and revision <= self.data_revision:
                     return None
                 accepted_image_overlay = (
-                    self._image_overlay
-                    if prepared.image_overlay is None
-                    else prepared.image_overlay
+                    # The overlay is DATA-derived: a new run's frame must
+                    # not inherit the outgoing run's points.
+                    prepared.image_overlay
+                    if generation_changed
+                    else (
+                        self._image_overlay
+                        if prepared.image_overlay is None
+                        else prepared.image_overlay
+                    )
                 )
             accepted_fit = None
             resolution = None

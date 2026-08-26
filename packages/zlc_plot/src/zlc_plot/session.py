@@ -1406,18 +1406,41 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             self._projection.data,
             projection.data,
         )
+
+        def _fingerprint(data: object) -> str | None:
+            block = getattr(data, "block", None)
+            schema = getattr(block, "schema", None)
+            if schema is None:
+                return None
+            fingerprint = getattr(schema, "fingerprint", None)
+            if callable(fingerprint):
+                fingerprint = fingerprint()
+            return None if fingerprint is None else str(fingerprint)
+
+        # A new generation over the SAME geometry is the bench firing
+        # again: the axes, the selectors' meaning and the fit seeds all
+        # still name the same world, so only the DATA-derived accepted
+        # results reset.  Cancelling the gesture and rebuilding the
+        # selector controller on every shot made any drag that spanned a
+        # shot boundary go dead mid-flight.
+        old_fingerprint = _fingerprint(self._projection.data)
+        new_fingerprint = _fingerprint(projection.data)
+        geometry_changed = generation_changed and not (
+            old_fingerprint is not None
+            and old_fingerprint == new_fingerprint
+        )
         if generation_changed:
             image_overlay = None
             accepted_fit = None
-        if old_count != new_count or generation_changed:
+        if old_count != new_count or geometry_changed:
             self._cancel_gesture()
         replacement_selector_controller = (
             _SelectorController()
-            if generation_changed
+            if geometry_changed
             else self._selector_controller
         )
         replacement_fit_warm_starts = (
-            {} if generation_changed else self._fit_warm_starts
+            {} if geometry_changed else self._fit_warm_starts
         )
         with self._lock:
             previous = (
@@ -3002,7 +3025,21 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         self._projection.data,
                         data,
                     )
-                    if generation_changed:
+                    # A new run over the SAME geometry keeps the operator's
+                    # selectors: the axes still name the same world, and
+                    # wiping the table per shot erased the very markers the
+                    # panel record had just mirrored.  Only a geometry
+                    # change (the event<->indexed representation flip is
+                    # the one reachable here) still clears them.
+                    previous_fingerprint = getattr(
+                        previous_schema, "fingerprint", None
+                    )
+                    next_fingerprint = getattr(next_schema, "fingerprint", None)
+                    selector_geometry_changed = generation_changed and not (
+                        previous_fingerprint is not None
+                        and previous_fingerprint == next_fingerprint
+                    )
+                    if selector_geometry_changed:
                         removed_selection_events = tuple(
                             SelectionEvent(
                                 SelectionChange.REMOVED,
@@ -3035,6 +3072,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                             image_frame.overlay,
                         )
                 else:
+                    selector_geometry_changed = False
                     next_revision = (
                         self.data_revision + 1
                         if revision is None
@@ -3053,7 +3091,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 if generation_changed:
                     projection_context = ProjectionContext(
                         display_state=self.display_state,
-                        selector_snapshot=SelectorSnapshot(()),
+                        selector_snapshot=(
+                            SelectorSnapshot(())
+                            if selector_geometry_changed
+                            else self._selector_controller.snapshot()
+                        ),
                         viewport=self._viewport,
                         focused_facet_index=self._focused_facet_index,
                     )

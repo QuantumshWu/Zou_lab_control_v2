@@ -181,11 +181,20 @@ class PanelBinding:
     #: for a history window.  The lease, not the signal declaration, is the
     #: resource owner.
     history_lease: IndexedHistoryLease | None = None
-    #: Last display revision the sync settled per surface (id(host) keys):
+    #: Last display revision the sync settled per surface (host_id keys):
     #: callbacks arrive asynchronously, and a reordered stale echo read as
     #: a fresh edit ping-ponged the two surfaces between the last two
     #: values.  Monotonic ordering makes the mirror convergent.
     display_sync_revisions: dict = field(default_factory=dict)
+    #: Values the mirror pushed to each surface and has not yet seen come
+    #: back (host_id -> name -> queue of expected values).  Ordering alone
+    #: cannot break the CROSS-host loop: a quick second edit makes the
+    #: sibling's echo of the FIRST arrive as a legitimately newer revision
+    #: carrying the older value, which read as an operator edit and
+    #: ping-ponged both surfaces between the last two values.  An echo is
+    #: recognized by VALUE and consumed; a mismatch means the operator
+    #: really edited that surface meanwhile, and the expectation clears.
+    display_sync_echoes: dict = field(default_factory=dict)
     #: Edit deliberately keeps one frozen data revision until Refresh.  It is
     #: not panel configuration and therefore does not live in ``PanelState``.
     frozen_data: PanelFrozenData | None = None
@@ -4191,11 +4200,27 @@ class ConsolePresenter:
             if seen is not None and revision <= seen:
                 return
             binding.display_sync_revisions[source_key] = revision
+        source_key = getattr(source, "host_id", None) or id(source)
+        expected = binding.display_sync_echoes.get(source_key, {})
+        echoed: set[str] = set()
+        for name in tuple(expected):
+            queue = expected[name]
+            if queue and values.get(name) == queue[0]:
+                queue.pop(0)
+                echoed.add(name)
+                if not queue:
+                    expected.pop(name)
+            elif name in dict(values):
+                # The surface answered with something we never pushed:
+                # the operator edited it there, so the expectation is
+                # void and the value is a real edit.
+                expected.pop(name)
         recorded = dict(binding.state.display)
         changed = {
             str(name): value
             for name, value in dict(values).items()
             if recorded.get(str(name)) != value
+            and str(name) not in echoed
         }
         if not changed:
             return
@@ -4218,6 +4243,10 @@ class ConsolePresenter:
                 or (host is binding.editor_host and binding.frozen_stale)
             ):
                 continue
+            target_key = getattr(host, "host_id", None) or id(host)
+            pending = binding.display_sync_echoes.setdefault(target_key, {})
+            for name, value in changed.items():
+                pending.setdefault(name, []).append(value)
             host.set_parameters(changed)
 
     def _enqueue_panel_crosshair(
