@@ -68,13 +68,14 @@ def test_offscreen_semantic_combos_use_unique_labeled_choices() -> None:
 
 
 @pytest.mark.gui
-def test_offscreen_semantic_kind_combo_offers_only_usable_kinds() -> None:
-    """The kind combo lists exactly the kinds that can be switched to.
+def test_offscreen_semantic_kind_combo_lists_every_kind_the_data_admits() -> None:
+    """The kind combo lists every kind this dataset can host.
 
-    An editor never shows an option that cannot be used.  A repeated scalar
-    series can use its authored point coordinate as the facet and a histogram
-    as each cell; repeat remains reduced.  With only one repeat there is no
-    distribution cell, and an image still needs a second dimension.
+    Whether a kind has an OBVIOUS default is a different question from
+    whether the operator may choose it: a grid the data does not
+    obviously want is still one they may build, and the fate table is
+    where they say what it faces.  What stays out is a kind the data
+    cannot host at all -- an image still needs a second dimension.
     """
 
     try:
@@ -105,7 +106,10 @@ def test_offscreen_semantic_kind_combo_offers_only_usable_kinds() -> None:
     try:
         panel = Qt5ParameterPanel(session.describe_display())
         editor = panel.semantic_editor("kind")
-        assert editor.findData(FacetGridPlot.kind) < 0
+        # No automatic grid exists for a scalar sweep with nothing to face
+        # across, and the operator may still ask for one.
+        assert editor.findData(FacetGridPlot.kind) >= 0
+        # An image needs two dimensions; this dataset has one.
         assert editor.findData(ImagePlot.kind) < 0
     finally:
         if panel is not None:

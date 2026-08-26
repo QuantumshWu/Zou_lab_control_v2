@@ -475,6 +475,24 @@ def _with_reduced(spec: PlotSpec, reduced: tuple[AxisRef, ...]) -> PlotSpec:
     return replace(spec, cell=updated)
 
 
+def _chosen_spec(
+    schema: DatasetSchema | None, current: PlotSpec, kind: PlotKind
+) -> PlotSpec | None:
+    """The specification a KIND CHOICE lands on.
+
+    A kind with an unambiguous default takes it.  A grid the dataset does
+    not obviously want is still one the operator may build, so it starts
+    from the plot they were looking at; the fate table is where they say
+    what it should face.
+    """
+
+    if kind is PlotKind.FACET_GRID:
+        from ._kinds.facet_grid import chosen_spec
+
+        return chosen_spec(schema, semantic_spec(current))
+    return default_spec(schema, kind)
+
+
 def _declares_reduced(spec: PlotSpec) -> bool:
     """Whether this kind carries an explicit list of collapsed axes."""
 
@@ -724,10 +742,10 @@ def composed_spec(
         if not isinstance(kind, PlotKind):
             raise TypeError("semantic kind value must be PlotKind")
         if kind is not spec.kind:
-            candidate = default_spec(schema, kind)
+            candidate = _chosen_spec(schema, spec, kind)
             if candidate is None:
                 raise ValueError(
-                    f"{kind.value} has no unambiguous default for this dataset"
+                    f"{kind.value} cannot be built for this dataset"
                 )
 
     # A fate table is ONE assignment, not a sequence of role edits.  First
@@ -1076,7 +1094,14 @@ def describe_semantics(
 
     declared = _field_names(spec)
     fields: list[SemanticField] = []
-    fields.append(_field("kind", "Plot kind", spec.kind, kind_choices, True))
+    # EVERY kind this dataset admits, listed.  Whether one of them has an
+    # obvious default is a different question from whether the operator
+    # may choose it: filtering by the default silently removed a kind
+    # whose legal configurations the operator could build by hand -- a
+    # per-site distribution grid over a signal with no scan to face.
+    fields.append(
+        SemanticField("kind", "Plot kind", spec.kind, kind_choices, True)
+    )
     # ONE ROW PER AXIS.  A role picker asks "which axis is x", which is the
     # question backwards: it can leave an axis unaccounted for, or be asked to
     # put two axes in one role, and then the panel repairs something the
