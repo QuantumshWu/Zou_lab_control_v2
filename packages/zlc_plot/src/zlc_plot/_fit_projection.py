@@ -420,6 +420,18 @@ class FitProjection:
         return self._context.display_state
 
     @property
+    def spec(self) -> Any:
+        """What this projection's view and payload were built FROM.
+
+        A payload only means anything beside the spec it was projected
+        through, and a live frame is prepared long before it is committed.
+        Saying so out loud is what lets the commit refuse a frame whose
+        spec has been replaced underneath it.
+        """
+
+        return self._spec
+
+    @property
     def data_revision(self) -> int:
         return self._revision
 
