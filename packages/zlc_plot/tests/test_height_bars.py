@@ -262,6 +262,44 @@ def test_middle_drag_orbits_and_left_drag_is_inert() -> None:
         session.close()
 
 
+def test_a_hand_still_holding_the_scene_already_owns_the_view() -> None:
+    """The camera has ONE owner, and the moving hand writes to it.
+
+    A drag that keeps its turn to itself until the button comes up is a
+    view that nothing else can see: a live generation arriving mid-drag
+    mounts a replacement surface from the panel's record, and the record
+    still held the pre-drag camera -- so an operator who had not let go
+    yet watched the scene home itself.  Every frame of the drag is the
+    committed view; only the render RESOLUTION is transient.
+    """
+
+    session = _session()
+    try:
+        session.set_parameter("presentation", "height_bars")
+        session.rgba()
+        axis = next(
+            t for t in session._raster_axes_snapshot() if t.role == "image"
+        )
+        start = float(session.display_state["camera_azimuth"])
+        _pointer(session, "press", axis, 0.5, 0.5, button=2)
+        _pointer(session, "move", axis, 0.72, 0.34, button=2)
+        turned = float(session.display_state["camera_azimuth"])
+        assert turned != start, "the hand's turn is not the panel's view"
+        shown = session._renderer.height_bars_camera
+        assert shown is not None and shown.azimuth_deg == turned
+        assert session._renderer._height_bars_dragging, (
+            "a drag in flight still renders on the drag's budget"
+        )
+        # Whatever takes the pointer away -- a replacement surface, a
+        # layout rebuild, a window losing focus -- ends the DRAG.  It
+        # does not get to move the view back.
+        session.cancel_interaction()
+        assert float(session.display_state["camera_azimuth"]) == turned
+        assert not session._renderer._height_bars_dragging
+    finally:
+        session.close()
+
+
 def test_orbit_holds_the_camera_distance_still() -> None:
     """The scale is azimuth-invariant: an orbit must not breathe.
 
@@ -380,13 +418,12 @@ def test_drag_preview_keeps_the_chrome_typography_in_place() -> None:
                 for text in artists["texts"]
             }
         committed = chrome_positions()
-        camera = renderer.height_bars_camera
-        renderer.set_height_bars_preview(camera, dragging=True)
+        renderer.set_height_bars_dragging(True)
         try:
             session._render_current(RenderEffect.BASE_GEOMETRY)
             preview = chrome_positions()
         finally:
-            renderer.set_height_bars_preview(None)
+            renderer.set_height_bars_dragging(False)
             session._render_current(RenderEffect.BASE_GEOMETRY)
         assert set(preview) == set(committed)
         for label, (px, py) in preview.items():
@@ -936,9 +973,10 @@ def test_a_rotated_scene_never_prints_a_label_across_another(azimuth) -> None:
 
     session = _long_coordinate_session()
     try:
-        session._renderer.set_height_bars_preview(
-            HeightBarCamera(azimuth_deg=azimuth, elevation_deg=25.0)
-        )
+        session.set_parameters({
+            "camera_azimuth": azimuth,
+            "camera_elevation": 25.0,
+        })
         session.rgba()
         renderer = session._renderer
         chrome = renderer._artists["image:h3d_chrome"]
@@ -964,9 +1002,10 @@ def test_scene_labels_are_cut_off_at_the_room_the_scene_owns() -> None:
 
     session = _long_coordinate_session()
     try:
-        session._renderer.set_height_bars_preview(
-            HeightBarCamera(azimuth_deg=40.0, elevation_deg=25.0)
-        )
+        session.set_parameters({
+            "camera_azimuth": 40.0,
+            "camera_elevation": 25.0,
+        })
         session.rgba()
         renderer = session._renderer
         chrome = renderer._artists["image:h3d_chrome"]
