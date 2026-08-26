@@ -302,6 +302,102 @@ def _pointer_coalesce(args: tuple[Any, ...], _kwargs: Mapping[str, Any]) -> obje
         return "pointer-scroll"
     return None
 
+class _HandArbiter:
+    """A person's hand outranks every camera IN THE PROCESS.
+
+    :meth:`RasterPlotHost._take_next_task` already rules that a pointer
+    beats a data frame inside one host.  The bench found the identical
+    competition BETWEEN hosts: a panel's Edit surface and its live card
+    render on two threads but share one machine, and the card's
+    full-resolution committed frames -- an all-cores kernel plus a
+    GIL-held compose -- stalled the drag on the Edit surface for a third
+    of a second at a time (measured over 1024x1024 data: per-move p90
+    59 ms alone, 354 ms with the sibling live).  The ruling's true scope
+    is the machine, so the arbiter is process-wide.
+
+    Yielding costs nothing but freshness: a data frame retains only its
+    latest successor, so work deferred while the hand moves collapses to
+    one frame the moment it stops.  A hold is never a promise either --
+    it expires on its own, sized from what that host's pointer work
+    actually costs, so a hand that stops moving (or a widget that dies
+    mid-gesture) frees the board within about two frames instead of
+    starving it on a bracket that never closed.
+    """
+
+    _MINIMUM_HOLD_SECONDS = 0.04
+    _MAXIMUM_HOLD_SECONDS = 0.40
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._held: dict[str, tuple[float, float]] = {}
+        self._running: dict[str, int] = {}
+
+    def grip(self, host_key: str) -> None:
+        """Pointer work is RUNNING here: hold until it is not.
+
+        An estimate cannot cover the move it is estimating.  Sized from
+        the previous move, the hold lapsed under a move that ran longer
+        than its predecessor -- and that is exactly when a sibling frame
+        must not start, because a slow move means a loaded machine.
+        Measured, one 286 ms frame slipped through the middle of a
+        153 ms move and cost the drag a third of a second.
+        """
+
+        with self._lock:
+            self._running[host_key] = self._running.get(host_key, 0) + 1
+
+    def ungrip(self, host_key: str, cost_seconds: float) -> None:
+        """Pointer work finished: fall back to a hold sized by its cost."""
+
+        with self._lock:
+            remaining = self._running.get(host_key, 0) - 1
+            if remaining > 0:
+                self._running[host_key] = remaining
+            else:
+                self._running.pop(host_key, None)
+        self.touch(host_key, cost_seconds)
+
+    def touch(self, host_key: str, cost_seconds: float | None = None) -> None:
+        """Note pointer work, and size the hold from what it cost."""
+
+        with self._lock:
+            _expires, hold = self._held.get(host_key, (0.0, self._MINIMUM_HOLD_SECONDS))
+            if cost_seconds is not None:
+                hold = min(
+                    max(2.0 * float(cost_seconds), self._MINIMUM_HOLD_SECONDS),
+                    self._MAXIMUM_HOLD_SECONDS,
+                )
+            self._held[host_key] = (monotonic() + hold, hold)
+
+    def busy_elsewhere(self, host_key: str) -> bool:
+        """Is another host's hand moving right now?"""
+
+        now = monotonic()
+        with self._lock:
+            if any(key != host_key for key in self._running):
+                return True
+            for key, (expires, _hold) in tuple(self._held.items()):
+                if expires <= now:
+                    del self._held[key]
+                elif key != host_key:
+                    return True
+        return False
+
+    def forget(self, host_key: str) -> None:
+        with self._lock:
+            self._held.pop(host_key, None)
+            self._running.pop(host_key, None)
+
+
+#: One machine, one arbiter.
+_HANDS = _HandArbiter()
+
+#: How long a yielding worker sleeps before re-asking.  A hand moves at
+#: 60-125 Hz, so this is short enough to be invisible and long enough
+#: never to spin.
+_HAND_YIELD_POLL_SECONDS = 0.008
+
+
 @dataclass(slots=True)
 class _WorkerTask:
     callback: Callable[[], Any]
@@ -310,6 +406,9 @@ class _WorkerTask:
     coalesce_key: object | None
     after_publish: Callable[[], None] | None
     on_abort: Callable[[], None] | None
+    #: Pointer work: this task IS the operator's hand, and every other
+    #: host's speculative frame yields to it while it moves.
+    hand: bool = False
 
 
 class RasterPlotHost:
@@ -864,6 +963,7 @@ class RasterPlotHost:
         *args: Any,
         _mode: _DispatchMode,
         coalesce_key: object | None = None,
+        _hand: bool = False,
         **kwargs: Any,
     ) -> Future[RasterOperation[Any]]:
         callback = lambda: operation(*args, **kwargs)
@@ -871,6 +971,7 @@ class RasterPlotHost:
             callback,
             mode=_mode,
             coalesce_key=coalesce_key,
+            hand=_hand,
         )
 
     def dispatch(self, callback: Callable[[], None]) -> Future[RasterOperation[None]]:
@@ -1928,6 +2029,7 @@ class RasterPlotHost:
             apply,
             _mode=_DispatchMode.ADAPTIVE,
             coalesce_key=_pointer_coalesce((selected_action,), {}),
+            _hand=True,
         )
 
     def set_viewport(
@@ -2011,9 +2113,15 @@ class RasterPlotHost:
         coalesce_key: object | None = None,
         after_publish: Callable[[], None] | None = None,
         on_abort: Callable[[], None] | None = None,
+        hand: bool = False,
     ) -> Future[RasterOperation[ValueT]]:
         if not isinstance(mode, _DispatchMode):
             raise TypeError("task mode must be _DispatchMode")
+        if hand:
+            # Held from the gesture's arrival, not from its render: the
+            # sibling must stand aside BEFORE it starts a frame this
+            # move would then have to wait out.
+            _HANDS.touch(self._host_id)
         if mode is _DispatchMode.PRESENTATION:
             if not callable(after_publish) or not callable(on_abort):
                 raise TypeError("presentation task requires finalize and abort callbacks")
@@ -2027,6 +2135,7 @@ class RasterPlotHost:
             coalesce_key,
             after_publish,
             on_abort,
+            hand,
         )
         superseded: Future[RasterOperation[Any]] | None = None
         with self._condition:
@@ -2088,6 +2197,22 @@ class RasterPlotHost:
                 return candidate
         return self._pending.popleft()
 
+    def _yields_to_hand(self, task: _WorkerTask) -> bool:
+        """Does this task stand aside for a hand on another surface?
+
+        Only speculative pixels yield -- a data frame or a presentation
+        repaint, whose content the next one supersedes anyway.  CONTROL
+        work never yields: it carries answers a caller is blocked on.
+        Nor does a host without a front yet: putting a surface on screen
+        for the first time is not speculative, and a mount that happens
+        during someone else's drag (opening Edit, for one) must not wait
+        on it.
+        """
+
+        if not task.mode.publishes or self._front is None:
+            return False
+        return _HANDS.busy_elsewhere(self._host_id)
+
     def _run(self) -> None:
         try:
             try:
@@ -2144,7 +2269,17 @@ class RasterPlotHost:
                                 expired = (active, elapsed)
                                 break
                         if self._pending:
-                            task = self._take_next_task()
+                            candidate = self._take_next_task()
+                            if self._yields_to_hand(candidate):
+                                # Exactly where it came from: only a
+                                # queue-head publish task can yield, so
+                                # arrival order among frames is intact.
+                                self._pending.appendleft(candidate)
+                                self._condition.wait(
+                                    timeout=_HAND_YIELD_POLL_SECONDS
+                                )
+                                continue
+                            task = candidate
                             break
                         if self._closing:
                             return
@@ -2157,6 +2292,9 @@ class RasterPlotHost:
                     with self._condition:
                         self._condition.notify_all()
                     continue
+                started = monotonic()
+                if task.hand:
+                    _HANDS.grip(self._host_id)
                 try:
                     operation = self._execute_worker_task(
                         task.callback,
@@ -2169,9 +2307,17 @@ class RasterPlotHost:
                 else:
                     task.completion.set_result(operation)
                 finally:
+                    if task.hand:
+                        # The gap between two moves is one render long,
+                        # so the hold has to outlast a render or the
+                        # sibling slips a frame in between every pair.
+                        _HANDS.ungrip(self._host_id, monotonic() - started)
                     with self._condition:
                         self._condition.notify_all()
         finally:
+            # A dead host's hand is nobody's: expiry would free the
+            # board on its own, but a closing worker knows sooner.
+            _HANDS.forget(self._host_id)
             try:
                 session = self._session
                 if session is not None:

@@ -38,6 +38,7 @@ from zlc_plot import (
 )
 from zlc_plot.primitives import ImageFrame, ImagePointOverlay, PointStatus
 from zlc_ui import STATUS_SEVERITIES
+from zlc_plot.semantics import FATE_REDUCE, ROLE_FATES
 from zlc_plot.specs import semantic_spec, validate_authored_display
 from zlc_plot.ui import parameter_controls_for_kind
 from zlc_runtime import (
@@ -1734,12 +1735,22 @@ class ConsolePresenter:
                         focused_cell=binding.state.focused_cell,
                     )
                     if live:
-                        if binding.port is None or binding.port.accept_configuration(
+                        if binding.port is None:
+                            raise RuntimeError(
+                                "the panel has no live surface to update"
+                            )
+                        if binding.port.accept_configuration(
                             operation, target
                         ) is None:
-                            raise RuntimeError(
-                                "interactive plot front was not presented"
-                            )
+                            # A refusal here is the widget's stale-race
+                            # answer: a newer front already paints, and it
+                            # was rendered from this same session state.
+                            # The record catches up when that front is
+                            # accepted.  Reporting it turned an ordinary
+                            # race -- a shot landing while a crosshair or
+                            # a colour limit commits -- into "interactive
+                            # plot front was not presented" on the card.
+                            return
                     else:
                         binding.frozen_data = replace(
                             current,
@@ -1785,6 +1796,32 @@ class ConsolePresenter:
         """Fully configure a replacement without changing the mounted panel."""
 
         del value
+
+        # The target says WHICH DATA this projection is for; it does not
+        # say how the panel is being looked at.  It was captured when the
+        # projection was submitted, so a replacement already in flight
+        # when the operator finished a drag mounted the pre-drag camera --
+        # the record held the new one and the screen jumped back to the
+        # old one.  Identity fields still come from the target (a retarget
+        # must not be undone by a stale record); everything the operator
+        # authors comes from the record as it stands now.
+        current = binding.state
+        if (
+            current.signal == state.signal
+            and current.kind == state.kind
+            and current.cell_kind == state.cell_kind
+        ):
+            state = replace(
+                state,
+                semantic=dict(current.semantic),
+                display=dict(current.display),
+                fit=dict(current.fit),
+                size=current.size,
+                selector=dict(current.selector),
+                crosshair=dict(current.crosshair),
+                classifier_thresholds=tuple(current.classifier_thresholds),
+                focused_cell=current.focused_cell,
+            )
 
         host = self._make_host(plot_input, state)
         try:
@@ -2221,9 +2258,32 @@ class ConsolePresenter:
                     severity="error",
                 )
                 return False
+            # THE WHOLE TABLE, not just the row the operator touched.
+            # Composing the default spec with one key discarded every fate
+            # authored before it: giving spatial-x the x fate silently
+            # returned spatial-y from group to reduced, and after a vacant
+            # intermediate state the next edit started from the kind's
+            # default -- which is what made fates look like they were
+            # fighting each other.  A bag is ONE edit (composed_spec), and
+            # the bag is the panel's table with this change applied, which
+            # is exactly how a saved board is restored.
+            edited = {
+                str(name): value
+                for name, value in dict(changes["semantic"]).items()
+            }
+            authored = {
+                str(name): value
+                for name, value in dict(current.semantic).items()
+            }
+            for name, value in edited.items():
+                if value not in ROLE_FATES:
+                    continue
+                for other, held in tuple(authored.items()):
+                    if other != name and held == value:
+                        authored[other] = authored.get(name, FATE_REDUCE)
             patch_state = replace(
                 base_state,
-                semantic=dict(changes["semantic"]),
+                semantic={**authored, **edited},
                 display={},
             )
             try:
