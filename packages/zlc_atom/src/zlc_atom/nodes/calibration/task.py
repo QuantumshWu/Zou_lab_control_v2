@@ -943,7 +943,7 @@ def _save_report_images(
             samples,
             FacetGridPlot(
                 AxisRef.data("calibration.site"),
-                HistogramPlot(PlotLabels(x="Readout signal", y="Count")),
+                HistogramPlot(labels=PlotLabels(x="Readout signal", y="Count")),
                 labels=PlotLabels(title=title),
             ),
             parameters={"threshold_classifier": True},

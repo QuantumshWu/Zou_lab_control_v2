@@ -16,11 +16,16 @@ def render(renderer: Any, payload: Any, state: Any, *, axes: Any, key: str, **po
 
 def build_payload(projection: Any, view: Any, state: Any) -> None:
     window = int(state["window"])
+    spec = projection._semantic_spec()
+    collapsed = tuple(getattr(spec, "reduced", ()))
+    aggregation = getattr(spec, "reduction", None)
     if window <= 1:
         # One shot: the distribution of what was just measured.  No history is
         # consulted, and none is kept for it.
         projection._payload = view.histogram(
             bins=projection._histogram_bins(view, state),
+            reduce_axes=collapsed,
+            aggregation=aggregation,
         )
         return
 
@@ -37,6 +42,8 @@ def build_payload(projection: Any, view: Any, state: Any) -> None:
         ),
         values=values,
         valid=valid,
+        reduce_axes=collapsed,
+        aggregation=aggregation,
     )
 
 
@@ -74,7 +81,7 @@ HANDLER = KindHandler(
     "histogram",
     render,
     build_payload,
-    ("kind",),
+    ("kind", "reduction"),
     admits,
     default_spec,
     label_roles,

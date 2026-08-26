@@ -101,7 +101,7 @@ def histogram(
     values = _with_parameter_alias(parameters, "bin_count", bins, alias="bins")
     return PlotSession(
         data,
-        HistogramPlot(labels or PlotLabels()),
+        HistogramPlot(labels=labels or PlotLabels()),
         size=size,
         parameters=values,
         **session_options,

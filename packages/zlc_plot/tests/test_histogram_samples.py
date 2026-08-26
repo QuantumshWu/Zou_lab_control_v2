@@ -40,8 +40,11 @@ def test_histogram_spec_needs_no_axis_declaration() -> None:
     try:
         description = session.describe_semantics()
         names = tuple(field.name for field in description.fields)
-        assert names[0] == "kind"
-        assert tuple(name for _axis, name in description.fate_rows) == names[1:]
+        # The kind row, then one row per axis, then the reduction the
+        # collapsed axes are read under.  What a histogram declares no
+        # axis for is a ROLE: there is no x, y, group or facet to assign.
+        assert names[0] == "kind" and names[-1] == "reduction"
+        assert tuple(name for _axis, name in description.fate_rows) == names[1:-1]
         assert all(
             description.field(name).value == "pool"
             for _axis, name in description.fate_rows
@@ -162,5 +165,57 @@ def test_only_bin_edits_reproject_histogram_samples(monkeypatch) -> None:
             assert session._payload is not previous
             assert len(session._payload.counts) == bin_count
             assert len(session._payload.edges.display) == bin_count + 1
+    finally:
+        session.close()
+
+
+def test_an_axis_may_be_collapsed_before_the_values_are_binned() -> None:
+    """Pooling is the default fate of a histogram axis, not the only one.
+
+    "The distribution of every shot" and "the distribution of each site's
+    mean over shots" are two different measurements of the same data, and
+    the fate table is where the operator says which one they are looking
+    at: an axis pools, or it collapses under the reduction first.
+    """
+
+    import numpy as np
+
+    from zlc_plot import AxisRef
+    from zlc_plot.semantics import describe_semantics, fate_field_name, updated_spec
+
+    rng = np.random.default_rng(3)
+    per_site = np.array([0.2, 0.4, 0.6, 0.8, 1.0])
+    values = per_site[None, None, :] + rng.normal(scale=0.02, size=(4, 1, 5))
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=4),
+        PointTable.from_columns({"shot": [0.0]}),
+        data_axes=(Axis.create("site", values=[0.0, 1.0, 2.0, 3.0, 4.0]),),
+        dtype=np.float64,
+    )
+    session = PlotSession(
+        DatasetSnapshot(schema, values, revision=1),
+        HistogramPlot(),
+        parameters={"bin_count": 12},
+    )
+    try:
+        pooled = session._projection._payload
+        assert int(np.sum(pooled.counts)) == 20  # four shots of five sites
+
+        session.replace_spec(
+            updated_spec(
+                schema,
+                session.spec,
+                fate_field_name(AxisRef.repeat()),
+                "reduce",
+            )
+        )
+        collapsed = session._projection._payload
+        assert int(np.sum(collapsed.counts)) == 5  # one mean per site
+
+        description = describe_semantics(schema, session.spec)
+        repeat_row = description.field(fate_field_name(AxisRef.repeat()))
+        assert repeat_row.value == "reduce"
+        assert "pool" in [value for value, _label in repeat_row.choices]
+        assert session.rgba() is not None
     finally:
         session.close()

@@ -27,11 +27,11 @@ from zlc_plot.selectors import (
     (
         CurvePlot(AxisRef.point("x"), group=AxisRef.data("component")),
         ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
-        HistogramPlot(PlotLabels(title="distribution")),
+        HistogramPlot(labels=PlotLabels(title="distribution")),
         RollingPlot(group=AxisRef.data("site")),
         FacetGridPlot(
             AxisRef.data("site"),
-            HistogramPlot(PlotLabels(x="signal", y="count")),
+            HistogramPlot(labels=PlotLabels(x="signal", y="count")),
         ),
     ),
 )

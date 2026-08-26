@@ -461,6 +461,26 @@ def fate_field_name(ref: AxisRef) -> str:
     return f"{FATE_PREFIX}{suffix}"
 
 
+def _with_reduced(spec: PlotSpec, reduced: tuple[AxisRef, ...]) -> PlotSpec:
+    """Return this specification with its collapsed axes replaced.
+
+    The unwrap is the one authority's answer (``semantic_spec``); writing
+    back is its inverse, and a grid carries the cell it was handed.
+    """
+
+    semantic = semantic_spec(spec)
+    updated = replace(semantic, reduced=reduced)
+    if semantic is spec:
+        return updated
+    return replace(spec, cell=updated)
+
+
+def _declares_reduced(spec: PlotSpec) -> bool:
+    """Whether this kind carries an explicit list of collapsed axes."""
+
+    return hasattr(semantic_spec(spec), "reduced")
+
+
 def _default_fate(spec: PlotSpec) -> str:
     return FATE_POOL if semantic_spec(spec).kind is PlotKind.HISTOGRAM else FATE_REDUCE
 
@@ -495,6 +515,13 @@ def _fate_of(spec: PlotSpec, ref: AxisRef) -> object:
     scope = _scope_terms(spec)
     if ref in scope:
         return scope_fate(scope[ref])
+    # A kind whose default is POOL can still be told to collapse one axis
+    # under its reduction; the axis says so itself.
+    if any(
+        entry.physical_identity == ref.physical_identity
+        for entry in getattr(semantic, "reduced", ())
+    ):
+        return FATE_REDUCE
     return _default_fate(spec)
 
 
@@ -750,7 +777,21 @@ def composed_spec(
             if is_scope_fate(value):
                 scope[axis] = scope_coordinate_from_fate(value)
             elif value in (FATE_REDUCE, FATE_POOL):
-                pass
+                if _declares_reduced(candidate):
+                    # Not an editor field: the fate rows ARE how an axis is
+                    # collapsed or pooled, so the tuple is composed here and
+                    # applied to the kind that carries it.
+                    reduced_axes = {
+                        entry.physical_identity: entry
+                        for entry in semantic_spec(candidate).reduced
+                    }
+                    if value == FATE_REDUCE:
+                        reduced_axes[axis.physical_identity] = axis
+                    else:
+                        reduced_axes.pop(axis.physical_identity, None)
+                    candidate = _with_reduced(
+                        candidate, tuple(reduced_axes.values())
+                    )
             elif value in ROLE_FATES:
                 role = str(value)
                 if role not in declared_roles:
@@ -1052,6 +1093,10 @@ def describe_semantics(
         name = fate_field_name(ref)
         current = _fate_of(spec, ref)
         offered: list[SemanticChoice] = [(default_fate, f"({default_label})")]
+        if default_fate == FATE_POOL and _declares_reduced(spec):
+            # Pooling is the default, not the only choice: an axis may be
+            # collapsed under the reduction before the values are binned.
+            offered.append((FATE_REDUCE, "reduced"))
         if spec.kind is PlotKind.ROLLING and _is_primary_index_axis(schema, ref):
             # Rolling does not reduce the Runtime's shot index away -- it
             # ROLLS along it.  The row still offers "= Latest" and the

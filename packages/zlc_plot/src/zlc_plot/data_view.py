@@ -2063,16 +2063,78 @@ class DataView:
         bins: int | Sequence[float],
         values: NDArray[Any] | None = None,
         valid: NDArray[np.bool_] | None = None,
+        reduce_axes: Sequence[AxisRef] = (),
+        aggregation: Reduction = Reduction.MEAN,
     ) -> HistogramData:
-        """Distribution of every acquired value: the whole box is the pool."""
+        """Distribution of the acquired values.
+
+        Every axis pools into the one distribution unless it is named in
+        ``reduce_axes``, which collapses it under ``aggregation`` first --
+        the difference between the distribution of every shot and the
+        distribution of each site's mean over shots.
+        """
 
         if (values is None) != (valid is None):
             raise ValueError("histogram history values and validity must appear together")
-        return self._histogram_from_values(
-            bins,
-            self._samples.value.canonical if values is None else values,
-            valid=self._samples.valid_mask if valid is None else valid,
+        selected = self._samples.value.canonical if values is None else values
+        usable = self._samples.valid_mask if valid is None else valid
+        if reduce_axes:
+            selected, usable = self._collapse_axes(
+                selected, usable, reduce_axes, aggregation
+            )
+        return self._histogram_from_values(bins, selected, valid=usable)
+
+    def _collapse_axes(
+        self,
+        values: NDArray[Any],
+        valid: NDArray[np.bool_],
+        refs: Sequence[AxisRef],
+        aggregation: Reduction,
+    ) -> tuple[NDArray[Any], NDArray[np.bool_]]:
+        """Collapse whole box axes, keeping validity honest.
+
+        A collapsed cell is valid when it had anything to collapse; the
+        aggregation reads only the usable entries, so a partly invalid row
+        still reports the statistic of what was measured.
+        """
+
+        if not isinstance(aggregation, Reduction):
+            raise TypeError("aggregation must be Reduction")
+        dimensions = sorted(
+            {int(self._resolve(ref).dimension) for ref in refs}
         )
+        if not dimensions:
+            return values, valid
+        axes = tuple(dimensions)
+        usable = np.asarray(np.broadcast_to(valid, values.shape), dtype=bool)
+        counts = np.count_nonzero(usable, axis=axes)
+        present = counts > 0
+        as_double = values.astype(np.float64, copy=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            if aggregation in (Reduction.MEAN, Reduction.SUM):
+                totals = np.sum(as_double, axis=axes, where=usable)
+                collapsed = (
+                    np.divide(
+                        totals,
+                        counts,
+                        out=np.zeros_like(totals),
+                        where=present,
+                    )
+                    if aggregation is Reduction.MEAN
+                    else totals
+                )
+            else:
+                ufunc = np.min if aggregation is Reduction.MIN else np.max
+                collapsed = ufunc(
+                    as_double,
+                    axis=axes,
+                    where=usable,
+                    initial=(
+                        np.inf if aggregation is Reduction.MIN else -np.inf
+                    ),
+                )
+        return collapsed, present
 
     def history_values(
         self, window: int
