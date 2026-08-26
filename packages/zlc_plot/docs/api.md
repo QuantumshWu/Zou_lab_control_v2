@@ -79,6 +79,13 @@ histogram_session = histogram(snapshot, bins=80)
 rolling_session = rolling(snapshot, window=64, side_distribution=True)
 ```
 
+Rolling 的 `trailing=N` 决定每个画出的点平均多少枪：`1`（默认）就是那一枪
+自己，`N` 是最近 N 枪的均值，band 也随之变成这 N 枪的标准误。它读的是保留
+下来的矩，因此一枪 pool 的样本越多权重越大——这是均值的算术，所以在非 MEAN
+reduction 上它不起作用。窗口未填满时它就是「至今为止的均值」，不会有跳变。
+`window=` 仍然只决定看得见多少枪、永不改变数字；当 `trailing` 比 `window`
+更靠后时，runtime 的历史保留量按 `trailing` 计。
+
 `curve(...)`、`image(...)` 与 `rolling(...)` 都通过 `reduction=` 暴露与各自
 typed specification 相同的 reduction 选择；需要 topology dimension 时传入显式
 `AxisRef.point_dimension(...)`，字符串只表示 PointTable coordinate。

@@ -863,6 +863,14 @@ def history_window_requirement(
         return None
     if isinstance(semantic, HistogramPlot) and window == 1:
         return None
+    if isinstance(semantic, RollingPlot):
+        # A trailing mean reads shots the window may not show, so demand is
+        # whichever reaches further back.  Sizing retention by the visible
+        # window alone would leave the earliest points of a long trailing
+        # mean averaging a history that had already been released.
+        trailing = display.get("trailing")
+        if type(trailing) is int and trailing > window:
+            return trailing
     return window
 
 
@@ -934,7 +942,7 @@ def _parameter_schema_for_context(
         # band on a live panel and the projection computes the MEAN's
         # standard error on demand.  On a curve that is the spread of what
         # each plotted point pooled; on a rolling trace it is each shot's
-        # own pooled spread (or the running error when cumulative).  On a
+        # own pooled spread (or the trailing error when averaging).  On a
         # non-MEAN reduction the statistic does not exist and the switch
         # is inert.
         entries.append(
@@ -971,15 +979,24 @@ def _parameter_schema_for_context(
                     default=True,
                     label="Side distribution",
                 ),
-                # The running mean of every shot so far, drawn with its
-                # running standard error as the band: the live "rate
-                # converging shot by shot" view.  Inert on non-MEAN.
+                # How many shots each drawn point averages: 1 is the shot
+                # itself, N is the mean of the last N -- the live "rate
+                # over the recent past" view, with the standard error of
+                # those same N shots as its band.  It reads the retained
+                # moments, so a shot that pooled more samples weighs more,
+                # which is why it is inert on non-MEAN reductions (a mean
+                # of maxima weighted by sample counts would be a number
+                # about nothing).
                 ParameterSpec(
-                    "cumulative",
-                    bool,
+                    "trailing",
+                    int,
                     _UNCERTAINTY_EFFECTS,
-                    default=False,
-                    label="Cumulative mean",
+                    default=1,
+                    normalizer=_normalize_integer,
+                    label="Trailing mean (shots)",
+                    minimum=1,
+                    maximum=1_000_000,
+                    step=1,
                 ),
             )
         )

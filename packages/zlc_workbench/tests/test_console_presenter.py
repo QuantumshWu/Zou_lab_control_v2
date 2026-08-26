@@ -4724,7 +4724,7 @@ def test_bound_rolling_panel_offers_the_uncertainty_switch(
         str(entry["key"]) for entry in binding.parameter_surface["display"]
     }
     assert "uncertainty" in names, sorted(names)
-    assert "cumulative" in names, sorted(names)
+    assert "trailing" in names, sorted(names)
 
 
 def test_the_semantic_form_appears_the_moment_a_signal_connects(

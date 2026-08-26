@@ -84,17 +84,39 @@ class FitScope(str, Enum):
     ALL = "all"
 
 
-def _cumulative_trace(
+def _window_totals(totals: np.ndarray, span: int) -> np.ndarray:
+    """Running totals turned into totals over the last ``span`` entries.
+
+    A prefix sum answers "everything up to here"; subtracting the prefix
+    that has left the window answers "the last span".  Before the window
+    has filled, the subtracted prefix is empty, so the early points are the
+    running totals -- the trace begins as everything it has and settles
+    into the window without a discontinuity.
+    """
+
+    if span >= totals.size:
+        return totals
+    shifted = np.zeros_like(totals)
+    shifted[span:] = totals[:-span]
+    return totals - shifted
+
+
+def _trailing_trace(
     history: tuple[RollingSample, ...],
     key: tuple,
     start: int,
+    span: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Running mean and standard error over retained Runtime history, then sliced.
+    """Mean and standard error over the last ``span`` shots, then sliced.
 
     Ungrouped, each shot contributes everything it pooled (its stored
     moments), so shots pooling different sample counts weigh in correctly.
     Grouped, each shot contributes its one per-key reduced value -- for a
     per-site trace that IS the shot's one sample.
+
+    ``span`` counts SHOTS, not samples: "the mean of the last hundred
+    shots" is a statement about the recent past of the run, whatever each
+    of those shots happened to pool.
     """
 
     total = len(history)
@@ -130,9 +152,9 @@ def _cumulative_trace(
                     value,
                     value * value,
                 )
-    running_n = np.cumsum(n)
-    running_sum = np.cumsum(sums)
-    running_squares = np.cumsum(squares)
+    running_n = _window_totals(np.cumsum(n), span)
+    running_sum = _window_totals(np.cumsum(sums), span)
+    running_squares = _window_totals(np.cumsum(squares), span)
     with np.errstate(invalid="ignore", divide="ignore"):
         mean = running_sum / running_n
         spread = np.clip(
@@ -626,17 +648,18 @@ class FitProjection:
         history: tuple[RollingSample, ...],
         *,
         window: int,
-        cumulative: bool = False,
+        trailing: int = 1,
         uncertainty: bool = False,
     ) -> CurveData:
         """Build one history series per optional rolling group.
 
-        ``cumulative`` replaces every point with the running mean of all
-        retained shots up to it; ``uncertainty`` draws the band -- the running
-        standard error on a cumulative trace, each shot's own pooled
-        standard error on the plain one.  The window selects the displayed
-        tail; data older than Runtime's active bounded retention is never
-        reconstructed by Plot.
+        ``trailing`` is how many shots each drawn point averages: 1 is the
+        shot itself, N is the mean of the last N.  ``uncertainty`` draws the
+        band -- the standard error of those same N shots when averaging,
+        each shot's own pooled standard error when not.  The window selects
+        the displayed tail and never changes the numbers; data older than
+        Runtime's active bounded retention is never reconstructed by Plot,
+        so a trailing mean averages what is actually retained.
         """
 
         if window <= 0:
@@ -671,9 +694,9 @@ class FitProjection:
             canonical_values = np.full(visible_size, np.nan, dtype=float)
             valid = np.zeros(visible_size, dtype=np.bool_)
             sem = None
-            if cumulative:
-                canonical_values, running_sem, valid = _cumulative_trace(
-                    history, key, start
+            if trailing > 1:
+                canonical_values, running_sem, valid = _trailing_trace(
+                    history, key, start, trailing
                 )
                 if uncertainty:
                     sem = running_sem
