@@ -77,6 +77,8 @@ class HostBench:
         t0 = time.perf_counter()
         self.host = RasterPlotHost.from_plot(self.feed.next(), spec)
         self.host.configure(size=SIZE_PRESET)
+        if self.case.parameters:
+            self.host.configure(parameters=dict(self.case.parameters))
         self.widget = Qt5PlotWidget(self.host)
         self.widget.show()
         self.presented = Presented(self.widget)
