@@ -2200,9 +2200,23 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     and self._view is not None
                     else None
                 )
-                if effects & (
-                    RenderEffect.INTERACTION_REPROJECT | RenderEffect.LAYOUT
+                if effects & RenderEffect.LAYOUT:
+                    # The axes themselves are rebuilt: nothing a gesture
+                    # captured survives that.
+                    self._cancel_gesture()
+                elif effects & RenderEffect.INTERACTION_REPROJECT and not (
+                    isinstance(
+                        self._gesture,
+                        (_PanGesture, _OrbitGesture, _PickGesture),
+                    )
                 ):
+                    # A reprojection moves SELECTOR geometry, so a selector
+                    # or colour-limit drag must let go of its candidate.
+                    # Navigation gestures -- pan, orbit, the scene pick --
+                    # read the axes, which a colour limit does not move;
+                    # cancelling them discarded the in-flight pan and the
+                    # picture snapped back to where the drag began, mid
+                    # drag, whenever any display parameter was committed.
                     self._cancel_gesture()
                 old_plan = self.surface_plan
                 previous_projection = self._projection._with_context(

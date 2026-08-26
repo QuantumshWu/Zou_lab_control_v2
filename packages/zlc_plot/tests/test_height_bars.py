@@ -777,3 +777,35 @@ def test_the_orbit_is_continuous_across_quadrant_boundaries() -> None:
     for boundary in (90.0, 180.0, 270.0, 360.0):
         jump = step(boundary - 0.1, boundary + 0.1)
         assert jump < 4 * control, (boundary, jump, control)
+
+
+def test_a_display_commit_mid_drag_does_not_undo_the_drag() -> None:
+    """A pan or orbit reads the AXES; a colour limit does not move them.
+
+    Cancelling every gesture on INTERACTION_REPROJECT threw away the
+    in-flight candidate, so a clim commit -- or any mirrored display
+    parameter -- landing mid-drag snapped the scene back to where the
+    drag began and left the rest of the drag dead.
+    """
+
+    session = _session()
+    try:
+        session.set_parameters({
+            "presentation": "height_bars",
+            "color_min": 0.0,
+            "color_max": 1.0,
+        })
+        session.rgba()
+        axis = next(
+            t for t in session._raster_axes_snapshot() if t.role == "image"
+        )
+        start = float(session.display_state["camera_azimuth"])
+        _pointer(session, "press", axis, 0.5, 0.5, button=2)
+        _pointer(session, "move", axis, 0.62, 0.55, button=2)
+        # a display commit lands while the hand is still down
+        session.set_parameter("color_max", 0.75)
+        _pointer(session, "move", axis, 0.74, 0.60, button=2)
+        _pointer(session, "release", axis, 0.74, 0.60, button=2)
+        assert float(session.display_state["camera_azimuth"]) != start
+    finally:
+        session.close()
