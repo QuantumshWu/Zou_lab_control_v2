@@ -381,6 +381,7 @@ class ConsolePresenter:
         close_worker: Callable[[], bool] | None = None,
         review_points: Callable[[Any, ImagePointOverlay, OperatorInputRequest], object]
         | None = None,
+        manual_axis: Callable[[OperatorInputRequest], object] | None = None,
     ) -> None:
         if request_close is not None and not callable(request_close):
             raise TypeError("request_close must be callable or None")
@@ -390,6 +391,8 @@ class ConsolePresenter:
             raise TypeError("close_worker must be callable or None")
         if review_points is not None and not callable(review_points):
             raise TypeError("review_points must be callable or None")
+        if manual_axis is not None and not callable(manual_axis):
+            raise TypeError("manual_axis must be callable or None")
         self.session = session
         self.view = view
         self._make_host = make_host
@@ -403,6 +406,7 @@ class ConsolePresenter:
         self._run_off_thread = _run_inline if run_off_thread is None else run_off_thread
         self._close_worker = (lambda: True) if close_worker is None else close_worker
         self._review_points = review_points
+        self._manual_axis = manual_axis
         self.logic: dict[str, LogicBinding] = {}
         self.catalog = LogicCatalog()
         # Task identity is a command-admission projection only.  Its lifecycle,
@@ -5618,6 +5622,28 @@ class ConsolePresenter:
         finally:
             self._retire_plot_host(review_host)
 
+    def _operator_manual_axis(
+        self, binding: LogicBinding, request: OperatorInputRequest
+    ) -> None:
+        """Ask the operator for an axis nothing here can advance.
+
+        The worker is stopped at a bench knob, so the answer is the whole
+        interaction: a refusal is the operator saying stop, and it stops
+        the run rather than being retried against a hand that has moved on.
+        """
+
+        host = binding.host
+        if host is None:
+            return
+        ask = self._manual_axis
+        if ask is None:
+            raise RuntimeError("TaskConsole has no manual-axis UI")
+        response = ask(request)
+        if response is None:
+            host.cancel("operator stopped the manual scan")
+        else:
+            host.submit_operator_input(request.request_id, response)
+
     def _handle_operator_request(self, binding: LogicBinding) -> None:
         host = binding.host
         request = None if host is None else host.operator_request
@@ -5628,11 +5654,17 @@ class ConsolePresenter:
             return
         binding.operator_request_id = request.request_id
         try:
-            if request.kind != "point-selection":
+            # A request kind is protocol vocabulary, spelled where it is
+            # spoken: this console may not import the node that raises it,
+            # and a test asserts the two spellings still agree.
+            if request.kind == "point-selection":
+                self._operator_point_review(binding, request)
+            elif request.kind == "manual-axis":
+                self._operator_manual_axis(binding, request)
+            else:
                 raise RuntimeError(
                     f"TaskConsole does not support operator request {request.kind!r}"
                 )
-            self._operator_point_review(binding, request)
         except BaseException as error:
             if host is not None and host.running:
                 host.cancel(f"operator input failed: {_error_text(error)}")

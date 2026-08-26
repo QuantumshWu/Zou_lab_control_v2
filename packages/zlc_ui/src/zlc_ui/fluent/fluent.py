@@ -3054,6 +3054,16 @@ class FluentInputDialog(QtWidgets.QDialog):
         btn_row.addWidget(cancel)
         layout.addLayout(btn_row)
 
+    def text(self) -> str:
+        """What was typed, whatever it was.
+
+        ``getValue`` folds a Cancel and an unreadable number into one
+        answer, which is right for a caller that only wants a number and
+        wrong for one that has to tell a refusal from a typo.
+        """
+
+        return self._edit.text()
+
     def getValue(self):
         if self.exec_() == QtWidgets.QDialog.Accepted:
             try:

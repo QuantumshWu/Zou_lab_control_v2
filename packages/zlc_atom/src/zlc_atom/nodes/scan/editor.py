@@ -6,6 +6,13 @@ editor owns exactly one authored field -- ``plan`` -- and says so through
 ``managed_fields``, so the auto-generated form does not render the raw JSON
 beside it.
 
+A MANUAL axis is the other kind of row: a name and a point count, and no
+port at all, because nothing here can advance it.  It carries no values
+either -- the operator types those when the run asks, which is the whole
+reason the axis exists.  Manual rows sit above the machine rows and cannot
+be moved below them: an operator walks their points BETWEEN plays of the
+inner plan, so they are outside it by construction.
+
 Ports are read from the projection -- the resolved pulse template's API
 parameters, plus the bench's tunable devices for a node that can move them --
 the same set that node's binding enforces.  A board-advanced scan cannot make
@@ -29,13 +36,17 @@ from zlc_ui.fluent import (
     FluentButton,
     FluentComboBox,
     FluentDoubleSpinBox,
+    FluentLineEdit,
     FluentSpinBox,
 )
 
 from .plan import (
+    MANUAL_PARAM_FAMILY,
     ScanAxis,
     ScanPlan,
     hardware_scan_ports_for,
+    manual_axis,
+    manual_axis_name,
     scan_ports_for,
     scan_ports_for_devices,
 )
@@ -138,6 +149,10 @@ class _AxisRow(QtWidgets.QWidget):
         self.custom_label.setText("")
         self.edited.emit()
 
+    @property
+    def manual(self) -> bool:
+        return False
+
     def axis(self) -> ScanAxis:
         if self._custom_values is not None:
             return ScanAxis(str(self.port_combo.currentData()), self._custom_values)
@@ -148,6 +163,56 @@ class _AxisRow(QtWidgets.QWidget):
         return ScanAxis(
             str(self.port_combo.currentData()),
             tuple(float(value) for value in values),
+        )
+
+
+class _ManualAxisRow(QtWidgets.QWidget):
+    """One manual axis: a name, how many points, and the remove button.
+
+    Deliberately no from/to.  A manual axis's values are whatever the bench
+    turns out to give, and the run asks for them; authoring bounds here
+    would be writing down a number the operator has to contradict.
+    """
+
+    edited = QtCore.pyqtSignal()
+    remove_requested = QtCore.pyqtSignal(object)
+
+    def __init__(self, axis: ScanAxis | None, parent=None) -> None:
+        super().__init__(parent)
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.name_edit = FluentLineEdit()
+        self.name_edit.setPlaceholderText("manual axis name")
+        self.points_spin = FluentSpinBox()
+        self.points_spin.setRange(1, 100_000)
+        remove = FluentButton("×", color=GREY)
+        remove.setFixedWidth(32)
+        remove.setToolTip("Remove this axis")
+        self.remove_button = remove
+        layout.addWidget(QtWidgets.QLabel("by hand"))
+        layout.addWidget(self.name_edit, 2)
+        layout.addWidget(QtWidgets.QLabel("points"))
+        layout.addWidget(self.points_spin)
+        layout.addWidget(QtWidgets.QLabel("values asked for at the start"), 1)
+        layout.addWidget(remove)
+
+        if axis is not None:
+            self.name_edit.setText(manual_axis_name(axis.port))
+            self.points_spin.setValue(len(axis.values))
+        else:
+            self.points_spin.setValue(3)
+
+        self.name_edit.textChanged.connect(lambda _text: self.edited.emit())
+        self.points_spin.valueChanged.connect(lambda _value: self.edited.emit())
+        remove.clicked.connect(lambda: self.remove_requested.emit(self))
+
+    @property
+    def manual(self) -> bool:
+        return True
+
+    def axis(self) -> ScanAxis:
+        return manual_axis(
+            self.name_edit.text().strip(), int(self.points_spin.value())
         )
 
 
@@ -164,10 +229,14 @@ class ScanPlanEditor(QtWidgets.QWidget):
         device_ports: bool = True,
         hardware_slots: bool = False,
         only_port: str | None = None,
+        manual_axes: bool = False,
     ) -> None:
         super().__init__(parent)
         self._device_ports = bool(device_ports)
         self._hardware_slots = bool(hardware_slots)
+        # Only a node that can STOP between plays can offer one, so the
+        # editor shows the button exactly where the node would honour it.
+        self._manual_axes = bool(manual_axes)
         # A node whose measurement IS about one knob -- release-recapture is a
         # statement about t_off and nothing else -- offers that knob and no
         # way to add a second.  The row is always there, so the form opens on
@@ -179,12 +248,18 @@ class ScanPlanEditor(QtWidgets.QWidget):
         title = QtWidgets.QLabel("Scan plan")
         title.setStyleSheet("font-weight: 600;")
         self.add_button = FluentButton("Add axis", color=ACCENT)
+        self.add_manual_button = FluentButton("Add manual axis", color=GREY)
         header.addWidget(title)
         header.addStretch(1)
         if self._only_port is None:
             header.addWidget(self.add_button)
+            if self._manual_axes:
+                header.addWidget(self.add_manual_button)
+            else:
+                self.add_manual_button.hide()
         else:
             self.add_button.hide()
+            self.add_manual_button.hide()
         column.addLayout(header)
         self.rows_layout = QtWidgets.QVBoxLayout()
         column.addLayout(self.rows_layout)
@@ -197,6 +272,11 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self._loading = False
         self._plan_text = ""
         self.add_button.clicked.connect(self._add_axis)
+        self.add_manual_button.clicked.connect(self._add_manual_axis)
+        # Whether a hand can be waited for is a fact about the NODE, known
+        # at construction; the projection only ever changes which ports a
+        # machine offers.
+        self.add_manual_button.setEnabled(self._manual_axes)
 
     # ------------------------------------------------------- host contract
 
@@ -254,7 +334,10 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 except (ValueError, TypeError, json.JSONDecodeError):
                     axes = ()
             for axis in axes:
-                self._attach_row(axis)
+                if axis.port.startswith(MANUAL_PARAM_FAMILY):
+                    self._attach_manual_row(axis)
+                else:
+                    self._attach_row(axis)
             if self._only_port is not None and not self._rows and self._ports:
                 self._attach_row(None)
         finally:
@@ -269,10 +352,25 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self._rows.append(row)
         self.rows_layout.addWidget(row)
 
+    def _attach_manual_row(self, axis: ScanAxis | None) -> None:
+        row = _ManualAxisRow(axis, self)
+        row.edited.connect(self._emit_plan)
+        row.remove_requested.connect(self._remove_row)
+        # Above every machine row, because that is where it runs: the
+        # displayed order IS the nesting order, and a manual axis nested
+        # inside a fired table is not a thing the bench can do.
+        at = sum(1 for existing in self._rows if existing.manual)
+        self._rows.insert(at, row)
+        self.rows_layout.insertWidget(at, row)
+
     def _add_axis(self) -> None:
         if not self._ports:
             return
         self._attach_row(None)
+        self._emit_plan()
+
+    def _add_manual_axis(self) -> None:
+        self._attach_manual_row(None)
         self._emit_plan()
 
     def _remove_row(self, row) -> None:
@@ -307,10 +405,26 @@ class ScanPlanEditor(QtWidgets.QWidget):
             )
             return
         shape = " × ".join(str(n) for n in plan.shape)
+        manual = tuple(
+            axis for axis in plan.axes
+            if axis.port.startswith(MANUAL_PARAM_FAMILY)
+        )
+        stops = 1
+        for axis in manual:
+            stops *= len(axis.values)
+        by_hand = (
+            ""
+            if not manual
+            else (
+                f"  {stops} of those points are reached by hand: the run "
+                "asks for every manual value before it starts, then stops "
+                "at each one."
+            )
+        )
         self.summary.setText(
             f"{len(plan.axes)} axis(es), {shape} = {plan.point_count} points, "
             "outermost first; each point resolves the template, plays it, and "
-            "captures one measurement."
+            f"captures one measurement.{by_hand}"
         )
 
 
@@ -320,10 +434,12 @@ def scan_plan_editor_factory(
     device_ports: bool = True,
     only_port: str | None = None,
     hardware_slots: bool = False,
+    manual_axes: bool = False,
 ) -> ScanPlanEditor:
     return ScanPlanEditor(
         parent,
         device_ports=device_ports,
         only_port=only_port,
         hardware_slots=hardware_slots,
+        manual_axes=manual_axes,
     )

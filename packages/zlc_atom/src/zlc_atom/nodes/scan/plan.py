@@ -53,6 +53,13 @@ PULSE_PARAM_FAMILY = "pulse:param:"
 #: cannot advance it itself, so a board-advanced plan refuses it.
 DEVICE_PARAM_FAMILY = "device:"
 
+#: ``manual:<name>`` -- a knob no machine here can reach.  Nothing advances
+#: it: the run stops, the OPERATOR moves it, and the run continues.  That is
+#: what makes power, polarization and anything else that lives behind a
+#: thumbscrew scannable at all, and it is why such an axis always stands
+#: outside every axis a machine advances.
+MANUAL_PARAM_FAMILY = "manual:"
+
 #: What a file must be to be a scan's pulse template.
 SCAN_PULSE_CONTRACT = "zlc.pulse/scan-template"
 
@@ -274,6 +281,76 @@ class ScanPlan:
             for entry in tree["axes"]
         )
         return cls(axes)
+
+
+def manual_axis_name(port: str) -> str:
+    """The operator-facing name behind a ``manual:`` port."""
+
+    text = str(port)
+    if not text.startswith(MANUAL_PARAM_FAMILY):
+        raise ValueError(f"{port!r} is not a manual axis")
+    name = text[len(MANUAL_PARAM_FAMILY):].strip()
+    if not name:
+        raise ValueError("a manual axis carries a name")
+    return name
+
+
+def manual_axis(name: str, points: int) -> ScanAxis:
+    """One manual axis: a name and how many points it visits.
+
+    A manual axis authors NO values.  Nobody knows what the bench will
+    read off a power meter next Tuesday, and inventing bounds for it
+    would be authoring a number the operator has to contradict.  What
+    the document holds until the run asks is the point ordinals; the
+    operator supplies the values themselves, and those are what reach
+    the dataset as coordinates.
+    """
+
+    count = int(points)
+    if count < 1:
+        raise ValueError("a manual axis visits at least one point")
+    return ScanAxis(
+        MANUAL_PARAM_FAMILY + str(name).strip(),
+        tuple(float(index) for index in range(count)),
+    )
+
+
+def split_manual_axes(plan: ScanPlan) -> tuple[tuple[ScanAxis, ...], ScanPlan]:
+    """The operator's axes, and the plan a machine can play underneath.
+
+    A manual axis is walked by hand BETWEEN runs of the inner plan, so it
+    is outside everything a machine advances -- not a preference, a fact
+    about who moves what: the inner plan plays from one load, and a hand
+    cannot reach into it.  A plan that nests one the other way round is
+    refused here, by name, rather than silently reordered into something
+    the operator did not author.
+    """
+
+    axes = plan.axes
+    manual = tuple(
+        axis for axis in axes if axis.port.startswith(MANUAL_PARAM_FAMILY)
+    )
+    if not manual:
+        return (), plan
+    if axes[: len(manual)] != manual:
+        inside = tuple(
+            manual_axis_name(axis.port)
+            for axis in axes[len(manual):]
+            if axis.port.startswith(MANUAL_PARAM_FAMILY)
+        )
+        raise ValueError(
+            "an operator walks a manual axis between plays of the inner "
+            "plan, so it stands outside every axis a machine advances; "
+            f"move {', '.join(repr(name) for name in inside)} above the "
+            "machine axes"
+        )
+    board = axes[len(manual):]
+    if not board:
+        raise ValueError(
+            "a seamless scan plays a table the board advances; a plan of "
+            "manual axes alone has no table to play"
+        )
+    return manual, ScanPlan(board)
 
 
 def bind_plan(

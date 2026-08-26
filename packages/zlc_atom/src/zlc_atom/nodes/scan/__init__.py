@@ -21,10 +21,11 @@ from .dataset import (
     ScanDatasetWriter,
     scan_dataset_schema,
 )
-from .seamless import SeamlessScanMeasurement
+from .seamless import MANUAL_AXIS_REQUEST, SeamlessScanMeasurement
 from .plan import (
     SCAN_PLAN_SELECTIONS,
     DEVICE_PARAM_FAMILY,
+    MANUAL_PARAM_FAMILY,
     PULSE_PARAM_FAMILY,
     SCAN_PULSE_CONTRACT,
     SEAMLESS_PULSE_RESOURCE,
@@ -35,6 +36,9 @@ from .plan import (
     bind_plan,
     hardware_scan_ports_for,
     load_seamless_template,
+    manual_axis,
+    manual_axis_name,
+    split_manual_axes,
     load_stepped_template,
     slots_from_plan,
     plan_from_authored,
@@ -55,6 +59,8 @@ __all__ = [
     "check_cancelled",
     "wait_for_board",
     "DEVICE_PARAM_FAMILY",
+    "MANUAL_AXIS_REQUEST",
+    "MANUAL_PARAM_FAMILY",
     "PULSE_PARAM_FAMILY",
     "SCAN_OUTPUT",
     "SCAN_PULSE_CONTRACT",
@@ -69,6 +75,9 @@ __all__ = [
     "hardware_scan_ports_for",
     "load_seamless_template",
     "load_stepped_template",
+    "manual_axis",
+    "manual_axis_name",
+    "split_manual_axes",
     "slots_from_plan",
     "plan_from_authored",
     "scan_dataset_schema",

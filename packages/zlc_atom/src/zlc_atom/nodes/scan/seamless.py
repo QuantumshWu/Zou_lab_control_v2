@@ -26,6 +26,22 @@ table by the shot count, which is what pushed long scans past the board's
 two resident banks into streaming refill: the host then fed banks over UART
 against the clock while everything else on the link starved.
 
+A MANUAL AXIS BREAKS THE FIRE, NOT THE POINT.  An axis nobody here can
+advance -- a power knob, a waveplate -- is walked by the OPERATOR, so it
+stands outside everything a machine advances: for each of its points the
+run stops, asks, and then plays the whole inner table from one fire, still
+seamless inside.  ``repeats`` means the same thing it always did, the whole
+plan again from the top; with a manual axis in the plan it simply cannot be
+a longer fire, so it is a longer loop.
+
+THE COORDINATES COME FIRST, EVEN THE OPERATOR'S.  A dataset's schema is
+fixed by its first frame and a generation may never restate it, so every
+manual coordinate is collected BEFORE the first point plays -- the operator
+types the values, the scan then walks them and asks for each to be set in
+turn.  A number typed after the frames it describes could not be that
+run's axis; it would be a measurement about the run, which is a different
+thing and does not belong on the x axis.
+
 THE LOOP LIVES HERE, NOT IN A NODE PACKAGE, BECAUSE IT HAS TWO CONSUMERS.
 ``acquire`` plays the plan and commits each point; Runtime hands back the
 current canonical scan.  A Task that scans for a reason of its own commits its
@@ -35,6 +51,8 @@ other about what a played point means.
 
 from __future__ import annotations
 
+import itertools
+import math
 import time
 from collections.abc import Sequence
 from dataclasses import replace
@@ -49,8 +67,20 @@ from zlc_pulse import (
     scan_columns_for,
 )
 from .dataset import SCAN_OUTPUT, ScanDatasetWriter
-from .plan import PULSE_PARAM_FAMILY, ScanPlan, ScanPort
+from .plan import (
+    PULSE_PARAM_FAMILY,
+    ScanPlan,
+    ScanPort,
+    manual_axis_name,
+    split_manual_axes,
+)
 from .source import check_cancelled, wait_for_board
+
+#: The one operator-input kind this engine raises.  Its payload's ``mode``
+#: says which of the two questions is being asked: ``values`` collects a
+#: manual axis's coordinates before any data, ``set`` asks for the knob to
+#: be moved to one of them.
+MANUAL_AXIS_REQUEST = "manual-axis"
 
 
 class SeamlessScanMeasurement:
@@ -75,7 +105,15 @@ class SeamlessScanMeasurement:
         self.source = source
         self.sequence = sequence
         self.plan = plan
+        #: The operator's axes and the board's, split once: who moves an
+        #: axis decides where its loop lives, and that never changes for
+        #: the life of one measurement.
+        self.manual_axes, self.board_plan = split_manual_axes(plan)
         self.ports = ports
+        if len(ports) != len(self.board_plan.axes):
+            raise ValueError(
+                "one bound port per board axis; manual axes bind to nobody"
+            )
         self.repeats = int(repeats)
         if self.repeats < 1:
             raise ValueError("repeats must be at least 1")
@@ -172,7 +210,7 @@ class SeamlessScanMeasurement:
     def _slot_ordered_rows(
         self, rows: Sequence[Sequence[float]], columns
     ) -> tuple[tuple[float, ...], ...]:
-        """Plan rows re-ordered from axis order into the table's slot order."""
+        """Board rows re-ordered from axis order into the table's slot order."""
 
         planned = tuple(
             port.port[len(PULSE_PARAM_FAMILY):] for port in self.ports
@@ -198,52 +236,128 @@ class SeamlessScanMeasurement:
             tuple(float(row[index]) for index in order) for row in rows
         )
 
-    def acquire(self, context: object, *, on_point: object = None):
-        """Play the whole plan from one fire and return the dataset it filled.
+    def _ask(self, context: object, *, title: str, message: str, payload: dict):
+        """One question to the operator, or the refusal that names the gap."""
 
-        The live slot is attached to the caller's generation, so whoever runs
-        this loop shows the growing scan while it runs -- and then says for
-        itself what the finished dataset MEANS.
+        ask = getattr(context, "request_operator_input", None)
+        if not callable(ask):
+            raise RuntimeError(
+                "a manual axis stops the run to ask the operator for a "
+                "value, and this host offers no way to ask"
+            )
+        return ask(
+            MANUAL_AXIS_REQUEST,
+            title=title,
+            message=message,
+            payload=payload,
+        )
 
-        ``on_point`` is how a Task reads a point AS it lands: release-recapture
-        judges each cycle against the calibration the moment the camera hands
-        it over, which is the only place the cycle still exists as one cycle --
-        the finished scan dataset has folded the frames into its point table.
-        What it returns, if anything, is published beside the frames.
+    def _manual_coordinates(
+        self, context: object
+    ) -> tuple[tuple[float, ...], ...]:
+        """Every manual axis's coordinates, asked for before any data.
+
+        Distinctness is required because these ARE the axis: two points
+        sharing a value are one point in every projection, and the scan
+        grid could not be formed from them.  Asking again costs the
+        operator a moment; discovering it at the end costs them the run.
         """
 
-        board = self.sequencer.describe()
-        rows = self.plan.rows()
-        # The board fires one cycle per POINT -- the shots play inside it as
-        # the pulse's own repeat bracket -- while the source hands back one
-        # value per READOUT, of which every bracket iteration produces one.
-        streamed, columns = self._streamed_sequence(board)
-        streamed, shots = self._shot_bracketed(streamed)
-        fired = self.repeats * len(rows)
+        collected: list[tuple[float, ...]] = []
+        for axis in self.manual_axes:
+            name = manual_axis_name(axis.port)
+            points = len(axis.values)
+            message = (
+                f"Set {name} to each of the {points} values this scan will "
+                "walk, and record them here in the order it will walk them."
+            )
+            while True:
+                response = self._ask(
+                    context,
+                    title=f"{name}: the values this scan walks",
+                    message=message,
+                    payload={
+                        "mode": "values",
+                        "axis": name,
+                        "points": points,
+                    },
+                )
+                try:
+                    values = tuple(float(value) for value in response["values"])
+                except (KeyError, TypeError, ValueError):
+                    message = f"{name} needs {points} numbers."
+                    continue
+                if len(values) != points:
+                    message = (
+                        f"{name} visits {points} points, so it needs "
+                        f"{points} values; {len(values)} arrived."
+                    )
+                    continue
+                if any(not math.isfinite(value) for value in values):
+                    message = f"every {name} value must be a real number."
+                    continue
+                if len(set(values)) != len(values):
+                    message = (
+                        f"two {name} points cannot share a value -- the scan "
+                        "would have no axis to tell them apart."
+                    )
+                    continue
+                collected.append(values)
+                break
+        return tuple(collected)
+
+    def _ask_for_setting(
+        self,
+        context: object,
+        *,
+        changed: Sequence[tuple[str, float, int, int]],
+    ) -> None:
+        """Stop for the hand, and only for what the hand has to move."""
+
+        for name, value, index, points in changed:
+            context.report_progress(f"Waiting for {name}")
+            self._ask(
+                context,
+                title=f"Set {name}",
+                message=f"Set {name} to {value:g}, then continue.",
+                payload={
+                    "mode": "set",
+                    "axis": name,
+                    "value": float(value),
+                    "point": index + 1,
+                    "points": points,
+                },
+            )
+
+    def _play_table(
+        self,
+        context: object,
+        *,
+        board: object,
+        streamed: PulseSequence,
+        wire: object,
+        slot_tick_scales: Sequence[int],
+        writer: ScanDatasetWriter,
+        rows: Sequence[Sequence[float]],
+        inner_count: int,
+        shots: int,
+        sweeps: int,
+        row_offset: int,
+        visit_base: int,
+        progress_base: int,
+        progress_total: int,
+        run_record: dict,
+        on_point: object,
+    ) -> None:
+        """One load, one fire, and every readout it plays, placed.
+
+        The apparatus is stopped ONCE per fire, because the whole table
+        plays from it: the settle is what the world is given to reach the
+        state this fire's first point starts from.
+        """
+
+        fired = sweeps * inner_count
         readouts = fired * shots
-        slot_rows = self._slot_ordered_rows(rows, columns)
-        effective_slot_rows, slot_tick_scales, wire = prepare_scan_application(
-            streamed,
-            slot_rows,
-            params=board.geometry,
-        )
-        effective_rows = self._plan_ordered_rows(
-            effective_slot_rows,
-            columns,
-        )
-        run_record = self.run_record(
-            effective_rows=effective_rows,
-            slot_tick_scales=slot_tick_scales,
-        )
-        writer = ScanDatasetWriter(
-            effective_rows,
-            [(port.label, port.unit) for port in self.ports],
-            visits=self.repeats * shots,
-            run_record=run_record,
-        )
-        # The apparatus is stopped ONCE, because the whole table plays from
-        # one fire: the settle is what the world is given to reach the state
-        # the first point starts from.
         self.sequencer.safe()
         time.sleep(self.settle_seconds)
         self.source.open(context, cycles=readouts)
@@ -258,17 +372,18 @@ class SeamlessScanMeasurement:
             self.sequencer.load(program, source=streamed, rows=wire)
             self.source.arm()
             self.sequencer.fire(cycles=fired)
-            per_sweep = len(rows) * shots
+            per_sweep = inner_count * shots
             for played in range(readouts):
                 check_cancelled(context)
                 sweep, rest = divmod(played, per_sweep)
                 row_index, shot = divmod(rest, shots)
                 value, source_publication = self.source.next_value(context)
-                visit = sweep * shots + shot
+                visit = visit_base + sweep * shots + shot
+                row = row_offset + row_index
                 front = {
                     SCAN_OUTPUT.name: writer.write(
                         value,
-                        row=row_index,
+                        row=row,
                         visit=visit,
                     )
                 }
@@ -279,9 +394,9 @@ class SeamlessScanMeasurement:
                     # that its own evidence has not arrived for yet.
                     companions = on_point(
                         value,
-                        row=row_index,
+                        row=row,
                         visit=visit,
-                        point_rows=effective_rows,
+                        point_rows=rows,
                     ) or {}
                     front.update(
                         {
@@ -300,8 +415,8 @@ class SeamlessScanMeasurement:
                 if (played + 1) % shots == 0:
                     context.report_progress(
                         "Scanning",
-                        current=(played + 1) // shots,
-                        total=self.repeats * len(rows),
+                        current=progress_base + (played + 1) // shots,
+                        total=progress_total,
                     )
             wait_for_board(self.sequencer, context)
         finally:
@@ -309,6 +424,118 @@ class SeamlessScanMeasurement:
                 self.source.close()
             finally:
                 self.sequencer.safe()
+
+    def acquire(self, context: object, *, on_point: object = None):
+        """Play the whole plan and return the dataset it filled.
+
+        The live slot is attached to the caller's generation, so whoever runs
+        this loop shows the growing scan while it runs -- and then says for
+        itself what the finished dataset MEANS.
+
+        A plan the board owns entirely plays from ONE fire.  A plan carrying a
+        manual axis plays one fire per manual point instead, and ``repeats``
+        walks the whole plan again rather than lengthening a fire -- the same
+        sentence either way, spent where the plan leaves room for it.
+
+        ``on_point`` is how a Task reads a point AS it lands: release-recapture
+        judges each cycle against the calibration the moment the camera hands
+        it over, which is the only place the cycle still exists as one cycle --
+        the finished scan dataset has folded the frames into its point table.
+        What it returns, if anything, is published beside the frames.
+        """
+
+        board = self.sequencer.describe()
+        inner_rows = self.board_plan.rows()
+        # The board fires one cycle per POINT -- the shots play inside it as
+        # the pulse's own repeat bracket -- while the source hands back one
+        # value per READOUT, of which every bracket iteration produces one.
+        streamed, columns = self._streamed_sequence(board)
+        streamed, shots = self._shot_bracketed(streamed)
+        slot_rows = self._slot_ordered_rows(inner_rows, columns)
+        effective_slot_rows, slot_tick_scales, wire = prepare_scan_application(
+            streamed,
+            slot_rows,
+            params=board.geometry,
+        )
+        effective_inner = self._plan_ordered_rows(
+            effective_slot_rows,
+            columns,
+        )
+        # Every coordinate before the first frame, the operator's included.
+        manual_rows = tuple(
+            itertools.product(*self._manual_coordinates(context))
+        )
+        effective_rows = tuple(
+            tuple(manual_row) + tuple(inner_row)
+            for manual_row in manual_rows
+            for inner_row in effective_inner
+        )
+        axes = tuple(
+            [(manual_axis_name(axis.port), "") for axis in self.manual_axes]
+            + [(port.label, port.unit) for port in self.ports]
+        )
+        run_record = self.run_record(
+            effective_rows=effective_rows,
+            slot_tick_scales=slot_tick_scales,
+        )
+        writer = ScanDatasetWriter(
+            effective_rows,
+            axes,
+            visits=self.repeats * shots,
+            run_record=run_record,
+        )
+        inner_count = len(effective_inner)
+        segment = dict(
+            board=board,
+            streamed=streamed,
+            wire=wire,
+            slot_tick_scales=slot_tick_scales,
+            writer=writer,
+            rows=effective_rows,
+            inner_count=inner_count,
+            shots=shots,
+            run_record=run_record,
+            on_point=on_point,
+            progress_total=self.repeats * len(effective_rows),
+        )
+        if not self.manual_axes:
+            self._play_table(
+                context,
+                sweeps=self.repeats,
+                row_offset=0,
+                visit_base=0,
+                progress_base=0,
+                **segment,
+            )
+        else:
+            standing: tuple[float, ...] | None = None
+            done = 0
+            for sweep in range(self.repeats):
+                for index, manual_row in enumerate(manual_rows):
+                    self._ask_for_setting(
+                        context,
+                        changed=tuple(
+                            (
+                                manual_axis_name(axis.port),
+                                manual_row[position],
+                                index,
+                                len(manual_rows),
+                            )
+                            for position, axis in enumerate(self.manual_axes)
+                            if standing is None
+                            or standing[position] != manual_row[position]
+                        ),
+                    )
+                    standing = manual_row
+                    self._play_table(
+                        context,
+                        sweeps=1,
+                        row_offset=index * inner_count,
+                        visit_base=sweep * shots,
+                        progress_base=done,
+                        **segment,
+                    )
+                    done += inner_count
         check_cancelled(context)
         return context.current_dataset(SCAN_OUTPUT.name), run_record
 

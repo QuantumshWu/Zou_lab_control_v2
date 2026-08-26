@@ -5507,3 +5507,73 @@ def test_a_replacement_host_mounts_the_view_the_operator_just_committed(
     finally:
         presenter._make_host = original
         presenter._retire_plot_host(host)
+
+
+def test_the_console_answers_the_manual_axis_question_the_engine_asks(
+    session,
+) -> None:
+    """One vocabulary, two packages, and a test that keeps them equal.
+
+    A request kind cannot be imported across this wall -- the workbench
+    may not reach into a node leaf -- so it is a literal at both ends.
+    What keeps two literals one word is this: the kind the scan engine
+    raises is fed to the console, and the console has to route it.
+    """
+
+    from zlc_atom.nodes.scan import MANUAL_AXIS_REQUEST
+    from zlc_runtime import OperatorInputRequest
+    from zlc_workbench.apps.task_console import build_panel_host
+    from zlc_workbench.logic import LogicBinding
+
+    class _Host:
+        def __init__(self, request):
+            self.operator_request = request
+            self.answered = []
+            self.cancelled = ""
+            self.running = True
+
+        def submit_operator_input(self, request_id, response):
+            self.answered.append((request_id, dict(response)))
+
+        def cancel(self, reason):
+            self.cancelled = str(reason)
+
+    def request(mode):
+        return OperatorInputRequest(
+            "req-1" if mode == "values" else "req-2",
+            MANUAL_AXIS_REQUEST,
+            "power: the values this scan walks",
+            "Set power to each of the 2 values this scan will walk.",
+            {"mode": mode, "axis": "power", "points": 2},
+        )
+
+    asked = []
+    answers = [{"values": (1.0, 2.0)}, None]
+    view = _ConsoleView()
+    presenter = ConsolePresenter(
+        session,
+        view,
+        make_host=build_panel_host,
+        spec_for=lambda s, kind="", cell_kind="": task_console_fitting_spec(
+            s.block.schema, kind, cell_kind
+        ),
+        manual_axis=lambda incoming: (
+            asked.append(incoming) or answers[len(asked) - 1]
+        ),
+    )
+    try:
+        host = _Host(request("values"))
+        binding = LogicBinding(node_id="scan", descriptor=None, host=host)
+        presenter._handle_operator_request(binding)
+        assert [incoming.kind for incoming in asked] == [MANUAL_AXIS_REQUEST]
+        assert host.answered == [("req-1", {"values": (1.0, 2.0)})]
+        assert not host.cancelled
+
+        # Declining is an answer too: the operator is the loop here, and
+        # the run stops rather than waiting on a hand that has left.
+        host.operator_request = request("set")
+        presenter._handle_operator_request(binding)
+        assert host.answered == [("req-1", {"values": (1.0, 2.0)})]
+        assert "stopped the manual scan" in host.cancelled
+    finally:
+        presenter.close()
