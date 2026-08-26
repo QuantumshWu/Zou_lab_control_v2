@@ -805,6 +805,24 @@ def _qt5_plot_widget_class() -> type[Any]:
                         # transform, while each transient viewport front is
                         # allowed to become visible immediately.
                         return self._promote_front(front)
+                    if (
+                        front.identity.data_revision
+                        != gesture_front.identity.data_revision
+                    ):
+                        # New DATA moved the axes, not this gesture.  On the
+                        # panels that live -- a rolling trace whose shot axis
+                        # grows with every shot, a curve whose limits follow
+                        # what just arrived -- that happens constantly and
+                        # through no act of the operator's, so it cannot mean
+                        # "the surface changed under you".  Dropping those
+                        # fronts froze the picture from press to release: the
+                        # box being dragged stopped following the pointer, and
+                        # what the operator saw was a selection that would not
+                        # open.  The front becomes visible; the gesture keeps
+                        # the transform its press captured, so what is being
+                        # marked stays the DATA it was drawn on rather than
+                        # sliding with the axis underneath it.
+                        return self._promote_front(front)
                     return False
                 elif isinstance(self._candidate, ColorLimitCandidate):
                     limits = front.interaction.color_limits
