@@ -280,6 +280,7 @@ def render_height_bars(
     bar_edges: bool = True,
     pool_cache: dict | None = None,
     display_stretch: float = 1.0,
+    pool_reference_width: int | None = None,
 ) -> tuple[NDArray[np.uint8], HeightBarScene]:
     """Render the grid as boxes -> ((H, W, 4) uint8 RGBA, scene map).
 
@@ -310,7 +311,15 @@ def render_height_bars(
     # camera, and it dominated large-scan camera commits; the caller may
     # hand a cache whose validity rides on INPUT IDENTITY -- safe because
     # the caller's own input cache keeps those arrays alive and unchanged.
-    limit = max(8, int(render_w / max(pool_pixels_per_cell, 0.5)))
+    # Pooling is a DATA-side level of detail: how many cells the panel's
+    # pixels can distinguish.  Deriving it from the transient render width
+    # made the pooled grid -- and therefore its cache -- change whenever a
+    # drag lowered the preview resolution, so every drag re-pooled the
+    # whole scan (millions of cells) instead of reusing it.  The reference
+    # is the committed surface's width; a preview simply draws that same
+    # pooled grid at fewer pixels.
+    pool_width = int(render_w if pool_reference_width is None else pool_reference_width)
+    limit = max(8, int(pool_width / max(pool_pixels_per_cell, 0.5)))
     pool_key = (id(h_grid), id(rgb_grid), h_grid.shape, limit)
     if pool_cache is not None and pool_cache.get("key") == pool_key:
         h_grid, rgb_grid, finite_grid, pool_x, pool_y = pool_cache["value"]

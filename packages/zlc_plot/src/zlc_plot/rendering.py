@@ -16,6 +16,7 @@ from numbers import Real
 from pathlib import Path
 import re
 from enum import Enum
+from time import perf_counter
 from types import MappingProxyType
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
@@ -3337,7 +3338,15 @@ class MatplotlibRenderer:
         box_h = max(int(round(float(box.height))), 8)
         divisor = 1
         if getattr(self, "_height_bars_dragging", False):
-            divisor = max(1, int(policy.height_bars_drag_resolution_divisor))
+            # The preview's resolution is a BUDGET, not a constant.  A
+            # fixed divisor renders whatever the data costs: on a 2048x2048
+            # scan that is hundreds of milliseconds a frame, so the drag
+            # collapsed to a few frames per second while the hand kept
+            # moving.  The divisor now tracks what the last preview
+            # actually cost, so an interactive frame rate survives any
+            # grid size -- the committed frame is untouched, being drawn
+            # at divisor 1 by definition.
+            divisor = max(int(policy.height_bars_drag_resolution_divisor), 1)
         vector_outlines = (
             heights.size <= policy.height_bars_supersample_tiny_bars
             and divisor == 1
@@ -3363,6 +3372,9 @@ class MatplotlibRenderer:
             z_fraction=policy.height_bars_z_fraction,
             bar_edges=not vector_outlines,
             display_stretch=float(divisor),
+            # Committed geometry decides the pooled grid, so a preview
+            # reuses it instead of re-pooling the scan at its own size.
+            pool_reference_width=box_w * 3,
         )
         self._height_bars_scene_map = scene
         self._height_bars_values = heights
