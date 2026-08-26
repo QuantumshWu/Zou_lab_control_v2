@@ -2757,7 +2757,6 @@ class ConsolePresenter:
         if spec is None:
             return None
         semantic_reason = ""
-        authored: Mapping[str, object] = {}
         projection = None
         try:
             projection = project_panel_state(schema, spec, state)
@@ -2781,7 +2780,6 @@ class ConsolePresenter:
             except Exception:
                 return None
             semantic_reason = projection.vacancy
-            authored = dict(state.semantic)
         elif projection is not None:
             resolved = projection.spec
             try:
@@ -2801,15 +2799,12 @@ class ConsolePresenter:
             )
         except (TypeError, ValueError, KeyError):
             controls = ()
+        # The authored table is put back on these rows by
+        # _publish_panel_state, which every path handing a surface to a view
+        # goes through -- keyed on the row's own "key".  A second overlay
+        # here read "name", a key semantic_entries has never emitted, so it
+        # matched nothing and only looked like it was doing the work.
         entries = list(semantic_entries(description))
-        if authored:
-            shown = []
-            for entry in entries:
-                name = str(entry.get("name", ""))
-                if name in authored:
-                    entry = {**entry, "value": authored[name]}
-                shown.append(entry)
-            entries = shown
         return self._parameter_surface(
             controls,
             state,

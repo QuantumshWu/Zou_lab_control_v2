@@ -716,6 +716,27 @@ def _field_names(spec: PlotSpec) -> tuple[str, ...]:
     return tuple(dict.fromkeys(names))
 
 
+def typed_choice(name: str, value: object) -> object:
+    """One semantic value in the form composition needs.
+
+    A choice travels two ways: as the typed member the vocabulary is made of
+    (``Reduction.SUM``, ``PlotKind.CURVE``), and as the plain value a RECORD
+    holds -- a panel state, a saved layout, the editor row a frontend hands
+    back.  Both name the same choice, so composition reads both instead of
+    making every caller remember which side of that line it stands on.  The
+    Figure Viewer stands on the other side: it routes an editor row straight
+    to ``apply_semantic``, so a plain ``"sum"`` reached ``CurvePlot.reduction``
+    and the dataclass refused it -- "reduction must be Reduction" -- for an
+    edit the operator made from the list this same module offered.
+    """
+
+    if name == "kind":
+        return value if isinstance(value, PlotKind) else PlotKind(str(value))
+    if name == "reduction":
+        return value if isinstance(value, Reduction) else Reduction(str(value))
+    return value
+
+
 def updated_spec(
     schema: DatasetSchema | None,
     spec: PlotSpec,
@@ -756,7 +777,10 @@ def composed_spec(
         raise TypeError("semantic values must be a mapping")
     if not values:
         return spec
-    rest = dict(values)
+    rest = {
+        str(name): typed_choice(str(name), value)
+        for name, value in values.items()
+    }
     candidate = spec
     # A scope is about WHICH data, not which drawing, so it survives every
     # other edit -- including a kind switch, which rebases everything else on
@@ -767,9 +791,8 @@ def composed_spec(
     # interpreted.  Applying fates to the old kind and rebasing afterwards
     # made one saved table mean two different specifications.
     if "kind" in rest:
+        # Already a PlotKind: typed_choice read whichever form arrived.
         kind = rest.pop("kind")
-        if not isinstance(kind, PlotKind):
-            raise TypeError("semantic kind value must be PlotKind")
         if kind is not spec.kind:
             candidate = _chosen_spec(schema, spec, kind)
             if candidate is None:

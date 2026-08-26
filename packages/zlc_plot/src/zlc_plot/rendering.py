@@ -3650,15 +3650,22 @@ class MatplotlibRenderer:
             if len(trimmed) > 2:
                 # The shared far corner keeps one label, not two.
                 del trimmed[-1]
+            # ``picks`` returns SOURCE indices -- the very indices the
+            # label value is computed from -- and fold_cell speaks source
+            # indices too (it does the pooling divide itself).  Multiplying
+            # by the pool factor first cancelled that divide, so on any
+            # grid dense enough to pool (the large scans pooling exists
+            # for) every tick but the first stood at up to pool_y times
+            # its own position, and the far ones fell off the scene.
             for column in x_picks:
-                a, b = scene.fold_cell(0, column * scene.pool_x)
+                a, b = scene.fold_cell(0, column)
                 value = left + (column + 0.5) * (right - left) / source_nx
                 if even:
                     a_tick(a + 0.5, value)
                 else:
                     b_tick(b + 0.5, value)
             for row in y_picks:
-                a, b = scene.fold_cell(row * scene.pool_y, 0)
+                a, b = scene.fold_cell(row, 0)
                 value = top_c + (row + 0.5) * (bottom - top_c) / source_ny
                 if even:
                     b_tick(b + 0.5, value)

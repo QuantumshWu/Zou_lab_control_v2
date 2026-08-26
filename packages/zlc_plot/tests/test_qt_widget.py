@@ -326,14 +326,21 @@ def test_qt_raster_host_accepts_facet_grid_spec() -> None:
 
 
 @pytest.mark.gui
-def test_the_first_painted_front_is_already_at_the_screen_density() -> None:
-    """A rebuilt surface must not show a stretched low-density frame first.
+def test_the_widget_asks_the_screen_before_it_subscribes() -> None:
+    """The correction starts at construction, not one render later.
 
-    The pixel-ratio observer used to be created when the FIRST front
-    arrived, so a host opened at density 1, that frame was painted
-    stretched into the widget, and the sharp one only replaced it after
-    a second render.  Panel Edit's Refresh replaces its host, so it
-    showed that soft frame every single time.
+    Nothing tells a host what screen it is for, so its opening frame is
+    rendered at density 1 and painted stretched into the widget.  The
+    pixel-ratio observer used to be created only when the FIRST front
+    ARRIVED, so the request for the real density went out one whole render
+    after that -- the soft frame every rebuilt surface showed, and Panel
+    Edit's Refresh replaces its host, so it showed it every time.  Asking
+    during construction puts the corrected render in flight while the
+    opening frame is still being handed over.
+
+    Refusing to PAINT the density-1 front is NOT the answer: a staged
+    console panel is presented exactly once, and a refusal there is read as
+    a stale race -- the port closes the host and the panel never appears.
     """
 
     try:
@@ -367,31 +374,36 @@ def test_the_first_painted_front_is_already_at_the_screen_density() -> None:
     host = build_host()
     original = observer.current_ratio
     observer.current_ratio = property(lambda self: 2.0)
-    painted: list[float] = []
+    calls: list[str] = []
     try:
         host.wait_for_front(timeout=30)
         assert float(host.front.device_pixel_ratio) == 1.0
+        host_dpr = host.set_device_pixel_ratio
+        host_subscribe = host.subscribe_front
+
+        def spy_dpr(ratio):
+            calls.append(f"dpr:{float(ratio)}")
+            return host_dpr(ratio)
+
+        def spy_subscribe(callback):
+            calls.append("subscribe")
+            return host_subscribe(callback)
+
+        host.set_device_pixel_ratio = spy_dpr
+        host.subscribe_front = spy_subscribe
         widget = Qt5PlotWidget(host)
         try:
-            original_install = widget._install_front
-
-            def spy(front):
-                accepted = original_install(front)
-                if accepted:
-                    painted.append(float(front.device_pixel_ratio))
-                return accepted
-
-            widget._install_front = spy
+            assert calls[:2] == ["dpr:2.0", "subscribe"], calls
+            # and the widget still SHOWS the opening frame it was handed,
+            # whatever density it was rendered at
+            assert widget.presented_front is not None
             deadline = time.monotonic() + 30.0
-            while not painted and time.monotonic() < deadline:
+            while time.monotonic() < deadline:
                 ensure_qt5_application([]).processEvents()
-                if widget.presented_front is not None:
-                    painted.append(
-                        float(widget.presented_front.device_pixel_ratio)
-                    )
+                if float(widget.presented_front.device_pixel_ratio) == 2.0:
+                    break
                 time.sleep(0.005)
-            assert painted, "the widget never painted a front"
-            assert painted[0] == 2.0, painted
+            assert float(widget.presented_front.device_pixel_ratio) == 2.0
         finally:
             widget.close_adapter()
     finally:

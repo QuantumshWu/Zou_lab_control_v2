@@ -144,6 +144,42 @@ def test_the_scene_is_an_oblique_view_of_the_same_heatmap() -> None:
     assert plain(0, 0)[1] > plain(3, 0)[1]
 
 
+def test_floor_ticks_stand_under_the_bars_they_name_on_a_pooled_grid() -> None:
+    """A scan dense enough to pool must still label its own cells.
+
+    ``picks`` returns SOURCE indices and fold_cell speaks source indices --
+    it does the pooling divide itself -- so multiplying by the pool factor
+    first cancelled that divide.  Every tick but the first stood at up to
+    pool times its own position and the far ones fell off the scene
+    entirely, on exactly the large scans pooling exists for.
+    """
+
+    side = 401
+    heights = np.zeros((side, side))
+    colors = np.zeros((side, side, 3), dtype=np.float32)
+    _frame, scene = render_height_bars(
+        heights, colors, camera=HeightBarCamera(), value_limits=(0.0, 1.0),
+        width=252, height=252, pool_cache={}, origin="upper",
+        pool_reference_width=252 * 3,
+    )
+    assert scene.pool_y > 1, "this grid must actually pool"
+    shown = min(scene.source_ny, 6)
+    for row in sorted({
+        int(round(v)) for v in np.linspace(0, scene.source_ny - 1, shown)
+    }):
+        folded = scene.fold_cell(row, 0)
+        assert 0 <= folded[0] < scene.nx and 0 <= folded[1] < scene.ny, (
+            row, folded
+        )
+        # the slot the tick stands on holds a bar of the row it names
+        landed_row, _landed_column = scene.unfold_cell(*folded)
+        assert landed_row * scene.pool_y == (row // scene.pool_y) * scene.pool_y
+        # and the way it used to be placed does not
+        stale = scene.fold_cell(row * scene.pool_y, 0)
+        if row:
+            assert stale != folded
+
+
 def test_bars_clip_to_the_value_limits() -> None:
     """A value beyond the colour limits saturates in HEIGHT exactly as it
     saturates in colour: the z axis and the colorbar are one scale."""

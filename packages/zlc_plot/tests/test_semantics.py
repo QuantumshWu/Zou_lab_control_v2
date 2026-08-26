@@ -17,6 +17,7 @@ from zlc_plot import (
     describe_semantics,
 )
 from zlc_plot.semantics import (
+    typed_choice,
     SemanticVacancy,
     axis_size,
     composed_spec,
@@ -134,6 +135,43 @@ def test_semantic_choices_are_labeled_once_and_kind_domain_is_registry_filtered(
         for _axis, name in description.fate_rows
     )
     assert description.field("reduction").choices[-1][1] == "first"
+
+def test_a_choice_composes_typed_or_as_a_record_holds_it() -> None:
+    """One vocabulary, two forms, and composition reads both.
+
+    A choice travels as the typed member here and as the plain value a
+    record holds everywhere else -- the panel state, the saved layout, the
+    editor row a frontend hands back.  The Figure Viewer routes that row
+    straight to apply_semantic, so a plain "sum" reached CurvePlot.reduction
+    and the dataclass refused an edit made from this module's own list.
+    """
+
+    points = PointTable.from_columns(
+        {"x": np.tile(np.arange(3.0), 3), "y": np.repeat(np.arange(3.0), 3)}
+    )
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=2), points, dtype=np.float64
+    )
+    spec = CurvePlot(AxisRef.point("x"))
+    assert updated_spec(schema, spec, "reduction", "sum").reduction is Reduction.SUM
+    assert (
+        updated_spec(schema, spec, "reduction", Reduction.SUM).reduction
+        is Reduction.SUM
+    )
+    # The kind row is the same rule: a plain name reaches the kind branch
+    # instead of being refused by an isinstance guard before it gets there.
+    assert updated_spec(schema, spec, "kind", "curve") == spec
+    assert updated_spec(schema, spec, "kind", PlotKind.CURVE) == spec
+    assert typed_choice("kind", "image") is PlotKind.IMAGE
+    # A value that names no choice is still refused, by the vocabulary.
+    for name, bad in (("reduction", "nonsense"), ("kind", "bogus")):
+        try:
+            updated_spec(schema, spec, name, bad)
+        except ValueError as error:
+            assert bad in str(error)
+        else:  # pragma: no cover
+            raise AssertionError(f"{name}={bad!r} must be refused")
+
 
 def test_the_facet_role_is_offered_by_the_same_rule_as_every_other_role() -> None:
     """A cell axis may take the facet, and taking it SWAPS.

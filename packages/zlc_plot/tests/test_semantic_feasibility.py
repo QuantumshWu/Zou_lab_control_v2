@@ -400,5 +400,8 @@ def test_updated_spec_is_the_single_composition_authority() -> None:
 
     with pytest.raises(KeyError):
         updated_spec(schema, facet, "not_a_field", 1)
-    with pytest.raises(TypeError):
-        updated_spec(schema, facet, "kind", "curve")
+    # A choice may arrive typed or as the plain value a record holds -- both
+    # name the same choice -- but a value that names none is still refused.
+    assert updated_spec(schema, facet, "kind", "curve").kind is PlotKind.CURVE
+    with pytest.raises(ValueError, match="not a valid PlotKind"):
+        updated_spec(schema, facet, "kind", "not_a_kind")

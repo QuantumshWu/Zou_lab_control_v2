@@ -571,15 +571,20 @@ def _qt5_plot_widget_class() -> type[Any]:
             self._unsubscribe: Callable[[], None] | None = None
             self._pixel_ratio_observer: _RasterPixelRatioObserver | None = None
             try:
-                # The screen's density is an INPUT to the first picture,
-                # not a correction applied after it.  The observer used to
-                # be created when the first front arrived, so every host
-                # built its opening frame at density 1, that frame was
-                # painted stretched into the widget, and only the
-                # re-render that followed was sharp -- the "low resolution
-                # first, then it updates" every rebuilt panel showed
-                # (Panel Edit's Refresh replaces its host, so it showed it
-                # every time).  Asking first costs one render, not two.
+                # Ask the screen BEFORE subscribing, so the re-render at
+                # the real density is already in flight while the host's
+                # opening frame (rendered at density 1 -- nothing tells a
+                # host what screen it is for) is still being handed over.
+                # The observer used to be created only when the first front
+                # ARRIVED, so that request was issued one whole render
+                # later and the stretched opening frame stayed on screen
+                # for all of it -- the "low resolution first, then it
+                # updates" every rebuilt panel showed (Panel Edit's
+                # Refresh replaces its host, so it showed it every time).
+                # Refusing to PAINT the density-1 front is not the answer:
+                # a staged console panel is presented exactly once, and a
+                # refusal there is read as a stale race -- the port closes
+                # the host and the panel never appears at all.
                 self._pixel_ratio_observer = _RasterPixelRatioObserver(
                     self,
                     self._apply_device_pixel_ratio,
@@ -590,12 +595,7 @@ def _qt5_plot_widget_class() -> type[Any]:
                 if auto_present:
                     self._unsubscribe = self._host.subscribe_front(self._on_front)
                 initial_front = self._host.front
-                if initial_front is not None and math.isclose(
-                    float(initial_front.device_pixel_ratio),
-                    float(self._requested_dpr),
-                ):
-                    # A front at another density is the pre-request one; the
-                    # request's own render is already on its way here.
+                if initial_front is not None:
                     self._install_front(initial_front)
             except Exception:
                 self.close_adapter()

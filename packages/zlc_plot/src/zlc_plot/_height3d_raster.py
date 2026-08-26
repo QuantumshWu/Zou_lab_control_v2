@@ -472,8 +472,12 @@ def render_height_bars(
     # into the two z planes, so an elevation drag pays two cheap
     # multiplies instead of the whole derivation (which made vertical
     # orbiting feel dead next to snappy horizontal orbiting).
+    # Every input the cached value depends on is named here.  The derived
+    # grids are computed AFTER the row reversal, so the row direction is one
+    # of those inputs -- a cache shared across two origins would otherwise
+    # hand back the other picture's geometry.
     derived_key = (
-        pool_key, quadrant, value_low, value_high, zero_rgb,
+        pool_key, flip_rows, quadrant, value_low, value_high, zero_rgb,
         bool(dense_surface), float(z_fraction),
     )
     if pool_cache is not None and pool_cache.get("derived_key") == derived_key:
