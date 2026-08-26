@@ -27,6 +27,7 @@ from data_factory import (
 )
 from zlc_data import AxisId
 from zlc_plot import AxisRef, FacetGridPlot, ImagePlot, PlotSession
+from zlc_plot.specs import RenderEffect
 from zlc_plot._height3d_raster import (
     HeightBarCamera,
     render_height_bars,
@@ -257,6 +258,114 @@ def test_middle_drag_orbits_and_left_drag_is_inert() -> None:
         state = session.display_state
         assert float(state["camera_azimuth"]) == committed
         assert session.selectors == ()
+    finally:
+        session.close()
+
+
+def test_orbit_holds_the_camera_distance_still() -> None:
+    """The scale is azimuth-invariant: an orbit must not breathe.
+
+    A fit against the current projected footprint widens and narrows
+    with the azimuth, which read as the scene lurching nearer and
+    farther during a drag -- and flipped the dense-surface threshold
+    (the lighting) with it.  The scale fits the invariant envelope
+    instead, so every azimuth at one elevation shares one scale.
+    """
+
+    from zlc_plot._height3d_raster import HeightBarCamera, render_height_bars
+
+    rng = np.random.default_rng(21)
+    heights = rng.random((24, 32))
+    colors = np.repeat(
+        heights[..., None].astype(np.float32).clip(0.0, 1.0), 3, axis=-1
+    )
+    scales = []
+    dense_flags = []
+    for azimuth in range(-175, 185, 10):
+        _, scene = render_height_bars(
+            heights, colors,
+            camera=HeightBarCamera(azimuth_deg=float(azimuth)),
+            value_limits=(0.0, 1.0), width=420, height=320,
+            supersample=1, zero_rgb=(1.0, 1.0, 1.0),
+        )
+        scales.append(scene.scale)
+        dense_flags.append(scene.dense)
+    assert len(set(scales)) == 1, scales
+    assert len(set(dense_flags)) == 1
+
+
+def test_color_limit_preview_rerenders_the_scene() -> None:
+    """A clim drag previews the 3D scene itself, never a stale heatmap.
+
+    The 2D preview fast path re-gathers heatmap pixels into the shared
+    artist; in scene mode that painted an old heatmap over the boxes
+    (or, with no cached planes, changed nothing until release).  The
+    preview must re-render the scene with the candidate limits, and the
+    preview frame must equal the frame those limits commit to.
+    """
+
+    session = _session()
+    try:
+        session.set_parameters({
+            "presentation": "height_bars",
+            "color_min": 0.0,
+            "color_max": 1.0,
+        })
+        session.rgba()
+        renderer = session._renderer
+        image = renderer._active_image_artist()
+        before = np.array(image.get_array())
+        renderer.preview_color_limits(0.0, 0.4)
+        preview = np.array(renderer._active_image_artist().get_array())
+        assert not np.array_equal(before, preview)
+        session.set_parameter("color_max", 0.4)
+        session.rgba()
+        committed = np.array(renderer._active_image_artist().get_array())
+        np.testing.assert_array_equal(preview, committed)
+    finally:
+        session.close()
+
+
+def test_drag_preview_keeps_the_chrome_typography_in_place() -> None:
+    """The half-resolution drag preview must not move the scene chrome.
+
+    Tick lengths and label gaps are POINT metrics on the canvas; dividing
+    them by the reduced preview raster inflated every gap by the drag
+    divisor, so the labels flew outward the moment a drag began.  With
+    the same camera, preview and committed chrome may differ only by the
+    raster's coarser position quantization.
+    """
+
+    session = _session()
+    try:
+        session.set_parameters({
+            "presentation": "height_bars",
+            "color_min": 0.0,
+            "color_max": 1.0,
+        })
+        session.rgba()
+        renderer = session._renderer
+        def chrome_positions():
+            artists = renderer._artists["image:h3d_chrome"]
+            return {
+                text.get_text(): text.get_position()
+                for text in artists["texts"]
+            }
+        committed = chrome_positions()
+        camera = renderer.height_bars_camera
+        renderer.set_height_bars_preview(camera, dragging=True)
+        try:
+            session._render_current(RenderEffect.BASE_GEOMETRY)
+            preview = chrome_positions()
+        finally:
+            renderer.set_height_bars_preview(None)
+            session._render_current(RenderEffect.BASE_GEOMETRY)
+        assert set(preview) == set(committed)
+        for label, (px, py) in preview.items():
+            cx, cy = committed[label]
+            assert abs(px - cx) <= 0.008 and abs(py - cy) <= 0.008, (
+                label, (px, py), (cx, cy)
+            )
     finally:
         session.close()
 

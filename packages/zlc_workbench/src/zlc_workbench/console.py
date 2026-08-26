@@ -34,9 +34,11 @@ from zlc_plot import (
     image_point_overlay_from_signal,
 )
 from zlc_plot.primitives import ImageFrame, ImagePointOverlay, PointStatus
+from zlc_plot.semantics import SemanticVacancy
 from zlc_plot.specs import semantic_spec, validate_authored_display
 from zlc_plot.ui import parameter_controls_for_kind
 from zlc_runtime import (
+    DatasetCoverage,
     IndexedHistoryLease,
     OperatorInputRequest,
     SelectionChange,
@@ -280,7 +282,20 @@ class PanelBinding:
         shown = self.display_publication
         if shown is None:
             return False
-        return _run_of(frozen.publication) != _run_of(shown)
+        if _run_of(frozen.publication) != _run_of(shown):
+            return True
+        # Same run is not the whole story: an EXACT dataset GROWS point
+        # by point (a seamless scan commits one readout at a time), and a
+        # picture frozen at partial coverage is one column pretending to
+        # be the scan.  Growth is staleness too -- comparing run identity
+        # alone kept the badge dark while the live card filled in.
+        frozen_coverage = getattr(frozen.publication, "coverage", None)
+        shown_coverage = getattr(shown, "coverage", None)
+        return (
+            isinstance(frozen_coverage, DatasetCoverage)
+            and isinstance(shown_coverage, DatasetCoverage)
+            and shown_coverage.written_cells > frozen_coverage.written_cells
+        )
 
     @property
     def signal(self) -> str:
@@ -1222,12 +1237,17 @@ class ConsolePresenter:
         subject: object | None = None,
         schema: object | None = None,
     ) -> object | None:
-        projection = self._panel_projection(
-            binding,
-            state,
-            subject=subject,
-            schema=schema,
-        )
+        try:
+            projection = self._panel_projection(
+                binding,
+                state,
+                subject=subject,
+                schema=schema,
+            )
+        except SemanticVacancy:
+            # An authored table with a vacant required role: legitimate
+            # panel state that simply has no drawable specification.
+            return None
         return None if projection is None else projection[0]
 
     @staticmethod
@@ -1388,13 +1408,30 @@ class ConsolePresenter:
                     )
                     else ()
                 )
-                selectors = (
-                    *region_selectors,
-                    *(
+                recorded = dict(panel_state.crosshair)
+                if recorded:
+                    from zlc_plot.selectors import (
+                        CrosshairPoint,
+                        SelectorState as _SelectorState,
+                    )
+
+                    crosshair_selectors: tuple = (
+                        _SelectorState(
+                            SelectorKind.CROSSHAIR,
+                            CrosshairPoint(
+                                float(recorded["x"]), float(recorded["y"])
+                            ),
+                        ),
+                    )
+                else:
+                    crosshair_selectors = tuple(
                         selector
                         for selector in accepted_display.selectors
                         if selector.kind is SelectorKind.CROSSHAIR
-                    ),
+                    )
+                selectors = (
+                    *region_selectors,
+                    *crosshair_selectors,
                 )
             else:
                 # An unresolved host must not receive interaction state whose
@@ -2100,6 +2137,21 @@ class ConsolePresenter:
                     base_spec,
                     patch_state,
                 )
+            except SemanticVacancy as vacancy:
+                # The operator's fates STICK.  A table whose required role
+                # is vacant draws nothing -- that is the panel's state, not
+                # a reason to bounce the edit back.
+                semantic = {
+                    **{
+                        str(name): value
+                        for name, value in dict(current.semantic).items()
+                    },
+                    **{
+                        str(name): value
+                        for name, value in dict(changes["semantic"]).items()
+                    },
+                }
+                self._report(f"{panel_id}: {vacancy}", severity="info")
             except (KeyError, TypeError, ValueError) as error:
                 self._report(
                     f"{panel_id}: {_error_text(error)}",
@@ -2523,6 +2575,8 @@ class ConsolePresenter:
         )
         if spec is None:
             return None
+        semantic_reason = ""
+        authored: Mapping[str, object] = {}
         try:
             resolved, _semantic, _display = project_panel_state(
                 schema, spec, state
@@ -2538,6 +2592,12 @@ class ConsolePresenter:
             except Exception:
                 return None
             reason = _error_text(error)
+            if isinstance(error, SemanticVacancy):
+                # The operator's own table, not the default's: the fates
+                # they chose stay on the form, with the vacancy as the
+                # reason nothing draws.
+                semantic_reason = _error_text(error)
+                authored = dict(state.semantic)
         actual_cell_kind = (
             semantic_spec(resolved).kind.value
             if state.kind == PlotKind.FACET_GRID.value
@@ -2551,10 +2611,20 @@ class ConsolePresenter:
             )
         except (TypeError, ValueError, KeyError):
             controls = ()
+        entries = list(semantic_entries(description))
+        if authored:
+            shown = []
+            for entry in entries:
+                name = str(entry.get("name", ""))
+                if name in authored:
+                    entry = {**entry, "value": authored[name]}
+                shown.append(entry)
+            entries = shown
         return self._parameter_surface(
             controls,
             state,
-            semantic=semantic_entries(description),
+            semantic=tuple(entries),
+            semantic_unavailable=semantic_reason,
             fit_unavailable=str(reason),
             semantic_provisional=True,
         )
@@ -3181,6 +3251,9 @@ class ConsolePresenter:
         source = PlotSelectionSource(
             host,
             on_threshold=lambda event: self._enqueue_panel_threshold(
+                panel_id, host, event, frozen=frozen
+            ),
+            on_crosshair=lambda event: self._enqueue_panel_crosshair(
                 panel_id, host, event, frozen=frozen
             ),
         )
@@ -4018,6 +4091,9 @@ class ConsolePresenter:
             on_threshold=lambda event, host=binding.host: (
                 self._enqueue_panel_threshold(binding.panel_id, host, event)
             ),
+            on_crosshair=lambda event, host=binding.host: (
+                self._enqueue_panel_crosshair(binding.panel_id, host, event)
+            ),
         )
         binding.selections.subscribe_viewport_observation(
             lambda observation: self._enqueue_panel_viewport(
@@ -4050,6 +4126,81 @@ class ConsolePresenter:
             lambda: self._settle_panel_threshold(
                 panel_id, host, observation, frozen=frozen
             )
+        )
+
+    def _enqueue_panel_crosshair(
+        self,
+        panel_id: str,
+        host: object,
+        event: object,
+        *,
+        frozen: PanelFrozenData | None = None,
+    ) -> None:
+        self._enqueue_panel_interaction(
+            lambda: self._settle_panel_crosshair(
+                panel_id, host, event, frozen=frozen
+            )
+        )
+
+    def _settle_panel_crosshair(
+        self,
+        panel_id: str,
+        source: object,
+        event: object,
+        *,
+        frozen: PanelFrozenData | None = None,
+    ) -> None:
+        """A crosshair placed on either surface is the panel's marker.
+
+        Both of a panel's views look at the same experiment, so they point
+        at the same place: the marker lands in the panel record (a board
+        restores it) and mirrors to the sibling surface.  Removing it
+        clears both.  A stale Edit surface neither speaks nor listens,
+        exactly as every other gesture.
+        """
+
+        binding = self.panels.get(str(panel_id))
+        if binding is None:
+            return
+        accepted = self._accepted_panel_interaction(
+            binding,
+            source,
+            event,
+            frozen=frozen,
+            exact_subject=False,
+        )
+        if accepted is None:
+            return
+        change = SelectionChange(
+            str(getattr(event.change, "value", event.change))
+        )
+        if change is SelectionChange.REMOVED:
+            document: dict[str, object] = {}
+        else:
+            value = event.selector.value
+            document = {"x": float(value.x), "y": float(value.y)}
+        if dict(binding.state.crosshair) == document:
+            return
+        self._remember_panel_view(binding, crosshair=document)
+        for host in (binding.host, binding.editor_host):
+            if (
+                host is None
+                or host is source
+                or (host is binding.editor_host and binding.frozen_stale)
+            ):
+                continue
+            if document:
+                host.set_crosshair_selector(document["x"], document["y"])
+            else:
+                try:
+                    host.selector_state(SelectorKind.CROSSHAIR)
+                except KeyError:
+                    continue
+                host.remove_selector(SelectorKind.CROSSHAIR)
+        self._track_panel_configuration(
+            binding,
+            source,
+            source.describe_display(),
         )
 
     def _accepted_panel_interaction(
@@ -4320,7 +4471,7 @@ class ConsolePresenter:
             return
         self._synchronize_panel_interaction(
             binding,
-            binding.editor_host,
+            None if binding.frozen_stale else binding.editor_host,
             _UNCHANGED,
             observation.display,
         )

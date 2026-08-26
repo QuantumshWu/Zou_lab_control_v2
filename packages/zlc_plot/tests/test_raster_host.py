@@ -207,7 +207,16 @@ def test_close_cancels_queued_tasks() -> None:
         host.close(timeout=10)
 
 
-def test_press_rejects_a_front_that_was_not_presented_after_live_revision() -> None:
+def test_press_rejects_a_stale_transform_after_live_limits_moved() -> None:
+    """Press currency is GEOMETRY: moved autoscale limits reject the front.
+
+    The data revisions alone are deliberately not checked -- a live plot
+    bumps them every frame while retention holds the limits still, and a
+    press consumes geometry, not data.  When the live frame DOES move the
+    autoscaled limits, the painted transform is genuinely stale and the
+    press must be refused.
+    """
+
     schema = DatasetSchema.create(
         Axis.create("repeat", size=1),
         PointTable.from_columns({"x": [0.0, 1.0, 2.0]}),
@@ -228,7 +237,7 @@ def test_press_rejects_a_front_that_was_not_presented_after_live_revision() -> N
         assert updated.value.limits != before.limits
         assert latest.identity.sequence > stale.identity.sequence
 
-        with pytest.raises(RuntimeError, match="session-compatible"):
+        with pytest.raises(RuntimeError, match="no longer current"):
             host._pointer_event(
                 "press",
                 0.45,
@@ -238,6 +247,51 @@ def test_press_rejects_a_front_that_was_not_presented_after_live_revision() -> N
                 axes=stale.interaction.axes[0],
                 interaction=stale.interaction,
             ).result(timeout=10)
+    finally:
+        host.close(timeout=10)
+
+
+def test_press_accepts_a_live_revision_that_held_the_geometry_still() -> None:
+    """A live frame that moves no limits must not reject the press.
+
+    This is the acquisition steady state: data revisions advance with
+    every published frame, retention holds the view still, and the
+    operator's press lands on exactly the geometry they saw.  Rejecting
+    it made selectors and camera gestures unusable during live runs.
+    """
+
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns({"x": [0.0, 1.0, 2.0]}),
+        dtype=np.float64,
+        generation="raster-press-live-hold",
+    )
+    first_data = DatasetSnapshot(schema, np.array([[1.0, 2.0, 3.0]]), revision=0)
+    same_data = DatasetSnapshot(schema, np.array([[1.0, 2.0, 3.0]]), revision=1)
+    host = RasterPlotHost.from_plot(first_data, CurvePlot(AxisRef.point("x")))
+    try:
+        stale = host.wait_for_front(timeout=10)
+        host.update_data(same_data).result(timeout=10)
+        latest = host.front
+        assert latest is not None
+        assert latest.identity.data_revision != stale.identity.data_revision
+
+        state = host._pointer_event(
+            "press",
+            0.45,
+            0.45,
+            button=1,
+            identity=stale.identity,
+            axes=stale.interaction.axes[0],
+            interaction=stale.interaction,
+        ).result(timeout=10)
+        assert state is not None
+        host._pointer_event(
+            "cancel",
+            0.45,
+            0.45,
+            button=1,
+        ).result(timeout=10)
     finally:
         host.close(timeout=10)
 

@@ -739,6 +739,7 @@ class MatplotlibRenderer:
         self._selector_topologies: dict[SceneKind, tuple[object, ...]] = {}
         self._selector_candidate: SelectorState | None = None
         self._color_limit_candidate: ColorLimitCandidate | None = None
+        self._height_bars_calls: dict[str, tuple] = {}
         self._selector_gesture_kind: SceneKind | None = None
         self._last_selectors = SelectorSnapshot(())
         self._fit_artists: list[Any] = []
@@ -3244,6 +3245,13 @@ class MatplotlibRenderer:
 
         from ._height3d_raster import HeightBarCamera, render_height_bars
 
+        # The colour-limit preview re-renders the scene with candidate
+        # limits (a clim drag moves bar HEIGHTS too -- the z axis and the
+        # colorbar are one scale), so the call that painted it is kept.
+        self._height_bars_calls[key] = (
+            axes, values, valid, extent, state, cmap_name, cmap,
+            valid_identity,
+        )
         policy = self.style.render
         if axes.axison:
             # The 2D ticks and spines say nothing about a 3D scene.
@@ -3392,7 +3400,7 @@ class MatplotlibRenderer:
         self._home_limits[id(axes)] = ((0.0, 1.0), (0.0, 1.0))
         self._set_xlim(axes, 0.0, 1.0)
         self._set_ylim(axes, 0.0, 1.0)
-        self._update_height_bars_chrome(axes, key, scene)
+        self._update_height_bars_chrome(axes, key, scene, box_w, box_h)
         self._update_height_bars_outlines(
             axes, key, scene, heights if vector_outlines else None
         )
@@ -3406,7 +3414,7 @@ class MatplotlibRenderer:
         return x / max(scene.width, 1), 1.0 - y / max(scene.height, 1)
 
     def _update_height_bars_chrome(
-        self, axes: Any, key: str, scene: Any
+        self, axes: Any, key: str, scene: Any, box_w: int, box_h: int
     ) -> None:
         """The scene's axis chrome: z ticks/labels and base coordinate labels.
 
@@ -3446,9 +3454,14 @@ class MatplotlibRenderer:
             float(_matplotlib.rcParams["xtick.major.pad"]) * dots_per_point
         )
         label_gap_px = tick_length_px + tick_pad_px
-        tick_px = tick_length_px / max(scene.width, 1)
-        gap_px = label_gap_px / max(scene.width, 1)
-        gap_py = label_gap_px / max(scene.height, 1)
+        # Point metrics are CANVAS pixels; fractions must divide by the
+        # canvas box, not the scene raster -- a drag preview renders the
+        # raster at a fraction of the box and stretches it, and dividing
+        # by the reduced raster inflated every tick and label gap by the
+        # divisor: the scene held still while its labels flew out.
+        tick_px = tick_length_px / max(box_w, 1)
+        gap_px = label_gap_px / max(box_w, 1)
+        gap_py = label_gap_px / max(box_h, 1)
 
         # The pane grid follows the reference (MATLAB) convention: RULES
         # sit at tick positions, and every rule runs the FULL display
@@ -3518,7 +3531,7 @@ class MatplotlibRenderer:
                 scene.project(float(scene.nx), float(scene.ny), base_value),
             )
 
-            tick_py = tick_length_px / max(scene.height, 1)
+            tick_py = tick_length_px / max(box_h, 1)
             for column in picks(source_nx):
                 a, b = scene.fold_cell(0, column * scene.pool_x)
                 centre = a + 0.5
@@ -5706,6 +5719,25 @@ class MatplotlibRenderer:
         image = self._active_image_artist()
         if image is None:
             raise TypeError("color-limit preview requires an Image")
+        if self._height_bars_scene:
+            # The 2D fast path below re-gathers HEATMAP pixels, which for
+            # the 3D scene would paint a stale heatmap over it (and with
+            # no cached planes would change nothing until release).  The
+            # scene's own render is the recolour: candidate limits move
+            # both the colours and the bar heights they anchor.
+            stashed = self._height_bars_calls.get(key)
+            if stashed is not None:
+                axes, values, valid, extent, state, cmap_name, cmap, vid = (
+                    stashed
+                )
+                with style_context(self.style):
+                    self._update_height_bars_artist(
+                        axes, values, valid, extent, state, key,
+                        (float(selected[0]), float(selected[1])),
+                        cmap_name, cmap, valid_identity=vid,
+                    )
+                    image.set_clim(float(selected[0]), float(selected[1]))
+                return
         with style_context(self.style):
             limits = (float(selected[0]), float(selected[1]))
             prepared = self._artists.get(f"{key}:prepared_current")

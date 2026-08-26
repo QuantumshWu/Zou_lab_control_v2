@@ -355,13 +355,24 @@ def render_height_bars(
     x_high = float(ground_x.max())
     y_low = float(ground_y.min()) + pane_low
     y_high = float(ground_y.max()) + pane_high
-    margin = 0.04 * max(x_high - x_low, y_high - y_low)
-    x_low -= margin
-    x_high += margin
-    y_low -= margin
-    y_high += margin
+    # The camera DISTANCE must not depend on where the orbit points: a
+    # fit against the current footprint breathes as the projected box
+    # widens and narrows with the azimuth (and flips the dense-surface
+    # threshold with it), which read as the scene lurching nearer and
+    # farther -- and lighting toggling -- during a drag.  The scale
+    # therefore fits the azimuth-INVARIANT envelope: the footprint's
+    # diagonal, which the projected extents reach at their widest.
+    # Centring still tracks the actual box, so the scene stays centred
+    # while its size holds still.
+    diagonal = math.hypot(nx, ny)
+    span_x = diagonal
+    span_y = diagonal * se + pane_high - pane_low
+    margin = 0.04 * max(span_x, span_y)
     scale = (
-        min(render_w / (x_high - x_low), render_h / (y_high - y_low))
+        min(
+            render_w / (span_x + 2.0 * margin),
+            render_h / (span_y + 2.0 * margin),
+        )
         * camera.zoom
     )
     x_mid = 0.5 * (x_low + x_high)

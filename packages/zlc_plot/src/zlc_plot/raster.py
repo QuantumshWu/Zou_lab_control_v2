@@ -1909,15 +1909,17 @@ class RasterPlotHost:
                         "the painted pointer front is no longer layout-compatible"
                     )
                 if selected_action == "press":
-                    if (
-                        session.data_generation != effective_identity.data_generation
-                        or session.data_revision != effective_identity.data_revision
-                        or session.image_overlay_revision
-                        != effective_identity.image_overlay_revision
-                    ):
-                        raise RuntimeError(
-                            "the current pointer front is no longer session-compatible"
-                        )
+                    # A press means what the OPERATOR saw, and what they saw
+                    # is geometry: the layout, the painted transforms and the
+                    # interaction state, each checked precisely here.  Data
+                    # currency is deliberately NOT required -- a live plot
+                    # advances its data revision with every published frame
+                    # while retention holds the limits still, so demanding
+                    # revision equality rejected most presses during any
+                    # acquisition without protecting anything the press
+                    # actually consumes.  When live data DOES move the
+                    # autoscaled limits, the transform membership check
+                    # below rejects the stale front on its own.
                     if effective_axes is not None:
                         current_axes = session._raster_axes_snapshot()
                         if effective_axes not in current_axes:

@@ -12,7 +12,7 @@ from zlc_plot import (
     describe_semantics,
     normalize_classifier_threshold_targets,
 )
-from zlc_plot.semantics import composed_spec
+from zlc_plot.semantics import FATE_PREFIX, composed_spec
 
 
 __all__ = [
@@ -369,6 +369,17 @@ def project_panel_state(
     for name, saved in saved_values.items():
         key = str(name)
         if not description.declares(key):
+            if key.startswith(FATE_PREFIX):
+                # A fate names an AXIS.  The same signal legally changes
+                # its schema representation -- the Runtime's indexed
+                # history injects a source-index point column, and its
+                # arrival or departure adds and removes fate rows (the
+                # synthetic point-row ordinal among them).  A saved fate
+                # for an axis the current representation does not offer
+                # is not a typo (the editor authors these names); it is a
+                # statement about an axis that is not here to have a
+                # fate.  Non-fate names remain hard errors.
+                continue
             raise KeyError(key)
         value = restore_semantic_choice(description, key, saved)
         field = description.field(key)
@@ -431,6 +442,10 @@ class PanelState:
     #: of them is being read.  Written down so a board comes back as it was
     #: left; empty means "nothing chosen", not "restore nothing".
     selector: Mapping[str, Any] = field(default_factory=dict)
+    #: The panel's crosshair marker ({"x": float, "y": float}, empty when
+    #: none): both surfaces point at the same place, and a board restores
+    #: it with the rest of the record.
+    crosshair: Mapping[str, Any] = field(default_factory=dict)
     classifier_thresholds: tuple[Mapping[str, Any], ...] = ()
     focused_cell: int | None = None
 
@@ -520,6 +535,7 @@ class PanelState:
             "overlay_signal": self.overlay_signal,
             "published_outputs": dict(self.published_outputs),
             "selector": _document_value(self.selector),
+            "crosshair": _document_value(self.crosshair),
             "classifier_thresholds": _document_value(self.classifier_thresholds),
             "focused_cell": self.focused_cell,
         }
@@ -543,6 +559,7 @@ class PanelState:
             "overlay_signal",
             "published_outputs",
             "selector",
+            "crosshair",
             "classifier_thresholds",
             "focused_cell",
         }
@@ -595,6 +612,7 @@ class PanelState:
             overlay_signal=text("overlay_signal"),
             published_outputs=published,
             selector=mapping("selector"),
+            crosshair=mapping("crosshair"),
             classifier_thresholds=tuple(thresholds),
             focused_cell=focused,
         )

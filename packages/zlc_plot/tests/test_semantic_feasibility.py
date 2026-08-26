@@ -13,6 +13,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from zlc_plot.semantics import SemanticVacancy
 from zlc_plot import (
     AxisRef,
     CurvePlot,
@@ -103,7 +104,17 @@ def test_every_offered_option_succeeds(
         for value, field_value in _field_candidates(field, description):
             probe = PlotSession(make_snapshot(), spec)
             try:
-                candidate = updated_spec(schema, spec, field.name, field_value)
+                try:
+                    candidate = updated_spec(
+                        schema, spec, field.name, field_value
+                    )
+                except SemanticVacancy:
+                    # A legitimate outcome, not a failure: demoting the
+                    # only holder of a required role leaves the table
+                    # authored-but-undrawable, and the console presents
+                    # that state.  No offered option may fail any OTHER
+                    # way.
+                    continue
                 probe.replace_spec(candidate)
             finally:
                 probe.close()

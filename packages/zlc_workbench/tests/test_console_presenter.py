@@ -2941,6 +2941,7 @@ def test_a_board_can_be_written_down_and_put_back(presenter, session, tmp_path) 
         "fit": {"model": "radial_gaussian_center"}, "overlay_signal": "",
         "published_outputs": {},
         "selector": {},
+        "crosshair": {},
         "classifier_thresholds": [],
         "focused_cell": None,
     }
@@ -3088,6 +3089,7 @@ def test_task_console_layout_rejects_a_non_catalog_facet_cell(presenter) -> None
             "overlay_signal": "",
             "published_outputs": {},
             "selector": {},
+            "crosshair": {},
             "classifier_thresholds": [],
             "focused_cell": None,
         }
@@ -3115,7 +3117,7 @@ def test_a_board_naming_a_signal_nobody_publishes_keeps_the_blank_panel(
          "cell_kind": "", "size": "",
          "interval_ms": 200, "semantic": {}, "display": {}, "fit": {},
          "overlay_signal": "", "published_outputs": {},
-         "selector": {}, "classifier_thresholds": [], "focused_cell": None}
+         "selector": {}, "crosshair": {}, "classifier_thresholds": [], "focused_cell": None}
     )
 
     assert presenter.apply_layout(document) is True

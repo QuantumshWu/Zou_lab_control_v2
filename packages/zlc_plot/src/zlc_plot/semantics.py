@@ -276,19 +276,39 @@ def schema_structure(schema: DatasetSchema) -> SchemaStructure:
         ]
     else:
         columns = tuple(schema.point_table.columns)
+        rows = int(schema.point_table.row_count)
+        # The Runtime's indexed history materializes shots INTO the point
+        # table (rows = shots x event points).  Fusing that into one
+        # "point N" invents a geometry the event never had; the shot
+        # index is its own bracket entry and the residue is the event's.
+        from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
+
+        points = []
+        shot_column = next(
+            (
+                column
+                for column in columns
+                if column.coordinate_id == PRIMARY_INDEX_AXIS_ID
+            ),
+            None,
+        )
+        if shot_column is not None:
+            shots = max(len(set(shot_column.values)), 1)
+            points.append((str(shot_column.name), shots))
+            columns = tuple(
+                column for column in columns if column is not shot_column
+            )
+            rows = rows // shots if rows % shots == 0 else rows
         # Without topology, every point column is a coordinate over the SAME
         # physical row dimension.  Printing one ``row_count`` per column turns
         # 100 rows carrying (x, y) into a fictional 100×100 geometry.
-        points = (
-            []
-            if not columns
-            else [
+        if columns:
+            points.append(
                 (
                     str(columns[0].name) if len(columns) == 1 else "point",
-                    int(schema.point_table.row_count),
+                    rows,
                 )
-            ]
-        )
+            )
     # Exactly three brackets: (repeat) x (points) x (cell payload).  A cell
     # axis carrying a point-domain EVENT role -- the frame axis a producer
     # declares without a point column -- is still a fact about WHEN within one
@@ -350,6 +370,24 @@ ROLE_FATES = ("x", "y", "group", "facet")
 #: split by; vacating a required one means SOMETHING has to be drawn along, so
 #: the kind's own default steps in.
 OPTIONAL_ROLES = frozenset({"group"})
+
+
+class SemanticVacancy(ValueError):
+    """A required role has no axis: the authored table cannot draw.
+
+    Not a rejection.  The operator's fates are exactly what they said --
+    the plot simply has nothing on this role, so there is nothing to
+    display until some axis takes it.  Callers keep the authored table
+    and present this reason; they never assign an axis the operator did
+    not choose.
+    """
+
+    def __init__(self, role: str, kind: "PlotKind") -> None:
+        self.role = str(role)
+        super().__init__(
+            f"no axis holds {role!r}: give an axis the {role!r} fate to "
+            f"draw this {kind.value}"
+        )
 #: What becomes of an axis nobody gave a role to.  Which of the two it is, is
 #: the KIND's to say and not the operator's: a distribution pools everything
 #: it is given -- that is what a distribution IS -- and every other kind
@@ -470,6 +508,19 @@ def _role_holder(spec: PlotSpec, role: str) -> AxisRef | None:
     if role == "facet":
         return spec.facet if isinstance(spec, FacetGridPlot) else None
     return getattr(semantic_spec(spec), role, None)
+
+
+def _is_primary_index_axis(schema: DatasetSchema, ref: AxisRef) -> bool:
+    """Whether this fate row is the Runtime's materialized shot index."""
+
+    from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
+
+    return any(
+        column.coordinate_id == PRIMARY_INDEX_AXIS_ID
+        and AxisRef.point(column.coordinate_id.value).physical_identity
+        == ref.physical_identity
+        for column in schema.point_table.columns
+    )
 
 
 def _fate_row_axes(
@@ -760,41 +811,14 @@ def composed_spec(
             ):
                 desired_roles[previous_role] = displaced
 
-        # Only now repair a genuinely unfilled required role.  Explicitly
-        # reduced/pinned axes are excluded: choosing Reduced must not be
-        # silently undone by the repair it was meant to accompany.
-        fallback = default_spec(schema, candidate.kind)
-        blocked = {
-            axis.physical_identity
-            for axis, value in fate_values.items()
-            if value not in ROLE_FATES
-        }
+        # A genuinely unfilled required role is NEVER repaired.  Grabbing
+        # some axis the operator did not choose turned one explicit edit
+        # into a different plot, and refusing the edit outright made the
+        # fates unassignable.  The vacancy is a STATE: the caller keeps
+        # the authored table, draws nothing, and says why.
         for role in declared_roles:
-            if desired_roles[role] is not None:
-                continue
-            if role in OPTIONAL_ROLES:
-                continue
-            preferred = None if fallback is None else _role_holder(fallback, role)
-            taken = {
-                holder.physical_identity
-                for other, holder in desired_roles.items()
-                if other != role and holder is not None
-            }
-            replacement = next(
-                (
-                    ref
-                    for ref in (preferred, *axis_choices_for_schema(schema))
-                    if ref is not None
-                    and ref.physical_identity not in taken
-                    and ref.physical_identity not in blocked
-                ),
-                None,
-            )
-            if replacement is None:
-                raise ValueError(
-                    f"{role} cannot be vacated: this dataset offers no other axis for it"
-                )
-            desired_roles[role] = replacement
+            if desired_roles[role] is None and role not in OPTIONAL_ROLES:
+                raise SemanticVacancy(role, candidate.kind)
 
         for role in declared_roles:
             rest[role] = desired_roles[role]
@@ -1028,6 +1052,12 @@ def describe_semantics(
         name = fate_field_name(ref)
         current = _fate_of(spec, ref)
         offered: list[SemanticChoice] = [(default_fate, f"({default_label})")]
+        if spec.kind is PlotKind.ROLLING and _is_primary_index_axis(schema, ref):
+            # Rolling does not reduce the Runtime's shot index away -- it
+            # ROLLS along it.  The row still offers "= Latest" and the
+            # per-shot pins, which genuinely narrow the window; only the
+            # default's label stops lying about the axis's fate.
+            offered[0] = (default_fate, "(shot axis)")
         for role in roles:
             if role in ("x", "group") and ref not in series_axes and current != role:
                 # A series is drawn ALONG its x and split BY its group; a
