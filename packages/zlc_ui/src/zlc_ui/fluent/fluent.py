@@ -639,6 +639,7 @@ def show_fluent_popup_for_anchor(
     minimum_height: int = 300,
     maximum_height: int | None = None,
     content_width: int | None = None,
+    origin: QtCore.QPoint | None = None,
 ) -> None:
     """Size and place one Fluent popup beside its anchor on the active screen.
 
@@ -651,6 +652,12 @@ def show_fluent_popup_for_anchor(
     (a form's widest row).  Passing it explicitly lets a width-bounded scroll
     content stay a width CONSUMER -- no manual minimum pinned onto the widget
     that would clip when the screen clamps the popup narrower.
+
+    ``origin`` is a global top-left the OPERATOR chose by dragging the
+    popup there.  Placement then keeps it (clamped to the screen) and only
+    the size is recomputed: a popup whose form grew a row -- picking a fit
+    model adds one -- was otherwise re-anchored beside its button, which
+    reads as the panel throwing the operator's window back.
     """
 
     if not isinstance(popup, FluentPopup):
@@ -677,6 +684,8 @@ def show_fluent_popup_for_anchor(
         or content_width <= 0
     ):
         raise ValueError("content_width must be a positive integer or None")
+    if origin is not None and not isinstance(origin, QtCore.QPoint):
+        raise TypeError("origin must be QPoint or None")
 
     popup.adjustSize()
     hint = content.sizeHint()
@@ -735,6 +744,8 @@ def show_fluent_popup_for_anchor(
         top = anchor_bottom_right.y() + 1 + gap
     popup.resize(desired_width, desired_height)
     left = anchor_bottom_right.x() - popup.width() + 1
+    if origin is not None:
+        left, top = origin.x(), origin.y()
     if available is not None:
         left = max(
             available.left(),

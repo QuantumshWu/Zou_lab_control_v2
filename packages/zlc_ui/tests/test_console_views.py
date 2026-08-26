@@ -426,6 +426,97 @@ finally:
     )
 
 
+def test_a_dragged_setting_popup_stays_where_the_operator_put_it() -> None:
+    """Growing the form must not throw the popup back beside its button.
+
+    Placement had two owners -- the anchor and the operator's drag -- and
+    the anchor re-asserted itself on every content resize.  Picking a fit
+    model adds the parameter row, so the popup jumped back to the card
+    the moment the operator used it.
+    """
+
+    _run_qt(
+        """
+import zou_lab_control
+from PyQt5 import QtCore
+from zlc_ui import open_task_console
+from zlc_ui.qt import ensure_qt_app
+
+app = ensure_qt_app(['setting-drag'])
+console = open_task_console(window_ratio=0.4)
+console.set_panel_sizes(('2x2',), '2x2')
+console.set_panel_intervals((100,), 100)
+console.add_panel('panel-1', 'Panel')
+state = {
+    'signal': '', 'kind': 'image', 'size': '2x2', 'interval_ms': 100,
+    'title': 'Panel', 'semantic': {}, 'display': {}, 'fit': {},
+    'overlay_signal': '',
+}
+def fit_fields(*keys):
+    return tuple(
+        {
+            'key': key, 'label': key.title(), 'kind': 'text', 'value': '',
+            'allow_none': True, 'choices': (), 'minimum': None,
+            'maximum': None, 'step': None,
+        }
+        for key in keys
+    )
+console.set_panel_projection('panel-1', state, {
+    'semantic': (), 'display': (), 'fit': fit_fields('model'),
+    'semantic_unavailable': '', 'display_unavailable': '',
+    'fit_unavailable': '',
+})
+card = console._cards['panel-1']
+card._open_settings()
+app.processEvents()
+popup = card._settings_popup
+assert popup is not None and popup.isVisible()
+
+handle = card._settings_drag_handle
+press = QtCore.QPoint(4, 4)
+carried = popup.frameGeometry().topLeft() + QtCore.QPoint(120, 90)
+import PyQt5.QtGui as QtGui
+app.sendEvent(handle, QtGui.QMouseEvent(
+    QtCore.QEvent.MouseButtonPress, QtCore.QPointF(press),
+    handle.mapToGlobal(press), QtCore.Qt.LeftButton,
+    QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+))
+app.sendEvent(handle, QtGui.QMouseEvent(
+    QtCore.QEvent.MouseMove, QtCore.QPointF(press),
+    carried + (handle.mapToGlobal(press) - popup.frameGeometry().topLeft()),
+    QtCore.Qt.LeftButton, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier,
+))
+app.sendEvent(handle, QtGui.QMouseEvent(
+    QtCore.QEvent.MouseButtonRelease, QtCore.QPointF(press),
+    carried, QtCore.Qt.NoButton, QtCore.Qt.NoButton, QtCore.Qt.NoModifier,
+))
+app.processEvents()
+moved = popup.frameGeometry().topLeft()
+assert moved != carried - QtCore.QPoint(120, 90), 'the drag did nothing'
+
+try:
+    # Picking a fit model: the form grows a row and re-measures.
+    console.set_panel_projection('panel-1', state, {
+        'semantic': (), 'display': (),
+        'fit': fit_fields('model', 'expression'),
+        'semantic_unavailable': '', 'display_unavailable': '',
+        'fit_unavailable': '',
+    })
+    app.processEvents()
+    assert popup.frameGeometry().topLeft() == moved, (
+        popup.frameGeometry().topLeft(), moved
+    )
+    # Closing ends the operator's placement; the next open anchors again.
+    card.retire_settings_popup()
+    app.processEvents()
+    assert card._settings_origin is None
+finally:
+    console.close()
+    app.processEvents()
+"""
+    )
+
+
 def test_board_constructs_and_packs_from_metrics() -> None:
     _run_qt(
         """
