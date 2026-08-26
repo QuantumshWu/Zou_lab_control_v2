@@ -5181,3 +5181,110 @@ def test_the_operator_viewport_survives_a_same_geometry_run(
     assert viewport is not None
     assert (float(viewport.x.low), float(viewport.x.high)) == (30.0, 60.0)
     assert (float(viewport.y.low), float(viewport.y.high)) == (20.0, 50.0)
+
+
+def test_a_gesture_survives_a_shot_landing_mid_drag(presenter, session) -> None:
+    """The reported "drag goes dead ~30% of the time" in one assertion.
+
+    A shot that lands mid-gesture used to retire the host whose widget
+    had the mouse grabbed, so the drag stopped answering until release.
+    A same-geometry run keeps the host: the gesture continues and its
+    release commits.
+    """
+
+    node, snap = _one_shot(session)
+    panel = presenter.add_panel(node.signal_key("frames"), snap, kind="image")
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.host is not None and panel.accepted_surface is not None,
+    )
+    host = panel.host
+    front = host.front
+    axes = next(t for t in front.interaction.axes if t.role == "image")
+    left, top, right, bottom = axes.bounds
+    cx, cy = (left + right) / 2, (top + bottom) / 2
+
+    host._pointer_event(
+        "press", cx, cy, button=2,
+        identity=front.identity, axes=axes, interaction=front.interaction,
+    ).result(timeout=10)
+
+    _one_shot(session, producer="cm")
+    for _ in range(40):
+        presenter.beat()
+        time.sleep(0.005)
+
+    assert panel.host is host, "the shot retired the host mid-gesture"
+    moved = host._pointer_event(
+        "move", cx + 40.0, cy + 20.0, button=2
+    ).result(timeout=10)
+    assert moved is not None
+    host._pointer_event(
+        "release", cx + 40.0, cy + 20.0, button=2
+    ).result(timeout=10)
+    for _ in range(40):
+        presenter.beat()
+        time.sleep(0.005)
+    assert host.describe_display().result(timeout=10).value.viewport is not None
+
+
+def test_the_display_mirror_goes_quiet_after_a_burst(presenter, session) -> None:
+    """Rapid edits must converge, not ping-pong.
+
+    Revision ordering alone cannot break the cross-host loop: a quick
+    second edit makes the sibling's echo of the FIRST arrive as a newer
+    revision carrying the older value.  Echoes are recognized by value
+    and consumed, so the mirror falls silent and both surfaces agree.
+    """
+
+    node, snap = _one_shot(session)
+    panel = presenter.add_panel(node.signal_key("frames"), snap, kind="image")
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.host is not None and panel.accepted_surface is not None,
+    )
+    assert presenter.update_panel_state(
+        panel.panel_id, {"display": {"presentation": "height_bars"}}
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.configuration is None
+        and panel.port.presentation_current,
+    )
+    assert presenter.edit_panel(panel.panel_id)
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.editor_host is not None
+        and panel.frozen_data is not None
+        and panel.frozen_data.description is not None,
+    )
+
+    pushes: list[dict] = []
+    for host in (panel.host, panel.editor_host):
+        original = host.set_parameters
+
+        def spy(mapping, _original=original):
+            pushes.append(dict(mapping))
+            return _original(mapping)
+
+        host.set_parameters = spy
+
+    panel.editor_host.set_parameters({"camera_zoom": 1.2})
+    panel.editor_host.set_parameters({"camera_zoom": 1.44})
+    for _ in range(80):
+        presenter.beat()
+        time.sleep(0.005)
+    settled = len(pushes)
+    for _ in range(60):
+        presenter.beat()
+        time.sleep(0.005)
+
+    assert len(pushes) == settled, f"the mirror kept talking: {pushes[settled:]}"
+    live = panel.host.describe_display().result(
+        timeout=10
+    ).value.display_state.values
+    edit = panel.editor_host.describe_display().result(
+        timeout=10
+    ).value.display_state.values
+    assert live["camera_zoom"] == edit["camera_zoom"] == 1.44
+    assert panel.state.display["camera_zoom"] == 1.44
