@@ -1030,3 +1030,52 @@ def test_an_exact_processor_starts_on_an_armed_silent_source() -> None:
     finally:
         host.shutdown()
         plane.close()
+
+
+def test_a_run_record_is_written_once_when_the_run_is_over(tmp_path) -> None:
+    """Liveness is not a disk fact, and a record is not rewritten.
+
+    The file used to carry ``status.state`` and be replaced on every
+    transition, every progress report and every artifact -- hundreds of
+    times in a long calibration, each one an ``os.replace`` over a path
+    another handle may hold, which is the PermissionError the bench hit on
+    the last write of a run.  Nothing ever read it while the run was
+    going.  So: nothing on disk while running, and exactly one write --
+    a creation, never a replacement -- when the run ends.
+    """
+
+    from zlc_runtime.task_run import TaskRun
+
+    directory = tmp_path / "run-0001"
+    directory.mkdir()
+    record = directory / "run.json"
+    run = TaskRun(
+        directory=directory,
+        task_name="calibration",
+        instance_id="cal-1",
+        input_summary={"repeats": 3},
+    )
+    assert not record.exists(), "a starting run wrote a live state to disk"
+
+    run.mark_running()
+    for cycle in range(200):
+        run.report_progress("Capturing", current=cycle, total=200)
+    produced = directory / "frame.json"
+    produced.write_text("{}", encoding="utf-8")
+    run.register_artifact("frame", produced, role="summary")
+    assert not record.exists(), (
+        "a running task published its progress to disk; the file exists to "
+        "record what the run WAS, not to broadcast what it is doing"
+    )
+
+    run.mark_completed()
+    document = json.loads(record.read_text(encoding="utf-8"))
+    assert document["status"]["state"] == "completed"
+    assert [item["name"] for item in document["artifacts"]] == ["frame"]
+
+    # And the record is final: a later terminal report never replaces the
+    # file, because replacing it is the failure this design avoids.
+    written_at = record.stat().st_mtime_ns
+    run.mark_failed(RuntimeError("after the fact"))
+    assert record.stat().st_mtime_ns == written_at
+    assert json.loads(record.read_text(encoding="utf-8"))["error"] is None

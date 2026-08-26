@@ -891,3 +891,107 @@ def test_a_drag_reuses_the_pooled_grid_it_was_already_showing() -> None:
     back = frame(1, 3)
     assert preview is committed, "the drag re-pooled the scan"
     assert back is committed, "the release re-pooled the scan"
+
+
+def _long_coordinate_session(side: int = 10):
+    """A scan whose coordinates are long numbers -- an optical frequency.
+
+    Long labels are what makes a rotated scene crowd: the text boxes are
+    wide enough to meet however the projection lays the ticks out.
+    """
+
+    base = 384227900000.0
+    coords = tuple(base + index for index in range(side))
+    cells = [(i % side, i // side) for i in range(side * side)]
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=4),
+        PointTable.from_columns({
+            "ax": np.asarray([coords[c[0]] for c in cells]),
+            "ay": np.asarray([coords[c[1]] for c in cells]),
+        }),
+        data_axes=(Axis.create("site", values=[0.0, 1.0]),),
+        dtype=np.float64,
+        point_topology=PointTopology(
+            (AxisId("ax"), AxisId("ay")), (coords,) * 2, tuple(cells)
+        ),
+    )
+    rng = np.random.default_rng(7)
+    session = PlotSession(
+        DatasetSnapshot(schema, rng.random((4, side * side, 2)), revision=1),
+        ImagePlot(AxisRef.point_dimension("ax"), AxisRef.point_dimension("ay")),
+    )
+    session.set_size("2x2")
+    session.set_parameter("presentation", "height_bars")
+    return session
+
+
+@pytest.mark.parametrize("azimuth", [-55.0, 40.0, 130.0, 220.0])
+def test_a_rotated_scene_never_prints_a_label_across_another(azimuth) -> None:
+    """Rotation moves the labels, so no fixed stride can keep them apart.
+
+    Whether two labels collide is measurable, so that is what decides --
+    and the ends survive, because an axis whose extremes are legible still
+    says what it spans.
+    """
+
+    session = _long_coordinate_session()
+    try:
+        session._renderer.set_height_bars_preview(
+            HeightBarCamera(azimuth_deg=azimuth, elevation_deg=25.0)
+        )
+        session.rgba()
+        renderer = session._renderer
+        chrome = renderer._artists["image:h3d_chrome"]
+        shown = [text for text in chrome["texts"] if text.get_visible()]
+        assert len(shown) >= 2
+        canvas_renderer = renderer.figure.canvas.get_renderer()
+        boxes = [text.get_window_extent(canvas_renderer) for text in shown]
+        for first in range(len(boxes)):
+            for second in range(first + 1, len(boxes)):
+                assert not boxes[first].overlaps(boxes[second]), (
+                    f"{shown[first].get_text()!r} prints across "
+                    f"{shown[second].get_text()!r} at azimuth {azimuth}"
+                )
+    finally:
+        session.close()
+
+
+def test_scene_labels_are_cut_off_at_the_room_the_scene_owns() -> None:
+    """A 3D label goes where the projection puts it, which is not a place
+    any layout reserved.  It gets the scene's own room -- out to whatever
+    bounds it on the right -- and is cut there rather than printing over a
+    neighbour that means something else."""
+
+    session = _long_coordinate_session()
+    try:
+        session._renderer.set_height_bars_preview(
+            HeightBarCamera(azimuth_deg=40.0, elevation_deg=25.0)
+        )
+        session.rgba()
+        renderer = session._renderer
+        chrome = renderer._artists["image:h3d_chrome"]
+        shown = [text for text in chrome["texts"] if text.get_visible()]
+        rails = [
+            axes
+            for role in ("distribution", "colorbar")
+            for axes in renderer._axes.get(role, ())
+        ]
+        assert rails, "this panel has the neighbours the region is bounded by"
+        limit = min(float(axes.get_window_extent().x0) for axes in rails)
+        canvas_renderer = renderer.figure.canvas.get_renderer()
+        reaching = [
+            text
+            for text in shown
+            if text.get_window_extent(canvas_renderer).x1 > limit
+        ]
+        assert reaching, (
+            "this arrangement is the one where labels reach the rail; "
+            "without that the clip proves nothing"
+        )
+        for text in reaching:
+            assert text.get_clip_on(), text.get_text()
+            assert float(text.get_clip_box().x1) <= limit + 1.0, (
+                f"{text.get_text()!r} may paint past the room it owns"
+            )
+    finally:
+        session.close()

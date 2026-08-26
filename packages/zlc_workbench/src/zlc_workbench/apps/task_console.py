@@ -372,6 +372,7 @@ class ExperimentGuiFlow:
                 session,
                 key,
                 window_ratio=self.window_ratio,
+                owner=self._console_owner_window(),
             )
         else:
             control = self._open_generic_control(key, leaf.device)
@@ -393,6 +394,18 @@ class ExperimentGuiFlow:
         control.closed.connect(released)
         return control
 
+    def _console_owner_window(self):
+        """The console window every window this app opens belongs to.
+
+        One place says who the owner is, so a new window cannot be added
+        without answering the question -- and the answer is never "nobody",
+        which is what left a settings frame free for the desktop to stack a
+        browser underneath.
+        """
+
+        console = self.console
+        return None if console is None else console.owner_window
+
     def _open_generic_control(self, key: str, device: object) -> object:
         from zlc_atom.authoring import AuthoringSchema
         from zlc_ui import open_device_control
@@ -404,6 +417,7 @@ class ExperimentGuiFlow:
             raise RuntimeError("initialize devices before opening a control")
         empty_spec = project_schema(AuthoringSchema(()))
         control = open_device_control(
+            owner=self._console_owner_window(),
             title=f"{key} control",
             spec=empty_spec,
             projection={

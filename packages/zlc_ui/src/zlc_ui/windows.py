@@ -26,6 +26,7 @@ def open_device_control(
     spec: Any,
     projection: Any,
     window_ratio: float | None = None,
+    owner=None,
 ) -> Any:
     """Open one projection-driven generic control without exposing Qt."""
 
@@ -41,6 +42,7 @@ def open_device_control(
 
     window = open_fluent_window(
         _body,
+        owner=owner,
         title=str(title),
         window_ratio=(
             WINDOW_SCREEN_FRACTION if window_ratio is None else float(window_ratio)
@@ -53,6 +55,7 @@ def open_pulse_editor(
     *,
     title: str = "PulseGUI@Zou lab",
     window_ratio: float | None = None,
+    owner=None,
 ) -> Any:
     """Open the pulse editor and return the handle that drives it."""
 
@@ -71,6 +74,7 @@ def open_pulse_editor(
 
     window = open_fluent_window(
         _body,
+        owner=owner,
         title=str(title),
         window_ratio=(
             WINDOW_SCREEN_FRACTION if window_ratio is None else float(window_ratio)
@@ -83,6 +87,7 @@ def open_figure_viewer(
     *,
     title: str = "FigureViewer@Zou lab",
     window_ratio: float | None = None,
+    owner=None,
 ) -> Any:
     """Open the figure viewer and return the handle that drives it."""
 
@@ -98,6 +103,7 @@ def open_figure_viewer(
 
     window = open_fluent_window(
         _body,
+        owner=owner,
         title=str(title),
         window_ratio=(
             WINDOW_SCREEN_FRACTION if window_ratio is None else float(window_ratio)
@@ -110,6 +116,7 @@ def open_device_manager(
     *,
     title: str = "DeviceManager@Zou lab",
     window_ratio: float | None = None,
+    owner=None,
 ) -> Any:
     """Open the device manager and return the handle that drives it."""
 
@@ -125,6 +132,7 @@ def open_device_manager(
 
     window = open_fluent_window(
         _body,
+        owner=owner,
         title=str(title),
         window_ratio=(
             WINDOW_SCREEN_FRACTION if window_ratio is None else float(window_ratio)
@@ -138,6 +146,7 @@ def open_task_console(
     title: str = "TaskConsole@Zou lab",
     window_ratio: float | None = None,
     plot_surface: Any | None = None,
+    owner=None,
 ) -> Any:
     """Open the task console and return the handle that drives it.
 
@@ -159,6 +168,7 @@ def open_task_console(
 
     window = open_fluent_window(
         _body,
+        owner=owner,
         title=str(title),
         window_ratio=(
             WINDOW_SCREEN_FRACTION if window_ratio is None else float(window_ratio)

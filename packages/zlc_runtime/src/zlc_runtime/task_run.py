@@ -101,7 +101,7 @@ class TaskRun:
         self._error: dict[str, object] | None = None
         self._artifacts: dict[str, TaskArtifact] = {}
         self._lock = RLock()
-        self._write_locked()
+        self._recorded = False
 
     @classmethod
     def create(
@@ -145,7 +145,6 @@ class TaskRun:
                 raise RuntimeError(f"Task run cannot stop from {self._state}")
             self._state = "stopping"
             self._stop_reason = _text(reason, "Task stop reason")
-            self._write_locked()
 
     def mark_completed(self) -> None:
         self._transition("completed", allowed=("running",))
@@ -163,7 +162,7 @@ class TaskRun:
             self._ended_at = _now()
             self._progress = None
             self._error = self._error_document(error)
-            self._write_locked()
+            self._record_locked()
 
     def execute(self, work: Callable[["TaskRun"], _Result]) -> _Result:
         """Run direct/notebook Task work through this same durable lifecycle."""
@@ -194,7 +193,6 @@ class TaskRun:
                 "current": current,
                 "total": total,
             }
-            self._write_locked()
 
     def register_artifact(
         self,
@@ -245,7 +243,6 @@ class TaskRun:
                 if existing == artifact:
                     return existing
             self._artifacts[selected_name] = artifact
-            self._write_locked()
         return artifact
 
     def _transition(self, state: str, *, allowed: tuple[str, ...]) -> None:
@@ -258,9 +255,37 @@ class TaskRun:
             if state in _TERMINAL_STATES:
                 self._ended_at = _now()
                 self._progress = None
-            self._write_locked()
+                self._record_locked()
 
-    def _write_locked(self) -> None:
+    def _record_locked(self) -> None:
+        """Write the run's record, once, when the run is over.
+
+        A record is written when there is something to record.  This file
+        used to be rewritten on every state change, every progress report
+        and every artifact -- a two-hundred-repeat calibration replaced it
+        two hundred times, each replacement an fsync and an ``os.replace``
+        over a path something else might have open, which on Windows is a
+        PermissionError landing on the last write of a long run.  Nothing
+        ever read it while the run was going.
+
+        It was doing two jobs and only one of them is a file's: what the
+        run WAS -- its input, its artifacts, how it ended -- is a durable
+        fact worth keeping, and whether it is running right now is not.
+        Liveness belongs to the process that has it; a "running" left in a
+        file by a process that has since died is not stale information,
+        it is false information.  So a run directory without this file is
+        a run that did not finish, which is exactly what it means.
+
+        Written once also means the path is created, never replaced: there
+        is no destination for an open handle to hold, so the failure that
+        started this cannot happen.
+        """
+
+        if self._recorded:
+            # A terminal state is reached once.  Recording twice would be
+            # the replace this design exists to avoid.
+            return
+        self._recorded = True
         write_readable_json(
             self.directory / "run.json",
             {

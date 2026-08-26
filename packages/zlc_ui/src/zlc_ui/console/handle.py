@@ -128,6 +128,16 @@ class TaskConsoleHandle(QtCore.QObject):
 
         QtCore.QTimer.singleShot(0, self.close)
 
+    @property
+    def owner_window(self):
+        """The window anything opened FROM this console belongs to.
+
+        Named here because ownership is the console's to state: a window it
+        opens is not a peer that the desktop may stack anything between.
+        """
+
+        return self._window
+
     def set_close_guard(self, guard) -> None:
         """Refuse the close until the host says its workers are down.
 
