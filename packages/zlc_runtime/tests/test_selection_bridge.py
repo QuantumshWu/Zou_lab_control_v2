@@ -2266,3 +2266,72 @@ def test_an_implicit_axis_cropped_to_a_run_stays_implicit() -> None:
     assert cropped.size == 512
     assert cropped.index_origin == 400
     assert cropped.coordinate_at(0) == 400
+
+
+def test_two_fit_events_in_flight_never_own_one_name_twice() -> None:
+    """A fit publication CLAIMS its names before it knows it is still wanted.
+
+    Attaching (or reserving) registers the output names in the plane, and
+    only afterwards does the bridge decide whether that claim survives.
+    Two events in flight -- an operator arming a fit while the shot the
+    plot was still fitting lands -- therefore both held the same names for
+    a moment, and the plane refused the second one:
+
+        signal '@logic/fit/x0' is already owned by 'fit:fit:1'
+
+    Recorded per event and re-reported every beat, that is a panel whose
+    fit is broken and stays broken.  One route per role means publishing
+    one is not a concurrent operation.
+    """
+
+    schema = _curve_schema()
+    values = np.asarray([[[0.0], [0.0], [0.0], [0.0], [0.0]]])
+    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    plane.set_front_signals(
+        {"camera/frame", "@logic/fit/x0", "@logic/fit/x0_err"}
+    )
+    events = _Events()
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="fit")
+    bridge.start()
+    claimed, release = Event(), Event()
+    original = plane.attach_latest_only_processor
+
+    def holding_attach(processor, **kwargs):
+        result = original(processor, **kwargs)
+        claimed.set()
+        release.wait(20.0)
+        return result
+
+    plane.attach_latest_only_processor = holding_attach
+    failures: list[BaseException] = []
+
+    def emit(value: float, error: float, revision: int) -> None:
+        try:
+            events.emit_fit(_scalar_fit_event(plane, value, error, revision))
+        except BaseException as caught:  # pragma: no cover - the defect
+            failures.append(caught)
+
+    first = Thread(target=emit, args=(2.5, 0.1, 1))
+    first.start()
+    try:
+        assert claimed.wait(20.0), "the first fit never claimed its names"
+        second = Thread(target=emit, args=(3.5, 0.2, 2))
+        second.start()
+        # The second must be WAITING for the first to finish, not racing
+        # it: without that it claims '@logic/fit/x0' while the first still
+        # holds it, and the plane refuses the fit outright.
+        second.join(0.5)
+        assert second.is_alive()
+    finally:
+        release.set()
+        first.join(20.0)
+    second.join(20.0)
+    plane.attach_latest_only_processor = original
+    try:
+        assert not failures, failures
+        assert bridge.last_error is None, bridge.last_error
+        parameter = plane.freeze().value("@logic/fit/x0")
+        assert parameter is not None
+        assert float(parameter.snapshot.block.values.reshape(-1)[0]) == 3.5
+    finally:
+        _close(bridge, plane, source)

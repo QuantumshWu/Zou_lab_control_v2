@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
+from enum import Enum
 from types import MappingProxyType
 from typing import Any
 
@@ -12,7 +13,15 @@ from zlc_plot import (
     describe_semantics,
     normalize_classifier_threshold_targets,
 )
-from zlc_plot.semantics import FATE_PREFIX, SemanticVacancy, composed_spec
+from zlc_plot.semantics import (
+    FATE_PREFIX,
+    SemanticVacancy,
+    axis_admits_scope,
+    composed_spec,
+    is_scope_fate,
+    scope_coordinate_from_fate,
+    scope_fate,
+)
 
 
 __all__ = [
@@ -93,15 +102,28 @@ def panel_data_shape(
 
 
 def semantic_entries(description: object) -> tuple[dict[str, object], ...]:
+    """One fate row per axis, as a DOCUMENT: plain values, plain choices.
+
+    The surface is what the operator is shown and what they hand back, and
+    the record it lands in holds plain values -- so the surface speaks the
+    same representation.  Handing typed choices out beside a plain value
+    (the panel's authored state is written over these rows) put two
+    representations of one vocabulary in a single row: they compare equal,
+    so nothing broke loudly, and every consumer had to know which one it
+    was looking at.  ``restore_semantic_choice`` types them again where
+    composition needs it.
+    """
+
     return tuple(
         {
             "key": str(field.name),
             "label": str(field.label),
             "kind": "choice",
-            "value": field.value,
+            "value": _state_value(field.value),
             "allow_none": not bool(field.required),
             "choices": tuple(
-                (str(label), value) for value, label in tuple(field.choices)
+                (str(label), _state_value(value))
+                for value, label in tuple(field.choices)
             ),
             "minimum": None,
             "maximum": None,
@@ -260,6 +282,33 @@ def panel_state_from_description(
     )
 
 
+def _record_scalar(value: Any) -> Any:
+    """One scalar as a RECORD can hold it: the plain JSON type, never a
+    subclass of one.
+
+    ``zlc_durable`` accepts a value only when ``type(value)`` IS a JSON
+    type; every plot choice is a ``(str, Enum)``, which passes an
+    ``isinstance`` test and fails that one.  Two definitions of "plain"
+    meant a panel could hold a value it could never save: the reduction
+    row reached the layout writer as ``Reduction.MEAN`` and the board
+    refused with "is not a plain JSON value" -- at save time, far from
+    the assignment that put it there.  Projecting at the record's own
+    door makes "a panel state holds plain values" true instead of hoped
+    for, and a typed choice is restored from its plain form by
+    ``restore_semantic_choice``, which already compares against exactly
+    this projection.
+    """
+
+    if value is None or type(value) in (bool, int, float, str):
+        return value
+    if isinstance(value, Enum):
+        return _record_scalar(value.value)
+    for plain in (bool, int, float, str):
+        if isinstance(value, plain):
+            return plain(value)
+    return str(value)
+
+
 def _state_value(value: Any) -> Any:
     if isinstance(value, Mapping):
         if any(not isinstance(key, str) for key in value):
@@ -269,7 +318,7 @@ def _state_value(value: Any) -> Any:
         )
     if isinstance(value, (tuple, list)):
         return tuple(_state_value(item) for item in value)
-    return value
+    return _record_scalar(value)
 
 
 def _plain_state(values: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -296,13 +345,11 @@ def _validated_selector_document(value: Mapping[str, Any]) -> Mapping[str, Any]:
 def _document_value(value: Any) -> Any:
     """Project typed plot choices into the plain values a layout can store."""
 
-    if value is None or isinstance(value, (str, bool, int, float)):
-        return value
     if isinstance(value, Mapping):
         return {str(key): _document_value(item) for key, item in value.items()}
     if isinstance(value, (tuple, list)):
         return [_document_value(item) for item in value]
-    return str(value)
+    return _record_scalar(value)
 
 
 def restore_semantic_choice(description: object, name: str, saved: object) -> object:
@@ -355,6 +402,15 @@ class PanelProjection:
     @property
     def drawable(self) -> bool:
         return self.spec is not None
+
+
+def _fate_row_axis(description: object, name: str) -> object | None:
+    """The axis one fate row speaks for, from the description's own table."""
+
+    for ref, row_name in tuple(getattr(description, "fate_rows", ())):
+        if row_name == name:
+            return ref
+    return None
 
 
 def project_panel_state(
@@ -411,6 +467,20 @@ def project_panel_state(
         value = restore_semantic_choice(description, key, saved)
         field = description.field(key)
         if not any(value == choice for choice in field.choice_values):
+            if key.startswith(FATE_PREFIX) and is_scope_fate(value):
+                # A scope pin names a COORDINATE, and the row's dropdown is
+                # capped -- so "not in the list" answers the wrong question.
+                # Ask the data instead: a coordinate the axis has is legal
+                # however long the axis is, and one it no longer has is a
+                # statement with no referent, exactly like a fate naming an
+                # axis that is not here.  A camera restarted with another
+                # frame count rebuilds the pair axis; the pin the operator
+                # left on the pair that is gone must fall back to the row's
+                # default fate, not raise on every projection for ever.
+                ref = _fate_row_axis(description, key)
+                if ref is not None and axis_admits_scope(schema, ref, value):
+                    wanted[key] = scope_fate(scope_coordinate_from_fate(value))
+                continue
             raise ValueError(
                 f"semantic field {key!r} value is outside this plot vocabulary"
             )

@@ -323,3 +323,89 @@ def test_qt_raster_host_accepts_facet_grid_spec() -> None:
         assert len(front.interaction.axes) >= 2
     finally:
         host.close(timeout=10)
+
+
+@pytest.mark.gui
+def test_the_widget_asks_the_screen_before_it_subscribes() -> None:
+    """The correction starts at construction, not one render later.
+
+    Nothing tells a host what screen it is for, so its opening frame is
+    rendered at density 1 and painted stretched into the widget.  The
+    pixel-ratio observer used to be created only when the FIRST front
+    ARRIVED, so the request for the real density went out one whole render
+    after that -- the soft frame every rebuilt surface showed, and Panel
+    Edit's Refresh replaces its host, so it showed it every time.  Asking
+    during construction puts the corrected render in flight while the
+    opening frame is still being handed over.
+
+    Refusing to PAINT the density-1 front is NOT the answer: a staged
+    console panel is presented exactly once, and a refusal there is read as
+    a stale race -- the port closes the host and the panel never appears.
+    """
+
+    try:
+        ensure_qt5_application([])
+    except Exception as error:  # pragma: no cover - environment-dependent
+        pytest.skip(f"Qt5 offscreen unavailable: {error}")
+
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns({"x": (0.0, 1.0, 2.0)}),
+        dtype=np.float64,
+        generation="qt-dpr-test",
+    )
+
+    def build_host():
+        return RasterPlotHost.from_plot(
+            DatasetSnapshot(schema, np.asarray([[0.0, 1.0, 2.0]]), 0),
+            CurvePlot(AxisRef.point("x")),
+            size="2x2",
+        )
+
+    # The observer class is private to the lazily built Qt module; one
+    # ordinary widget hands it over.
+    probe_host = build_host()
+    probe_host.wait_for_front(timeout=30)
+    probe = Qt5PlotWidget(probe_host)
+    observer = type(probe._pixel_ratio_observer)
+    probe.close_adapter()
+    probe_host.close(timeout=30)
+
+    host = build_host()
+    original = observer.current_ratio
+    observer.current_ratio = property(lambda self: 2.0)
+    calls: list[str] = []
+    try:
+        host.wait_for_front(timeout=30)
+        assert float(host.front.device_pixel_ratio) == 1.0
+        host_dpr = host.set_device_pixel_ratio
+        host_subscribe = host.subscribe_front
+
+        def spy_dpr(ratio):
+            calls.append(f"dpr:{float(ratio)}")
+            return host_dpr(ratio)
+
+        def spy_subscribe(callback):
+            calls.append("subscribe")
+            return host_subscribe(callback)
+
+        host.set_device_pixel_ratio = spy_dpr
+        host.subscribe_front = spy_subscribe
+        widget = Qt5PlotWidget(host)
+        try:
+            assert calls[:2] == ["dpr:2.0", "subscribe"], calls
+            # and the widget still SHOWS the opening frame it was handed,
+            # whatever density it was rendered at
+            assert widget.presented_front is not None
+            deadline = time.monotonic() + 30.0
+            while time.monotonic() < deadline:
+                ensure_qt5_application([]).processEvents()
+                if float(widget.presented_front.device_pixel_ratio) == 2.0:
+                    break
+                time.sleep(0.005)
+            assert float(widget.presented_front.device_pixel_ratio) == 2.0
+        finally:
+            widget.close_adapter()
+    finally:
+        observer.current_ratio = original
+        host.close(timeout=30)

@@ -234,7 +234,7 @@ def test_formal_console_panel_state_and_histogram_edits_are_atomic(workspace) ->
                     for name, value in patch.items()
                 )
             )
-            assert histogram.reported_error is None
+            assert not histogram.reported_condition
     finally:
         if presenter is not None:
             presenter.close()

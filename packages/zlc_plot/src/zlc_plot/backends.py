@@ -571,6 +571,27 @@ def _qt5_plot_widget_class() -> type[Any]:
             self._unsubscribe: Callable[[], None] | None = None
             self._pixel_ratio_observer: _RasterPixelRatioObserver | None = None
             try:
+                # Ask the screen BEFORE subscribing, so the re-render at
+                # the real density is already in flight while the host's
+                # opening frame (rendered at density 1 -- nothing tells a
+                # host what screen it is for) is still being handed over.
+                # The observer used to be created only when the first front
+                # ARRIVED, so that request was issued one whole render
+                # later and the stretched opening frame stayed on screen
+                # for all of it -- the "low resolution first, then it
+                # updates" every rebuilt panel showed (Panel Edit's
+                # Refresh replaces its host, so it showed it every time).
+                # Refusing to PAINT the density-1 front is not the answer:
+                # a staged console panel is presented exactly once, and a
+                # refusal there is read as a stale race -- the port closes
+                # the host and the panel never appears at all.
+                self._pixel_ratio_observer = _RasterPixelRatioObserver(
+                    self,
+                    self._apply_device_pixel_ratio,
+                )
+                self._apply_device_pixel_ratio(
+                    self._pixel_ratio_observer.current_ratio
+                )
                 if auto_present:
                     self._unsubscribe = self._host.subscribe_front(self._on_front)
                 initial_front = self._host.front
@@ -868,15 +889,6 @@ def _qt5_plot_widget_class() -> type[Any]:
             width, height = front.logical_size
             if self.width() != width or self.height() != height:
                 self.setFixedSize(width, height)
-            if self._pixel_ratio_observer is None:
-                self._requested_dpr = front.device_pixel_ratio
-                self._pixel_ratio_observer = _RasterPixelRatioObserver(
-                    self,
-                    self._apply_device_pixel_ratio,
-                )
-                self._apply_device_pixel_ratio(
-                    self._pixel_ratio_observer.current_ratio
-                )
             self.update()
             surface_changed = (
                 current is None

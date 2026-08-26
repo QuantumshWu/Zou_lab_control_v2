@@ -101,6 +101,85 @@ def test_pick_inverts_projection_in_every_quadrant(azimuth) -> None:
         assert picked == (row, column), (azimuth, row, column, picked)
 
 
+def test_the_scene_is_an_oblique_view_of_the_same_heatmap() -> None:
+    """Tipped nearly flat, the 3D grid must READ as the heatmap.
+
+    The scene showed the array's own row order regardless of the origin
+    the heatmap draws under, so the picture was mirrored top for bottom:
+    the cell at the heatmap's bottom right stood at the scene's far
+    corner, directly above the near one.
+    """
+
+    from zlc_plot.config import DEFAULTS
+
+    heights = np.zeros((4, 5))
+    colors = np.full((4, 5, 3), 0.5, dtype=np.float32)
+    # azimuth 0, elevation at its ceiling: as close to looking straight
+    # down at the picture as the camera goes.
+    camera = HeightBarCamera(azimuth_deg=0.0, elevation_deg=80.0)
+
+    def centres(origin):
+        _frame, scene = render_height_bars(
+            heights, colors, camera=camera, value_limits=(0.0, 1.0),
+            width=320, height=240, origin=origin,
+        )
+
+        def centre(row, column):
+            a, b = scene.fold_cell(row, column)
+            return scene.project(a + 0.5, b + 0.5, 0.0)
+
+        return centre
+
+    # The panel draws its heatmap with THIS origin, and the scene follows
+    # it: row 0 is the top of the picture, so it is farther up the screen
+    # (scene pixel y grows downward), and column 0 is on the left.
+    origin = DEFAULTS.style.render.image_origin
+    assert origin == "upper"
+    centre = centres(origin)
+    assert centre(0, 0)[1] < centre(3, 0)[1]
+    assert centre(0, 0)[0] < centre(0, 4)[0]
+    # The kernel's own default keeps the array's order, which is the
+    # opposite picture -- the parameter is what carries the fact.
+    plain = centres("lower")
+    assert plain(0, 0)[1] > plain(3, 0)[1]
+
+
+def test_floor_ticks_stand_under_the_bars_they_name_on_a_pooled_grid() -> None:
+    """A scan dense enough to pool must still label its own cells.
+
+    ``picks`` returns SOURCE indices and fold_cell speaks source indices --
+    it does the pooling divide itself -- so multiplying by the pool factor
+    first cancelled that divide.  Every tick but the first stood at up to
+    pool times its own position and the far ones fell off the scene
+    entirely, on exactly the large scans pooling exists for.
+    """
+
+    side = 401
+    heights = np.zeros((side, side))
+    colors = np.zeros((side, side, 3), dtype=np.float32)
+    _frame, scene = render_height_bars(
+        heights, colors, camera=HeightBarCamera(), value_limits=(0.0, 1.0),
+        width=252, height=252, pool_cache={}, origin="upper",
+        pool_reference_width=252 * 3,
+    )
+    assert scene.pool_y > 1, "this grid must actually pool"
+    shown = min(scene.source_ny, 6)
+    for row in sorted({
+        int(round(v)) for v in np.linspace(0, scene.source_ny - 1, shown)
+    }):
+        folded = scene.fold_cell(row, 0)
+        assert 0 <= folded[0] < scene.nx and 0 <= folded[1] < scene.ny, (
+            row, folded
+        )
+        # the slot the tick stands on holds a bar of the row it names
+        landed_row, _landed_column = scene.unfold_cell(*folded)
+        assert landed_row * scene.pool_y == (row // scene.pool_y) * scene.pool_y
+        # and the way it used to be placed does not
+        stale = scene.fold_cell(row * scene.pool_y, 0)
+        if row:
+            assert stale != folded
+
+
 def test_bars_clip_to_the_value_limits() -> None:
     """A value beyond the colour limits saturates in HEIGHT exactly as it
     saturates in colour: the z axis and the colorbar are one scale."""
@@ -227,6 +306,40 @@ def _pointer(session, action, axis, fx, fy, **kwargs):
         axes_snapshot=axis,
         **kwargs,
     )
+
+
+def test_the_release_commits_the_orbit_at_full_resolution() -> None:
+    """The drag's resolution budget ends WITH the drag.
+
+    The preview carries two facts -- which camera, and how coarse -- and
+    the release ends them at different moments.  Lifting the preview
+    after the commit (so a racing live frame cannot show the pre-drag
+    camera) left the commit itself rendering under the drag budget, so
+    the scene stayed at half resolution until some unrelated change --
+    a zoom, a new shot -- happened to redraw it.
+    """
+
+    session = _session(16)
+    try:
+        session.set_parameter("presentation", "height_bars")
+        session.rgba()
+        renderer = session._renderer
+        committed = renderer._height_bars_scene_map.width
+        axis = next(
+            t for t in session._raster_axes_snapshot() if t.role == "image"
+        )
+        _pointer(session, "press", axis, 0.5, 0.5, button=2)
+        for step in range(6):
+            _pointer(
+                session, "move", axis,
+                0.5 + 0.02 * (step + 1), 0.5 + 0.01 * (step + 1),
+                button=2,
+            )
+        assert renderer._height_bars_scene_map.width < committed
+        _pointer(session, "release", axis, 0.62, 0.56, button=2)
+        assert renderer._height_bars_scene_map.width == committed
+    finally:
+        session.close()
 
 
 def test_middle_drag_orbits_and_left_drag_is_inert() -> None:

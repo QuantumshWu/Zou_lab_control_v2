@@ -153,6 +153,12 @@ class PanelCardView(FluentGroupBox):
         self._default_size = ""
         self._drag_offset: QtCore.QPoint | None = None
         self._settings_drag_offset: QtCore.QPoint | None = None
+        #: Where the OPERATOR dragged this popup, for as long as it stays
+        #: open.  Placement has two owners -- the anchor beside the Setting
+        #: button, and the drag -- and the anchor used to re-assert itself
+        #: on every content resize, so picking a fit model (which adds the
+        #: parameter row) threw the popup back beside the button.
+        self._settings_origin: QtCore.QPoint | None = None
 
         #: Whether what this card shows will deliver again.  A live panel
         #: redraws on a beat and can be taken off the board; a saved figure
@@ -634,6 +640,7 @@ class PanelCardView(FluentGroupBox):
                 and self._settings_drag_offset is not None
             ):
                 popup.move(event.globalPos() - self._settings_drag_offset)
+                self._settings_origin = popup.frameGeometry().topLeft()
                 return True
             if (
                 event.type() == QtCore.QEvent.MouseButtonRelease
@@ -642,7 +649,10 @@ class PanelCardView(FluentGroupBox):
                 self._settings_drag_offset = None
                 return True
             if event.type() == QtCore.QEvent.Hide:
+                # Closing ends the operator's placement: the next open is
+                # a fresh gesture and belongs beside its button again.
                 self._settings_drag_offset = None
+                self._settings_origin = None
         if (
             watched is self._settings_body
             and event.type() == QtCore.QEvent.LayoutRequest
@@ -758,6 +768,7 @@ class PanelCardView(FluentGroupBox):
 
         if self._settings_popup is not None:
             self._settings_popup.hide()
+            self._settings_origin = None
 
     def _commit_title(self) -> None:
         value = self.title_edit.text().strip()
@@ -991,8 +1002,16 @@ class PanelCardView(FluentGroupBox):
             self._settings_body,
             minimum_width=1,
             minimum_height=320,
-            maximum_height=self._settings_available_height(),
+            # The card-relative cap describes a popup hanging under the
+            # Setting button; once the operator carried it elsewhere only
+            # the screen bounds it, which the placement already applies.
+            maximum_height=(
+                None
+                if self._settings_origin is not None
+                else self._settings_available_height()
+            ),
             content_width=self._settings_content_width,
+            origin=self._settings_origin,
         )
 
     def _open_settings(self) -> None:

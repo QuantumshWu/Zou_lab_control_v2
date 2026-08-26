@@ -672,6 +672,18 @@ class SelectionBridge:
         self._request_owner_wake = request_owner_wake
         self.bridge_id = bridge_id
         self._lock = RLock()
+        #: One route per role, so publishing one is not a concurrent
+        #: operation.  A publication CLAIMS its output names in the plane
+        #: (attach/reserve) before it can decide whether the claim is still
+        #: wanted, so two in-flight events for the same role both held the
+        #: same names for a moment and the plane refused the second with
+        #: "signal '@logic/<panel>/amplitude' is already owned by
+        #: '<panel>:fit:1'" -- an operator arming a fit while a shot landed
+        #: saw their fit break and stay broken.  These serialize the
+        #: decide-claim-install sequence; ``_lock`` still guards state and is
+        #: never held across a plane call.
+        self._selection_publish_lock = RLock()
+        self._fit_publish_lock = RLock()
         self._started = False
         self._closed = False
         self._selection: SelectionState | None = None
@@ -725,19 +737,15 @@ class SelectionBridge:
                 previous.get(name, True) != normalized.get(name, True)
                 for name in fit_names
             )
-            old_selection = self._selection_processor if selection_changed else None
-            old_fit = self._fit_processor if fit_changed else None
             if selection_changed:
                 self._selection = None
                 self._selection_publication = None
                 self._selection_epoch += 1
-                self._selection_processor = None
-            if fit_changed:
-                self._fit_processor = None
             started = self._started
-        for processor in (old_selection, old_fit):
-            if processor is not None:
-                self._withdraw_processor(processor)
+        if selection_changed:
+            self._release_route("selection")
+        if fit_changed:
+            self._release_route("fit")
         if not started:
             return
         if selection_changed and selection is not None:
@@ -817,10 +825,7 @@ class SelectionBridge:
             self._selection = None
             self._selection_publication = None
             self._selection_epoch += 1
-            processor = self._selection_processor
-            self._selection_processor = None
-        if processor is not None:
-            self._withdraw_processor(processor)
+        self._release_route("selection")
 
     def close(self) -> None:
         with self._lock:
@@ -828,13 +833,6 @@ class SelectionBridge:
                 return
             self._closed = True
             subscriptions, self._subscriptions = self._subscriptions, []
-            processors = tuple(
-                item
-                for item in (self._selection_processor, self._fit_processor)
-                if item is not None
-            )
-            self._selection_processor = None
-            self._fit_processor = None
             self._selection = None
             self._selection_publication = None
             self._selection_epoch += 1
@@ -842,8 +840,8 @@ class SelectionBridge:
             self._fit_publication = None
         for unsubscribe in subscriptions:
             unsubscribe()
-        for processor in processors:
-            self._withdraw_processor(processor)
+        for role in ("selection", "fit"):
+            self._release_route(role)
 
     def _on_fit(self, event: FitEventValue | None) -> None:
         if event is None:
@@ -854,10 +852,7 @@ class SelectionBridge:
                 self._fit_event = None
                 self._fit_publication = None
                 self._last_fit_batch_revision = None
-                processor = self._fit_processor
-                self._fit_processor = None
-            if processor is not None:
-                self._withdraw_processor(processor)
+            self._release_route("fit")
             return
         self._publish_fit_event(event, None, accept_revision=True)
 
@@ -981,93 +976,98 @@ class SelectionBridge:
             self._source_snapshot(publication),
             event,
         )
-        with self._lock:
-            if (
-                self._closed
-                or not self._started
-                or self._fit_event is not event
-                or self._fit_trigger_revision != trigger_revision
-            ):
-                return
-        if not self._plane.is_generation_live(self._source_signal):
-            if processor is not None:
-                with self._lock:
-                    if self._fit_processor is processor:
-                        self._fit_processor = None
-                self._withdraw_processor(processor)
-            if publication is not self._current_source_publication():
-                # The generation finished on a NEWER shot than this fit's;
-                # a terminal answer must describe the final snapshot.
-                self._record_error(
-                    RuntimeError("fit event trails a finished source generation")
-                )
-                return
-            self._publish_terminal("fit", outputs, publication)
-            return
-        with self._lock:
-            if (
-                self._closed
-                or not self._started
-                or self._fit_event is not event
-                or self._fit_trigger_revision != trigger_revision
-            ):
-                return
-            processor = self._fit_processor
-            attach = processor is None
-            if attach:
-                processor = self._new_processor("fit", output_names)
-        assert processor is not None
-        if attach:
-            # A fit signal is a presentation-paced follower: it advances only
-            # after its source presents, so it retains lineage but does not
-            # hold the source's coherent front waiting for itself.
-            current = self._current_source_publication()
-            if current is None:
-                self._record_error(
-                    RuntimeError("fit route lost its source while attaching")
-                )
-                return
-            self._plane.attach_latest_only_processor(
-                processor,
-                source_name=self._source_signal,
-                initial_publication=current,
-                coherent=False,
-            )
+        # From here the plane's output NAMES are claimed -- by the attach, or
+        # by the terminal reserve -- and only afterwards can this event learn
+        # whether its claim is still wanted.  The bridge owns ONE fit route,
+        # so that sequence is not a concurrent operation: two events in
+        # flight both held the same names for a moment and the plane refused
+        # the second ("signal ... is already owned by ...").  The lock covers
+        # the CLAIM only, never the materialization above it: a superseded
+        # event must still bail at its own trigger check instead of queueing
+        # behind the work that superseded it.
+        with self._fit_publish_lock:
             with self._lock:
-                install = (
-                    not self._closed
-                    and self._started
-                    and self._fit_event is event
-                    and self._fit_trigger_revision == trigger_revision
-                    and self._fit_processor is None
-                )
-                if install:
-                    self._fit_processor = processor
-            if not install:
-                self._withdraw_processor(processor)
-                return
-        try:
-            self._commit_processor(
-                processor,
-                outputs,
-                publication,
-                trigger=("fit", trigger_revision),
-            )
-        except RuntimeError as error:
-            if "obsolete parent" in str(error):
-                return
-            with self._lock:
-                stale = (
+                if (
                     self._closed
+                    or not self._started
                     or self._fit_event is not event
                     or self._fit_trigger_revision != trigger_revision
-                )
-                if self._fit_processor is processor:
-                    self._fit_processor = None
-            if stale:
-                self._withdraw_processor(processor)
+                ):
+                    return
+            if not self._plane.is_generation_live(self._source_signal):
+                if publication is not self._current_source_publication():
+                    # The generation finished on a NEWER shot than this
+                    # fit's; a terminal answer must describe the final
+                    # snapshot.
+                    self._record_error(
+                        RuntimeError(
+                            "fit event trails a finished source generation"
+                        )
+                    )
+                    return
+                # Whatever holds the route now is withdrawn by the terminal
+                # publish itself: the owner it must replace is the one in
+                # the slot AT CLAIM TIME, not whichever was read before this
+                # event materialized.
+                self._publish_terminal("fit", outputs, publication)
                 return
-            raise
+            with self._lock:
+                processor = self._fit_processor
+                attach = processor is None
+                if attach:
+                    processor = self._new_processor("fit", output_names)
+            assert processor is not None
+            if attach:
+                # A fit signal is a presentation-paced follower: it advances
+                # only after its source presents, so it retains lineage but
+                # does not hold the source's coherent front waiting for it.
+                current = self._current_source_publication()
+                if current is None:
+                    self._record_error(
+                        RuntimeError("fit route lost its source while attaching")
+                    )
+                    return
+                self._plane.attach_latest_only_processor(
+                    processor,
+                    source_name=self._source_signal,
+                    initial_publication=current,
+                    coherent=False,
+                )
+                with self._lock:
+                    install = (
+                        not self._closed
+                        and self._started
+                        and self._fit_event is event
+                        and self._fit_trigger_revision == trigger_revision
+                        and self._fit_processor is None
+                    )
+                    if install:
+                        self._fit_processor = processor
+                if not install:
+                    self._withdraw_processor(processor)
+                    return
+            try:
+                self._commit_processor(
+                    processor,
+                    outputs,
+                    publication,
+                    trigger=("fit", trigger_revision),
+                )
+            except RuntimeError as error:
+                if "obsolete parent" in str(error):
+                    return
+                with self._lock:
+                    stale = (
+                        self._closed
+                        or self._fit_event is not event
+                        or self._fit_trigger_revision != trigger_revision
+                    )
+                    if self._fit_processor is processor:
+                        self._fit_processor = None
+                if stale:
+                    self._withdraw_processor(processor)
+                    return
+                raise
 
     def _commit_selection(
         self,
@@ -1098,90 +1098,100 @@ class SelectionBridge:
                 self._source_snapshot(publication),
                 state,
             )
-        with self._lock:
-            if (
-                self._closed
-                or not self._started
-                or self._selection_epoch != selection_epoch
-            ):
-                return
-            # A committed image selection may change the derived sub-box
-            # schema.  The plane deliberately freezes schemas per generation,
-            # so every committed selection starts a fresh latest-only
-            # generation while upstream publications still re-cut it in place.
-            old_processor = self._selection_processor
-            self._selection_processor = None
-            self._selection = state
-            self._selection_publication = publication
-
-        if old_processor is not None:
-            self._withdraw_processor(old_processor)
-        if not output_names:
-            return
-        assert publication is not None and outputs is not None
-
-        # A box drawn on a run that has already finished is not a live
-        # derivation and cannot be one: no further parent publication will ever
-        # arrive to re-cut it.  It is still a real question with a real answer,
-        # so it is answered once, terminally, instead of being refused because
-        # the only machinery on offer was the live kind.
-        if not self._plane.is_generation_live(self._source_signal):
-            self._publish_terminal("selection", outputs, publication)
-            return
-
-        with self._lock:
-            if (
-                self._closed
-                or not self._started
-                or self._selection is not state
-            ):
-                return
-            self._selection_publication = publication
-            processor = self._new_processor("selection", output_names)
-        self._plane.attach_latest_only_processor(
-            processor,
-            source_name=self._source_signal,
-            initial_publication=publication,
-            paused=True,
-        )
-        with self._lock:
-            install = (
-                not self._closed
-                and self._started
-                and self._selection is state
-                and self._selection_processor is None
-            )
-            if install:
-                self._selection_processor = processor
-        if not install:
-            self._withdraw_processor(processor)
-            return
-
-        try:
-            self._commit_processor(
-                processor,
-                outputs,
-                publication,
-                trigger=("selection", state.revision),
-            )
-            # The first answer belongs to the exact publication already on
-            # screen.  Only after that answer exists may this same derived
-            # generation join the source's current latest publication; doing
-            # it in the opposite order either rejects a lagged restored panel
-            # or lets its first ROI silently describe a newer shot.
-            self._plane.catch_up_latest_only_processor(processor)
-            self._processor_wake()
-        except RuntimeError as error:
-            if "obsolete parent" in str(error):
-                return
+        # From here the plane's output NAMES are claimed, and only afterwards
+        # can this commit learn whether its claim is still wanted -- the same
+        # sequence the fit route runs, and the same reason it is serialized:
+        # one selection route per bridge.  The materialization above stays
+        # outside, so a superseded box still bails at its epoch check instead
+        # of queueing behind the box that superseded it.
+        with self._selection_publish_lock:
             with self._lock:
-                stale = self._closed or self._selection is not state
-                if self._selection_processor is processor:
-                    self._selection_processor = None
-            self._withdraw_processor(processor)
-            if stale:
+                if (
+                    self._closed
+                    or not self._started
+                    or self._selection_epoch != selection_epoch
+                ):
+                    return
+                # A committed image selection may change the derived sub-box
+                # schema.  The plane deliberately freezes schemas per
+                # generation, so every committed selection starts a fresh
+                # latest-only generation while upstream publications still
+                # re-cut it in place.
+                old_processor = self._selection_processor
+                self._selection_processor = None
+                self._selection = state
+                self._selection_publication = publication
+
+            if old_processor is not None:
+                self._withdraw_processor(old_processor)
+            if not output_names:
                 return
-            raise
+            assert publication is not None and outputs is not None
+
+            # A box drawn on a run that has already finished is not a live
+            # derivation and cannot be one: no further parent publication will
+            # ever arrive to re-cut it.  It is still a real question with a
+            # real answer, so it is answered once, terminally, instead of
+            # being refused because the only machinery on offer was the live
+            # kind.
+            if not self._plane.is_generation_live(self._source_signal):
+                self._publish_terminal("selection", outputs, publication)
+                return
+
+            with self._lock:
+                if (
+                    self._closed
+                    or not self._started
+                    or self._selection is not state
+                ):
+                    return
+                self._selection_publication = publication
+                processor = self._new_processor("selection", output_names)
+            self._plane.attach_latest_only_processor(
+                processor,
+                source_name=self._source_signal,
+                initial_publication=publication,
+                paused=True,
+            )
+            with self._lock:
+                install = (
+                    not self._closed
+                    and self._started
+                    and self._selection is state
+                    and self._selection_processor is None
+                )
+                if install:
+                    self._selection_processor = processor
+            if not install:
+                self._withdraw_processor(processor)
+                return
+
+            try:
+                self._commit_processor(
+                    processor,
+                    outputs,
+                    publication,
+                    trigger=("selection", state.revision),
+                )
+                # The first answer belongs to the exact publication already
+                # on screen.  Only after that answer exists may this same
+                # derived generation join the source's current latest
+                # publication; doing it in the opposite order either rejects
+                # a lagged restored panel or lets its first ROI silently
+                # describe a newer shot.
+                self._plane.catch_up_latest_only_processor(processor)
+                self._processor_wake()
+            except RuntimeError as error:
+                if "obsolete parent" in str(error):
+                    return
+                with self._lock:
+                    stale = self._closed or self._selection is not state
+                    if self._selection_processor is processor:
+                        self._selection_processor = None
+                self._withdraw_processor(processor)
+                if stale:
+                    return
+                raise
 
     def _publish_terminal(
         self,
@@ -1195,6 +1205,13 @@ class SelectionBridge:
         terminal because there is no source stream left to follow.
         """
 
+        previous = self._take_processor(role)
+        if previous is not None:
+            # ONE owner per role.  The live path clears the slot before it
+            # claims new names; this path minted its owner and left the old
+            # one holding them, so the plane refused the terminal answer as
+            # a name conflict with the bridge's own live route.
+            self._withdraw_processor(previous)
         with self._lock:
             if self._closed or not self._started:
                 return
@@ -1359,12 +1376,7 @@ class SelectionBridge:
             # until the plot emits the next batch for this same panel.
             return
         self._record_error(error)
-        with self._lock:
-            if self._selection_processor is processor:
-                self._selection_processor = None
-            if self._fit_processor is processor:
-                self._fit_processor = None
-        self._withdraw_processor(processor)
+        self._release_processor(processor)
 
     def _accept_processor_cancelled(self, processor: _BridgeProcessor) -> None:
         return None
@@ -1383,6 +1395,60 @@ class SelectionBridge:
             source_publication=publication,
             trigger=trigger,
         )
+
+    def _role_publish_lock(self, role: str) -> RLock:
+        return (
+            self._selection_publish_lock
+            if role == "selection"
+            else self._fit_publish_lock
+        )
+
+    def _release_route(self, role: str) -> None:
+        """Take one role's route out and free the names it holds.
+
+        Claiming and releasing are the two halves of the same thing -- who
+        owns this role's output names in the plane -- so they run under the
+        same lock.  Releasing outside it left a window between "the slot is
+        empty" and "the names are free" in which a claim arriving on another
+        thread attached and the plane refused it: "signal ... is already
+        owned by ...".  That window is what an operator saw as a fit that
+        broke the moment they touched its publish switches while shots were
+        landing.
+        """
+
+        with self._role_publish_lock(role):
+            processor = self._take_processor(role)
+            if processor is not None:
+                self._withdraw_processor(processor)
+
+    def _release_processor(self, processor: "_BridgeProcessor") -> None:
+        """Release one EXACT processor, under its role's lock."""
+
+        with self._role_publish_lock(processor._role):
+            with self._lock:
+                if self._selection_processor is processor:
+                    self._selection_processor = None
+                if self._fit_processor is processor:
+                    self._fit_processor = None
+            self._withdraw_processor(processor)
+
+    def _take_processor(self, role: str) -> "_BridgeProcessor | None":
+        """Remove one role's processor from the bridge, to be withdrawn.
+
+        The bridge owns exactly one route per role; taking it out and
+        withdrawing it is what frees its output names.  Written once here
+        because every call site that open-coded it had to remember to do
+        both, and the terminal path remembered neither.
+        """
+
+        with self._lock:
+            if role == "selection":
+                processor = self._selection_processor
+                self._selection_processor = None
+            else:
+                processor = self._fit_processor
+                self._fit_processor = None
+        return processor
 
     def _withdraw_processor(self, processor: _BridgeProcessor) -> None:
         self._plane.cancel_latest_only_processor(processor)

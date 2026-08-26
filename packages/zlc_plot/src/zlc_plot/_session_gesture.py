@@ -797,11 +797,17 @@ class GestureSessionMixin:
                     )
                 return
             camera = gesture.current
-            # ONE display revision commits the whole drag, and its render
-            # effect repaints the scene at full resolution.  The preview
-            # lifts AFTER the commit: cleared first, a live frame racing
-            # this release rendered one frame at the pre-drag camera and
-            # the scene visibly jumped before snapping back.
+            # The preview carries TWO facts, and the release ends them at
+            # different moments: which camera to draw (still the drag's
+            # last one, until the commit lands) and how much resolution
+            # to spend (the drag is over -- full).  Re-installing the
+            # same camera with dragging=False ends the budget here, so
+            # the commit's own render is the full-resolution frame, and
+            # keeps covering a live frame racing this release, which is
+            # what clearing the preview first used to let jump back to
+            # the pre-drag camera.  Clearing afterwards changes nothing:
+            # the committed state now IS this camera.
+            self._renderer.set_height_bars_preview(camera, dragging=False)
             self.set_parameters({
                 "camera_azimuth": camera.azimuth_deg,
                 "camera_elevation": camera.elevation_deg,

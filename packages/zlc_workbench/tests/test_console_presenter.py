@@ -980,7 +980,7 @@ def test_changing_the_cell_kind_rebuilds_the_plot_host(
             lambda: binding.accepted_display is not None
             and bool(binding.state.display),
         )
-        assert binding.reported_error is None, binding.reported_error
+        assert not binding.reported_condition, binding.reported_condition
         assert binding.state.display, (
             f"the {cell_kind} host never settled; it likely failed to start"
         )
@@ -4179,7 +4179,7 @@ def test_a_cell_kind_change_is_not_refused_by_the_previous_kinds_assignments(
         if str(entry["key"]) == row
     )
     assert binding.state.semantic.get(row) == curve_settled
-    assert binding.reported_error is None
+    assert not binding.reported_condition
 
 
 def test_a_cell_kind_change_survives_a_shared_name_it_cannot_honour(
@@ -4227,7 +4227,7 @@ def test_a_cell_kind_change_survives_a_shared_name_it_cannot_honour(
     )
     _settle_panel_hosts(presenter, lambda: binding.state.cell_kind == "image")
     assert binding.state.cell_kind == "image"
-    assert binding.reported_error is None
+    assert not binding.reported_condition
 
 
 def test_a_panel_that_crossed_vocabularies_still_configures_and_saves(
@@ -4879,7 +4879,11 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     fates = {str(entry["label"]) for entry in surface["semantic"]}
     assert {"field.x", "field.y", "field.z"} <= fates
     assert "point" not in fates
-    assert "exceeds the fixed layout" in surface["fit_unavailable"]
+    # The refusal belongs to the PANEL's status, where a refusal goes; the
+    # Fit column says why fit is missing, which is that nothing mounted.
+    status, marked = presenter.view._cards[refused.panel_id].status
+    assert "exceeds the fixed layout" in status and marked
+    assert surface["fit_unavailable"] == presenter._RESOLVING_REASON
     assert presenter.view.panel_parameter_surfaces[
         refused.panel_id
     ]["data_structure"] == expected
