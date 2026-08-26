@@ -24,7 +24,7 @@ import numpy as np
 
 from ._image_raster import ImageFrontStore, PreparedImageFront
 from ._fit_scene import FitOverlay, FitPolyline
-from .data_view import aligned_histogram_edges
+from .data_view import aligned_histogram_edges, histogram_counts
 from ._kinds import handler_for
 from ._rendering.pulse import update_pulse_timeline
 from ._pulse_time import pulse_time_scale
@@ -2592,11 +2592,11 @@ class MatplotlibRenderer:
             values = getattr(payload, "values", payload)
             values = np.asarray(_display_array(values), dtype=float).reshape(-1)
             values = values[np.isfinite(values)]
-            count_values, edge_values = np.histogram(
-                values,
-                bins=aligned_histogram_edges(values, int(state["bin_count"])),
+            edge_values = np.asarray(
+                aligned_histogram_edges(values, int(state["bin_count"])),
+                dtype=float,
             )
-            count_values = count_values.astype(float)
+            count_values = histogram_counts(values, edge_values).astype(float)
         density = bool(state["density"])
         cumulative = bool(state["cumulative"])
         if cumulative:
@@ -3141,7 +3141,7 @@ class MatplotlibRenderer:
         y_limits: tuple[float, float],
         axes: Any,
     ) -> np.ndarray:
-        """Upsample a small composed RGBA front to its axes' pixel box.
+        """Resize a composed RGBA front to its axes' pixel box.
 
         A 10x10 heatmap cell paid Matplotlib's full image machinery on
         every draw of every cell; at the box size the compose's exact
@@ -3149,8 +3149,15 @@ class MatplotlibRenderer:
         re-rendering 64 images per frame.  Nearest-neighbour placement is
         computed here instead of inside Agg -- boundary rows may land one
         pixel from Agg's fixed-point choice, which changes no value or
-        coordinate semantics.  Anything but a strict integer-box upsample
-        of a view-filling front is returned unchanged.
+        coordinate semantics.  Anything but an integer-box resize of a
+        view-filling front is returned unchanged.
+
+        Both directions, because a camera frame lands just ABOVE its box:
+        the front store's mip level is chosen so one sample is about one
+        display pixel and then refuses a marginal reduction, so a 2048
+        frame in a 504 box arrives as 512 and Agg re-resampled those eight
+        rows on every single draw -- four milliseconds a frame to lose
+        1.6% of a picture we had already composed.
         """
 
         rows, columns = rgba.shape[:2]
@@ -3175,7 +3182,7 @@ class MatplotlibRenderer:
             return rgba
         box_w = int(round(corners[2])) - int(round(corners[0]))
         box_h = int(round(corners[3])) - int(round(corners[1]))
-        if box_w <= columns or box_h <= rows or box_w < 1 or box_h < 1:
+        if box_w < 1 or box_h < 1 or (box_w == columns and box_h == rows):
             return rgba
         cache_name = f"{key}:rgba_box"
         cache_key = (id(rgba), box_w, box_h)
@@ -4917,14 +4924,15 @@ class MatplotlibRenderer:
                 )
                 if not samples.size:
                     samples = np.asarray([histogram_limits[0]], dtype=float)
-                counts, edges = np.histogram(
-                    samples,
-                    bins=aligned_histogram_edges(
+                edges = np.asarray(
+                    aligned_histogram_edges(
                         samples,
                         bin_count,
                         limits=histogram_limits,
                     ),
+                    dtype=float,
                 )
+                counts = histogram_counts(samples, edges)
                 self._artists[cache_name] = (cache_key, counts, edges)
                 distribution_changed = True
 
