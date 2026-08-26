@@ -683,7 +683,10 @@ class GestureSessionMixin:
                 "pan",
                 self._defaults.interaction.pointer_update_interval_ms,
             ):
-                self._update_pan(event, gesture)
+                try:
+                    self._update_pan(event, gesture)
+                finally:
+                    gesture.lane_finished("pan")
             return
         if isinstance(gesture, _OrbitGesture):
             if not gesture.lane_due(
@@ -691,6 +694,7 @@ class GestureSessionMixin:
                 self._defaults.interaction.pointer_update_interval_ms,
             ):
                 return
+            orbit_lane = True
             from ._height3d_raster import HeightBarCamera
 
             dx = float(event.x) - gesture.origin_px[0]
@@ -705,11 +709,15 @@ class GestureSessionMixin:
             )
             gesture.current = camera
             assert self._renderer is not None
-            self._renderer.set_height_bars_preview(camera, dragging=True)
-            with self._renderer.raster_transaction():
-                self._render_current(
-                    RenderEffect.BASE_GEOMETRY, schedule_fit=False
-                )
+            try:
+                self._renderer.set_height_bars_preview(camera, dragging=True)
+                with self._renderer.raster_transaction():
+                    self._render_current(
+                        RenderEffect.BASE_GEOMETRY, schedule_fit=False
+                    )
+            finally:
+                if orbit_lane:
+                    gesture.lane_finished("orbit")
             return
         if isinstance(gesture, _PickGesture):
             # A scene press is a pick in waiting: release decides click
@@ -738,11 +746,16 @@ class GestureSessionMixin:
                     "raster",
                     self._defaults.interaction.pointer_update_interval_ms,
                 ):
-                    self._renderer.preview_color_limits(
-                        candidate.value.low,
-                        candidate.value.high,
-                    )
-                    self._render_current(RenderEffect.OVERLAY, schedule_fit=False)
+                    try:
+                        self._renderer.preview_color_limits(
+                            candidate.value.low,
+                            candidate.value.high,
+                        )
+                        self._render_current(
+                            RenderEffect.OVERLAY, schedule_fit=False
+                        )
+                    finally:
+                        gesture.lane_finished("raster")
             return
         if self._selector_controller.active_gesture is None:
             self._cancel_gesture()
