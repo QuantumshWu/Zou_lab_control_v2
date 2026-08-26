@@ -745,3 +745,35 @@ def test_composed_camera_frames_equal_a_full_draw() -> None:
         np.testing.assert_array_equal(composed, full)
     finally:
         session.close()
+
+
+def test_the_orbit_is_continuous_across_quadrant_boundaries() -> None:
+    """The fold is a ROTATION: crossing a quadrant boundary must change
+    the picture no more than the same step inside a quadrant.  The
+    flip-only fold kept the axes in place and the scene snapped ninety
+    degrees at every boundary."""
+
+    from zlc_plot._height3d_raster import HeightBarCamera, render_height_bars
+
+    xx, yy = np.meshgrid(np.arange(24), np.arange(12))
+    heights = np.exp(-((xx - 6.0) ** 2 + (yy - 3.0) ** 2) / 12.0)
+    colors = np.repeat(
+        heights[..., None].astype(np.float32).clip(0.0, 1.0), 3, axis=-1
+    )
+
+    def frame(azimuth: float) -> np.ndarray:
+        rendered, _ = render_height_bars(
+            heights, colors,
+            camera=HeightBarCamera(azimuth_deg=azimuth, elevation_deg=30.0),
+            value_limits=(0.0, 1.0), width=360, height=280,
+            supersample=1, zero_rgb=(1.0, 1.0, 1.0),
+        )
+        return rendered[..., :3].astype(np.int64)
+
+    def step(low: float, high: float) -> int:
+        return int(np.abs(frame(low) - frame(high)).sum())
+
+    control = step(44.9, 45.1)
+    for boundary in (90.0, 180.0, 270.0, 360.0):
+        jump = step(boundary - 0.1, boundary + 0.1)
+        assert jump < 4 * control, (boundary, jump, control)

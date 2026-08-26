@@ -150,16 +150,33 @@ class HeightBarScene:
         return (sx - self.x_low) * self.scale, (self.y_high - sy) * self.scale
 
     def fold_cell(self, row: int, column: int) -> tuple[int, int]:
-        """Original grid indices -> folded (a_cell, b_cell) indices."""
+        """Original grid indices -> folded (a_cell, b_cell) indices.
 
-        a, b = int(column) // self.pool_x, int(row) // self.pool_y
+        The fold is ``np.rot90(grid, quadrant)``: odd quadrants swap the
+        axes (the folded width is the source height), and both mappings
+        here are that rotation written for one index pair.
+        """
+
+        col_p, row_p = int(column) // self.pool_x, int(row) // self.pool_y
+        if self.quadrant == 0:
+            return col_p, row_p
         if self.quadrant == 1:
-            a = self.nx - 1 - a
-        elif self.quadrant == 2:
-            a, b = self.nx - 1 - a, self.ny - 1 - b
-        elif self.quadrant == 3:
-            b = self.ny - 1 - b
-        return a, b
+            return row_p, self.ny - 1 - col_p
+        if self.quadrant == 2:
+            return self.nx - 1 - col_p, self.ny - 1 - row_p
+        return self.nx - 1 - row_p, col_p
+
+    def unfold_cell(self, a: int, b: int) -> tuple[int, int]:
+        """Folded (a_cell, b_cell) -> pooled source (row_p, col_p)."""
+
+        a, b = int(a), int(b)
+        if self.quadrant == 0:
+            return b, a
+        if self.quadrant == 1:
+            return a, self.ny - 1 - b
+        if self.quadrant == 2:
+            return self.ny - 1 - b, self.nx - 1 - a
+        return self.nx - 1 - a, b
 
     def pick(self, x: float, y: float) -> tuple[int, int] | None:
         """Pixel -> original (row, column) of the bar drawn there."""
@@ -173,13 +190,8 @@ class HeightBarScene:
             return None
         cell = (face - 4) // 4
         a, b = cell % self.nx, cell // self.nx
-        if self.quadrant == 1:
-            a = self.nx - 1 - a
-        elif self.quadrant == 2:
-            a, b = self.nx - 1 - a, self.ny - 1 - b
-        elif self.quadrant == 3:
-            b = self.ny - 1 - b
-        return b * self.pool_y, a * self.pool_x
+        row_p, col_p = self.unfold_cell(a, b)
+        return row_p * self.pool_y, col_p * self.pool_x
 
     def cell_corners(
         self, row: int, column: int
@@ -312,24 +324,22 @@ def render_height_bars(
             pool_cache["value"] = (
                 h_grid, rgb_grid, finite_grid, pool_x, pool_y
             )
-    ny, nx = h_grid.shape
 
-    # ---- fold the azimuth into [0, 90) by flipping the grid
+    # ---- fold the azimuth into [0, 90) by rotating the grid
     azimuth = math.radians(camera.azimuth_deg) % (2.0 * math.pi)
     quadrant = int(azimuth // (math.pi / 2.0))
     local = azimuth - quadrant * (math.pi / 2.0)
-    if quadrant == 1:
-        h_grid, rgb_grid, finite_grid = (
-            h_grid[:, ::-1], rgb_grid[:, ::-1], finite_grid[:, ::-1]
-        )
-    elif quadrant == 2:
-        h_grid, rgb_grid, finite_grid = (
-            h_grid[::-1, ::-1], rgb_grid[::-1, ::-1], finite_grid[::-1, ::-1]
-        )
-    elif quadrant == 3:
-        h_grid, rgb_grid, finite_grid = (
-            h_grid[::-1, :], rgb_grid[::-1, :], finite_grid[::-1, :]
-        )
+    if quadrant:
+        # The fold is a ROTATION, not a flip: crossing a quadrant
+        # boundary swaps which source axis runs along the projected
+        # horizontal, and continuing the orbit smoothly requires the
+        # grid to turn with it.  Flipping alone kept the axes in place,
+        # so the scene snapped ninety degrees at every boundary.
+        h_grid = np.rot90(h_grid, quadrant)
+        rgb_grid = np.rot90(rgb_grid, quadrant, axes=(0, 1))
+        finite_grid = np.rot90(finite_grid, quadrant)
+    # AFTER the fold: odd quadrants swap the folded dimensions.
+    ny, nx = h_grid.shape
     ca = max(math.cos(local), 1e-9)
     sa = max(math.sin(local), 1e-9)
     elevation = math.radians(camera.elevation_deg)
@@ -409,21 +419,25 @@ def render_height_bars(
     dense_surface = (
         scale * display_stretch < edge_min_cell_px * supersample
     )
+    # Two cache stages.  Everything the ELEVATION never touches -- the
+    # clipped height field, colours, lighting, validity -- caches under
+    # the inputs/quadrant/limits alone; the elevation only scales hz
+    # into the two z planes, so an elevation drag pays two cheap
+    # multiplies instead of the whole derivation (which made vertical
+    # orbiting feel dead next to snappy horizontal orbiting).
     derived_key = (
-        pool_key, quadrant, value_low, value_high,
-        float(camera.elevation_deg), zero_rgb, bool(dense_surface),
-        float(z_fraction),
+        pool_key, quadrant, value_low, value_high, zero_rgb,
+        bool(dense_surface), float(z_fraction),
     )
     if pool_cache is not None and pool_cache.get("derived_key") == derived_key:
         (
-            z_top32, z_bot32, finite_grid, rgb_grid, base_grid, top_grid,
-            top_values,
+            hz, finite_grid, rgb_grid, base_grid, top_grid, top_values,
         ) = pool_cache["derived_value"]
     else:
         clipped = np.clip(h_grid, value_low, value_high)
-        hz = np.where(finite_grid, clipped, 0.0) * z_unit
-        z_top32 = (np.maximum(hz, 0.0) * ce).astype(np.float32)
-        z_bot32 = (np.minimum(hz, 0.0) * ce).astype(np.float32)
+        hz = np.ascontiguousarray(
+            np.where(finite_grid, clipped, 0.0) * z_unit
+        )
         if zero_rgb is None:
             base_grid = rgb_grid
         else:
@@ -448,8 +462,6 @@ def render_height_bars(
         top_values = np.where(
             finite_grid, np.maximum(clipped, 0.0), -np.inf
         )
-        z_top32 = np.ascontiguousarray(z_top32)
-        z_bot32 = np.ascontiguousarray(z_bot32)
         finite_grid = np.ascontiguousarray(finite_grid)
         rgb_grid = np.ascontiguousarray(rgb_grid)
         base_grid = np.ascontiguousarray(base_grid)
@@ -457,9 +469,21 @@ def render_height_bars(
         if pool_cache is not None:
             pool_cache["derived_key"] = derived_key
             pool_cache["derived_value"] = (
-                z_top32, z_bot32, finite_grid, rgb_grid, base_grid,
-                top_grid, top_values,
+                hz, finite_grid, rgb_grid, base_grid, top_grid, top_values,
             )
+    z_key = (derived_key, float(ce))
+    if pool_cache is not None and pool_cache.get("derived_z_key") == z_key:
+        z_top32, z_bot32 = pool_cache["derived_z_value"]
+    else:
+        z_top32 = np.ascontiguousarray(
+            (np.maximum(hz, 0.0) * ce).astype(np.float32)
+        )
+        z_bot32 = np.ascontiguousarray(
+            (np.minimum(hz, 0.0) * ce).astype(np.float32)
+        )
+        if pool_cache is not None:
+            pool_cache["derived_z_key"] = z_key
+            pool_cache["derived_z_value"] = (z_top32, z_bot32)
 
     if _scanline_selected():
         # The numba analytic engine: exact vertical coverage per column

@@ -4181,10 +4181,16 @@ class ConsolePresenter:
             return
         revision = getattr(state, "revision", None)
         if revision is not None:
-            seen = binding.display_sync_revisions.get(id(source))
+            # Keyed by the host's durable identity: ``id()`` recycles the
+            # moment a replaced host is collected, so a fresh editor host
+            # inherited the dead host's high-water revision and its
+            # callbacks were dropped forever -- Refresh appeared to stop
+            # refreshing, and half-dropped mirrors flip-flopped the zoom.
+            source_key = getattr(source, "host_id", None) or id(source)
+            seen = binding.display_sync_revisions.get(source_key)
             if seen is not None and revision <= seen:
                 return
-            binding.display_sync_revisions[id(source)] = revision
+            binding.display_sync_revisions[source_key] = revision
         recorded = dict(binding.state.display)
         changed = {
             str(name): value

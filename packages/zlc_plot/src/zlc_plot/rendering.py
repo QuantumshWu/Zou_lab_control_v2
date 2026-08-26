@@ -3565,9 +3565,7 @@ class MatplotlibRenderer:
                 scene.project(float(scene.nx), float(scene.ny), base_value),
             )
 
-            for column in picks(source_nx):
-                a, b = scene.fold_cell(0, column * scene.pool_x)
-                centre = a + 0.5
+            def a_tick(centre: float, value: float) -> None:
                 grid_edges.append(
                     ((centre, float(scene.ny), wall_low),
                      (centre, float(scene.ny), wall_high))
@@ -3586,7 +3584,6 @@ class MatplotlibRenderer:
                 segments_y.extend(
                     (f[1], f[1] + uy * tick_length_px / box_h, np.nan)
                 )
-                value = left + (column + 0.5) * (right - left) / source_nx
                 ha, va = anchored((ux, uy))
                 wanted_texts.append(
                     (
@@ -3597,14 +3594,8 @@ class MatplotlibRenderer:
                         va,
                     )
                 )
-            # The y edge shares its far corner with the x edge's last
-            # label; dropping y's endpoint keeps the corner readable.
-            y_picks = picks(source_ny)
-            if len(y_picks) > 2:
-                y_picks = y_picks[:-1]
-            for row in y_picks:
-                a, b = scene.fold_cell(row * scene.pool_y, 0)
-                centre = b + 0.5
+
+            def b_tick(centre: float, value: float) -> None:
                 grid_edges.append(
                     ((0.0, centre, wall_low), (0.0, centre, wall_high))
                 )
@@ -3622,7 +3613,6 @@ class MatplotlibRenderer:
                 segments_y.extend(
                     (f[1], f[1] + uy * tick_length_px / box_h, np.nan)
                 )
-                value = top_c + (row + 0.5) * (bottom - top_c) / source_ny
                 ha, va = anchored((ux, uy))
                 wanted_texts.append(
                     (
@@ -3633,6 +3623,31 @@ class MatplotlibRenderer:
                         va,
                     )
                 )
+
+            # The rot90 fold hands each source axis to a DIFFERENT front
+            # edge on odd quadrants: whichever folded coordinate a source
+            # cell varies along decides which edge carries its labels.
+            even = scene.quadrant % 2 == 0
+            x_picks = picks(source_nx)
+            y_picks = picks(source_ny)
+            trimmed = y_picks if even else x_picks
+            if len(trimmed) > 2:
+                # The shared far corner keeps one label, not two.
+                del trimmed[-1]
+            for column in x_picks:
+                a, b = scene.fold_cell(0, column * scene.pool_x)
+                value = left + (column + 0.5) * (right - left) / source_nx
+                if even:
+                    a_tick(a + 0.5, value)
+                else:
+                    b_tick(b + 0.5, value)
+            for row in y_picks:
+                a, b = scene.fold_cell(row * scene.pool_y, 0)
+                value = top_c + (row + 0.5) * (bottom - top_c) / source_ny
+                if even:
+                    b_tick(b + 0.5, value)
+                else:
+                    a_tick(a + 0.5, value)
 
         # ---- the pane/floor grid, occluded like real geometry
         grid = artists["grid"]
@@ -4126,13 +4141,11 @@ class MatplotlibRenderer:
         quantized = np.round(clipped / pixel_z) * pixel_z
         # The scene works in FOLDED orientation; flip the height grid to
         # match so neighbourhoods read directly.
-        folded = quantized
-        if scene.quadrant == 1:
-            folded = folded[:, ::-1]
-        elif scene.quadrant == 2:
-            folded = folded[::-1, ::-1]
-        elif scene.quadrant == 3:
-            folded = folded[::-1, :]
+        folded = (
+            np.rot90(quantized, scene.quadrant)
+            if scene.quadrant
+            else quantized
+        )
         if folded.shape != (scene.ny, scene.nx):
             # A pooled scene's outline cells are the POOLED boxes; the
             # generic per-cell path handles the fold-plus-pool mapping.

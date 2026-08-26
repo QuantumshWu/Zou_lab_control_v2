@@ -1896,72 +1896,20 @@ class RasterPlotHost:
                     raise RuntimeError(
                         "the painted pointer front belongs to another raster host"
                     )
-                # Identity CURRENCY belongs to the press alone.  A scroll
-                # is self-relative view navigation (a 3D wheel tick commits
-                # the camera and bumps the display revision, so demanding
-                # currency made every following tick in the frontend's
-                # one-front lag window bounce); moves and releases are
-                # anchored to the front their own press validated.
-                if selected_action == "press":
-                    revisions = session.revisions
-                    plan = session.surface_plan
-                    if (
-                        effective_identity is None
-                        or int(revisions.display)
-                        != effective_identity.display_revision
-                        or int(revisions.layout)
-                        != effective_identity.layout_revision
-                        or str(plan.kind) != effective_identity.kind
-                        or str(plan.preset) != effective_identity.preset
-                    ):
-                        raise RuntimeError(
-                            "the painted pointer front is no longer layout-compatible"
-                        )
-                    # A press means what the OPERATOR saw -- and the painted
-                    # front it carries IS what they saw: the widget swaps
-                    # pixels and identity atomically, so the transform that
-                    # arrives with the event always matches the picture the
-                    # operator pressed on, and the gesture layer interprets
-                    # the press THROUGH that transform into canonical
-                    # coordinates.  Demanding that it also equal the
-                    # session's CURRENT transform re-rejected the first
-                    # press after every commit for as long as the frontend
-                    # ran one front behind -- data currency, transform
-                    # currency, one disease.  What still gates: the
-                    # grabbable interaction state below, because a grab
-                    # resolves against current selectors.
-                    if effective_interaction is not None:
-                        # A press consumes the GRABBABLE geometry: region
-                        # edges and threshold lines.  The crosshair is a
-                        # marker -- nothing grabs it -- yet every pick
-                        # republishes a front carrying it, and demanding
-                        # marker equality rejected the very next press for
-                        # as long as the frontend lagged one front behind
-                        # (every orbit after a pick, in practice).  The
-                        # clim handles live on the distribution rail, so
-                        # their currency gates rail presses alone.
-                        def _grabbable(states: object) -> tuple:
-                            return tuple(
-                                state
-                                for state in states
-                                if state.kind is not SelectorKind.CROSSHAIR
-                            )
-
-                        stale_selectors = _grabbable(
-                            session._raster_interaction_snapshot()
-                        ) != _grabbable(effective_interaction.selectors)
-                        on_rail = (
-                            getattr(effective_axes, "role", None)
-                            == "distribution"
-                        )
-                        stale_limits = on_rail and (
-                            session._raster_color_limits_snapshot()
-                            != effective_interaction.color_limits
-                        )
-                        if stale_selectors or stale_limits:
-                            raise RuntimeError(
-                                "the painted interaction state is no longer current"
-                            )
+                # There is NO press-time currency check beyond host
+                # wiring.  The front a pointer event carries IS what the
+                # operator saw: the widget swaps pixels and identity
+                # atomically, and the gesture layer interprets every
+                # action THROUGH the carried transform into canonical
+                # coordinates -- so a press against a one-front-old
+                # picture is self-consistent, whatever the session
+                # committed meanwhile.  Every equality gate this branch
+                # ever held (data revisions, transform membership,
+                # layout revisions, painted-selector state) rejected the
+                # first gesture after every commit for as long as the
+                # frontend ran one front behind -- each was the same
+                # disease wearing a different field, and each cost the
+                # bench ~a third of its presses during live acquisition.
             return session._raster_pointer_event(
                 selected_action,
                 x_value,
