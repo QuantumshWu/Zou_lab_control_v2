@@ -167,53 +167,88 @@ class _AxisRow(QtWidgets.QWidget):
 
 
 class _ManualAxisRow(QtWidgets.QWidget):
-    """One manual axis: a name, how many points, and the remove button.
+    """One manual axis: a name, its values, and the remove button.
 
-    Deliberately no from/to.  A manual axis's values are whatever the bench
-    turns out to give, and the run asks for them; authoring bounds here
-    would be writing down a number the operator has to contradict.
+    The same from/to/points every other row authors, because a manual
+    axis IS a scan axis -- its coordinates have to exist before the data
+    they describe, whoever turns the knob.  What it has instead of a port
+    is a name, since no port here reaches the thing it moves.
     """
 
     edited = QtCore.pyqtSignal()
     remove_requested = QtCore.pyqtSignal(object)
 
-    def __init__(self, axis: ScanAxis | None, parent=None) -> None:
+    def __init__(self, axis: ScanAxis | None, name: str = "", parent=None) -> None:
         super().__init__(parent)
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.name_edit = FluentLineEdit()
         self.name_edit.setPlaceholderText("manual axis name")
+        self.start_spin = FluentDoubleSpinBox()
+        self.stop_spin = FluentDoubleSpinBox()
+        for spin in (self.start_spin, self.stop_spin):
+            # No port, so no hard limits to read: a hand's range is
+            # whatever the bench's own knob will do.
+            spin.setRange(-1e12, 1e12)
+            spin.setDecimals(4)
         self.points_spin = FluentSpinBox()
         self.points_spin.setRange(1, 100_000)
+        self.custom_label = QtWidgets.QLabel("")
         remove = FluentButton("×", color=GREY)
         remove.setFixedWidth(32)
         remove.setToolTip("Remove this axis")
         self.remove_button = remove
         layout.addWidget(QtWidgets.QLabel("by hand"))
         layout.addWidget(self.name_edit, 2)
+        layout.addWidget(QtWidgets.QLabel("from"))
+        layout.addWidget(self.start_spin, 1)
+        layout.addWidget(QtWidgets.QLabel("to"))
+        layout.addWidget(self.stop_spin, 1)
         layout.addWidget(QtWidgets.QLabel("points"))
         layout.addWidget(self.points_spin)
-        layout.addWidget(QtWidgets.QLabel("values asked for at the start"), 1)
+        layout.addWidget(self.custom_label)
         layout.addWidget(remove)
 
+        self._custom_values: tuple[float, ...] | None = None
         if axis is not None:
             self.name_edit.setText(manual_axis_name(axis.port))
+            self.start_spin.setValue(axis.values[0])
+            self.stop_spin.setValue(axis.values[-1])
             self.points_spin.setValue(len(axis.values))
+            if not _uniform(axis.values):
+                self._custom_values = axis.values
+                self.custom_label.setText("custom values")
         else:
+            # A row the operator can run without first naming it: an
+            # unnamed axis is not a plan, and an empty box is a form that
+            # refuses to be used until it is filled in.
+            self.name_edit.setText(str(name))
+            self.stop_spin.setValue(1.0)
             self.points_spin.setValue(3)
 
         self.name_edit.textChanged.connect(lambda _text: self.edited.emit())
-        self.points_spin.valueChanged.connect(lambda _value: self.edited.emit())
+        for spin in (self.start_spin, self.stop_spin, self.points_spin):
+            spin.valueChanged.connect(self._spins_edited)
         remove.clicked.connect(lambda: self.remove_requested.emit(self))
+
+    def _spins_edited(self) -> None:
+        self._custom_values = None
+        self.custom_label.setText("")
+        self.edited.emit()
 
     @property
     def manual(self) -> bool:
         return True
 
     def axis(self) -> ScanAxis:
-        return manual_axis(
-            self.name_edit.text().strip(), int(self.points_spin.value())
+        name = self.name_edit.text().strip()
+        if self._custom_values is not None:
+            return manual_axis(name, self._custom_values)
+        points = int(self.points_spin.value())
+        values = np.linspace(
+            float(self.start_spin.value()), float(self.stop_spin.value()), points
         )
+        return manual_axis(name, tuple(float(value) for value in values))
 
 
 class ScanPlanEditor(QtWidgets.QWidget):
@@ -352,8 +387,19 @@ class ScanPlanEditor(QtWidgets.QWidget):
         self._rows.append(row)
         self.rows_layout.addWidget(row)
 
+    def _default_manual_name(self) -> str:
+        """A name the operator can run with, and change if they like."""
+
+        taken = {
+            row.name_edit.text().strip() for row in self._rows if row.manual
+        }
+        ordinal = 1
+        while f"manual {ordinal}" in taken:
+            ordinal += 1
+        return f"manual {ordinal}"
+
     def _attach_manual_row(self, axis: ScanAxis | None) -> None:
-        row = _ManualAxisRow(axis, self)
+        row = _ManualAxisRow(axis, self._default_manual_name(), self)
         row.edited.connect(self._emit_plan)
         row.remove_requested.connect(self._remove_row)
         # Above every machine row, because that is where it runs: the
@@ -417,8 +463,7 @@ class ScanPlanEditor(QtWidgets.QWidget):
             if not manual
             else (
                 f"  {stops} of those points are reached by hand: the run "
-                "asks for every manual value before it starts, then stops "
-                "at each one."
+                "stops at each one and waits for you to set it."
             )
         )
         self.summary.setText(

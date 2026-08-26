@@ -303,42 +303,6 @@ class TaskConsoleHandle(QtCore.QObject):
         finally:
             surface.close_adapter()
 
-    def manual_axis_values(
-        self,
-        *,
-        title: str,
-        message: str,
-        axis: str,
-        points: int,
-    ) -> tuple[float, ...] | None:
-        """Collect one manual axis's values, one point at a time.
-
-        One point per dialog because that is how the bench does it: set
-        the knob, read what it gave, type that, move on.  ``None`` is the
-        operator saying stop; an empty tuple is an answer that could not
-        be read, which the worker asks about again in its own words.
-        """
-
-        from ..fluent import FluentInputDialog
-
-        parent = self._window if self._window is not None else self._view
-        total = int(points)
-        values: list[float] = []
-        for index in range(total):
-            dialog = FluentInputDialog(
-                f"{message}\n\n{axis} \u2014 point {index + 1} of {total}",
-                "",
-                parent,
-                title=str(title),
-            )
-            if dialog.exec_() != QtWidgets.QDialog.Accepted:
-                return None
-            try:
-                values.append(float(dialog.text().strip()))
-            except ValueError:
-                return ()
-        return tuple(values)
-
     def manual_axis_setting(self, *, title: str, message: str) -> bool:
         """Stand aside while a hand moves a knob; False when it declines."""
 

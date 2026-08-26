@@ -5542,17 +5542,17 @@ def test_the_console_answers_the_manual_axis_question_the_engine_asks(
         def cancel(self, reason):
             self.cancelled = str(reason)
 
-    def request(mode):
+    def request(identity, value):
         return OperatorInputRequest(
-            "req-1" if mode == "values" else "req-2",
+            identity,
             MANUAL_AXIS_REQUEST,
-            "power: the values this scan walks",
-            "Set power to each of the 2 values this scan will walk.",
-            {"mode": mode, "axis": "power", "points": 2},
+            "Set power",
+            f"Set power to {value:g}, then continue.",
+            {"axis": "power", "value": value, "point": 1, "points": 2},
         )
 
     asked = []
-    answers = [{"values": (1.0, 2.0)}, None]
+    answers = [{}, None]
     view = _ConsoleView()
     presenter = ConsolePresenter(
         session,
@@ -5566,18 +5566,18 @@ def test_the_console_answers_the_manual_axis_question_the_engine_asks(
         ),
     )
     try:
-        host = _Host(request("values"))
+        host = _Host(request("req-1", 1.0))
         binding = LogicBinding(node_id="scan", descriptor=None, host=host)
         presenter._handle_operator_request(binding)
         assert [incoming.kind for incoming in asked] == [MANUAL_AXIS_REQUEST]
-        assert host.answered == [("req-1", {"values": (1.0, 2.0)})]
+        assert host.answered == [("req-1", {})]
         assert not host.cancelled
 
         # Declining is an answer too: the operator is the loop here, and
         # the run stops rather than waiting on a hand that has left.
-        host.operator_request = request("set")
+        host.operator_request = request("req-2", 2.0)
         presenter._handle_operator_request(binding)
-        assert host.answered == [("req-1", {"values": (1.0, 2.0)})]
+        assert host.answered == [("req-1", {})]
         assert "stopped the manual scan" in host.cancelled
     finally:
         presenter.close()

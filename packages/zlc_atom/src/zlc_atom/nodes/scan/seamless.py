@@ -34,13 +34,12 @@ seamless inside.  ``repeats`` means the same thing it always did, the whole
 plan again from the top; with a manual axis in the plan it simply cannot be
 a longer fire, so it is a longer loop.
 
-THE COORDINATES COME FIRST, EVEN THE OPERATOR'S.  A dataset's schema is
-fixed by its first frame and a generation may never restate it, so every
-manual coordinate is collected BEFORE the first point plays -- the operator
-types the values, the scan then walks them and asks for each to be set in
-turn.  A number typed after the frames it describes could not be that
-run's axis; it would be a measurement about the run, which is a different
-thing and does not belong on the x axis.
+A MANUAL AXIS IS AUTHORED LIKE ANY OTHER.  Its values are written in the
+plan, because a dataset's schema is fixed by its first frame and a
+generation may never restate it: a number typed after the frames it
+describes could not be that run's axis.  So the plan says which values
+the axis walks, and the run's only question is the one a machine cannot
+answer -- move the knob there.
 
 THE LOOP LIVES HERE, NOT IN A NODE PACKAGE, BECAUSE IT HAS TWO CONSUMERS.
 ``acquire`` plays the plan and commits each point; Runtime hands back the
@@ -52,7 +51,6 @@ other about what a played point means.
 from __future__ import annotations
 
 import itertools
-import math
 import time
 from collections.abc import Sequence
 from dataclasses import replace
@@ -76,10 +74,8 @@ from .plan import (
 )
 from .source import check_cancelled, wait_for_board
 
-#: The one operator-input kind this engine raises.  Its payload's ``mode``
-#: says which of the two questions is being asked: ``values`` collects a
-#: manual axis's coordinates before any data, ``set`` asks for the knob to
-#: be moved to one of them.
+#: The one operator-input kind this engine raises, and it asks the one
+#: question a machine here cannot answer: move this knob to this value.
 MANUAL_AXIS_REQUEST = "manual-axis"
 
 
@@ -236,76 +232,6 @@ class SeamlessScanMeasurement:
             tuple(float(row[index]) for index in order) for row in rows
         )
 
-    def _ask(self, context: object, *, title: str, message: str, payload: dict):
-        """One question to the operator, or the refusal that names the gap."""
-
-        ask = getattr(context, "request_operator_input", None)
-        if not callable(ask):
-            raise RuntimeError(
-                "a manual axis stops the run to ask the operator for a "
-                "value, and this host offers no way to ask"
-            )
-        return ask(
-            MANUAL_AXIS_REQUEST,
-            title=title,
-            message=message,
-            payload=payload,
-        )
-
-    def _manual_coordinates(
-        self, context: object
-    ) -> tuple[tuple[float, ...], ...]:
-        """Every manual axis's coordinates, asked for before any data.
-
-        Distinctness is required because these ARE the axis: two points
-        sharing a value are one point in every projection, and the scan
-        grid could not be formed from them.  Asking again costs the
-        operator a moment; discovering it at the end costs them the run.
-        """
-
-        collected: list[tuple[float, ...]] = []
-        for axis in self.manual_axes:
-            name = manual_axis_name(axis.port)
-            points = len(axis.values)
-            message = (
-                f"Set {name} to each of the {points} values this scan will "
-                "walk, and record them here in the order it will walk them."
-            )
-            while True:
-                response = self._ask(
-                    context,
-                    title=f"{name}: the values this scan walks",
-                    message=message,
-                    payload={
-                        "mode": "values",
-                        "axis": name,
-                        "points": points,
-                    },
-                )
-                try:
-                    values = tuple(float(value) for value in response["values"])
-                except (KeyError, TypeError, ValueError):
-                    message = f"{name} needs {points} numbers."
-                    continue
-                if len(values) != points:
-                    message = (
-                        f"{name} visits {points} points, so it needs "
-                        f"{points} values; {len(values)} arrived."
-                    )
-                    continue
-                if any(not math.isfinite(value) for value in values):
-                    message = f"every {name} value must be a real number."
-                    continue
-                if len(set(values)) != len(values):
-                    message = (
-                        f"two {name} points cannot share a value -- the scan "
-                        "would have no axis to tell them apart."
-                    )
-                    continue
-                collected.append(values)
-                break
-        return tuple(collected)
-
     def _ask_for_setting(
         self,
         context: object,
@@ -314,14 +240,19 @@ class SeamlessScanMeasurement:
     ) -> None:
         """Stop for the hand, and only for what the hand has to move."""
 
+        ask = getattr(context, "request_operator_input", None)
+        if not callable(ask):
+            raise RuntimeError(
+                "a manual axis stops the run to ask the operator to move a "
+                "knob, and this host offers no way to ask"
+            )
         for name, value, index, points in changed:
             context.report_progress(f"Waiting for {name}")
-            self._ask(
-                context,
+            ask(
+                MANUAL_AXIS_REQUEST,
                 title=f"Set {name}",
                 message=f"Set {name} to {value:g}, then continue.",
                 payload={
-                    "mode": "set",
                     "axis": name,
                     "value": float(value),
                     "point": index + 1,
@@ -461,9 +392,8 @@ class SeamlessScanMeasurement:
             effective_slot_rows,
             columns,
         )
-        # Every coordinate before the first frame, the operator's included.
         manual_rows = tuple(
-            itertools.product(*self._manual_coordinates(context))
+            itertools.product(*(axis.values for axis in self.manual_axes))
         )
         effective_rows = tuple(
             tuple(manual_row) + tuple(inner_row)
