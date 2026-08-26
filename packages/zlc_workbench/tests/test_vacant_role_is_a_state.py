@@ -22,6 +22,10 @@ from pathlib import Path
 import pytest
 
 from pulse_fixtures import PULSE_NAME, write_ordinary_pulse
+from test_console_presenter import (  # noqa: F401 -- fixtures
+    presenter,
+    session,
+)
 from test_task_console_app import workspace  # noqa: F401
 from zlc_ui import STATUS_SEVERITIES
 
@@ -170,3 +174,52 @@ def test_a_reporting_defect_cannot_take_the_console_down() -> None:
     ConsolePresenter._report(presenter, "something happened", severity="nope")
     assert shown and shown[0][0] == "error"
     assert "nope" in shown[0][1] and "something happened" in shown[0][1]
+
+
+def _card_status(presenter, panel_id):
+    return presenter.view._cards[panel_id].status
+
+
+def test_the_card_says_the_settings_are_not_applied_while_they_are_not(
+    presenter, session
+) -> None:
+    """A vacant role wears a mark for as long as it lasts.
+
+    A status line says it once and scrolls away; the operator's question --
+    "why is my setting not applied?" -- is about right now.  So the panel
+    that is showing an older picture than its own table says so on itself,
+    and stops saying it the moment the table draws again.
+    """
+
+    from test_console_presenter import _one_shot, _settle_panel_hosts
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(node.signal_key("frames"), snapshot)
+    panel_id = binding.panel_id
+    _settle_panel_hosts(presenter)
+
+    rows = {
+        str(entry["key"]): entry["value"]
+        for entry in binding.parameter_surface["semantic"]
+        if str(entry["key"]).startswith("fate:")
+    }
+    x_holder = next(key for key, value in rows.items() if value == "x")
+    assert _card_status(presenter, panel_id)[0] == ""
+
+    assert presenter.update_panel_state(
+        panel_id, {"semantic": {x_holder: "reduce"}}
+    )
+    for _turn in range(5):
+        presenter.beat()
+    text, error = _card_status(presenter, panel_id)
+    assert error is True
+    assert "not applied" in text and "x" in text
+
+    # It is a condition, not a log: filling the role clears the mark.
+    assert presenter.update_panel_state(
+        panel_id, {"semantic": {x_holder: "x"}}
+    )
+    _settle_panel_hosts(
+        presenter, lambda: _card_status(presenter, panel_id)[0] == ""
+    )
+    assert _card_status(presenter, panel_id) == ("", False)

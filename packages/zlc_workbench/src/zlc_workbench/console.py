@@ -224,6 +224,12 @@ class PanelBinding:
     interaction_viewport: Any = None
     #: The last failure already shown, so one refusal is reported once.
     reported_error: Any = None
+    #: Why this panel's authored settings are not on screen: a required role
+    #: has no axis, so the picture is the last one that could be drawn.  It
+    #: is state rather than a passing message because it stays true until
+    #: some axis takes the role -- and a status line the operator scrolled
+    #: past is not an answer to "why is my setting not applied".
+    vacancy: str = ""
     #: Image annotation has its own presentation revision while its data remains
     #: an explicit sibling in the selected publication.
     overlay_revision: int = -1
@@ -1318,6 +1324,13 @@ class ConsolePresenter:
             subject=subject,
             schema=schema,
         )
+        if state is None or state is binding.state:
+            # Asked about the panel's OWN state, so the answer IS the
+            # panel's condition: recorded here rather than only where an
+            # edit happens, because a table can also stop drawing without
+            # anybody editing it -- the same signal can arrive under a
+            # representation that has no such axis to hold the role.
+            binding.vacancy = "" if projection is None else projection.vacancy
         # None twice over, and they mean different things: no projection at
         # all (this Dataset offers no such plot), or a projection whose
         # authored table leaves a required role vacant.  Neither draws.
@@ -2250,6 +2263,7 @@ class ConsolePresenter:
             else:
                 semantic = projection.semantic
             merged["semantic"] = semantic
+            binding.vacancy = vacancy_reason
             if vacancy_reason:
                 self._report(f"{panel_id}: {vacancy_reason}", severity="warning")
         try:
@@ -5151,6 +5165,23 @@ class ConsolePresenter:
                 or getattr(binding.bridge, "last_error", None)
                 or getattr(binding.port, "last_error", None)
             )
+            if error is None and binding.vacancy:
+                # An authored table that cannot draw is a CONDITION of this
+                # panel, not a failure of it: the picture on screen is the
+                # last one that could be drawn, and the settings the
+                # operator just wrote are not in it.  The card says so for
+                # as long as it stays true -- the status line said it once
+                # and scrolled away.
+                condition = (
+                    f"settings not applied -- {binding.vacancy}"
+                )
+                if binding.reported_error != condition:
+                    binding.reported_error = condition
+                    if panel_id in self.view.panel_ids():
+                        self.view.set_panel_status(
+                            panel_id, condition, error=True
+                        )
+                continue
             if error is None:
                 # The mark is the panel's CURRENT condition, not a log of what
                 # once went wrong: a panel that has drawn again since clears
