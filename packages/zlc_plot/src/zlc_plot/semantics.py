@@ -636,6 +636,42 @@ def _scope_coordinates(
     return choices or None
 
 
+def axis_admits_scope(
+    schema: DatasetSchema,
+    ref: AxisRef,
+    value: object,
+) -> bool:
+    """Whether a scope fate names a coordinate this axis actually HAS.
+
+    The row's dropdown lists at most ``SCOPE_CHOICE_LIMIT`` coordinates,
+    because a two-thousand-entry menu is not an editor -- but that is a
+    fact about the MENU.  Whether a pin is legal is a fact about the
+    DATA, and reading the menu for it conflated two different questions:
+    a legal pin on a large axis and a pin whose coordinate the data no
+    longer has both came back "not offered", so a saved board could not
+    tell "too many to list" from "gone".
+
+    A pin whose coordinate is gone is a statement with no referent under
+    this representation -- the same shape as a fate naming an axis that
+    is not here -- and its row falls back to the axis's default fate.
+    """
+
+    if not is_scope_fate(value):
+        return False
+    coordinate = scope_coordinate_from_fate(value)
+    if coordinate is LATEST_COORDINATE:
+        return (
+            ref.domain is AxisDomain.POINT_COORDINATE
+            and ref.axis_id == PRIMARY_INDEX_AXIS_ID.value
+        )
+    resolved = resolve_axis(schema, ref)
+    label = resolved.label
+    return any(
+        canonical_coordinate_scalar(item, f"{label} coordinate") == coordinate
+        for item in resolved.coordinates
+    )
+
+
 def _scope_choice_label(value: object) -> str:
     coordinate = scope_coordinate_from_fate(value)
     if coordinate is LATEST_COORDINATE:
@@ -665,13 +701,6 @@ def _choice_pairs(
             raise ValueError("semantic choice labels must be non-empty text")
         pairs.append((value, text))
     return tuple(pairs)
-
-
-def _without(values: Iterable[AxisRef], excluded: Iterable[AxisRef]) -> tuple[AxisRef, ...]:
-    blocked = {value.physical_identity for value in excluded}
-    return tuple(
-        value for value in values if value.physical_identity not in blocked
-    )
 
 
 def _field_names(spec: PlotSpec) -> tuple[str, ...]:
@@ -1071,8 +1100,6 @@ def describe_semantics(
     y = getattr(semantic, "y", None)
     group = getattr(semantic, "group", None)
     reduction = getattr(semantic, "reduction", None)
-    used = tuple(item for item in (x, y, group) if isinstance(item, AxisRef))
-    facet_axes = _without(axes, used)
     # A series is drawn ALONG its x and split BY its group; a size-1 axis can
     # carry neither -- it yields one invisible point or one redundant split.
     # Series-family kinds therefore never offer degenerate axes for those
@@ -1136,8 +1163,18 @@ def describe_semantics(
             # default's label stops lying about the axis's fate.
             offered[0] = (default_fate, "(shot axis)")
         for role in roles:
-            if role == "facet" and ref not in facet_axes and current != "facet":
-                continue
+            # ``facet`` is offered by the same rule as every other role.
+            # It used to be hidden on any axis the CELL already consumed,
+            # which made it the one role whose option list depended on
+            # where the other axes happened to sit -- and the swap that
+            # resolves every other collision was never reached.  Two
+            # consequences, one cause: an operator could not promote a
+            # cell axis to the facet at all, and the fate an EARLIER swap
+            # had legitimately put there ("site = facet", reached by
+            # giving repeat the x role) was not in its own row's
+            # vocabulary when the table was replayed against the kind's
+            # default spec -- which is the "value is outside this plot
+            # vocabulary" the next edit died on.
             if _reason(name, role) is None or current == role:
                 offered.append((role, _ROLE_LABELS[role]))
         pins = _scope_coordinates(schema, ref)

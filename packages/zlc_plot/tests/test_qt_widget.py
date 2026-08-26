@@ -323,3 +323,77 @@ def test_qt_raster_host_accepts_facet_grid_spec() -> None:
         assert len(front.interaction.axes) >= 2
     finally:
         host.close(timeout=10)
+
+
+@pytest.mark.gui
+def test_the_first_painted_front_is_already_at_the_screen_density() -> None:
+    """A rebuilt surface must not show a stretched low-density frame first.
+
+    The pixel-ratio observer used to be created when the FIRST front
+    arrived, so a host opened at density 1, that frame was painted
+    stretched into the widget, and the sharp one only replaced it after
+    a second render.  Panel Edit's Refresh replaces its host, so it
+    showed that soft frame every single time.
+    """
+
+    try:
+        ensure_qt5_application([])
+    except Exception as error:  # pragma: no cover - environment-dependent
+        pytest.skip(f"Qt5 offscreen unavailable: {error}")
+
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns({"x": (0.0, 1.0, 2.0)}),
+        dtype=np.float64,
+        generation="qt-dpr-test",
+    )
+
+    def build_host():
+        return RasterPlotHost.from_plot(
+            DatasetSnapshot(schema, np.asarray([[0.0, 1.0, 2.0]]), 0),
+            CurvePlot(AxisRef.point("x")),
+            size="2x2",
+        )
+
+    # The observer class is private to the lazily built Qt module; one
+    # ordinary widget hands it over.
+    probe_host = build_host()
+    probe_host.wait_for_front(timeout=30)
+    probe = Qt5PlotWidget(probe_host)
+    observer = type(probe._pixel_ratio_observer)
+    probe.close_adapter()
+    probe_host.close(timeout=30)
+
+    host = build_host()
+    original = observer.current_ratio
+    observer.current_ratio = property(lambda self: 2.0)
+    painted: list[float] = []
+    try:
+        host.wait_for_front(timeout=30)
+        assert float(host.front.device_pixel_ratio) == 1.0
+        widget = Qt5PlotWidget(host)
+        try:
+            original_install = widget._install_front
+
+            def spy(front):
+                accepted = original_install(front)
+                if accepted:
+                    painted.append(float(front.device_pixel_ratio))
+                return accepted
+
+            widget._install_front = spy
+            deadline = time.monotonic() + 30.0
+            while not painted and time.monotonic() < deadline:
+                ensure_qt5_application([]).processEvents()
+                if widget.presented_front is not None:
+                    painted.append(
+                        float(widget.presented_front.device_pixel_ratio)
+                    )
+                time.sleep(0.005)
+            assert painted, "the widget never painted a front"
+            assert painted[0] == 2.0, painted
+        finally:
+            widget.close_adapter()
+    finally:
+        observer.current_ratio = original
+        host.close(timeout=30)

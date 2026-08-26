@@ -571,10 +571,31 @@ def _qt5_plot_widget_class() -> type[Any]:
             self._unsubscribe: Callable[[], None] | None = None
             self._pixel_ratio_observer: _RasterPixelRatioObserver | None = None
             try:
+                # The screen's density is an INPUT to the first picture,
+                # not a correction applied after it.  The observer used to
+                # be created when the first front arrived, so every host
+                # built its opening frame at density 1, that frame was
+                # painted stretched into the widget, and only the
+                # re-render that followed was sharp -- the "low resolution
+                # first, then it updates" every rebuilt panel showed
+                # (Panel Edit's Refresh replaces its host, so it showed it
+                # every time).  Asking first costs one render, not two.
+                self._pixel_ratio_observer = _RasterPixelRatioObserver(
+                    self,
+                    self._apply_device_pixel_ratio,
+                )
+                self._apply_device_pixel_ratio(
+                    self._pixel_ratio_observer.current_ratio
+                )
                 if auto_present:
                     self._unsubscribe = self._host.subscribe_front(self._on_front)
                 initial_front = self._host.front
-                if initial_front is not None:
+                if initial_front is not None and math.isclose(
+                    float(initial_front.device_pixel_ratio),
+                    float(self._requested_dpr),
+                ):
+                    # A front at another density is the pre-request one; the
+                    # request's own render is already on its way here.
                     self._install_front(initial_front)
             except Exception:
                 self.close_adapter()
@@ -850,15 +871,6 @@ def _qt5_plot_widget_class() -> type[Any]:
             width, height = front.logical_size
             if self.width() != width or self.height() != height:
                 self.setFixedSize(width, height)
-            if self._pixel_ratio_observer is None:
-                self._requested_dpr = front.device_pixel_ratio
-                self._pixel_ratio_observer = _RasterPixelRatioObserver(
-                    self,
-                    self._apply_device_pixel_ratio,
-                )
-                self._apply_device_pixel_ratio(
-                    self._pixel_ratio_observer.current_ratio
-                )
             self.update()
             surface_changed = (
                 current is None

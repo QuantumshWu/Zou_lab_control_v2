@@ -135,7 +135,17 @@ def test_semantic_choices_are_labeled_once_and_kind_domain_is_registry_filtered(
     )
     assert description.field("reduction").choices[-1][1] == "first"
 
-def test_facet_domain_excludes_cell_axes() -> None:
+def test_the_facet_role_is_offered_by_the_same_rule_as_every_other_role() -> None:
+    """A cell axis may take the facet, and taking it SWAPS.
+
+    ``facet`` used to be the one role whose option list depended on where
+    the other axes sat: an axis the cell already consumed was silently
+    dropped from the list instead of swapping like every other role.  It
+    left an axis the operator could not promote, and -- because an
+    earlier swap can legitimately put ``facet`` on a cell axis -- a fate
+    that its own row would refuse when the table was replayed.
+    """
+
     spec = FacetGridPlot(
         AxisRef.point("row"),
         CurvePlot(AxisRef.point("x")),
@@ -152,8 +162,18 @@ def test_facet_domain_excludes_cell_axes() -> None:
     )
     description = describe_semantics(schema, spec)
     facet_values = description.axes_offering("facet")
-    assert AxisRef.point("x") not in facet_values
+    assert AxisRef.point("x") in facet_values
     assert AxisRef.point("row") in facet_values
+    # and the swap is what makes it legal: the cell keeps an x axis.
+    name = next(
+        row for axis, row in description.fate_rows if axis == AxisRef.point("x")
+    )
+    composed = composed_spec(schema, spec, {name: "facet"})
+    assert composed.facet == AxisRef.point("x")
+    assert composed.cell.x == AxisRef.point("row")
+    # a table stating that swap replays against the kind's own default
+    replayed = describe_semantics(schema, composed)
+    assert replayed.field(name).value == "facet"
 
 def _camera_frame_schema():
     """One camera frame: R=1, one point row, dense y × x data axes."""

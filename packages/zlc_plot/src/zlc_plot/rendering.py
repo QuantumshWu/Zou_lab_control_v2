@@ -3375,6 +3375,10 @@ class MatplotlibRenderer:
             # Committed geometry decides the pooled grid, so a preview
             # reuses it instead of re-pooling the scan at its own size.
             pool_reference_width=box_w * 3,
+            # The scene is an oblique view of THIS surface's heatmap, so
+            # its ground runs the way the heatmap's picture runs.  The
+            # origin is that picture's single authority.
+            origin=policy.image_origin,
         )
         self._height_bars_scene_map = scene
         self._height_bars_values = heights

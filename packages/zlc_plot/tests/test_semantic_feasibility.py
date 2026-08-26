@@ -202,21 +202,38 @@ def test_curve_x_repeat_is_offered_and_draws() -> None:
         session.close()
 
 
-def test_facet_pair_beyond_cell_cap_is_not_offered() -> None:
-    snapshot = _grid_snapshot()
+def test_facet_beyond_cell_cap_is_not_offered_but_a_cell_axis_is() -> None:
+    """The facet row is filtered by FEASIBILITY, never by bookkeeping.
+
+    An axis of more coordinates than the layout has cells cannot be
+    faceted and is not offered -- that is a fact about the drawing.  An
+    axis the cell currently uses is a different matter entirely: taking
+    the facet swaps, exactly as taking x or group does, so it stays
+    offered.  Excluding it was the one place a role's option list
+    depended on where the other axes sat.
+    """
+
+    points = PointTable.from_columns(
+        {"big": np.arange(400.0), "few": np.arange(400.0) % 7}
+    )
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1), points, dtype=np.float64
+    )
+    snapshot = DatasetSnapshot(
+        schema, np.arange(400.0)[None, :, None], revision=0
+    )
     session = PlotSession(
         snapshot,
-        FacetGridPlot(
-            AxisRef.point_dimension("row"),
-            CurvePlot(AxisRef.point_dimension("col")),
-        ),
+        FacetGridPlot(AxisRef.point("few"), CurvePlot(AxisRef.point("big"))),
     )
     try:
         offering = session.describe_semantics().axes_offering("facet")
-        # The single repeat (1 cell) is a usable facet; the col dimension is
-        # the cell's x and is excluded from the facet domain.
         assert AxisRef.repeat() in offering
-        assert AxisRef.point_dimension("col") not in offering
+        # 400 cells against a 64-cell layout: it would refuse, so it is
+        # not offered.
+        assert AxisRef.point("big") not in offering
+        # the cell's own x axis, small enough to facet, IS offered
+        assert AxisRef.point("few") in offering
     finally:
         session.close()
 
