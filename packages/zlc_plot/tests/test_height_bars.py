@@ -475,6 +475,76 @@ def test_color_limit_preview_rerenders_the_scene() -> None:
         session.close()
 
 
+def test_the_artist_is_handed_the_runs_and_nothing_else() -> None:
+    """Hidden samples are dropped, and the picture does not change.
+
+    Sampling answers per sample, so a hidden stretch arrives as one
+    blank per sample -- more than half of every edge on a crowded scene
+    -- and a blank is still a vertex the renderer walks in order to
+    draw nothing.  A hole needs exactly one gap to be a hole.  What
+    must survive is every pixel: same runs, same order, same line.
+    """
+
+    from zlc_plot.rendering import MatplotlibRenderer
+
+    session = _session(10)
+    try:
+        session.set_parameter("presentation", "height_bars")
+        session.rgba()
+        renderer = session._renderer
+        scene = renderer._height_bars_scene_map
+        edges = renderer._artists["image:h3d_outline_geometry"][1]
+        outline = renderer._artists["image:h3d_outlines"]
+
+        raw = renderer._height_bars_sampled_polyline(scene, edges, 64)
+        compact = MatplotlibRenderer._height_bars_visible_runs(*raw)
+        blank = np.isnan(raw[0])
+        assert blank.sum() > np.isfinite(raw[0]).sum() * 0.2, (
+            "this scene must actually hide something"
+        )
+        assert compact[0].size < raw[0].size
+        doubled = np.isnan(compact[0][1:]) & np.isnan(compact[0][:-1])
+        assert not doubled.any(), "a hole was left wider than one gap"
+
+        def painted(xs, ys):
+            outline.set_data(xs, ys)
+            renderer._composed_generation = -1
+            return renderer.rgba().copy()
+
+        assert np.array_equal(painted(*compact), painted(*raw)), (
+            "dropping the blanks moved a pixel"
+        )
+    finally:
+        session.close()
+
+
+def test_a_visible_run_is_handed_over_as_its_two_ends() -> None:
+    """The compaction itself, on a line whose holes are known.
+
+    Every sample of one run lies on the line through its ends -- the
+    edge is straight and the projection is affine -- so the points
+    between them say nothing the ends do not.
+    """
+
+    from zlc_plot.rendering import MatplotlibRenderer
+
+    xs = np.asarray([np.nan, 1.0, 2.0, 3.0, np.nan, np.nan, 7.0, np.nan])
+    ys = np.asarray([np.nan, 4.0, 5.0, 6.0, np.nan, np.nan, 8.0, np.nan])
+    out_x, out_y = MatplotlibRenderer._height_bars_visible_runs(xs, ys)
+    # run one: 1 -> 3.  run two: the lone 7, a segment of no length,
+    # which is what a one-sample run has always drawn.
+    assert out_x.tolist()[:2] == [1.0, 3.0]
+    assert out_y.tolist()[:2] == [4.0, 6.0]
+    assert np.isnan(out_x[2])
+    assert out_x.tolist()[3:5] == [7.0, 7.0]
+    assert np.isnan(out_x[5])
+    assert out_x.size == 6
+    # Nothing visible: nothing to draw.
+    blank = np.full(4, np.nan)
+    empty_x, empty_y = MatplotlibRenderer._height_bars_visible_runs(blank, blank)
+    assert empty_x.size == 0 and empty_y.size == 0
+
+
 def test_one_mechanism_draws_every_edge_the_scene_has() -> None:
     """Edges are vector chrome, and that is the only kind there is.
 
@@ -758,8 +828,11 @@ def test_occlusion_is_a_box_test_not_a_centre_depth_proxy() -> None:
     renderer = object.__new__(MatplotlibRenderer)
 
     def visible_fraction(edge):
-        xs, _ = renderer._height_bars_occluded_polyline(
-            scene, np.asarray([edge], dtype=np.float64)
+        # The SAMPLER is the unit that decides what hides what; what the
+        # artist is handed afterwards is the visible runs, which no
+        # longer carries a sample-by-sample answer.
+        xs, _ = renderer._height_bars_sampled_polyline(
+            scene, np.asarray([edge], dtype=np.float64), 64
         )
         finite = np.isfinite(xs[:-1])
         return finite.mean()

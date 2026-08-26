@@ -3871,7 +3871,51 @@ class MatplotlibRenderer:
             )
             xs_parts.append(xs)
             ys_parts.append(ys)
-        return np.concatenate(xs_parts), np.concatenate(ys_parts)
+        return self._height_bars_visible_runs(
+            np.concatenate(xs_parts), np.concatenate(ys_parts)
+        )
+
+    @staticmethod
+    def _height_bars_visible_runs(
+        xs: "np.ndarray", ys: "np.ndarray"
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """What is left to DRAW: one straight segment per visible run.
+
+        Sampling answers per SAMPLE -- is this point hidden -- so an
+        edge arrives as a cloud of points along itself, most of them
+        blank on a crowded scene.  But the edge is a straight segment
+        and the projection is affine, so every sample of one run lies
+        exactly on the line through its ends: the points between them
+        carry no shape at all.  They were only ever how visibility was
+        decided, and once it is decided a run IS its two ends.
+
+        So the artist is handed two vertices per visible stretch and one
+        blank between stretches, instead of every sample and one blank
+        per hidden sample.
+        """
+
+        finite = np.isfinite(xs)
+        keep = np.nonzero(finite)[0]
+        if keep.size == 0:
+            return xs[:0], ys[:0]
+        opens = np.empty(keep.size, dtype=bool)
+        opens[0] = True
+        opens[1:] = np.diff(keep) > 1
+        closes = np.empty(keep.size, dtype=bool)
+        closes[-1] = True
+        closes[:-1] = opens[1:]
+        first, last = keep[opens], keep[closes]
+        runs = first.size
+        # start, end, gap -- three slots a run, and the trailing gap of
+        # the last one is what separates it from whatever is drawn next.
+        drawn_x = np.full(runs * 3, np.nan)
+        drawn_y = np.full(runs * 3, np.nan)
+        position = np.arange(runs) * 3
+        drawn_x[position] = xs[first]
+        drawn_y[position] = ys[first]
+        drawn_x[position + 1] = xs[last]
+        drawn_y[position + 1] = ys[last]
+        return drawn_x, drawn_y
 
     def _height_bars_sampled_polyline(
         self,
