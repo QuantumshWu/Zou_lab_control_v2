@@ -3699,6 +3699,7 @@ class MatplotlibRenderer:
         line.set_data(segments_x, segments_y)
         line.set_visible(True)
 
+        region = self._height_bars_chrome_region(axes)
         texts = artists["texts"]
         for index, (fx, fy, content, ha, va) in enumerate(wanted_texts):
             if index < len(texts):
@@ -3709,7 +3710,6 @@ class MatplotlibRenderer:
                     transform=axes.transAxes,
                     fontsize=self.style.fonts.tick_pt,
                     zorder=6,
-                    clip_on=False,
                 )
                 texts.append(text)
             text.set_position((fx, fy))
@@ -3717,8 +3717,94 @@ class MatplotlibRenderer:
             text.set_horizontalalignment(ha)
             text.set_verticalalignment(va)
             text.set_visible(True)
+            # A 3D label goes where the projection puts it, which is not a
+            # place any layout reserved.  It gets the room the scene owns --
+            # out to whatever sits on its right, down from under the title --
+            # and is cut off at that edge instead of printing across a
+            # neighbour that means something else.
+            text.set_clip_box(region)
+            text.set_clip_on(True)
         for text in texts[len(wanted_texts):]:
             text.set_visible(False)
+        self._thin_overlapping_chrome(texts[: len(wanted_texts)])
+
+    def _height_bars_chrome_region(self, axes: Any) -> Any:
+        """The room a 3D scene's own labels may occupy, in device pixels.
+
+        A 2D panel reserves margins for its chrome because it knows where
+        its chrome goes.  A rotated 3D scene does not: a tick that sat
+        below the floor a moment ago is beside the colorbar now.  So the
+        scene is given a REGION rather than a margin -- its own box grown
+        to whatever bounds it (the rail or colorbar on the right, the
+        title above) and never past it.  Inside, labels may go anywhere
+        the projection puts them; at the edge they are cut off, which is
+        the honest thing for a label with nowhere left to go.
+        """
+
+        from matplotlib.transforms import Bbox
+
+        figure = axes.figure
+        box = axes.get_window_extent()
+        left, bottom = 0.0, 0.0
+        right = float(figure.bbox.width)
+        top = float(figure.bbox.height)
+        for role in ("distribution", "colorbar"):
+            for neighbour in self._axes.get(role, ()):
+                if neighbour is axes or not neighbour.get_visible():
+                    continue
+                other = neighbour.get_window_extent()
+                if other.x0 >= box.x1:
+                    right = min(right, float(other.x0))
+                elif other.x1 <= box.x0:
+                    left = max(left, float(other.x1))
+        title = self._artists.get("figure:title")
+        if title is not None and title.get_visible():
+            try:
+                extent = title.get_window_extent(
+                    figure.canvas.get_renderer()
+                )
+            except (AttributeError, RuntimeError, ValueError):
+                extent = None
+            if extent is not None and extent.y0 >= box.y1:
+                top = min(top, float(extent.y0))
+        return Bbox.from_extents(
+            min(left, box.x0),
+            min(bottom, box.y0),
+            max(right, box.x1),
+            max(top, box.y1),
+        )
+
+    def _thin_overlapping_chrome(self, texts: list) -> None:
+        """Drop 3D labels that would print across one already kept.
+
+        Rotation is continuous and the labels move with it, so any fixed
+        stride is wrong at some angle: two ticks that were a centimetre
+        apart meet when the axis turns edge-on.  What can be measured is
+        whether two labels actually collide, so that is what decides --
+        and the ENDS are kept first, because an axis whose extremes are
+        legible still says what it spans, while one thinned from the
+        outside in says nothing at all.
+        """
+
+        visible = [text for text in texts if text.get_visible()]
+        if len(visible) < 2:
+            return
+        renderer = getattr(visible[0].figure.canvas, "get_renderer", None)
+        if renderer is None:
+            return
+        renderer = renderer()
+        order = [0, len(visible) - 1] + list(range(1, len(visible) - 1))
+        kept: list[Any] = []
+        for position in order:
+            text = visible[position]
+            try:
+                extent = text.get_window_extent(renderer)
+            except (RuntimeError, ValueError):
+                continue
+            if any(extent.overlaps(other) for other in kept):
+                text.set_visible(False)
+                continue
+            kept.append(extent)
 
     def _hide_height_bars_chrome(self, key: str) -> None:
         artists = self._artists.get(f"{key}:h3d_chrome")
