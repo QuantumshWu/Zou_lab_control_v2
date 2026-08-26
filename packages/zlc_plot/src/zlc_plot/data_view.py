@@ -2332,6 +2332,7 @@ class DataView:
         *,
         group: AxisRef | None = None,
         aggregation: Reduction = Reduction.MEAN,
+        uncertainty: bool = True,
     ) -> tuple[RollingSample, ...]:
         """Expand the repeat axis into per-shot rolling samples, oldest first.
 
@@ -2339,6 +2340,11 @@ class DataView:
         repeat reduces to one rolling sample exactly as :meth:`rolling_sample`
         reduces one whole revision.  A snapshot without repeats degenerates to
         the single whole-revision sample.
+
+        ``uncertainty`` is whether the caller will DRAW the band.  Its
+        standard error needs a second pass over every value -- squared,
+        masked and reduced again -- which the rolling panel paid on every
+        revision whether or not the band was switched on.
         """
 
         if self.has_primary_index:
@@ -2357,6 +2363,7 @@ class DataView:
             group=group,
             aggregation=aggregation,
             repeats=repeats,
+            uncertainty=uncertainty,
         )
         if tensor is not None:
             return tensor
@@ -2423,6 +2430,7 @@ class DataView:
         group: AxisRef | None,
         aggregation: Reduction,
         repeats: int,
+        uncertainty: bool = True,
     ) -> tuple[RollingSample, ...] | None:
         """Reduce a regular repeat history once, not once per repeat.
 
@@ -2477,11 +2485,23 @@ class DataView:
         counts = np.asarray(counts, dtype=np.int64)
         reduced = np.where(counts > 0, reduced, np.nan)
         sem = None
-        if aggregation is Reduction.MEAN:
-            mean_square, _ = _masked_leading_reduce(
-                np.moveaxis(np.square(working), -1, 0),
+        if uncertainty and aggregation is Reduction.MEAN:
+            # ``np.square`` on the whole cube materialises a second copy of
+            # every value in the history -- sixteen megabytes on a
+            # two-million-sample pool -- before reducing it.  einsum sums the
+            # products in one pass with no temporary at all, and over the
+            # SAME masked values, so the moment it feeds is identical.
+            masked = np.where(
                 np.moveaxis(usable_cube, -1, 0),
-                Reduction.MEAN,
+                np.moveaxis(working, -1, 0),
+                0.0,
+            )
+            squared_sum = np.einsum("i...,i...->...", masked, masked)
+            mean_square = np.divide(
+                squared_sum,
+                counts,
+                out=np.zeros_like(squared_sum, dtype=np.float64),
+                where=counts > 0,
             )
             sem = _sem_from_moments(
                 reduced,

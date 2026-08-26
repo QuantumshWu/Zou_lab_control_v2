@@ -1563,10 +1563,52 @@ class MatplotlibRenderer:
             for spine in axes.spines.values():
                 if spine.get_visible():
                     entries.append((spine, axes, spine.get_zorder()))
+            # Only what the DATA can cover.  Every dynamic artist of this
+            # axes is clipped to its box, so chrome that lies entirely
+            # outside the box is never overpainted and its background copy
+            # is still exact.  Ticks point OUTWARD by default: a facet of
+            # sixty-four cells was re-stroking two hundred and fifty-six
+            # tick marks per frame that nothing had touched -- ten
+            # milliseconds a frame spent restoring pixels that were
+            # already right.
+            entries = [
+                entry
+                for entry in entries
+                if self._chrome_meets_data(entry[0], axes)
+            ]
             self._boundary_chrome_cache[id(axes)] = tuple(entries)
             for artist, owner, zorder in entries:
                 keyed(artist, owner, zorder)
         return collected
+
+    def _chrome_meets_data(self, artist: Any, axes: Any) -> bool:
+        """Whether this chrome artist shares pixels with its data region.
+
+        The question is asked once per chrome epoch, beside the cache it
+        fills, because ``get_window_extent`` is not free either.  Anything
+        that cannot be measured is repainted: an unknown extent is not a
+        promise that nothing covers it.
+        """
+
+        try:
+            box = axes.bbox
+            extent = artist.get_window_extent(self._figure.canvas.get_renderer())
+        except Exception:
+            return True
+        if extent is None:
+            return True
+        try:
+            # A half-open touch is still a touch: chrome sits ON the
+            # boundary, and Agg's anti-aliasing reaches the pixel either
+            # side of it, so the comparison is deliberately inclusive.
+            return not (
+                float(extent.x1) < float(box.x0) - 1.0
+                or float(extent.x0) > float(box.x1) + 1.0
+                or float(extent.y1) < float(box.y0) - 1.0
+                or float(extent.y0) > float(box.y1) + 1.0
+            )
+        except Exception:
+            return True
 
     def _compose_frame(self, *, chrome_stable: bool) -> None:
         """Compose one complete frame, reusing the cached chrome background.

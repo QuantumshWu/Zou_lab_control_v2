@@ -189,13 +189,11 @@ class ResolvedAxis:
         topology = schema.grid_topology
         if topology is None:
             raise KeyError(self.axis_id)
-        return np.fromiter(
-            (
-                cell[self.topology_position]
-                for cell in topology.row_to_cell
-            ),
-            dtype=np.int64,
-            count=len(topology.row_to_cell),
+        # One column of the topology's own cached index array: the walk
+        # over every row's tuple was the single largest cost of a dense
+        # scan's revision.
+        return np.ascontiguousarray(
+            topology.cell_indices[:, self.topology_position]
         )
 
 

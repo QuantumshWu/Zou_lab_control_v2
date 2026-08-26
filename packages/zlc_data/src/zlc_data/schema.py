@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import numpy as np
 from .validation import canonical_text, nonnegative_integer, positive_integer
@@ -186,6 +186,8 @@ class GridTopology:
     dimension_ids: tuple[AxisId, ...]
     coordinate_domains: tuple[tuple[CoordinateScalar, ...], ...]
     row_to_cell: tuple[tuple[int, ...], ...]
+    #: Cached on first request, like the schema digest beside it.
+    _cell_indices: Any = field(init=False, repr=False, compare=False, default=None)
 
     def __post_init__(self) -> None:
         dimensions = tuple(self.dimension_ids)
@@ -225,10 +227,30 @@ class GridTopology:
         object.__setattr__(self, "dimension_ids", dimensions)
         object.__setattr__(self, "coordinate_domains", domains)
         object.__setattr__(self, "row_to_cell", tuple(mapping))
+        object.__setattr__(self, "_cell_indices", None)
 
     @property
     def logical_shape(self) -> tuple[int, ...]:
         return tuple(len(domain) for domain in self.coordinate_domains)
+
+    @property
+    def cell_indices(self) -> np.ndarray:
+        """``(rows, rank)`` int64 cell indices, computed once, on request.
+
+        The tuple-of-tuples is the record; every consumer that wants one
+        DIMENSION of it wants a column of numbers, and walking the tuples
+        per revision is a Python loop over every point row -- twelve
+        milliseconds a frame on a 200x200 scan, paid again on the next
+        frame for a map that cannot change.  The array is immutable and
+        shared, exactly like the fingerprint cached beside it.
+        """
+
+        cached = self._cell_indices
+        if cached is None:
+            cached = np.asarray(self.row_to_cell, dtype=np.int64)
+            cached.setflags(write=False)
+            object.__setattr__(self, "_cell_indices", cached)
+        return cached
 
 
 def _validate_grid_topology(point_table: PointTable, topology: GridTopology) -> None:
