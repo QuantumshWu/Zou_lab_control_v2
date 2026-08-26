@@ -127,6 +127,7 @@ from .specs import (
 )
 from .state import DisplayState, DisplayStateStore
 from .semantics import (
+    SemanticVacancy,
     SemanticDescription,
     composed_spec,
     describe_semantics,
@@ -1048,6 +1049,10 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             schema = snapshot_schema(data) if isinstance(data, OwnedSnapshot) else None
             try:
                 candidate = updated_spec(schema, self._spec, name, value)
+            except SemanticVacancy:
+                # A vacant required role is a panel state, not an
+                # infeasible edit; the option stays offered.
+                return None
             except Exception as error:
                 return str(error) or type(error).__name__
             if candidate == self._spec:

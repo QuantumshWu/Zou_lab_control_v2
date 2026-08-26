@@ -461,6 +461,44 @@ def fate_field_name(ref: AxisRef) -> str:
     return f"{FATE_PREFIX}{suffix}"
 
 
+def _with_reduced(spec: PlotSpec, reduced: tuple[AxisRef, ...]) -> PlotSpec:
+    """Return this specification with its collapsed axes replaced.
+
+    The unwrap is the one authority's answer (``semantic_spec``); writing
+    back is its inverse, and a grid carries the cell it was handed.
+    """
+
+    semantic = semantic_spec(spec)
+    updated = replace(semantic, reduced=reduced)
+    if semantic is spec:
+        return updated
+    return replace(spec, cell=updated)
+
+
+def _chosen_spec(
+    schema: DatasetSchema | None, current: PlotSpec, kind: PlotKind
+) -> PlotSpec | None:
+    """The specification a KIND CHOICE lands on.
+
+    A kind with an unambiguous default takes it.  A grid the dataset does
+    not obviously want is still one the operator may build, so it starts
+    from the plot they were looking at; the fate table is where they say
+    what it should face.
+    """
+
+    if kind is PlotKind.FACET_GRID:
+        from ._kinds.facet_grid import chosen_spec
+
+        return chosen_spec(schema, semantic_spec(current))
+    return default_spec(schema, kind)
+
+
+def _declares_reduced(spec: PlotSpec) -> bool:
+    """Whether this kind carries an explicit list of collapsed axes."""
+
+    return hasattr(semantic_spec(spec), "reduced")
+
+
 def _default_fate(spec: PlotSpec) -> str:
     return FATE_POOL if semantic_spec(spec).kind is PlotKind.HISTOGRAM else FATE_REDUCE
 
@@ -495,6 +533,13 @@ def _fate_of(spec: PlotSpec, ref: AxisRef) -> object:
     scope = _scope_terms(spec)
     if ref in scope:
         return scope_fate(scope[ref])
+    # A kind whose default is POOL can still be told to collapse one axis
+    # under its reduction; the axis says so itself.
+    if any(
+        entry.physical_identity == ref.physical_identity
+        for entry in getattr(semantic, "reduced", ())
+    ):
+        return FATE_REDUCE
     return _default_fate(spec)
 
 
@@ -697,10 +742,10 @@ def composed_spec(
         if not isinstance(kind, PlotKind):
             raise TypeError("semantic kind value must be PlotKind")
         if kind is not spec.kind:
-            candidate = default_spec(schema, kind)
+            candidate = _chosen_spec(schema, spec, kind)
             if candidate is None:
                 raise ValueError(
-                    f"{kind.value} has no unambiguous default for this dataset"
+                    f"{kind.value} cannot be built for this dataset"
                 )
 
     # A fate table is ONE assignment, not a sequence of role edits.  First
@@ -750,7 +795,21 @@ def composed_spec(
             if is_scope_fate(value):
                 scope[axis] = scope_coordinate_from_fate(value)
             elif value in (FATE_REDUCE, FATE_POOL):
-                pass
+                if _declares_reduced(candidate):
+                    # Not an editor field: the fate rows ARE how an axis is
+                    # collapsed or pooled, so the tuple is composed here and
+                    # applied to the kind that carries it.
+                    reduced_axes = {
+                        entry.physical_identity: entry
+                        for entry in semantic_spec(candidate).reduced
+                    }
+                    if value == FATE_REDUCE:
+                        reduced_axes[axis.physical_identity] = axis
+                    else:
+                        reduced_axes.pop(axis.physical_identity, None)
+                    candidate = _with_reduced(
+                        candidate, tuple(reduced_axes.values())
+                    )
             elif value in ROLE_FATES:
                 role = str(value)
                 if role not in declared_roles:
@@ -965,6 +1024,13 @@ def describe_semantics(
             return feasibility(name, field_value)
         try:
             updated_spec(schema, spec, name, field_value)
+        except SemanticVacancy:
+            # Leaving a required role empty is a STATE the panel may sit
+            # in, exactly as a scope pin on the role's holder already
+            # was.  Hiding the role options that reach it made the table
+            # inconsistent with itself: the operator could vacate x by
+            # pinning a coordinate but not by saying "reduce this".
+            return None
         except Exception as error:
             return str(error) or type(error).__name__
         return None
@@ -1011,12 +1077,12 @@ def describe_semantics(
     # carry neither -- it yields one invisible point or one redundant split.
     # Series-family kinds therefore never offer degenerate axes for those
     # roles; the current value stays offered because it is the actual state.
-    series = handler_for(semantic).fit_target == "series"
-    series_axes = (
-        tuple(value for value in axes if axis_size(schema, value) > 1)
-        if series
-        else axes
-    )
+    # EVERY axis may take every role its kind declares.  A size-one axis
+    # draws one point or one group, which is a legitimate thing to ask for
+    # -- provenance an operator wants on the x axis, a single frame they
+    # want split out -- and refusing it left rows in the table that could
+    # not be edited at all.
+    series_axes = axes
 
     def _axes_with_current(
         current: object,
@@ -1028,7 +1094,14 @@ def describe_semantics(
 
     declared = _field_names(spec)
     fields: list[SemanticField] = []
-    fields.append(_field("kind", "Plot kind", spec.kind, kind_choices, True))
+    # EVERY kind this dataset admits, listed.  Whether one of them has an
+    # obvious default is a different question from whether the operator
+    # may choose it: filtering by the default silently removed a kind
+    # whose legal configurations the operator could build by hand -- a
+    # per-site distribution grid over a signal with no scan to face.
+    fields.append(
+        SemanticField("kind", "Plot kind", spec.kind, kind_choices, True)
+    )
     # ONE ROW PER AXIS.  A role picker asks "which axis is x", which is the
     # question backwards: it can leave an axis unaccounted for, or be asked to
     # put two axes in one role, and then the panel repairs something the
@@ -1052,6 +1125,10 @@ def describe_semantics(
         name = fate_field_name(ref)
         current = _fate_of(spec, ref)
         offered: list[SemanticChoice] = [(default_fate, f"({default_label})")]
+        if default_fate == FATE_POOL and _declares_reduced(spec):
+            # Pooling is the default, not the only choice: an axis may be
+            # collapsed under the reduction before the values are binned.
+            offered.append((FATE_REDUCE, "reduced"))
         if spec.kind is PlotKind.ROLLING and _is_primary_index_axis(schema, ref):
             # Rolling does not reduce the Runtime's shot index away -- it
             # ROLLS along it.  The row still offers "= Latest" and the
@@ -1059,11 +1136,6 @@ def describe_semantics(
             # default's label stops lying about the axis's fate.
             offered[0] = (default_fate, "(shot axis)")
         for role in roles:
-            if role in ("x", "group") and ref not in series_axes and current != role:
-                # A series is drawn ALONG its x and split BY its group; a
-                # size-one axis carries neither -- one invisible point, or one
-                # redundant split.
-                continue
             if role == "facet" and ref not in facet_axes and current != "facet":
                 continue
             if _reason(name, role) is None or current == role:

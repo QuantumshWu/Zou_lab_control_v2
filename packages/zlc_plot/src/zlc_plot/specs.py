@@ -270,23 +270,40 @@ class ImagePlot:
 
 @dataclass(frozen=True, slots=True)
 class HistogramPlot:
-    """Distribution of every acquired value.
+    """Distribution of the acquired values.
 
-    A histogram pools the whole (repeat, points, data axes) box by
-    definition — that is the one fate a distribution gives every axis, so
-    there is nothing to declare per axis.  Slicing belongs to selection and
-    faceting, not to the histogram itself.
+    Pooling is the DEFAULT fate, not the only one: an axis may instead be
+    collapsed under the reduction before the values are binned, which is
+    the difference between "the distribution of every shot" and "the
+    distribution of each site's mean over shots" -- two different
+    measurements of the same data.  There is no group fate: a histogram
+    draws one distribution, and several belong in a facet grid.
     """
 
+    reduction: Reduction = Reduction.MEAN
+    #: Axes collapsed under the reduction before binning; every other axis
+    #: pools into the one distribution.
+    reduced: tuple[AxisRef, ...] = ()
     labels: PlotLabels = field(default_factory=PlotLabels)
     scope: tuple[ScopeTerm, ...] = ()
     kind: ClassVar[PlotKind] = PlotKind.HISTOGRAM
 
     def __post_init__(self) -> None:
+        if not isinstance(self.reduction, Reduction):
+            raise TypeError("HistogramPlot.reduction must be Reduction")
         if not isinstance(self.labels, PlotLabels):
             raise TypeError("HistogramPlot.labels must be PlotLabels")
+        reduced = tuple(self.reduced)
+        if any(not isinstance(ref, AxisRef) for ref in reduced):
+            raise TypeError("HistogramPlot.reduced must contain AxisRef values")
+        identities = [ref.physical_identity for ref in reduced]
+        if len(set(identities)) != len(identities):
+            raise ValueError("HistogramPlot.reduced must name distinct axes")
         scope = _validated_scope(self.scope)
-        _require_distinct_axes((), scope)
+        pinned = {term[0].physical_identity for term in scope}
+        if pinned & set(identities):
+            raise ValueError("an axis cannot be both reduced and pinned")
+        object.__setattr__(self, "reduced", reduced)
         object.__setattr__(self, "scope", scope)
 
 

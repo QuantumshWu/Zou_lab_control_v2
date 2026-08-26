@@ -13,7 +13,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from zlc_plot.semantics import SemanticVacancy
+from zlc_plot.semantics import SemanticVacancy, fate_field_name
 from zlc_plot import (
     AxisRef,
     CurvePlot,
@@ -175,16 +175,29 @@ def test_the_row_ordinal_is_the_name_of_last_resort() -> None:
         flat_session.close()
 
 
-def test_curve_x_repeat_is_not_offered() -> None:
-    """The audit's concrete dead click: x=repeat leaves the point domain
-    unreferenced, so the option simply is not listed."""
+def test_curve_x_repeat_is_offered_and_draws() -> None:
+    """Every offered option must work, including a degenerate axis.
+
+    A single-shot repeat on the x axis draws one point -- which is what
+    asking for it means -- so it is listed and it renders.  What may
+    never happen is listing an option that then refuses.
+    """
 
     snapshot = _grid_snapshot()
     session = PlotSession(snapshot, CurvePlot(AxisRef.point_dimension("col")))
     try:
         offering = session.describe_semantics().axes_offering("x")
-        assert AxisRef.repeat() not in offering
+        assert AxisRef.repeat() in offering
         assert AxisRef.point_dimension("row") in offering
+        session.replace_spec(
+            updated_spec(
+                snapshot.block.schema,
+                session.spec,
+                fate_field_name(AxisRef.repeat()),
+                "x",
+            )
+        )
+        assert session.rgba() is not None
     finally:
         session.close()
 

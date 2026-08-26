@@ -7,7 +7,13 @@ from typing import Any
 from ..data_contract import image_axes, live_grid_dimensions
 from ..kinds import AxisRef, PlotKind
 from zlc_data import DatasetSchema
-from ..specs import CurvePlot, FacetGridPlot, HistogramPlot, ImagePlot, Reduction
+from ..specs import (
+    CurvePlot,
+    FacetGridPlot,
+    HistogramPlot,
+    ImagePlot,
+    Reduction,
+)
 from .base import KindHandler
 from .curve import default_spec as curve_default_spec
 
@@ -243,6 +249,53 @@ def default_spec(schema: Any) -> FacetGridPlot | None:
         return None
     cell = cell_within_one_cell(schema, facet, cell)
     return None if cell is None else FacetGridPlot(facet, cell)
+
+
+def chosen_spec(schema: Any, current: Any) -> FacetGridPlot | None:
+    """A grid for an operator who ASKED for one, default or not.
+
+    ``default_spec`` answers a narrower question -- is there one
+    unambiguous grid this dataset obviously wants -- and a dataset that
+    has no obvious answer still has legal grids the operator may want to
+    build.  Choosing the kind must therefore land somewhere they can
+    edit: the plot they were already looking at becomes the cell, and
+    the facet is simply the first axis that cell does not consume.  It
+    is a starting point, not a recommendation; the fate table is where
+    the operator says what they actually meant.
+    """
+
+    if not isinstance(schema, DatasetSchema):
+        return None
+    automatic = default_spec(schema)
+    if automatic is not None:
+        return automatic
+    cell = (
+        current
+        if isinstance(current, (CurvePlot, ImagePlot, HistogramPlot))
+        else curve_default_spec(schema)
+    )
+    if cell is None:
+        return None
+    consumed = {
+        ref.physical_identity
+        for ref in (
+            getattr(cell, "x", None),
+            getattr(cell, "y", None),
+            getattr(cell, "group", None),
+        )
+        if isinstance(ref, AxisRef)
+    }
+    from ..semantics import axis_choices_for_schema
+
+    offered = axis_choices_for_schema(schema)
+    facet = next(
+        (ref for ref in offered if ref.physical_identity not in consumed),
+        offered[0] if offered else None,
+    )
+    if facet is None:
+        return None
+    within = cell_within_one_cell(schema, facet, cell)
+    return FacetGridPlot(facet, cell if within is None else within)
 
 
 HANDLER = KindHandler(

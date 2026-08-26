@@ -61,19 +61,45 @@ def default_spec(schema: Any) -> CurvePlot | None:
 
     if not isinstance(schema, DatasetSchema):
         return None
+    candidates: list[tuple[Any, int]] = []
     if schema.grid_topology is not None and schema.grid_topology.dimension_ids:
-        x = AxisRef.point_dimension(str(schema.grid_topology.dimension_ids[-1]))
-    elif schema.point_table.columns:
+        dimension = str(schema.grid_topology.dimension_ids[-1])
+        domain = schema.grid_topology.coordinate_domains[
+            len(schema.grid_topology.dimension_ids) - 1
+        ]
+        candidates.append((AxisRef.point_dimension(dimension), len(domain)))
+    for column in schema.point_table.columns:
         # By coordinate ID, which is what AxisRef.point means and what the
         # resolver looks up.  A column's NAME is what an operator reads, and
         # the two are equal often enough that passing the name worked until a
         # producer named a column something other than its coordinate -- then
         # the spec named an axis the point table does not have, and the
         # session raised on construction, leaving the host permanently closing.
-        x = AxisRef.point(str(schema.point_table.columns[0].coordinate_id))
-    else:  # pragma: no cover - DatasetSchema requires a point column
-        x = AxisRef.point_rows()
-    data_axes = tuple(axis for axis in schema.cell_schema.data_axes if axis.size > 1)
+        candidates.append(
+            (
+                AxisRef.point(str(column.coordinate_id)),
+                len(set(column.values)),
+            )
+        )
+    # The cell's own structure, innermost first: a scalar measured per
+    # (pair, site) has no scan to walk, and the site axis IS the walk.
+    for axis in reversed(schema.cell_schema.data_axes):
+        candidates.append((AxisRef.data(str(axis.axis_id)), int(axis.size)))
+    candidates.append((AxisRef.point_rows(), int(schema.point_table.row_count)))
+    # The default x must have STRUCTURE.  Taking the first candidate
+    # whatever its size drew one invisible point whenever the natural
+    # candidate was degenerate -- a synthetic point row on a survival
+    # signal, a single-frame camera cycle -- and left the real structure
+    # collapsed under the reduction.
+    x = next(
+        (ref for ref, size in candidates if size > 1),
+        candidates[0][0],
+    )
+    data_axes = tuple(
+        axis
+        for axis in schema.cell_schema.data_axes
+        if axis.size > 1 and AxisRef.data(str(axis.axis_id)) != x
+    )
     group = AxisRef.data(str(data_axes[0].axis_id)) if len(data_axes) == 1 else None
     return CurvePlot(x, group=group, reduction=Reduction.MEAN)
 
