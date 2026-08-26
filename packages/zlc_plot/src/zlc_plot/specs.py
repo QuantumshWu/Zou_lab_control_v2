@@ -690,7 +690,13 @@ def _image_parameters(style: PlotStyleConfig) -> tuple[ParameterSpec[object], ..
             ParameterSpec(
                 "presentation",
                 str,
-                _IMAGE_COLOR_EFFECTS | RenderEffect.BASE_GEOMETRY,
+                # LAYOUT because the two presentations are laid out
+                # differently: a heatmap's chrome has reserved margins,
+                # a 3D scene's labels move with the camera and share one
+                # padded region with the scene itself.
+                _IMAGE_COLOR_EFFECTS
+                | RenderEffect.BASE_GEOMETRY
+                | RenderEffect.LAYOUT,
                 default=ImagePresentation.HEATMAP.value,
                 normalizer=_image_presentation,
                 label="Presentation",

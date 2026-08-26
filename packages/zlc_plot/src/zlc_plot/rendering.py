@@ -836,7 +836,6 @@ class MatplotlibRenderer:
         self._composed_generation = -1
         self._focused_facet_index: int | None = None
         self._facet_focus_index: int | None = None
-        self._height_bars_preview = None
         self._height_bars_dragging = False
         self._height_bars_rendered_camera = None
         self._height_bars_scene = False
@@ -3205,17 +3204,22 @@ class MatplotlibRenderer:
             return True
         return key.startswith("facet:") and self._facet_focus_index is not None
 
-    def set_height_bars_preview(
-        self,
-        camera: "HeightBarCamera | None",
-        *,
-        dragging: bool = False,
-    ) -> None:
-        """Install (or clear) the transient camera the next render uses."""
+    def set_height_bars_dragging(self, dragging: bool) -> None:
+        """Say whether a hand is currently turning the scene.
 
+        This is a RESOLUTION BUDGET and nothing else.  The camera itself
+        has one owner -- the display parameters -- so a drag is not a
+        second, transient place where the view can live: whatever moves
+        the scene writes the parameters, and anything that rebuilds,
+        replaces or re-mounts the surface therefore shows the view the
+        hand is holding rather than the one it left.
+        """
+
+        dragging = bool(dragging)
+        if dragging == self._height_bars_dragging:
+            return
         self._composed_generation = -1
-        self._height_bars_preview = camera
-        self._height_bars_dragging = bool(dragging)
+        self._height_bars_dragging = dragging
 
     @property
     def height_bars_camera(self) -> "HeightBarCamera | None":
@@ -3322,27 +3326,23 @@ class MatplotlibRenderer:
                 (heights, top_rgb, low, high, zero_rgb),
             )
 
-        preview = getattr(self, "_height_bars_preview", None)
-        if preview is not None:
-            camera = preview
-        else:
-            camera = HeightBarCamera(
-                azimuth_deg=float(state["camera_azimuth"]),
-                elevation_deg=float(state["camera_elevation"]),
-                zoom=float(state["camera_zoom"]),
-            )
+        camera = HeightBarCamera(
+            azimuth_deg=float(state["camera_azimuth"]),
+            elevation_deg=float(state["camera_elevation"]),
+            zoom=float(state["camera_zoom"]),
+        )
         self._height_bars_rendered_camera = camera
 
         box = axes.bbox
         box_w = max(int(round(float(box.width))), 8)
         box_h = max(int(round(float(box.height))), 8)
         divisor = 1
-        if getattr(self, "_height_bars_dragging", False):
-            # The preview's resolution is a BUDGET, not a constant.  A
+        if self._height_bars_dragging:
+            # The drag's resolution is a BUDGET, not a constant.  A
             # fixed divisor renders whatever the data costs: on a 2048x2048
             # scan that is hundreds of milliseconds a frame, so the drag
             # collapsed to a few frames per second while the hand kept
-            # moving.  The divisor now tracks what the last preview
+            # moving.  The divisor now tracks what the last drag frame
             # actually cost, so an interactive frame rate survives any
             # grid size -- the committed frame is untouched, being drawn
             # at divisor 1 by definition.
@@ -3354,7 +3354,7 @@ class MatplotlibRenderer:
         # Vertical anti-aliasing is ANALYTIC (exact coverage), so the
         # only sampling knob left is horizontal: three subcolumn taps on
         # every committed frame, whatever the grid size.  The camera
-        # DRAG preview is the fast lane instead.
+        # DRAG is the fast lane instead.
         supersample = 1 if divisor != 1 else 3
         frame, scene = render_height_bars(
             heights,
@@ -3372,8 +3372,8 @@ class MatplotlibRenderer:
             z_fraction=policy.height_bars_z_fraction,
             bar_edges=not vector_outlines,
             display_stretch=float(divisor),
-            # Committed geometry decides the pooled grid, so a preview
-            # reuses it instead of re-pooling the scan at its own size.
+            # Committed geometry decides the pooled grid, so a drag
+            # frame reuses it instead of re-pooling at its own size.
             pool_reference_width=box_w * 3,
             # The scene is an oblique view of THIS surface's heatmap, so
             # its ground runs the way the heatmap's picture runs.  The
@@ -3710,7 +3710,6 @@ class MatplotlibRenderer:
         line.set_data(segments_x, segments_y)
         line.set_visible(True)
 
-        region = self._height_bars_chrome_region(axes)
         texts = artists["texts"]
         for index, (fx, fy, content, ha, va) in enumerate(wanted_texts):
             if index < len(texts):
@@ -3728,62 +3727,16 @@ class MatplotlibRenderer:
             text.set_horizontalalignment(ha)
             text.set_verticalalignment(va)
             text.set_visible(True)
-            # A 3D label goes where the projection puts it, which is not a
-            # place any layout reserved.  It gets the room the scene owns --
-            # out to whatever sits on its right, down from under the title --
-            # and is cut off at that edge instead of printing across a
-            # neighbour that means something else.
-            text.set_clip_box(region)
+            # The label is cut at the SAME edge the scene is: the axes
+            # box is the scene's whole region -- the picture's box plus
+            # one padding all round, which the layout grew for exactly
+            # this -- so a label with nowhere left to go is cut there
+            # rather than printed across a neighbour that means
+            # something else.
             text.set_clip_on(True)
         for text in texts[len(wanted_texts):]:
             text.set_visible(False)
         self._thin_overlapping_chrome(texts[: len(wanted_texts)])
-
-    def _height_bars_chrome_region(self, axes: Any) -> Any:
-        """The room a 3D scene's own labels may occupy, in device pixels.
-
-        A 2D panel reserves margins for its chrome because it knows where
-        its chrome goes.  A rotated 3D scene does not: a tick that sat
-        below the floor a moment ago is beside the colorbar now.  So the
-        scene is given a REGION rather than a margin -- its own box grown
-        to whatever bounds it (the rail or colorbar on the right, the
-        title above) and never past it.  Inside, labels may go anywhere
-        the projection puts them; at the edge they are cut off, which is
-        the honest thing for a label with nowhere left to go.
-        """
-
-        from matplotlib.transforms import Bbox
-
-        figure = axes.figure
-        box = axes.get_window_extent()
-        left, bottom = 0.0, 0.0
-        right = float(figure.bbox.width)
-        top = float(figure.bbox.height)
-        for role in ("distribution", "colorbar"):
-            for neighbour in self._axes.get(role, ()):
-                if neighbour is axes or not neighbour.get_visible():
-                    continue
-                other = neighbour.get_window_extent()
-                if other.x0 >= box.x1:
-                    right = min(right, float(other.x0))
-                elif other.x1 <= box.x0:
-                    left = max(left, float(other.x1))
-        title = self._artists.get("figure:title")
-        if title is not None and title.get_visible():
-            try:
-                extent = title.get_window_extent(
-                    figure.canvas.get_renderer()
-                )
-            except (AttributeError, RuntimeError, ValueError):
-                extent = None
-            if extent is not None and extent.y0 >= box.y1:
-                top = min(top, float(extent.y0))
-        return Bbox.from_extents(
-            min(left, box.x0),
-            min(bottom, box.y0),
-            max(right, box.x1),
-            max(top, box.y1),
-        )
 
     def _thin_overlapping_chrome(self, texts: list) -> None:
         """Drop 3D labels that would print across one already kept.

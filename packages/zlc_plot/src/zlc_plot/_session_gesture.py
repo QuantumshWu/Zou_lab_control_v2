@@ -186,6 +186,7 @@ class GestureSessionMixin:
                     scene_camera,
                     scene_camera,
                 )
+                self._renderer.set_height_bars_dragging(True)
                 return
             if button == 1 and not is_double:
                 self._gesture = _PickGesture(
@@ -710,11 +711,21 @@ class GestureSessionMixin:
             gesture.current = camera
             assert self._renderer is not None
             try:
-                self._renderer.set_height_bars_preview(camera, dragging=True)
+                # The moving hand COMMITS the view it is showing.  Held
+                # privately, the turn existed only inside this gesture and
+                # inside the renderer: a live generation arriving mid-drag
+                # mounts a replacement surface from the panel's record, so
+                # a hand that had not let go yet watched the scene snap
+                # home to the view it started from.  The camera has one
+                # owner -- the display parameters -- and the drag writes
+                # it like the scroll wheel already writes the zoom.  Only
+                # the RESOLUTION is transient, and that is the renderer's
+                # drag budget, not a second copy of the view.
                 with self._renderer.raster_transaction():
-                    self._render_current(
-                        RenderEffect.BASE_GEOMETRY, schedule_fit=False
-                    )
+                    self.set_parameters({
+                        "camera_azimuth": camera.azimuth_deg,
+                        "camera_elevation": camera.elevation_deg,
+                    })
             finally:
                 if orbit_lane:
                     gesture.lane_finished("orbit")
@@ -783,36 +794,14 @@ class GestureSessionMixin:
         if isinstance(gesture, _OrbitGesture):
             self._clear_gesture(gesture)
             assert self._renderer is not None
-            moved = math.hypot(
-                float(event.x) - gesture.origin_px[0],
-                float(event.y) - gesture.origin_px[1],
-            )
-            if moved <= self._defaults.interaction.double_click_radius_px:
-                # A middle click, not a drag: nothing to navigate, just
-                # repaint the committed camera at full resolution.
-                self._renderer.set_height_bars_preview(None)
-                with self._renderer.raster_transaction():
-                    self._render_current(
-                        RenderEffect.BASE_GEOMETRY, schedule_fit=False
-                    )
-                return
-            camera = gesture.current
-            # The preview carries TWO facts, and the release ends them at
-            # different moments: which camera to draw (still the drag's
-            # last one, until the commit lands) and how much resolution
-            # to spend (the drag is over -- full).  Re-installing the
-            # same camera with dragging=False ends the budget here, so
-            # the commit's own render is the full-resolution frame, and
-            # keeps covering a live frame racing this release, which is
-            # what clearing the preview first used to let jump back to
-            # the pre-drag camera.  Clearing afterwards changes nothing:
-            # the committed state now IS this camera.
-            self._renderer.set_height_bars_preview(camera, dragging=False)
-            self.set_parameters({
-                "camera_azimuth": camera.azimuth_deg,
-                "camera_elevation": camera.elevation_deg,
-            })
-            self._renderer.set_height_bars_preview(None)
+            # Letting go changes no view: every frame of the drag was
+            # already committed.  What lifts is the resolution budget, so
+            # the scene the hand left is repainted in full.
+            self._renderer.set_height_bars_dragging(False)
+            with self._renderer.raster_transaction():
+                self._render_current(
+                    RenderEffect.BASE_GEOMETRY, schedule_fit=False
+                )
             return
         if getattr(event, "button", None) == 2:
             if not isinstance(gesture, _PanGesture):
@@ -1034,7 +1023,10 @@ class GestureSessionMixin:
                 cancelled = self._selector_controller.lost_pointer_capture()
             elif isinstance(gesture, _OrbitGesture):
                 assert self._renderer is not None
-                self._renderer.set_height_bars_preview(None)
+                # Losing the pointer ends the DRAG, never the view: the
+                # camera it turned is committed, so cancelling only hands
+                # the resolution budget back.
+                self._renderer.set_height_bars_dragging(False)
         finally:
             self._clear_gesture(gesture)
         if (
