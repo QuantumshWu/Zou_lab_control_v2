@@ -285,28 +285,26 @@ def test_categorical_scope_values_do_not_collide_with_fate_tokens() -> None:
         )
 
 
-def test_series_x_and_group_choices_exclude_degenerate_axes() -> None:
-    """A size-1 axis can never carry a multi-point series.
+def test_every_axis_may_take_every_role_its_kind_declares() -> None:
+    """A size-one axis is still an axis the operator may draw along.
 
-    On a camera frame the point domain has one row, so offering it as a curve
-    x yields one invisible point.  The x/group domains of series-family kinds
-    exclude every size-1 axis; the current value stays offered because it is
-    the actual state.
+    Excluding degenerate axes from x and group left rows in the fate table
+    that could not be edited at all -- a camera cycle's single point row,
+    a single-shot repeat -- while the operator's reason for wanting them
+    (provenance on the x axis, one frame split out) is legitimate and
+    draws exactly one point or one group, which is what they asked for.
     """
 
     schema = _camera_frame_schema()
     description = describe_semantics(schema, CurvePlot(AxisRef.point("frame")))
     x_values = description.axes_offering("x")
-    assert AxisRef.point("frame") in x_values  # the current state stays
-    assert AxisRef.point_rows() not in x_values
-    assert AxisRef.repeat() not in x_values
+    assert AxisRef.point("frame") in x_values
+    assert AxisRef.repeat() in x_values
     assert AxisRef.data("spatial-y") in x_values
     assert AxisRef.data("spatial-x") in x_values
     group_values = description.axes_offering("group")
-    assert AxisRef.point("frame") not in group_values
-    assert AxisRef.point_rows() not in group_values
-    assert AxisRef.repeat() not in group_values
-    # And the ordinal is not in the vocabulary at all: the frame column
+    assert AxisRef.repeat() in group_values
+    # The ordinal is still absent from the vocabulary: the frame column
     # names every row, so the rows ARE the frames.
     assert AxisRef.point_rows() not in description.axis_choices
 
@@ -322,7 +320,7 @@ def test_non_series_kinds_keep_degenerate_axes_where_legitimate() -> None:
     assert AxisRef.data("spatial-x") in x_values
 
 
-def test_facet_grid_series_cell_filters_its_x_domain_too() -> None:
+def test_facet_grid_series_cell_offers_every_axis_for_x() -> None:
     points = PointTable.from_columns(
         {
             "x": np.arange(4.0),
@@ -335,7 +333,7 @@ def test_facet_grid_series_cell_filters_its_x_domain_too() -> None:
         FacetGridPlot(AxisRef.point("row"), CurvePlot(AxisRef.point("x"))),
     )
     x_values = description.axes_offering("x")
-    assert AxisRef.repeat() not in x_values  # size 1 cannot carry a series
+    assert AxisRef.repeat() in x_values  # a size-one axis is still offered
     assert AxisRef.point("x") in x_values
 
 

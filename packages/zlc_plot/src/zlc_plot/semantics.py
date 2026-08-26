@@ -1011,12 +1011,12 @@ def describe_semantics(
     # carry neither -- it yields one invisible point or one redundant split.
     # Series-family kinds therefore never offer degenerate axes for those
     # roles; the current value stays offered because it is the actual state.
-    series = handler_for(semantic).fit_target == "series"
-    series_axes = (
-        tuple(value for value in axes if axis_size(schema, value) > 1)
-        if series
-        else axes
-    )
+    # EVERY axis may take every role its kind declares.  A size-one axis
+    # draws one point or one group, which is a legitimate thing to ask for
+    # -- provenance an operator wants on the x axis, a single frame they
+    # want split out -- and refusing it left rows in the table that could
+    # not be edited at all.
+    series_axes = axes
 
     def _axes_with_current(
         current: object,
@@ -1059,11 +1059,6 @@ def describe_semantics(
             # default's label stops lying about the axis's fate.
             offered[0] = (default_fate, "(shot axis)")
         for role in roles:
-            if role in ("x", "group") and ref not in series_axes and current != role:
-                # A series is drawn ALONG its x and split BY its group; a
-                # size-one axis carries neither -- one invisible point, or one
-                # redundant split.
-                continue
             if role == "facet" and ref not in facet_axes and current != "facet":
                 continue
             if _reason(name, role) is None or current == role:
