@@ -62,6 +62,20 @@ _POINT_ROLES = frozenset(
 )
 
 
+def point_domain_admits(role: AxisRoleId) -> bool:
+    """Whether the point-row domain can carry a column in this role.
+
+    The vocabulary is narrower than the axis vocabulary as a whole -- a
+    repeat is not an independent variable, and neither is a component or
+    the implicit scalar -- so a caller RE-STATING an axis as a point
+    column has to ask before it inherits that axis's role.  Asking here
+    keeps one list; the alternative was every such caller carrying its
+    own copy of it.
+    """
+
+    return isinstance(role, AxisRoleId) and role in _POINT_ROLES
+
+
 @dataclass(frozen=True)
 class PointColumn:
     """One correlated metadata column over the shared point-row domain."""

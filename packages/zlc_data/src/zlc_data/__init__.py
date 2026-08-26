@@ -23,6 +23,7 @@ from .schema import (
     DatasetSchema,
     GridTopology,
     PointColumn,
+    point_domain_admits,
     PointTable,
     ValueSchema,
 )
@@ -119,6 +120,7 @@ __all__ = [
     "Invalid",
     "OwnedSnapshot",
     "PointColumn",
+    "point_domain_admits",
     "PointTable",
     "PRIMARY_INDEX",
     "READOUT_EVENT",

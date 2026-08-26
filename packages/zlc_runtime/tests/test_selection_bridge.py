@@ -8,7 +8,9 @@ import numpy as np
 import pytest
 
 from zlc_data import (
+    COMPONENT,
     READOUT_EVENT,
+    SITE,
     REPEAT,
     SCAN_POINT,
     SPATIAL_X,
@@ -2333,5 +2335,66 @@ def test_two_fit_events_in_flight_never_own_one_name_twice() -> None:
         parameter = plane.freeze().value("@logic/fit/x0")
         assert parameter is not None
         assert float(parameter.snapshot.block.values.reshape(-1)[0]) == 3.5
+    finally:
+        _close(bridge, plane, source)
+
+
+def _component_schema() -> DatasetSchema:
+    """A survival-shaped parent: its data axes carry COMPONENT and SITE."""
+
+    repeat = AxisSpec(AxisId("repeat"), "repeat", REPEAT, 1, (0,))
+    pair = AxisSpec(
+        AxisId("pair"), "pair", COMPONENT, 3,
+        coordinate_labels=("0-1", "0-2", "1-2"),
+    )
+    site = AxisSpec(AxisId("site"), "site", SITE, 2, (0, 1))
+    cell = ValueSchema(
+        (pair, site),
+        ValidityContract.components(pair.axis_id, site.axis_id),
+        np.dtype("float64"),
+        "1",
+    )
+    return DatasetSchema(repeat, PointTable(4), None, cell)
+
+
+def test_a_fit_faceted_over_a_component_axis_publishes() -> None:
+    """A grid may be faceted over ANY axis; the fit must survive that.
+
+    The sample column inherits the faceted axis's ROLE, but the point-row
+    domain admits a narrower vocabulary than the axis vocabulary as a
+    whole -- a component, like a repeat or the implicit scalar, is not an
+    independent variable.  Inheriting one raised "point column role is
+    outside the point-domain role set" from inside the fit, where an
+    operator reads it as the fit being broken.
+    """
+
+    schema = _component_schema()
+    values = np.zeros((1, 4, 3, 2), dtype=np.float64)
+    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    plane.set_front_signals(
+        {"camera/frame", "@logic/fit/center", "@logic/fit/center_err",
+         "@logic/fit/width", "@logic/fit/width_err"}
+    )
+    events = _Events()
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="fit")
+    bridge.start()
+    try:
+        event = replace(
+            _batch_fit_event(plane, source_revision=1),
+            sample_axis_domain="data",
+            sample_axis_id="pair",
+            sample_axis_name="pair",
+            sample_labels=("0-1", "0-2", "1-2"),
+            sample_unit="",
+            sample_coordinates=np.asarray([0.0, 1.0, 2.0]),
+        )
+        events.emit_fit(event)
+        assert bridge.last_error is None, bridge.last_error
+        published = plane.freeze().value("@logic/fit/center")
+        assert published is not None
+        column = published.snapshot.block.schema.point_table.columns[0]
+        assert column.name == "pair"
+        # No role to inherit: the point ordinal's own role stands in.
+        assert column.role == SCAN_POINT
     finally:
         _close(bridge, plane, source)

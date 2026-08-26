@@ -28,6 +28,7 @@ from zlc_data import (
     DatasetSchema,
     OwnedSnapshot,
     PointColumn,
+    point_domain_admits,
     PointTable,
     REPEAT,
     SCAN_POINT,
@@ -1886,10 +1887,21 @@ class SelectionBridge:
             # frame-faceted fit is a READOUT_EVENT column, a scan-faceted fit
             # a SCAN_POINT one.  An axis the parent does not declare (the
             # scalar fit, a point-row ordinal facet) has no role to inherit
-            # and takes the point ordinal's own role.
+            # and takes the point ordinal's own role -- and so does an axis
+            # whose role the point domain does not admit.  A grid may be
+            # faceted over ANY axis, including a component or the implicit
+            # scalar, and re-stating one of those as a point column raised
+            # "point column role is outside the point-domain role set" from
+            # inside the fit, where an operator reads it as the fit being
+            # broken.  Inheriting a role means inheriting one this domain
+            # can carry; where it cannot, there is no role to inherit.
             sample_name = event.sample_axis_name or "sample"
             sample_axis_id = event.sample_axis_id or sample_name
-            sample_role = SCAN_POINT if faceted is None else faceted[0].role
+            sample_role = (
+                faceted[0].role
+                if faceted is not None and point_domain_admits(faceted[0].role)
+                else SCAN_POINT
+            )
             point_columns = [
                 PointColumn(
                     AxisId(sample_axis_id),
