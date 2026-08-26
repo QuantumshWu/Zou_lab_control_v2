@@ -151,19 +151,43 @@ class _ColorLimitDrag:
 class _PointerGestureBase:
     axes: Any
     transform: AxisTransform
-    _cadence_at: dict[str, float] = field(
+    _cadence_at: dict[str, tuple[float, float]] = field(
         default_factory=dict,
         init=False,
         repr=False,
     )
 
     def lane_due(self, lane: str, interval_ms: int) -> bool:
+        """Whether this lane may render again, paced by its OWN cost.
+
+        A fixed interval is a guess about how expensive a frame is, and it
+        is wrong in both directions: a 3 ms scene preview waited 30 ms for
+        no reason, and -- because a lane that is not due DROPS the motion
+        rather than deferring it -- the last move before release was often
+        thrown away, so the picture only caught up when the button came
+        up.  The honest pace is the one the work itself sustains: a lane
+        reopens once its previous frame's own duration has passed, with
+        the configured interval as the CEILING for frames so expensive
+        that pacing them is the point.
+        """
+
         now = monotonic()
         previous = self._cadence_at.get(lane)
-        if previous is not None and now - previous < float(interval_ms) / 1000.0:
-            return False
-        self._cadence_at[lane] = now
+        if previous is not None:
+            started, duration = previous
+            if now - started < min(float(interval_ms) / 1000.0, duration):
+                return False
+        self._cadence_at[lane] = (now, float(interval_ms) / 1000.0)
         return True
+
+    def lane_finished(self, lane: str) -> None:
+        """Record what this lane's frame actually cost."""
+
+        previous = self._cadence_at.get(lane)
+        if previous is None:
+            return
+        started, _ = previous
+        self._cadence_at[lane] = (started, max(monotonic() - started, 0.0))
 
 
 @dataclass(slots=True)

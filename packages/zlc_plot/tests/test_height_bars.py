@@ -9,7 +9,7 @@ display state that never touches the projection.
 
 from __future__ import annotations
 
-from time import perf_counter
+from time import perf_counter, sleep
 
 import matplotlib
 
@@ -777,3 +777,77 @@ def test_the_orbit_is_continuous_across_quadrant_boundaries() -> None:
     for boundary in (90.0, 180.0, 270.0, 360.0):
         jump = step(boundary - 0.1, boundary + 0.1)
         assert jump < 4 * control, (boundary, jump, control)
+
+
+def test_a_display_commit_mid_drag_does_not_undo_the_drag() -> None:
+    """A pan or orbit reads the AXES; a colour limit does not move them.
+
+    Cancelling every gesture on INTERACTION_REPROJECT threw away the
+    in-flight candidate, so a clim commit -- or any mirrored display
+    parameter -- landing mid-drag snapped the scene back to where the
+    drag began and left the rest of the drag dead.
+    """
+
+    session = _session()
+    try:
+        session.set_parameters({
+            "presentation": "height_bars",
+            "color_min": 0.0,
+            "color_max": 1.0,
+        })
+        session.rgba()
+        axis = next(
+            t for t in session._raster_axes_snapshot() if t.role == "image"
+        )
+        start = float(session.display_state["camera_azimuth"])
+        _pointer(session, "press", axis, 0.5, 0.5, button=2)
+        _pointer(session, "move", axis, 0.62, 0.55, button=2)
+        # a display commit lands while the hand is still down
+        session.set_parameter("color_max", 0.75)
+        _pointer(session, "move", axis, 0.74, 0.60, button=2)
+        _pointer(session, "release", axis, 0.74, 0.60, button=2)
+        assert float(session.display_state["camera_azimuth"]) != start
+    finally:
+        session.close()
+
+
+def test_every_move_of_a_fast_hand_reaches_the_screen() -> None:
+    """A gesture lane paces itself by what its own frames cost.
+
+    The lane was a fixed 30 ms, and a lane that is not due DROPS the
+    motion rather than deferring it -- so a hand moving at mouse rate
+    lost two thirds of its updates, and whenever the last move before
+    release fell in a closed window the picture only caught up when the
+    button came up.  A scene preview costs a few milliseconds, so at a
+    realistic 125 Hz hand every move must reach the screen.
+    """
+
+    session = _session()
+    try:
+        session.set_parameters({
+            "presentation": "height_bars",
+            "color_min": 0.0,
+            "color_max": 1.0,
+        })
+        session.rgba()
+        axis = next(
+            t for t in session._raster_axes_snapshot() if t.role == "image"
+        )
+        _pointer(session, "press", axis, 0.5, 0.5, button=2)
+        rendered = 0
+        for step in range(20):
+            state = _pointer(
+                session,
+                "move",
+                axis,
+                0.5 + 0.02 * (step + 1),
+                0.5 + 0.01 * (step + 1),
+                button=2,
+            )
+            if getattr(state, "publish_front", False):
+                rendered += 1
+            sleep(0.008)
+        _pointer(session, "release", axis, 0.9, 0.7, button=2)
+        assert rendered == 20, f"{20 - rendered} moves never reached pixels"
+    finally:
+        session.close()

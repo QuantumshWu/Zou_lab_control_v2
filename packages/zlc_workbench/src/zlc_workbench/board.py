@@ -169,6 +169,22 @@ class LiveBoard:
         future.add_done_callback(finished)
         return future
 
+    def owe_presentation(self, panel_ids: Sequence[str]) -> None:
+        """Owe these panels a staging pass regardless of their cadence.
+
+        The display interval paces what the bench PUBLISHES; it must not
+        pace what the operator ASKS for.  Refresh used to hope the next
+        natural beat covered the panel, which cost a whole cadence when
+        the beat was not due.  Owed panels stage on the next tick whatever
+        the clock says -- the same debt a held component already uses.
+        """
+
+        selected = tuple(str(value) for value in panel_ids)
+        if not selected:
+            return
+        self._scheduler.invalidate_presentations(selected)
+        self.wake.request_owner_wake()
+
     def invalidate_presentations(
         self,
         panel_ids: Sequence[str],

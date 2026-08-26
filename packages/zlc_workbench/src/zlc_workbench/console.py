@@ -3442,25 +3442,61 @@ class ConsolePresenter:
         if binding is None:
             return False
         front = self.session.signal_plane.freeze()
-        value = front.value(binding.state.signal)
         publication = front.publication(binding.state.signal)
-        if value is None or publication is None:
+        surface = binding.accepted_surface
+        shown_publication = None if surface is None else surface.publication
+        shown_input = None if surface is None else surface.plot_input
+        if surface is None and publication is None:
+            # Nothing has ever been drawn and nothing is published: the
+            # only honest refusal.
             self._report(
                 f"{binding.state.signal} has not published yet",
                 severity="warning",
             )
             return False
-        surface = binding.accepted_surface
-        shown_publication = None if surface is None else surface.publication
-        shown_input = None if surface is None else surface.plot_input
-        if shown_publication is publication and shown_input is not None:
-            previous = binding.frozen_data
-            surface = binding.accepted_surface
-            if surface is None or surface.description is None:
-                return False
+        previous = binding.frozen_data
+        # "Already frozen" means the same PICTURE under the same TARGET.
+        # A record holding the right pixels for a configuration the panel
+        # has since left still owes the operator a re-stamp: that is what
+        # a panel which crossed vocabularies asks Refresh for.
+        already_frozen = (
+            previous is not None
+            and previous.publication is shown_publication
+            and previous.plot_input is shown_input
+            and _same_panel_plot_target(previous.target, binding.state)
+        )
+        # The one thing that would make adoption nonsense is a card
+        # showing ANOTHER SIGNAL -- mid-retarget, before its replacement
+        # host is accepted.  Everything else about the accepted surface
+        # (its authored bags are a subset of the accepted state's) still
+        # describes this panel's picture, which is what Refresh is for.
+        describes_current = (
+            surface is not None
+            and surface.description is not None
+            and surface.target.signal == binding.state.signal
+        )
+        # A publication NEWER than the card's own picture is the one case
+        # that must wait: Edit's record and Edit's pixels swap together
+        # when that surface is accepted.
+        newer_pending = (
+            publication is not None and publication is not shown_publication
+        )
+        # Otherwise Refresh adopts what the card is showing, right now.
+        # Asking the PLANE what to freeze was the defect: a derived signal
+        # (an ROI feeding a second panel) is retired with the run that
+        # produced it, so the plane answers "nothing published" while the
+        # card is still showing a perfectly good picture -- and Refresh
+        # returned False without touching anything.  The panel's accepted
+        # surface is the authority on what the operator sees.
+        if (
+            shown_input is not None
+            and describes_current
+            and not already_frozen
+            and not newer_pending
+        ):
             frozen = self._panel_frozen_data(
                 binding,
-                publication=publication,
+                publication=shown_publication,
                 plot_input=shown_input,
                 event_records=surface.event_records,
                 target=binding.state,
@@ -3487,11 +3523,20 @@ class ConsolePresenter:
                     )
             self.refresh_panel_editor(panel_id)
             return True
+        if not newer_pending:
+            # The card and Edit already agree, or the card has nothing this
+            # panel may adopt.  Arming the deferred path here would hand
+            # Edit the NEXT accepted surface behind the operator's back --
+            # a retargeted panel would silently adopt the new signal
+            # instead of staying stale until it is asked.
+            return True
         # A newer exact publication exists.  The board tick only submits its
         # canonical projection; materialization and rendering remain on the
         # board/plot workers, and _panel_presented installs the frozen record
-        # when that same-shot surface is accepted.
+        # when that same-shot surface is accepted.  The panel is OWED that
+        # pass: the display interval paces the bench, not the operator.
         binding.refresh_requested = True
+        self.board.owe_presentation((binding.panel_id,))
         self.board.tick()
         return True
 

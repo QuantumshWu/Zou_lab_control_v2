@@ -5299,3 +5299,105 @@ def test_the_display_mirror_goes_quiet_after_a_burst(presenter, session) -> None
     ).value.display_state.values
     assert live["camera_zoom"] == edit["camera_zoom"] == 1.44
     assert panel.state.display["camera_zoom"] == 1.44
+
+
+def test_refresh_adopts_the_card_when_the_derived_signal_retired(
+    presenter,
+    session,
+) -> None:
+    """The operator's chain: camera image -> ROI -> a second panel.
+
+    A derived signal is retired with the run that produced it.  Refresh
+    asked the PLANE what to freeze, so once that run ended it answered
+    "has not published yet" and refused -- while the card was still
+    showing a perfectly good picture the Edit tab had not caught up to.
+    The panel's accepted surface is the authority on what the operator
+    sees, so Refresh adopts it.
+    """
+
+    from zlc_workbench.logic import stable_signal_key
+
+    camera_id = presenter.add_logic(
+        "camera_measurement",
+        node_id="roi-refresh",
+        values={"exposure_seconds": 0.002, "repeat": 0, "frames_per_cycle": 1},
+        device_keys={"camera": "camera"},
+        open_editor=False,
+    )
+    session.load_pulse(PULSE_NAME)
+    assert presenter.start_logic(camera_id)
+    camera_signal = stable_signal_key(camera_id, "frames")
+    deadline = time.monotonic() + 10.0
+    publication = None
+    while publication is None and time.monotonic() < deadline:
+        session.fire(shots=1)
+        presenter.beat()
+        publication = session.signal_plane.latest_publication(camera_signal)
+        time.sleep(0.005)
+    assert publication is not None
+
+    image = presenter.add_panel(
+        camera_signal,
+        publication.value(camera_signal).snapshot,
+        kind="image",
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: image.host is not None and image.bridge is not None,
+    )
+    presenter.set_deriving(True)
+    _commit_area(image.host, lower_fraction=0.3, upper_fraction=0.7)
+    presenter.commit_surfaces()
+    roi_signal = f"@logic/{image.panel_id}/roi_frame"
+    _settle_panel_hosts(
+        presenter,
+        lambda: session.signal_plane.latest_publication(roi_signal) is not None,
+    )
+
+    derived = presenter.add_panel(
+        roi_signal,
+        session.signal_plane.current_dataset(roi_signal),
+        kind="image",
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: derived.host is not None
+        and derived.accepted_surface is not None,
+    )
+    assert presenter.edit_panel(derived.panel_id)
+    _settle_panel_hosts(
+        presenter,
+        lambda: derived.editor_host is not None
+        and derived.frozen_data is not None
+        and derived.frozen_data.description is not None,
+    )
+
+    opened = derived.frozen_data
+    for _ in range(3):
+        session.fire(shots=1)
+        for _beat in range(20):
+            presenter.beat()
+            time.sleep(0.005)
+    card = derived.accepted_surface
+    assert card is not None and card.publication is not opened.publication, (
+        "the card must move ahead of Edit for this to mean anything"
+    )
+
+    # The producing run ends: the derived signal leaves the plane.
+    assert presenter.stop_logic(camera_id)
+    for _beat in range(40):
+        presenter.beat()
+        presenter.poll_logic()
+        time.sleep(0.005)
+    assert session.signal_plane.latest_publication(roi_signal) is None
+
+    assert presenter.refresh_panel_snapshot(derived.panel_id) is True
+    assert derived.frozen_data is not opened, (
+        "Refresh must adopt the picture the card is showing"
+    )
+    assert derived.frozen_data.publication is card.publication
+    presenter.remove_logic(camera_id)
+    for _beat in range(40):
+        presenter.beat()
+        presenter.poll_logic()
+        time.sleep(0.005)
