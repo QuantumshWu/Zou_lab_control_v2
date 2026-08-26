@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import numpy as np
 
-from zlc_plot import PlotSession, RollingPlot
+from zlc_data import PRIMARY_INDEX
+from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
+from zlc_plot import AxisRef, PlotSession, Reduction, RollingPlot
+from zlc_plot.data_view import DataView
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
 
 
@@ -136,8 +139,6 @@ def test_replace_spec_keeps_history_for_an_equivalent_rolling_spec() -> None:
     replacement reseeds from the current snapshot instead.
     """
 
-    from zlc_plot import Reduction
-
     session = PlotSession(_snapshot(0, repeats=10), RollingPlot())
     try:
         session.replace_spec(RollingPlot())
@@ -149,3 +150,60 @@ def test_replace_spec_keeps_history_for_an_equivalent_rolling_spec() -> None:
         np.testing.assert_array_equal(x, np.arange(10.0))
     finally:
         session.close()
+
+
+def test_primary_index_history_keeps_source_order_holes_and_site_groups() -> None:
+    source = [10, 10, 12, 12]
+    indexed_schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns(
+            {"source index": source, "category": [0.0, 1.0, 0.0, 1.0]},
+            ids={"source index": str(PRIMARY_INDEX_AXIS_ID)},
+            roles={"source index": PRIMARY_INDEX},
+        ),
+        data_axes=(Axis.create("site", values=[0.0, 1.0, 2.0]),),
+        dtype=np.float64,
+        generation="rolling-indexed-vectorized",
+    )
+    indexed_values = np.arange(12.0).reshape(1, 4, 3)
+    indexed_valid = np.ones(indexed_values.shape, dtype=np.bool_)
+    indexed_valid[:, :2] = False
+    snapshot = DatasetSnapshot(
+        indexed_schema,
+        indexed_values,
+        revision=9,
+        validity=indexed_valid,
+    )
+    history = DataView(snapshot).rolling_history_samples(
+        group=AxisRef.data("site"), aggregation=Reduction.MEAN
+    )
+    assert tuple(sample.source_index for sample in history) == (10, 12)
+    assert all(sample.revision == 9 for sample in history)
+    assert all(
+        sample.generation == snapshot.ref.stream_generation.value
+        for sample in history
+    )
+    assert tuple(key[0].canonical for key in history[0].group_keys) == (
+        0.0,
+        1.0,
+        2.0,
+    )
+    np.testing.assert_allclose(history[0].values, [np.nan] * 3, equal_nan=True)
+    np.testing.assert_array_equal(history[0].valid, [False] * 3)
+    np.testing.assert_array_equal(history[0].counts, [0] * 3)
+    np.testing.assert_allclose(history[1].values, [7.5, 8.5, 9.5])
+    np.testing.assert_array_equal(history[1].valid, [True] * 3)
+    np.testing.assert_array_equal(history[1].counts, [2] * 3)
+    np.testing.assert_allclose(history[1].sem, [1.5] * 3)
+
+    repeat = DataView(_snapshot(0, repeats=3)).rolling_history_samples()
+    np.testing.assert_allclose(
+        [sample.values[0] for sample in repeat], [1.5, 5.5, 9.5]
+    )
+    np.testing.assert_array_equal(
+        [sample.counts[0] for sample in repeat], [4, 4, 4]
+    )
+    assert all(
+        sample.source_index is None and sample.group_keys == ((),)
+        for sample in repeat
+    )

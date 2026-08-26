@@ -27,6 +27,12 @@
   latest或tagged typed coordinate value，不再让display label或裸文本控制字进入truth。
 - Runtime是唯一跨publication history owner；active leases的signal-level event/indexed表示变化
   通过presentation epoch使同signal全部Panel重新投影，不增加scientific publication/revision。
+- Rolling history投影在现有`DataView`内一次归约：规则repeat tensor直接沿非保留轴
+  reduction，其余repeat与primary-index分别按`(repeat, group)`、`(source index, group)`
+  联合bucket；旧`O(history × samples)`逐history mask循环已删除，Runtime history owner不变。
+  2.04M MEAN compute为204.124→9.719 ms，真实Windows Rolling Host中位为
+  264.37→58.85 ms、P90为286.34→66.89 ms；70组reduction/validity/group矩阵满足
+  既有浮点数值等价与结构精确contract，聚焦回归63项通过。
 - PanelState只保存authored target；Live、Frozen和FigureViewer都以Plot成功返回的完整accepted
   `DisplayDescription`判断当前pixels、能力与交互。Selector/viewport observation携exact Dataset
   generation+revision，TaskConsole Console核对后才持久化、镜像或发布derivation。

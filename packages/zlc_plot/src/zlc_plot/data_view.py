@@ -2353,6 +2353,13 @@ class DataView:
             )
         self.validate_rolling(group)
         aggregation = _validate_aggregation(aggregation)
+        tensor = self._repeat_history_tensor(
+            group=group,
+            aggregation=aggregation,
+            repeats=repeats,
+        )
+        if tensor is not None:
+            return tensor
         positions = self._all_positions()
         flat_values = self._samples.value.canonical.reshape(-1)
         flat_valid = self._samples.valid_mask.reshape(-1)
@@ -2369,48 +2376,131 @@ class DataView:
         repeat_of_position = positions // block
         usable = flat_valid[positions] & (codes >= 0)
         position_values = flat_values[positions]
-        squared = (
-            np.square(position_values.astype(np.float64, copy=False))
-            if aggregation is Reduction.MEAN
-            else None
+        combined = repeat_of_position * domain_size + codes
+        bucket_count = repeats * domain_size
+        values, counts = _aggregate_by_codes(
+            position_values,
+            usable,
+            combined,
+            bucket_count,
+            aggregation,
         )
-        samples: list[RollingSample] = []
-        for repeat in range(repeats):
-            in_repeat = repeat_of_position == repeat
-            values, counts = _aggregate_by_codes(
-                position_values,
-                usable & in_repeat,
-                codes,
-                domain_size,
-                aggregation,
+        values = np.asarray(values).reshape(repeats, domain_size)
+        counts = np.asarray(counts).reshape(repeats, domain_size)
+        sem = None
+        if aggregation is Reduction.MEAN:
+            mean_square, _ = _aggregate_by_codes(
+                np.square(position_values.astype(np.float64, copy=False)),
+                usable,
+                combined,
+                bucket_count,
+                Reduction.MEAN,
             )
-            sem = None
-            if squared is not None:
-                mean_sq, _sq_counts = _aggregate_by_codes(
-                    squared,
-                    usable & in_repeat,
-                    codes,
-                    domain_size,
-                    Reduction.MEAN,
-                )
-                sem = _sem_from_moments(
-                    np.asarray(values, np.float64),
-                    np.asarray(mean_sq, np.float64),
-                    counts,
-                )
-            valid = (counts > 0) & np.isfinite(values)
-            samples.append(
-                RollingSample(
-                    revision=self._samples.revision,
-                    generation=self._samples.generation,
-                    values=values,
-                    valid=valid,
-                    counts=counts,
-                    group_keys=keys,
-                    sem=sem,
-                )
+            sem = _sem_from_moments(
+                np.asarray(values, dtype=np.float64),
+                np.asarray(mean_square, dtype=np.float64).reshape(
+                    repeats, domain_size
+                ),
+                counts,
             )
-        return tuple(samples)
+        valid = (counts > 0) & np.isfinite(values)
+        return tuple(
+            RollingSample(
+                revision=self._samples.revision,
+                generation=self._samples.generation,
+                values=values[index],
+                valid=valid[index],
+                counts=counts[index],
+                group_keys=keys,
+                sem=None if sem is None else sem[index],
+            )
+            for index in range(repeats)
+        )
+
+    def _repeat_history_tensor(
+        self,
+        *,
+        group: AxisRef | None,
+        aggregation: Reduction,
+        repeats: int,
+    ) -> tuple[RollingSample, ...] | None:
+        """Reduce a regular repeat history once, not once per repeat.
+
+        Runtime remains the only history owner; this is only a projection of
+        its immutable Dataset.  A DATA group is one retained tensor axis.
+        Anything whose group/domain cannot be proven one-to-one returns None
+        and keeps the generic position path above.
+        """
+
+        values = self._samples.value.canonical
+        usable = self._samples.valid_mask
+        if values.shape[0] != repeats:
+            return None
+        if group is None:
+            group_count = 1
+            keys: tuple[tuple[AxisValue, ...], ...] = ((),)
+            value_cube = values.reshape(repeats, 1, -1)
+            usable_cube = usable.reshape(repeats, 1, -1)
+        else:
+            if group.domain is not AxisDomain.DATA:
+                return None
+            resolved = self._resolve(group)
+            dimension = int(resolved.dimension)
+            if dimension <= 0 or dimension >= values.ndim:
+                return None
+            group_count = int(values.shape[dimension])
+            stride = int(np.prod(values.shape[dimension + 1 :], dtype=np.int64))
+            representatives = np.arange(group_count, dtype=np.int64) * stride
+            domain = self._domain(group, representatives)
+            if domain.size != group_count or not np.array_equal(
+                domain.codes,
+                np.arange(group_count, dtype=np.int64),
+            ):
+                return None
+            keys = tuple((value,) for value in domain.values)
+            value_cube = np.moveaxis(values, dimension, 1).reshape(
+                repeats, group_count, -1
+            )
+            usable_cube = np.moveaxis(usable, dimension, 1).reshape(
+                repeats, group_count, -1
+            )
+
+        # The generic bucket reducer always accumulates numerics in float64;
+        # matching that here also prevents integer SUM/square overflow.
+        working = value_cube.astype(np.float64, copy=False)
+        reduced, counts = _masked_leading_reduce(
+            np.moveaxis(working, -1, 0),
+            np.moveaxis(usable_cube, -1, 0),
+            aggregation,
+        )
+        reduced = np.asarray(reduced, dtype=np.float64)
+        counts = np.asarray(counts, dtype=np.int64)
+        reduced = np.where(counts > 0, reduced, np.nan)
+        sem = None
+        if aggregation is Reduction.MEAN:
+            mean_square, _ = _masked_leading_reduce(
+                np.moveaxis(np.square(working), -1, 0),
+                np.moveaxis(usable_cube, -1, 0),
+                Reduction.MEAN,
+            )
+            sem = _sem_from_moments(
+                reduced,
+                np.asarray(mean_square, dtype=np.float64),
+                counts,
+            )
+        valid = (counts > 0) & np.isfinite(reduced)
+        return tuple(
+            RollingSample(
+                revision=self._samples.revision,
+                generation=self._samples.generation,
+                values=reduced[index],
+                valid=valid[index],
+                counts=counts[index],
+                group_keys=keys,
+                sem=None if sem is None else sem[index],
+            )
+            for index in range(repeats)
+        )
 
     def _history_samples_by_primary_index(
         self,
@@ -2423,8 +2513,6 @@ class DataView:
         self.validate_rolling(group)
         aggregation = _validate_aggregation(aggregation)
         positions = self._all_positions()
-        flat_values = self._samples.value.canonical.reshape(-1)
-        flat_valid = self._samples.valid_mask.reshape(-1)
         primary = self._domain(self._primary_index_ref(), positions)
         if group is None:
             codes = np.zeros(positions.size, dtype=np.int64)
@@ -2435,51 +2523,52 @@ class DataView:
             codes = grouped.codes
             domain_size = len(grouped.values)
             keys = tuple((value,) for value in grouped.values)
-        usable = flat_valid[positions] & (codes >= 0)
+        flat_values = self._samples.value.canonical.reshape(-1)
+        flat_valid = self._samples.valid_mask.reshape(-1)
+        usable = flat_valid[positions] & (codes >= 0) & (primary.codes >= 0)
         position_values = flat_values[positions]
-        squared = (
-            np.square(position_values.astype(np.float64, copy=False))
-            if aggregation is Reduction.MEAN
-            else None
+        history_count = len(primary.values)
+        combined = primary.codes * domain_size + codes
+        bucket_count = history_count * domain_size
+        values, counts = _aggregate_by_codes(
+            position_values,
+            usable,
+            combined,
+            bucket_count,
+            aggregation,
         )
-        samples: list[RollingSample] = []
-        for index, source in enumerate(primary.values):
-            selected = usable & (primary.codes == index)
-            values, counts = _aggregate_by_codes(
-                position_values,
-                selected,
-                codes,
-                domain_size,
-                aggregation,
+        values = np.asarray(values).reshape(history_count, domain_size)
+        counts = np.asarray(counts).reshape(history_count, domain_size)
+        sem = None
+        if aggregation is Reduction.MEAN:
+            mean_square, _ = _aggregate_by_codes(
+                np.square(position_values.astype(np.float64, copy=False)),
+                usable,
+                combined,
+                bucket_count,
+                Reduction.MEAN,
             )
-            sem = None
-            if squared is not None:
-                mean_sq, _sq_counts = _aggregate_by_codes(
-                    squared,
-                    selected,
-                    codes,
-                    domain_size,
-                    Reduction.MEAN,
-                )
-                sem = _sem_from_moments(
-                    np.asarray(values, np.float64),
-                    np.asarray(mean_sq, np.float64),
-                    counts,
-                )
-            valid = (counts > 0) & np.isfinite(values)
-            samples.append(
-                RollingSample(
-                    revision=self._samples.revision,
-                    generation=self._samples.generation,
-                    values=values,
-                    valid=valid,
-                    counts=counts,
-                    source_index=int(source.canonical),
-                    group_keys=keys,
-                    sem=sem,
-                )
+            sem = _sem_from_moments(
+                np.asarray(values, dtype=np.float64),
+                np.asarray(mean_square, dtype=np.float64).reshape(
+                    history_count, domain_size
+                ),
+                counts,
             )
-        return tuple(samples)
+        valid = (counts > 0) & np.isfinite(values)
+        return tuple(
+            RollingSample(
+                revision=self._samples.revision,
+                generation=self._samples.generation,
+                values=values[index],
+                valid=valid[index],
+                counts=counts[index],
+                source_index=int(source.canonical),
+                group_keys=keys,
+                sem=None if sem is None else sem[index],
+            )
+            for index, source in enumerate(primary.values)
+        )
 
     def _histogram_from_positions(
         self,
