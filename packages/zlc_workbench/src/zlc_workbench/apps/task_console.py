@@ -188,25 +188,13 @@ def build_console(session, *, window_ratio=None, request_close=None):
         )
 
     def _manual_axis(request):
-        """One manual-axis question, answered in the operator's own words."""
+        """Stand aside for the hand: the one thing no machine here does."""
 
-        payload = request.payload
-        mode = str(payload.get("mode", ""))
-        if mode == "values":
-            values = view.manual_axis_values(
-                title=request.title,
-                message=request.message,
-                axis=str(payload.get("axis", "")),
-                points=int(payload.get("points", 0)),
-            )
-            return None if values is None else {"values": tuple(values)}
-        if mode == "set":
-            accepted = view.manual_axis_setting(
-                title=request.title,
-                message=request.message,
-            )
-            return {} if accepted else None
-        raise RuntimeError(f"unknown manual-axis question {mode!r}")
+        accepted = view.manual_axis_setting(
+            title=request.title,
+            message=request.message,
+        )
+        return {} if accepted else None
 
     try:
         presenter = ConsolePresenter(

@@ -19,8 +19,9 @@ from zlc_ui.fluent import (
     ACCENT,
     GREY,
     FluentButton,
+    FluentCardDialog,
     FluentLabel,
-    fluent_widget_stylesheet,
+    FluentSectionLabel,
     scaled_px,
     window_pad,
 )
@@ -29,19 +30,23 @@ from zlc_ui.fluent import (
 __all__ = ["SignalChooser", "choose_signal"]
 
 
-class SignalChooser(QtWidgets.QDialog):
-    """A modal list of offerable signals, grouped by what produced them."""
+class SignalChooser(FluentCardDialog):
+    """A modal list of offerable signals, grouped by what produced them.
+
+    On the shared Fluent card, like every other modal here: a widget
+    background of its own would paint a square over the card's rounded
+    corners, so the card supplies the ground and this supplies a title
+    the frameless chrome has nowhere else to put.
+    """
 
     def __init__(self, rows, parent=None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Add panel")
-        self.setStyleSheet(fluent_widget_stylesheet())
-        self.setModal(True)
+        super().__init__(parent, title="Add panel")
 
         layout = QtWidgets.QVBoxLayout(self)
         margin = window_pad(1)
         layout.setContentsMargins(margin, margin, margin, margin)
         layout.setSpacing(window_pad(0.5))
+        layout.addWidget(FluentSectionLabel("Add panel"))
 
         self.list = QtWidgets.QListWidget()
         self.list.setMinimumWidth(scaled_px(420, minimum=320))

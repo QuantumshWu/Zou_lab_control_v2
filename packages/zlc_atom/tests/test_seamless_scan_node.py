@@ -692,7 +692,7 @@ def _manual_run(
 
     Returns the finished dataset value, the questions the run asked, and
     the bench.  ``answer`` overrides what the operator says, so a test can
-    refuse, mistype, or repeat a value on purpose.
+    refuse on purpose.
     """
 
     installation = create_installation("virtual")
@@ -709,10 +709,9 @@ def _manual_run(
         )
         bench.publish(SCRIPTED_SEED_VALUE)
         plan = ScanPlan(
-            tuple(manual_axis(name, len(points)) for name, points in manual)
+            tuple(manual_axis(name, points) for name, points in manual)
             + (ScanAxis(BIAS_X_PORT, values),)
         )
-        entered = {name: points for name, points in manual}
         node = descriptors["seamless_scan"].instantiate(
             sequencer=bench,
             signal_plane=plane,
@@ -741,12 +740,7 @@ def _manual_run(
                 else answer(request, len(asked) - 1)
             )
             if reply is None:
-                mode = request.payload["mode"]
-                reply = (
-                    {"values": entered[request.payload["axis"]]}
-                    if mode == "values"
-                    else {}
-                )
+                reply = {}
             if reply == "stop":
                 host.cancel("operator stopped the manual scan")
                 continue
@@ -780,9 +774,8 @@ def test_a_manual_axis_is_the_outer_loop_and_its_answers_are_the_axis() -> None:
     """A hand walks the outside; the board still plays the inside seamlessly.
 
     Three power points over two bias points: THREE fires, each playing the
-    same two-row table, and the dataset's power coordinate carries what the
-    operator typed -- not the ordinals the plan document held while nobody
-    knew them yet.
+    same two-row table, and the dataset's power coordinate is the axis the
+    plan authored -- outermost, advancing slowest.
     """
 
     value, asked, bench = _manual_run(
@@ -807,23 +800,18 @@ def test_a_manual_axis_is_the_outer_loop_and_its_answers_are_the_axis() -> None:
     # Outermost first: power advances slowest, exactly as the plan reads.
     assert power.values == pytest.approx((1.5, 1.5, 2.5, 2.5, 4.0, 4.0))
     assert bias.values == pytest.approx((-256.0, 256.0) * 3)
-    assert power.unit is None, "a manual axis is asked for a number, not a unit"
+    assert power.unit is None, "a manual axis carries a name, not a unit"
 
     # Every point captured, in played order: publication k lands on row k.
     block = np.asarray(value.block.values, dtype=float)
     assert block.mean(axis=(2, 3)).tolist() == [[0.0, 1.0, 2.0, 3.0, 4.0, 5.0]]
 
-    # One question for the values, then one stop per manual point.
-    assert [request.payload["mode"] for request in asked] == [
-        "values",
-        "set",
-        "set",
-        "set",
-    ]
+    # One question, one stop, and nothing else asked of the operator.
+    assert len(asked) == 3, "a stop per manual point, and no other question"
     assert [
-        request.payload["value"] for request in asked if
-        request.payload["mode"] == "set"
+        request.payload["value"] for request in asked
     ] == pytest.approx([1.5, 2.5, 4.0])
+    assert [request.payload["point"] for request in asked] == [1, 2, 3]
 
 
 def test_repeats_walk_the_whole_plan_again_and_stop_again() -> None:
@@ -831,7 +819,7 @@ def test_repeats_walk_the_whole_plan_again_and_stop_again() -> None:
 
     A plan the board owns spends it on a longer fire.  A plan with a hand
     in it cannot, so it spends it on a second walk -- the same points, the
-    same coordinates, asked for again because the knob has moved since.
+    same coordinates, stopped for again because the knob has moved since.
     """
 
     value, asked, bench = _manual_run(
@@ -841,15 +829,8 @@ def test_repeats_walk_the_whole_plan_again_and_stop_again() -> None:
     )
 
     assert bench.fired_cycles == [2, 2, 2, 2], "two walks of two manual points"
-    stops = [
-        request.payload["value"]
-        for request in asked
-        if request.payload["mode"] == "set"
-    ]
+    stops = [request.payload["value"] for request in asked]
     assert stops == pytest.approx([1.0, 2.0, 1.0, 2.0])
-    assert sum(
-        1 for request in asked if request.payload["mode"] == "values"
-    ) == 1, "the values are asked for once; a repeat re-walks them"
 
     schema = value.block.schema
     assert schema.repeat_axis.size == 2, "a walk is a visit, not a new point"
@@ -874,7 +855,6 @@ def test_only_the_axis_that_moves_is_asked_for() -> None:
     stops = [
         (request.payload["axis"], request.payload["value"])
         for request in asked
-        if request.payload["mode"] == "set"
     ]
     # power advances once every three angle points, and says so only then.
     assert stops == [
@@ -887,32 +867,6 @@ def test_only_the_axis_that_moves_is_asked_for() -> None:
         ("angle", 20.0),
         ("angle", 30.0),
     ]
-
-
-def test_two_manual_points_may_not_share_a_value() -> None:
-    """Two points with one coordinate are one point, and the scan says so."""
-
-    replies = []
-
-    def answer(request, index):
-        if request.payload["mode"] != "values":
-            return {}
-        replies.append(request.message)
-        # The first answer repeats a value; the second is distinct.
-        return {"values": (2.0, 2.0) if len(replies) == 1 else (2.0, 3.0)}
-
-    value, asked, _bench = _manual_run(
-        manual=(("power", (2.0, 3.0)),),
-        values=(-256.0,),
-        answer=answer,
-    )
-    assert len(replies) == 2, "a repeated value has to be asked about again"
-    assert "share a value" in replies[1]
-    power = next(
-        column for column in value.block.schema.point_table.columns
-        if column.name == "power"
-    )
-    assert power.values == pytest.approx((2.0, 3.0))
 
 
 def test_stopping_at_the_question_stops_the_run() -> None:
@@ -928,7 +882,7 @@ def test_stopping_at_the_question_stops_the_run() -> None:
     try:
         bench.publish(SCRIPTED_SEED_VALUE)
         plan = ScanPlan(
-            (manual_axis("power", 2), ScanAxis(BIAS_X_PORT, (-256.0,)))
+            (manual_axis("power", (1.0, 2.0)), ScanAxis(BIAS_X_PORT, (-256.0,)))
         )
         node = descriptors["seamless_scan"].instantiate(
             sequencer=bench,
@@ -965,7 +919,7 @@ def test_a_manual_axis_nested_inside_the_table_is_refused_by_name() -> None:
     """A hand cannot reach into a fired table, so it cannot be nested there."""
 
     plan = ScanPlan(
-        (ScanAxis(BIAS_X_PORT, (-256.0, 256.0)), manual_axis("power", 2))
+        (ScanAxis(BIAS_X_PORT, (-256.0, 256.0)), manual_axis("power", (1.0, 2.0)))
     )
     with pytest.raises(ValueError) as refusal:
         split_manual_axes(plan)
@@ -977,5 +931,5 @@ def test_a_plan_of_manual_axes_alone_has_no_table_to_play() -> None:
     """The seamless node exists to play a board table; a hand is not one."""
 
     with pytest.raises(ValueError) as refusal:
-        split_manual_axes(ScanPlan((manual_axis("power", 2),)))
+        split_manual_axes(ScanPlan((manual_axis("power", (1.0, 2.0)),)))
     assert "no table to play" in str(refusal.value)

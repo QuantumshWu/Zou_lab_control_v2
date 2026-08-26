@@ -295,24 +295,21 @@ def manual_axis_name(port: str) -> str:
     return name
 
 
-def manual_axis(name: str, points: int) -> ScanAxis:
-    """One manual axis: a name and how many points it visits.
+def manual_axis(name: str, values: Sequence[float]) -> ScanAxis:
+    """One manual axis: a name, and the values a HAND will set.
 
-    A manual axis authors NO values.  Nobody knows what the bench will
-    read off a power meter next Tuesday, and inventing bounds for it
-    would be authoring a number the operator has to contradict.  What
-    the document holds until the run asks is the point ordinals; the
-    operator supplies the values themselves, and those are what reach
-    the dataset as coordinates.
+    Authored exactly like every other axis, values and all.  A coordinate
+    is known before its data whichever knob carries it -- the dataset's
+    schema is fixed the moment the first point lands, and a number typed
+    later can no longer become an axis.  What makes this axis manual is
+    only WHO advances it: the run stops and asks, where a board axis
+    advances a slot.
     """
 
-    count = int(points)
-    if count < 1:
-        raise ValueError("a manual axis visits at least one point")
-    return ScanAxis(
-        MANUAL_PARAM_FAMILY + str(name).strip(),
-        tuple(float(index) for index in range(count)),
-    )
+    label = str(name).strip()
+    if not label:
+        raise ValueError("a manual axis carries a name")
+    return ScanAxis(MANUAL_PARAM_FAMILY + label, tuple(values))
 
 
 def split_manual_axes(plan: ScanPlan) -> tuple[tuple[ScanAxis, ...], ScanPlan]:

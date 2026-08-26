@@ -1605,14 +1605,49 @@ class _FluentRoundedMenu(QtWidgets.QMenu):
         super().paintEvent(event)
 
 
-class _FluentMessageDialog(QtWidgets.QDialog):
-    """A modal message / warning box with the Fluent rounded-card chrome and NO native title bar -- so
-    no platform window frame and no stray Python app icon in the corner (the reason a raw ``QMessageBox``
-    reads off-brand here).  Frameless + translucent, it PAINTS the same rounded white card (fill + 1 px
-    DIVIDER border, the shared ``drawRoundedRect`` recipe) as every other Fluent surface, stacks a bold
-    title (``FluentSectionLabel``), the wrapped message (``FluentLabel``) and a single Fluent OK button,
-    and centres on its parent.  ``fluent_message`` is the ONE entry point -- use it in place of
-    ``QMessageBox.information`` / ``.warning``."""
+class FluentCardDialog(QtWidgets.QDialog):
+    """THE chrome every modal this project owns wears.
+
+    A native dialog frame puts the platform title bar -- and with it the
+    interpreter's own icon -- in the corner of a window whose every other
+    pixel is this project's.  One off-brand corner is all it takes to read
+    as somebody else's dialog, so no modal here has a native frame:
+    frameless and translucent, each PAINTS the same rounded white card
+    (fill + 1 px DIVIDER border, the shared ``drawRoundedRect`` recipe) as
+    every other Fluent surface.
+
+    The chrome lives HERE and not in each dialog, because three copies of
+    it is three chances for one of them to drift back to a platform frame
+    -- which is exactly how the two that did got there.  A subclass builds
+    its own contents and renders its own title (a frameless card has no
+    title bar to put one in); it inherits the card.
+    """
+
+    def __init__(self, parent=None, *, title: str = "") -> None:
+        super().__init__(parent, QtCore.Qt.FramelessWindowHint | QtCore.Qt.Dialog)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+        self.setModal(True)
+        self.setFont(QtGui.QFont(FONT, fluent_font_size()))
+        self._radius = float(_radius())
+        if title:
+            self.setWindowTitle(str(title))
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        pen = QtGui.QPen(QtGui.QColor(DIVIDER))
+        pen.setWidthF(1.0)
+        painter.setPen(pen)
+        painter.setBrush(QtGui.QColor("white"))
+        rect = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.drawRoundedRect(rect, self._radius, self._radius)
+
+
+class _FluentMessageDialog(FluentCardDialog):
+    """A modal message / warning box on the shared card: a bold title
+    (``FluentSectionLabel``), the wrapped message and a single Fluent OK
+    button, centred on its parent.  ``fluent_message`` is the ONE entry
+    point -- use it in place of ``QMessageBox.information`` / ``.warning``."""
 
     def __init__(
         self,
@@ -1625,10 +1660,7 @@ class _FluentMessageDialog(QtWidgets.QDialog):
         confirm_text: str = "Confirm",
         cancel_text: str = "Cancel",
     ):
-        super().__init__(parent, QtCore.Qt.FramelessWindowHint | QtCore.Qt.Dialog)
-        self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
-        self.setModal(True)
-        self._radius = float(_radius())
+        super().__init__(parent)
         pad = scaled_px(16, minimum=10)
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(pad, pad, pad, pad)
@@ -1663,16 +1695,6 @@ class _FluentMessageDialog(QtWidgets.QDialog):
             ok.clicked.connect(self.accept)
             row.addWidget(ok)
         outer.addLayout(row)
-
-    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
-        pen = QtGui.QPen(QtGui.QColor(DIVIDER))
-        pen.setWidthF(1.0)
-        painter.setPen(pen)
-        painter.setBrush(QtGui.QColor("white"))
-        rect = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        painter.drawRoundedRect(rect, self._radius, self._radius)
 
 
 def retire_pending_widgets() -> None:
@@ -3027,19 +3049,21 @@ class FluentSpinBox(_WheelFocusGuardMixin, QtWidgets.QSpinBox):
         _paint_fluent_spin_buttons(self)
 
 
-class FluentInputDialog(QtWidgets.QDialog):
+class FluentInputDialog(FluentCardDialog):
     """Small Fluent input dialog; the historical numeric API remains intact."""
 
     def __init__(self, prompt: str, default: float | str, parent=None, *, title: str = ""):
-        super().__init__(parent, QtCore.Qt.WindowTitleHint | QtCore.Qt.WindowCloseButtonHint)
-        if title:
-            self.setWindowTitle(str(title))
-        self.setFont(QtGui.QFont(FONT, fluent_font_size()))
-        self.setStyleSheet("QDialog { background: white; }")
+        super().__init__(parent, title=title)
+        pad = scaled_px(16, minimum=10)
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(scaled_px(12), scaled_px(12), scaled_px(12), scaled_px(12))
+        layout.setContentsMargins(pad, pad, pad, pad)
         layout.setSpacing(scaled_px(8, minimum=5))
 
+        # The card has no title bar to carry a title, so a titled dialog
+        # renders its own -- the same bold section label the message box
+        # uses, because they are the same kind of thing.
+        if title:
+            layout.addWidget(FluentSectionLabel(str(title)))
         layout.addWidget(FluentLabel(prompt, self))
         self._edit = FluentLineEdit(str(default), self)
         layout.addWidget(self._edit)
