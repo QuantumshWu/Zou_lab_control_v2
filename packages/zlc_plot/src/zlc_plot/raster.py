@@ -1896,19 +1896,27 @@ class RasterPlotHost:
                     raise RuntimeError(
                         "the painted pointer front belongs to another raster host"
                     )
-                revisions = session.revisions
-                plan = session.surface_plan
-                if (
-                    effective_identity is None
-                    or int(revisions.display) != effective_identity.display_revision
-                    or int(revisions.layout) != effective_identity.layout_revision
-                    or str(plan.kind) != effective_identity.kind
-                    or str(plan.preset) != effective_identity.preset
-                ):
-                    raise RuntimeError(
-                        "the painted pointer front is no longer layout-compatible"
-                    )
+                # Identity CURRENCY belongs to the press alone.  A scroll
+                # is self-relative view navigation (a 3D wheel tick commits
+                # the camera and bumps the display revision, so demanding
+                # currency made every following tick in the frontend's
+                # one-front lag window bounce); moves and releases are
+                # anchored to the front their own press validated.
                 if selected_action == "press":
+                    revisions = session.revisions
+                    plan = session.surface_plan
+                    if (
+                        effective_identity is None
+                        or int(revisions.display)
+                        != effective_identity.display_revision
+                        or int(revisions.layout)
+                        != effective_identity.layout_revision
+                        or str(plan.kind) != effective_identity.kind
+                        or str(plan.preset) != effective_identity.preset
+                    ):
+                        raise RuntimeError(
+                            "the painted pointer front is no longer layout-compatible"
+                        )
                     # A press means what the OPERATOR saw, and what they saw
                     # is geometry: the layout, the painted transforms and the
                     # interaction state, each checked precisely here.  Data

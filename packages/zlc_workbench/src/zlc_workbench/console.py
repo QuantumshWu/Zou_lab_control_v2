@@ -4136,12 +4136,6 @@ class ConsolePresenter:
             )
         )
 
-    #: The camera is DISPLAY STATE the operator mostly writes by GESTURE
-    #: (orbit, wheel zoom): the session commits it internally, so without
-    #: this channel the shared record kept the mounting-time camera and a
-    #: Setting edit -- or the Edit surface -- snapped the view back.
-    _CAMERA_KEYS = ("camera_azimuth", "camera_elevation", "camera_zoom")
-
     def _enqueue_panel_display(
         self,
         panel_id: str,
@@ -4158,37 +4152,48 @@ class ConsolePresenter:
         source: object,
         state: object,
     ) -> None:
-        """A camera committed on either surface is the panel's view.
+        """Display state committed on either surface is the panel's state.
 
-        Both of a panel's surfaces look at the same scene from the same
-        place: a gesture-committed camera lands in the panel record (so a
-        Setting edit no longer snaps the view back) and mirrors to the
-        sibling surface.  Values already recorded are the loop-breaker.
+        The mount contract says the two surfaces are one configuration
+        over two data moments -- appearance never differs.  Anything
+        committed into one host's display state (a camera orbit, a
+        colour-limit drag, a normalized Setting) therefore lands in the
+        panel record and mirrors to the sibling as a diff.  The
+        BLACKLIST IS EMPTY: nothing in the display bag is per-surface;
+        genuinely per-surface state (the viewport, in-flight gesture
+        candidates) does not live in display state.  A stale Edit
+        surface neither speaks nor listens, and values already recorded
+        are the loop-breaker.
         """
 
         binding = self.panels.get(str(panel_id))
         if binding is None:
             return
+        if source is binding.editor_host and binding.frozen_stale:
+            return
         values = getattr(state, "values", None)
         if values is None:
             return
-        camera = {
-            name: float(values[name])
-            for name in self._CAMERA_KEYS
-            if name in values
+        recorded = dict(binding.state.display)
+        changed = {
+            str(name): value
+            for name, value in dict(values).items()
+            if recorded.get(str(name)) != value
         }
-        if not camera:
+        if not changed:
             return
-        recorded = {
-            name: binding.state.display.get(name)
-            for name in camera
-        }
-        if all(recorded[name] == camera[name] for name in camera):
-            return
-        self._remember_panel_view(
-            binding,
-            display={**dict(binding.state.display), **camera},
-        )
+        merged = {**recorded, **changed}
+        self._remember_panel_view(binding, display=merged)
+        frozen = binding.frozen_data
+        if frozen is not None:
+            # The sync moves BOTH surfaces and the record together: the
+            # frozen picture still shows the same data under the same
+            # (now-updated) configuration, so the freeze's target follows.
+            # Leaving it behind flipped frozen_stale on the first synced
+            # value and gated the very channel keeping the surfaces equal.
+            binding.frozen_data = replace(
+                frozen, target=replace(frozen.target, display=merged)
+            )
         for host in (binding.host, binding.editor_host):
             if (
                 host is None
@@ -4196,7 +4201,7 @@ class ConsolePresenter:
                 or (host is binding.editor_host and binding.frozen_stale)
             ):
                 continue
-            host.set_parameters(camera)
+            host.set_parameters(changed)
 
     def _enqueue_panel_crosshair(
         self,

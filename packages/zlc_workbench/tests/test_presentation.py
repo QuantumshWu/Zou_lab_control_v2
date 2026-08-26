@@ -1429,3 +1429,80 @@ def test_the_wake_coalesces_so_a_burst_costs_one_turn() -> None:
 
     wake.request_owner_wake()
     assert len(notifications) == 2, "a wake after a turn must notify again"
+
+
+def test_a_stale_refusal_is_flow_control_not_a_panel_error(live_bench) -> None:
+    """The widget's False means "a newer front already paints" -- the
+    documented stale-race answer during any continuous gesture.  It was
+    recorded as "plot surface did not accept the rendered front", so a
+    zoom or a drag streamed red errors while behaving correctly."""
+
+    plot = pytest.importorskip("zlc_plot")
+    plane, node, sequencer, monitor = live_bench
+
+    signal = node.signal_key("frames")
+    front = plane.freeze()
+    value = front.value(signal)
+    assert value is not None
+
+    host = plot.RasterPlotHost.from_plot(
+        value.snapshot,
+        _camera_image_spec(
+            plot,
+            value,
+            labels=plot.PlotLabels("live", "x", "y"),
+        ),
+    )
+    try:
+        calls = {"n": 0, "refused": 0}
+
+        def _present(_host, _operation) -> bool:
+            calls["n"] += 1
+            # the mount accepts; the NEXT two fronts hit the stale race,
+            # exactly like a wheel tick landing between staging and present
+            if calls["n"] in (2, 3):
+                calls["refused"] += 1
+                return False
+            return True
+
+        port = PlotPanelPort(
+            "panel-refusal",
+            signal,
+            display_interval_ms=100,
+            submit_projection=_submit_now,
+            replace_host=_initial_then(host),
+            present=_present,
+        )
+
+        class _Wake:
+            def __init__(self) -> None:
+                self.pending = Event()
+
+            def request_owner_wake(self) -> None:
+                self.pending.set()
+
+        arbiter = SurfaceBatchArbiter(_Wake())
+        clock = HarmonicClock((100, 200, 400, 800))
+        scheduler = BoardScheduler(plane, clock, arbiter, lambda: (port,))
+
+        deadline = time.monotonic() + 15.0
+        presented = None
+        while time.monotonic() < deadline:
+            sequencer.fire()
+            sequencer.wait_done(1.0)
+            monitor.poll()
+            scheduler.on_tick()
+            arbiter.drain(
+                lambda panel_id: port if panel_id == port.panel_id else None
+            )
+            if port.last_error is not None:
+                break
+            presented = _accepted(port, "publication")
+            if presented is not None and calls["refused"] >= 2:
+                break
+            time.sleep(0.05)
+        assert calls["refused"] >= 2, "the refusal path never ran"
+        assert port.last_error is None, port.last_error
+        assert presented is not None
+    finally:
+        host.close()

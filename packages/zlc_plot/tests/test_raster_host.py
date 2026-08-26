@@ -1346,3 +1346,37 @@ def test_press_ignores_the_crosshair_marker_in_the_painted_interaction() -> None
         host._pointer_event("cancel", 0.45, 0.45, button=2).result(timeout=10)
     finally:
         host.close(timeout=10)
+
+
+def test_scroll_is_self_relative_and_needs_no_front_currency() -> None:
+    """A 3D wheel tick commits the camera and bumps the display revision;
+    the frontend is one front behind for a beat, and demanding identity
+    currency on the NEXT tick bounced continuous zooming.  A scroll is
+    self-relative view navigation: it rides whatever front it saw."""
+
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns({"x": [0.0, 1.0, 2.0]}),
+        dtype=np.float64,
+        generation="raster-scroll-currency",
+    )
+    data = DatasetSnapshot(schema, np.array([[1.0, 2.0, 3.0]]), revision=0)
+    host = RasterPlotHost.from_plot(data, CurvePlot(AxisRef.point("x")))
+    try:
+        stale = host.wait_for_front(timeout=10)
+        host.set_size("4x4").result(timeout=10)
+        latest = host.front
+        assert latest is not None
+        assert latest.identity != stale.identity
+
+        state = host._pointer_event(
+            "scroll",
+            0.45,
+            0.45,
+            step=1.0,
+            identity=stale.identity,
+            axes=stale.interaction.axes[0],
+        ).result(timeout=10)
+        assert state is not None
+    finally:
+        host.close(timeout=10)

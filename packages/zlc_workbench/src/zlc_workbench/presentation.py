@@ -772,10 +772,14 @@ class PlotPanelPort:
         if not presented:
             if replacement is not None:
                 self._close_staged_host(replacement)
-            with self._state_lock:
-                self.last_error = present_error or RuntimeError(
-                    "plot surface did not accept the rendered front"
-                )
+            if present_error is not None:
+                with self._state_lock:
+                    self.last_error = present_error
+            # A refusal WITHOUT an exception is the widget's documented
+            # answer for a stale race -- the operator zoomed or dragged
+            # while this front was in flight, and the host's own newer
+            # front paints instead.  Recording it as a panel error turned
+            # every continuous gesture into a red-message stream.
             self._request_invalidation()
             # The batch was handled, but its candidate never became screen
             # truth.  Debt will rebuild the unchanged latest publication.
@@ -835,10 +839,11 @@ class PlotPanelPort:
             host = surface.host
         presented, error = self._put_on_screen(host, operation)
         if not presented:
-            with self._state_lock:
-                self.last_error = error or RuntimeError(
-                    "plot surface did not accept the configured front"
-                )
+            if error is not None:
+                with self._state_lock:
+                    self.last_error = error
+            # As above: refusal without an exception is stale-race flow
+            # control, not a failure to report.
             self._request_invalidation()
             return None
         description = getattr(operation, "value", None)

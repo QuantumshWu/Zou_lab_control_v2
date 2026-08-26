@@ -4185,9 +4185,12 @@ class MatplotlibRenderer:
             ),
             None,
         )
+        readout = self._artists.get(f"{key}:h3d_cage_readout")
         if scene is None or crosshair is None:
             if cage is not None:
                 cage.set_visible(False)
+            if readout is not None:
+                readout.set_visible(False)
             return
         cell = self._height_bars_cell_of(
             float(crosshair.value.x), float(crosshair.value.y)
@@ -4195,6 +4198,8 @@ class MatplotlibRenderer:
         if cell is None:
             if cage is not None:
                 cage.set_visible(False)
+            if readout is not None:
+                readout.set_visible(False)
             return
         z_low = np.asarray([min(scene.value_low, 0.0)])
         z_high = np.asarray([max(scene.value_high, 0.0)])
@@ -4218,6 +4223,54 @@ class MatplotlibRenderer:
             self._artists[f"{key}:h3d_cage"] = cage
         cage.set_data(xs, ys)
         cage.set_visible(True)
+        self._update_height_bars_readout(key, axes, crosshair, cell)
+
+    def _update_height_bars_readout(
+        self, key: str, axes: Any, crosshair: Any, cell: tuple[int, int]
+    ) -> None:
+        """The selected bar's numbers, where the heatmap crosshair puts
+        them: (x, y, z) in the axes corner, selector typography."""
+
+        from ._selector_scene import _selector_number, _selector_precision
+
+        values = getattr(self, "_height_bars_values", None)
+        frame = getattr(self, "_height_bars_data_frame", None)
+        scene = getattr(self, "_height_bars_scene_map", None)
+        if values is None or frame is None or scene is None:
+            return
+        extent = frame[0]
+        row, column = cell
+        z = float(values[row, column])
+        xp = _selector_precision(abs(extent[1] - extent[0]))
+        yp = _selector_precision(abs(extent[3] - extent[2]))
+        zp = _selector_precision(abs(scene.value_high - scene.value_low))
+        text = (
+            f"({_selector_number(float(crosshair.value.x), xp)}, "
+            f"{_selector_number(float(crosshair.value.y), yp)}, "
+            f"{_selector_number(z, zp)})"
+        )
+        readout = self._artists.get(f"{key}:h3d_cage_readout")
+        policy = self.style.render
+        inset = policy.axes_text_inset_fraction
+        if readout is None:
+            from matplotlib.colors import to_rgba
+
+            readout = axes.text(
+                1.0 - inset,
+                1.0 - inset,
+                text,
+                transform=axes.transAxes,
+                ha="right",
+                va="top",
+                fontsize=self.style.fonts.annotation_pt,
+                fontfamily=self.style.fonts.resolved_family,
+                color=to_rgba(self.style.palette.line_single),
+                zorder=8,
+            )
+            self._artists[f"{key}:h3d_cage_readout"] = readout
+        elif readout.get_text() != text:
+            readout.set_text(text)
+        readout.set_visible(True)
 
     def _image_color_lut(self, cmap_name: str, cmap: Any) -> np.ndarray:
         """The colormap's 256-entry uint8 RGBA table, cached per colormap."""

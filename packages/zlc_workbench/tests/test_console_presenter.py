@@ -5063,3 +5063,68 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     )
     assert terminal_description.semantics == live_description.semantics
     assert terminal_description.limits == live_description.limits
+
+
+def test_display_state_synchronizes_both_panel_surfaces(
+    presenter,
+    session,
+) -> None:
+    """Appearance is ONE truth over two data moments: any display value
+    committed on either surface -- a camera orbit, a colour-limit drag --
+    lands in the panel record and mirrors to the sibling.  The blacklist
+    is empty, and the sync itself never reads as staleness."""
+
+    import time as _time
+
+    node, snap = _one_shot(session)
+    panel = presenter.add_panel(node.signal_key("frames"), snap, kind="image")
+    _settle_panel_hosts(presenter, lambda: panel.host is not None)
+    assert presenter.update_panel_state(
+        panel.panel_id, {"display": {"presentation": "height_bars"}}
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.configuration is None
+        and panel.port.presentation_current,
+    )
+    assert presenter.edit_panel(panel.panel_id)
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.editor_host is not None
+        and panel.frozen_data is not None
+        and panel.frozen_data.description is not None,
+    )
+
+    def beat(condition, timeout=6.0):
+        deadline = _time.monotonic() + timeout
+        while _time.monotonic() < deadline:
+            presenter.beat()
+            if condition():
+                return True
+            _time.sleep(0.01)
+        return condition()
+
+    def live_display():
+        return panel.host.describe_display().result(
+            timeout=10
+        ).value.display_state.values
+
+    def edit_display():
+        return panel.editor_host.describe_display().result(
+            timeout=10
+        ).value.display_state.values
+
+    panel.editor_host.set_parameters(
+        {"color_min": 10.0, "color_max": 200.0}
+    ).result(timeout=10)
+    assert beat(lambda: live_display().get("color_max") == 200.0)
+    assert panel.frozen_stale is False
+
+    panel.editor_host.set_parameters({"camera_azimuth": 200.0}).result(
+        timeout=10
+    )
+    assert beat(lambda: live_display().get("camera_azimuth") == 200.0)
+
+    panel.host.set_parameters({"color_max": 150.0}).result(timeout=10)
+    assert beat(lambda: edit_display().get("color_max") == 150.0)
+    assert panel.state.display.get("color_max") == 150.0
