@@ -49,6 +49,7 @@ from zlc_atom.nodes.scan import (
     check_cancelled,
     wait_for_board,
 )
+from zlc_atom.devices.sequencer import sequencer_archive_snapshot
 from zlc_atom.nodes._framework.descriptor import ResolvedDeviceClaim
 
 
@@ -63,6 +64,7 @@ class SteppedScanMeasurement:
         self,
         *,
         sequencer: object,
+        sequencer_key: str = "sequencer",
         source: object,
         sequence: PulseSequence,
         plan: ScanPlan,
@@ -78,6 +80,7 @@ class SteppedScanMeasurement:
         self.instance_id = str(producer).strip() or "stepped_scan"
         self.producer = self.instance_id
         self.sequencer = sequencer
+        self.sequencer_key = str(sequencer_key)
         self.source = source
         self.sequence = sequence
         self.plan = plan
@@ -177,8 +180,44 @@ class SteppedScanMeasurement:
         board = self.sequencer.describe()
         rows = self.plan.rows()
         shots = self.shots_per_point
+        tunable_roles = {
+            f"tunable:{key}": key
+            for port in self.ports
+            if port.port.startswith(DEVICE_PARAM_FAMILY)
+            for key in (port.port[len(DEVICE_PARAM_FAMILY):].partition(":")[0],)
+        }
+        tunable_snapshots: dict[str, dict[str, object]] = {}
+        for axis in self.plan.axes:
+            if not axis.port.startswith(DEVICE_PARAM_FAMILY):
+                continue
+            key, separator, field = axis.port[
+                len(DEVICE_PARAM_FAMILY):
+            ].partition(":")
+            if not separator:
+                raise ValueError("device scan axis has no field")
+            fields = tunable_snapshots.setdefault(
+                f"tunable:{key}",
+                {
+                    "application": (
+                        "each published point follows a tune readback equal "
+                        "to its scan coordinate"
+                    ),
+                    "fields": {},
+                },
+            )["fields"]
+            assert isinstance(fields, dict)
+            fields[field] = {"scan_values": [float(value) for value in axis.values]}
         run_record = {
+            "node": self.instance_id,
             **self.source.describe(),
+            "named_devices": {
+                "sequencer": self.sequencer_key,
+                **tunable_roles,
+            },
+            "device_snapshots": {
+                "sequencer": sequencer_archive_snapshot(description=board),
+                **tunable_snapshots,
+            },
             "pulse": self.sequence.name,
             "plan": self.plan.to_tree(),
             "scan_shape": self.plan.shape,

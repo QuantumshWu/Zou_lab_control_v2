@@ -453,6 +453,19 @@ class CameraCycleSource:
         if records is None:
             raise RuntimeError("the scan was cancelled")
         self._taken += 1
+        run_record = self.camera_node.run_record
+        snapshots = run_record.get("device_snapshots")
+        camera_snapshot = (
+            snapshots.get("camera") if isinstance(snapshots, Mapping) else None
+        )
+        if not isinstance(camera_snapshot, Mapping):
+            raise RuntimeError("camera cycle source lost its working point")
+        event_record = dict(
+            self.camera_node._camera_event_record(records, accumulate=True)
+        )
+        event_record["device_snapshots"] = {
+            "camera": dict(camera_snapshot)
+        }
         return SignalValue(
             CAMERA_FRAMES_OUTPUT.name,
             frames_snapshot(
@@ -464,10 +477,8 @@ class CameraCycleSource:
                 value_unit=self.camera_node.frame_value_unit,
             ),
             MonitorCoverage(written_cells=len(records), total_cells=len(records)),
-            run_record=self.camera_node.run_record,
-            event_record=self.camera_node._camera_event_record(
-                records, accumulate=True
-            ),
+            run_record=run_record,
+            event_record=event_record,
         ), None
 
     def close(self) -> CameraCaptureTerminalRecord | None:
@@ -481,6 +492,7 @@ class CameraCycleSource:
         return {
             "source_camera": request.camera_key,
             "frames_per_cycle": request.frames_per_cycle,
+            "named_devices": {"camera": request.camera_key},
         }
 
 

@@ -13,14 +13,14 @@ Two jobs, kept apart:
 * :class:`FigureViewerPresenter` connects those rows and a rebuilt dataset to a
   mute view.
 
-Both stop short of interpretation.  Rows are named for the subject they came
-from and are not renamed into something friendlier, because a record whose
-labels drift from the ones the producing package used is a record you cannot
-grep for.
+Both stop short of scientific interpretation.  Logic and Device facts are
+separated into operator-facing projections, while Raw retains the archive's
+exact spelling for forensic inspection.
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -62,7 +62,8 @@ class ArchiveDescription:
     #: key is the archive's own name for it; the label is what it IS, taken
     #: from the panel record that was saved beside it.
     datasets: tuple[tuple[str, str], ...]
-    lineage: tuple[tuple[str, tuple], ...]
+    #: Plain node/edge data for the one Flow projection owned by the UI.
+    flow: Mapping[str, tuple[Mapping[str, object], ...]]
 
     @property
     def dataset_keys(self) -> tuple[str, ...]:
@@ -89,16 +90,16 @@ def describe_archive(
     label = f"{title} — {signal}" if title and signal and title != signal else title or signal
     datasets = tuple((key, label or key) for key in keys)
     recipes = {key: read_figure_plot(info, arrays, key)[1] for key in keys}
-    lineage = _lineage_tree(sections["lineage"])
+    flow = _lineage_graph(sections["lineage"], source=source)
     return ArchiveDescription(
         name=str(info.get("name", "")),
         schema=str(info.get("schema", "")),
         datasets=datasets,
-        lineage=lineage,
+        flow=flow,
         tabs=(
             ("Plot", _plot_rows(arrays, recipes)),
-            ("Measurement", _lineage_rows(sections["lineage"])),
-            ("Device", _device_rows(sections["lineage"])),
+            ("Logic", _logic_rows(sections["lineage"], source=source)),
+            ("Devices", _device_rows(sections["lineage"], source=source)),
             ("Flow", ()),
             ("Raw", _flatten(sections)),
         ),
@@ -181,123 +182,510 @@ def _lineage_nodes(value: object) -> tuple[str | None, dict[str, Mapping[str, An
     return root, nodes
 
 
-def _lineage_tree(value: object) -> tuple[tuple[str, tuple], ...]:
+def _logic_name(node: Mapping[str, Any]) -> str:
+    """Return one operator-facing Logic identity, never an archive node ID."""
+
+    record = node["record"]
+    raw_explicit = record.get("node")
+    if raw_explicit is not None and not isinstance(raw_explicit, str):
+        raise TypeError("figure Logic node identity must be text")
+    explicit = str(raw_explicit or "").strip()
+    if raw_explicit is not None and explicit != raw_explicit:
+        raise ValueError("figure Logic node identity must be canonical text")
+    if explicit:
+        return explicit
+    stream = str(node["event"]["stream"])
+    if stream.startswith("@logic/"):
+        owner, _separator, _output = stream[len("@logic/") :].rpartition("/")
+        if owner:
+            return owner
+    return stream
+
+
+def _signal_name(value: object) -> str:
+    text = str(value)
+    return text.rpartition("/")[2] if text.startswith("@logic/") else text
+
+
+def _source_run_record(
+    source: Mapping[str, object] | None,
+) -> tuple[str, str, Mapping[str, object]] | None:
+    if not isinstance(source, Mapping):
+        return None
+    record = source.get("run_record")
+    if not isinstance(record, Mapping):
+        return None
+    raw_source_task = source.get("task")
+    raw_record_node = record.get("node")
+    if raw_source_task is not None and not isinstance(raw_source_task, str):
+        raise TypeError("Figure source task must be text")
+    if raw_record_node is not None and not isinstance(raw_record_node, str):
+        raise TypeError("Task Figure Logic identity must be text")
+    source_task = str(raw_source_task or "").strip()
+    record_node = str(raw_record_node or "").strip()
+    if raw_source_task is not None and source_task != raw_source_task:
+        raise ValueError("Figure source task must be canonical text")
+    if raw_record_node is not None and record_node != raw_record_node:
+        raise ValueError("Task Figure Logic identity must be canonical text")
+    if source_task and record_node and source_task != record_node:
+        raise ValueError("Figure source task differs from its run-record Logic")
+    task = source_task or record_node
+    if not task:
+        raise ValueError("Task Figure run record has no Logic identity")
+    raw_output = source.get("report") or source.get("artifact") or source.get("signal")
+    if raw_output is not None and not isinstance(raw_output, str):
+        raise TypeError("Task Figure saved-result identity must be text")
+    output = str(raw_output or "").strip()
+    if raw_output is not None and output != raw_output:
+        raise ValueError("Task Figure saved-result identity must be canonical text")
+    if not output:
+        raise ValueError("Task Figure source does not name its saved result")
+    return task, output, record
+
+
+_DEVICE_RECORD_FIELDS = frozenset(
+    {"named_devices", "device_snapshots", "actual_devices", "device_settings"}
+)
+
+
+def _logic_record(value: object) -> object:
+    """Remove device truth recursively; the Devices tab is its sole owner."""
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _logic_record(item)
+            for key, item in value.items()
+            if key not in _DEVICE_RECORD_FIELDS
+        }
+    if isinstance(value, list):
+        return [_logic_record(item) for item in value]
+    return value
+
+
+def _logic_rows(
+    value: object,
+    *,
+    source: Mapping[str, object] | None = None,
+) -> Rows:
+    """Project saved Logic run snapshots without exposing event-N internals."""
+
+    _root, nodes = _lineage_nodes(value)
+    if not nodes:
+        saved = _source_run_record(source)
+        if saved is None:
+            return ()
+        name, output, record = saved
+        projected = _logic_record(record)
+        assert isinstance(projected, Mapping)
+        return ((
+            name,
+            {
+                "outputs": [output],
+                **{
+                    str(key): item
+                    for key, item in projected.items()
+                    if key != "node"
+                },
+            },
+        ),)
+    names = [_logic_name(node) for node in nodes.values()]
+    repeated = {name for name, count in Counter(names).items() if count > 1}
+    rows: list[tuple[str, object]] = []
+    for node in nodes.values():
+        name = _logic_name(node)
+        event = node["event"]
+        label = (
+            f"{name} · sequence {event['sequence']}"
+            if name in repeated
+            else name
+        )
+        projected = _logic_record(node["record"])
+        assert isinstance(projected, Mapping)
+        record = {
+            str(key): item
+            for key, item in projected.items()
+            if key != "node"
+        }
+        rows.append(
+            (
+                label,
+                {
+                    "outputs": [_signal_name(item) for item in node["signals"]],
+                    **record,
+                },
+            )
+        )
+    return tuple(rows)
+
+
+def _lineage_graph(
+    value: object,
+    *,
+    source: Mapping[str, object] | None = None,
+) -> dict[str, tuple[Mapping[str, object], ...]]:
+    """Project the exact saved DAG as unique Logic/Device nodes and edges."""
+
     root, nodes = _lineage_nodes(value)
     if root is None:
-        return ()
+        saved = _source_run_record(source)
+        if saved is None:
+            return {"nodes": (), "edges": ()}
+        name, output, record = saved
+        graph_nodes: list[Mapping[str, object]] = [
+            {
+                "id": "logic:source",
+                "kind": "logic",
+                "title": name,
+                "subtitle": str(output),
+                "root": True,
+                "tooltip": f"Logic: {name}\nSaved result: {output}",
+            }
+        ]
+        graph_edges: list[Mapping[str, object]] = []
+        source_devices: dict[str, list[str]] = {}
+        for role, device_key in _record_device_associations(record):
+            source_devices.setdefault(device_key, []).append(role)
+        for device_key, roles in source_devices.items():
+            graph_nodes.append(
+                {
+                    "id": f"device:{device_key}",
+                    "kind": "device",
+                    "title": device_key,
+                    "subtitle": ", ".join(roles),
+                    "root": False,
+                    "tooltip": (
+                        f"Device: {device_key}\nRoles: {', '.join(roles)}\n"
+                        f"Used by: {name}"
+                    ),
+                }
+            )
+            graph_edges.append(
+                {
+                    "source": f"device:{device_key}",
+                    "target": "logic:source",
+                    "kind": "device",
+                    "label": ", ".join(roles),
+                }
+            )
+        return {"nodes": tuple(graph_nodes), "edges": tuple(graph_edges)}
     visiting: set[str] = set()
     visited: set[str] = set()
 
-    def leaves(values: object) -> tuple[tuple[str, tuple], ...]:
-        if not isinstance(values, Mapping):
-            return ()
-        return tuple((f"{key} = {_text(item)}", ()) for key, item in values.items())
+    order: list[str] = []
 
-    def details(node: Mapping[str, Any]) -> tuple[tuple[str, tuple], ...]:
-        record = node["record"]
-        result: list[tuple[str, tuple]] = []
-        source = record.get("source_signal")
-        if source and not node["parents"]:
-            result.append((f"Source · {source}", ()))
-        source_camera = record.get("source_camera")
-        if source_camera:
-            result.append((f"Camera source · {source_camera}", ()))
-        pulse = record.get("pulse")
-        if pulse:
-            result.append((f"Pulse · {pulse}", ()))
-        plan = record.get("plan")
-        axes = plan.get("axes") if isinstance(plan, Mapping) else None
-        if isinstance(axes, (tuple, list)):
-            planned = []
-            for axis in axes:
-                if not isinstance(axis, Mapping):
-                    continue
-                port = str(axis.get("port") or "axis")
-                prefix = "Device call" if port.startswith("device:") else "Scan axis"
-                planned.append((f"{prefix} · {port} = {_text(axis.get('values'))}", ()))
-            if planned:
-                result.append(("Plan", tuple(planned)))
-        parameters = leaves(record.get("parameters"))
-        if parameters:
-            result.append(("Parameters", parameters))
-        devices = tuple(
-            (
-                f"{role} → {device_key}",
-                leaves(snapshot),
-            )
-            for role, device_key, snapshot in _record_devices(record)
-        )
-        if devices:
-            result.append(("Devices", devices))
-        return tuple(result)
-
-    def branch(node_id: str) -> tuple[str, tuple]:
+    def visit(node_id: str) -> None:
         if node_id in visiting:
             raise ValueError("figure lineage contains a cycle")
+        if node_id in visited:
+            return
         visiting.add(node_id)
         node = nodes[node_id]
-        event = node["event"]
-        signals = ", ".join(node["signals"]) or event["stream"]
-        parents = tuple(branch(parent) for parent in node["parents"])
-        node_details = details(node)
-        children = node_details + (("Upstream", parents),) if parents else node_details
+        for parent in node["parents"]:
+            visit(parent)
         visiting.remove(node_id)
         visited.add(node_id)
-        subject = str(node["record"].get("node") or event["stream"])
-        return f"{subject} → {signals} @{event['sequence']}", children
-    tree = (branch(root),)
+        order.append(node_id)
+
+    visit(root)
     if visited != set(nodes):
         raise ValueError("figure lineage contains nodes outside the root graph")
-    return tree
-
-
-def _lineage_rows(value: object) -> Rows:
-    _root, nodes = _lineage_nodes(value)
-    return tuple((node_id, node["record"]) for node_id, node in nodes.items())
+    graph_nodes: list[Mapping[str, object]] = []
+    graph_edges: list[Mapping[str, object]] = []
+    devices: dict[str, dict[str, object]] = {}
+    device_edges: set[tuple[str, str, str]] = set()
+    logic_names = [_logic_name(nodes[node_id]) for node_id in order]
+    repeated_logic = {
+        name for name, count in Counter(logic_names).items() if count > 1
+    }
+    for node_id in order:
+        node = nodes[node_id]
+        event = node["event"]
+        signals = [_signal_name(item) for item in node["signals"]]
+        graph_nodes.append(
+            {
+                "id": f"logic:{node_id}",
+                "kind": "logic",
+                "title": _logic_name(node),
+                "subtitle": (
+                    f"{', '.join(signals) or _signal_name(event['stream'])}"
+                    + (
+                        f" · sequence {event['sequence']}"
+                        if _logic_name(node) in repeated_logic
+                        else ""
+                    )
+                ),
+                "root": node_id == root,
+                "tooltip": (
+                    f"Logic: {_logic_name(node)}\n"
+                    f"Outputs: {', '.join(node['signals']) or event['stream']}"
+                ),
+            }
+        )
+        for parent in node["parents"]:
+            graph_edges.append(
+                {
+                    "source": f"logic:{parent}",
+                    "target": f"logic:{node_id}",
+                    "kind": "causal",
+                    "label": "",
+                }
+            )
+        record = node["record"]
+        event_record = node["event_record"]
+        named = _named_devices(record)
+        event_named = _named_devices(event_record)
+        for role, device_key in event_named.items():
+            previous = named.setdefault(role, device_key)
+            if previous != device_key:
+                raise ValueError(
+                    f"device role {role!r} changes inside one Logic event"
+                )
+        associations = list(named.items())
+        for association in (
+            *_record_device_associations(record),
+            *_record_device_associations(event_record),
+        ):
+            if association not in associations:
+                associations.append(association)
+        for role, device_key in associations:
+            device = devices.setdefault(
+                device_key,
+                {"roles": [], "logic": []},
+            )
+            roles = device["roles"]
+            consumers = device["logic"]
+            assert isinstance(roles, list) and isinstance(consumers, list)
+            if role not in roles:
+                roles.append(role)
+            logic_name = _logic_name(node)
+            if logic_name not in consumers:
+                consumers.append(logic_name)
+            edge = (device_key, node_id, role)
+            if edge not in device_edges:
+                device_edges.add(edge)
+                graph_edges.append(
+                    {
+                        "source": f"device:{device_key}",
+                        "target": f"logic:{node_id}",
+                        "kind": "device",
+                        "label": role,
+                    }
+                )
+    for device_key, facts in devices.items():
+        roles = tuple(str(item) for item in facts["roles"])
+        consumers = tuple(str(item) for item in facts["logic"])
+        graph_nodes.append(
+            {
+                "id": f"device:{device_key}",
+                "kind": "device",
+                "title": device_key,
+                "subtitle": ", ".join(roles),
+                "root": False,
+                "tooltip": (
+                    f"Device: {device_key}\nRoles: {', '.join(roles)}\n"
+                    f"Used by: {', '.join(consumers)}"
+                ),
+            }
+        )
+    return {"nodes": tuple(graph_nodes), "edges": tuple(graph_edges)}
 
 
 def _record_devices(
     record: Mapping[str, object],
+    *,
+    named_devices: Mapping[str, str] | None = None,
 ) -> tuple[tuple[str, str, Mapping[str, object]], ...]:
-    named = record.get("named_devices")
+    named = dict(named_devices or {})
+    local_named = _named_devices(record)
+    for role, device_key in local_named.items():
+        previous = named.setdefault(role, device_key)
+        if previous != device_key:
+            raise ValueError(
+                f"device role {role!r} names two different devices"
+            )
     snapshots = record.get("device_snapshots")
-    result = []
-    if isinstance(named, Mapping) and isinstance(snapshots, Mapping):
-        result.extend(
-            (str(role), str(named.get(role) or role), snapshot)
-            for role, snapshot in snapshots.items()
-            if isinstance(snapshot, Mapping)
-        )
+    result: list[tuple[str, str, Mapping[str, object]]] = []
+    if snapshots is not None:
+        if not isinstance(snapshots, Mapping):
+            raise TypeError("device_snapshots must be a mapping")
+        for role, snapshot in snapshots.items():
+            if not isinstance(role, str) or not role or role.strip() != role:
+                raise ValueError("device snapshot roles must be canonical text")
+            if role not in named:
+                raise ValueError(
+                    f"device snapshot role {role!r} has no stable device mapping"
+                )
+            if not isinstance(snapshot, Mapping):
+                raise TypeError("device snapshot must be an object")
+            result.append((role, named[role], snapshot))
     actual = record.get("actual_devices")
-    if isinstance(actual, Mapping):
-        result.extend(
-            (str(device_key), str(device_key), snapshot)
-            for device_key, snapshot in actual.items()
-            if isinstance(snapshot, Mapping)
-            and not any(existing[1] == str(device_key) for existing in result)
-        )
+    if actual is not None:
+        if not isinstance(actual, Mapping):
+            raise TypeError("actual_devices must be a mapping")
+        for device_key, snapshot in actual.items():
+            if (
+                not isinstance(device_key, str)
+                or not device_key
+                or device_key.strip() != device_key
+            ):
+                raise ValueError("actual device keys must be canonical text")
+            if not isinstance(snapshot, Mapping):
+                raise TypeError("actual device snapshot must be an object")
+            existing = next(
+                (item for item in result if item[1] == device_key),
+                None,
+            )
+            if existing is not None:
+                if dict(existing[2]) != dict(snapshot):
+                    raise ValueError(
+                        f"device {device_key!r} has conflicting snapshots"
+                    )
+                continue
+            result.append((device_key, device_key, snapshot))
     return tuple(result)
 
 
-def _device_rows(value: object) -> Rows:
+def _named_devices(record: Mapping[str, object]) -> dict[str, str]:
+    raw = record.get("named_devices")
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        raise TypeError("named_devices must be a mapping")
+    result: dict[str, str] = {}
+    for role, device_key in raw.items():
+        if (
+            not isinstance(role, str)
+            or not role
+            or role.strip() != role
+            or not isinstance(device_key, str)
+            or not device_key
+            or device_key.strip() != device_key
+        ):
+            raise ValueError("named device roles and keys must be canonical text")
+        result[role] = device_key
+    return result
+
+
+def _record_device_associations(
+    record: Mapping[str, object],
+) -> tuple[tuple[str, str], ...]:
+    result = list(_named_devices(record).items())
+    actual = record.get("actual_devices")
+    if actual is not None:
+        if not isinstance(actual, Mapping):
+            raise TypeError("actual_devices must be a mapping")
+        for key in actual:
+            if not isinstance(key, str) or not key or key.strip() != key:
+                raise ValueError("actual device keys must be canonical text")
+            if not any(existing == key for _role, existing in result):
+                result.append((key, key))
+    return tuple(result)
+
+
+def _device_rows(
+    value: object,
+    *,
+    source: Mapping[str, object] | None = None,
+) -> Rows:
     _root, nodes = _lineage_nodes(value)
     assert isinstance(value, Mapping)
-    baseline = tuple(
-        (
-            f"{role} → {device_key}",
-            snapshot,
+    devices: dict[str, dict[str, object]] = {}
+
+    def device(device_key: str) -> dict[str, object]:
+        return devices.setdefault(
+            str(device_key),
+            {"roles": [], "used_by": [], "snapshots": [], "settings": []},
         )
-        for node in nodes.values()
-        for role, device_key, snapshot in _record_devices(node["record"])
-    )
-    changes = tuple(
-        (
-            f"{item.get('device_key', 'device')} epoch {item.get('settings_epoch', '?')}",
-            item,
+
+    records: list[
+        tuple[str, int | None, str, Mapping[str, object], Mapping[str, str]]
+    ] = []
+    for node in nodes.values():
+        run_record = node["record"]
+        event_record = node["event_record"]
+        named = _named_devices(run_record)
+        for role, device_key in _named_devices(event_record).items():
+            previous = named.setdefault(role, device_key)
+            if previous != device_key:
+                raise ValueError(
+                    f"device role {role!r} changes inside one Logic event"
+                )
+        logic = _logic_name(node)
+        sequence = int(node["event"]["sequence"])
+        records.extend(
+            (
+                (logic, sequence, "run", run_record, named),
+                (logic, sequence, "event", event_record, named),
+            )
         )
-        for item in value["device_settings"]
-    )
-    return baseline + changes
+    if not nodes:
+        saved = _source_run_record(source)
+        if saved is not None:
+            records.append(
+                (saved[0], None, "task run", saved[2], _named_devices(saved[2]))
+            )
+    for logic, sequence, scope, record, named in records:
+        for role, raw_key in _record_device_associations(record):
+            facts = device(str(raw_key))
+            roles = facts["roles"]
+            used_by = facts["used_by"]
+            assert isinstance(roles, list) and isinstance(used_by, list)
+            if str(role) not in roles:
+                roles.append(str(role))
+            if logic not in used_by:
+                used_by.append(logic)
+        for role, device_key, snapshot in _record_devices(
+            record,
+            named_devices=named,
+        ):
+            facts = device(device_key)
+            roles = facts["roles"]
+            used_by = facts["used_by"]
+            snapshots = facts["snapshots"]
+            assert isinstance(roles, list)
+            assert isinstance(used_by, list)
+            assert isinstance(snapshots, list)
+            if role not in roles:
+                roles.append(role)
+            if logic not in used_by:
+                used_by.append(logic)
+            candidate = {
+                "logic": logic,
+                "scope": scope,
+                **({} if sequence is None else {"sequence": sequence}),
+                "snapshot": dict(snapshot),
+            }
+            if candidate not in snapshots:
+                snapshots.append(candidate)
+    for item in value["device_settings"]:
+        raw_key = item.get("device_key")
+        if (
+            not isinstance(raw_key, str)
+            or not raw_key
+            or raw_key.strip() != raw_key
+        ):
+            raise ValueError("device setting record has no canonical device_key")
+        key = raw_key
+        settings = device(key)["settings"]
+        assert isinstance(settings, list)
+        settings.append(dict(item))
+    rows = []
+    for device_key, facts in devices.items():
+        snapshots = facts["snapshots"]
+        settings = facts["settings"]
+        assert isinstance(snapshots, list) and isinstance(settings, list)
+        rows.append(
+            (
+                device_key,
+                {
+                    "roles": facts["roles"],
+                    "used_by": facts["used_by"],
+                    "snapshots": snapshots,
+                    "settings_epochs": settings,
+                },
+            )
+        )
+    return tuple(rows)
 
 
 def _flatten(value: Any, prefix: str = "") -> Rows:
@@ -919,8 +1307,7 @@ class FigureViewerPresenter:
             # and the old File/info projection untouched.
             self.view.set_title(description.name or resolved.stem)
             self.view.set_path(str(resolved))
-            self.view.set_info(description.tabs)
-            self.view.set_lineage_tree(description.lineage)
+            self.view.set_archive_info(description.tabs, description.flow)
         except BaseException:
             self.view.remove_panel(new_panel_id)
             self.panels.pop(new_panel_id, None)
@@ -934,11 +1321,11 @@ class FigureViewerPresenter:
                     or ("" if old_path is None else old_path.stem)
                 )
                 self.view.set_path("" if old_path is None else str(old_path))
-                self.view.set_info(
-                    () if old_description is None else old_description.tabs
-                )
-                self.view.set_lineage_tree(
-                    () if old_description is None else old_description.lineage
+                self.view.set_archive_info(
+                    () if old_description is None else old_description.tabs,
+                    {"nodes": (), "edges": ()}
+                    if old_description is None
+                    else old_description.flow
                 )
             except BaseException as restore_error:
                 self._discard_candidate(candidate)

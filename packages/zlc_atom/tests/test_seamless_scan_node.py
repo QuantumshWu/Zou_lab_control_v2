@@ -376,7 +376,14 @@ def test_the_table_is_the_plan_and_the_shots_ride_the_bracket(monkeypatch) -> No
         if column.name == "da_bias_x"
     )
     assert coordinate.values == pytest.approx(played)
-    assert canonical[0].run_record["slot_tick_scales"] == [2]
+    run_record = canonical[0].run_record
+    assert run_record["slot_tick_scales"] == [2]
+    assert run_record["named_devices"] == {"sequencer": "sequencer"}
+    sequencer = run_record["device_snapshots"]["sequencer"]["description"]
+    assert sequencer["clock_hz"] > 0.0
+    assert sequencer["layout_fingerprint"] > 0
+    assert sequencer["target"]["raw_lanes"]
+    assert "package_pins" in sequencer["target"]
 
 
 def test_an_authored_whole_bracket_multiplies_with_the_shots() -> None:

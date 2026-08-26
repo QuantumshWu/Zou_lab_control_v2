@@ -95,6 +95,7 @@ SEAMLESS_SCAN_SCHEMA = AuthoringSchema(
 def _build(
     *,
     sequencer: object,
+    sequencer_key: str = "sequencer",
     signal_plane: object,
     source_signal: str,
     pulse_resource: ResolvedWorkspaceResource,
@@ -129,6 +130,7 @@ def _build(
 
     return SeamlessScanMeasurement(
         sequencer=sequencer,
+        sequencer_key=sequencer_key,
         source=watched_signal_source(signal_plane, source_signal),
         sequence=sequence,
         plan=parsed,

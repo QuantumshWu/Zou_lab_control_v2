@@ -48,7 +48,7 @@ class FigureViewerView(QtWidgets.QWidget):
         self._grid_cell_kinds: tuple[str, ...] = ()
         self._closing = False
         self._info_tabs: tuple = ()
-        self._lineage_tree: tuple = ()
+        self._flow_graph: object = {"nodes": (), "edges": ()}
         root = QtWidgets.QHBoxLayout(self)
         # InfoPane owns the left/right window inset.  The host supplies only
         # the top/bottom frame.
@@ -63,8 +63,8 @@ class FigureViewerView(QtWidgets.QWidget):
             label_names=("schema_fingerprint", "coordinate_frame"),
             tabs=(
                 ("Plot", ()),
-                ("Measurement", ()),
-                ("Device", ()),
+                ("Logic", ()),
+                ("Devices", ()),
                 ("Flow", ()),
                 ("Raw", ()),
             ),
@@ -72,7 +72,7 @@ class FigureViewerView(QtWidgets.QWidget):
             path_caption="Open a saved figure archive (.npz)",
             file_filter="Saved figure archives (*.npz)",
             initial_status="Open a current saved Figure (.npz).",
-            tree_tabs=("Flow",),
+            graph_tabs=("Flow",),
             parent=self,
         )
         self.info_pane.path_committed.connect(self.path_committed)
@@ -140,28 +140,32 @@ class FigureViewerView(QtWidgets.QWidget):
         root.addWidget(holder, 1)
         self._sync_monitor_empty()
 
-    def set_info(self, tabs: tuple[tuple[str, tuple[tuple[str, object], ...]], ...]) -> None:
+    def set_archive_info(
+        self,
+        tabs: tuple[tuple[str, tuple[tuple[str, object], ...]], ...],
+        graph: object,
+    ) -> None:
+        """Replace one archive's rows and Flow in the same owner turn."""
+
+        previous_tabs = self._info_tabs
+        previous_graph = self._flow_graph
         self._info_tabs = tuple(tabs)
-        self._render_info()
-
-    def set_lineage_tree(self, tree: object) -> None:
-        """Show an exact causal tree through the view's plain-data seam."""
-
-        if not isinstance(tree, tuple):
-            raise TypeError("lineage tree must be a tuple")
-        self._lineage_tree = tree
-        # The tree has its own stable widget.  Rebuilding all five info tabs
-        # after set_info() just to populate Flow caused a visible second flash
-        # and discarded the user's current tab for no data-model reason.
-        self.info_pane.set_tree("Flow", tree)
+        self._flow_graph = graph
+        try:
+            self._render_info()
+        except BaseException:
+            self._info_tabs = previous_tabs
+            self._flow_graph = previous_graph
+            self._render_info()
+            raise
 
     def _render_info(self) -> None:
         rows = dict(self._info_tabs)
         self.info_pane.set_tabs(tuple(
             (title, () if title == "Flow" else tuple(rows.get(title, ())))
-            for title in ("Plot", "Measurement", "Device", "Flow", "Raw")
+            for title in ("Plot", "Logic", "Devices", "Flow", "Raw")
         ))
-        self.info_pane.set_tree("Flow", self._lineage_tree)
+        self.info_pane.set_graph("Flow", self._flow_graph)
 
     def set_panel_kinds(self, kinds: object) -> None:
         rows = tuple((str(key), str(label or key)) for key, label in tuple(kinds))

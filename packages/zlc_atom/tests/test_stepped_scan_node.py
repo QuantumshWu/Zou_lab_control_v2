@@ -410,6 +410,15 @@ def test_scanning_a_device_port_moves_the_camera_exposure() -> None:
         assert observed.error is None, observed.error
         assert observed.terminal
 
+        publication = plane.latest_publication(host.signal_key("scan"))
+        assert publication is not None
+        published = publication.value(host.signal_key("scan"))
+        assert published is not None
+        role = "tunable:mot_camera"
+        assert published.run_record["named_devices"][role] == "mot_camera"
+        assert published.run_record["device_snapshots"][role]["fields"][
+            "exposure_seconds"
+        ]["scan_values"] == exposures
         value = plane.current_dataset(host.signal_key("scan"))
         frames = np.asarray(value.block.values, dtype=float)
         assert frames.shape[1] == len(exposures)

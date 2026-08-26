@@ -43,7 +43,32 @@ def populate(viewer) -> None:
         },
         {"semantic": (), "display": (), "fit": (), "data_structure": (), "data_scope": ()},
     )
-    viewer.set_info((("Measurement", (("shots", 32), ("pulse", "calibration"))),))
+    viewer.set_archive_info(
+        (
+            ("Logic", (("calibration", {"shots": 32, "pulse": "calibration"}),)),
+            ("Devices", (("camera", {"exposure_seconds": 0.02}),)),
+            ("Flow", ()),
+        ),
+        {
+            "nodes": (
+                {
+                    "id": "device:camera", "kind": "device", "title": "camera",
+                    "subtitle": "Device · camera", "root": False, "tooltip": "camera",
+                },
+                {
+                    "id": "logic:calibration", "kind": "logic",
+                    "title": "calibration", "subtitle": "site map",
+                    "root": True, "tooltip": "calibration",
+                },
+            ),
+            "edges": (
+                {
+                    "source": "device:camera", "target": "logic:calibration",
+                    "kind": "device", "label": "camera",
+                },
+            ),
+        },
+    )
     viewer.set_status("fake archive: nothing was read from disk")
     print("filled: 2 datasets, 1 info tab, listening on 5 signals", flush=True)
 

@@ -160,8 +160,9 @@ embedding them or adding fingerprint/hash.
 Figure Viewer reads and fully prepares a candidate off the Qt owner, atomically
 mounts only a successful candidate, and keeps the previous accepted figure on
 failure. It accepts only the current exact Figure recipe, reconstructs the typed
-plot input without shape inference, and displays the saved direct-parent lineage
-as a tree. Its resize/save/host retirement are likewise asynchronous. TaskConsole
+plot input without shape inference, and projects the saved direct-parent lineage
+as one node-edge Flow of unique Logic and Device nodes. Its resize/save/host
+retirement are likewise asynchronous. TaskConsole
 keeps its lifecycle beat running while nodes, projections, plot hosts or Panel
 Save retire; the window stays visible until every owner is actually stopped.
 Session/device shutdown runs on the one flow-owned serial device worker used by

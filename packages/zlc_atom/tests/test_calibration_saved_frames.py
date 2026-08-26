@@ -367,6 +367,12 @@ def test_failed_calibration_analysis_saves_partial_capture_figure(
         assert run_root is not None
         assert (run_root / "figures" / "partial_capture.npz").is_file()
         assert (run_root / "figures" / "partial_capture.png").is_file()
+        partial_info, _partial_arrays = read_archive(
+            run_root / "figures" / "partial_capture.npz"
+        )
+        assert set(
+            partial_info["sections"]["source"]["run_record"]["actual_devices"]
+        ) == {"camera", "sequencer"}
         summary = json.loads(
             (run_root / "partial-summary.json").read_text(encoding="utf-8")
         )
@@ -484,6 +490,11 @@ def test_nothing_is_written_unless_the_operator_asks(tmp_path: Path) -> None:
     )
 
     site_info, site_arrays = read_archive(figures / "site_map.npz")
+    report_source = site_info["sections"]["source"]
+    assert report_source["task"] == "calibration"
+    assert set(report_source["run_record"]["actual_devices"]) == {
+        "camera", "sequencer"
+    }
     site_figure, _site_recipe = read_figure_plot(site_info, site_arrays, "data")
     assert isinstance(site_figure, ImageFrame)
     site_map = result.calibration.site_map

@@ -44,6 +44,7 @@ from zlc_runtime import DatasetOutputDeclaration, LiveDatasetOutput, MonitorCove
 
 from zlc_atom.data import snapshot_from_array
 from zlc_atom.devices.slm import SlmAdapter, canonical_phase
+from zlc_atom.devices.sequencer import sequencer_archive_snapshot
 from zlc_atom.devices.slm.solver import (
     SCIENCE_CONTEXT_ARTIFACT_CONTRACT,
     compose_science_phase,
@@ -1055,6 +1056,7 @@ class SlmFeedbackTask:
         self._effective_photoelectrons: bool | None = None
         self._effective_count_unit: str | None = None
         self._last_measured_phase: np.ndarray | None = None
+        self._actual_device_snapshots: dict[str, Mapping[str, object]] = {}
         factors = tuple(float(value) for value in probe_factors)
         if (
             not factors
@@ -1107,6 +1109,7 @@ class SlmFeedbackTask:
 
     def _run_record(self) -> dict[str, object]:
         return {
+            "node": self.instance_id,
             "calibration_path": str(self.calibration_path),
             "science_context_path": str(self.science_context_path),
             "pulse_path": str(self.pulse_path),
@@ -1124,6 +1127,54 @@ class SlmFeedbackTask:
             "feedback_gain": self.feedback_gain,
             "maximum_weight_change": self.maximum_weight_change,
         }
+
+    def _device_event_record(
+        self,
+        *,
+        include_measurement: bool,
+        candidate: int,
+    ) -> dict[str, object]:
+        """The exact working points for the candidate being published."""
+
+        if type(include_measurement) is not bool:
+            raise TypeError("include_measurement must be bool")
+        if type(candidate) is not int or candidate < 1:
+            raise ValueError("feedback device snapshot candidate must be positive")
+        snapshots: dict[str, object] = {}
+        if include_measurement:
+            missing = {"camera", "sequencer"} - set(
+                self._actual_device_snapshots
+            )
+            if missing:
+                raise RuntimeError(
+                    "measured feedback candidate has no exact device snapshot for "
+                    + ", ".join(sorted(missing))
+                )
+            snapshots.update(
+                {
+                    role: dict(self._actual_device_snapshots[role])
+                    for role in ("camera", "sequencer")
+                }
+            )
+        snapshots["slm"] = {
+            "identity": str(self.slm.identity),
+            "shape_yx": [int(value) for value in self.slm.shape_yx],
+            "command_revision": int(self.slm.command_revision),
+            "mapping_revision": int(self.slm.mapping_revision),
+            "command_receipt": dict(self.slm.last_command_receipt),
+        }
+        plain = _plain_json(
+            {
+                "device_snapshots": snapshots,
+                "device_snapshot_context": {
+                    "candidate": candidate,
+                    "measurement_completed": include_measurement,
+                },
+            }
+        )
+        if not isinstance(plain, dict):
+            raise TypeError("feedback device event record must remain an object")
+        return plain
 
     def _candidate_metadata(
         self,
@@ -1200,6 +1251,7 @@ class SlmFeedbackTask:
         phase: np.ndarray,
         candidate: int,
         history: list[dict[str, object]],
+        device_event_record: Mapping[str, object],
     ) -> None:
         candidate = int(candidate)
         if not 1 <= candidate <= self._candidate_capacity:
@@ -1296,12 +1348,16 @@ class SlmFeedbackTask:
             validity=np.isfinite(target_share)[None],
         )
         record = self._run_record()
+        if not isinstance(device_event_record, Mapping):
+            raise TypeError("candidate device_event_record must be a mapping")
+        event_record = dict(device_event_record)
         outputs = {
             CANDIDATE_PHASE_OUTPUT.name: LiveDatasetOutput(
                 CANDIDATE_PHASE_OUTPUT,
                 phase_event,
                 MonitorCoverage(1, 1, retain_at_terminal=True),
                 record,
+                event_record=event_record,
             ),
             UNIFORMITY_HISTORY_OUTPUT.name: LiveDatasetOutput(
                 UNIFORMITY_HISTORY_OUTPUT,
@@ -1312,6 +1368,7 @@ class SlmFeedbackTask:
                     retain_at_terminal=True,
                 ),
                 record,
+                event_record=event_record,
             ),
             OBSERVABLE_UNIFORMITY_HISTORY_OUTPUT.name: LiveDatasetOutput(
                 OBSERVABLE_UNIFORMITY_HISTORY_OUTPUT,
@@ -1322,6 +1379,7 @@ class SlmFeedbackTask:
                     retain_at_terminal=True,
                 ),
                 record,
+                event_record=event_record,
             ),
             SITE_SIGNAL_HISTORY_OUTPUT.name: LiveDatasetOutput(
                 SITE_SIGNAL_HISTORY_OUTPUT,
@@ -1332,6 +1390,7 @@ class SlmFeedbackTask:
                     retain_at_terminal=True,
                 ),
                 record,
+                event_record=event_record,
             ),
             TARGET_SHARE_HISTORY_OUTPUT.name: LiveDatasetOutput(
                 TARGET_SHARE_HISTORY_OUTPUT,
@@ -1342,6 +1401,7 @@ class SlmFeedbackTask:
                     retain_at_terminal=True,
                 ),
                 record,
+                event_record=event_record,
             ),
         }
         context.commit_live(outputs)
@@ -1457,10 +1517,26 @@ class SlmFeedbackTask:
         try:
             self.sequencer.safe()
             arm_sequencer(self.sequencer, pulse)
+            if "sequencer" not in self._actual_device_snapshots:
+                raw_sequencer_snapshot = self.sequencer.snapshot()
+                if not isinstance(raw_sequencer_snapshot, Mapping):
+                    raise TypeError("sequencer snapshot must be a mapping")
+                self._actual_device_snapshots["sequencer"] = (
+                    sequencer_archive_snapshot(state=raw_sequencer_snapshot)
+                )
             capture = node.prepare(should_stop=context.cancel_requested)
             actual = node.actual_working_point
             if actual is None:
                 raise RuntimeError("camera did not freeze its actual working point")
+            camera_snapshots = node.run_record.get("device_snapshots")
+            camera_snapshot = (
+                camera_snapshots.get("camera")
+                if isinstance(camera_snapshots, Mapping)
+                else None
+            )
+            if not isinstance(camera_snapshot, Mapping):
+                raise RuntimeError("Camera Measurement did not freeze its working point")
+            self._actual_device_snapshots["camera"] = dict(camera_snapshot)
             self._assert_camera_contract(actual)
             self._actual_exposure_seconds = float(actual.exposure_seconds)
             self._effective_photoelectrons = bool(node.reads_photoelectrons)
@@ -1696,7 +1772,10 @@ class SlmFeedbackTask:
         artifact_name: str | None = None,
         image_role: str = "preview",
         fit: Mapping[str, object] | None = None,
+        device_event_record: Mapping[str, object],
     ) -> tuple[Path, Path]:
+        if not isinstance(device_event_record, Mapping):
+            raise TypeError("Figure device_event_record must be a mapping")
         registered_name = str(name if artifact_name is None else artifact_name)
         base = paths["figures"] / f"{name}.png"
         try:
@@ -1709,8 +1788,13 @@ class SlmFeedbackTask:
                 fit=fit,
                 source={
                     "task": self.instance_id,
+                    "report": name,
                     "calibration_path": str(self.calibration_path),
                     "science_context_path": str(self.science_context_path),
+                    "run_record": {
+                        **self._run_record(),
+                        **dict(device_event_record),
+                    },
                 },
             )
         except BaseException:
@@ -1808,6 +1892,7 @@ class SlmFeedbackTask:
                 size="8x8",
                 image_role="figure",
                 fit={"model": "bimodal_gaussian", "fit_all_facets": True},
+                device_event_record=measurement["device_event_record"],
             )
 
     def _save_figures(
@@ -1831,6 +1916,14 @@ class SlmFeedbackTask:
             candidate_reports,
             generation=generation,
         )
+        selected_history = selected.get("history")
+        selected_device_record = (
+            selected_history.get("device_event_record")
+            if isinstance(selected_history, Mapping)
+            else None
+        )
+        if not isinstance(selected_device_record, Mapping):
+            raise RuntimeError("selected feedback candidate lost its device snapshot")
         candidate_id = AxisId("slm_feedback.candidate")
         candidate_column = PointColumn(
             candidate_id,
@@ -1906,6 +1999,7 @@ class SlmFeedbackTask:
                     y="max / min bright-dark",
                 ),
             ),
+            device_event_record=selected_device_record,
         )
 
         self._save_figure(
@@ -1924,6 +2018,7 @@ class SlmFeedbackTask:
                     y="bright - dark",
                 ),
             ),
+            device_event_record=selected_device_record,
         )
 
         self._save_figure(
@@ -1940,6 +2035,7 @@ class SlmFeedbackTask:
                     y="normalized weight",
                 ),
             ),
+            device_event_record=selected_device_record,
         )
 
         selected_samples = np.asarray(selected["samples"], dtype="<f8")
@@ -1966,7 +2062,7 @@ class SlmFeedbackTask:
             spec=FacetGridPlot(
                 AxisRef.data(str(site_axis.axis_id)),
                 HistogramPlot(
-                    PlotLabels(
+                    labels=PlotLabels(
                         title="Selected candidate site distributions",
                         x="box signal",
                         y="shots",
@@ -1974,6 +2070,7 @@ class SlmFeedbackTask:
                 ),
             ),
             parameters={"bin_count": min(60, max(10, self.shots // 2))},
+            device_event_record=selected_device_record,
         )
 
         selected_number = int(selected["candidate"])
@@ -2063,6 +2160,7 @@ class SlmFeedbackTask:
                 ),
                 labels=PlotLabels(title="Initial and selected camera mean"),
             ),
+            device_event_record=selected_device_record,
         )
 
         phase_snapshot, phase_x, phase_y = comparison_snapshot(
@@ -2081,6 +2179,7 @@ class SlmFeedbackTask:
                 ),
                 labels=PlotLabels(title="Initial and selected SLM phase"),
             ),
+            device_event_record=selected_device_record,
         )
 
     def _write_summary(
@@ -2325,11 +2424,22 @@ class SlmFeedbackTask:
         )
         candidate_number = int(candidate["candidate"])
         if republish:
+            candidate_history = candidate.get("history")
+            device_record = (
+                candidate_history.get("device_event_record")
+                if isinstance(candidate_history, Mapping)
+                else None
+            )
+            if not isinstance(device_record, Mapping):
+                raise RuntimeError(
+                    "selected feedback candidate lost its device snapshot"
+                )
             self._publish_candidate(
                 context,
                 phase=applied,
                 candidate=candidate_number,
                 history=history,
+                device_event_record=device_record,
             )
         retained_history = candidate.get("history")
         if (
@@ -2459,6 +2569,10 @@ class SlmFeedbackTask:
             )
 
     def execute(self, context: object) -> dict[str, object]:
+        self._actual_device_snapshots = {}
+        self._actual_exposure_seconds = None
+        self._effective_photoelectrons = None
+        self._effective_count_unit = None
         incoming = self._incoming_phase
         incoming_pattern = self._pattern_phase
         paths = self._prepare_artifacts(context)
@@ -2674,6 +2788,10 @@ class SlmFeedbackTask:
                     phase=applied,
                     candidate=candidate_number,
                     history=history,
+                    device_event_record=self._device_event_record(
+                        include_measurement=False,
+                        candidate=candidate_number,
+                    ),
                 )
                 samples, saturated_sites, missing_sites, mean_frame = self._measure(
                     pulse, context, iteration
@@ -3013,6 +3131,10 @@ class SlmFeedbackTask:
                         probe_baseline_control_direction[:] = (
                             probe_direction_sign
                         )
+                measured_device_record = self._device_event_record(
+                    include_measurement=True,
+                    candidate=candidate_number,
+                )
                 history.append({
                     "iteration": candidate_number,
                     "shots": self.shots,
@@ -3119,6 +3241,7 @@ class SlmFeedbackTask:
                         int(value) for value in np.flatnonzero(fit_invalid)
                     ],
                     "minimum_visibility_confidence": visibility_margin,
+                    "device_event_record": measured_device_record,
                 })
                 history[-1]["checkpoint_path"] = (
                     f"candidates/candidate-{candidate_number:04d}.npz"
@@ -3131,6 +3254,7 @@ class SlmFeedbackTask:
                     phase=applied,
                     candidate=candidate_number,
                     history=history,
+                    device_event_record=measured_device_record,
                 )
                 completed: dict[str, object] = {
                     "candidate": candidate_number,

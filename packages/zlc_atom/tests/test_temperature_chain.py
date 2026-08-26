@@ -195,6 +195,15 @@ def test_the_temperature_task_publishes_release_recapture_survival(
 
         survival_signal = host.signal_key("survival")
         survival_value = plane.current_dataset(survival_signal)
+        survival_publication = plane.latest_publication(survival_signal)
+        assert survival_publication is not None
+        survival_event = survival_publication.value(survival_signal)
+        assert survival_event is not None
+        assert survival_event.run_record["named_devices"] == {
+            "sequencer": "sequencer",
+            "camera": "camera",
+        }
+        assert "camera" in survival_event.event_record["device_snapshots"]
 
         # --- The axes: repeats x release times x sites, and the site axis is
         #     kept so one dead trap is still visible.
@@ -266,6 +275,9 @@ def test_the_temperature_task_publishes_release_recapture_survival(
         payload = json.loads(saved.read_text(encoding="utf-8"))
         assert set(payload) == {"format", "t_off", "run_record"}
         assert payload["t_off"] == {"unit": "ms", "values": list(T_OFF_MS)}
+        assert set(payload["run_record"]["device_snapshots"]) == {
+            "camera", "sequencer"
+        }
         curve = payload["run_record"]["curve"]
         np.testing.assert_allclose(curve["survival_rate"], rate, rtol=0, atol=1e-12)
         assert sum(curve["loaded_pairs"]) == judged.size
@@ -292,6 +304,9 @@ def test_the_temperature_task_publishes_release_recapture_survival(
         assert figure_path.is_file() and preview_path.is_file()
         info, arrays = read_archive(figure_path)
         assert info["schema"] == FIGURE_SCHEMA
+        assert set(
+            info["sections"]["source"]["run_record"]["device_snapshots"]
+        ) == {"camera", "sequencer"}
         from zlc_plot import PlotKind, read_figure_plot
 
         figure_data, recipe = read_figure_plot(info, arrays, "data")

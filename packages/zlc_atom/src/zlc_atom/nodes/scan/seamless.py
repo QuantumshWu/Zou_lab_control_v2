@@ -52,7 +52,7 @@ from __future__ import annotations
 
 import itertools
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
 from zlc_pulse import (
@@ -64,6 +64,7 @@ from zlc_pulse import (
     resolve_api_parameters,
     scan_columns_for,
 )
+from zlc_atom.devices.sequencer import sequencer_archive_snapshot
 from .dataset import SCAN_OUTPUT, ScanDatasetWriter
 from .plan import (
     PULSE_PARAM_FAMILY,
@@ -86,6 +87,7 @@ class SeamlessScanMeasurement:
         self,
         *,
         sequencer: object,
+        sequencer_key: str = "sequencer",
         source: object,
         sequence: PulseSequence,
         plan: ScanPlan,
@@ -98,6 +100,7 @@ class SeamlessScanMeasurement:
         self.instance_id = str(producer).strip() or "seamless_scan"
         self.producer = self.instance_id
         self.sequencer = sequencer
+        self.sequencer_key = str(sequencer_key)
         self.source = source
         self.sequence = sequence
         self.plan = plan
@@ -119,6 +122,7 @@ class SeamlessScanMeasurement:
         self.settle_seconds = float(settle_seconds)
         if not self.settle_seconds >= 0.0:
             raise ValueError("settle_seconds must be zero or more")
+        self._last_run_record: dict[str, object] | None = None
 
     @property
     def dataset_output_declarations(self):
@@ -375,6 +379,7 @@ class SeamlessScanMeasurement:
         What it returns, if anything, is published beside the frames.
         """
 
+        self._last_run_record = None
         board = self.sequencer.describe()
         inner_rows = self.board_plan.rows()
         # The board fires one cycle per POINT -- the shots play inside it as
@@ -407,7 +412,9 @@ class SeamlessScanMeasurement:
         run_record = self.run_record(
             effective_rows=effective_rows,
             slot_tick_scales=slot_tick_scales,
+            board=board,
         )
+        self._last_run_record = dict(run_record)
         writer = ScanDatasetWriter(
             effective_rows,
             axes,
@@ -474,6 +481,7 @@ class SeamlessScanMeasurement:
         *,
         effective_rows: Sequence[Sequence[float]],
         slot_tick_scales: Sequence[int],
+        board: object,
     ) -> dict[str, object]:
         """What this run WAS, in the words of the plan that drove it."""
 
@@ -495,8 +503,24 @@ class SeamlessScanMeasurement:
                 }
             )
 
+        source_record = dict(self.source.describe())
+        raw_named = source_record.pop("named_devices", {})
+        if not isinstance(raw_named, Mapping):
+            raise TypeError("scan source named_devices must be a mapping")
+        named_devices = {"sequencer": self.sequencer_key}
+        for role, device_key in raw_named.items():
+            if not isinstance(role, str) or not isinstance(device_key, str):
+                raise TypeError("scan source device roles and keys must be text")
+            previous = named_devices.setdefault(role, device_key)
+            if previous != device_key:
+                raise ValueError(f"scan device role {role!r} is ambiguous")
         return {
-            **self.source.describe(),
+            "node": self.instance_id,
+            **source_record,
+            "named_devices": named_devices,
+            "device_snapshots": {
+                "sequencer": sequencer_archive_snapshot(description=board)
+            },
             "pulse": self.sequence.name,
             "plan": {"axes": axes},
             "scan_shape": list(self.plan.shape),
@@ -505,6 +529,14 @@ class SeamlessScanMeasurement:
             "settle_seconds": self.settle_seconds,
             "slot_tick_scales": list(slot_tick_scales),
         }
+
+    @property
+    def last_run_record(self) -> Mapping[str, object] | None:
+        return (
+            None
+            if self._last_run_record is None
+            else dict(self._last_run_record)
+        )
 
     def execute(self, context: object):
         dataset, _run_record = self.acquire(context)

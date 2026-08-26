@@ -39,6 +39,7 @@ from zlc_atom.devices.camera.contract import (
     CameraWorkingPoint,
 )
 from zlc_atom.devices.camera.photoelectrons import PHOTOELECTRONS
+from zlc_atom.devices.sequencer import sequencer_archive_snapshot
 from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementNode,
     CameraMeasurementRequest,
@@ -692,7 +693,11 @@ def _save_report_images(
                 parameters={} if parameters is None else parameters,
                 size="4x4",
                 classifier_thresholds=classifier_thresholds,
-                source={"task": "calibration", "report": stem},
+                source={
+                    "task": "calibration",
+                    "report": stem,
+                    "run_record": dict(result.run_record),
+                },
             )
         except BaseException:
             figure_path = base_path.with_suffix(".npz")
@@ -1059,27 +1064,6 @@ def _plain(value: object) -> object:
     raise TypeError(f"device snapshot contains non-plain {type(value).__name__}")
 
 
-def _sequencer_snapshot(sequencer: object) -> dict[str, object]:
-    snapshot = sequencer.snapshot()
-    if not isinstance(snapshot, Mapping):
-        raise TypeError("sequencer snapshot must be a mapping")
-    fields = (
-        "opened",
-        "loaded",
-        "firing",
-        "forever",
-        "cursor",
-        "scan_count",
-        "underflow",
-        "status",
-    )
-    return {
-        key: _plain(snapshot[key])
-        for key in fields
-        if key in snapshot
-    }
-
-
 class _SiteReviewPublisher:
     """One short-lived companion producer for the operator review image."""
 
@@ -1316,13 +1300,19 @@ class CalibrationTask:
             photoelectrons = measurement.reads_photoelectrons
             value_unit = measurement.frame_value_unit
             arm_sequencer(self.sequencer, pulse)
-            sequencer_snapshot = _sequencer_snapshot(self.sequencer)
+            sequencer_state = self.sequencer.snapshot()
+            if not isinstance(sequencer_state, Mapping):
+                raise TypeError("sequencer snapshot must be a mapping")
+            sequencer_snapshot = sequencer_archive_snapshot(
+                state=sequencer_state
+            )
             run_record = self._run_record(
                 actual,
                 sequencer_snapshot,
                 pulse_facts,
                 photoelectrons=photoelectrons,
             )
+            self._partial_run_record = dict(run_record)
             if context is not None:
                 context.report_progress(
                     "Capturing calibration",
@@ -1730,6 +1720,7 @@ class CalibrationTask:
         self._result = None
         self._partial_cycles_completed = 0
         self._partial_result: CalibrationRunResult | None = None
+        self._partial_run_record: dict[str, object] | None = None
         self._site_review_record = None
         if self.request.review_detected_sites and context is None:
             raise RuntimeError(
@@ -1766,6 +1757,7 @@ class CalibrationTask:
                 if context is not None:
                     context.report_progress("Reading saved frames")
                 capture, run_record, contract = self._replay_saved_frames(context)
+                self._partial_run_record = dict(run_record)
                 pulse_facts: Mapping[str, object] = dict(
                     run_record.get("pulse") or {}
                 )
@@ -1928,8 +1920,14 @@ class CalibrationTask:
                 size="4x4",
                 source={
                     "task": "calibration",
+                    "report": "partial_capture",
                     "status": str(status),
                     "cycles_completed": self._partial_cycles_completed,
+                    **(
+                        {}
+                        if self._partial_run_record is None
+                        else {"run_record": dict(self._partial_run_record)}
+                    ),
                 },
             )
         except BaseException:

@@ -133,7 +133,7 @@ class _ViewerView:
         self.save_image_requested = _Signal()
         self.close_requested = _Signal()
         self.tabs: tuple = ()
-        self.lineage: tuple = ()
+        self.flow: object = {"nodes": (), "edges": ()}
         self.surface = None
         self.title = ""
         self.size = ""
@@ -198,11 +198,9 @@ class _ViewerView:
         self.editors[str(panel_id)] = projection
         return True
 
-    def set_info(self, tabs) -> None:
+    def set_archive_info(self, tabs, graph) -> None:
         self.tabs = tuple(tabs)
-
-    def set_lineage_tree(self, tree) -> None:
-        self.lineage = tuple(tree)
+        self.flow = graph
 
     def set_title(self, text: str) -> None:
         self.title = str(text)
@@ -371,31 +369,124 @@ def test_a_saved_dataset_comes_back_with_its_axes(saved) -> None:
 
 def test_the_description_reports_only_facts_saved_in_the_archive(saved) -> None:
     path, _snapshot = saved
-    description = describe_archive(*read_archive(path))
+    info, arrays = read_archive(path)
+    description = describe_archive(info, arrays)
     tabs = dict(description.tabs)
-    assert tuple(tabs) == ("Plot", "Measurement", "Device", "Flow", "Raw")
+    assert tuple(tabs) == ("Plot", "Logic", "Devices", "Flow", "Raw")
 
-    measurement = dict(tabs["Measurement"])
-    assert measurement
-    devices = dict(tabs["Device"])
+    logic = dict(tabs["Logic"])
+    assert tuple(logic) == ("cm",)
+    assert logic["cm"]["outputs"] == ["frames"]
+    devices = dict(tabs["Devices"])
     assert len(devices) == 1
     camera = next(iter(devices.values()))
-    assert camera["exposure_seconds"] == pytest.approx(0.02)
-    assert camera["roi_shape_yx"] == [96, 128]
+    camera_snapshot = camera["snapshots"][0]
+    assert camera_snapshot["logic"] == "cm"
+    assert camera_snapshot["scope"] == "run"
+    assert isinstance(camera_snapshot["sequence"], int)
+    working_point = camera_snapshot["snapshot"]
+    assert working_point["exposure_seconds"] == pytest.approx(0.02)
+    assert working_point["roi_shape_yx"] == [96, 128]
 
     plot_rows = dict(tabs["Plot"])
     assert "data" in plot_rows and "uint16" in plot_rows["data"]
     assert plot_rows["plot data"].startswith("image")
 
+    # Task-generated report Figures have no Runtime publication to invent a
+    # DAG from.  Their frozen source run record still projects as one real
+    # Logic node with its actual devices, rather than an empty Viewer.
+    task_info = {
+        **info,
+        "sections": {
+            **info["sections"],
+            "lineage": {"root": None, "nodes": [], "device_settings": []},
+            "source": {
+                "task": "calibration",
+                "report": "site_map",
+                "run_record": {
+                    "request": {"repeats": 12},
+                    "actual_devices": {
+                        "camera": dict(working_point),
+                        "sequencer": {"clock_hz": 50_000_000.0},
+                    },
+                },
+            },
+        },
+    }
+    task = describe_archive(task_info, arrays)
+    assert tuple(dict(dict(task.tabs)["Logic"])) == ("calibration",)
+    assert tuple(dict(dict(task.tabs)["Devices"])) == ("camera", "sequencer")
+    assert [node["title"] for node in task.flow["nodes"]] == [
+        "calibration", "camera", "sequencer"
+    ]
+    assert len(task.flow["edges"]) == 2
 
-def test_the_flow_projection_is_the_saved_exact_lineage_tree(saved) -> None:
+
+def test_the_flow_projection_is_the_saved_exact_node_edge_graph(saved) -> None:
     path, _snapshot = saved
     description = describe_archive(*read_archive(path))
-    assert description.lineage
-    assert "@logic/cm/frames" in description.lineage[0][0]
-    details = dict(description.lineage[0][1])
-    assert set(details) >= {"Parameters", "Devices"}
-    assert "camera → camera" in dict(details["Devices"])
+    nodes = {node["id"]: node for node in description.flow["nodes"]}
+    edges = description.flow["edges"]
+    assert {node["kind"] for node in nodes.values()} == {"logic", "device"}
+    logic = next(node for node in nodes.values() if node["kind"] == "logic")
+    camera = next(node for node in nodes.values() if node["kind"] == "device")
+    assert logic["title"] == "cm" and "frames" in logic["subtitle"]
+    assert camera["title"] == "camera"
+    assert any(
+        edge["source"] == camera["id"] and edge["target"] == logic["id"]
+        for edge in edges
+    )
+
+    # A convergent DAG keeps its shared event and shared device unique.
+    info, arrays = read_archive(path)
+    camera_record = next(
+        node["record"]
+        for node in info["sections"]["lineage"]["nodes"]
+        if node["record"].get("node") == "cm"
+    )
+    raw_nodes = [
+        {
+            "id": "source",
+            "event": {"stream": "@logic/cm/frames", "generation": "g", "sequence": 1},
+            "parents": [],
+            "signals": ["@logic/cm/frames"],
+            "record": camera_record,
+            "event_record": {"device_snapshots": {"camera": {"gain": 2.0}}},
+        },
+        *(
+            {
+                "id": name,
+                "event": {"stream": f"@logic/{name}/value", "generation": "g", "sequence": sequence},
+                "parents": ["source"],
+                "signals": [f"@logic/{name}/value"],
+                "record": {"node": name, "parameters": {}},
+                "event_record": {},
+            }
+            for name, sequence in (("left", 2), ("right", 3))
+        ),
+        {
+            "id": "merge",
+            "event": {"stream": "@logic/merge/value", "generation": "g", "sequence": 4},
+            "parents": ["left", "right"],
+            "signals": ["@logic/merge/value"],
+            "record": {"node": "merge", "parameters": {}},
+            "event_record": {},
+        },
+    ]
+    diamond_info = {
+        **info,
+        "sections": {
+            **info["sections"],
+            "lineage": {"root": "merge", "nodes": raw_nodes, "device_settings": []},
+        },
+    }
+    diamond = describe_archive(diamond_info, arrays).flow
+    assert sum(node["kind"] == "logic" for node in diamond["nodes"]) == 4
+    assert sum(node["kind"] == "device" for node in diamond["nodes"]) == 1
+    assert sum(edge["kind"] == "causal" for edge in diamond["edges"]) == 4
+    diamond_devices = dict(describe_archive(diamond_info, arrays).tabs)["Devices"]
+    camera_snapshots = dict(diamond_devices)["camera"]["snapshots"]
+    assert [item["scope"] for item in camera_snapshots] == ["run", "event"]
 
 
 def test_the_raw_tab_is_the_typed_document_not_a_node_probe(saved) -> None:
@@ -419,10 +510,10 @@ def test_opening_shows_the_figure_and_its_record(presenter, saved) -> None:
     assert presenter.description is not None, presenter.view.status
     assert presenter.view.title == "run.png"
     assert presenter.view.path == str(path), "the File field cannot stay empty"
-    assert dict(presenter.view.tabs)["Measurement"]
+    assert dict(presenter.view.tabs)["Logic"]
     assert presenter.view.surface is not None, presenter.view.status
     assert presenter.view.status[-1] == ("showing data", False)
-    assert presenter.view.lineage
+    assert presenter.view.flow["nodes"]
 
     panel_id = presenter._active_panel_id
     presenter.resize_panel(panel_id, "4x4")

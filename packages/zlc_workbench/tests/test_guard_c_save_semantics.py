@@ -302,12 +302,26 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
             calibration_path.resolve()
         )
         description = describe_archive(info, arrays)
-        device = next(iter(dict(dict(description.tabs)["Device"]).values()))
-        assert device["exposure_seconds"] == pytest.approx(0.02)
-        root_label, root_children = description.lineage[0]
-        assert "occupancy" in root_label
-        upstream = dict(root_children)["Upstream"]
-        assert len(upstream) == 1 and "camera_measurement" in upstream[0][0]
+        device = next(iter(dict(dict(description.tabs)["Devices"]).values()))
+        assert device["snapshots"][0]["snapshot"][
+            "exposure_seconds"
+        ] == pytest.approx(0.02)
+        graph_nodes = {node["id"]: node for node in description.flow["nodes"]}
+        graph_edges = description.flow["edges"]
+        occupancy_node = next(
+            node for node in graph_nodes.values() if node["title"] == "occupancy"
+        )
+        camera_node = next(
+            node
+            for node in graph_nodes.values()
+            if node["title"] == "camera_measurement"
+        )
+        assert any(
+            edge["source"] == camera_node["id"]
+            and edge["target"] == occupancy_node["id"]
+            and edge["kind"] == "causal"
+            for edge in graph_edges
+        )
         encoded_archive = json.dumps(info).lower()
         assert CALIBRATION_SENTINEL.lower() not in encoded_archive
         assert all(word not in encoded_archive for word in ("fingerprint", "sha256", "hash"))

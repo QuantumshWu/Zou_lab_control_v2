@@ -35,6 +35,7 @@ is the mean projection of this same truth, not a second accumulated Dataset.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
@@ -205,6 +206,7 @@ class TemperatureTask:
         )
         self._scan = SeamlessScanMeasurement(
             sequencer=sequencer,
+            sequencer_key=sequencer_key,
             source=CameraCycleSource(self._camera),
             sequence=sequence,
             plan=plan,
@@ -358,6 +360,17 @@ class TemperatureTask:
         curve: dict[str, object],
         scan_record: dict[str, object],
     ) -> dict[str, object]:
+        camera_record = self._camera.run_record
+        camera_snapshots = camera_record.get("device_snapshots")
+        scan_snapshots = scan_record.get("device_snapshots")
+        if not isinstance(camera_snapshots, Mapping) or not isinstance(
+            camera_snapshots.get("camera"), Mapping
+        ):
+            raise RuntimeError("temperature camera working point was not frozen")
+        if not isinstance(scan_snapshots, Mapping) or not isinstance(
+            scan_snapshots.get("sequencer"), Mapping
+        ):
+            raise RuntimeError("temperature sequencer working point was not frozen")
         return {
             "node": self.instance_id,
             "parameters": {
@@ -377,8 +390,12 @@ class TemperatureTask:
                 ),
             },
             "named_devices": dict(self._devices),
+            "device_snapshots": {
+                "camera": dict(camera_snapshots["camera"]),
+                "sequencer": dict(scan_snapshots["sequencer"]),
+            },
             "scan": dict(scan_record),
-            "camera": self._camera.run_record,
+            "camera": camera_record,
             "curve": dict(curve),
         }
 
@@ -392,6 +409,10 @@ class TemperatureTask:
             return
         survival = context.current_dataset(SURVIVAL_OUTPUT.name)
         curve = self._curve(survival)
+        scan_record = self._scan.last_run_record
+        if not isinstance(scan_record, Mapping):
+            raise RuntimeError("partial temperature run lost its scan record")
+        run_record = self._run_record(curve, dict(scan_record))
         summary = {
             "format": "zlc.temperature.summary",
             "status": str(status),
@@ -428,6 +449,7 @@ class TemperatureTask:
                     "task": self.instance_id,
                     "signal": SURVIVAL_OUTPUT.name,
                     "status": str(status),
+                    "run_record": run_record,
                 },
             )
         except BaseException:
@@ -542,7 +564,11 @@ class TemperatureTask:
                 ),
                 parameters={},
                 size="4x4",
-                source={"task": self.instance_id, "signal": SURVIVAL_OUTPUT.name},
+                source={
+                    "task": self.instance_id,
+                    "signal": SURVIVAL_OUTPUT.name,
+                    "run_record": record,
+                },
             )
         except BaseException:
             figure_path = figure_base.with_suffix(".npz")

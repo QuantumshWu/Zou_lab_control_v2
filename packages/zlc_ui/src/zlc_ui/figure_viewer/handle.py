@@ -111,11 +111,12 @@ class FigureViewerHandle(QtCore.QObject):
     def set_status(self, text: str, *, error: bool = False) -> None:
         self._view.set_status(text, error=error)
 
-    def set_info(self, tabs: tuple[tuple[str, tuple[tuple[str, object], ...]], ...]) -> None:
-        self._view.set_info(tabs)
-
-    def set_lineage_tree(self, tree: object) -> None:
-        self._view.set_lineage_tree(tree)
+    def set_archive_info(
+        self,
+        tabs: tuple[tuple[str, tuple[tuple[str, object], ...]], ...],
+        graph: object,
+    ) -> None:
+        self._view.set_archive_info(tabs, graph)
 
     def set_panel_sizes(self, sizes: object, default_size: str) -> None:
         self._view.set_panel_sizes(sizes, default_size)

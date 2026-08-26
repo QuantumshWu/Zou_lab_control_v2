@@ -482,6 +482,16 @@ def _task(
     )
 
 
+def _measured(task: SlmFeedbackTask, result):
+    """Give a mocked shot batch the exact device facts the real path freezes."""
+
+    task._actual_device_snapshots = {
+        "camera": {"exposure_seconds": 0.020},
+        "sequencer": {"state": {"loaded": True}},
+    }
+    return result
+
+
 def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
     descriptors = {item.api_name: item for item in discover_logic_nodes()}
     descriptor = descriptors["slm_feedback"]
@@ -985,12 +995,12 @@ def test_feedback_applies_science_context_then_measures_before_solving_update(
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration: (
+        lambda self, pulse, context, iteration: _measured(self, (
             np.zeros((self.shots, 35)),
             (),
             (),
             np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        ),
+        )),
     )
     plane = SignalDataPlane()
 
@@ -1101,12 +1111,12 @@ def test_arbitrary_sparse_geometry_matches_calibration_sites_before_updating_tar
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration: (
+        lambda self, pulse, context, iteration: _measured(self, (
             np.zeros((self.shots, len(rows))),
             (),
             (),
             np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        ),
+        )),
     )
     plane = SignalDataPlane()
     task = _task(
@@ -1179,16 +1189,16 @@ def test_uniformity_history_is_one_latest_curve_paired_with_candidate_phase(
         "_fit_contrasts",
         lambda samples, **_kwargs: _fitted_result(next(contrasts)),
     )
-    monkeypatch.setattr(
-        SlmFeedbackTask,
-        "_measure",
-        lambda self, pulse, run_context, iteration: (
+    def measure(self, pulse, run_context, iteration):
+        del pulse, run_context, iteration
+        return _measured(self, (
             np.zeros((self.shots, 35)),
             (),
             (),
             np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        ),
-    )
+        ))
+
+    monkeypatch.setattr(SlmFeedbackTask, "_measure", measure)
     task = _task(
         tmp_path,
         slm=slm,
@@ -1198,6 +1208,7 @@ def test_uniformity_history_is_one_latest_curve_paired_with_candidate_phase(
         target=_grid_target(slm.shape_yx),
         updates=2,
     )
+    task._actual_device_snapshots = {}
     try:
         result = task.execute(context)
         assert result["feedback_status"] == "completed"
@@ -1205,6 +1216,20 @@ def test_uniformity_history_is_one_latest_curve_paired_with_candidate_phase(
         np.testing.assert_allclose(output.snapshot.block.values[0, :2, 0], (4.0, 2.0))
         assert output.snapshot.block.values[0, 2, 0] <= 1.10
         assert len(context.commits) == 7
+        initial_devices = context.commits[0]["candidate_phase"].event_record
+        assert set(initial_devices["device_snapshots"]) == {"slm"}
+        assert initial_devices["device_snapshot_context"] == {
+            "candidate": 1,
+            "measurement_completed": False,
+        }
+        measured_devices = context.commits[1]["candidate_phase"].event_record
+        assert set(measured_devices["device_snapshots"]) == {
+            "camera", "sequencer", "slm"
+        }
+        assert measured_devices["device_snapshot_context"] == {
+            "candidate": 1,
+            "measurement_completed": True,
+        }
         assert not np.any(
             context.commits[0]["uniformity_history"]
             .snapshot.expanded_validity()
@@ -1223,6 +1248,10 @@ def test_uniformity_history_is_one_latest_curve_paired_with_candidate_phase(
         column = output.snapshot.block.schema.point_table.columns[0]
         assert column.name == "candidate"
         assert tuple(column.values) == (1, 2, 3, 4, 5, 6, 7)
+        info, _arrays = read_archive(tmp_path / "figures" / "uniformity_history.npz")
+        assert set(
+            info["sections"]["source"]["run_record"]["device_snapshots"]
+        ) == {"camera", "sequencer", "slm"}
     finally:
         plane.close()
 
@@ -1442,6 +1471,9 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
         def safe(self):
             return None
 
+        def snapshot(self):
+            return {"loaded": self.loaded is not None, "firing": False}
+
     sequencer = Sequencer()
     armed_buffer_sizes: list[int] = []
     original_arm = camera.arm
@@ -1497,6 +1529,25 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
         assert camera.working_point().exposure_seconds == pytest.approx(0.020)
         assert sequencer.fires == [10]
         assert armed_buffer_sizes == [10]
+        device_record = task._device_event_record(
+            include_measurement=True,
+            candidate=1,
+        )
+        assert task._run_record()["named_devices"] == {
+            "camera": task.camera_key,
+            "sequencer": task.sequencer_key,
+            "slm": task.slm_key,
+        }
+        assert set(device_record["device_snapshots"]) == {
+            "camera", "sequencer", "slm"
+        }
+        assert device_record["device_snapshots"]["camera"][
+            "exposure_seconds"
+        ] == pytest.approx(0.020)
+        assert set(device_record["device_snapshots"]["sequencer"]) == {"state"}
+        assert device_record["device_snapshots"]["slm"][
+            "command_revision"
+        ] == slm.command_revision
         signal = "@logic/slm_feedback/camera/frames"
         raw = plane.current_dataset(signal)
         assert raw.block.values.shape == (10, 1, 5, 7)
@@ -1598,6 +1649,9 @@ def test_electron_measurement_uses_current_conversion_and_saturation(
 
         def safe(self):
             return None
+
+        def snapshot(self):
+            return {"loaded": True, "firing": False}
 
     installation = create_installation("virtual")
     try:
@@ -1716,12 +1770,12 @@ def test_single_population_sites_probe_both_sides_then_measure_combined_target(
 
     def measure(self, pulse, context, iteration):
         measured_phases.append(np.array(self.slm.last_commanded_phase, copy=True))
-        return (
+        return _measured(self, (
             np.zeros((self.shots, 35)),
             (),
             (),
             np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        )
+        ))
 
     monkeypatch.setattr(SlmFeedbackTask, "_measure", measure)
     monkeypatch.setattr(
@@ -1889,12 +1943,12 @@ def test_baseline_single_with_formal_history_steps_to_bracket_midpoint_without_p
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration: (
+        lambda self, pulse, context, iteration: _measured(self, (
             np.zeros((self.shots, 35)),
             (),
             (),
             np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        ),
+        )),
     )
     monkeypatch.setattr(
         SlmFeedbackTask, "_save_figures", lambda *args, **kwargs: None
@@ -2005,12 +2059,12 @@ def test_probe_combined_counts_as_formal_update_and_reuses_episode_baseline(
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration: (
+        lambda self, pulse, context, iteration: _measured(self, (
             np.zeros((self.shots, 35)),
             (),
             (),
             np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        ),
+        )),
     )
     monkeypatch.setattr(
         SlmFeedbackTask, "_save_figures", lambda *args, **kwargs: None
@@ -2089,13 +2143,13 @@ def test_all_single_population_sites_stall_at_baseline_without_fake_probe(
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration: (
+        lambda self, pulse, context, iteration: _measured(self, (
             measured.append(np.array(self.slm.last_commanded_phase, copy=True)),
             np.zeros((self.shots, 35)),
             (),
             (),
             np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        )[1:],
+        )[1:]),
     )
     monkeypatch.setattr(
         SlmFeedbackTask, "_save_figures", lambda *args, **kwargs: None
@@ -2165,12 +2219,12 @@ def test_unchanged_solved_phase_stops_without_a_second_shot_batch(
     def measure(self, pulse, context, iteration):
         nonlocal calls
         calls += 1
-        return (
+        return _measured(self, (
             np.zeros((self.shots, 35)),
             (),
             (),
             np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        )
+        ))
 
     monkeypatch.setattr(SlmFeedbackTask, "_measure", measure)
     monkeypatch.setattr(
@@ -2236,12 +2290,12 @@ def test_persistently_single_site_probes_both_sides_then_restores_baseline(
 
     def measure(self, pulse, run_context, iteration):
         measured_phases.append(np.array(self.slm.last_commanded_phase, copy=True))
-        return (
+        return _measured(self, (
             np.zeros((self.shots, 35)),
             (),
             (),
             np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        )
+        ))
 
     monkeypatch.setattr(SlmFeedbackTask, "_measure", measure)
     monkeypatch.setattr(
@@ -2435,13 +2489,13 @@ def test_completed_run_selects_best_candidate_without_extra_shots(
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration: (
+        lambda self, pulse, context, iteration: _measured(self, (
             requested_shots.append(self.shots),
             np.zeros((self.shots, 35)),
             (),
             (),
             np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        )[1:],
+        )[1:]),
     )
     task = _task(
         tmp_path,
@@ -2514,13 +2568,13 @@ def test_valid_site_history_changes_the_next_target_correction(
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration: (
+        lambda self, pulse, context, iteration: _measured(self, (
             requested_shots.append(self.shots),
             np.zeros((self.shots, 35)),
             (),
             (),
             np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        )[1:],
+        )[1:]),
     )
     task = _task(
         tmp_path,
@@ -2617,12 +2671,12 @@ def test_stop_during_failed_first_checkpoint_retains_measured_candidate(
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration: (
+        lambda self, pulse, context, iteration: _measured(self, (
             np.zeros((self.shots, 35)),
             (),
             (),
             np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        ),
+        )),
     )
 
     def fail_first_checkpoint(self, context, paths, **kwargs):
@@ -2684,7 +2738,7 @@ def test_failure_after_a_completed_candidate_saves_figures_and_context(
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration: (
+        lambda self, pulse, context, iteration: _measured(self, (
             _mixture_samples(np.linspace(1.0, 2.0, 35), self.shots),
             (),
             (),
@@ -2692,7 +2746,7 @@ def test_failure_after_a_completed_candidate_saves_figures_and_context(
                 self.calibration.frame_contract.image_shape,
                 dtype=np.float32,
             ),
-        ),
+        )),
     )
     monkeypatch.setattr(
         feedback_module,
@@ -2729,6 +2783,16 @@ def test_failure_after_a_completed_candidate_saves_figures_and_context(
             "candidate-0001.png"
         ]
         info, arrays = read_archive(candidate_figures / "candidate-0001.npz")
+        archived_slm = info["sections"]["source"]["run_record"][
+            "device_snapshots"
+        ]["slm"]
+        assert set(
+            info["sections"]["source"]["run_record"]["device_snapshots"]
+        ) == {"camera", "sequencer", "slm"}
+        assert info["sections"]["source"]["run_record"][
+            "device_snapshot_context"
+        ] == {"candidate": 1, "measurement_completed": True}
+        assert archived_slm["command_revision"] < slm.command_revision
         _plot_input, recipe = read_figure_plot(info, arrays, "data")
         assert isinstance(recipe["spec"], FacetGridPlot)
         assert isinstance(recipe["spec"].cell, HistogramPlot)
@@ -2797,12 +2861,12 @@ def test_stop_after_terminal_commit_keeps_host_success_and_artifact(
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration: (
+        lambda self, pulse, context, iteration: _measured(self, (
             np.zeros((self.shots, 35)),
             (),
             (),
             np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        ),
+        )),
     )
     original_save = feedback_module.save_science_context
 
@@ -2906,12 +2970,12 @@ def test_terminal_save_failure_restores_incoming_and_fails_host(
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
-        lambda self, pulse, context, iteration: (
+        lambda self, pulse, context, iteration: _measured(self, (
             np.zeros((self.shots, 35)),
             (),
             (),
             np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        ),
+        )),
     )
     task = _task(
         tmp_path,
@@ -2973,12 +3037,12 @@ def test_invalid_site_holds_weight_and_never_retries_the_same_phase(
 
     def measure(self, pulse, context, iteration):
         measured_phases.append(np.array(self.slm.last_commanded_phase, copy=True))
-        return (
+        return _measured(self, (
             first,
             (),
             (4,),
             np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        )
+        ))
 
     monkeypatch.setattr(
         SlmFeedbackTask,

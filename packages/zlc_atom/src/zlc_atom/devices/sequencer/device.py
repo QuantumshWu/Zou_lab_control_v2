@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import fields
+import math
 from typing import TypeAlias
 
 from zlc_pulse.compile import CompiledProgram
@@ -12,6 +14,85 @@ from zlc_pulse.remote import RemotePulseStreamer
 
 
 Streamer: TypeAlias = PulseStreamer | RemotePulseStreamer
+
+
+def _description_snapshot(description: BoardDescription) -> dict[str, object]:
+
+    if not isinstance(description, BoardDescription):
+        raise TypeError("sequencer description must be BoardDescription")
+    target = description.target
+    return {
+        "clock_hz": float(description.clock_hz),
+        "time_step_ns": float(description.time_step_ns),
+        "layout_fingerprint": int(description.layout_fingerprint),
+        "target_abi_fingerprint": str(target.abi_fingerprint),
+        "geometry": {
+            field.name: int(getattr(description.geometry, field.name))
+            for field in fields(description.geometry)
+        },
+        "target": {
+            "raw_lanes": list(target.raw_lanes),
+            "package_pins": dict(target.package_pins),
+            "ports": [
+                {
+                    "key": port.key,
+                    "kind": port.kind,
+                    "label": port.label,
+                    "lanes": list(port.lanes),
+                    "bus_index": port.bus_index,
+                    "width": port.width,
+                    "encoding": port.encoding,
+                    "safe_value": port.safe_value,
+                    "latch_clock": port.latch_clock,
+                }
+                for port in target.ports
+            ],
+        },
+    }
+
+
+def sequencer_archive_snapshot(
+    *,
+    description: BoardDescription | None = None,
+    state: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Canonical archive snapshot of proven board facts and/or runtime state."""
+
+    if description is None and state is None:
+        raise ValueError("a sequencer archive snapshot needs description or state")
+    result: dict[str, object] = {}
+    if description is not None:
+        result["description"] = _description_snapshot(description)
+    if state is not None:
+        if not isinstance(state, Mapping):
+            raise TypeError("sequencer state must be a mapping")
+        selected: dict[str, object] = {}
+        for name in (
+            "opened",
+            "loaded",
+            "firing",
+            "cycles",
+            "reloaded_before_fire",
+            "cursor",
+            "scan_count",
+            "scan_next_chunk",
+            "underflow",
+            "status",
+            "applied_digest",
+        ):
+            if name not in state:
+                continue
+            value = state[name]
+            if value is None or type(value) in (str, bool, int):
+                selected[name] = value
+            elif type(value) is float and math.isfinite(value):
+                selected[name] = value
+            else:
+                raise TypeError(
+                    f"sequencer state {name!r} is not archive-ready"
+                )
+        result["state"] = selected
+    return result
 
 
 class SequencerDevice:
@@ -59,4 +140,4 @@ class SequencerDevice:
         return self.streamer.applied()
 
 
-__all__ = ["SequencerDevice", "Streamer"]
+__all__ = ["SequencerDevice", "Streamer", "sequencer_archive_snapshot"]

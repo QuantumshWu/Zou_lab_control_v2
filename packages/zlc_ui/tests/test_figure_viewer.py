@@ -35,11 +35,14 @@ print(tested_module.__file__)
 def test_figure_viewer_mount_reconcile_and_open_intent() -> None:
     _run_qt(
         """
-from PyQt5 import QtCore, QtTest, QtWidgets
+from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
 from zlc_ui.figure_viewer import FigureViewerHandle, FigureViewerView
 from zlc_ui.qt import ensure_qt_app
 app = ensure_qt_app(["figure-test"])
-view = FigureViewerView(); view.set_info((("Summary", (("Name", "fake"),)), ("Flow", ())))
+view = FigureViewerView(); view.set_archive_info(
+    (("Summary", (("Name", "fake"),)), ("Flow", ())),
+    {'nodes': (), 'edges': ()},
+)
 assert view.info_pane.path_edit._filter == "Saved figure archives (*.npz)"
 view.set_panel_sizes(('2x2',), '2x2')
 view.set_grid_cell_kinds(('curve', 'image', 'histogram'))
@@ -71,14 +74,48 @@ assert view.info_pane.path_edit.text() == "D:/data/2026_08_05/run.npz"
 assert committed == []
 
 handle = FigureViewerHandle(None, view)
-tree = (("fit @3", (("roi @2", (("camera @1", ()),)),)),)
-handle.set_lineage_tree(tree)
-assert view._lineage_tree == tree
-flow = view.info_pane._tree_tabs["Flow"]
-assert flow.topLevelItemCount() == 1
-assert flow.topLevelItem(0).text(0) == "fit @3"
-assert flow.topLevelItem(0).child(0).text(0) == "roi @2"
-assert flow.topLevelItem(0).child(0).child(0).text(0) == "camera @1"
+graph = {
+    'nodes': (
+        {'id': 'device:camera', 'kind': 'device', 'title': 'camera', 'subtitle': 'Device · camera', 'root': False, 'tooltip': 'camera'},
+        {'id': 'device:sequencer', 'kind': 'device', 'title': 'sequencer', 'subtitle': 'Device · sequencer', 'root': False, 'tooltip': 'sequencer'},
+        {'id': 'device:slm', 'kind': 'device', 'title': 'slm', 'subtitle': 'Device · slm', 'root': False, 'tooltip': 'slm'},
+        {'id': 'logic:camera', 'kind': 'logic', 'title': 'camera measurement', 'subtitle': 'frames', 'root': False, 'tooltip': 'camera measurement'},
+        {'id': 'logic:left', 'kind': 'logic', 'title': 'left processor', 'subtitle': 'left', 'root': False, 'tooltip': 'left'},
+        {'id': 'logic:right', 'kind': 'logic', 'title': 'right processor', 'subtitle': 'right', 'root': False, 'tooltip': 'right'},
+        {'id': 'logic:fit', 'kind': 'logic', 'title': 'fit', 'subtitle': 'amplitude', 'root': True, 'tooltip': 'fit'},
+    ),
+    'edges': (
+        {'source': 'device:camera', 'target': 'logic:camera', 'kind': 'device', 'label': 'camera'},
+        {'source': 'device:sequencer', 'target': 'logic:camera', 'kind': 'device', 'label': 'sequencer'},
+        {'source': 'device:slm', 'target': 'logic:fit', 'kind': 'device', 'label': 'slm'},
+        {'source': 'logic:camera', 'target': 'logic:left', 'kind': 'causal', 'label': ''},
+        {'source': 'logic:camera', 'target': 'logic:right', 'kind': 'causal', 'label': ''},
+        {'source': 'logic:left', 'target': 'logic:fit', 'kind': 'causal', 'label': ''},
+        {'source': 'logic:right', 'target': 'logic:fit', 'kind': 'causal', 'label': ''},
+    ),
+}
+handle.set_archive_info(view._info_tabs, graph)
+assert view._flow_graph == graph
+flow = view.info_pane._graph_tabs['Flow']
+assert flow._flow_edge_count == 7
+assert set(flow._flow_node_rects) == {
+    'device:camera', 'device:sequencer', 'device:slm',
+    'logic:camera', 'logic:left', 'logic:right', 'logic:fit'
+}
+rects = tuple(flow._flow_node_rects.values())
+assert all(not left.intersects(right) for i, left in enumerate(rects) for right in rects[i + 1:])
+scene = flow.sceneRect()
+assert all(scene.contains(rect) for rect in rects)
+for source, target, path in flow._flow_edge_paths:
+    stroker = QtGui.QPainterPathStroker(); stroker.setWidth(3.0)
+    stroke = stroker.createStroke(path)
+    crossings = tuple(
+        node_id
+        for node_id, rect in flow._flow_node_rects.items()
+        if node_id not in {source, target}
+        and stroke.intersects(rect)
+    )
+    assert not crossings, (source, target, crossings)
 
 projection = {
     'state': state,
@@ -117,7 +154,7 @@ assert type(figure.info_pane.info_tabs) is FluentTabWidget
 assert type(console.tabs) is FluentTabWidget
 assert type(figure.info_pane.info_tabs) is type(console.tabs)
 assert [figure.info_pane.info_tabs.tabText(i) for i in range(figure.info_pane.info_tabs.count())] == [
-    'Plot', 'Measurement', 'Device', 'Flow', 'Raw'
+    'Plot', 'Logic', 'Devices', 'Flow', 'Raw'
 ]
 assert [console.tabs.tabText(i) for i in range(console.tabs.count())] == ['Monitor', 'Logic']
 """
