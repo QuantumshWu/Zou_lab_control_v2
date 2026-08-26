@@ -970,6 +970,16 @@ def _qt5_plot_widget_class() -> type[Any]:
             if self._requested_dpr == selected:
                 return
             self._requested_dpr = selected
+            current_front = self._host.front
+            if current_front is not None and math.isclose(
+                float(current_front.device_pixel_ratio),
+                selected,
+                rel_tol=0.0,
+                abs_tol=1.0e-12,
+            ):
+                # Composition may already have built the Host for this exact
+                # screen.  Observing the same screen is not a render request.
+                return
             if self._pointer_button is not None or self._gesture_front is not None:
                 self._cancel_active_interaction()
             future = self._host.set_device_pixel_ratio(selected)
@@ -983,7 +993,15 @@ def _qt5_plot_widget_class() -> type[Any]:
                     if done.cancelled() or done.exception() is not None:
                         return
                     front = getattr(done.result(), "front", None)
-                    if front is not None and not self._closed:
+                    current = self._front
+                    if (
+                        front is not None
+                        and not self._closed
+                        and (
+                            current is None
+                            or front.identity.sequence > current.identity.sequence
+                        )
+                    ):
                         self._on_front(front)
 
                 future.add_done_callback(hand_over)

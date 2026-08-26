@@ -184,6 +184,23 @@ def test_initial_front_precedes_a_startup_noop_configuration() -> None:
         host.close(timeout=10)
 
 
+def test_equal_device_pixel_ratio_reuses_the_current_front() -> None:
+    host = RasterPlotHost.from_plot(
+        _snapshot(),
+        CurvePlot(AxisRef.point("x")),
+        device_pixel_ratio=2.0,
+    )
+    try:
+        first = host.wait_for_front(timeout=10)
+        unchanged = host.set_device_pixel_ratio(2.0).result(timeout=10)
+        assert unchanged.front is first
+        changed = host.set_device_pixel_ratio(1.0).result(timeout=10)
+        assert changed.front.identity.sequence == first.identity.sequence + 1
+        assert changed.front.device_pixel_ratio == 1.0
+    finally:
+        host.close(timeout=10)
+
+
 def test_close_cancels_queued_tasks() -> None:
     host = RasterPlotHost.from_plot(_snapshot(), CurvePlot(AxisRef.point("x")))
     gate = Event()

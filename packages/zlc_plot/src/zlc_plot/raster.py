@@ -1648,7 +1648,12 @@ class RasterPlotHost:
             raise ValueError("device pixel ratio must be positive")
         return self._dispatch_session(
             lambda: self._require_session().set_device_pixel_ratio(selected),
-            _mode=_DispatchMode.PUBLISH,
+            # The Qt observer asks once when its widget is constructed even
+            # when composition already built the Host at that exact DPR.
+            # A real cross-screen change advances the session presentation
+            # epoch and ADAPTIVE captures it; an equal ratio must reuse the
+            # existing front instead of publishing identical pixels.
+            _mode=_DispatchMode.ADAPTIVE,
             coalesce_key="device-pixel-ratio",
         )
 
