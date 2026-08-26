@@ -364,16 +364,32 @@ def read_figure_plot(
 
 
 def build_figure_host(
-    plot_input: object, spec: object, *, parameters: Mapping[str, object], size: str,
+    plot_input: object,
+    spec: object,
+    *,
+    parameters: Mapping[str, object],
+    size: str,
+    device_pixel_ratio: float = 1.0,
 ) -> object:
     """The shared TaskConsole/FigureViewer raster-host construction path."""
 
     from .raster import RasterPlotHost
 
-    return RasterPlotHost.from_plot(plot_input, spec, size=size, parameters=parameters)
+    return RasterPlotHost.from_plot(
+        plot_input,
+        spec,
+        size=size,
+        parameters=parameters,
+        device_pixel_ratio=device_pixel_ratio,
+    )
 
 
-def open_figure_host(plot_input: object, recipe: Mapping[str, object]) -> object:
+def open_figure_host(
+    plot_input: object,
+    recipe: Mapping[str, object],
+    *,
+    device_pixel_ratio: float = 1.0,
+) -> object:
     """Build and configure the one raster host described by a decoded recipe."""
 
     expected = {
@@ -382,7 +398,11 @@ def open_figure_host(plot_input: object, recipe: Mapping[str, object]) -> object
     }
     entry = _keys(recipe, expected, "decoded plot recipe")
     host = build_figure_host(
-        plot_input, entry["spec"], size=entry["size"], parameters=entry["parameters"],
+        plot_input,
+        entry["spec"],
+        size=entry["size"],
+        parameters=entry["parameters"],
+        device_pixel_ratio=device_pixel_ratio,
     )
     try:
         pending = host.configure(

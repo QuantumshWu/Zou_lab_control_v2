@@ -103,17 +103,15 @@ def _wheel_frozen_snapshot(editor, host, *, delta: int) -> None:
     raise AssertionError("wheel on the embedded frozen plot did not change its viewport")
 
 
-def _visible_producer_roi(editor) -> tuple[int, int, int, int]:
-    producer = editor._producer_editor
-    assert producer is not None
-    values = producer.form.read_all()
+def _visible_logic_roi(editor) -> tuple[int, int, int, int]:
+    values = editor.form.read_all()
     return tuple(
         int(values[name])
         for name in ("roi_x", "roi_y", "roi_width", "roi_height")
     )
 
 
-def test_guard_b_task_console_selector_updates_shared_draft_and_producer_restart_restarts(
+def test_guard_b_task_console_selector_updates_shared_draft_and_logic_restart_restarts(
     tmp_path,
 ) -> None:
     plot = pytest.importorskip("zlc_plot")
@@ -213,6 +211,12 @@ def test_guard_b_task_console_selector_updates_shared_draft_and_producer_restart
         panel_editor = view._panel_editors[panel.panel_id]
         assert panel_editor._surface is panel.editor_host.qt_widget()
         assert not panel_editor._surface.interaction_enabled
+        panel_editor.open_producer_button.click()
+        app.processEvents()
+        logic_editor = view._logic_editors[node_id]
+        assert window.tabs.currentWidget() is logic_editor
+        assert view.focus_panel_editor(panel.panel_id)
+        app.processEvents()
 
         # The real header switch hands all pointer gestures to both the live
         # card and its already-open frozen Edit surface.
@@ -231,7 +235,7 @@ def test_guard_b_task_console_selector_updates_shared_draft_and_producer_restart
 
         _commit_area(panel.editor_host)
         _wait_until(
-            lambda: _visible_producer_roi(panel_editor) != authored_roi,
+            lambda: _visible_logic_roi(logic_editor) != authored_roi,
             presenter,
         )
         draft = presenter.logic[node_id].draft.values
@@ -242,11 +246,11 @@ def test_guard_b_task_console_selector_updates_shared_draft_and_producer_restart
         assert selected_roi != authored_roi, (
             "committing the Image Area selector left the producer row ROI draft unchanged"
         )
-        assert _visible_producer_roi(panel_editor) == selected_roi
+        assert _visible_logic_roi(logic_editor) == selected_roi
 
         _wheel_frozen_snapshot(panel_editor, panel.editor_host, delta=120)
         _wait_until(lambda: panel.interaction_viewport is not None, presenter)
-        assert _visible_producer_roi(panel_editor) == selected_roi
+        assert _visible_logic_roi(logic_editor) == selected_roi
         visible = panel.editor_host.describe_display().result().value.viewport
         assert visible is not None
         assert visible.x.span > authored_roi[2]
@@ -260,17 +264,17 @@ def test_guard_b_task_console_selector_updates_shared_draft_and_producer_restart
         panel.editor_host.remove_selector(plot.SelectorKind.AREA).result()
         _wait_until(lambda: panel.state.selector == {}, presenter)
         _wait_until(
-            lambda: _visible_producer_roi(panel_editor) == authored_roi,
+            lambda: _visible_logic_roi(logic_editor) == authored_roi,
             presenter,
         )
-        assert _visible_producer_roi(panel_editor) == authored_roi
+        assert _visible_logic_roi(logic_editor) == authored_roi
         logic_values = view._logic_editors[node_id].form.read_all()
         assert tuple(
             int(logic_values[name])
             for name in ("roi_x", "roi_y", "roi_width", "roi_height")
         ) == authored_roi
 
-        assert presenter.restart_panel_producer(panel.panel_id) is True
+        assert presenter.start_logic(node_id) is True
         _wait_until(lambda: presenter.logic[node_id].host is not old_host, presenter)
         replacement = presenter.logic[node_id].host
         assert replacement is not None and replacement.running

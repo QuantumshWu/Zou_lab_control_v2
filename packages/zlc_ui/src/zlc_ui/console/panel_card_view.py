@@ -692,20 +692,31 @@ class PanelCardView(FluentGroupBox):
     ) -> None:
         """Replace the signal domain used by the Setting form."""
 
-        self._groups = tuple(
+        selected_groups = tuple(
             (str(producer), tuple((str(display), str(key)) for display, key in leaves))
             for producer, leaves in groups
         )
-        self._overlay_groups = tuple(
+        selected_overlay_groups = tuple(
             (str(producer), tuple((str(display), str(key)) for display, key in leaves))
             for producer, leaves in overlay_groups
         )
         current = str(current or self._state_projection.get("signal") or "")
-        if current:
-            self._state_projection["signal"] = current
-        self._state_projection["overlay_signal"] = str(
+        overlay = str(
             overlay_current or self._state_projection.get("overlay_signal") or ""
         )
+        if (
+            selected_groups == self._groups
+            and selected_overlay_groups == self._overlay_groups
+            and current == str(self._state_projection.get("signal") or "")
+            and overlay
+            == str(self._state_projection.get("overlay_signal") or "")
+        ):
+            return
+        self._groups = selected_groups
+        self._overlay_groups = selected_overlay_groups
+        if current:
+            self._state_projection["signal"] = current
+        self._state_projection["overlay_signal"] = overlay
         with signals_blocked(self.signal_combo):
             self.signal_combo.clear()
             for producer, leaves in self._groups:
@@ -718,7 +729,7 @@ class PanelCardView(FluentGroupBox):
             index = self.signal_combo.findData(current)
             if index >= 0:
                 self.signal_combo.setCurrentIndex(index)
-        self._rebuild_settings_form()
+        self._rebuild_settings_form(force=True)
 
     def set_status(self, text: str, *, error: bool) -> None:
         """Say on the card itself what a board-wide status line says about it.
@@ -910,11 +921,12 @@ class PanelCardView(FluentGroupBox):
                 )
         return values
 
-    def _rebuild_settings_form(self) -> None:
+    def _rebuild_settings_form(self, *, force: bool = False) -> None:
         if self._settings_form is not None:
             spec = self._form_spec()
-            self._settings_form.reconcile(spec, self._form_values())
-            self._settings_form.refresh()
+            values = self._form_values()
+            if force or not self._settings_form.adopt_projection(spec, values):
+                self._settings_form.reconcile(spec, values)
             self._apply_settings_enabled_state()
             self._sync_settings_body_size()
 

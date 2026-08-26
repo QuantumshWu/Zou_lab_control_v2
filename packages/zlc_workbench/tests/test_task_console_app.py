@@ -180,14 +180,15 @@ def test_formal_console_panel_state_and_histogram_edits_are_atomic(workspace) ->
             and binding.port.accepted_surface() is not None
             and bool(binding.parameter_surface.get("display"))
         )
-        # Drain the one possible Qt DPR negotiation before measuring title work.
+        # The composition gives the host this window's DPR before its first
+        # render, so mounting cannot create a second negotiation front.
         for _turn in range(5):
             presenter.beat()
             application.processEvents()
             time.sleep(0.005)
         first_sequence = binding.host.front.identity.sequence
-        # Mount is one front, plus at most one Qt DPR negotiation.
-        assert first_sequence <= 2
+        assert first_sequence == 1
+        assert binding.host.front.device_pixel_ratio == view.device_pixel_ratio()
 
         view.panel_state_changed.emit(panel_id, {"title": "Card title only"})
         settle(lambda: binding.state.title == "Card title only")
@@ -210,6 +211,11 @@ def test_formal_console_panel_state_and_histogram_edits_are_atomic(workspace) ->
             lambda: histogram.editor_open
             and histogram.editor_host is not None
             and histogram.editor_host.front is not None
+        )
+        assert histogram.editor_host.front.identity.sequence == 1
+        assert (
+            histogram.editor_host.front.device_pixel_ratio
+            == view.device_pixel_ratio()
         )
 
         for patch in (

@@ -1064,6 +1064,48 @@ class FluentParameterForm(QtWidgets.QWidget):
 
         self._prepare_population(values)
 
+    def adopt_projection(
+        self,
+        spec: FormSpec,
+        values: Mapping[str, object],
+    ) -> bool:
+        """Adopt metadata when widgets already show the exact projection."""
+
+        metadata = tuple(
+            name
+            for name in FormFieldProps.__dataclass_fields__
+            if name != "default"
+        )
+        if len(spec.fields) != len(self._spec.fields) or any(
+            any(
+                getattr(current, name) != getattr(incoming, name)
+                for name in metadata
+            )
+            for current, incoming in zip(
+                self._spec.fields,
+                spec.fields,
+                strict=True,
+            )
+        ):
+            return False
+        prepared = self._prepare_population(values)
+        for field in self._spec.fields:
+            automatic = self._auto_switches.get(field.key)
+            selected = automatic is not None and values[field.key] is None
+            if automatic is not None and automatic.isChecked() != selected:
+                return False
+            if not selected and not _widget_has_value(
+                self._handlers[field.key],
+                field,
+                self._widgets[field.key],
+                prepared[field.key],
+            ):
+                return False
+        self._spec = spec
+        self._fields = {field.key: field for field in spec.fields}
+        self._dependents = self._dependency_map(spec)
+        return True
+
     def _prepare_population(
         self,
         values: Mapping[str, object],

@@ -45,10 +45,13 @@ def build(
     install_panel_sizes()
     import zlc_plot as plot
     from ..viewer import FigureViewerPresenter
-
     def make_host(plot_input, name: str, recipe):
         del name
-        return plot.open_figure_host(plot_input, recipe)
+        return plot.open_figure_host(
+            plot_input,
+            recipe,
+            device_pixel_ratio=float(view.device_pixel_ratio()),
+        )
 
     return FigureViewerPresenter(
         view,

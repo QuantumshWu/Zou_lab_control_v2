@@ -33,6 +33,16 @@
   2.04M MEAN compute为204.124→9.719 ms，真实Windows Rolling Host中位为
   264.37→58.85 ms、P90为286.34→66.89 ms；70组reduction/validity/group矩阵满足
   既有浮点数值等价与结构精确contract，聚焦回归63项通过。
+- Panel Edit/Setting性能cut在同一真实Windows Camera Facet链上完成：Direct Producer不再嵌套
+  LogicEditor而只打开已有Logic tab；Qt owner在Host首次render前传入screen DPR；正常已settle
+  Edit首开`update_projection 3→1`、`refresh_panel_editor 3→0`、Form reconcile `19→4`、
+  独立Form refresh `4→0`、renderer present `2→1`，Editor对象树由598/337/136个
+  QObject/Widget/Layout降为500/280/115。相同FormSpec且Widget已显示目标值时Card只adopt metadata，
+  relim因果front由138/135 ms降为113/99 ms。无方法hook Edit click P50由522.3降至487.6 ms，
+  P95尾部约678→522 ms；尚未达到100 ms，剩余首轮4 Form约93–112 ms、add-tab约84–121 ms及
+  单次正确DPR render约84–104 ms已明确记录为下一性能cut，不以已完成项掩盖。最终直接UI文件
+  42项、跨层重点8项与Workbench相关六文件152项均通过；此前重负载组合中一次10秒settle长尾
+  在最终tree文件级复跑消失，目标用例另连续3/3通过。
 - PanelState只保存authored target；Live、Frozen和FigureViewer都以Plot成功返回的完整accepted
   `DisplayDescription`判断当前pixels、能力与交互。Selector/viewport observation携exact Dataset
   generation+revision，TaskConsole Console核对后才持久化、镜像或发布derivation。

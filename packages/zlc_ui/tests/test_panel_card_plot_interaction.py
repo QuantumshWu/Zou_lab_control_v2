@@ -409,6 +409,12 @@ card.set_panel_projection(
     dict(projection), {**surface, 'semantic': changed_semantic}
 )
 assert reconciles == [1]
+reconciles.clear()
+groups = (('camera', (('frames', '@logic/cm/frames'),)),)
+card.set_signal_choices(groups, current='@logic/cm/frames')
+assert reconciles == [1]
+card.set_signal_choices(groups, current='@logic/cm/frames')
+assert reconciles == [1], 'an identical signal domain must not rebuild Setting'
 long_name = '@logic/' + 'a-very-long-node-name/' * 6 + 'frames'
 card.set_panel_projection({**projection, 'title': long_name}, dict(surface))
 app.processEvents()

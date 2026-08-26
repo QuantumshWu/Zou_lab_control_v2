@@ -39,6 +39,11 @@ class FigureViewerHandle(QtCore.QObject):
         super().__init__()
         self._window = window
         self._view = view
+        dpr_target = window if window is not None else view
+        self._device_pixel_ratio = float(dpr_target.devicePixelRatioF())
+        native_window = dpr_target.windowHandle()
+        if native_window is not None:
+            native_window.screenChanged.connect(self._screen_changed)
         view.path_committed.connect(self.path_committed)
         view.add_panel_requested.connect(self.add_panel_requested)
         view.panel_state_changed.connect(self.panel_state_changed)
@@ -84,6 +89,16 @@ class FigureViewerHandle(QtCore.QObject):
     def window_title(self) -> str:
         target = self._window if self._window is not None else self._view
         return str(target.windowTitle())
+
+    def device_pixel_ratio(self) -> float:
+        """The latest GUI-owned screen scale, safe for a projection worker."""
+
+        return self._device_pixel_ratio
+
+    def _screen_changed(self, screen: object) -> None:
+        ratio = getattr(screen, "devicePixelRatio", None)
+        if callable(ratio):
+            self._device_pixel_ratio = float(ratio())
 
     # ------------------------------------------------------------- the page
 
@@ -153,6 +168,9 @@ class FigureViewerHandle(QtCore.QObject):
 
     def update_panel_editor(self, panel_id: str, projection: object) -> bool:
         return self._view.update_panel_editor(panel_id, projection)
+
+    def has_panel_editor(self, panel_id: str) -> bool:
+        return self._view.has_panel_editor(panel_id)
 
 
 __all__ = ["FigureViewerHandle"]
