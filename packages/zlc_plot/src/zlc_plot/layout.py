@@ -646,6 +646,7 @@ def _split_image(
     *,
     region_px: tuple[float, float] | None = None,
     image_aspect: float | None = None,
+    scene: bool = False,
 ) -> tuple[AxesPlan, ...]:
     """The image and its two strips, measured in units of the IMAGE's width.
 
@@ -690,11 +691,52 @@ def _split_image(
     colorbar = NormalizedBox(
         cursor, data.top, cursor + unit * split.colorbar, data.bottom
     )
+    if scene:
+        image = _scene_box(image, data, split, region_px, distribution)
     return (
         AxesPlan("image", image),
         AxesPlan("distribution", distribution),
         AxesPlan("colorbar", colorbar),
     )
+
+
+def _scene_box(
+    image: NormalizedBox,
+    data: NormalizedBox,
+    split: ImageSplit,
+    region_px: tuple[float, float] | None,
+    distribution: NormalizedBox,
+) -> NormalizedBox:
+    """The room a 3D scene of this image gets: the whole picture area.
+
+    A heatmap can reserve margins because its chrome has fixed places --
+    ticks under the bottom spine, labels left of the left one.  Turn a
+    camera and a label that hung under the floor is beside the colorbar,
+    so no margin can be reserved for a place that moves.  The scene and
+    its labels therefore share ONE region and are cut at ONE edge, and
+    that region is everything the picture side of the panel has: down to
+    one padding from the figure's left and bottom edges, out to one
+    padding from the rail beside it.  The top is the picture's own --
+    the title's room is not the scene's to take.
+
+    The padding is the gap the layout already leaves between the picture
+    and that rail, and it is one VISUAL distance, so the vertical share
+    is the horizontal one converted through the figure's pixel shape.
+    """
+
+    pad_x = split.image_distribution_gap * (image.width / split.image)
+    pad_y = pad_x
+    if region_px is not None:
+        width_px, height_px = (float(value) for value in region_px)
+        if width_px > 0.0 and height_px > 0.0:
+            figure_w = width_px / data.width
+            figure_h = height_px / data.height
+            if figure_h > 0.0:
+                pad_y = pad_x * figure_w / figure_h
+    left = min(pad_x, image.left)
+    right = max(distribution.left - pad_x, image.right)
+    bottom = max(1.0 - pad_y, image.bottom)
+    return NormalizedBox(left, image.top, min(right, 1.0), min(bottom, 1.0))
 
 
 def _split_rolling(
@@ -763,6 +805,7 @@ def resolve_surface(
     export_scale: float | None = None,
     rolling_side_distribution: bool | None = None,
     image_aspect: float | None = None,
+    image_scene: bool = False,
     layout: PlotLayoutConfig,
     style: PlotStyleConfig,
 ) -> SurfacePlan:
@@ -791,6 +834,12 @@ def resolve_surface(
         if canonical_kind != "image":
             raise ValueError("image_aspect is accepted only for Image surfaces")
         image_aspect = _finite(image_aspect, "image_aspect", positive=True)
+    if not isinstance(image_scene, bool):
+        raise TypeError("image_scene must be bool")
+    if image_scene and canonical_kind not in ("image", "facet_grid"):
+        raise ValueError(
+            "image_scene is accepted only for Image and FacetGrid surfaces"
+        )
     if canonical_kind == "facet_grid":
         if not isinstance(facet_topology, FacetTopology):
             raise TypeError("FacetGrid requires facet_topology")
@@ -844,6 +893,7 @@ def resolve_surface(
             layout.image_split,
             region_px=(data_width, data_height),
             image_aspect=image_aspect,
+            scene=image_scene,
         )
     elif canonical_kind == "rolling":
         assert rolling_side_distribution is not None
@@ -900,6 +950,7 @@ def resolve_surface(
                 union.height * figure_design_height,
             ),
             image_aspect=facet_topology.cell_aspect,
+            scene=image_scene,
         )
     else:
         axes = (AxesPlan("main", data),)

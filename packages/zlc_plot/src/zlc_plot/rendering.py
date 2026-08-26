@@ -3703,7 +3703,6 @@ class MatplotlibRenderer:
         line.set_data(segments_x, segments_y)
         line.set_visible(True)
 
-        region = self._height_bars_chrome_region(axes)
         texts = artists["texts"]
         for index, (fx, fy, content, ha, va) in enumerate(wanted_texts):
             if index < len(texts):
@@ -3721,62 +3720,16 @@ class MatplotlibRenderer:
             text.set_horizontalalignment(ha)
             text.set_verticalalignment(va)
             text.set_visible(True)
-            # A 3D label goes where the projection puts it, which is not a
-            # place any layout reserved.  It gets the room the scene owns --
-            # out to whatever sits on its right, down from under the title --
-            # and is cut off at that edge instead of printing across a
-            # neighbour that means something else.
-            text.set_clip_box(region)
+            # The label is cut at the SAME edge the scene is: the axes
+            # box is the scene's whole region -- the picture's box plus
+            # one padding all round, which the layout grew for exactly
+            # this -- so a label with nowhere left to go is cut there
+            # rather than printed across a neighbour that means
+            # something else.
             text.set_clip_on(True)
         for text in texts[len(wanted_texts):]:
             text.set_visible(False)
         self._thin_overlapping_chrome(texts[: len(wanted_texts)])
-
-    def _height_bars_chrome_region(self, axes: Any) -> Any:
-        """The room a 3D scene's own labels may occupy, in device pixels.
-
-        A 2D panel reserves margins for its chrome because it knows where
-        its chrome goes.  A rotated 3D scene does not: a tick that sat
-        below the floor a moment ago is beside the colorbar now.  So the
-        scene is given a REGION rather than a margin -- its own box grown
-        to whatever bounds it (the rail or colorbar on the right, the
-        title above) and never past it.  Inside, labels may go anywhere
-        the projection puts them; at the edge they are cut off, which is
-        the honest thing for a label with nowhere left to go.
-        """
-
-        from matplotlib.transforms import Bbox
-
-        figure = axes.figure
-        box = axes.get_window_extent()
-        left, bottom = 0.0, 0.0
-        right = float(figure.bbox.width)
-        top = float(figure.bbox.height)
-        for role in ("distribution", "colorbar"):
-            for neighbour in self._axes.get(role, ()):
-                if neighbour is axes or not neighbour.get_visible():
-                    continue
-                other = neighbour.get_window_extent()
-                if other.x0 >= box.x1:
-                    right = min(right, float(other.x0))
-                elif other.x1 <= box.x0:
-                    left = max(left, float(other.x1))
-        title = self._artists.get("figure:title")
-        if title is not None and title.get_visible():
-            try:
-                extent = title.get_window_extent(
-                    figure.canvas.get_renderer()
-                )
-            except (AttributeError, RuntimeError, ValueError):
-                extent = None
-            if extent is not None and extent.y0 >= box.y1:
-                top = min(top, float(extent.y0))
-        return Bbox.from_extents(
-            min(left, box.x0),
-            min(bottom, box.y0),
-            max(right, box.x1),
-            max(top, box.y1),
-        )
 
     def _thin_overlapping_chrome(self, texts: list) -> None:
         """Drop 3D labels that would print across one already kept.

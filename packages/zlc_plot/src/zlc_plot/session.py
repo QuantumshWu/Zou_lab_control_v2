@@ -119,6 +119,7 @@ from .specs import (
     FacetGridPlot,
     HistogramPlot,
     ImagePlot,
+    ImagePresentation,
     PlotSpec,
     PulseTimelinePlot,
     RollingPlot,
@@ -1278,9 +1279,26 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 if isinstance(spec, ImagePlot)
                 else None
             ),
+            # A 3D scene of the image is laid out as a scene: one region
+            # for the picture AND its labels, since a turned camera puts
+            # a label wherever it likes and no margin can be reserved for
+            # a place that moves.
+            image_scene=self._draws_height_bars(spec, state),
             layout=self._defaults.layout,
             style=self._defaults.style,
         )
+
+    @staticmethod
+    def _draws_height_bars(spec: PlotSpec, state: DisplayState) -> bool:
+        """Whether this surface draws its image as the 3D scene."""
+
+        if not isinstance(semantic_spec(spec), ImagePlot):
+            return False
+        try:
+            presentation = state["presentation"]
+        except KeyError:
+            return False
+        return str(presentation) == ImagePresentation.HEIGHT_BARS.value
 
     def _drawn_image_aspect(self, payload: Any) -> float | None:
         """Return the shape the renderer will actually DRAW an image at.

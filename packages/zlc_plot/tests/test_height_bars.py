@@ -1069,6 +1069,49 @@ def test_a_rotated_scene_never_prints_a_label_across_another(azimuth) -> None:
         session.close()
 
 
+def test_the_scene_and_its_labels_share_one_padded_region() -> None:
+    """A scene is laid out as a scene: ONE region, for picture and labels.
+
+    A heatmap can reserve margins because its chrome has fixed places --
+    ticks under the bottom spine, labels left of the left one.  Turn a
+    camera and a label that hung under the floor is beside the colorbar,
+    so no margin can be reserved for a place that moves.  The scene
+    therefore gets the whole picture side of the panel: down to one
+    padding from the figure's left and bottom edges, out to one padding
+    from the rail beside it, and no further up than the picture already
+    reached -- the title's room is not the scene's to take.  The padding
+    is the gap the layout already leaves between picture and rail.
+    """
+
+    def boxes(presentation):
+        session = _session()
+        try:
+            session.set_parameter("presentation", presentation)
+            session.rgba()
+            plan = session.surface_plan
+            return (
+                next(a for a in plan.axes if a.role == "image").box,
+                next(a for a in plan.axes if a.role == "distribution").box,
+                plan.figure_size_inches,
+            )
+        finally:
+            session.close()
+
+    picture, rail, figure_size = boxes("heatmap")
+    scene, scene_rail, _ = boxes("height_bars")
+    # The rails do not move: toggling the presentation re-rooms the
+    # picture, it does not re-lay the panel.
+    assert (scene_rail.left, scene_rail.right) == (rail.left, rail.right)
+    pad = rail.left - picture.right
+    assert pad > 0.0
+    figure_width, figure_height = figure_size
+    vertical = pad * figure_width / figure_height
+    assert scene.left == pytest.approx(pad)
+    assert scene.right == pytest.approx(rail.left - pad)
+    assert scene.bottom == pytest.approx(1.0 - vertical)
+    assert scene.top == pytest.approx(picture.top)
+
+
 def test_scene_labels_are_cut_off_at_the_room_the_scene_owns() -> None:
     """A 3D label goes where the projection puts it, which is not a place
     any layout reserved.  It gets the scene's own room -- out to whatever
