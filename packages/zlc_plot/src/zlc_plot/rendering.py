@@ -3347,6 +3347,12 @@ class MatplotlibRenderer:
             # grid size -- the committed frame is untouched, being drawn
             # at divisor 1 by definition.
             divisor = max(int(policy.height_bars_drag_resolution_divisor), 1)
+            # A preview is bounded in PIXELS, not just divided.  The Edit
+            # tab's canvas is several times a card's, and a fixed divisor
+            # made the identical drag cost several times as much there.
+            ceiling = max(int(policy.height_bars_drag_preview_max_px), 32)
+            if box_w > ceiling * divisor:
+                divisor = max(divisor, -(-box_w // ceiling))
         vector_outlines = (
             heights.size <= policy.height_bars_supersample_tiny_bars
             and divisor == 1
@@ -3356,14 +3362,16 @@ class MatplotlibRenderer:
         # every committed frame, whatever the grid size.  The camera
         # DRAG preview is the fast lane instead.
         supersample = 1 if divisor != 1 else 3
+        preview_width = max(box_w // divisor, 8)
+        preview_height = max(box_h // divisor, 8)
         frame, scene = render_height_bars(
             heights,
             top_rgb,
             camera=camera,
             value_limits=(low, high),
             zero_rgb=zero_rgb,
-            width=max(box_w // divisor, 8),
-            height=max(box_h // divisor, 8),
+            width=preview_width,
+            height=preview_height,
             supersample=supersample,
             pool_cache=self._artists.setdefault("image:h3d_pool_cache", {}),
             side_shades=policy.height_bars_side_shades,

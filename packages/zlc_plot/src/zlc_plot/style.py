@@ -575,6 +575,13 @@ class RenderPolicyConfig:
     #: While the camera is being dragged the raster renders at 1/divisor
     #: resolution and the release repaints at full resolution.
     height_bars_drag_resolution_divisor: int = 2
+    #: ...and never wider than this, whatever the surface measures.  A
+    #: fixed divisor makes the preview cost grow with the canvas: the
+    #: same scene that previews in 15 ms on a card takes 39 ms in the
+    #: Edit tab, which is the same drag feeling three times heavier for
+    #: no reason a hand can see.  The preview is a preview; the release
+    #: still repaints at the surface's own resolution.
+    height_bars_drag_preview_max_px: int = 360
     axes_title_pad_pt: float = 2.5
     compact_axes_title_pad_pt: float = 1.5
     figure_title_y: float = 0.992

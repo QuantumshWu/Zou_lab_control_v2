@@ -38,6 +38,7 @@ from zlc_plot import (
 )
 from zlc_plot.primitives import ImageFrame, ImagePointOverlay, PointStatus
 from zlc_ui import STATUS_SEVERITIES
+from zlc_plot.semantics import FATE_REDUCE, ROLE_FATES
 from zlc_plot.specs import semantic_spec, validate_authored_display
 from zlc_plot.ui import parameter_controls_for_kind
 from zlc_runtime import (
@@ -2244,9 +2245,32 @@ class ConsolePresenter:
                     severity="error",
                 )
                 return False
+            # THE WHOLE TABLE, not just the row the operator touched.
+            # Composing the default spec with one key discarded every fate
+            # authored before it: giving spatial-x the x fate silently
+            # returned spatial-y from group to reduced, and after a vacant
+            # intermediate state the next edit started from the kind's
+            # default -- which is what made fates look like they were
+            # fighting each other.  A bag is ONE edit (composed_spec), and
+            # the bag is the panel's table with this change applied, which
+            # is exactly how a saved board is restored.
+            edited = {
+                str(name): value
+                for name, value in dict(changes["semantic"]).items()
+            }
+            authored = {
+                str(name): value
+                for name, value in dict(current.semantic).items()
+            }
+            for name, value in edited.items():
+                if value not in ROLE_FATES:
+                    continue
+                for other, held in tuple(authored.items()):
+                    if other != name and held == value:
+                        authored[other] = authored.get(name, FATE_REDUCE)
             patch_state = replace(
                 base_state,
-                semantic=dict(changes["semantic"]),
+                semantic={**authored, **edited},
                 display={},
             )
             try:
