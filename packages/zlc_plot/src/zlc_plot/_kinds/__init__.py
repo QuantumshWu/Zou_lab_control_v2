@@ -127,6 +127,15 @@ def fitting_spec(schema: Any, kind: Any = None, *, cell: Any = None) -> Any:
         raise ValueError("only a facet grid has a cell kind")
     if kind is not None:
         grid = default_spec(schema, kind)
+        if grid is None and kind is PlotKind.FACET_GRID:
+            # The operator NAMED this kind, so the answer is not "this
+            # dataset has no obvious grid" -- that was the defaulting
+            # question.  A grid it can host is built from what one cell
+            # would show, faceted by an axis that cell leaves free; the
+            # fate table is where the operator says what it should face.
+            from .facet_grid import chosen_spec
+
+            grid = chosen_spec(schema, None)
         if cell is None or grid is None:
             return grid
         # Naming a cell kind changes the KIND of the cell, never the rule
