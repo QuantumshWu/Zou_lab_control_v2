@@ -326,6 +326,24 @@ class HostBench:
         self.host.dispatch(lambda: None)
         return result
 
+    def _do_drag_orbit(self) -> dict:
+        """Turn the 3D scene: the middle drag that owns the camera."""
+
+        axis = self._main_axis()
+        path = [
+            _inside(axis, 0.5 + 0.03 * i, 0.5 + 0.015 * i) for i in range(9)
+        ]
+        before = self._display_value("camera_azimuth")
+        result = self._drag(path, button=self.QtCore.Qt.MiddleButton)
+        result["camera_moved"] = (
+            self._display_value("camera_azimuth") != before
+        )
+        return result
+
+    def _display_value(self, name: str):
+        described = self.host.describe_display().result(timeout=FRONT_TIMEOUT)
+        return described.value.display_state.values.get(name)
+
     def _do_drag_clim(self) -> dict:
         front = self.front()
         axis = axis_by_role(front, "distribution")
