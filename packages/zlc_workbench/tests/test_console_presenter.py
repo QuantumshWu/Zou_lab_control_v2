@@ -5447,3 +5447,63 @@ def test_refresh_adopts_a_card_that_is_ahead_even_with_a_newer_shot_pending(
         "a card ahead of Edit must be adopted at once"
     )
     assert panel.frozen_data.publication is card.publication
+
+
+def test_a_replacement_host_mounts_the_view_the_operator_just_committed(
+    presenter,
+    session,
+) -> None:
+    """A projection in flight must not freeze the operator's view.
+
+    The target a replacement is staged from was captured when the
+    projection was submitted.  A drag that finishes after that -- which
+    is every drag on a live panel -- is written into the panel record but
+    not into that target, so the new generation mounted the pre-drag
+    camera and the scene jumped back to where the drag began.  Identity
+    still comes from the target; what the operator authors comes from the
+    record as it stands when the host is built.
+    """
+
+    from dataclasses import replace as _replace
+
+    node, snap = _one_shot(session)
+    panel = presenter.add_panel(node.signal_key("frames"), snap, kind="image")
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.host is not None and panel.accepted_surface is not None,
+    )
+
+    stale_target = panel.state
+    # the operator's drag lands after that target was captured
+    panel.state = _replace(
+        panel.state,
+        display={**dict(panel.state.display), "camera_azimuth": 133.0},
+    )
+
+    seen: list[object] = []
+    original = presenter._make_host
+
+    def spy(plot_input, state):
+        seen.append(state)
+        return original(plot_input, state)
+
+    presenter._make_host = spy
+    surface = panel.accepted_surface
+    assert surface is not None
+    host, _operation = presenter._stage_panel_host(
+        panel,
+        surface.plot_input,
+        None,
+        surface.publication,
+        state=stale_target,
+    )
+    try:
+        assert seen, "the replacement was never built"
+        mounted = seen[-1]
+        assert mounted.signal == stale_target.signal
+        assert mounted.display.get("camera_azimuth") == 133.0, (
+            "the replacement mounted a view the operator had already left"
+        )
+    finally:
+        presenter._make_host = original
+        presenter._retire_plot_host(host)

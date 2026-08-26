@@ -1773,6 +1773,32 @@ class ConsolePresenter:
 
         del value
 
+        # The target says WHICH DATA this projection is for; it does not
+        # say how the panel is being looked at.  It was captured when the
+        # projection was submitted, so a replacement already in flight
+        # when the operator finished a drag mounted the pre-drag camera --
+        # the record held the new one and the screen jumped back to the
+        # old one.  Identity fields still come from the target (a retarget
+        # must not be undone by a stale record); everything the operator
+        # authors comes from the record as it stands now.
+        current = binding.state
+        if (
+            current.signal == state.signal
+            and current.kind == state.kind
+            and current.cell_kind == state.cell_kind
+        ):
+            state = replace(
+                state,
+                semantic=dict(current.semantic),
+                display=dict(current.display),
+                fit=dict(current.fit),
+                size=current.size,
+                selector=dict(current.selector),
+                crosshair=dict(current.crosshair),
+                classifier_thresholds=tuple(current.classifier_thresholds),
+                focused_cell=current.focused_cell,
+            )
+
         host = self._make_host(plot_input, state)
         try:
             operation = self._match_host_to_panel(
