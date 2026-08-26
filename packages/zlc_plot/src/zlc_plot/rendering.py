@@ -3362,6 +3362,7 @@ class MatplotlibRenderer:
             background_rgb=policy.height_bars_background_rgb,
             z_fraction=policy.height_bars_z_fraction,
             bar_edges=not vector_outlines,
+            display_stretch=float(divisor),
         )
         self._height_bars_scene_map = scene
         self._height_bars_values = heights
@@ -5726,18 +5727,23 @@ class MatplotlibRenderer:
             # scene's own render is the recolour: candidate limits move
             # both the colours and the bar heights they anchor.
             stashed = self._height_bars_calls.get(key)
-            if stashed is not None:
-                axes, values, valid, extent, state, cmap_name, cmap, vid = (
-                    stashed
-                )
-                with style_context(self.style):
-                    self._update_height_bars_artist(
-                        axes, values, valid, extent, state, key,
-                        (float(selected[0]), float(selected[1])),
-                        cmap_name, cmap, valid_identity=vid,
-                    )
-                    image.set_clim(float(selected[0]), float(selected[1]))
+            if stashed is None:
+                # No stashed scene call yet: update the clim authority and
+                # wait for the next scene render.  Falling through to the
+                # 2D path would paint a HEATMAP front over the scene.
+                image.set_clim(float(selected[0]), float(selected[1]))
                 return
+            axes, values, valid, extent, state, cmap_name, cmap, vid = (
+                stashed
+            )
+            with style_context(self.style):
+                self._update_height_bars_artist(
+                    axes, values, valid, extent, state, key,
+                    (float(selected[0]), float(selected[1])),
+                    cmap_name, cmap, valid_identity=vid,
+                )
+                image.set_clim(float(selected[0]), float(selected[1]))
+            return
         with style_context(self.style):
             limits = (float(selected[0]), float(selected[1]))
             prepared = self._artists.get(f"{key}:prepared_current")

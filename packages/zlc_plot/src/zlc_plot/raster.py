@@ -1926,15 +1926,38 @@ class RasterPlotHost:
                             raise RuntimeError(
                                 "the painted pointer transform is no longer current"
                             )
-                    if effective_interaction is not None and (
-                        tuple(session._raster_interaction_snapshot())
-                        != effective_interaction.selectors
-                        or session._raster_color_limits_snapshot()
-                        != effective_interaction.color_limits
-                    ):
-                        raise RuntimeError(
-                            "the painted interaction state is no longer current"
+                    if effective_interaction is not None:
+                        # A press consumes the GRABBABLE geometry: region
+                        # edges and threshold lines.  The crosshair is a
+                        # marker -- nothing grabs it -- yet every pick
+                        # republishes a front carrying it, and demanding
+                        # marker equality rejected the very next press for
+                        # as long as the frontend lagged one front behind
+                        # (every orbit after a pick, in practice).  The
+                        # clim handles live on the distribution rail, so
+                        # their currency gates rail presses alone.
+                        def _grabbable(states: object) -> tuple:
+                            return tuple(
+                                state
+                                for state in states
+                                if state.kind is not SelectorKind.CROSSHAIR
+                            )
+
+                        stale_selectors = _grabbable(
+                            session._raster_interaction_snapshot()
+                        ) != _grabbable(effective_interaction.selectors)
+                        on_rail = (
+                            getattr(effective_axes, "role", None)
+                            == "distribution"
                         )
+                        stale_limits = on_rail and (
+                            session._raster_color_limits_snapshot()
+                            != effective_interaction.color_limits
+                        )
+                        if stale_selectors or stale_limits:
+                            raise RuntimeError(
+                                "the painted interaction state is no longer current"
+                            )
             return session._raster_pointer_event(
                 selected_action,
                 x_value,

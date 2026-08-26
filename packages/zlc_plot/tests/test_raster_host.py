@@ -1309,3 +1309,40 @@ def test_axis_resolution_grabs_what_is_visible() -> None:
     # Beyond the radius resolves to nothing, exactly as before.
     assert _axis_at_normalized(front, 0.75, 0.05, tolerance_px=10.0) is None
     assert _axis_at_normalized(front, 0.75, 0.099, tolerance_px=0.0) is None
+
+
+def test_press_ignores_the_crosshair_marker_in_the_painted_interaction() -> None:
+    """A pick republishes a front carrying its crosshair; the NEXT press
+    arrives with the previous front for as long as the frontend lags one
+    behind.  The crosshair is a marker nothing can grab, so it is not
+    part of press currency -- rejecting on it froze every orbit that
+    followed a pick."""
+
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns({"x": [0.0, 1.0, 2.0]}),
+        dtype=np.float64,
+        generation="raster-press-marker",
+    )
+    data = DatasetSnapshot(schema, np.array([[1.0, 2.0, 3.0]]), revision=0)
+    host = RasterPlotHost.from_plot(data, CurvePlot(AxisRef.point("x")))
+    try:
+        stale = host.wait_for_front(timeout=10)
+        host.set_crosshair_selector(1.0, 2.0).result(timeout=10)
+        latest = host.front
+        assert latest is not None
+        assert latest.interaction.selectors != stale.interaction.selectors
+
+        state = host._pointer_event(
+            "press",
+            0.45,
+            0.45,
+            button=2,
+            identity=stale.identity,
+            axes=stale.interaction.axes[0],
+            interaction=stale.interaction,
+        ).result(timeout=10)
+        assert state is not None
+        host._pointer_event("cancel", 0.45, 0.45, button=2).result(timeout=10)
+    finally:
+        host.close(timeout=10)

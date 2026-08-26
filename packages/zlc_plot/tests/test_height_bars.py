@@ -326,6 +326,34 @@ def test_color_limit_preview_rerenders_the_scene() -> None:
         session.close()
 
 
+def test_drag_preview_keeps_the_dense_lighting_decision() -> None:
+    """The dense-surface decision is about canvas cell size: the drag
+    preview renders at a fraction of the canvas and stretches back, and
+    judging the raster scale alone flipped mid-size grids to the lit
+    surface for the duration of every drag."""
+
+    from zlc_plot._height3d_raster import HeightBarCamera, render_height_bars
+
+    rng = np.random.default_rng(33)
+    heights = rng.random((48, 64))
+    colors = np.repeat(
+        heights[..., None].astype(np.float32).clip(0.0, 1.0), 3, axis=-1
+    )
+    camera = HeightBarCamera(azimuth_deg=-55.0)
+    flags = {}
+    for label, width, height, taps, stretch in (
+        ("committed", 320, 240, 3, 1.0),
+        ("drag", 160, 120, 1, 2.0),
+    ):
+        _, scene = render_height_bars(
+            heights, colors, camera=camera, value_limits=(0.0, 1.0),
+            width=width, height=height, supersample=taps,
+            zero_rgb=(1.0, 1.0, 1.0), display_stretch=stretch,
+        )
+        flags[label] = scene.dense
+    assert flags["committed"] == flags["drag"], flags
+
+
 def test_drag_preview_keeps_the_chrome_typography_in_place() -> None:
     """The half-resolution drag preview must not move the scene chrome.
 

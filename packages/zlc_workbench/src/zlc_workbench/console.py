@@ -3257,6 +3257,9 @@ class ConsolePresenter:
                 panel_id, host, event, frozen=frozen
             ),
         )
+        host.subscribe_display(
+            lambda state: self._enqueue_panel_display(panel_id, host, state)
+        )
         source.subscribe_observation(
             lambda observation: self._enqueue_panel_editor_observation(
                 panel_id, host, frozen, observation
@@ -4100,6 +4103,11 @@ class ConsolePresenter:
                 binding.panel_id, source_host, observation
             )
         )
+        binding.host.subscribe_display(
+            lambda state, host=binding.host: self._enqueue_panel_display(
+                binding.panel_id, host, state
+            )
+        )
         binding.selections.subscribe_focus_observation(
             lambda focused_index, subject, generation, revision: (
                 self._enqueue_panel_focus(
@@ -4127,6 +4135,68 @@ class ConsolePresenter:
                 panel_id, host, observation, frozen=frozen
             )
         )
+
+    #: The camera is DISPLAY STATE the operator mostly writes by GESTURE
+    #: (orbit, wheel zoom): the session commits it internally, so without
+    #: this channel the shared record kept the mounting-time camera and a
+    #: Setting edit -- or the Edit surface -- snapped the view back.
+    _CAMERA_KEYS = ("camera_azimuth", "camera_elevation", "camera_zoom")
+
+    def _enqueue_panel_display(
+        self,
+        panel_id: str,
+        host: object,
+        state: object,
+    ) -> None:
+        self._enqueue_panel_interaction(
+            lambda: self._settle_panel_display(panel_id, host, state)
+        )
+
+    def _settle_panel_display(
+        self,
+        panel_id: str,
+        source: object,
+        state: object,
+    ) -> None:
+        """A camera committed on either surface is the panel's view.
+
+        Both of a panel's surfaces look at the same scene from the same
+        place: a gesture-committed camera lands in the panel record (so a
+        Setting edit no longer snaps the view back) and mirrors to the
+        sibling surface.  Values already recorded are the loop-breaker.
+        """
+
+        binding = self.panels.get(str(panel_id))
+        if binding is None:
+            return
+        values = getattr(state, "values", None)
+        if values is None:
+            return
+        camera = {
+            name: float(values[name])
+            for name in self._CAMERA_KEYS
+            if name in values
+        }
+        if not camera:
+            return
+        recorded = {
+            name: binding.state.display.get(name)
+            for name in camera
+        }
+        if all(recorded[name] == camera[name] for name in camera):
+            return
+        self._remember_panel_view(
+            binding,
+            display={**dict(binding.state.display), **camera},
+        )
+        for host in (binding.host, binding.editor_host):
+            if (
+                host is None
+                or host is source
+                or (host is binding.editor_host and binding.frozen_stale)
+            ):
+                continue
+            host.set_parameters(camera)
 
     def _enqueue_panel_crosshair(
         self,
@@ -4192,11 +4262,21 @@ class ConsolePresenter:
             if document:
                 host.set_crosshair_selector(document["x"], document["y"])
             else:
-                try:
-                    host.selector_state(SelectorKind.CROSSHAIR)
-                except KeyError:
-                    continue
-                host.remove_selector(SelectorKind.CROSSHAIR)
+                # Removal must tolerate absence: the sibling may never
+                # have held the marker (a freshly mounted editor between
+                # events).  ``selector_state`` answers on the host worker,
+                # so the removal chains off its future instead of
+                # blocking the owner here.
+                state_future = host.selector_state(SelectorKind.CROSSHAIR)
+
+                def _remove_if_present(done, target=host):
+                    try:
+                        done.result()
+                    except Exception:
+                        return
+                    target.remove_selector(SelectorKind.CROSSHAIR)
+
+                state_future.add_done_callback(_remove_if_present)
         self._track_panel_configuration(
             binding,
             source,

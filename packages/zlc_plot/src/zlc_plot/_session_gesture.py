@@ -695,7 +695,10 @@ class GestureSessionMixin:
             dy = float(event.y) - gesture.origin_px[1]
             camera = HeightBarCamera(
                 azimuth_deg=gesture.start.azimuth_deg - dx * 0.35,
-                elevation_deg=gesture.start.elevation_deg + dy * 0.35,
+                # Dragging UP tips the camera DOWN toward the horizon and
+                # dragging down raises it -- the bench ruling on which way
+                # the scene follows the hand.
+                elevation_deg=gesture.start.elevation_deg - dy * 0.35,
                 zoom=gesture.start.zoom,
             )
             gesture.current = camera

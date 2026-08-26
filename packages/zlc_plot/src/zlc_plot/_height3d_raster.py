@@ -267,6 +267,7 @@ def render_height_bars(
     edge_min_cell_px: float = 3.0,
     bar_edges: bool = True,
     pool_cache: dict | None = None,
+    display_stretch: float = 1.0,
 ) -> tuple[NDArray[np.uint8], HeightBarScene]:
     """Render the grid as boxes -> ((H, W, 4) uint8 RGBA, scene map).
 
@@ -399,7 +400,15 @@ def render_height_bars(
     # fold, the elevation and the density flag -- never on the azimuth
     # within a quadrant or the zoom -- so an orbit drag reuses them
     # verbatim: an identity cache, bit-exact by construction.
-    dense_surface = scale < edge_min_cell_px * supersample
+    # The dense decision is about how big a cell looks ON THE CANVAS.
+    # A drag preview renders at a fraction of the canvas and stretches
+    # back (display_stretch = the drag divisor), so judging the raster
+    # scale alone flipped mid-size grids to the lit dense surface for
+    # the duration of every drag -- the scene brightened while turning
+    # and dimmed on release.
+    dense_surface = (
+        scale * display_stretch < edge_min_cell_px * supersample
+    )
     derived_key = (
         pool_key, quadrant, value_low, value_high,
         float(camera.elevation_deg), zero_rgb, bool(dense_surface),
