@@ -97,9 +97,13 @@ def build_panel_host(plot_input, state):
         raise ValueError(
             f"{state.signal!r} cannot be drawn as {state.kind or 'anything'}"
         )
-    spec, _semantic, parameters = project_panel_state(
-        snapshot.block.schema, spec, state
-    )
+    projection = project_panel_state(snapshot.block.schema, spec, state)
+    if not projection.drawable:
+        # A figure host draws; a table with a vacant required role does not.
+        raise ValueError(
+            f"{state.signal!r} cannot be drawn: {projection.vacancy}"
+        )
+    spec, parameters = projection.spec, projection.parameters
     return plot.build_figure_host(
         plot_input,
         spec,

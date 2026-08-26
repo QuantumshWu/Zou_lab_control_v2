@@ -21,6 +21,8 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+
+from zlc_ui import STATUS_SEVERITIES
 from zlc_plot import SelectorKind
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -245,6 +247,15 @@ class _ConsoleView:
         self.selectors = bool(enabled)
 
     def show_status(self, text: str, severity: str) -> None:
+        # The double answers for the REAL strip, vocabulary included.  It
+        # used to take any word at all, so a severity the shipped view
+        # rejects sailed through every test here and only failed in the
+        # operator's console -- where the rejection came out of a Qt slot
+        # and killed the whole application.
+        if str(severity) not in STATUS_SEVERITIES:
+            raise ValueError(
+                f"severity {severity!r} is not one of {STATUS_SEVERITIES}"
+            )
         self.status.append((str(severity), str(text)))
 
     def set_task_takeover(self, active: bool) -> None:

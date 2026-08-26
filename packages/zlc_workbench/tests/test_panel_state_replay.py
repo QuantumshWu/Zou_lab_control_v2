@@ -87,9 +87,9 @@ def test_fates_saved_under_one_representation_replay_under_the_other() -> None:
         )
         assert spec is not None
         # must not raise: absent-axis fates are dropped, the rest apply
-        resolved, semantic, _display = project_panel_state(
-            target, spec, _state(saved)
-        )
+        projection = project_panel_state(target, spec, _state(saved))
+        assert projection.drawable, projection.vacancy
+        resolved, semantic = projection.spec, projection.semantic
         assert resolved is not None
         assert set(semantic) >= _fate_names(target) - {"kind"} or True
 

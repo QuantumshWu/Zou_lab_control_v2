@@ -15,6 +15,9 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from functools import wraps
+from weakref import ref
+import logging
 from operator import attrgetter
 from pathlib import Path
 from queue import Empty, SimpleQueue
@@ -34,7 +37,7 @@ from zlc_plot import (
     image_point_overlay_from_signal,
 )
 from zlc_plot.primitives import ImageFrame, ImagePointOverlay, PointStatus
-from zlc_plot.semantics import SemanticVacancy
+from zlc_ui import STATUS_SEVERITIES
 from zlc_plot.specs import semantic_spec, validate_authored_display
 from zlc_plot.ui import parameter_controls_for_kind
 from zlc_runtime import (
@@ -337,6 +340,21 @@ class _LayoutCandidate:
     incompatible_panels: tuple[tuple[str, str], ...] = ()
 
 
+#: Where a defect that crossed the Qt boundary is written down.  A status
+#: line tells the operator; this tells whoever has to fix it.
+_LOG = logging.getLogger(__name__)
+
+
+class PanelNotDrawable(ValueError):
+    """There is nothing for this panel to draw, so there is no host target.
+
+    Either the Dataset offers no such plot, or the operator's own table
+    leaves a required role vacant.  Named so the mount and reconfigure
+    paths can say it out loud, and a ``ValueError`` so a path nobody
+    foresaw degrades into an ordinary refusal instead of an abort.
+    """
+
+
 class ConsolePresenter:
     """Wires a console view to a running session."""
 
@@ -466,6 +484,49 @@ class ConsolePresenter:
 
     # ------------------------------------------------------------------ wiring
 
+    def _guarded(self, handler):
+        """Wrap one view-signal handler so a defect cannot kill the bench.
+
+        A presenter method connected to a Qt signal IS a slot, and an
+        exception leaving a slot is not reported anywhere: PyQt calls
+        qFatal(), the process dies where it stands, and the operator loses
+        a running experiment, every mounted panel and any chance of a
+        traceback.  That is how one mistyped status severity -- three
+        frames below a panel edit -- took the whole console down.
+
+        The guard is exactly here, at the boundary where a method becomes a
+        slot, and nowhere else: called directly (as the tests call them)
+        these methods still raise, so a defect is still loud where loudness
+        costs nothing.  Crossing into Qt, it becomes an error line and a
+        traceback on stderr, and the instrument keeps running.
+        """
+
+        name = handler.__name__
+        # A WEAK reference, deliberately.  Qt keeps a strong reference to a
+        # plain callable and only a weak one to a bound method, so wrapping
+        # the bound method in a closure would have the view hold the
+        # presenter -- and every host, worker and thread it owns -- alive
+        # for as long as the window exists.  Holding the presenter weakly
+        # keeps the lifetime exactly as it was before this guard existed.
+        reference = ref(self)
+
+        @wraps(handler)
+        def guarded(*args, **kwargs):
+            presenter = reference()
+            if presenter is None:
+                return None
+            try:
+                return getattr(presenter, name)(*args, **kwargs)
+            except Exception as error:  # noqa: BLE001 -- the boundary IS total
+                _LOG.exception("console handler %s failed", name)
+                presenter._report(
+                    f"internal error in {name}: {_error_text(error)}",
+                    severity="error",
+                )
+                return None
+
+        return guarded
+
     def _connect(self) -> None:
         """Every outbound signal the view offers gets an answer here.
 
@@ -473,57 +534,57 @@ class ConsolePresenter:
         nothing, which is worse than a control that is visibly absent.
         """
 
-        self.view.pause_toggled.connect(self.set_paused)
-        self.view.save_layout_requested.connect(self.save_layout)
-        self.view.load_layout_requested.connect(self.load_layout)
-        self.view.save_screenshot_requested.connect(self.save_screenshot)
-        self.view.add_panel_requested.connect(self.add_selected_panel)
-        self.view.selectors_toggled.connect(self.set_deriving)
-        self.view.add_logic_requested.connect(self.add_logic)
-        self.view.panel_order_committed.connect(self.reorder_panels)
+        self.view.pause_toggled.connect(self._guarded(self.set_paused))
+        self.view.save_layout_requested.connect(self._guarded(self.save_layout))
+        self.view.load_layout_requested.connect(self._guarded(self.load_layout))
+        self.view.save_screenshot_requested.connect(self._guarded(self.save_screenshot))
+        self.view.add_panel_requested.connect(self._guarded(self.add_selected_panel))
+        self.view.selectors_toggled.connect(self._guarded(self.set_deriving))
+        self.view.add_logic_requested.connect(self._guarded(self.add_logic))
+        self.view.panel_order_committed.connect(self._guarded(self.reorder_panels))
         # Every control on a card is a decision about ONE named panel, wired
         # once here rather than re-strung by whoever built the widget.
-        self.view.panel_remove_requested.connect(self.remove_panel)
-        self.view.panel_edit_requested.connect(self.edit_panel)
-        self.view.logic_start_requested.connect(self.start_logic)
-        self.view.logic_auto_preview_changed.connect(self.set_logic_auto_preview)
-        self.view.logic_stop_requested.connect(self.stop_logic)
-        self.view.logic_edit_requested.connect(self.edit_logic)
-        self.view.logic_remove_requested.connect(self.remove_logic)
-        self.view.stop_task_requested.connect(self.stop_active_task)
+        self.view.panel_remove_requested.connect(self._guarded(self.remove_panel))
+        self.view.panel_edit_requested.connect(self._guarded(self.edit_panel))
+        self.view.logic_start_requested.connect(self._guarded(self.start_logic))
+        self.view.logic_auto_preview_changed.connect(self._guarded(self.set_logic_auto_preview))
+        self.view.logic_stop_requested.connect(self._guarded(self.stop_logic))
+        self.view.logic_edit_requested.connect(self._guarded(self.edit_logic))
+        self.view.logic_remove_requested.connect(self._guarded(self.remove_logic))
+        self.view.stop_task_requested.connect(self._guarded(self.stop_active_task))
         plot_error = getattr(self.view, "panel_plot_error", None)
         if plot_error is not None:
             # The plot widget's own refusal channel (errorOccurred, relayed by
             # the card).  Unconnected, a pointer currency-guard refusal --
             # "the painted pointer front is no longer layout-compatible" --
             # was fully silent and the panel just stopped answering gestures.
-            plot_error.connect(self._panel_plot_error)
+            plot_error.connect(self._guarded(self._panel_plot_error))
         draft_changed = getattr(self.view, "logic_draft_changed", None)
         if draft_changed is not None:
-            draft_changed.connect(self._logic_draft_changed)
+            draft_changed.connect(self._guarded(self._logic_draft_changed))
         publisher_edit = getattr(self.view, "panel_publisher_edit_requested", None)
         if publisher_edit is not None:
-            publisher_edit.connect(self.edit_panel_publisher)
+            publisher_edit.connect(self._guarded(self.edit_panel_publisher))
         publisher_changed = getattr(self.view, "panel_publisher_draft_changed", None)
         if publisher_changed is not None:
-            publisher_changed.connect(self._panel_publisher_draft_changed)
+            publisher_changed.connect(self._guarded(self._panel_publisher_draft_changed))
         panel_changed = getattr(self.view, "panel_state_changed", None)
         if panel_changed is not None:
-            panel_changed.connect(self.update_panel_state)
+            panel_changed.connect(self._guarded(self.update_panel_state))
         refresh_requested = getattr(
             self.view, "panel_snapshot_refresh_requested", None
         )
         if refresh_requested is not None:
-            refresh_requested.connect(self.refresh_panel_snapshot)
+            refresh_requested.connect(self._guarded(self.refresh_panel_snapshot))
         producer_restart = getattr(self.view, "panel_producer_restart_requested", None)
         if producer_restart is not None:
-            producer_restart.connect(self.restart_panel_producer)
+            producer_restart.connect(self._guarded(self.restart_panel_producer))
         save_figure = getattr(self.view, "panel_save_figure_requested", None)
         if save_figure is not None:
-            save_figure.connect(self.save_panel_figure)
+            save_figure.connect(self._guarded(self.save_panel_figure))
         editor_closed = getattr(self.view, "panel_editor_closed", None)
         if editor_closed is not None:
-            editor_closed.connect(self._panel_editor_closed)
+            editor_closed.connect(self._guarded(self._panel_editor_closed))
         self.set_paused(False)
         self.set_deriving(False)
 
@@ -929,10 +990,10 @@ class ConsolePresenter:
             schema=schema,
         )
         window = None
-        if projection is not None:
+        if projection is not None and projection.drawable:
             from zlc_plot.specs import parameter_schema_for
 
-            spec, _semantic, display = projection
+            spec, display = projection.spec, projection.parameters
             effective = dict(
                 parameter_schema_for(
                     spec,
@@ -1251,18 +1312,16 @@ class ConsolePresenter:
         subject: object | None = None,
         schema: object | None = None,
     ) -> object | None:
-        try:
-            projection = self._panel_projection(
-                binding,
-                state,
-                subject=subject,
-                schema=schema,
-            )
-        except SemanticVacancy:
-            # An authored table with a vacant required role: legitimate
-            # panel state that simply has no drawable specification.
-            return None
-        return None if projection is None else projection[0]
+        projection = self._panel_projection(
+            binding,
+            state,
+            subject=subject,
+            schema=schema,
+        )
+        # None twice over, and they mean different things: no projection at
+        # all (this Dataset offers no such plot), or a projection whose
+        # authored table leaves a required role vacant.  Neither draws.
+        return None if projection is None else projection.spec
 
     @staticmethod
     def _panel_accepted_display(
@@ -1383,9 +1442,17 @@ class ConsolePresenter:
             panel_state,
             subject=interaction_subject,
         )
-        if projection is None:
-            raise ValueError("panel target does not resolve on this Dataset")
-        target_spec, _semantic, _display = projection
+        if projection is None or not projection.drawable:
+            # ONE refusal for the one fact: there is no target to match a
+            # host to.  Either this Dataset offers no such plot at all, or
+            # the authored table leaves a required role vacant -- and in
+            # both cases the panel keeps its state and its card says why.
+            raise PanelNotDrawable(
+                projection.vacancy
+                if projection is not None
+                else "panel target does not resolve on this Dataset"
+            )
+        target_spec = projection.spec
         interaction_spec = None
         classifier_thresholds: object = _UNCHANGED
         selectors: object = _UNCHANGED
@@ -1473,7 +1540,7 @@ class ConsolePresenter:
                 # them, which is how a restarted producer came back framed by
                 # the picture before it.
                 binding.interaction_viewport = None
-        _target_spec, semantic, display = projection
+        semantic, display = projection.semantic, projection.parameters
         configuration: dict[str, object] = {
             "semantic": semantic,
             "parameters": display,
@@ -2124,6 +2191,7 @@ class ConsolePresenter:
                     return False
             merged[name] = values
         fit_expression_update = fit_override is not _UNCHANGED
+        vacancy_reason = ""
         if "semantic" in changes and candidate_schema is not None:
             base_state = replace(
                 current,
@@ -2146,12 +2214,19 @@ class ConsolePresenter:
                 display={},
             )
             try:
-                _resolved, semantic, _display = project_panel_state(
+                projection = project_panel_state(
                     candidate_schema,
                     base_spec,
                     patch_state,
                 )
-            except SemanticVacancy as vacancy:
+            except (KeyError, TypeError, ValueError) as error:
+                self._report(
+                    f"{panel_id}: {_error_text(error)}",
+                    severity="error",
+                )
+                return False
+            vacancy_reason = projection.vacancy
+            if vacancy_reason:
                 # The operator's fates STICK.  A table whose required role
                 # is vacant draws nothing -- that is the panel's state, not
                 # a reason to bounce the edit back.
@@ -2165,14 +2240,18 @@ class ConsolePresenter:
                         for name, value in dict(changes["semantic"]).items()
                     },
                 }
-                self._report(f"{panel_id}: {vacancy}", severity="info")
-            except (KeyError, TypeError, ValueError) as error:
-                self._report(
-                    f"{panel_id}: {_error_text(error)}",
-                    severity="error",
-                )
-                return False
+                # The authored table is kept FIRST and the reason is told
+                # afterwards.  Reporting between deciding the table and
+                # storing it made a broken diagnostic lose the edit: this
+                # branch reported at a severity the real status strip does
+                # not have, and the raise carried the operator's fates away
+                # with it -- the vacant role silently reverted to the axis
+                # they had just taken it from.
+            else:
+                semantic = projection.semantic
             merged["semantic"] = semantic
+            if vacancy_reason:
+                self._report(f"{panel_id}: {vacancy_reason}", severity="warning")
         try:
             desired_overlay = str(merged["overlay_signal"])
             projection_candidate = replace(
@@ -2457,6 +2536,13 @@ class ConsolePresenter:
                 ):
                     live_overlay = None
                 self._cancel_panel_configuration(binding)
+                if vacancy_reason:
+                    # Nothing to draw, so nothing to configure: the panel
+                    # keeps the operator's table and its last picture, and
+                    # the status line already says which role is vacant.
+                    self._publish_panel_state(binding)
+                    self._refresh_console_projection()
+                    return True
                 pending = self._match_host_to_panel(
                     binding,
                     binding.host,
@@ -2591,11 +2677,9 @@ class ConsolePresenter:
             return None
         semantic_reason = ""
         authored: Mapping[str, object] = {}
+        projection = None
         try:
-            resolved, _semantic, _display = project_panel_state(
-                schema, spec, state
-            )
-            description = describe_semantics(schema, resolved)
+            projection = project_panel_state(schema, spec, state)
         except Exception as error:
             # The form is the repair surface.  Keep the schema's exact field
             # domain visible, but keep the refusal loud; never pretend the
@@ -2604,14 +2688,25 @@ class ConsolePresenter:
             try:
                 description = describe_semantics(schema, resolved)
             except Exception:
+                del error
                 return None
-            reason = _error_text(error)
-            if isinstance(error, SemanticVacancy):
-                # The operator's own table, not the default's: the fates
-                # they chose stay on the form, with the vacancy as the
-                # reason nothing draws.
-                semantic_reason = _error_text(error)
-                authored = dict(state.semantic)
+        if projection is not None and not projection.drawable:
+            # A vacancy is not a refusal of the form: the operator's own
+            # table -- the very fates that fix it -- stays on screen, with
+            # the vacancy beside it as the reason nothing draws.
+            resolved = spec
+            try:
+                description = describe_semantics(schema, resolved)
+            except Exception:
+                return None
+            semantic_reason = projection.vacancy
+            authored = dict(state.semantic)
+        elif projection is not None:
+            resolved = projection.spec
+            try:
+                description = describe_semantics(schema, resolved)
+            except Exception:
+                return None
         actual_cell_kind = (
             semantic_spec(resolved).kind.value
             if state.kind == PlotKind.FACET_GRID.value
@@ -5043,9 +5138,26 @@ class ConsolePresenter:
         self._report(f"{title}: {message}", severity="warning")
 
     def _report(self, text: str, *, severity: str) -> None:
+        """Say what just happened -- and never be worse than what it says.
+
+        This is the seam every diagnostic in the console goes through, so
+        it is the seam that must not fail: a status line raising inside a
+        Qt slot kills the whole instrument, and it does it exactly when
+        something has already gone wrong.  An unknown severity is a defect
+        in the caller, so it is shown (loudly, at the worst severity that
+        exists) rather than thrown -- the operator reads the message, the
+        console keeps running, and the contract test below names the
+        caller that got it wrong.
+        """
+
         show = getattr(self.view, "show_status", None)
-        if show is not None:
-            show(text, severity)
+        if show is None:
+            return
+        selected = str(severity)
+        if selected not in STATUS_SEVERITIES:
+            text = f"{text} [internal: unknown status severity {selected!r}]"
+            selected = "error"
+        show(text, selected)
 
 
     # ------------------------------------------------------------------- logic

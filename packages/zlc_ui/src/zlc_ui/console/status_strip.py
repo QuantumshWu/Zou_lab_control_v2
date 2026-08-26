@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from zlc_ui.fluent import FluentStatusStrip
+from zlc_ui.status import STATUS_SEVERITIES
 
 
 class StatusStrip(FluentStatusStrip):
@@ -20,7 +21,7 @@ class StatusStrip(FluentStatusStrip):
     """
 
 
-    _PRIORITY = {"idle": 0, "warning": 1, "task": 2, "error": 3}
+    _PRIORITY = {name: rank for rank, name in enumerate(STATUS_SEVERITIES)}
     _FLUENT_SEVERITY = {"idle": "info", "warning": "warning", "task": "task", "error": "error"}
 
     def __init__(self, parent=None, *, action_text: str = "") -> None:
@@ -41,7 +42,9 @@ class StatusStrip(FluentStatusStrip):
     def show_status(self, text: str, severity: str) -> None:
         severity = str(severity)
         if severity not in self._PRIORITY:
-            raise ValueError("severity must be idle, warning, task, or error")
+            raise ValueError(
+                "severity must be one of " + ", ".join(STATUS_SEVERITIES)
+            )
         value = str(text)
         # An empty message at any severity means "nothing to say", which is the
         # idle state rather than a reason to bring an older line back.

@@ -91,11 +91,12 @@ def test_guard_c_header_saves_and_single_panel_save_have_distinct_semantics(
 
     def make_host(plot_input, state):
         initial = getattr(plot_input, "snapshot", plot_input)
-        spec, _semantic, parameters = project_panel_state(
+        projection = project_panel_state(
             initial.block.schema,
             spec_for(initial, state.kind, state.cell_kind),
             state,
         )
+        spec, parameters = projection.spec, projection.parameters
         parameters = dict(parameters)
         parameters["title"] = state.title
         return plot.RasterPlotHost.from_plot(
