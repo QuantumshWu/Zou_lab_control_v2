@@ -5401,3 +5401,49 @@ def test_refresh_adopts_the_card_when_the_derived_signal_retired(
         presenter.beat()
         presenter.poll_logic()
         time.sleep(0.005)
+
+
+def test_refresh_adopts_a_card_that_is_ahead_even_with_a_newer_shot_pending(
+    presenter,
+    session,
+) -> None:
+    """Adoption and waiting are not exclusive.
+
+    When the card has moved ahead of Edit, showing that picture is what
+    the operator asked for -- immediately.  Making it wait for the
+    pending publication meant a press did nothing visible until the next
+    shot rendered, and nothing at all if the bench stopped between.
+    """
+
+    node, snap = _one_shot(session)
+    panel = presenter.add_panel(node.signal_key("frames"), snap, kind="image")
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.host is not None and panel.accepted_surface is not None,
+    )
+    assert presenter.edit_panel(panel.panel_id)
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.editor_host is not None
+        and panel.frozen_data is not None
+        and panel.frozen_data.description is not None,
+    )
+    opened = panel.frozen_data
+
+    # the card accepts a newer shot; Edit stays where it was
+    _one_shot(session, producer="cm")
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.accepted_surface is not None
+        and panel.accepted_surface.publication is not opened.publication,
+    )
+    card = panel.accepted_surface
+
+    # ... and one more publication is already waiting in the plane
+    _one_shot(session, producer="cm")
+
+    assert presenter.refresh_panel_snapshot(panel.panel_id) is True
+    assert panel.frozen_data is not opened, (
+        "a card ahead of Edit must be adopted at once"
+    )
+    assert panel.frozen_data.publication is card.publication

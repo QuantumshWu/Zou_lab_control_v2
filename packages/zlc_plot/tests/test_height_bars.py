@@ -851,3 +851,43 @@ def test_every_move_of_a_fast_hand_reaches_the_screen() -> None:
         assert rendered == 20, f"{20 - rendered} moves never reached pixels"
     finally:
         session.close()
+
+
+def test_a_drag_reuses_the_pooled_grid_it_was_already_showing() -> None:
+    """Pooling is a DATA-side level of detail, not a preview artifact.
+
+    The pooled grid was derived from the transient render width, so the
+    drag preview (fewer pixels) and the committed frame (three taps)
+    asked for different pools -- and a scan of millions of cells was
+    re-pooled at every drag boundary and on every live frame that landed
+    inside a drag.  The committed surface decides the pool; a preview
+    draws that same grid at fewer pixels.
+    """
+
+    from zlc_plot._height3d_raster import HeightBarCamera, render_height_bars
+
+    rng = np.random.default_rng(5)
+    heights = rng.random((512, 512))
+    colors = np.repeat(
+        heights[..., None].astype(np.float32).clip(0.0, 1.0), 3, axis=-1
+    )
+    camera = HeightBarCamera(azimuth_deg=-55.0)
+    cache: dict = {}
+    committed_box = 320
+
+    def frame(divisor: int, taps: int) -> object:
+        render_height_bars(
+            heights, colors, camera=camera, value_limits=(0.0, 1.0),
+            width=max(committed_box // divisor, 8),
+            height=max(committed_box // divisor, 8),
+            supersample=taps, zero_rgb=(1.0, 1.0, 1.0),
+            pool_cache=cache, display_stretch=float(divisor),
+            pool_reference_width=committed_box * 3,
+        )
+        return cache["value"][0]
+
+    committed = frame(1, 3)
+    preview = frame(2, 1)
+    back = frame(1, 3)
+    assert preview is committed, "the drag re-pooled the scan"
+    assert back is committed, "the release re-pooled the scan"

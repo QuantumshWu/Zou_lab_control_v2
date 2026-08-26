@@ -3488,11 +3488,18 @@ class ConsolePresenter:
         # card is still showing a perfectly good picture -- and Refresh
         # returned False without touching anything.  The panel's accepted
         # surface is the authority on what the operator sees.
+        # Adoption does not wait on the newer publication.  Whenever the
+        # card has moved ahead of Edit, showing that picture NOW is what
+        # the operator asked for; the pending publication still arrives
+        # through ``refresh_requested`` below.  Making the two exclusive
+        # meant a press whose card was already ahead did nothing visible
+        # until the next shot rendered -- and nothing at all if the bench
+        # had stopped.  The atomic-swap contract is untouched: when Edit
+        # already holds the card's picture there is nothing to adopt.
         if (
             shown_input is not None
             and describes_current
             and not already_frozen
-            and not newer_pending
         ):
             frozen = self._panel_frozen_data(
                 binding,
@@ -3522,13 +3529,20 @@ class ConsolePresenter:
                         severity="error",
                     )
             self.refresh_panel_editor(panel_id)
-            return True
         if not newer_pending:
             # The card and Edit already agree, or the card has nothing this
             # panel may adopt.  Arming the deferred path here would hand
             # Edit the NEXT accepted surface behind the operator's back --
             # a retargeted panel would silently adopt the new signal
             # instead of staying stale until it is asked.
+            if already_frozen:
+                # Say so.  A button that correctly does nothing and says
+                # nothing is indistinguishable from a broken one.
+                self._report(
+                    f"{binding.state.title or binding.state.signal}: "
+                    "Edit already shows the latest picture",
+                    severity="info",
+                )
             return True
         # A newer exact publication exists.  The board tick only submits its
         # canonical projection; materialization and rendering remain on the
