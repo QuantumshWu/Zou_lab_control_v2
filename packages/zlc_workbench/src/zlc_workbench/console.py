@@ -1721,12 +1721,22 @@ class ConsolePresenter:
                         focused_cell=binding.state.focused_cell,
                     )
                     if live:
-                        if binding.port is None or binding.port.accept_configuration(
+                        if binding.port is None:
+                            raise RuntimeError(
+                                "the panel has no live surface to update"
+                            )
+                        if binding.port.accept_configuration(
                             operation, target
                         ) is None:
-                            raise RuntimeError(
-                                "interactive plot front was not presented"
-                            )
+                            # A refusal here is the widget's stale-race
+                            # answer: a newer front already paints, and it
+                            # was rendered from this same session state.
+                            # The record catches up when that front is
+                            # accepted.  Reporting it turned an ordinary
+                            # race -- a shot landing while a crosshair or
+                            # a colour limit commits -- into "interactive
+                            # plot front was not presented" on the card.
+                            return
                     else:
                         binding.frozen_data = replace(
                             current,
