@@ -780,9 +780,18 @@ class PlotPanelPort:
             # while this front was in flight, and the host's own newer
             # front paints instead.  Recording it as a panel error turned
             # every continuous gesture into a red-message stream.
-            self._request_invalidation()
-            # The batch was handled, but its candidate never became screen
-            # truth.  Debt will rebuild the unchanged latest publication.
+            with self._state_lock:
+                accepted_surface = self._surface
+            if (
+                accepted_surface is None
+                or accepted_surface.publication is not publication
+            ):
+                # Only a candidate carrying an UNSEEN publication owes a
+                # rebuild.  Re-invalidating for every refused re-describe
+                # kept a render-debt churn running underneath the very
+                # gesture that made the fronts stale -- the intermittent
+                # lag an operator feels as "smooth, stuck, smooth".
+                self._request_invalidation()
             return True
 
         description = operation.value

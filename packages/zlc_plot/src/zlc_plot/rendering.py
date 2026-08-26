@@ -3460,9 +3460,6 @@ class MatplotlibRenderer:
         # raster at a fraction of the box and stretches it, and dividing
         # by the reduced raster inflated every tick and label gap by the
         # divisor: the scene held still while its labels flew out.
-        tick_px = tick_length_px / max(box_w, 1)
-        gap_px = label_gap_px / max(box_w, 1)
-        gap_py = label_gap_px / max(box_h, 1)
 
         # The pane grid follows the reference (MATLAB) convention: RULES
         # sit at tick positions, and every rule runs the FULL display
@@ -3491,17 +3488,53 @@ class MatplotlibRenderer:
             )
             grid_edges.append(((0.0, 0.0, tick), (0.0, float(scene.ny), tick)))
 
+        def outward(edge_point, inner_point):
+            """Unit direction (axes fractions) pushing a label AWAY from
+            the scene: the projected direction of the axis departing from
+            its edge, the reference's tick convention."""
+
+            f_edge = self._height_bars_fraction(scene, *edge_point)
+            f_inner = self._height_bars_fraction(scene, *inner_point)
+            vx = (f_edge[0] - f_inner[0]) * box_w
+            vy = (f_edge[1] - f_inner[1]) * box_h
+            length = float(np.hypot(vx, vy))
+            if length <= 0.0:
+                return (0.0, -1.0), f_edge
+            return (vx / length, vy / length), f_edge
+
+        def anchored(direction):
+            ux, uy = direction
+            ha = "left" if ux > 0.4 else ("right" if ux < -0.4 else "center")
+            va = "bottom" if uy > 0.4 else ("top" if uy < -0.4 else "center")
+            return ha, va
+
         # ---- z axis along the left pane's front edge, at ground (0, 0)
         base = scene.project(0.0, 0.0, wall_low)
         top = scene.project(0.0, 0.0, wall_high)
         add_segment(base, top)
         for tick in z_ticks:
-            anchor = scene.project(0.0, 0.0, float(tick))
-            f = self._height_bars_fraction(scene, *anchor)
-            segments_x.extend((f[0], f[0] - tick_px, np.nan))
-            segments_y.extend((f[1], f[1], np.nan))
+            # The z labels leave their axis along the projected x
+            # direction (the bench's ruling), exactly as the floor labels
+            # leave theirs.
+            (ux, uy), f = outward(
+                scene.project(0.0, 0.0, float(tick)),
+                scene.project(1.0, 0.0, float(tick)),
+            )
+            segments_x.extend(
+                (f[0], f[0] + ux * tick_length_px / box_w, np.nan)
+            )
+            segments_y.extend(
+                (f[1], f[1] + uy * tick_length_px / box_h, np.nan)
+            )
+            ha, va = anchored((ux, uy))
             wanted_texts.append(
-                (f[0] - gap_px, f[1], f"{tick:g}", "right", "center")
+                (
+                    f[0] + ux * label_gap_px / box_w,
+                    f[1] + uy * label_gap_px / box_h,
+                    f"{tick:g}",
+                    ha,
+                    va,
+                )
             )
 
         # ---- base coordinate labels along the two front edges
@@ -3531,28 +3564,6 @@ class MatplotlibRenderer:
                 scene.project(float(scene.nx), 0.0, base_value),
                 scene.project(float(scene.nx), float(scene.ny), base_value),
             )
-
-            def outward(edge_point, inner_point):
-                """Unit direction (axes fractions) pushing a floor label
-                AWAY from the scene: the projected direction of the axis
-                that departs from this edge, exactly the reference's floor
-                tick convention.  The z labels keep their horizontal
-                offset -- that ruling stands."""
-
-                f_edge = self._height_bars_fraction(scene, *edge_point)
-                f_inner = self._height_bars_fraction(scene, *inner_point)
-                vx = (f_edge[0] - f_inner[0]) * box_w
-                vy = (f_edge[1] - f_inner[1]) * box_h
-                length = float(np.hypot(vx, vy))
-                if length <= 0.0:
-                    return (0.0, -1.0), f_edge
-                return (vx / length, vy / length), f_edge
-
-            def anchored(direction):
-                ux, uy = direction
-                ha = "left" if ux > 0.4 else ("right" if ux < -0.4 else "center")
-                va = "bottom" if uy > 0.4 else ("top" if uy < -0.4 else "center")
-                return ha, va
 
             for column in picks(source_nx):
                 a, b = scene.fold_cell(0, column * scene.pool_x)

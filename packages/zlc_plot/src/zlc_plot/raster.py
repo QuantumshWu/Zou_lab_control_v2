@@ -1917,23 +1917,19 @@ class RasterPlotHost:
                         raise RuntimeError(
                             "the painted pointer front is no longer layout-compatible"
                         )
-                    # A press means what the OPERATOR saw, and what they saw
-                    # is geometry: the layout, the painted transforms and the
-                    # interaction state, each checked precisely here.  Data
-                    # currency is deliberately NOT required -- a live plot
-                    # advances its data revision with every published frame
-                    # while retention holds the limits still, so demanding
-                    # revision equality rejected most presses during any
-                    # acquisition without protecting anything the press
-                    # actually consumes.  When live data DOES move the
-                    # autoscaled limits, the transform membership check
-                    # below rejects the stale front on its own.
-                    if effective_axes is not None:
-                        current_axes = session._raster_axes_snapshot()
-                        if effective_axes not in current_axes:
-                            raise RuntimeError(
-                                "the painted pointer transform is no longer current"
-                            )
+                    # A press means what the OPERATOR saw -- and the painted
+                    # front it carries IS what they saw: the widget swaps
+                    # pixels and identity atomically, so the transform that
+                    # arrives with the event always matches the picture the
+                    # operator pressed on, and the gesture layer interprets
+                    # the press THROUGH that transform into canonical
+                    # coordinates.  Demanding that it also equal the
+                    # session's CURRENT transform re-rejected the first
+                    # press after every commit for as long as the frontend
+                    # ran one front behind -- data currency, transform
+                    # currency, one disease.  What still gates: the
+                    # grabbable interaction state below, because a grab
+                    # resolves against current selectors.
                     if effective_interaction is not None:
                         # A press consumes the GRABBABLE geometry: region
                         # edges and threshold lines.  The crosshair is a

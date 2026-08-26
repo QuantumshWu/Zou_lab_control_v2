@@ -181,6 +181,11 @@ class PanelBinding:
     #: for a history window.  The lease, not the signal declaration, is the
     #: resource owner.
     history_lease: IndexedHistoryLease | None = None
+    #: Last display revision the sync settled per surface (id(host) keys):
+    #: callbacks arrive asynchronously, and a reordered stale echo read as
+    #: a fresh edit ping-ponged the two surfaces between the last two
+    #: values.  Monotonic ordering makes the mirror convergent.
+    display_sync_revisions: dict = field(default_factory=dict)
     #: Edit deliberately keeps one frozen data revision until Refresh.  It is
     #: not panel configuration and therefore does not live in ``PanelState``.
     frozen_data: PanelFrozenData | None = None
@@ -4174,6 +4179,12 @@ class ConsolePresenter:
         values = getattr(state, "values", None)
         if values is None:
             return
+        revision = getattr(state, "revision", None)
+        if revision is not None:
+            seen = binding.display_sync_revisions.get(id(source))
+            if seen is not None and revision <= seen:
+                return
+            binding.display_sync_revisions[id(source)] = revision
         recorded = dict(binding.state.display)
         changed = {
             str(name): value
@@ -4920,6 +4931,10 @@ class ConsolePresenter:
             resolved = description.spec
             display = description.display_state.values
             focused_cell = description.facet_focus
+        # An unset unit is ABSENT, not "present as None": the accepted
+        # description carries the keys with None while the panel record
+        # omits them, and comparing those two representations dropped a
+        # remembered viewport on every host replacement.
         units = tuple(
             (name, display.get(name))
             for name in (
@@ -4927,22 +4942,17 @@ class ConsolePresenter:
                 "y_display_unit",
                 "facet_display_unit",
             )
-            if name in display
+            if display.get(name) is not None
         )
+        # The RUN is deliberately absent.  A viewport is measured on
+        # GEOMETRY -- the schema fingerprint, the resolved spec, the
+        # units -- and the same instrument fired again puts the same
+        # axes under the same numeric rectangle.  Keying on the stream
+        # generation threw the operator's zoom away at every shot
+        # boundary and mounted each new run at the autoscaled home,
+        # which read as "my view keeps snapping back".  A different
+        # scan changes the fingerprint and still resets honestly.
         return (
-            (
-                None
-                if snapshot is None
-                else getattr(
-                    getattr(
-                        getattr(snapshot, "ref", None),
-                        "stream_generation",
-                        None,
-                    ),
-                    "value",
-                    None,
-                )
-            ),
             None if schema is None else getattr(schema, "fingerprint", None),
             resolved,
             units,

@@ -207,14 +207,16 @@ def test_close_cancels_queued_tasks() -> None:
         host.close(timeout=10)
 
 
-def test_press_rejects_a_stale_transform_after_live_limits_moved() -> None:
-    """Press currency is GEOMETRY: moved autoscale limits reject the front.
+def test_press_lands_on_the_painted_transform_it_carries() -> None:
+    """The front a press arrives with IS what the operator saw.
 
-    The data revisions alone are deliberately not checked -- a live plot
-    bumps them every frame while retention holds the limits still, and a
-    press consumes geometry, not data.  When the live frame DOES move the
-    autoscaled limits, the painted transform is genuinely stale and the
-    press must be refused.
+    The widget swaps pixels and identity atomically, so the transform in
+    the event always matches the picture that was pressed on, and the
+    gesture layer interprets the press THROUGH it into canonical
+    coordinates.  Even after live autoscale moved the current limits,
+    the stale-front press is self-consistent and must be accepted --
+    rejecting it bounced the first press after every commit for as long
+    as the frontend ran one front behind.
     """
 
     schema = DatasetSchema.create(
@@ -237,16 +239,17 @@ def test_press_rejects_a_stale_transform_after_live_limits_moved() -> None:
         assert updated.value.limits != before.limits
         assert latest.identity.sequence > stale.identity.sequence
 
-        with pytest.raises(RuntimeError, match="no longer current"):
-            host._pointer_event(
-                "press",
-                0.45,
-                0.45,
-                button=1,
-                identity=stale.identity,
-                axes=stale.interaction.axes[0],
-                interaction=stale.interaction,
-            ).result(timeout=10)
+        state = host._pointer_event(
+            "press",
+            0.45,
+            0.45,
+            button=1,
+            identity=stale.identity,
+            axes=stale.interaction.axes[0],
+            interaction=stale.interaction,
+        ).result(timeout=10)
+        assert state is not None
+        host._pointer_event("cancel", 0.45, 0.45, button=1).result(timeout=10)
     finally:
         host.close(timeout=10)
 

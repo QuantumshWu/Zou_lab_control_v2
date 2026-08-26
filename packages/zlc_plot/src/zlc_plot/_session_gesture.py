@@ -427,13 +427,15 @@ class GestureSessionMixin:
         if axes is not active_axes:
             return
         if getattr(self._renderer, "_height_bars_scene", False):
-            camera = self._renderer.height_bars_camera
-            if camera is not None:
-                ticks = float(getattr(event, "step", 0.0))
-                if ticks == 0.0:
-                    ticks = 1.0 if direction == "up" else -1.0
-                growth = self._defaults.interaction.wheel_zoom_factor
-                self.set_parameter("camera_zoom", camera.zoom * growth ** -ticks)
+            # Anchor on the COMMITTED zoom, not the camera of the last
+            # render: renders lag commits, and compounding on a stale
+            # render made a wheel burst re-derive the same step.
+            zoom = float(self.display_state["camera_zoom"])
+            ticks = float(getattr(event, "step", 0.0))
+            if ticks == 0.0:
+                ticks = 1.0 if direction == "up" else -1.0
+            growth = self._defaults.interaction.wheel_zoom_factor
+            self.set_parameter("camera_zoom", zoom * growth ** -ticks)
             return
         # Zoom against the axes' CURRENT limits, not the painted snapshot the
         # frontend sampled: a queued tick must compound onto the previous one
@@ -768,7 +770,6 @@ class GestureSessionMixin:
         if isinstance(gesture, _OrbitGesture):
             self._clear_gesture(gesture)
             assert self._renderer is not None
-            self._renderer.set_height_bars_preview(None)
             moved = math.hypot(
                 float(event.x) - gesture.origin_px[0],
                 float(event.y) - gesture.origin_px[1],
@@ -776,6 +777,7 @@ class GestureSessionMixin:
             if moved <= self._defaults.interaction.double_click_radius_px:
                 # A middle click, not a drag: nothing to navigate, just
                 # repaint the committed camera at full resolution.
+                self._renderer.set_height_bars_preview(None)
                 with self._renderer.raster_transaction():
                     self._render_current(
                         RenderEffect.BASE_GEOMETRY, schedule_fit=False
@@ -783,11 +785,15 @@ class GestureSessionMixin:
                 return
             camera = gesture.current
             # ONE display revision commits the whole drag, and its render
-            # effect repaints the scene at full resolution.
+            # effect repaints the scene at full resolution.  The preview
+            # lifts AFTER the commit: cleared first, a live frame racing
+            # this release rendered one frame at the pre-drag camera and
+            # the scene visibly jumped before snapping back.
             self.set_parameters({
                 "camera_azimuth": camera.azimuth_deg,
                 "camera_elevation": camera.elevation_deg,
             })
+            self._renderer.set_height_bars_preview(None)
             return
         if getattr(event, "button", None) == 2:
             if not isinstance(gesture, _PanGesture):

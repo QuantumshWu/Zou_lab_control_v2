@@ -5128,3 +5128,51 @@ def test_display_state_synchronizes_both_panel_surfaces(
     panel.host.set_parameters({"color_max": 150.0}).result(timeout=10)
     assert beat(lambda: edit_display().get("color_max") == 150.0)
     assert panel.state.display.get("color_max") == 150.0
+
+
+def test_the_operator_viewport_survives_a_same_geometry_run(
+    presenter,
+    session,
+) -> None:
+    """A viewport is measured on GEOMETRY, and the same instrument fired
+    again puts the same axes under the same numeric rectangle.  Keying
+    the remembered viewport on the stream generation -- or on a units
+    representation that differed between the description and the record
+    -- threw the operator's zoom away at every shot boundary and mounted
+    each run at the autoscaled home."""
+
+    import time as _time
+
+    from zlc_plot import NumericRange
+
+    node, snap = _one_shot(session)
+    panel = presenter.add_panel(node.signal_key("frames"), snap, kind="image")
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.host is not None
+        and panel.accepted_surface is not None
+        and panel.selections is not None,
+    )
+    first_host = panel.host
+    first_host.set_viewport(
+        NumericRange(30.0, 60.0), NumericRange(20.0, 50.0)
+    ).result(timeout=10)
+    deadline = _time.monotonic() + 6.0
+    while _time.monotonic() < deadline and panel.interaction_viewport is None:
+        presenter.beat()
+        _time.sleep(0.01)
+    assert panel.interaction_viewport is not None
+
+    _one_shot(session, producer="cm")
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.host is not None
+        and panel.host is not first_host
+        and panel.configuration is None,
+    )
+    viewport = panel.host.describe_display().result(
+        timeout=10
+    ).value.viewport
+    assert viewport is not None
+    assert (float(viewport.x.low), float(viewport.x.high)) == (30.0, 60.0)
+    assert (float(viewport.y.low), float(viewport.y.high)) == (20.0, 50.0)
