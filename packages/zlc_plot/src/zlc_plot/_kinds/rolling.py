@@ -25,8 +25,8 @@ def build_payload(projection: Any, view: Any, state: Any) -> None:
     projection._payload = projection._rolling_payload(
         history,
         window=int(state["window"]),
-        cumulative=(
-            bool(state["cumulative"]) and spec.reduction is Reduction.MEAN
+        trailing=(
+            int(state["trailing"]) if spec.reduction is Reduction.MEAN else 1
         ),
         uncertainty=uncertainty,
     )

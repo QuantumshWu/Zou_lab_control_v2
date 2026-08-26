@@ -140,7 +140,7 @@ def rolling(
     *,
     group: AxisRef | str | None = None,
     reduction: Reduction = Reduction.MEAN,
-    cumulative: bool | None = None,
+    trailing: int | None = None,
     side_distribution: bool | None = None,
     window: int | None = None,
     labels: PlotLabels | None = None,
@@ -156,7 +156,7 @@ def rolling(
     )
     values = _with_parameter_alias(values, "window", window, alias="window")
     values = _with_parameter_alias(
-        values, "cumulative", cumulative, alias="cumulative"
+        values, "trailing", trailing, alias="trailing"
     )
     return PlotSession(
         data,

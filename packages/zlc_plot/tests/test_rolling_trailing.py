@@ -1,8 +1,9 @@
-"""The cumulative rolling trace: a rate converging shot by shot.
+"""The trailing rolling trace: the rate over the recent past.
 
-Each live revision appends one shot; cumulative replaces the per-shot
-trace with the running mean of everything so far and carries the running
-standard error as the band.  The display window never changes the numbers.
+Each live revision appends one shot.  ``trailing`` says how many shots
+one drawn point averages -- 1 is the shot itself, N is the mean of the
+last N, with the standard error of those same N as the band.  The
+display window still never changes the numbers.
 """
 from __future__ import annotations
 
@@ -26,7 +27,7 @@ def _schema(sites: int, repeats: int = 1) -> DatasetSchema:
         PointTable.from_columns({"site": np.arange(sites, dtype=np.int64)}),
         data_axes=(),
         dtype=np.float64,
-        generation="rolling-cumulative",
+        generation="rolling-trailing",
     )
 
 
@@ -42,33 +43,82 @@ def _shots(occupied: np.ndarray, revision: int = 0) -> DatasetSnapshot:
     return DatasetSnapshot(schema, values, revision=revision)
 
 
-def test_cumulative_trace_is_the_running_rate_with_binomial_sem() -> None:
-    """Feed 0/1 occupancy shot by shot; the trace must equal the running
-    mean over ALL samples pooled so far and its sem the sample standard
-    error -- which for booleans IS the binomial error."""
+def _trailing_mean(shots: np.ndarray, span: int) -> np.ndarray:
+    """The mean of every sample in the last ``span`` shots, shot by shot."""
+
+    return np.asarray(
+        [
+            shots[max(0, index - span + 1) : index + 1].reshape(-1).mean()
+            for index in range(len(shots))
+        ]
+    )
+
+
+def test_a_trailing_point_is_the_mean_of_the_last_n_shots() -> None:
+    """Feed 0/1 occupancy shot by shot; each drawn point must equal the
+    mean over every sample the last N shots pooled, and its sem the sample
+    standard error of those -- which for booleans IS the binomial error."""
 
     sites = 8
+    span = 10
     rng = np.random.default_rng(21)
     shots = (rng.random((30, sites)) < 0.4).astype(np.float64)
     session = PlotSession(
         _shots(shots),
         RollingPlot(reduction=Reduction.MEAN),
-        parameters={"cumulative": True, "uncertainty": True},
+        parameters={"trailing": span, "uncertainty": True},
     )
     try:
-        payload = session._projection._payload
-        series = payload.series[0]
-        pooled = shots.reshape(-1)  # every sample of every shot, in order
-        k = np.arange(1, len(shots) + 1) * sites
-        expected_mean = np.cumsum(pooled)[k - 1] / k
+        series = session._projection._payload.series[0]
         y = np.asarray(series.y.canonical)
-        np.testing.assert_allclose(y, expected_mean, rtol=1e-12)
-        # sem at the last point == sample standard error over all samples
-        final = pooled
-        expected_sem = float(np.std(final, ddof=1) / np.sqrt(final.size))
+        np.testing.assert_allclose(y, _trailing_mean(shots, span), rtol=1e-12)
+        window = shots[-span:].reshape(-1)
+        expected_sem = float(np.std(window, ddof=1) / np.sqrt(window.size))
         np.testing.assert_allclose(series.sem[-1], expected_sem, rtol=1e-12)
-        # and it shrinks as shots accumulate
-        assert series.sem[-1] < series.sem[1]
+    finally:
+        session.close()
+
+
+def test_a_span_longer_than_the_run_is_the_running_mean() -> None:
+    """The window fills from empty, so a trailing mean nobody has enough
+    shots for yet IS the mean of everything so far -- the trace settles
+    into its window with no discontinuity."""
+
+    sites = 4
+    rng = np.random.default_rng(7)
+    shots = (rng.random((9, sites)) < 0.5).astype(np.float64)
+    session = PlotSession(
+        _shots(shots),
+        RollingPlot(reduction=Reduction.MEAN),
+        parameters={"trailing": 1000, "uncertainty": True},
+    )
+    try:
+        series = session._projection._payload.series[0]
+        pooled = shots.reshape(-1)
+        k = np.arange(1, len(shots) + 1) * sites
+        running = np.cumsum(pooled)[k - 1] / k
+        np.testing.assert_allclose(
+            np.asarray(series.y.canonical), running, rtol=1e-12
+        )
+    finally:
+        session.close()
+
+
+def test_the_default_span_of_one_is_each_shot_itself() -> None:
+    """The default must not quietly redraw anybody's panel: one shot per
+    point, exactly the trace drawn before this parameter existed."""
+
+    sites = 5
+    rng = np.random.default_rng(31)
+    shots = (rng.random((7, sites)) < 0.5).astype(np.float64)
+    session = PlotSession(
+        _shots(shots), RollingPlot(reduction=Reduction.MEAN)
+    )
+    try:
+        series = session._projection._payload.series[0]
+        np.testing.assert_allclose(
+            np.asarray(series.y.canonical), shots.mean(axis=1), rtol=1e-12
+        )
     finally:
         session.close()
 
@@ -79,7 +129,7 @@ def test_window_frames_the_view_without_changing_the_numbers() -> None:
     shots = (rng.random((20, sites)) < 0.5).astype(np.float64)
 
     def last_value(window: int | None) -> tuple[float, float]:
-        values = {"cumulative": True, "uncertainty": True}
+        values = {"trailing": 6, "uncertainty": True}
         if window is not None:
             values["window"] = window
         session = PlotSession(
@@ -96,14 +146,14 @@ def test_window_frames_the_view_without_changing_the_numbers() -> None:
     assert last_value(5) == last_value(None)
 
 
-def test_cumulative_band_renders(tmp_path) -> None:
+def test_the_trailing_band_renders(tmp_path) -> None:
     sites = 6
     rng = np.random.default_rng(3)
     shots = (rng.random((12, sites)) < 0.5).astype(np.float64)
     session = PlotSession(
         _shots(shots),
         RollingPlot(reduction=Reduction.MEAN),
-        parameters={"cumulative": True, "uncertainty": True},
+        parameters={"trailing": 5, "uncertainty": True},
     )
     try:
         session._renderer.draw()
@@ -113,14 +163,16 @@ def test_cumulative_band_renders(tmp_path) -> None:
             for artist in axes.collections
             if isinstance(artist, LineCollection)
         ]
-        assert bands, "cumulative rolling must draw its running-sem bars"
+        assert bands, "a trailing rolling trace must draw its sem bars"
     finally:
         session.close()
 
 
-def test_cumulative_is_inert_on_a_non_mean_reduction() -> None:
-    """The switch is a display parameter; on a MIN trace the running
-    standard error does not exist, so flipping it changes nothing."""
+def test_trailing_is_inert_on_a_non_mean_reduction() -> None:
+    """It reads the pooled moments, weighting each shot by how many
+    samples it pooled.  That is the mean's arithmetic and nobody else's --
+    a count-weighted mean of minima is a number about nothing -- so on a
+    MIN trace the parameter does nothing at all."""
 
     sites = 4
     schema = _schema(sites)
@@ -128,7 +180,7 @@ def test_cumulative_is_inert_on_a_non_mean_reduction() -> None:
     session = PlotSession(
         _shot(schema, (rng.random(sites) < 0.5).astype(np.float64), 0),
         RollingPlot(reduction=Reduction.MIN),
-        parameters={"cumulative": True, "uncertainty": True},
+        parameters={"trailing": 4, "uncertainty": True},
     )
     try:
         for revision in range(1, 5):
@@ -142,7 +194,7 @@ def test_cumulative_is_inert_on_a_non_mean_reduction() -> None:
 
 
 def test_plain_rolling_uncertainty_is_each_shot_pooled_error() -> None:
-    """The survival-panel shape: uncertainty WITHOUT cumulative draws each
+    """The survival-panel shape: uncertainty WITHOUT trailing draws each
     shot's own pooled standard error."""
 
     sites = 30

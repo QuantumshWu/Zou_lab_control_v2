@@ -28,21 +28,23 @@ def test_uncertainty_parameter_survives_the_archive() -> None:
     recipe = _round_trip(CurvePlot(AxisRef.point("x")), {"uncertainty": True})
     assert recipe["parameters"]["uncertainty"] is True
     recipe = _round_trip(
-        RollingPlot(reduction=Reduction.MEAN), {"cumulative": True}
+        RollingPlot(reduction=Reduction.MEAN), {"trailing": 50}
     )
-    assert recipe["parameters"]["cumulative"] is True
+    assert recipe["parameters"]["trailing"] == 50
 
 
 def test_archives_complete_absent_parameters_to_off() -> None:
     recipe = _round_trip(CurvePlot(AxisRef.point("x")), {})
     assert recipe["parameters"]["uncertainty"] is False
     recipe = _round_trip(RollingPlot(), {})
-    assert recipe["parameters"]["cumulative"] is False
+    assert recipe["parameters"]["trailing"] == 1
 
 
 def test_schema_declares_the_switches() -> None:
-    """The panel contract itself offers the switches, defaulted off --
-    that is what makes them operator-owned display choices."""
+    """The panel contract itself offers them, defaulted to the plain
+    picture -- that is what makes them operator-owned display choices.
+    A trailing span of one averages nothing, which is the off state a
+    count-valued parameter has instead of a False."""
 
     curve_defaults = dict(
         parameter_schema_for(
@@ -53,4 +55,4 @@ def test_schema_declares_the_switches() -> None:
     rolling_defaults = dict(
         parameter_schema_for(RollingPlot(), style=DEFAULTS.style).initial_values({})
     )
-    assert rolling_defaults["cumulative"] is False
+    assert rolling_defaults["trailing"] == 1
