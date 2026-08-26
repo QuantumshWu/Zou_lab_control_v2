@@ -186,10 +186,19 @@ class SelectionRange:
             "point_coordinate",
             "point_dimension",
             "data",
+            # Two bounds cut something the Dataset does not name: the
+            # measured VALUE, and the session's own SHOT ordinal -- the
+            # rolling history's x, which counts publications rather than
+            # rows of any one of them.  Both are real regions an operator
+            # can draw and a panel must remember; neither restricts an
+            # upstream axis, which is what
+            # ``panel_selection_derives_signal`` reads them for.
             "value",
+            "shot",
         }:
             raise ValueError(
-                "selection domain must be an exact Dataset axis domain or value"
+                "selection domain must be an exact Dataset axis domain, "
+                "value, or shot"
             )
         if not isinstance(self.axis, str):
             raise TypeError("selection axis must be text")
@@ -251,6 +260,15 @@ class FacetCondition:
         object.__setattr__(self, "domain", domain)
 
 
+#: What a plot adapter may REPORT a region on.  Not the same question as
+#: what a region can be DERIVED from -- a rolling trace's x is the shot
+#: history, so an operator can mark a stretch of it and both of the panel's
+#: surfaces must show the same mark, while nothing upstream is cut by it.
+#: Conflating the two is why a rolling region was dropped on the floor: it
+#: could not derive, so it was not remembered either.
+SELECTION_PLOT_KINDS = frozenset({"image", "curve", "histogram", "rolling"})
+
+
 @dataclass(frozen=True, slots=True)
 class SelectionState:
     """Pure numeric selector state supplied by a plot adapter.
@@ -271,8 +289,11 @@ class SelectionState:
 
     def __post_init__(self) -> None:
         plot_kind = canonical_text(self.plot_kind, "selection plot_kind")
-        if plot_kind not in {"image", "curve", "histogram"}:
-            raise ValueError("selection plot_kind must be image, curve, or histogram")
+        if plot_kind not in SELECTION_PLOT_KINDS:
+            raise ValueError(
+                "selection plot_kind must be one of "
+                + ", ".join(sorted(SELECTION_PLOT_KINDS))
+            )
         selector_kind = canonical_text(self.selector_kind, "selection selector_kind")
         if selector_kind not in {"area", "x_range"}:
             raise ValueError("selection selector_kind must be area or x_range")

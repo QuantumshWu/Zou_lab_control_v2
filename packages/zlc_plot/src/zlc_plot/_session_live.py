@@ -208,12 +208,22 @@ class LiveSessionMixin:
                 data_base_current = (
                     self.data_revision == prepared.base_data_revision
                 )
+                # A semantic edit replaces the SPEC, and no parameter-schema
+                # check can see that: a fate lands through replace_spec, not
+                # through the display bag.  An old-spec payload committed
+                # beside the new spec leaves the session holding a pair that
+                # was never one accepted view, and the first consumer to ask
+                # them a question -- a selector, wanting its subject --
+                # refuses to answer.  The producer's next revision projects
+                # through the current spec and the panel heals.
+                spec_current = prepared.projection.spec == self._spec
                 image_overlay_current = (
                     prepared.image_overlay is None
                     or self._image_overlay is prepared.image_overlay_authority
                 )
                 if (
                     not projection_current
+                    or not spec_current
                     or not data_base_current
                     or not image_overlay_current
                 ):

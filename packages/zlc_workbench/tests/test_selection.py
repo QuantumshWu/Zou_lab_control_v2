@@ -61,6 +61,7 @@ from zlc_runtime import SelectionChange as RuntimeSelectionChange
 from zlc_runtime import SelectionRange, SelectionState
 from zlc_workbench.selection import (
     PlotSelectionSource,
+    panel_selection_derives_signal,
     attach_selection_bridge,
     panel_plot_selectors,
     panel_selection_document,
@@ -918,7 +919,13 @@ def test_rolling_viewport_survives_without_claiming_an_upstream_axis() -> None:
             plot.NumericRange(-1.0, 10.0),
         ).result(timeout=15)
         _commit_x_range(host, 0.0, 1.0)
-        assert seen == []
+        assert [observation.state.plot_kind for observation in seen] == [
+            "rolling"
+        ]
+        marked = seen[0].state
+        assert [item.domain for item in marked.ranges] == ["shot"]
+        assert all(not item.axis for item in marked.ranges)
+        assert panel_selection_derives_signal(marked) is False
         assert viewports
         assert viewports[-1].subject.plot_kind is plot.PlotKind.ROLLING
         assert viewports[-1].subject.x is None
