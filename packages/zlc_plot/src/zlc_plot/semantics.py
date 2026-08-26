@@ -1006,6 +1006,13 @@ def describe_semantics(
             return feasibility(name, field_value)
         try:
             updated_spec(schema, spec, name, field_value)
+        except SemanticVacancy:
+            # Leaving a required role empty is a STATE the panel may sit
+            # in, exactly as a scope pin on the role's holder already
+            # was.  Hiding the role options that reach it made the table
+            # inconsistent with itself: the operator could vacate x by
+            # pinning a coordinate but not by saying "reduce this".
+            return None
         except Exception as error:
             return str(error) or type(error).__name__
         return None
