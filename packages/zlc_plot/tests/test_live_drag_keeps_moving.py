@@ -126,3 +126,137 @@ def test_a_live_panel_keeps_presenting_while_a_selector_is_dragged(
     finally:
         widget.close_adapter()
         host.close()
+
+
+def _sliding_history(first_shot: int, rows: int = 5):
+    """One bounded shot history: absolute shot numbers that SLIDE."""
+
+    from zlc_data import (
+        AxisId,
+        AxisSpec,
+        PointColumn,
+        PRIMARY_INDEX,
+        REPEAT,
+        ValueSchema,
+    )
+    from zlc_data import DatasetSchema as RoleDatasetSchema
+    from zlc_data import PointTable as RolePointTable
+    from zlc_data.value import owned_snapshot_from_arrays
+
+    column = PointColumn(
+        AxisId("zlc_data.primary-index"), "source index", PRIMARY_INDEX,
+        PointColumn.NUMERIC,
+        tuple(float(first_shot + index) for index in range(rows)),
+    )
+    schema = RoleDatasetSchema(
+        AxisSpec(AxisId("repeat"), "repeat", REPEAT, 1, (0,)),
+        RolePointTable(rows, (column,)),
+        None,
+        ValueSchema.scalar(np.dtype("float64"), "1"),
+    )
+    return schema, column
+
+
+@pytest.mark.gui
+def test_a_sliding_shot_history_is_not_a_new_geometry_under_a_drag() -> None:
+    """A rolling panel past its window renames its own coordinates.
+
+    Its x IS the absolute shot number, so once the window is full every
+    shot slides the whole axis forward -- and the schema's full fingerprint
+    with it, because that name includes every coordinate value.  A source
+    that also re-generations each publication therefore declared a NEW
+    GEOMETRY on every shot, and a new geometry cancels the gesture: the
+    area the operator was dragging open vanished the moment a shot landed.
+    Sliding coordinates are not a new world; the axes, their roles and
+    units and the shape are all exactly what they were.
+    """
+
+    from zlc_data.value import owned_snapshot_from_arrays
+    from zlc_plot import RollingPlot, ensure_qt5_application
+
+    try:
+        app = ensure_qt5_application([])
+        from PyQt5 import QtCore, QtGui
+    except Exception as error:  # pragma: no cover - environment dependent
+        pytest.skip(f"Qt5 offscreen unavailable: {error}")
+
+    rng = np.random.default_rng(3)
+    rows = 5
+
+    def shot(first: int, revision: int):
+        schema, _column = _sliding_history(first, rows)
+        return owned_snapshot_from_arrays(
+            schema=schema,
+            values=rng.random((1, rows, 1)),
+            revision=revision,
+            # A new generation per publication, as a re-cut bounded history
+            # hands one over.
+            stream_generation=f"slide-{first}",
+        )
+
+    host = RasterPlotHost.from_plot(shot(0, 1), RollingPlot())
+    host.set_parameter("window", rows).result(timeout=20)
+    widget = Qt5PlotWidget(host)
+    widget.resize(520, 380)
+    widget.show()
+
+    def pump(seconds: float) -> None:
+        deadline = time.perf_counter() + seconds
+        while time.perf_counter() < deadline:
+            app.processEvents()
+            time.sleep(0.002)
+
+    try:
+        pump(0.4)
+        front = widget.presented_front
+        assert front is not None
+        axis = front.interaction.axes[0]
+        opened = axis.x_limits
+        left, top, right, bottom = axis.bounds
+
+        def at(fx: float, fy: float):
+            return QtCore.QPointF(
+                (left + fx * (right - left)) * widget.width(),
+                (top + fy * (bottom - top)) * widget.height(),
+            )
+
+        def send(kind, point, button, buttons) -> None:
+            app.sendEvent(
+                widget,
+                QtGui.QMouseEvent(
+                    kind, point, button, buttons, QtCore.Qt.NoModifier
+                ),
+            )
+
+        send(
+            QtGui.QMouseEvent.MouseButtonPress, at(0.2, 0.2),
+            QtCore.Qt.LeftButton, QtCore.Qt.LeftButton,
+        )
+        pump(0.3)
+        assert widget._candidate is not None, "the press opened no selector"
+
+        for step in range(4):
+            host.update_data(shot(step + 1, step + 2)).result(timeout=20)
+            send(
+                QtGui.QMouseEvent.MouseMove,
+                at(0.2 + 0.12 * (step + 1), 0.2 + 0.12 * (step + 1)),
+                QtCore.Qt.NoButton, QtCore.Qt.LeftButton,
+            )
+            pump(0.25)
+            assert widget._candidate is not None, (
+                f"the drag was cancelled by shot {step + 1}: a sliding shot "
+                "history was read as a new geometry"
+            )
+
+        # the window really did slide while the drag was held
+        assert widget.presented_front.interaction.axes[0].x_limits != opened
+        send(
+            QtGui.QMouseEvent.MouseButtonRelease, at(0.85, 0.85),
+            QtCore.Qt.LeftButton, QtCore.Qt.NoButton,
+        )
+        pump(0.4)
+        committed = host.selectors().result(timeout=20).value
+        assert [item.kind.value for item in committed] == ["area"], committed
+    finally:
+        widget.close_adapter()
+        host.close()

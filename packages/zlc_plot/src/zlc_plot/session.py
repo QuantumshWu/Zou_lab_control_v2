@@ -1431,11 +1431,25 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         )
 
         def _fingerprint(data: object) -> str | None:
+            """What this data IS, for the question "same world?".
+
+            The STRUCTURAL name, not the full one: the full fingerprint
+            includes every coordinate value, and a bounded shot history
+            slides its own shot numbers forward by design -- every shot
+            renames the dataset while the axes, their roles and units and
+            the shape all stand still.  Read the full name here and a
+            rolling panel past its window declared a new geometry on every
+            single shot, so an area drag was cancelled the moment one
+            landed: the box the operator was opening simply vanished.
+            """
+
             block = getattr(data, "block", None)
             schema = getattr(block, "schema", None)
             if schema is None:
                 return None
-            fingerprint = getattr(schema, "fingerprint", None)
+            fingerprint = getattr(schema, "structure_fingerprint", None)
+            if fingerprint is None:
+                fingerprint = getattr(schema, "fingerprint", None)
             if callable(fingerprint):
                 fingerprint = fingerprint()
             return None if fingerprint is None else str(fingerprint)

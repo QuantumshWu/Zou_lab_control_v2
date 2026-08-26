@@ -337,3 +337,40 @@ def value_schema_fingerprint(schema: ValueSchema) -> str:
 
 def dataset_schema_fingerprint(schema: DatasetSchema) -> str:
     return _tree_digest(dataset_schema_to_tree(schema))
+
+
+#: Tree keys holding one entry per coordinate rather than a structural fact.
+_COORDINATE_KEYS = frozenset({"values", "coordinates", "coordinate_labels"})
+
+
+def _structure_only(node: object) -> object:
+    """The same tree with every coordinate LIST replaced by its length."""
+
+    if isinstance(node, dict):
+        return {
+            key: (
+                None
+                if item is None
+                else len(item)
+                if key in _COORDINATE_KEYS and isinstance(item, list)
+                else _structure_only(item)
+            )
+            for key, item in node.items()
+        }
+    if isinstance(node, list):
+        return [_structure_only(item) for item in node]
+    return node
+
+
+def dataset_schema_structure_fingerprint(schema: DatasetSchema) -> str:
+    """What this schema IS, without what its coordinates currently read.
+
+    The full fingerprint includes every coordinate value, which is right for
+    "is this the same dataset".  It is the wrong question for "is this the
+    same world an interaction was started in": a bounded shot history slides
+    its own coordinates forward by design -- every shot renames them -- while
+    the axes, their roles, units and shape stand still.  Judging that by the
+    full fingerprint made every shot look like a new geometry.
+    """
+
+    return _tree_digest(_structure_only(dataset_schema_to_tree(schema)))

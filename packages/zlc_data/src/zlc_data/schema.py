@@ -352,6 +352,9 @@ class DatasetSchema:
     #: Cached on first request.  Computed eagerly it cost 23 us per schema,
     #: paid by every intermediate schema construction that never names it.
     _fingerprint: str | None = field(init=False, repr=False, compare=False, default=None)
+    _structure_fingerprint: str | None = field(
+        init=False, repr=False, compare=False, default=None
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.repeat_axis, AxisSpec) or self.repeat_axis.role != REPEAT:
@@ -386,6 +389,7 @@ class DatasetSchema:
         if self.grid_topology is not None:
             _validate_grid_topology(self.point_table, self.grid_topology)
         object.__setattr__(self, "_fingerprint", None)
+        object.__setattr__(self, "_structure_fingerprint", None)
 
     @property
     def physical_shape(self) -> tuple[int, ...]:
@@ -404,3 +408,25 @@ class DatasetSchema:
 
             object.__setattr__(self, "_fingerprint", dataset_schema_fingerprint(self))
         return self._fingerprint
+
+    @property
+    def structure_fingerprint(self) -> str:
+        """What this schema IS, without what its coordinates currently read.
+
+        Two schemas share this name when they declare the same axes -- the
+        same identities, roles, units, frames and shape -- however their
+        coordinates happen to be numbered right now.  A bounded shot history
+        slides its coordinates forward every shot by design; that renames the
+        dataset, and it does not change the world an interaction was started
+        in.
+        """
+
+        if self._structure_fingerprint is None:
+            from .codec import dataset_schema_structure_fingerprint
+
+            object.__setattr__(
+                self,
+                "_structure_fingerprint",
+                dataset_schema_structure_fingerprint(self),
+            )
+        return self._structure_fingerprint
