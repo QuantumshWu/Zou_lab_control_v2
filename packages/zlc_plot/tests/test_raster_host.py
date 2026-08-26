@@ -1383,3 +1383,100 @@ def test_scroll_is_self_relative_and_needs_no_front_currency() -> None:
         assert state is not None
     finally:
         host.close(timeout=10)
+
+
+def test_a_hand_on_one_host_stands_every_other_host_down() -> None:
+    """Two surfaces, one machine: the drag wins while it moves.
+
+    A panel's Edit surface and its live card render on separate worker
+    threads and compete for the same cores.  Measured over 1024x1024
+    data, the card's committed frames stalled a drag on the Edit surface
+    to a per-move p90 of 354 ms (46 ms with the card idle).  Every other
+    host's SPECULATIVE work therefore yields to pointer work, and only
+    speculative work does: a caller blocked on a control answer, and a
+    surface that has no front to show yet, never wait on someone else's
+    hand.
+    """
+
+    from zlc_plot.raster import _HANDS, _DispatchMode, _WorkerTask
+
+    hand = RasterPlotHost.from_plot(_snapshot(), CurvePlot(AxisRef.point("x")))
+    other = RasterPlotHost.from_plot(_snapshot(), CurvePlot(AxisRef.point("x")))
+    try:
+        hand.wait_for_front(timeout=10)
+        other.wait_for_front(timeout=10)
+
+        def task(mode: _DispatchMode) -> _WorkerTask:
+            return _WorkerTask(lambda: None, Future(), mode, None, None, None)
+
+        assert not other._yields_to_hand(task(_DispatchMode.PUBLISH))
+        _HANDS.grip(hand.host_id)
+        try:
+            assert other._yields_to_hand(task(_DispatchMode.PUBLISH))
+            assert other._yields_to_hand(task(_DispatchMode.PRESENTATION))
+            # a blocked caller is not speculative work
+            assert not other._yields_to_hand(task(_DispatchMode.CONTROL))
+            assert not other._yields_to_hand(task(_DispatchMode.ADAPTIVE))
+            # nor is the host's own hand
+            assert not hand._yields_to_hand(task(_DispatchMode.PUBLISH))
+            # nor is a surface still reaching its first front: opening Edit
+            # during someone's drag must not wait on it
+            fresh = RasterPlotHost.from_plot(
+                _snapshot(), CurvePlot(AxisRef.point("x"))
+            )
+            try:
+                assert fresh.wait_for_front(timeout=10) is not None
+            finally:
+                fresh.close(timeout=10)
+        finally:
+            _HANDS.ungrip(hand.host_id, 0.0)
+
+        # the hold outlives the grip by what the pointer work cost, so a
+        # sibling cannot slip a frame into the gap between two moves
+        _HANDS.touch(hand.host_id, 0.2)
+        assert other._yields_to_hand(task(_DispatchMode.PUBLISH))
+        _HANDS.forget(hand.host_id)
+        assert not other._yields_to_hand(task(_DispatchMode.PUBLISH))
+    finally:
+        hand.close(timeout=10)
+        other.close(timeout=10)
+
+
+def test_yielded_frames_are_never_lost_only_deferred() -> None:
+    """Standing down costs freshness, nothing else.
+
+    A data frame retains only its latest successor, so work deferred
+    while a hand moves collapses to one frame the moment it stops -- the
+    yield must not queue up a burst to replay, and must not drop the
+    newest picture either.
+    """
+
+    from zlc_plot.raster import _HANDS
+
+    hand = RasterPlotHost.from_plot(_snapshot(), CurvePlot(AxisRef.point("x")))
+    other = RasterPlotHost.from_plot(_snapshot(), CurvePlot(AxisRef.point("x")))
+    try:
+        hand.wait_for_front(timeout=10)
+        first = other.wait_for_front(timeout=10)
+        schema = _snapshot().block.schema
+        _HANDS.grip(hand.host_id)
+        pending = [
+            other.update_data(
+                DatasetSnapshot(
+                    schema, np.array([[float(revision), 2.0, 3.0]]), revision=revision
+                )
+            )
+            for revision in range(1, 4)
+        ]
+        time.sleep(0.15)
+        assert other.front is not None
+        assert other.front.identity == first.identity, "a frame ran under a hand"
+        _HANDS.ungrip(hand.host_id, 0.0)
+        _HANDS.forget(hand.host_id)
+        pending[-1].result(timeout=10)
+        latest = other.front
+        assert latest is not None
+        assert latest.identity.data_revision == 3
+    finally:
+        hand.close(timeout=10)
+        other.close(timeout=10)
