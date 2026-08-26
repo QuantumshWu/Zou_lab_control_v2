@@ -43,6 +43,14 @@
   单次正确DPR render约84–104 ms已明确记录为下一性能cut，不以已完成项掩盖。最终直接UI文件
   42项、跨层重点8项与Workbench相关六文件152项均通过；此前重负载组合中一次10秒settle长尾
   在最终tree文件级复跑消失，目标用例另连续3/3通过。
+- Fluent Combo根修删除collapsed实例的逐控件QSS、反复全choice `sizeHint`扫描及所有首开popup子树；
+  flat/tree共用一个owned model，第一次真实展开才分别建立唯一ListView/TreeView和FluentPopup。
+  相对上一Edit cut，无hook三轮click P50 `487.6→287.2 ms`、首次Paint `414.8→254.8 ms`、
+  interactive front `580.1→401.3 ms`；详细trace中Form `108.2→15.4 ms`、add-tab
+  `116.8→46.7 ms`，对象树QObject/Widget/Layout `500/280/115→248/142/57`。首次展开成本没有
+  隐藏：131-choice flat cold/warm P50约`23.5/6.6 ms`，Tree约`27.8/7.7 ms`；将首次Popup
+  加回Editor首次Paint后仍比旧链快约135–142 ms。collapsed实屏抓图只在306/4203360像素的
+  圆角抗锯齿边缘不同，popup抓图pixel-exact。
 - PanelState只保存authored target；Live、Frozen和FigureViewer都以Plot成功返回的完整accepted
   `DisplayDescription`判断当前pixels、能力与交互。Selector/viewport observation携exact Dataset
   generation+revision，TaskConsole Console核对后才持久化、镜像或发布derivation。

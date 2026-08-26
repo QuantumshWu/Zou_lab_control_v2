@@ -37,7 +37,7 @@ import zou_lab_control
 print(zou_lab_control.__file__)
 from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import FluentTreeComboBox
+from zlc_ui.fluent import FluentComboBox, FluentTreeComboBox
 from zlc_ui.console import panel_card_view as tested_module
 print(tested_module.__file__)
 PanelCardView = tested_module.PanelCardView
@@ -754,7 +754,7 @@ handle.open_logic_editor('camera-1', projection)
 editor = handle._logic_editors['camera-1']
 # The frame-signal picker is the SAME grouped tree every signal chooser uses:
 # a producer header with keyed leaves, not a flat list.
-from zlc_ui.fluent import FluentTreeComboBox
+from zlc_ui.fluent import FluentComboBox, FluentTreeComboBox
 assert isinstance(editor.source_combo, FluentTreeComboBox)
 assert editor.source_combo.model().item(0).text() == '(not selected)'
 source_header = editor.source_combo.model().item(1)
@@ -905,7 +905,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
 from zlc_ui.console import TaskConsoleHandle, TaskConsoleView
-from zlc_ui.fluent import FluentTreeComboBox
+from zlc_ui.fluent import FluentComboBox, FluentTreeComboBox
 from zlc_ui.form import FormFieldProps, FormSpec
 from zlc_ui.qt import ensure_qt_app
 app = ensure_qt_app(['panel-editor'])
@@ -1141,7 +1141,7 @@ assert card._settings_form.read_all()['semantic__x'] == 'sensor_x'
 assert card._settings_form.widget_for('fit__model').currentText() == '(none)'
 assert card._settings_form.read_all()['overlay_signal'] == '@logic/occ/site_overlay'
 interval_combo = card._settings_form.widget_for('interval_ms')
-assert isinstance(interval_combo, QtWidgets.QComboBox)
+assert isinstance(interval_combo, FluentComboBox)
 assert tuple(interval_combo.itemData(index) for index in range(interval_combo.count())) == (
     100, 200, 400, 800,
 )
@@ -1152,7 +1152,7 @@ handle.set_grid_cell_kinds(('curve', 'image', 'histogram'))
 facet_state = dict(state, kind='facet_grid', cell_kind='curve', title='Site grid')
 handle.set_panel_projection('panel-1', facet_state, surface)
 cell_combo = card._settings_form.widget_for('cell_kind')
-assert isinstance(cell_combo, QtWidgets.QComboBox)
+assert isinstance(cell_combo, FluentComboBox)
 assert cell_combo.isEnabled()
 assert tuple(cell_combo.itemData(index) for index in range(cell_combo.count())) == (
     '', 'curve', 'image', 'histogram',
@@ -1369,7 +1369,7 @@ fit_combo = editor.parameter_forms['fit'].widget_for('model')
 fit_combo.setCurrentIndex(1)
 fit_combo.activated.emit(1)
 editor_interval = editor.panel_form.widget_for('interval_ms')
-assert isinstance(editor_interval, QtWidgets.QComboBox)
+assert isinstance(editor_interval, FluentComboBox)
 editor_interval.setCurrentIndex(editor_interval.findData(800))
 editor_interval.activated.emit(editor_interval.currentIndex())
 editor.refresh_button.click()

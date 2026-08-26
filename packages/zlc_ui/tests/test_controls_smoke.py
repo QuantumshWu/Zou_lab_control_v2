@@ -124,6 +124,58 @@ assert 'ambient temperature' in legend.toolTip()
     )
 
 
+def test_fluent_combo_popup_is_lazy_single_owned_and_keyboard_selectable() -> None:
+    _run_qt_smoke(
+        """
+from PyQt5 import QtCore, QtTest, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import FluentComboBox, FluentTreeComboBox
+app = ensure_qt_app(['combo-lifecycle'])
+flat = FluentComboBox()
+flat.addItems(('short', 'a considerably longer choice'))
+tree = FluentTreeComboBox()
+tree.set_choice_tree((
+    ('camera', (('frames', '@logic/camera/frames', 'camera · frames'),)),
+), current='@logic/camera/frames')
+assert not flat.findChildren(QtWidgets.QAbstractItemView)
+assert not tree.findChildren(QtWidgets.QAbstractItemView)
+
+initial_width = flat.sizeHint().width()
+flat.addItem('new widest choice of the complete model')
+assert flat.sizeHint().width() > initial_width
+font = flat.font(); font.setPointSize(font.pointSize() + 2); flat.setFont(font)
+assert flat.sizeHint().width() > initial_width
+
+flat.show(); tree.show(); app.processEvents()
+assert not flat.findChildren(QtWidgets.QAbstractItemView)
+assert not tree.findChildren(QtWidgets.QAbstractItemView)
+flat.showPopup(); app.processEvents()
+flat_view = flat.view()
+assert type(flat_view).__name__ == 'QListView'
+flat_events = []
+flat.activated.connect(flat_events.append)
+flat_view.setCurrentIndex(flat.model().index(1, 0))
+QtTest.QTest.keyClick(flat_view, QtCore.Qt.Key_Return)
+assert flat.currentIndex() == 1 and flat_events == [1]
+tree.showPopup(); app.processEvents()
+tree_view = tree.view()
+assert type(tree_view).__name__ == '_ExpandableTreeView'
+assert not tree.findChildren(QtWidgets.QListView)
+assert flat_view.styleSheet() == tree_view.styleSheet() != ''
+assert tree.current_choice_key() == '@logic/camera/frames'
+tree_index = tree.model().index(0, 0, tree.model().index(0, 0))
+tree_view.setExpanded(tree_index.parent(), True)
+tree_view.setCurrentIndex(tree_index)
+QtTest.QTest.keyClick(tree_view, QtCore.Qt.Key_Return)
+assert tree.current_choice_key() == '@logic/camera/frames'
+flat.showPopup(); app.processEvents(); flat.hidePopup()
+tree.showPopup(); app.processEvents()
+assert flat.view() is flat_view and tree.view() is tree_view
+flat.hidePopup(); tree.hidePopup(); flat.close(); tree.close()
+"""
+    )
+
+
 def test_form_runtime_context_and_qt_projection() -> None:
     _run_qt_smoke(
         """

@@ -532,7 +532,7 @@ class FluentPopup(QtWidgets.QFrame):
         super().__init__(parent, QtCore.Qt.Popup | QtCore.Qt.FramelessWindowHint
                          | QtCore.Qt.NoDropShadowWindowHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
-        self._radius = float(_radius() if radius is None else radius)
+        self._radius = None if radius is None else float(radius)
         self._border = QtGui.QColor(border)
         self._fill = QtGui.QColor(fill)
         # A Qt.Popup auto-closes on ANY outside mouse PRESS -- including the press on
@@ -553,6 +553,8 @@ class FluentPopup(QtWidgets.QFrame):
                 QtCore.QEvent.WindowDeactivate,
                 QtCore.QEvent.Hide,
                 QtCore.QEvent.Close,
+                QtCore.QEvent.Move,
+                QtCore.QEvent.Resize,
             )
             if event_type == QtCore.QEvent.WindowStateChange:
                 owner_retired = bool(
@@ -576,7 +578,8 @@ class FluentPopup(QtWidgets.QFrame):
         painter.setBrush(self._fill)
         # inset by the half pen width so the 1 px stroke hugs the edge unclipped
         rect = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        painter.drawRoundedRect(rect, self._radius, self._radius)
+        radius = float(_radius() if self._radius is None else self._radius)
+        painter.drawRoundedRect(rect, radius, radius)
 
 
 def _popup_content_chrome(
@@ -1508,46 +1511,6 @@ class FluentSettingRow(QtWidgets.QWidget):
             self._label.setFixedWidth(int(width))
 
 
-class _RoundedPopupCard(QtCore.QObject):
-    """Paints a FluentPopup-style rounded card (white fill + 1 px border) onto the
-    widget it filters, suppressing that widget's default opaque square paint.
-
-    Used on a QComboBox's top-level drop-down container: the container is a private
-    C++ widget we cannot subclass, and assigning ``container.paintEvent`` does
-    nothing (Qt's C++ dispatch never calls a Python instance attribute).  An event
-    filter is the one reliable hook -- on the Paint event it strokes the card and
-    returns True so the default (square, opaque) paint is skipped; the translucent
-    container then shows nothing outside the rounded arc (no bottom-right nub)."""
-
-    def __init__(self, radius: float, border: str, *, combo=None, gap: int = 0, parent=None):
-        super().__init__(parent)
-        self._radius = float(radius)
-        self._border = QtGui.QColor(border)
-        self._combo = combo            # the owning FluentComboBox (for the outer-gap offset)
-        self._gap = int(gap)
-
-    def eventFilter(self, obj, event):  # noqa: N802 - Qt naming
-        et = event.type()
-        if et == QtCore.QEvent.Paint and isinstance(obj, QtWidgets.QWidget):
-            painter = QtGui.QPainter(obj)
-            painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
-            pen = QtGui.QPen(self._border)
-            pen.setWidthF(1.0)
-            painter.setPen(pen)
-            painter.setBrush(QtGui.QColor("white"))
-            rect = QtCore.QRectF(obj.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-            painter.drawRoundedRect(rect, self._radius, self._radius)
-            painter.end()
-            return True
-        if et == QtCore.QEvent.Move and self._combo is not None and isinstance(obj, QtWidgets.QWidget):
-            geo = obj.geometry()
-            target = self._combo._popup_origin(geo.width())
-            if abs(geo.top() - target.y()) > 1 or geo.left() != target.x():
-                obj.move(target)
-            return False
-        return False
-
-
 class _FluentRoundedMenu(QtWidgets.QMenu):
     """A ``QMenu`` with the SAME antialiased rounded-card chrome as every other Fluent popup
     (the FluentPopup Setting card, the FluentComboBox drop-down), reusable frontend-owned.
@@ -1556,8 +1519,7 @@ class _FluentRoundedMenu(QtWidgets.QMenu):
     behind the arc, so the corners outside the radius show a white nub (and the platform adds a native
     shadow) -- reading as a hard-cornered popup beside the antialiased round ones.  So the window is
     made TRANSLUCENT + frameless and this PAINTS the card itself (fill + 1 px border) via the same
-    ``drawRoundedRect`` single source, BEFORE the items -- unlike :class:`_RoundedPopupCard` (which
-    filters a container that owns no items and so can suppress its paint), a menu draws its own items,
+    ``drawRoundedRect`` single source, BEFORE the items.  A menu draws its own items,
     so the card is composited UNDER them (super paints the labels on top) rather than replacing them."""
 
     def __init__(self, parent=None, *, radius: float | None = None,
@@ -1592,7 +1554,7 @@ class _FluentRoundedMenu(QtWidgets.QMenu):
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         # Paint the rounded card FIRST (fill + 1 px antialiased border), then let QMenu draw its items
-        # on top -- same drawRoundedRect recipe as FluentPopup / _RoundedPopupCard (one visual source).
+        # on top -- same drawRoundedRect recipe as FluentPopup (one visual source).
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
         pen = QtGui.QPen(self._border)
@@ -1782,29 +1744,195 @@ def fluent_confirm(
 #: both the flat combo and the collapsible tree picker, so a long choice list never overflows the screen.
 _COMBO_MAX_VISIBLE_ITEMS = 12
 
+_COMBO_POPUP_STYLE_CACHE: tuple[float, str] | None = None
 
-class FluentComboBox(QtWidgets.QComboBox):
+
+def _combo_popup_stylesheet() -> str:
+    """The one visual declaration used by materialized list/tree popups."""
+
+    global _COMBO_POPUP_STYLE_CACHE
+    if (
+        _COMBO_POPUP_STYLE_CACHE is not None
+        and _COMBO_POPUP_STYLE_CACHE[0] == _FLUENT_SCALE
+    ):
+        return _COMBO_POPUP_STYLE_CACHE[1]
+    gap = popup_gap()
+    style = f"""
+QAbstractItemView {{
+    background: transparent;
+    border: none;
+    padding: {gap}px;
+    color: {TEXT};
+    selection-background-color: {ACCENT};
+    selection-color: white;
+    font: {fluent_font_size()}pt "{FONT}";
+    outline: none;
+}}
+QAbstractItemView::item {{
+    padding: {scaled_px(3, minimum=2)}px {scaled_px(6, minimum=4)}px;
+    border-radius: {_radius()}px;
+    color: {TEXT};
+}}
+QAbstractItemView::item:hover {{
+    background-color: {HOVER};
+    color: white;
+}}
+QAbstractItemView::item:selected {{
+    background-color: {ACCENT};
+    color: white;
+}}
+QAbstractItemView::corner {{
+    background: transparent;
+    border: none;
+}}
+{fluent_scrollbar_stylesheet('QScrollBar')}
+"""
+    _COMBO_POPUP_STYLE_CACHE = (_FLUENT_SCALE, style)
+    return style
+
+
+class FluentComboBox(QtWidgets.QAbstractButton):
     """A non-editable Fluent combo that paints its own current text.
 
-    QComboBox's editable-lineEdit display does not render reliably on the Qt
-    ``offscreen`` platform (and is finicky to style), so the current item text
-    is drawn directly in :meth:`paintEvent`.  This also makes the text always
-    visible for screenshots and avoids cursor/clipping quirks.
+    The collapsed control owns a plain item model.  Its list/tree popup is a
+    real :class:`FluentPopup` created only on first use, so Qt cannot silently
+    materialize a private QListView while an ancestor stylesheet is polished.
     """
+
+    activated = QtCore.pyqtSignal(int)
+    currentIndexChanged = QtCore.pyqtSignal(int)
+    currentTextChanged = QtCore.pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumHeight(scaled_px(30, minimum=22))
-        self.setEditable(False)
-        # The collapsed field is custom-painted below, so Qt's native combo
-        # chrome cannot author its natural width.  Re-evaluate when choices
-        # change and let :meth:`sizeHint` budget the exact same text rectangle
-        # as the painter.
-        self.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
-        # Long lists scroll rather than overflowing the screen.
-        self.setMaxVisibleItems(_COMBO_MAX_VISIBLE_ITEMS)
-        self._popup_styled = False
-        # The top-level popup is a translucent, rounded Fluent card.
+        self.setCheckable(False)
+        self.setMouseTracking(True)
+        self._drop_hover = False
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Preferred,
+            QtWidgets.QSizePolicy.Fixed,
+        )
+        self._current_index = -1
+        self._minimum_contents_length = 0
+        self._model = QtGui.QStandardItemModel(self)
+        self._popup_view: QtWidgets.QAbstractItemView | None = None
+        self._popup: FluentPopup | None = None
+        self._popup_anchor: FluentSettingsPopupAnchor | None = None
+        self._cached_content_width: int | None = None
+        self._bind_width_model(self._model)
+        self.clicked.connect(self._toggle_popup)
+
+    def model(self) -> QtCore.QAbstractItemModel:
+        return self._model
+
+    def modelColumn(self) -> int:  # noqa: N802 - Qt API name
+        return 0
+
+    def count(self) -> int:
+        return int(self._model.rowCount())
+
+    def addItem(self, text: object, userData: object = None) -> None:  # noqa: N802
+        item = QtGui.QStandardItem(str(text))
+        item.setData(userData, QtCore.Qt.UserRole)
+        item.setEditable(False)
+        self._model.appendRow(item)
+        if self._current_index < 0:
+            self.setCurrentIndex(0)
+
+    def addItems(self, texts) -> None:  # noqa: N802 - Qt API name
+        for text in texts:
+            self.addItem(text)
+
+    def clear(self) -> None:
+        previous = self._current_index
+        if self.count():
+            self._model.removeRows(0, self.count())
+        self._current_index = -1
+        if previous != -1:
+            self.currentIndexChanged.emit(-1)
+            self.currentTextChanged.emit("")
+        self.update()
+
+    def itemText(self, index: int) -> str:  # noqa: N802 - Qt API name
+        model_index = self._model.index(int(index), 0)
+        value = model_index.data(QtCore.Qt.DisplayRole)
+        return "" if value is None else str(value)
+
+    def itemData(
+        self,
+        index: int,
+        role: int = QtCore.Qt.UserRole,
+    ) -> object:  # noqa: N802
+        return self._model.index(int(index), 0).data(role)
+
+    def setItemData(
+        self,
+        index: int,
+        value: object,
+        role: int = QtCore.Qt.UserRole,
+    ) -> None:  # noqa: N802
+        model_index = self._model.index(int(index), 0)
+        if model_index.isValid():
+            self._model.setData(model_index, value, role)
+
+    def findData(
+        self,
+        value: object,
+        role: int = QtCore.Qt.UserRole,
+    ) -> int:  # noqa: N802
+        for index in range(self.count()):
+            candidate = self.itemData(index, role)
+            if type(candidate) is type(value) and candidate == value:
+                return index
+        return -1
+
+    def findText(self, text: object) -> int:  # noqa: N802 - Qt API name
+        selected = str(text)
+        return next(
+            (index for index in range(self.count()) if self.itemText(index) == selected),
+            -1,
+        )
+
+    def currentIndex(self) -> int:  # noqa: N802 - Qt API name
+        return self._current_index
+
+    def setCurrentIndex(self, index: int) -> None:  # noqa: N802 - Qt API name
+        selected = int(index)
+        if selected < 0 or selected >= self.count():
+            selected = -1
+        if selected == self._current_index:
+            return
+        self._current_index = selected
+        self.currentIndexChanged.emit(selected)
+        self.currentTextChanged.emit(self.currentText())
+        if self._popup_view is not None:
+            self._sync_popup_selection()
+        self.update()
+
+    def currentText(self) -> str:  # noqa: N802 - Qt API name
+        return self.itemText(self._current_index) if self._current_index >= 0 else ""
+
+    def setCurrentText(self, text: object) -> None:  # noqa: N802 - Qt API name
+        index = self.findText(text)
+        if index >= 0:
+            self.setCurrentIndex(index)
+
+    def currentData(self, role: int = QtCore.Qt.UserRole) -> object:  # noqa: N802
+        return self.itemData(self._current_index, role) if self._current_index >= 0 else None
+
+    def minimumContentsLength(self) -> int:  # noqa: N802 - Qt API name
+        return self._minimum_contents_length
+
+    def setMinimumContentsLength(self, length: int) -> None:  # noqa: N802
+        selected = max(0, int(length))
+        if selected != self._minimum_contents_length:
+            self._minimum_contents_length = selected
+            self.updateGeometry()
+
+    def _create_popup_view(self) -> QtWidgets.QAbstractItemView:
+        """Create this combo family's one popup view, on first use only."""
+
         view = QtWidgets.QListView(self)
         view.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         view.viewport().setAutoFillBackground(False)
@@ -1813,85 +1941,139 @@ class FluentComboBox(QtWidgets.QComboBox):
         view_palette.setColor(QtGui.QPalette.Base, QtCore.Qt.transparent)
         view_palette.setColor(QtGui.QPalette.Window, QtCore.Qt.transparent)
         view.setPalette(view_palette)
-        self.setView(view)
-        self._gap = popup_gap()
-        # Translucency must be installed before the native popup window is created.
-        self._configure_popup_container()
-        self.setStyleSheet(
-            f"""
-            QComboBox {{
-                background-color: white;
-                border: 1px solid {PLACEHOLDER};
-                border-radius: {_radius()}px;
-                color: {TEXT};
-                font: {fluent_font_size()}pt "{FONT}";
-                padding: 0px;
-            }}
-            QComboBox:disabled {{
-                background-color: {BG};
-                border: 1px solid {PLACEHOLDER};
-                color: {PLACEHOLDER};
-            }}
-            QComboBox::drop-down {{
-                subcontrol-origin: border;
-                subcontrol-position: right;
-                width: {scaled_px(COMBO_WIDTH)}px;
-                border: none;
-                background-color: {ACCENT};
-                border-top-right-radius: {_radius()}px;
-                border-bottom-right-radius: {_radius()}px;
-            }}
-            QComboBox::drop-down:disabled {{ background-color: {PLACEHOLDER}; }}
-            QComboBox::drop-down:hover {{ background-color: {HOVER}; }}
-            QComboBox::down-arrow {{ image: none; width: 0px; height: 0px; }}
-            QComboBox QAbstractItemView {{
-                background: transparent;
-                border: none;
-                padding: {self._gap}px;
-                color: {TEXT};
-                selection-background-color: {ACCENT};
-                selection-color: white;
-                font: {fluent_font_size()}pt "{FONT}";
-                outline: none;
-            }}
-            QComboBox QAbstractItemView::item {{
-                padding: {scaled_px(3, minimum=2)}px {scaled_px(6, minimum=4)}px;
-                border-radius: {_radius()}px;
-                color: {TEXT};
-            }}
-            QComboBox QAbstractItemView::item:hover {{
-                background-color: {HOVER};
-                color: white;
-            }}
-            QComboBox QAbstractItemView::item:selected {{
-                background-color: {ACCENT};
-                color: white;
-            }}
-            QComboBox QAbstractItemView::corner {{ background: transparent; border: none; }}
-            """
-            + fluent_scrollbar_stylesheet("QComboBox QAbstractItemView QScrollBar")
-        )
+        return view
 
-    def _configure_popup_container(self) -> None:
-        """Install the rounded translucent card on Qt's private popup container."""
-        container = self.view().window()
-        if container is None or container is self or self._popup_styled:
+    def _popup_view_created(self, view: QtWidgets.QAbstractItemView) -> None:
+        """Subclass hook for signals owned by the one materialized view."""
+
+        view.clicked.connect(self._commit_flat_index)
+        view.activated.connect(self._commit_flat_index)
+
+    def _commit_flat_index(self, index: QtCore.QModelIndex) -> None:
+        if not index.isValid() or not (
+            index.flags() & QtCore.Qt.ItemIsEnabled
+            and index.flags() & QtCore.Qt.ItemIsSelectable
+        ):
             return
-        self._popup_styled = True
-        container.setWindowFlags(container.windowFlags()
-                                 | QtCore.Qt.FramelessWindowHint | QtCore.Qt.NoDropShadowWindowHint)
-        container.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
-        container.setAttribute(QtCore.Qt.WA_NoSystemBackground, True)
-        layout = container.layout()
-        if layout is not None:
-            layout.setContentsMargins(0, 0, 0, 0)
-        self._card_filter = _RoundedPopupCard(float(_radius()), DIVIDER,
-                                              combo=self, gap=self._gap, parent=container)
-        container.installEventFilter(self._card_filter)
+        self.setCurrentIndex(index.row())
+        self.hidePopup()
+        self.activated.emit(index.row())
 
-    @staticmethod
-    def _collapsed_font() -> QtGui.QFont:
-        return QtGui.QFont(FONT, fluent_font_size())
+    def _ensure_popup_view(self) -> QtWidgets.QAbstractItemView:
+        view = self._popup_view
+        if view is not None:
+            return view
+        view = self._create_popup_view()
+        if not isinstance(view, QtWidgets.QAbstractItemView):
+            raise TypeError("Fluent combo popup factory must return QAbstractItemView")
+        view.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        view.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        view.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        view.installEventFilter(self)
+        view.setStyleSheet(_combo_popup_stylesheet())
+        view.setModel(self._model)
+        self._popup_view = view
+        self._popup_view_created(view)
+        popup = FluentPopup(self)
+        layout = QtWidgets.QVBoxLayout(popup)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(view)
+        self._popup = popup
+        self._popup_anchor = FluentSettingsPopupAnchor(popup, self)
+        return view
+
+    def view(self):  # noqa: N802 - Qt API name
+        """Materialize the correct family view when a caller explicitly asks."""
+
+        return self._ensure_popup_view()
+
+    def eventFilter(self, watched, event):  # noqa: N802 - Qt API name
+        if (
+            watched is self._popup_view
+            and event.type() == QtCore.QEvent.KeyPress
+            and event.key() == QtCore.Qt.Key_Escape
+        ):
+            self.hidePopup()
+            return True
+        return super().eventFilter(watched, event)
+
+    def _bind_width_model(self, model: QtCore.QAbstractItemModel) -> None:
+        callback = self._invalidate_content_width
+        for name in (
+            "rowsInserted",
+            "rowsRemoved",
+            "rowsMoved",
+            "columnsInserted",
+            "columnsRemoved",
+            "columnsMoved",
+            "modelReset",
+            "layoutChanged",
+        ):
+            signal = getattr(model, name, None)
+            if signal is not None:
+                signal.connect(callback)
+        data_changed = getattr(model, "dataChanged", None)
+        if data_changed is not None:
+            data_changed.connect(self._model_data_changed)
+        self._invalidate_content_width()
+
+    def _model_data_changed(self, top_left, bottom_right, roles=()) -> None:
+        display_changed = (
+            not roles
+            or QtCore.Qt.DisplayRole in roles
+            or QtCore.Qt.EditRole in roles
+        )
+        if display_changed:
+            self._invalidate_content_width()
+        if (
+            display_changed
+            and self._current_index >= 0
+            and top_left.row() <= self._current_index <= bottom_right.row()
+            and top_left.column() <= 0 <= bottom_right.column()
+        ):
+            self.currentTextChanged.emit(self.currentText())
+            self.update()
+
+    def _invalidate_content_width(self, *_args) -> None:
+        was_measured = self._cached_content_width is not None
+        self._cached_content_width = None
+        if was_measured:
+            self.updateGeometry()
+            self.update()
+
+    def changeEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        super().changeEvent(event)
+        if (
+            event.type() == QtCore.QEvent.EnabledChange
+            and not self.isEnabled()
+            and hasattr(self, "_popup")
+        ):
+            self.hidePopup()
+        if event.type() in {
+            QtCore.QEvent.FontChange,
+            QtCore.QEvent.ApplicationFontChange,
+            QtCore.QEvent.StyleChange,
+        } and hasattr(self, "_cached_content_width"):
+            self.setMinimumHeight(scaled_px(30, minimum=22))
+            self._invalidate_content_width()
+
+    def event(self, event) -> bool:
+        result = super().event(event)
+        # Qt5's PyQt enum omits ScreenChangeInternal, whose stable Qt value is
+        # 216.  Keep it in the derived-metrics owner rather than spreading a
+        # native-screen callback through every consumer.
+        if int(event.type()) == 216 and hasattr(self, "_cached_content_width"):
+            self._invalidate_content_width()
+        return result
+
+    def hideEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        if hasattr(self, "_popup"):
+            self.hidePopup()
+        super().hideEvent(event)
+
+    def _collapsed_font(self) -> QtGui.QFont:
+        return QtGui.QFont(self.font())
 
     @staticmethod
     def _collapsed_text_chrome() -> tuple[int, int, int]:
@@ -1908,28 +2090,64 @@ class FluentComboBox(QtWidgets.QComboBox):
     def _collapsed_text_candidates(self) -> tuple[str, ...]:
         return tuple(self.itemText(index) for index in range(self.count()))
 
+    def _collapsed_content_width(self) -> int:
+        if self._cached_content_width is None:
+            metrics = QtGui.QFontMetrics(self._collapsed_font())
+            measure = getattr(metrics, "horizontalAdvance", metrics.width)
+            self._cached_content_width = max(
+                (measure(text) for text in self._collapsed_text_candidates()),
+                default=0,
+            )
+        return self._cached_content_width
+
     def sizeHint(self):  # noqa: N802 - Qt API name
-        hint = super().sizeHint()
-        candidates = self._collapsed_text_candidates()
-        if not candidates:
-            return hint
-        metrics = QtGui.QFontMetrics(self._collapsed_font())
-        measure = getattr(metrics, "horizontalAdvance", metrics.width)
-        left, right, drop_width = self._collapsed_text_chrome()
-        content_width = max(measure(text) for text in candidates)
-        return QtCore.QSize(
-            max(hint.width(), content_width + left + right + drop_width),
-            hint.height(),
+        font = self._collapsed_font()
+        metrics = QtGui.QFontMetrics(font)
+        minimum_text = (
+            fluent_text_width(metrics, "M" * self.minimumContentsLength())
+            if self.minimumContentsLength() > 0
+            else 0
         )
+        content_width = max(self._collapsed_content_width(), minimum_text)
+        left, right, drop_width = self._collapsed_text_chrome()
+        return QtCore.QSize(
+            content_width + left + right + drop_width,
+            max(self.minimumHeight(), metrics.height() + scaled_px(4)),
+        )
+
+    def minimumSizeHint(self):  # noqa: N802 - Qt API name
+        return self.sizeHint()
 
     def paintEvent(self, event):
         del event
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        option = QtWidgets.QStyleOptionComboBox()
-        self.initStyleOption(option)
-        option.currentText = ""  # suppress the style's own label so we don't double-draw
-        self.style().drawComplexControl(QtWidgets.QStyle.CC_ComboBox, option, painter, self)
+        radius = float(_radius())
+        outer = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        outline = QtGui.QPen(QtGui.QColor(PLACEHOLDER))
+        outline.setWidthF(1.0)
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(QtGui.QColor("white" if self.isEnabled() else BG))
+        painter.drawRoundedRect(outer, radius, radius)
+        painter.setPen(outline)
+        painter.setBrush(QtCore.Qt.NoBrush)
+        painter.drawRoundedRect(outer, radius, radius)
+
+        _left, _right, drop_width = self._collapsed_text_chrome()
+        drop_left = max(0, self.width() - drop_width)
+        clip = QtGui.QPainterPath()
+        clip.addRoundedRect(QtCore.QRectF(self.rect()), radius, radius)
+        painter.save()
+        painter.setClipPath(clip)
+        painter.fillRect(
+            QtCore.QRectF(drop_left, 0, drop_width, self.height()),
+            QtGui.QColor(
+                PLACEHOLDER
+                if not self.isEnabled()
+                else HOVER if self._drop_hover else ACCENT
+            ),
+        )
+        painter.restore()
 
         text_rect = self._collapsed_text_rect()
         painter.setPen(QtGui.QColor(TEXT if self.isEnabled() else PLACEHOLDER))
@@ -1942,7 +2160,6 @@ class FluentComboBox(QtWidgets.QComboBox):
 
         painter.setPen(QtCore.Qt.NoPen)
         painter.setBrush(QtGui.QColor("#FFFFFF"))
-        _left, _right, drop_width = self._collapsed_text_chrome()
         cx = int(self.width() - drop_width / 2)
         cy = int(self.height() / 2)
         size = scaled_px(COMBO_TRI_SIZE)
@@ -1954,32 +2171,53 @@ class FluentComboBox(QtWidgets.QComboBox):
         painter.drawPolygon(QtGui.QPolygon(points))
         painter.end()
 
+    def _set_drop_hover(self, hovered: bool) -> None:
+        selected = bool(hovered)
+        if selected != self._drop_hover:
+            self._drop_hover = selected
+            self.update()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        _left, _right, drop_width = self._collapsed_text_chrome()
+        self._set_drop_hover(event.pos().x() >= self.width() - drop_width)
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        self._set_drop_hover(False)
+        super().leaveEvent(event)
+
     def showPopup(self):  # noqa: N802 - Qt naming
-        # Reconfigure the popup container (translucent + rounded-card event filter)
-        # in case Qt rebuilt it since __init__.  The OUTER gap (dropdown sits a few
-        # px off the box) and screen-aware placement are enforced by the
-        # container's Move event filter (_RoundedPopupCard), which beats Qt's
-        # deferred flush-positioning that a showPopup-time move() cannot.
-        self._configure_popup_container()
-        view = self.view()
+        view = self._ensure_popup_view()
+        popup = self._popup
+        if popup is None:
+            raise RuntimeError("Fluent combo popup owner was not constructed")
         width = self._desired_popup_width()
-        if view is not None:
-            view.setFixedWidth(width)
-            view.setMinimumHeight(0)
-            view.setMaximumHeight(QtWidgets.QWIDGETSIZE_MAX)
-        container = view.window() if view is not None else None
-        if container is not None and container is not self:
-            container.setMinimumHeight(0)
-            container.setMaximumHeight(QtWidgets.QWIDGETSIZE_MAX)
-        super().showPopup()
-        container = view.window() if view is not None else None
-        if container is not None and container is not self:
-            container.setFixedWidth(width)
+        view.setFixedWidth(width)
+        view.setMinimumHeight(0)
+        view.setMaximumHeight(QtWidgets.QWIDGETSIZE_MAX)
+        popup.setMinimumHeight(0)
+        popup.setMaximumHeight(QtWidgets.QWIDGETSIZE_MAX)
+        self._sync_popup_selection()
         self._resize_popup_to_contents()
+        popup.setFixedWidth(width)
         self._place_popup()
+        popup.show()
+        popup.raise_()
+        view.setFocus(QtCore.Qt.PopupFocusReason)
+
+    def hidePopup(self) -> None:  # noqa: N802 - Qt API name
+        if self._popup is not None:
+            self._popup.hide()
+
+    def _toggle_popup(self) -> None:
+        view = self._ensure_popup_view()
+        anchor = self._popup_anchor
+        if anchor is None:
+            raise RuntimeError("Fluent combo popup anchor was not constructed")
+        anchor.toggle(view, present=self.showPopup)
 
     def _popup_text_width(self) -> int:
-        view = self.view()
+        view = self._popup_view
         if view is None:
             return 0
         metrics = view.fontMetrics()
@@ -1987,7 +2225,7 @@ class FluentComboBox(QtWidgets.QComboBox):
         return max((measure(self.itemText(i)) for i in range(self.count())), default=0)
 
     def _desired_popup_width(self) -> int:
-        chrome = 2 * (self._gap + scaled_px(6, minimum=4))
+        chrome = 2 * (popup_gap() + scaled_px(6, minimum=4))
         chrome += self.style().pixelMetric(QtWidgets.QStyle.PM_ScrollBarExtent)
         width = max(self.width(), self._popup_text_width() + chrome)
         screen = self.screen() if hasattr(self, "screen") else None
@@ -2009,7 +2247,7 @@ class FluentComboBox(QtWidgets.QComboBox):
         if available is None:
             return (QtWidgets.QWIDGETSIZE_MAX, None)
         bottom = self.mapToGlobal(QtCore.QPoint(0, self.height())).y()
-        below_top = max(available.top(), bottom + self._gap)
+        below_top = max(available.top(), bottom + popup_gap())
         below = max(0, available.bottom() - below_top + 1)
         return below, available
 
@@ -2022,7 +2260,7 @@ class FluentComboBox(QtWidgets.QComboBox):
         )
         screen = self.screen() if hasattr(self, "screen") else None
         available = screen.availableGeometry() if screen is not None else None
-        top = anchor_bottom.y() + self._gap
+        top = anchor_bottom.y() + popup_gap()
         if available is not None:
             left = max(available.left(), min(left, available.right() - popup_width + 1))
         return QtCore.QPoint(int(left), int(top))
@@ -2032,24 +2270,23 @@ class FluentComboBox(QtWidgets.QComboBox):
 
         Wide content grows left from the field's right edge; vertical overflow
         never changes the anchor and is instead consumed by native scrolling.
-        The Move filter reapplies this target after Qt's deferred placement.
+        The popup is positioned once from the current anchor geometry.
         """
-        view = self.view()
-        container = view.window() if view is not None else None
-        if container is None or container is self:
+        popup = self._popup
+        if popup is None:
             return
-        container.move(self._popup_origin(container.width()))
+        popup.move(self._popup_origin(popup.width()))
 
     def _popup_pad(self) -> int:
-        return 2 * self._gap
+        return 2 * popup_gap()
 
     def _visible_popup_row_count(self) -> int:
-        return min(self.count(), self.maxVisibleItems())
+        return min(self.count(), _COMBO_MAX_VISIBLE_ITEMS)
 
     def _desired_popup_height(self) -> int:
         """Fit the visible rows below the field; overflow remains in the native view."""
 
-        view = self.view()
+        view = self._popup_view
         rows = self._visible_popup_row_count()
         if view is None or rows <= 0:
             return 0
@@ -2065,25 +2302,93 @@ class FluentComboBox(QtWidgets.QComboBox):
     def _resize_popup_to_contents(self, *_) -> None:
         """Apply one content/available-space height contract to list and tree popups."""
 
-        view = self.view()
-        container = view.window() if view is not None else None
-        if view is None or container is None or container is self:
+        view = self._popup_view
+        popup = self._popup
+        if view is None or popup is None:
             return
         desired = self._desired_popup_height()
-        view.setFixedHeight(max(0, desired - self._popup_pad()))
-        container.setFixedHeight(desired)
+        top_inset = popup_gap()
+        layout = popup.layout()
+        if layout is not None:
+            layout.setContentsMargins(0, top_inset, 0, 0)
+        view.setFixedHeight(max(0, desired - top_inset))
+        popup.setFixedHeight(desired)
 
     def _display_text(self) -> str:
         """The text painted in the COLLAPSED combo (the seam a tree combo overrides to show a
         fuller source-qualified name).  Default: the current item's own text."""
         return self.currentText()
 
+    def _sync_popup_selection(self) -> None:
+        """Project the collapsed flat selection into the materialized view."""
+
+        view = self._popup_view
+        if view is None:
+            return
+        index = self._model.index(self._current_index, 0)
+        if not index.isValid():
+            view.clearSelection()
+            view.setCurrentIndex(QtCore.QModelIndex())
+            return
+        view.setCurrentIndex(index)
+        view.selectionModel().select(
+            index,
+            QtCore.QItemSelectionModel.ClearAndSelect
+            | QtCore.QItemSelectionModel.Rows,
+        )
+        view.scrollTo(index)
+
     def wheelEvent(self, event):
-        view = self.view()
+        view = self._popup_view
         if view is not None and view.isVisible():
             super().wheelEvent(event)
             return
         event.ignore()
+
+    def _selectable_row(self, start: int, step: int) -> int:
+        row = int(start)
+        while 0 <= row < self.count():
+            flags = self._model.index(row, 0).flags()
+            if (
+                flags & QtCore.Qt.ItemIsEnabled
+                and flags & QtCore.Qt.ItemIsSelectable
+            ):
+                return row
+            row += int(step)
+        return -1
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        key = event.key()
+        if key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_Space, QtCore.Qt.Key_F4):
+            self._toggle_popup()
+            event.accept()
+            return
+        if key == QtCore.Qt.Key_Escape and self._popup is not None:
+            self.hidePopup()
+            event.accept()
+            return
+        if key in (
+            QtCore.Qt.Key_Up,
+            QtCore.Qt.Key_Down,
+            QtCore.Qt.Key_Home,
+            QtCore.Qt.Key_End,
+        ) and self.count():
+            step = -1 if key == QtCore.Qt.Key_Up else 1
+            if key == QtCore.Qt.Key_Home:
+                step, start = 1, 0
+            elif key == QtCore.Qt.Key_End:
+                step, start = -1, self.count() - 1
+            elif self._current_index < 0:
+                start = self.count() - 1 if step < 0 else 0
+            else:
+                start = self._current_index + step
+            candidate = self._selectable_row(start, step)
+            if candidate >= 0 and candidate != self._current_index:
+                self.setCurrentIndex(candidate)
+                self.activated.emit(candidate)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class _ExpandableTreeView(QtWidgets.QTreeView):
@@ -2091,7 +2396,7 @@ class _ExpandableTreeView(QtWidgets.QTreeView):
     -- the text as well as the disclosure triangle -- so a signal-group header is easy to open
     (G2 follow-up: "click the name OR the arrow"), exactly once (the click is swallowed so Qt's
     native triangle toggle never double-fires).  LEAF rows fall through to the normal click path
-    (``clicked`` -> ``FluentTreeComboBox._on_tree_clicked`` selects them).  Reusable: the behaviour
+    (``clicked`` -> ``FluentTreeComboBox._commit_tree_index`` selects them).  Reusable: the behaviour
     lives on the widget, not in any caller."""
 
     def mousePressEvent(self, event):  # noqa: N802 - Qt naming
@@ -2118,6 +2423,10 @@ class FluentTreeComboBox(FluentComboBox):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._full_by_key: dict[str, str] = {}
+        self._selected_index = QtCore.QPersistentModelIndex()
+
+    def _create_popup_view(self) -> QtWidgets.QAbstractItemView:
         tree = _ExpandableTreeView(self)         # parent rows toggle on a name OR triangle click
         tree.setHeaderHidden(True)
         tree.setRootIsDecorated(True)            # show the expand/collapse triangles
@@ -2131,25 +2440,32 @@ class FluentTreeComboBox(FluentComboBox):
         pal.setColor(QtGui.QPalette.Base, QtCore.Qt.transparent)
         pal.setColor(QtGui.QPalette.Window, QtCore.Qt.transparent)
         tree.setPalette(pal)
-        self._model = QtGui.QStandardItemModel(self)
-        self.setModel(self._model)
-        self.setView(tree)
-        self._configure_popup_container()
-        # {opaque choice key -> source-qualified label}, built when the tree is populated.  The collapsed
-        # box derives its text LIVE from this + the CURRENT selection (see _display_text) -- there is NO
-        # cached "_display" to go stale: a pick via the native view click, _on_tree_clicked, OR a
-        # Programmatic set_choice_tree calls also change currentData, so the box
-        # always tracks the real pick.
-        self._full_by_key: dict[str, str] = {}
-        # selecting a leaf in the tree drives the combo's current item + emits keyed_choice_picked
-        tree.clicked.connect(self._on_tree_clicked)
+        return tree
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        if event.key() in (
+            QtCore.Qt.Key_Up,
+            QtCore.Qt.Key_Down,
+            QtCore.Qt.Key_Home,
+            QtCore.Qt.Key_End,
+        ):
+            self.showPopup()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _popup_view_created(self, view: QtWidgets.QAbstractItemView) -> None:
+        if not isinstance(view, _ExpandableTreeView):
+            raise TypeError("Fluent tree combo requires its tree popup view")
+        view.clicked.connect(self._commit_tree_index)
+        view.activated.connect(self._commit_tree_index)
         # When a parent expands/collapses, RE-GROW the open popup so the children are fully visible
         # (Qt sizes the popup once at open and never re-fits a tree expand) -- the box "变长".
-        tree.expanded.connect(self._resize_popup_to_contents)
-        tree.collapsed.connect(self._resize_popup_to_contents)
+        view.expanded.connect(self._resize_popup_to_contents)
+        view.collapsed.connect(self._resize_popup_to_contents)
 
     def _popup_text_width(self) -> int:
-        view = self.view()
+        view = self._popup_view
         if not isinstance(view, QtWidgets.QTreeView):
             return super()._popup_text_width()
         metrics = view.fontMetrics()
@@ -2172,10 +2488,19 @@ class FluentTreeComboBox(FluentComboBox):
         visit(QtCore.QModelIndex(), 0)
         return int(widest)
 
+    def _collapsed_text_candidates(self) -> tuple[str, ...]:
+        none_labels = tuple(
+            item.text()
+            for row in range(self._model.rowCount())
+            for item in (self._model.item(row),)
+            if item is not None and item.data(QtCore.Qt.UserRole) == ""
+        )
+        return (*none_labels, *self._full_by_key.values())
+
     def _visible_popup_row_count(self) -> int:
         """Count the rows revealed by the current tree expansion state."""
 
-        view = self.view()
+        view = self._popup_view
         if not isinstance(view, QtWidgets.QTreeView):
             return 0
         model = self._model
@@ -2194,48 +2519,81 @@ class FluentTreeComboBox(FluentComboBox):
 
     def _display_text(self) -> str:
         """Derive the collapsed text live from the current key and source label."""
-        full = self._full_by_key.get(self.current_choice_key(), "")
-        return full or self.currentText()
+        key = self.current_choice_key()
+        full = self._full_by_key.get(key, "")
+        if full:
+            return full
+        index = self._selected_model_index()
+        item = self._model.itemFromIndex(index) if index.isValid() else None
+        return "" if item is None else item.text()
 
-    def _on_tree_clicked(self, index) -> None:
+    def _selected_model_index(self) -> QtCore.QModelIndex:
+        if not self._selected_index.isValid():
+            return QtCore.QModelIndex()
+        return QtCore.QModelIndex(self._selected_index)
+
+    def currentIndex(self) -> int:  # noqa: N802 - Qt API name
+        index = self._selected_model_index()
+        return index.row() if index.isValid() else -1
+
+    def currentText(self) -> str:  # noqa: N802 - Qt API name
+        index = self._selected_model_index()
+        item = self._model.itemFromIndex(index) if index.isValid() else None
+        return "" if item is None else item.text()
+
+    def currentData(self, role: int = QtCore.Qt.UserRole) -> object:  # noqa: N802
+        index = self._selected_model_index()
+        item = self._model.itemFromIndex(index) if index.isValid() else None
+        return None if item is None else item.data(role)
+
+    def _set_selected_index(self, index: QtCore.QModelIndex) -> bool:
+        previous = self._selected_model_index()
+        if previous == index:
+            return False
+        self._selected_index = (
+            QtCore.QPersistentModelIndex(index)
+            if index.isValid()
+            else QtCore.QPersistentModelIndex()
+        )
+        self.currentIndexChanged.emit(self.currentIndex())
+        self.currentTextChanged.emit(self.currentText())
+        self.update()
+        return True
+
+    def _sync_popup_selection(self) -> None:
+        view = self._popup_view
+        if not isinstance(view, QtWidgets.QTreeView):
+            return
+        index = self._selected_model_index()
+        if not index.isValid():
+            view.clearSelection()
+            view.setCurrentIndex(QtCore.QModelIndex())
+            return
+        parent = index.parent()
+        if parent.isValid():
+            view.setExpanded(parent, True)
+        view.setCurrentIndex(index)
+        view.selectionModel().select(
+            index,
+            QtCore.QItemSelectionModel.ClearAndSelect
+            | QtCore.QItemSelectionModel.Rows,
+        )
+        view.scrollTo(index)
+
+    def _commit_tree_index(self, index: QtCore.QModelIndex) -> None:
         item = self._model.itemFromIndex(index)
         if item is None or item.data(QtCore.Qt.UserRole) is None:
-            return                                # a parent header: let the triangle expand it
-        parent = item.parent()
-        if parent is None:
             return
-        self.setRootModelIndex(parent.index())
-        self.setCurrentIndex(item.row())
-        self.setRootModelIndex(QtCore.QModelIndex())
+        self._set_selected_index(index)
         self.hidePopup()
-        # repaint() NOT update(): the box lives inside the Setting Qt.Popup, and closing the tree's own
-        # child popup (hidePopup) leaves the SCHEDULED async repaint of update() unprocessed -- so the box
-        # showed the STALE pick until the whole Setting was closed + reopened (#1).  repaint() forces the
-        # (live-derived) source-qualified label to paint NOW.
+        # repaint() NOT update(): the box lives inside the Setting Qt.Popup,
+        # whose child popup has just closed, so a queued update can otherwise
+        # leave the collapsed source-qualified label stale until reopen.
         self.repaint()
-        # Emit BOTH the explicit keyed-choice signal AND the standard ``activated`` so any existing
-        # ``combo.activated.connect(...)`` wiring fires (setCurrentIndex alone does not emit it).
-        self.activated.emit(self.currentIndex())
+        self.activated.emit(item.row())
         self.keyed_choice_picked.emit(self.current_choice_key())
 
-    def select_choice_key(self, bare_key) -> bool:
-        """Select one nested choice leaf by its opaque ``UserRole`` key.
-
-        ``QComboBox.findData`` only searches the combo's current root.  Choice
-        leaves live below source rows, so using ``findData`` to restore a
-        saved value silently misses every real choice.  This method is the one
-        programmatic-selection path for the tree: it walks all nested leaves,
-        temporarily scopes the combo to the matching leaf's parent, selects
-        the leaf row, restores the top-level root, and paints the collapsed
-        source-qualified label immediately.
-
-        ``None`` and ``""`` clear the selection unless the model contains an
-        explicit empty leaf (the optional ``none_label`` row), in which case
-        that row is selected.  A non-empty key that is absent also leaves the
-        combo blank and returns ``False``; it never lands on a source header.
-        """
-
-        key = "" if bare_key is None else str(bare_key).strip()
+    def _find_choice_index(self, key: str) -> QtCore.QModelIndex:
         match = QtCore.QModelIndex()
 
         def visit(parent: QtCore.QModelIndex) -> bool:
@@ -2253,19 +2611,33 @@ class FluentTreeComboBox(FluentComboBox):
                     return True
             return False
 
-        found = visit(QtCore.QModelIndex())
-        try:
-            if found:
-                self.setRootModelIndex(match.parent())
-                self.setCurrentIndex(match.row())
-            else:
-                self.setRootModelIndex(QtCore.QModelIndex())
-                self.setCurrentIndex(-1)
-        finally:
-            # A temporary nested root is an implementation detail.  Leaving it
-            # installed makes the next popup expose only one source subtree.
-            self.setRootModelIndex(QtCore.QModelIndex())
-        self.repaint()
+        visit(QtCore.QModelIndex())
+        return match
+
+    def select_choice_key(self, bare_key) -> bool:
+        """Select one nested choice leaf by its opaque ``UserRole`` key.
+
+        A flat ``findData`` only searches top-level rows.  Choice leaves live
+        below source rows, so using it to restore a
+        saved value silently misses every real choice.  This method is the one
+        programmatic-selection path for the tree: it walks all nested leaves,
+        stores one persistent model index, and paints the collapsed
+        source-qualified label immediately without materializing a view.
+
+        ``None`` and ``""`` clear the selection unless the model contains an
+        explicit empty leaf (the optional ``none_label`` row), in which case
+        that row is selected.  A non-empty key that is absent also leaves the
+        combo blank and returns ``False``; it never lands on a source header.
+        """
+
+        key = "" if bare_key is None else str(bare_key).strip()
+        match = self._find_choice_index(key)
+        found = match.isValid()
+        if self._set_selected_index(
+            match if found else QtCore.QModelIndex()
+        ):
+            self._sync_popup_selection()
+            self.repaint()
         return found
 
     def set_choice_tree(self, groups, *, current="", none_label=None) -> None:
@@ -2291,7 +2663,7 @@ class FluentTreeComboBox(FluentComboBox):
                 full_by_key[choice_key] = full
             normalized.append((source_name, tuple(normalized_leaves)))
 
-        view = self.view()
+        view = self._popup_view
         expanded = set()
         vertical = horizontal = 0
         if isinstance(view, QtWidgets.QTreeView):
@@ -2323,20 +2695,28 @@ class FluentTreeComboBox(FluentComboBox):
         desired_top = []
         if none_label is not None:
             none_item = existing_none or QtGui.QStandardItem()
-            none_item.setText(str(none_label))
-            none_item.setData("", QtCore.Qt.UserRole)
-            none_item.setData("", QtCore.Qt.UserRole + 1)
-            none_item.setEditable(False)
+            if none_item.text() != str(none_label):
+                none_item.setText(str(none_label))
+            if none_item.data(QtCore.Qt.UserRole) != "":
+                none_item.setData("", QtCore.Qt.UserRole)
+            if none_item.data(QtCore.Qt.UserRole + 1) != "":
+                none_item.setData("", QtCore.Qt.UserRole + 1)
+            if none_item.isEditable():
+                none_item.setEditable(False)
             desired_top.append(none_item)
 
         for source, leaves in normalized:
             parent = existing_parents.get(source) or QtGui.QStandardItem()
-            parent.setText(source)
-            parent.setSelectable(False)
-            parent.setEditable(False)
+            if parent.text() != source:
+                parent.setText(source)
+            if parent.isSelectable():
+                parent.setSelectable(False)
+            if parent.isEditable():
+                parent.setEditable(False)
             font = parent.font()
-            font.setBold(True)
-            parent.setFont(font)
+            if not font.bold():
+                font.setBold(True)
+                parent.setFont(font)
             existing_children = {
                 str(child.data(QtCore.Qt.UserRole)): child
                 for row in range(parent.rowCount())
@@ -2346,10 +2726,14 @@ class FluentTreeComboBox(FluentComboBox):
             desired_children = []
             for leaf_label, bare, full_label in leaves:
                 child = existing_children.get(bare) or QtGui.QStandardItem()
-                child.setText(leaf_label)
-                child.setData(bare, QtCore.Qt.UserRole)
-                child.setData(full_label, QtCore.Qt.UserRole + 1)
-                child.setEditable(False)
+                if child.text() != leaf_label:
+                    child.setText(leaf_label)
+                if child.data(QtCore.Qt.UserRole) != bare:
+                    child.setData(bare, QtCore.Qt.UserRole)
+                if child.data(QtCore.Qt.UserRole + 1) != full_label:
+                    child.setData(full_label, QtCore.Qt.UserRole + 1)
+                if child.isEditable():
+                    child.setEditable(False)
                 desired_children.append(child)
             desired_child_ids = {id(child) for child in desired_children}
             for row in range(parent.rowCount() - 1, -1, -1):
@@ -2376,7 +2760,10 @@ class FluentTreeComboBox(FluentComboBox):
             else:
                 self._model.insertRow(row, item)
 
-        self._full_by_key = full_by_key
+        if self._full_by_key != full_by_key:
+            self._full_by_key = full_by_key
+            self._invalidate_content_width()
+            self.update()
         self.select_choice_key(current)
         if isinstance(view, QtWidgets.QTreeView):
             # ``expanded`` is captured before the keyed model reconcile.  A
@@ -2403,7 +2790,9 @@ class FluentTreeComboBox(FluentComboBox):
 
     def current_choice_key(self) -> str:
         """Return the selected opaque choice key (empty for none/header)."""
-        data = self.currentData(QtCore.Qt.UserRole)
+        index = self._selected_model_index()
+        item = self._model.itemFromIndex(index) if index.isValid() else None
+        data = None if item is None else item.data(QtCore.Qt.UserRole)
         return str(data).strip() if data else ""
 
 
