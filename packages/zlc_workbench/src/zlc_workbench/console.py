@@ -3541,7 +3541,7 @@ class ConsolePresenter:
                 self._report(
                     f"{binding.state.title or binding.state.signal}: "
                     "Edit already shows the latest picture",
-                    severity="info",
+                    severity="idle",
                 )
             return True
         # A newer exact publication exists.  The board tick only submits its
