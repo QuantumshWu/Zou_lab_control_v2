@@ -672,6 +672,18 @@ class SelectionBridge:
         self._request_owner_wake = request_owner_wake
         self.bridge_id = bridge_id
         self._lock = RLock()
+        #: One route per role, so publishing one is not a concurrent
+        #: operation.  A publication CLAIMS its output names in the plane
+        #: (attach/reserve) before it can decide whether the claim is still
+        #: wanted, so two in-flight events for the same role both held the
+        #: same names for a moment and the plane refused the second with
+        #: "signal '@logic/<panel>/amplitude' is already owned by
+        #: '<panel>:fit:1'" -- an operator arming a fit while a shot landed
+        #: saw their fit break and stay broken.  These serialize the
+        #: decide-claim-install sequence; ``_lock`` still guards state and is
+        #: never held across a plane call.
+        self._selection_publish_lock = RLock()
+        self._fit_publish_lock = RLock()
         self._started = False
         self._closed = False
         self._selection: SelectionState | None = None
@@ -870,6 +882,18 @@ class SelectionBridge:
     ) -> None:
         if not isinstance(event, FitEventValue):
             raise TypeError("fit callback event must be FitEventValue")
+        with self._fit_publish_lock:
+            self._publish_fit_event_locked(
+                event, publication, accept_revision=accept_revision
+            )
+
+    def _publish_fit_event_locked(
+        self,
+        event: FitEventValue,
+        publication: SignalPublication | None,
+        *,
+        accept_revision: bool,
+    ) -> None:
         with self._lock:
             if self._closed or not self._started:
                 return
@@ -1077,6 +1101,17 @@ class SelectionBridge:
     ) -> None:
         if not isinstance(source_publication, SignalPublication):
             raise TypeError("source_publication must be SignalPublication")
+        with self._selection_publish_lock:
+            self._commit_selection_locked(
+                state, source_publication=source_publication
+            )
+
+    def _commit_selection_locked(
+        self,
+        state: SelectionState,
+        *,
+        source_publication: SignalPublication,
+    ) -> None:
         with self._lock:
             if self._closed or not self._started:
                 return
@@ -1195,6 +1230,13 @@ class SelectionBridge:
         terminal because there is no source stream left to follow.
         """
 
+        previous = self._take_processor(role)
+        if previous is not None:
+            # ONE owner per role.  The live path clears the slot before it
+            # claims new names; this path minted its owner and left the old
+            # one holding them, so the plane refused the terminal answer as
+            # a name conflict with the bridge's own live route.
+            self._withdraw_processor(previous)
         with self._lock:
             if self._closed or not self._started:
                 return
@@ -1383,6 +1425,24 @@ class SelectionBridge:
             source_publication=publication,
             trigger=trigger,
         )
+
+    def _take_processor(self, role: str) -> "_BridgeProcessor | None":
+        """Remove one role's processor from the bridge, to be withdrawn.
+
+        The bridge owns exactly one route per role; taking it out and
+        withdrawing it is what frees its output names.  Written once here
+        because every call site that open-coded it had to remember to do
+        both, and the terminal path remembered neither.
+        """
+
+        with self._lock:
+            if role == "selection":
+                processor = self._selection_processor
+                self._selection_processor = None
+            else:
+                processor = self._fit_processor
+                self._fit_processor = None
+        return processor
 
     def _withdraw_processor(self, processor: _BridgeProcessor) -> None:
         self._plane.cancel_latest_only_processor(processor)

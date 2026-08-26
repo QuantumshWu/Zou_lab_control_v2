@@ -224,8 +224,14 @@ class PanelBinding:
     #: so it is kept beside the publication it was taken from and dropped when
     #: that no longer describes what is on screen.
     interaction_viewport: Any = None
-    #: The last failure already shown, so one refusal is reported once.
-    reported_error: Any = None
+    #: What this panel is currently SAYING is wrong, as text -- empty when
+    #: nothing is.  It used to hold whichever exception object carried the
+    #: refusal and was compared by identity, so a source that raises a fresh
+    #: object per attempt (a fit callback runs per event) was "new" every
+    #: beat: the same sentence was reported, the surface degraded and the
+    #: editor rebuilt over and over.  A condition is what it SAYS, not which
+    #: object said it.
+    reported_condition: str = ""
     #: Why this panel's authored settings are not on screen: a required role
     #: has no axis, so the picture is the last one that could be drawn.  It
     #: is state rather than a passing message because it stays true until
@@ -1648,7 +1654,7 @@ class ConsolePresenter:
             # (the operator reconfigured meanwhile).  The next render against
             # the new surface heals the pixels; the refusal is still recorded
             # so a panel that stops changing is never silent about why.
-            binding.reported_error = error
+            binding.reported_condition = _error_text(error)
             self._report(
                 f"{binding.title}: {_error_text(error)}", severity="error"
             )
@@ -1860,7 +1866,7 @@ class ConsolePresenter:
             except BaseException as error:
                 errors.append(error)
         if errors:
-            binding.reported_error = errors[0]
+            binding.reported_condition = _error_text(errors[0])
             self._report(
                 f"{binding.title}: {_error_text(errors[0])}",
                 severity="error",
@@ -2864,16 +2870,21 @@ class ConsolePresenter:
                 return value_schema(value)
         return None
 
-    def _degrade_panel_surface(
-        self, binding: PanelBinding, error: BaseException
-    ) -> None:
-        """Keep the semantic form alive when a host fails to mount."""
+    def _degrade_panel_surface(self, binding: PanelBinding) -> None:
+        """Keep the semantic form alive when a host fails to mount.
+
+        The Fit column says why FIT is unavailable -- it needs a mounted
+        surface and there is not one.  It used to be handed the mount's
+        refusal instead, so a fate the vocabulary rejected was announced
+        under "Fit", where it means nothing.  The refusal itself belongs
+        to the panel's status, which every caller here already writes.
+        """
 
         schema = self._panel_schema(binding)
         if schema is None:
             return
         surface = self._schema_projected_parameters(
-            binding, schema, _error_text(error)
+            binding, schema, self._RESOLVING_REASON
         )
         if surface is None:
             return
@@ -2942,17 +2953,17 @@ class ConsolePresenter:
                             candidate_port.close()
                         else:
                             self._panel_presented(binding, accepted)
-                        binding.reported_error = error
+                        binding.reported_condition = _error_text(error)
                         self._report(
                             f"{binding.panel_id}: {_error_text(error)}",
                             severity="error",
                         )
-                        self._degrade_panel_surface(binding, error)
+                        self._degrade_panel_surface(binding)
                     else:
                         try:
                             self._sync_panel_history(binding)
                         except Exception as error:
-                            binding.reported_error = error
+                            binding.reported_condition = _error_text(error)
                             self._report(
                                 f"{binding.panel_id}: {_error_text(error)}",
                                 severity="error",
@@ -2992,13 +3003,14 @@ class ConsolePresenter:
                             )
                         description = accepted.description
                     except Exception as error:
-                        if binding.reported_error is not error:
-                            binding.reported_error = error
+                        condition = _error_text(error)
+                        if binding.reported_condition != condition:
+                            binding.reported_condition = condition
                             self._report(
-                                f"{binding.panel_id}: {_error_text(error)}",
+                                f"{binding.panel_id}: {condition}",
                                 severity="error",
                             )
-                            self._degrade_panel_surface(binding, error)
+                            self._degrade_panel_surface(binding)
                     else:
                         assert description is not None
                         if normalize_state:
@@ -5276,8 +5288,8 @@ class ConsolePresenter:
                 condition = (
                     f"settings not applied -- {binding.vacancy}"
                 )
-                if binding.reported_error != condition:
-                    binding.reported_error = condition
+                if binding.reported_condition != condition:
+                    binding.reported_condition = condition
                     if panel_id in self.view.panel_ids():
                         self.view.set_panel_status(
                             panel_id, condition, error=True
@@ -5288,24 +5300,23 @@ class ConsolePresenter:
                 # once went wrong: a panel that has drawn again since clears
                 # its own error, and the card that still wore the dot told an
                 # operator a healthy panel was broken until the window closed.
-                if binding.reported_error is not None:
-                    binding.reported_error = None
+                if binding.reported_condition:
+                    binding.reported_condition = ""
                     if panel_id in self.view.panel_ids():
                         self.view.set_panel_status(panel_id, "", error=False)
                 continue
-            if error is binding.reported_error:
+            condition = _error_text(error)
+            if condition == binding.reported_condition:
                 continue
-            binding.reported_error = error
-            self._report(
-                f"{binding.title}: {_error_text(error)}", severity="error"
-            )
+            binding.reported_condition = condition
+            self._report(f"{binding.title}: {condition}", severity="error")
             # A refused projection is a STATE, not a reason to have no form:
             # the semantic fates that fix it stay editable.
-            self._degrade_panel_surface(binding, error)
+            self._degrade_panel_surface(binding)
             # And on the card itself, which has a status line nothing wrote to.
             # A board-wide line says which panel; the panel says it is the one.
             if panel_id in self.view.panel_ids():
-                self.view.set_panel_status(panel_id, _error_text(error), error=True)
+                self.view.set_panel_status(panel_id, condition, error=True)
 
     def _panel_plot_error(self, panel_id: str, message: str) -> None:
         """Report one refusal a mounted plot widget raised through its card."""

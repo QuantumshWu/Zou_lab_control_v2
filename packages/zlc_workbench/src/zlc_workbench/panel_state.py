@@ -102,15 +102,28 @@ def panel_data_shape(
 
 
 def semantic_entries(description: object) -> tuple[dict[str, object], ...]:
+    """One fate row per axis, as a DOCUMENT: plain values, plain choices.
+
+    The surface is what the operator is shown and what they hand back, and
+    the record it lands in holds plain values -- so the surface speaks the
+    same representation.  Handing typed choices out beside a plain value
+    (the panel's authored state is written over these rows) put two
+    representations of one vocabulary in a single row: they compare equal,
+    so nothing broke loudly, and every consumer had to know which one it
+    was looking at.  ``restore_semantic_choice`` types them again where
+    composition needs it.
+    """
+
     return tuple(
         {
             "key": str(field.name),
             "label": str(field.label),
             "kind": "choice",
-            "value": field.value,
+            "value": _state_value(field.value),
             "allow_none": not bool(field.required),
             "choices": tuple(
-                (str(label), value) for value, label in tuple(field.choices)
+                (str(label), _state_value(value))
+                for value, label in tuple(field.choices)
             ),
             "minimum": None,
             "maximum": None,
