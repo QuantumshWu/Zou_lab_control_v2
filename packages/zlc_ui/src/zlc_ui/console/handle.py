@@ -60,7 +60,6 @@ class TaskConsoleHandle(QtCore.QObject):
     panel_plot_error = QtCore.pyqtSignal(str, str)
     panel_state_changed = QtCore.pyqtSignal(str, object)
     panel_snapshot_refresh_requested = QtCore.pyqtSignal(str)
-    panel_producer_restart_requested = QtCore.pyqtSignal(str)
     panel_save_figure_requested = QtCore.pyqtSignal(str, str)
     panel_editor_closed = QtCore.pyqtSignal(str)
 
@@ -84,6 +83,11 @@ class TaskConsoleHandle(QtCore.QObject):
         super().__init__()
         self._window = window
         self._view = view
+        dpr_target = window if window is not None else view
+        self._device_pixel_ratio = float(dpr_target.devicePixelRatioF())
+        native_window = dpr_target.windowHandle()
+        if native_window is not None:
+            native_window.screenChanged.connect(self._screen_changed)
         # The composition root's panel-widget policy: host -> QWidget.  The
         # console injects a staging widget factory here so the board can
         # present same-shot groups atomically; without one the host supplies
@@ -163,6 +167,16 @@ class TaskConsoleHandle(QtCore.QObject):
     def window_title(self) -> str:
         target = self._window if self._window is not None else self._view
         return str(target.windowTitle())
+
+    def device_pixel_ratio(self) -> float:
+        """The latest GUI-owned screen scale, safe for a projection worker."""
+
+        return self._device_pixel_ratio
+
+    def _screen_changed(self, screen: object) -> None:
+        ratio = getattr(screen, "devicePixelRatio", None)
+        if callable(ratio):
+            self._device_pixel_ratio = float(ratio())
 
     # ------------------------------------------------------------- the board
 
@@ -471,11 +485,8 @@ class TaskConsoleHandle(QtCore.QObject):
             editor.snapshot_refresh_requested.connect(
                 lambda _=None, pid=key: self.panel_snapshot_refresh_requested.emit(pid)
             )
-            editor.producer_draft_changed.connect(
-                lambda node_id, patch: self.logic_draft_changed.emit(str(node_id), patch)
-            )
-            editor.producer_restart_requested.connect(
-                lambda _=None, pid=key: self.panel_producer_restart_requested.emit(pid)
+            editor.producer_edit_requested.connect(
+                lambda node_id: self.logic_edit_requested.emit(str(node_id))
             )
             editor.save_figure_requested.connect(
                 lambda path, pid=key: self.panel_save_figure_requested.emit(pid, str(path))
@@ -648,6 +659,9 @@ class TaskConsoleHandle(QtCore.QObject):
         )
         return True
 
+    def has_panel_publisher_editor(self, panel_id: str) -> bool:
+        return str(panel_id) in self._panel_publisher_editors
+
     def focus_panel_publisher_editor(self, panel_id: str) -> bool:
         editor = self._panel_publisher_editors.get(str(panel_id))
         return False if editor is None else self._view.focus_editor_tab(editor)
@@ -696,6 +710,9 @@ class TaskConsoleHandle(QtCore.QObject):
             return False
         editor.update_projection(projection)
         return True
+
+    def has_logic_editor(self, node_id: str) -> bool:
+        return str(node_id) in self._logic_editors
 
     def focus_logic_editor(self, node_id: str) -> bool:
         editor = self._logic_editors.get(str(node_id))

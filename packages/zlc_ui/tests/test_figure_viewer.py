@@ -96,6 +96,7 @@ assert 'interval_ms' not in editor.panel_form.spec.keys
 assert editor.snapshot_group.isHidden()
 assert editor.interaction_group.isHidden()
 assert editor.producer_group.isHidden()
+assert not editor.open_producer_button.isEnabled()
 assert editor.save_group.isHidden()
 view.close(); app.processEvents()
 """

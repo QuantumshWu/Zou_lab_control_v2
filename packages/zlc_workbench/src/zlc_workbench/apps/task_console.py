@@ -71,7 +71,7 @@ def open_experiment(workspace=None, template=None):
     return space, session
 
 
-def build_panel_host(plot_input, state):
+def build_panel_host(plot_input, state, *, device_pixel_ratio: float = 1.0):
     """One panel host from one panel state: THE mount path for every card.
 
     Module-level on purpose -- the presenter tests mount through this exact
@@ -109,6 +109,7 @@ def build_panel_host(plot_input, state):
         spec,
         size=state.size,
         parameters=parameters,
+        device_pixel_ratio=device_pixel_ratio,
     )
 
 
@@ -144,6 +145,16 @@ def build_console(session, *, window_ratio=None, request_close=None):
         window_ratio=window_ratio,
         plot_surface=_panel_surface,
     )
+    def _build_panel_host(plot_input, state):
+        return build_panel_host(
+            plot_input,
+            state,
+            # The handle is a thread-safe snapshot of the window's current
+            # screen scale.  Host replacement runs on the projection lane, so
+            # it must not touch Qt here; it must also not retain the scale of
+            # the screen on which the console originally opened.
+            device_pixel_ratio=float(view.device_pixel_ratio()),
+        )
 
     def _spec_for(snapshot, kind: str = "", cell_kind: str = ""):
         """The spec this data admits, as the chosen kind or as its own shape."""
@@ -200,7 +211,7 @@ def build_console(session, *, window_ratio=None, request_close=None):
         presenter = ConsolePresenter(
             session,
             view,
-            make_host=build_panel_host,
+            make_host=_build_panel_host,
             spec_for=_spec_for,
             open_saved=lambda start: _open_saved_figure(view, start),
             request_close=view.close_later if request_close is None else request_close,

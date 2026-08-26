@@ -300,6 +300,9 @@ class FigureViewerView(QtWidgets.QWidget):
         editor.update_projection(incoming)
         return True
 
+    def has_panel_editor(self, panel_id: str) -> bool:
+        return str(panel_id) in self._editors
+
     def _editor_close_clicked(self, editor: QtWidgets.QWidget) -> None:
         panel_id = next(
             (key for key, value in self._editors.items() if value is editor),

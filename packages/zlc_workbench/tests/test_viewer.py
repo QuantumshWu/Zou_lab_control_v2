@@ -144,6 +144,13 @@ class _ViewerView:
         self.grid_cell_kinds: tuple = ()
         self.panels: dict[str, dict] = {}
         self.editors: dict[str, object] = {}
+        self.dpr = 1.0
+
+    def device_pixel_ratio(self) -> float:
+        return float(self.dpr)
+
+    def has_panel_editor(self, panel_id: str) -> bool:
+        return str(panel_id) in self.editors
 
     def set_panel_sizes(self, sizes, default_size) -> None:
         self.panel_sizes = tuple(str(value) for value in sizes)
@@ -843,6 +850,7 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         _close_presenter(presenter)
 
     real_view = _ViewerView()
+    real_view.dpr = 1.75
     real_presenter = _built_presenter(real_view)
     try:
         real_presenter.open(str(written.archive))
@@ -858,7 +866,7 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
                 NumericRange(15.0, 55.0),
             )
         )
-        host.wait_for_front(timeout=5.0)
+        assert host.wait_for_front(timeout=5.0).device_pixel_ratio == 1.75
         assert host._session._renderer.primary_axes.get_title() == ""
         # And the authored appearance really is on the built host.
         described = host.describe_display().result().value
@@ -866,6 +874,9 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
 
         panel_id = real_presenter._active_panel_id
         center_x = float(state.fit["fixed"]["center_x"])
+        # A host created after moving the window must use that screen's scale,
+        # not the scale captured when the Viewer composition was built.
+        real_view.dpr = 2.25
         real_presenter.update_panel(
             panel_id,
             {"fit": {"expression": f"center_x=guess({center_x})"}},
@@ -876,6 +887,7 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
             "model": "anisotropic_gaussian_center",
             "initial": {"center_x": center_x},
         }
+        assert active["host"].wait_for_front(timeout=5.0).device_pixel_ratio == 2.25
 
     finally:
         _close_presenter(real_presenter)

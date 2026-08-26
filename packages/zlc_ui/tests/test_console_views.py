@@ -37,7 +37,7 @@ import zou_lab_control
 print(zou_lab_control.__file__)
 from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import FluentTreeComboBox
+from zlc_ui.fluent import FluentComboBox, FluentTreeComboBox
 from zlc_ui.console import panel_card_view as tested_module
 print(tested_module.__file__)
 PanelCardView = tested_module.PanelCardView
@@ -845,7 +845,7 @@ handle.open_logic_editor('camera-1', projection)
 editor = handle._logic_editors['camera-1']
 # The frame-signal picker is the SAME grouped tree every signal chooser uses:
 # a producer header with keyed leaves, not a flat list.
-from zlc_ui.fluent import FluentTreeComboBox
+from zlc_ui.fluent import FluentComboBox, FluentTreeComboBox
 assert isinstance(editor.source_combo, FluentTreeComboBox)
 assert editor.source_combo.model().item(0).text() == '(not selected)'
 source_header = editor.source_combo.model().item(1)
@@ -996,7 +996,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
 from zlc_ui.console import TaskConsoleHandle, TaskConsoleView
-from zlc_ui.fluent import FluentTreeComboBox
+from zlc_ui.fluent import FluentComboBox, FluentTreeComboBox
 from zlc_ui.form import FormFieldProps, FormSpec
 from zlc_ui.qt import ensure_qt_app
 app = ensure_qt_app(['panel-editor'])
@@ -1232,7 +1232,7 @@ assert card._settings_form.read_all()['semantic__x'] == 'sensor_x'
 assert card._settings_form.widget_for('fit__model').currentText() == '(none)'
 assert card._settings_form.read_all()['overlay_signal'] == '@logic/occ/site_overlay'
 interval_combo = card._settings_form.widget_for('interval_ms')
-assert isinstance(interval_combo, QtWidgets.QComboBox)
+assert isinstance(interval_combo, FluentComboBox)
 assert tuple(interval_combo.itemData(index) for index in range(interval_combo.count())) == (
     100, 200, 400, 800,
 )
@@ -1243,7 +1243,7 @@ handle.set_grid_cell_kinds(('curve', 'image', 'histogram'))
 facet_state = dict(state, kind='facet_grid', cell_kind='curve', title='Site grid')
 handle.set_panel_projection('panel-1', facet_state, surface)
 cell_combo = card._settings_form.widget_for('cell_kind')
-assert isinstance(cell_combo, QtWidgets.QComboBox)
+assert isinstance(cell_combo, FluentComboBox)
 assert cell_combo.isEnabled()
 assert tuple(cell_combo.itemData(index) for index in range(cell_combo.count())) == (
     '', 'curve', 'image', 'histogram',
@@ -1260,19 +1260,6 @@ handle.set_panel_projection('panel-1', state, surface)
 assert 'cell_kind' not in card._settings_form.spec.keys, (
     'only a facet grid offers a cell kind')
 
-producer = {
-    'node_id': 'cm', 'api_name': 'camera_measurement', 'kind': 'measurement',
-    'form_spec': FormSpec((
-        FormFieldProps('repeat', 'int', 'Repeat', default=0, minimum=0),
-    )),
-    'form_values': {'repeat': 0},
-    'source_required': False, 'source_signal': '', 'source_options': (),
-    'device_keys': {'camera': 'camera'},
-    'device_options': {'camera': ('camera', 'mot_camera')},
-    'running': True, 'pending': False, 'error': '',
-    'auto_preview': True,
-    'preview_offered': True,
-}
 projection = {
     'panel_id': 'panel-1', 'state': state, 'signal_options': groups,
     'overlay_signal_options': overlay_groups,
@@ -1281,20 +1268,17 @@ projection = {
     'save_directory': save_directory,
     'frozen_signal': '@logic/cm/frames',
     'frozen_publication': object(), 'frozen_snapshot': object(),
-    'stale': False, 'producer_node_id': 'cm', 'producer_logic': producer,
+    'stale': False, 'producer_node_id': 'cm',
 }
 events = []
 handle.panel_state_changed.connect(
     lambda panel_id, patch: events.append(('state', panel_id, patch))
 )
-handle.logic_draft_changed.connect(
-    lambda node_id, patch: events.append(('draft', node_id, patch))
+handle.logic_edit_requested.connect(
+    lambda node_id: events.append(('edit_logic', node_id))
 )
 handle.panel_snapshot_refresh_requested.connect(
     lambda panel_id: events.append(('refresh', panel_id))
-)
-handle.panel_producer_restart_requested.connect(
-    lambda panel_id: events.append(('restart', panel_id))
 )
 handle.panel_save_figure_requested.connect(
     lambda panel_id, path: events.append(('save', panel_id, path))
@@ -1366,7 +1350,8 @@ facet_projection = dict(projection, state=facet_state)
 assert handle.update_panel_editor('panel-1', facet_projection)
 assert editor.kind_label.text() == 'facet grid · curve cells'
 assert handle.update_panel_editor('panel-1', projection)
-assert not editor._producer_editor.start_button.isVisible()
+assert editor.producer_summary.text() == 'Logic node: cm'
+assert editor.open_producer_button.isEnabled()
 assert editor.parameter_forms['semantic'].spec.keys == ('x',)
 assert editor.parameter_forms['display'].spec.keys == (
     'title', 'x_label', 'x_display_unit', 'color_min', 'color_max',
@@ -1397,7 +1382,7 @@ assert not editor.panel_form.widget_for('overlay_signal').isEnabled()
 assert not editor.parameter_forms['semantic'].isEnabled()
 assert editor.parameter_forms['display'].isEnabled()
 assert editor.parameter_forms['fit'].isEnabled()
-assert not editor._producer_editor.form.isEnabled()
+assert editor.open_producer_button.isEnabled()
 handle.set_panel_projection('panel-1', state, surface)
 assert handle.update_panel_editor('panel-1', projection)
 assert editor.parameter_forms['semantic'].isEnabled()
@@ -1475,12 +1460,11 @@ fit_combo = editor.parameter_forms['fit'].widget_for('model')
 fit_combo.setCurrentIndex(1)
 fit_combo.activated.emit(1)
 editor_interval = editor.panel_form.widget_for('interval_ms')
-assert isinstance(editor_interval, QtWidgets.QComboBox)
+assert isinstance(editor_interval, FluentComboBox)
 editor_interval.setCurrentIndex(editor_interval.findData(800))
 editor_interval.activated.emit(editor_interval.currentIndex())
-editor._producer_editor.form.widget_for('repeat').setValue(2)
 editor.refresh_button.click()
-editor.producer_restart_button.click()
+editor.open_producer_button.click()
 assert editor.save_directory.text() == save_directory
 assert tuple(
     editor.save_format.itemData(index)
@@ -1506,9 +1490,8 @@ assert ('state', 'panel-1', {'display': {'x_display_unit': None}}) in events
 assert ('state', 'panel-1', {
     'fit': {'model': 'anisotropic_gaussian_center'}
 }) in events
-assert ('draft', 'cm', {'values': {'repeat': 2}}) in events
 assert ('refresh', 'panel-1') in events
-assert ('restart', 'panel-1') in events
+assert ('edit_logic', 'cm') in events
 assert ('save', 'panel-1', str(Path(save_directory) / 'manual-name.svg')) in events
 
 changed = dict(state, title='Retitled', interval_ms=800)
@@ -2071,7 +2054,6 @@ try:
                 'frozen_signal': state['signal'],
                 'frozen_publication': None, 'frozen_snapshot': None,
                 'stale': False, 'producer_node_id': '',
-                'producer_logic': None,
             }, owner)
             assert ('overlay_signal' in editor.panel_form.spec.keys) == (
                 'overlay_signal' in spec_keys

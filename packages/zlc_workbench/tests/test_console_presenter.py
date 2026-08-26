@@ -170,7 +170,7 @@ class _ConsoleView:
         "logic_stop_requested",
         "logic_edit_requested", "logic_remove_requested", "logic_draft_changed",
         "panel_state_changed", "panel_snapshot_refresh_requested",
-        "panel_producer_restart_requested", "panel_editor_closed",
+        "panel_editor_closed",
     )
 
     def __init__(self) -> None:
@@ -199,6 +199,7 @@ class _ConsoleView:
         self.panel_intervals: tuple[int, ...] = ()
         self.panel_sizes: tuple[str, ...] = ()
         self.panel_editors: dict[str, dict] = {}
+        self.panel_editor_update_count: dict[str, int] = {}
         self.panel_editor_surfaces: dict[str, object] = {}
         self.focused_panel_editor = ""
         self.task_takeover = False
@@ -365,6 +366,9 @@ class _ConsoleView:
         self.panel_publisher_editors[key] = dict(projection)
         return True
 
+    def has_panel_publisher_editor(self, panel_id: str) -> bool:
+        return str(panel_id) in self.panel_publisher_editors
+
     def focus_panel_publisher_editor(self, panel_id: str) -> bool:
         return str(panel_id) in self.panel_publisher_editors
 
@@ -375,8 +379,12 @@ class _ConsoleView:
         self.panel_editors[str(panel_id)] = dict(projection)
 
     def update_panel_editor(self, panel_id: str, projection) -> None:
-        if str(panel_id) in self.panel_editors:
-            self.panel_editors[str(panel_id)] = dict(projection)
+        key = str(panel_id)
+        if key in self.panel_editors:
+            self.panel_editors[key] = dict(projection)
+            self.panel_editor_update_count[key] = (
+                self.panel_editor_update_count.get(key, 0) + 1
+            )
 
     def show_panel_editor(self, panel_id: str, host) -> None:
         key = str(panel_id)
@@ -455,6 +463,9 @@ class _ConsoleView:
     def update_logic_editor(self, node_id: str, projection) -> None:
         if str(node_id) in self.logic_editors:
             self.logic_editors[str(node_id)] = dict(projection)
+
+    def has_logic_editor(self, node_id: str) -> bool:
+        return str(node_id) in self.logic_editors
 
     def focus_logic_editor(self, node_id: str) -> None:
         self.focused_logic_editor = str(node_id)
@@ -619,7 +630,7 @@ def test_camera_restart_drains_the_old_generation_before_replacement(
     assert presenter.update_logic_draft(
         node_id, values={"exposure_seconds": 0.012}
     )
-    assert presenter.restart_panel_producer(panel.panel_id) is True
+    assert presenter.start_logic(node_id) is True
     presenter.poll_logic()
     assert panel.port.surface_busy
     assert (
@@ -3151,7 +3162,7 @@ def test_a_file_that_is_not_a_board_is_refused_by_name(presenter) -> None:
     assert presenter.apply_layout(invalid_layout) is False
 
 
-def test_panel_edit_projects_the_direct_producer_restarts_it_and_ages(
+def test_panel_edit_projects_the_direct_producer_link_and_ages(
     presenter, session, monkeypatch
 ) -> None:
     """Edit knows whose data it shows, and when that run is over.
@@ -3165,12 +3176,17 @@ def test_panel_edit_projects_the_direct_producer_restarts_it_and_ages(
     node_id = presenter.add_logic("camera_measurement")
     node, snapshot = _one_shot(session, producer=node_id)
     panel = presenter.add_panel(node.signal_key("frames"), snapshot, kind="image")
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.accepted_surface is not None
+        and panel.parameter_surface.get("semantic_provisional") is False,
+    )
 
     assert presenter.edit_panel(panel.panel_id) is True
     _settle_panel_hosts(presenter, lambda: panel.frozen_data is not None)
     projection = presenter.view.panel_editors[panel.panel_id]
+    assert presenter.view.panel_editor_update_count.get(panel.panel_id, 0) == 0
     assert projection["producer_node_id"] == node_id
-    assert projection["producer_logic"] == presenter.logic_editor_projection(node_id)
     assert projection["stale"] is False
 
     previous = panel.frozen_data
@@ -3199,14 +3215,8 @@ def test_panel_edit_projects_the_direct_producer_restarts_it_and_ages(
     )
     assert presenter.view.panel_editors[panel.panel_id]["stale"] is False
 
-    started: list[str] = []
-    monkeypatch.setattr(
-        presenter,
-        "start_logic",
-        lambda selected: started.append(str(selected)) or True,
-    )
-    presenter.view.panel_producer_restart_requested.emit(panel.panel_id)
-    assert started == [node_id]
+    presenter.view.logic_edit_requested.emit(node_id)
+    assert presenter.view.focused_logic_editor == node_id
 
 
 def test_a_running_task_freezes_logic_identity_but_not_panels(

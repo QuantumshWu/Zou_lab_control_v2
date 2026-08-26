@@ -45,6 +45,6 @@ def test_demo_console_once_echoes_a_view_signal() -> None:
         "logic_remove_requested", "save_layout_requested",
         "load_layout_requested", "save_screenshot_requested",
         "panel_state_changed", "panel_snapshot_refresh_requested",
-        "panel_producer_restart_requested", "panel_save_figure_requested",
+        "panel_save_figure_requested",
     ):
         assert name in demo, name

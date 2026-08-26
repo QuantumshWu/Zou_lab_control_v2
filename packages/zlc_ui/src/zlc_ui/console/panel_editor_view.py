@@ -17,7 +17,6 @@ from PyQt5 import QtCore, QtWidgets
 from zlc_ui.fluent import (
     stamped_file_name,
     ACCENT,
-    GREEN,
     GREY,
     ORANGE,
     FluentButton,
@@ -50,7 +49,6 @@ from ._panel_projection import (
     parameter_form_values,
     signal_form_runtime,
 )
-from .logic_editor_view import LogicEditorView
 from .panel_card_view import _set_interaction
 
 
@@ -62,8 +60,7 @@ class PanelEditorView(QtWidgets.QWidget):
 
     state_changed = QtCore.pyqtSignal(object)
     snapshot_refresh_requested = QtCore.pyqtSignal()
-    producer_draft_changed = QtCore.pyqtSignal(str, object)
-    producer_restart_requested = QtCore.pyqtSignal()
+    producer_edit_requested = QtCore.pyqtSignal(str)
     save_figure_requested = QtCore.pyqtSignal(str)
 
     def __init__(self, panel_id: str, projection: Mapping[str, object], parent=None) -> None:
@@ -78,7 +75,6 @@ class PanelEditorView(QtWidgets.QWidget):
             "display": {},
             "fit": {},
         }
-        self._producer_editor: LogicEditorView | None = None
         self._surface: QtWidgets.QWidget | None = None
         self._selectors_on = True
         self._save_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -191,25 +187,25 @@ class PanelEditorView(QtWidgets.QWidget):
         body_layout.addWidget(interaction_group)
 
         self.producer_group = FluentGroupBox("Direct producer")
-        self.producer_layout = QtWidgets.QVBoxLayout(self.producer_group)
-        self.producer_layout.setContentsMargins(margin, margin, margin, margin)
-        self.producer_empty = FluentLabel("This signal has no editable direct producer.")
-        self.producer_empty.setWordWrap(True)
-        self.producer_empty.setStyleSheet(
+        producer_layout = QtWidgets.QVBoxLayout(self.producer_group)
+        producer_layout.setContentsMargins(margin, margin, margin, margin)
+        self.producer_summary = FluentLabel(
+            "This signal has no editable direct producer."
+        )
+        self.producer_summary.setWordWrap(True)
+        self.producer_summary.setStyleSheet(
             f"color: {GREY}; background: transparent; border: none;"
         )
-        self.producer_layout.addWidget(self.producer_empty)
+        producer_layout.addWidget(self.producer_summary)
         producer_actions = QtWidgets.QHBoxLayout()
         producer_actions.addStretch(1)
-        self.producer_restart_button = FluentButton("Producer Restart", color=GREEN)
-        self.producer_restart_button.setToolTip(
-            "Restart the direct producer once with its current shared draft"
+        self.open_producer_button = FluentButton("Open Producer", color=ACCENT)
+        self.open_producer_button.setToolTip(
+            "Open this node's existing Logic Edit tab"
         )
-        self.producer_restart_button.clicked.connect(
-            self.producer_restart_requested.emit
-        )
-        producer_actions.addWidget(self.producer_restart_button)
-        self.producer_layout.addLayout(producer_actions)
+        self.open_producer_button.clicked.connect(self._open_producer)
+        producer_actions.addWidget(self.open_producer_button)
+        producer_layout.addLayout(producer_actions)
         body_layout.addWidget(self.producer_group)
 
         save_group = FluentGroupBox("Save figure")
@@ -343,7 +339,6 @@ class PanelEditorView(QtWidgets.QWidget):
             isinstance(surface, Mapping) and surface.get("science_locked")
         )
         self.panel_form.reconcile(FormSpec(tuple(fields)), values)
-        self.panel_form.refresh()
         self.panel_form.widget_for("signal").setEnabled(bool(self._signal_groups))
 
         for section in ("semantic", "display", "fit"):
@@ -388,7 +383,13 @@ class PanelEditorView(QtWidgets.QWidget):
                 "the frozen plot's zoom/pan viewport controls it."
             )
         )
-        self._update_producer(incoming.get("producer_logic"))
+        producer_node_id = str(incoming.get("producer_node_id") or "")
+        self.producer_summary.setText(
+            f"Logic node: {producer_node_id}"
+            if producer_node_id
+            else "This signal has no editable direct producer."
+        )
+        self.open_producer_button.setEnabled(live and bool(producer_node_id))
         self.set_mutation_enabled(self._mutation_enabled)
 
     def set_surface(self, widget: QtWidgets.QWidget | None) -> None:
@@ -456,13 +457,6 @@ class PanelEditorView(QtWidgets.QWidget):
             )
         self.refresh_button.setEnabled(self._mutation_enabled)
         self._update_save_controls()
-        self.producer_restart_button.setEnabled(
-            self._mutation_enabled and self._producer_editor is not None
-        )
-        if self._producer_editor is not None:
-            self._producer_editor.set_mutation_enabled(
-                self._mutation_enabled and not self._science_locked
-            )
 
     def _save_path(self) -> Path | None:
         directory_text = self.save_directory.text().strip()
@@ -540,35 +534,10 @@ class PanelEditorView(QtWidgets.QWidget):
             return
         self.state_changed.emit({section: values})
 
-    def _update_producer(self, projection: object) -> None:
-        if not isinstance(projection, Mapping):
-            if self._producer_editor is not None:
-                self.producer_layout.removeWidget(self._producer_editor)
-                self._producer_editor.setParent(None)
-                self._producer_editor.deleteLater()
-                self._producer_editor = None
-            self.producer_empty.show()
-            self.producer_restart_button.setEnabled(False)
-            return
-
-        node_id = str(projection.get("node_id") or "")
-        if self._producer_editor is None or self._producer_editor.node_id != node_id:
-            if self._producer_editor is not None:
-                self.producer_layout.removeWidget(self._producer_editor)
-                self._producer_editor.setParent(None)
-                self._producer_editor.deleteLater()
-            editor = LogicEditorView(node_id, projection, show_actions=False)
-            editor.set_mutation_enabled(self._mutation_enabled)
-            editor.setMinimumHeight(scaled_px(330, minimum=260))
-            editor.draft_changed.connect(
-                lambda patch, nid=node_id: self.producer_draft_changed.emit(nid, patch)
-            )
-            self._producer_editor = editor
-            self.producer_layout.insertWidget(1, editor)
-        else:
-            self._producer_editor.update_projection(projection)
-        self.producer_empty.hide()
-        self.producer_restart_button.setEnabled(self._mutation_enabled)
+    def _open_producer(self) -> None:
+        node_id = str(self._projection.get("producer_node_id") or "")
+        if node_id and bool(self._projection.get("live", True)):
+            self.producer_edit_requested.emit(node_id)
 
     @staticmethod
     def _snapshot_text(projection: Mapping[str, object], *, stale: bool) -> str:

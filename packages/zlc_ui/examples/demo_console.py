@@ -53,7 +53,7 @@ class FakePresenter:
             "logic_stop_requested", "logic_edit_requested",
             "logic_remove_requested", "logic_draft_changed",
             "panel_state_changed", "panel_snapshot_refresh_requested",
-            "panel_producer_restart_requested", "panel_save_figure_requested",
+            "panel_save_figure_requested",
         ):
             callback = lambda *payload, label=name: print(
                 f"{label}{payload!r}", flush=True

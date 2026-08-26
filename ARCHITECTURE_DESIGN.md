@@ -63,6 +63,7 @@
 - Figure只使用稳定`zlc.figure`格式，无数字版本；reader只接受当前完整grammar，其它root或缺失字段均loud拒绝。
 - Figure NPZ是可重绘的数据真相，包含typed Dataset、exact PlotSpec、完整normalized parameters、overlay、viewport、selectors、facet focus、classifier、fit和exact causal lineage graph；PNG只是同stem preview。
 - FigureViewer按保存的recipe恢复typed plot input，并和TaskConsole Live/Frozen使用同一个Plot host/configure与accepted `DisplayDescription.spec` contract；不得按array shape重新猜plot kind。一个immutable archive可在同一Monitor board增加多个共享`PanelCardView`，默认panel恢复exact recipe，operator新增的其它plot kind只从同一typed Dataset schema重新compose。每个panel的Setting、可关闭Edit tab、size/signal/cell kind/display/fit均复用TaskConsole现有owner；saved/static Edit不显示live cadence、producer、snapshot refresh或第二套Save controls。Lineage以root、event nodes和direct parent IDs保存，并投影成可展开的真实树。
+- Panel Edit不得嵌入第二份Logic Editor；Direct Producer只显示稳定node identity并打开/聚焦现有Logic tab，draft、Start/Restart与device choices仍由唯一Logic Editor owner管理。正常首开只投影一次Editor Form；Editor host接受后只有accepted state或control surface真实变化才重放，关闭的Editor不得先构造projection再由View拒绝。
 - Measurement worker若显式消费一个Dataset signal，必须在取出值的同一时刻把该exact source publication交给Runtime commit；Runtime是direct parent edge唯一owner。Scan不得只保留`SignalValue`后丢弃publication identity，也不得在Figure Save/Viewer中按`source_signal`反查latest补边。FigureViewer Flow只展开archive中的event parents与各node已保存的source/pulse/plan/parameters/device details；Device页同时显示node `device_snapshots/actual_devices`记录的run working point和lineage顶层仅对实际引用epoch展开的active override，不得拿后者为空解释成run未使用device。
 - Dataset/Figure encoder只写caller-owned binary IO；路径原子发布唯一属于`zlc_durable`。
 
@@ -166,6 +167,8 @@ Node new chunk
 - ImagePlot及FacetGrid的image cell统一使用`nearest`像素呈现；interpolation不是Parameter、PanelState、Figure recipe或UI字段，任何Logic/Task不得另行设置。
 - Title/layout等非plot变化不得re-fit。
 - 删除重复configure/clear/replay与多front handoff。
+- Qt owner必须在RasterPlotHost第一次render前把当前screen DPR以plain scalar交给Plot；不得先按默认DPR生成front，再在Widget挂载后为同一data/state重画一次。Form consumer在FormSpec结构和实际Widget值均已匹配时只接受新metadata，不得reconcile；keyed runtime choice domain真实变化仍强制刷新。
+- Fluent choice是`zlc_ui`唯一前端owner：collapsed控件、一个owned item model和operator信号在控件本身；flat/tree popup view只在operator第一次展开时建立，随后复用，Tree不得先造flat view再替换。popup QSS只有一个共享声明，数值/choice authority仍是typed model，Workbench、Plot和Logic不得感知popup、font metric或Qt私有view。
 - Histogram只有`bins`变更需要一次完整sample projection；`density`/`cumulative`只是已接受bins的representation，不得再扫描full payload。复用已settle tick unit时必须在枚举lattice前先核上界，不得因range大幅变化卡住UI。
 - 正式96×128 Camera、小Area ROI、主图atomic fit、并行ROI image与一个fit-parameter Rolling Panel链路以100 ms作为profile警戒线；明显的额外cadence、HOL、错误串行和重复render必须删除。若剩余是必要fit/raster/Qt成本，只有能带来实质收益且不增加不相称复杂度的优化才实施。
 - 性能以真实TaskConsole、1/4/8 panels、fit+overlay、Setting/Edit和Qt owner latency为profile对象。

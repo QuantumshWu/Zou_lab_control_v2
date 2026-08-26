@@ -853,6 +853,8 @@ class FigureViewerPresenter:
         }
         if previous is None:
             self.view.add_panel(panel_id, state.title)
+        has_editor = getattr(self.view, "has_panel_editor", None)
+        editor_open = not callable(has_editor) or has_editor(panel_id)
         try:
             self.view.set_panel_datasets(
                 panel_id, description.datasets, str(name)
@@ -860,7 +862,7 @@ class FigureViewerPresenter:
             self.view.set_panel_projection(panel_id, state, surface)
             self.view.show_panel(panel_id, host)
             self.panels[panel_id] = candidate_record
-            if previous is not None:
+            if previous is not None and editor_open:
                 self.view.update_panel_editor(
                     panel_id,
                     self._editor_projection(candidate_record),
@@ -880,7 +882,7 @@ class FigureViewerPresenter:
                     panel_id, previous["state"], previous["surface"]
                 )
                 self.view.show_panel(panel_id, previous["host"])
-                if self.description is not None:
+                if self.description is not None and editor_open:
                     self.view.update_panel_editor(
                         panel_id,
                         self._editor_projection(previous),

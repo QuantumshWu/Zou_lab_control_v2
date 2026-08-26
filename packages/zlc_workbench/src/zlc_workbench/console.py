@@ -594,9 +594,6 @@ class ConsolePresenter:
         )
         if refresh_requested is not None:
             refresh_requested.connect(self._guarded(self.refresh_panel_snapshot))
-        producer_restart = getattr(self.view, "panel_producer_restart_requested", None)
-        if producer_restart is not None:
-            producer_restart.connect(self._guarded(self.restart_panel_producer))
         save_figure = getattr(self.view, "panel_save_figure_requested", None)
         if save_figure is not None:
             save_figure.connect(self._guarded(self.save_panel_figure))
@@ -2892,7 +2889,6 @@ class ConsolePresenter:
             self._publish_panel_state(binding)
         except Exception:
             pass
-        self.refresh_panel_editor(binding.panel_id)
 
     def _settle_panel_hosts(self) -> None:
         """Project metadata and selectors only after each initial render finished."""
@@ -3137,18 +3133,32 @@ class ConsolePresenter:
                     binding.editor_selections = selections
                     binding.frozen_data = accepted_frozen
                     if normalize_editor_state:
-                        binding.state = normalized_target
-                        binding.parameter_surface = panel_surface_from_description(
+                        previous_state = binding.state
+                        previous_surface = binding.parameter_surface
+                        accepted_surface = panel_surface_from_description(
                             normalized_target,
                             description,
                         )
-                        self._normalize_panel_interaction(binding)
-                        self._publish_panel_state(binding)
+                        surface_changed = any(
+                            previous_surface.get(name) != value
+                            for name, value in accepted_surface.items()
+                        )
+                        binding.state = normalized_target
+                        if surface_changed:
+                            binding.parameter_surface = accepted_surface
+                        interaction_changed = self._normalize_panel_interaction(
+                            binding
+                        )
+                        if (
+                            binding.state != previous_state
+                            or surface_changed
+                            or interaction_changed
+                        ):
+                            self._publish_panel_state(binding)
                     if old_selections is not None:
                         old_selections.close()
                     if old_host is not None:
                         self._retire_plot_host(old_host)
-                    self.refresh_panel_editor(binding.panel_id)
                 except Exception as error:
                     if editor_host is not binding.editor_host:
                         self._retire_plot_host(editor_host)
@@ -3204,15 +3214,13 @@ class ConsolePresenter:
             "frozen_snapshot": None if frozen is None else frozen.snapshot,
             "stale": bool(binding.frozen_stale),
             "producer_node_id": producer_node_id,
-            "producer_logic": (
-                None
-                if producer_node_id is None
-                else self.logic_editor_projection(producer_node_id)
-            ),
             "save_directory": str(self.session.day_folder()),
         }
 
     def refresh_panel_editor(self, panel_id: str) -> bool:
+        binding = self.panels.get(str(panel_id))
+        if binding is None or not binding.editor_open:
+            return False
         projection = self.panel_editor_projection(panel_id)
         if projection is None:
             return False
@@ -3293,6 +3301,9 @@ class ConsolePresenter:
         return callable(opened) or callable(focused)
 
     def refresh_panel_publisher_editor(self, panel_id: str) -> bool:
+        has_editor = getattr(self.view, "has_panel_publisher_editor", None)
+        if callable(has_editor) and not has_editor(str(panel_id)):
+            return False
         projection = self.panel_publisher_editor_projection(panel_id)
         update = getattr(self.view, "update_panel_publisher_editor", None)
         if projection is None or not callable(update):
@@ -3614,7 +3625,8 @@ class ConsolePresenter:
                         f"editor: {_error_text(error)}",
                         severity="error",
                     )
-            self.refresh_panel_editor(panel_id)
+            if binding.editor_open:
+                self.refresh_panel_editor(panel_id)
         if not newer_pending:
             # The card and Edit already agree, or the card has nothing this
             # panel may adopt.  Arming the deferred path here would hand
@@ -3709,19 +3721,6 @@ class ConsolePresenter:
             failed(error)
             return False
         return True
-
-    def restart_panel_producer(self, panel_id: str) -> bool:
-        binding = self.panels.get(str(panel_id))
-        if binding is None:
-            return False
-        producer_node_id = self._direct_producer_node_id(binding.state.signal)
-        if producer_node_id is None:
-            self._report(
-                f"{panel_id} has no editable direct producer",
-                severity="warning",
-            )
-            return False
-        return self.start_logic(producer_node_id)
 
     def _paints_image_surfaces(
         self,
@@ -5978,15 +5977,15 @@ class ConsolePresenter:
         return callable(opened) or callable(focused)
 
     def refresh_logic_editor(self, node_id: str) -> bool:
+        has_editor = getattr(self.view, "has_logic_editor", None)
+        if callable(has_editor) and not has_editor(str(node_id)):
+            return False
         projection = self.logic_editor_projection(node_id)
         if projection is None:
             return False
         update = getattr(self.view, "update_logic_editor", None)
         if callable(update):
             update(str(node_id), projection)
-        for panel_id, panel in self.panels.items():
-            if self._direct_producer_node_id(panel.state.signal) == str(node_id):
-                self.refresh_panel_editor(panel_id)
         return True
 
     def update_logic_draft(
