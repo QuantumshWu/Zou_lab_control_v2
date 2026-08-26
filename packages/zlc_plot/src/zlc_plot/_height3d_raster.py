@@ -121,6 +121,12 @@ class HeightBarScene:
     source_ny: int
     pool_x: int
     pool_y: int
+    #: Pooled row count BEFORE the azimuth fold, and whether the source
+    #: rows were reversed to stand the grid up the way the heatmap draws
+    #: it.  Both live here so every index mapping below speaks the
+    #: caller's ORIGINAL (row, column) whatever the renderer did.
+    pooled_rows: int
+    flip_rows: bool
     z_unit: float
     value_low: float
     value_high: float
@@ -152,12 +158,16 @@ class HeightBarScene:
     def fold_cell(self, row: int, column: int) -> tuple[int, int]:
         """Original grid indices -> folded (a_cell, b_cell) indices.
 
-        The fold is ``np.rot90(grid, quadrant)``: odd quadrants swap the
-        axes (the folded width is the source height), and both mappings
-        here are that rotation written for one index pair.
+        Two transforms, in the order the render applied them: the row
+        reversal that stands the grid up the way the heatmap draws it,
+        then ``np.rot90(grid, quadrant)`` -- odd quadrants swap the axes
+        (the folded width is the source height).  Both are written here
+        for one index pair.
         """
 
         col_p, row_p = int(column) // self.pool_x, int(row) // self.pool_y
+        if self.flip_rows:
+            row_p = self.pooled_rows - 1 - row_p
         if self.quadrant == 0:
             return col_p, row_p
         if self.quadrant == 1:
@@ -171,12 +181,16 @@ class HeightBarScene:
 
         a, b = int(a), int(b)
         if self.quadrant == 0:
-            return b, a
-        if self.quadrant == 1:
-            return a, self.ny - 1 - b
-        if self.quadrant == 2:
-            return self.ny - 1 - b, self.nx - 1 - a
-        return self.nx - 1 - a, b
+            row_p, col_p = b, a
+        elif self.quadrant == 1:
+            row_p, col_p = a, self.ny - 1 - b
+        elif self.quadrant == 2:
+            row_p, col_p = self.ny - 1 - b, self.nx - 1 - a
+        else:
+            row_p, col_p = self.nx - 1 - a, b
+        if self.flip_rows:
+            row_p = self.pooled_rows - 1 - row_p
+        return row_p, col_p
 
     def pick(self, x: float, y: float) -> tuple[int, int] | None:
         """Pixel -> original (row, column) of the bar drawn there."""
@@ -281,6 +295,7 @@ def render_height_bars(
     pool_cache: dict | None = None,
     display_stretch: float = 1.0,
     pool_reference_width: int | None = None,
+    origin: str = "lower",
 ) -> tuple[NDArray[np.uint8], HeightBarScene]:
     """Render the grid as boxes -> ((H, W, 4) uint8 RGBA, scene map).
 
@@ -291,10 +306,24 @@ def render_height_bars(
     background surfaces: every LINE of the scene -- pane grids, floor
     grid, axes and bar outlines -- is vector chrome drawn by the caller,
     never raster pixels, so nothing here can alias.
+
+    ``origin`` is the image origin the SAME grid is drawn under as a
+    heatmap.  A 3D scene of an image is an oblique view of that picture,
+    so the row axis must run the way the picture runs: with
+    ``origin="upper"`` row 0 is at the TOP of the heatmap, which is the
+    far side of the ground once the picture is tipped back, and the rows
+    are reversed to put it there.  Rendering the array's own row order
+    regardless mirrored the scene against the heatmap -- looking
+    straight down at it showed the picture upside down, and the cell at
+    the heatmap's bottom right stood at the far corner.
     """
 
     if supersample not in (1, 2, 3, 4):
         raise ValueError("supersample must be 1, 2, 3 or 4")
+    if origin not in ("lower", "upper"):
+        raise ValueError("origin must be 'lower' or 'upper'")
+    flip_rows = origin == "upper"
+
     render_w = int(width) * supersample
     render_h = int(height) * supersample
     if render_w < 8 or render_h < 8:
@@ -333,6 +362,15 @@ def render_height_bars(
             pool_cache["value"] = (
                 h_grid, rgb_grid, finite_grid, pool_x, pool_y
             )
+
+    # ---- the picture's own row direction, AFTER pooling so the pooled
+    # blocks stay aligned with the source rows -- and so the pool cache,
+    # whose key is the input arrays' identity, keeps hitting.
+    pooled_rows = int(h_grid.shape[0])
+    if flip_rows:
+        h_grid = h_grid[::-1]
+        rgb_grid = rgb_grid[::-1]
+        finite_grid = finite_grid[::-1]
 
     # ---- fold the azimuth into [0, 90) by rotating the grid
     azimuth = math.radians(camera.azimuth_deg) % (2.0 * math.pi)
@@ -930,6 +968,8 @@ def render_height_bars(
         source_ny=source_ny,
         pool_x=pool_x,
         pool_y=pool_y,
+        pooled_rows=pooled_rows,
+        flip_rows=flip_rows,
         z_unit=z_unit,
         value_low=value_low,
         value_high=value_high,
