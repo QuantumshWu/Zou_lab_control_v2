@@ -9,6 +9,10 @@ from importlib import import_module as _import_module
 
 _EXPORTS = {
     "ensure_qt_app": ("zlc_ui.qt", "ensure_qt_app"),
+    # The status vocabulary: headless presenters choose these words and the
+    # strip colours them, so it is named here rather than reached for inside
+    # the view package -- which would cost every presenter a Qt import.
+    "STATUS_SEVERITIES": ("zlc_ui.status", "STATUS_SEVERITIES"),
     "FormChoice": ("zlc_ui.form", "FormChoice"),
     "FormFieldProps": ("zlc_ui.form", "FormFieldProps"),
     "FormSpec": ("zlc_ui.form", "FormSpec"),

@@ -9,6 +9,7 @@ from .point_review_view import PointReviewView
 from .signal_chooser import SignalChooser, choose_signal
 from .handle import TaskConsoleHandle
 from .status_strip import StatusStrip
+from zlc_ui.status import STATUS_SEVERITIES
 from .task_console_view import TaskConsoleView
 
 __all__ = [
@@ -20,6 +21,7 @@ __all__ = [
     "PointReviewView",
     "SignalChooser",
     "choose_signal",
+    "STATUS_SEVERITIES",
     "StatusStrip",
     "TaskConsoleHandle",
     "TaskConsoleView",

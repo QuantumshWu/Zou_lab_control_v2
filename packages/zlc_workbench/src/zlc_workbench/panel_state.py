@@ -12,7 +12,7 @@ from zlc_plot import (
     describe_semantics,
     normalize_classifier_threshold_targets,
 )
-from zlc_plot.semantics import FATE_PREFIX, composed_spec
+from zlc_plot.semantics import FATE_PREFIX, SemanticVacancy, composed_spec
 
 
 __all__ = [
@@ -25,6 +25,7 @@ __all__ = [
     "panel_data_shape",
     "panel_state_from_description",
     "panel_surface_from_description",
+    "PanelProjection",
     "project_panel_state",
     "semantic_entries",
 ]
@@ -330,11 +331,37 @@ def restore_semantic_choice(description: object, name: str, saved: object) -> ob
     return saved
 
 
+@dataclass(frozen=True, slots=True)
+class PanelProjection:
+    """What a panel state MEANS -- including that it may mean "draw nothing".
+
+    ``spec`` is None exactly when the authored table leaves a required role
+    vacant.  That is a STATE, not a failure: the operator gave the x axis
+    another fate and this panel now has nothing to draw along x until some
+    axis takes it.  It is carried as a value because carrying it as an
+    exception is what kept breaking -- ``SemanticVacancy`` travelled up
+    whichever call stack happened to reach the projection, each consumer
+    caught it or did not, and the ones that did not took the whole console
+    down with them from inside a Qt slot.  A value cannot be forgotten by
+    a caller: it has to be looked at to be used.
+    """
+
+    spec: object | None
+    semantic: dict[str, Any]
+    parameters: dict[str, Any]
+    #: Why nothing can be drawn, in the operator's words.  Empty when it can.
+    vacancy: str = ""
+
+    @property
+    def drawable(self) -> bool:
+        return self.spec is not None
+
+
 def project_panel_state(
     schema: object,
     spec: object,
     state: "PanelState",
-) -> tuple[object, dict[str, Any], dict[str, Any]]:
+) -> PanelProjection:
     """What this panel MEANS on ``spec``: the composed spec and the two bags
     that spec will accept.
 
@@ -392,7 +419,20 @@ def project_panel_state(
         # One state, one composition.  A contradictory table is rejected as a
         # table; applying the subset that happened to iterate first invented a
         # valid-looking spec the operator never authored.
-        candidate = composed_spec(schema, candidate, wanted)
+        try:
+            candidate = composed_spec(schema, candidate, wanted)
+        except SemanticVacancy as vacancy:
+            # THE seam where a vacancy stops being an exception.  The
+            # authored table is echoed back exactly as it was given -- the
+            # operator's fates are theirs, and nothing here invents a
+            # replacement -- and the absent spec says the panel draws
+            # nothing until some axis takes the role.
+            return PanelProjection(
+                None,
+                {str(name): value for name, value in wanted.items()},
+                dict(state.display),
+                str(vacancy),
+            )
     semantic = {
         str(name): value
         for name, value in describe_semantics(schema, candidate).values.items()
@@ -402,7 +442,7 @@ def project_panel_state(
         candidate,
         style=DEFAULTS.style,
     ).declared_subset(dict(state.display))
-    return candidate, semantic, parameters
+    return PanelProjection(candidate, semantic, parameters)
 
 
 def allows_image_overlay(kind: str, cell_kind: str) -> bool:
