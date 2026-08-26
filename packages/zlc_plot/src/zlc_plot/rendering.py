@@ -3532,7 +3532,28 @@ class MatplotlibRenderer:
                 scene.project(float(scene.nx), float(scene.ny), base_value),
             )
 
-            tick_py = tick_length_px / max(box_h, 1)
+            def outward(edge_point, inner_point):
+                """Unit direction (axes fractions) pushing a floor label
+                AWAY from the scene: the projected direction of the axis
+                that departs from this edge, exactly the reference's floor
+                tick convention.  The z labels keep their horizontal
+                offset -- that ruling stands."""
+
+                f_edge = self._height_bars_fraction(scene, *edge_point)
+                f_inner = self._height_bars_fraction(scene, *inner_point)
+                vx = (f_edge[0] - f_inner[0]) * box_w
+                vy = (f_edge[1] - f_inner[1]) * box_h
+                length = float(np.hypot(vx, vy))
+                if length <= 0.0:
+                    return (0.0, -1.0), f_edge
+                return (vx / length, vy / length), f_edge
+
+            def anchored(direction):
+                ux, uy = direction
+                ha = "left" if ux > 0.4 else ("right" if ux < -0.4 else "center")
+                va = "bottom" if uy > 0.4 else ("top" if uy < -0.4 else "center")
+                return ha, va
+
             for column in picks(source_nx):
                 a, b = scene.fold_cell(0, column * scene.pool_x)
                 centre = a + 0.5
@@ -3544,13 +3565,26 @@ class MatplotlibRenderer:
                     grid_edges.append(
                         ((centre, 0.0, 0.0), (centre, float(scene.ny), 0.0))
                     )
-                anchor = scene.project(centre, 0.0, base_value)
-                f = self._height_bars_fraction(scene, *anchor)
-                segments_x.extend((f[0], f[0], np.nan))
-                segments_y.extend((f[1], f[1] - tick_py, np.nan))
+                (ux, uy), f = outward(
+                    scene.project(centre, 0.0, base_value),
+                    scene.project(centre, 1.0, base_value),
+                )
+                segments_x.extend(
+                    (f[0], f[0] + ux * tick_length_px / box_w, np.nan)
+                )
+                segments_y.extend(
+                    (f[1], f[1] + uy * tick_length_px / box_h, np.nan)
+                )
                 value = left + (column + 0.5) * (right - left) / source_nx
+                ha, va = anchored((ux, uy))
                 wanted_texts.append(
-                    (f[0], f[1] - gap_py, f"{value:g}", "center", "top")
+                    (
+                        f[0] + ux * label_gap_px / box_w,
+                        f[1] + uy * label_gap_px / box_h,
+                        f"{value:g}",
+                        ha,
+                        va,
+                    )
                 )
             # The y edge shares its far corner with the x edge's last
             # label; dropping y's endpoint keeps the corner readable.
@@ -3567,18 +3601,25 @@ class MatplotlibRenderer:
                     grid_edges.append(
                         ((0.0, centre, 0.0), (float(scene.nx), centre, 0.0))
                     )
-                anchor = scene.project(float(scene.nx), centre, base_value)
-                f = self._height_bars_fraction(scene, *anchor)
-                segments_x.extend((f[0], f[0] + 0.8 * tick_px, np.nan))
-                segments_y.extend((f[1], f[1] - 0.6 * tick_py, np.nan))
+                (ux, uy), f = outward(
+                    scene.project(float(scene.nx), centre, base_value),
+                    scene.project(float(scene.nx) - 1.0, centre, base_value),
+                )
+                segments_x.extend(
+                    (f[0], f[0] + ux * tick_length_px / box_w, np.nan)
+                )
+                segments_y.extend(
+                    (f[1], f[1] + uy * tick_length_px / box_h, np.nan)
+                )
                 value = top_c + (row + 0.5) * (bottom - top_c) / source_ny
+                ha, va = anchored((ux, uy))
                 wanted_texts.append(
                     (
-                        f[0] + gap_px,
-                        f[1] - 0.7 * gap_py,
+                        f[0] + ux * label_gap_px / box_w,
+                        f[1] + uy * label_gap_px / box_h,
                         f"{value:g}",
-                        "left",
-                        "top",
+                        ha,
+                        va,
                     )
                 )
 
