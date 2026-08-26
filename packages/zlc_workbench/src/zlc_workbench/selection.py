@@ -116,16 +116,70 @@ def plot_identity_matches_plot_input(
     )
 
 
+def same_plot_generation(observation: object, plot_input: object) -> bool:
+    """Whether an observation was drawn on the same RUN as this Dataset.
+
+    The weaker half of :func:`plot_identity_matches_plot_input`: the same
+    stream generation, whatever revision it has reached.  It is the right
+    question for a region that derives nothing -- what such a region names
+    is a place on a picture, and a later shot does not move it -- while a
+    region something IS cut from still has to name the exact revision it
+    was cut from.
+    """
+
+    snapshot = getattr(plot_input, "snapshot", plot_input)
+    ref = getattr(snapshot, "ref", None)
+    generation = getattr(getattr(ref, "stream_generation", None), "value", None)
+    if generation is None:
+        return False
+    return generation == str(getattr(observation, "data_generation", None))
+
+
 #: Plot kinds the runtime can derive from.  Rolling x is a plot-owned display
 #: ordinal over Runtime history, not an upstream source axis, so it is absent.
 _PLOT_KINDS = {
     "image": "image",
     "curve": "curve",
     "histogram": "histogram",
+    # A rolling trace reports its region like any other surface.  Whether
+    # anything upstream can be CUT by it is a separate question, answered
+    # by ``panel_selection_derives_signal`` -- see there.
+    "rolling": "rolling",
 }
 
 #: Selector kinds that describe a region.
 _SELECTOR_KINDS = {"area": "area", "x_range": "x_range"}
+
+#: Bounds that cut something no upstream axis names, so nothing derives
+#: from them.  They are still regions: drawn, remembered, and mirrored.
+_NON_UPSTREAM_DOMAINS = frozenset({"value", "shot"})
+
+
+def _rolling_ranges(
+    selector_kind: str,
+    x_bounds: object,
+    y_bounds: object = None,
+) -> tuple[SelectionRange, ...]:
+    """A rolling region's bounds: the shot ordinal, then the value.
+
+    THE rule, in one place, because it is needed twice -- to BUILD a region
+    from a gesture and to RECOGNISE a stored one as belonging to the surface
+    in front of you.  Written twice, the two drifted the moment rolling was
+    added to one of them, and a region that translated perfectly was thrown
+    away by the matcher a few frames later.
+    """
+
+    pairs = ((x_bounds, "shot"), (y_bounds, "value"))
+    return tuple(
+        SelectionRange(
+            axis="",
+            lower=float(bounds.low),
+            upper=float(bounds.high),
+            domain=domain,
+        )
+        for bounds, domain in pairs
+        if bounds is not None
+    )
 
 #: Selector kinds that mark a point or a level.  A crosshair or threshold
 #: cuts no region, so nothing downstream can be derived from one and a
@@ -290,6 +344,26 @@ def panel_selection_matches_subject(
     if plot_kind is None or selection.plot_kind != plot_kind:
         return False
     dummy = NumericRange(0.0, 1.0)
+    if plot_kind == "rolling":
+        # Same rule that built it, so a rolling region is recognised on the
+        # surface that drew it instead of being dropped one frame later.
+        expected = _rolling_ranges(
+            selection.selector_kind,
+            dummy,
+            dummy if selection.selector_kind == "area" else None,
+        )
+        expected_facets, expected_repeat = _subject_scope(subject)
+        return bool(
+            tuple(
+                (item.domain, item.axis, item.coordinate_frame)
+                for item in selection.ranges
+            )
+            == tuple(
+                (item.domain, item.axis, item.coordinate_frame)
+                for item in expected
+            )
+            and selection.repeat_index == expected_repeat
+        )
     try:
         if selection.selector_kind == "x_range":
             expected_ranges = (
@@ -349,11 +423,20 @@ def panel_selection_output_catalog(
 
 
 def panel_selection_derives_signal(selection: SelectionState) -> bool:
-    """Whether this panel-local selector also names upstream Dataset axes."""
+    """Whether this panel-local selector also names upstream Dataset axes.
+
+    Answered by what the ranges NAME, not by which kind drew them: a bound
+    on the measured value or on the session's shot ordinal restricts no
+    upstream axis, so nothing can be cut from it.  A rolling region is
+    entirely of that sort -- its x counts publications, its y is the value
+    -- and it is still the panel's region: remembered, and shown the same
+    on both surfaces.  Reading "cannot derive" as "did not happen" is what
+    dropped it on the floor.
+    """
 
     if not isinstance(selection, SelectionState):
         raise TypeError("selection must be SelectionState")
-    return all(item.domain != "value" for item in selection.ranges)
+    return all(item.domain not in _NON_UPSTREAM_DOMAINS for item in selection.ranges)
 
 
 def _apply_panel_selection(host: Any, selection: SelectionState) -> object:
@@ -459,9 +542,6 @@ class PlotSelectionSource:
                         self._on_crosshair,
                         event,
                     )
-                return
-            if _name_of(event.subject.plot_kind) == "rolling":
-                self._last_error = None
                 return
             change = _change_of(event)
             try:
@@ -679,6 +759,30 @@ class PlotSelectionSource:
         if selector_kind is None:
             raise _Unbridgeable(
                 f"a {_name_of(selector.kind)} selector marks a point, not a region"
+            )
+        if plot_kind == "rolling":
+            # A rolling trace's own two bounds: the shot ordinal it counts
+            # publications on, and the measured value.  The Dataset names
+            # neither, which is why the subject reports no axes -- and why
+            # this region derives nothing.  It is still exactly the region
+            # the operator drew, so it is carried whole: both bounds, in
+            # the order the surfaces apply them, so the mark the card shows
+            # and the mark the Setting editor shows are the same mark.
+            ranges = (
+                _rolling_ranges(
+                    selector_kind, selector.value.x, selector.value.y
+                )
+                if selector_kind == "area"
+                else _rolling_ranges(selector_kind, selector.value)
+            )
+            facets, repeat_index = _subject_scope(subject)
+            return SelectionState(
+                plot_kind=plot_kind,
+                selector_kind=selector_kind,
+                ranges=ranges,
+                facets=facets,
+                repeat_index=repeat_index,
+                revision=int(selector.revision),
             )
         if selector_kind == "area":
             # A bound axis resolves to None when it cuts the measured VALUE

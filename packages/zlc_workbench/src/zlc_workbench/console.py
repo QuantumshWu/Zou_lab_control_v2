@@ -103,6 +103,7 @@ from .selection import (
     PlotSelectionSource,
     panel_selection_document,
     panel_selection_derives_signal,
+    same_plot_generation,
     panel_selection_from_document,
     panel_selection_matches_subject,
     panel_selection_output_catalog,
@@ -4605,6 +4606,23 @@ class ConsolePresenter:
                 plot_input,
             )
             subject = getattr(observation, "subject", None)
+            if not identity_matches:
+                # A region that cuts nothing upstream is not tied to the
+                # revision it was drawn on.  It says "here, on this
+                # picture", and one shot later it is the same picture with
+                # one more point -- nothing is derived from that
+                # publication, so nothing about the region goes stale.
+                # Demanding the exact revision meant a ROLLING panel, whose
+                # host advances on every single shot while this bookkeeping
+                # necessarily lags it, could never have a region accepted
+                # at all: the operator drew, the mark appeared, and the
+                # panel forgot it before the next frame.
+                state = getattr(observation, "state", None)
+                identity_matches = (
+                    state is not None
+                    and not panel_selection_derives_signal(state)
+                    and same_plot_generation(observation, plot_input)
+                )
         if (
             publication is None
             or plot_input is None
@@ -4969,7 +4987,16 @@ class ConsolePresenter:
         accepted = self._accepted_panel_interaction(
             binding, source, observation
         )
-        if accepted is None or accepted[0] is not publication:
+        if accepted is None:
+            return
+        if accepted[0] is not publication and panel_selection_derives_signal(
+            observation.state
+        ):
+            # A region something is CUT from must name the exact publication
+            # it was cut from.  A region that cuts nothing need not: it marks
+            # a place on the picture, and on a live rolling panel the
+            # publication under that picture changes with every shot -- which
+            # is why such a panel could never keep a mark at all.
             return
         if not panel_selection_matches_subject(
             observation.state, observation.subject
@@ -4978,7 +5005,7 @@ class ConsolePresenter:
         self._apply_selection_observation(
             binding,
             observation,
-            publication,
+            accepted[0],
             other_host=binding.editor_host,
         )
         self._track_panel_configuration(
