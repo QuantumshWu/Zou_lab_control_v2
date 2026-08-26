@@ -394,7 +394,6 @@ class ExperimentGuiFlow:
                 session,
                 key,
                 window_ratio=self.window_ratio,
-                owner=self._console_owner_window(),
             )
         else:
             control = self._open_generic_control(key, leaf.device)
@@ -417,12 +416,16 @@ class ExperimentGuiFlow:
         return control
 
     def _console_owner_window(self):
-        """The console window every window this app opens belongs to.
+        """The console window a FRAME of this console belongs to.
 
-        One place says who the owner is, so a new window cannot be added
-        without answering the question -- and the answer is never "nobody",
-        which is what left a settings frame free for the desktop to stack a
-        browser underneath.
+        Only for a window that has no life of its own -- the generic
+        settings frame below is one: it shows the settings of a card this
+        console is already showing, so the desktop must not stack anything
+        between them.  A device that brings its own EDITOR (the pulse
+        editor, the SLM editor) opens an application window instead: it is
+        launched from here and then lives on its own, so it is not raised,
+        minimised or closed with this console, and claiming it would tie
+        two peers together.
         """
 
         console = self.console

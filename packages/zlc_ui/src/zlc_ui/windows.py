@@ -28,7 +28,18 @@ def open_device_control(
     window_ratio: float | None = None,
     owner=None,
 ) -> Any:
-    """Open one projection-driven generic control without exposing Qt."""
+    """Open one projection-driven generic control without exposing Qt.
+
+    ``owner`` is for a frame that has no life of its own: a console opens
+    this to show the settings of a card it is already showing, so the two
+    belong together and the desktop must not stack anything between them.
+    An APPLICATION window is not that.  The pulse editor, the figure
+    viewer, the device manager and the console itself each open on their
+    own, outlive whatever happened to launch them and are moved, raised
+    and closed on their own -- tying one to another would mean minimising
+    a console takes an editor down with it, which is a relationship
+    neither of them has.
+    """
 
     from .device_manager.handle import DeviceControlHandle
     from .device_manager.view import DeviceControlView
@@ -55,7 +66,6 @@ def open_pulse_editor(
     *,
     title: str = "PulseGUI@Zou lab",
     window_ratio: float | None = None,
-    owner=None,
 ) -> Any:
     """Open the pulse editor and return the handle that drives it."""
 
@@ -74,7 +84,6 @@ def open_pulse_editor(
 
     window = open_fluent_window(
         _body,
-        owner=owner,
         title=str(title),
         window_ratio=(
             WINDOW_SCREEN_FRACTION if window_ratio is None else float(window_ratio)
@@ -87,7 +96,6 @@ def open_figure_viewer(
     *,
     title: str = "FigureViewer@Zou lab",
     window_ratio: float | None = None,
-    owner=None,
 ) -> Any:
     """Open the figure viewer and return the handle that drives it."""
 
@@ -103,7 +111,6 @@ def open_figure_viewer(
 
     window = open_fluent_window(
         _body,
-        owner=owner,
         title=str(title),
         window_ratio=(
             WINDOW_SCREEN_FRACTION if window_ratio is None else float(window_ratio)
@@ -116,7 +123,6 @@ def open_device_manager(
     *,
     title: str = "DeviceManager@Zou lab",
     window_ratio: float | None = None,
-    owner=None,
 ) -> Any:
     """Open the device manager and return the handle that drives it."""
 
@@ -132,7 +138,6 @@ def open_device_manager(
 
     window = open_fluent_window(
         _body,
-        owner=owner,
         title=str(title),
         window_ratio=(
             WINDOW_SCREEN_FRACTION if window_ratio is None else float(window_ratio)
@@ -146,7 +151,6 @@ def open_task_console(
     title: str = "TaskConsole@Zou lab",
     window_ratio: float | None = None,
     plot_surface: Any | None = None,
-    owner=None,
 ) -> Any:
     """Open the task console and return the handle that drives it.
 
@@ -168,7 +172,6 @@ def open_task_console(
 
     window = open_fluent_window(
         _body,
-        owner=owner,
         title=str(title),
         window_ratio=(
             WINDOW_SCREEN_FRACTION if window_ratio is None else float(window_ratio)

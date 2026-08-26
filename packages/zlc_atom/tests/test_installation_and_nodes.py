@@ -596,8 +596,8 @@ def test_a_device_family_that_cannot_import_is_reported_not_raised(monkeypatch) 
     assert len(walks) == 1, "available and unavailable must be one atomic discovery"
 
 
-def test_every_device_control_window_can_be_owned() -> None:
-    """A control window opened from a console belongs to that console.
+def test_every_device_control_factory_takes_the_call_the_console_makes() -> None:
+    """A card opens a control by one call; every factory must accept it.
 
     Checked on the factories the device types actually declare, including
     the lazy shims that forward to them: a shim that does not restate a
@@ -617,8 +617,18 @@ def test_every_device_control_window_can_be_owned() -> None:
             continue
         seen += 1
         parameters = inspect.signature(factory).parameters
-        assert "owner" in parameters, (
-            f"{descriptor.type_id} control factory cannot be told who owns "
-            "the window it opens"
+        assert "window_ratio" in parameters, (
+            f"{descriptor.type_id} control factory cannot be opened the way "
+            "a device card opens one"
+        )
+        positional = [
+            name
+            for name, parameter in parameters.items()
+            if parameter.kind
+            in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        assert positional[:2] == ["session", "device_key"], (
+            f"{descriptor.type_id} control factory does not take (session, "
+            f"device_key): {positional}"
         )
     assert seen, "no device type declared a control factory"

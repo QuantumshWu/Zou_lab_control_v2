@@ -39,23 +39,33 @@ def test_a_window_opened_from_another_belongs_to_it() -> None:
         owner.close()
 
 
-def test_every_console_window_states_who_owns_it() -> None:
-    """The openers cannot be used without answering the question.
+def test_an_application_window_is_nobody_s_property() -> None:
+    """Ownership is for a frame, never for an application.
 
-    Ownership is not something a new window may quietly omit: every shared
-    opener takes it, so adding one makes the author say who it belongs to.
+    A frame has no life of its own: a console opens it to show the
+    settings of a card it is already showing, so the two belong together.
+    The pulse editor, the figure viewer, the device manager and the
+    console each open on their own, outlive whatever launched them, and
+    are raised, minimised and closed on their own.  Tying one to another
+    means minimising a console takes an editor down with it -- a
+    relationship neither of them has, and one an operator cannot undo.
     """
 
     import inspect
 
     from zlc_ui import windows as window_module
 
+    signature = inspect.signature(window_module.open_device_control)
+    assert "owner" in signature.parameters, (
+        "a frame opened from a console must be able to say whose it is"
+    )
     for name in (
-        "open_device_control",
         "open_pulse_editor",
         "open_figure_viewer",
         "open_device_manager",
         "open_task_console",
     ):
         signature = inspect.signature(getattr(window_module, name))
-        assert "owner" in signature.parameters, name
+        assert "owner" not in signature.parameters, (
+            f"{name} opens an application window: it belongs to nobody"
+        )
