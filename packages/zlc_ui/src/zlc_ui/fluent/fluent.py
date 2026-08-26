@@ -3703,9 +3703,18 @@ def launch_fluent_window(
     fixed_size: bool = False,
     size: tuple | None = None,
     window_ratio: float = WINDOW_SCREEN_FRACTION,
+    owner: QtWidgets.QWidget | None = None,
     wire=None,
 ) -> FluentWindow:
     """The ONE top-level-GUI launcher sequence.
+
+    ``owner`` is the window this one was opened FROM.  A window opened from
+    another belongs to it: the desktop keeps it above its owner, they raise
+    and minimise together, and closing the owner closes it.  Without an
+    owner every window of one application is an unrelated top-level, so
+    anything else on the desktop -- a browser, a terminal -- can sit
+    BETWEEN a console and the settings frame that belongs to it, which is
+    not a stack any operator asked for and not one they can fix.
 
     ``widget_or_factory`` may be an already constructed QWidget or a zero-
     argument factory.  The factory form is the canonical public entry because
@@ -3741,7 +3750,19 @@ def launch_fluent_window(
         widget = widget()
     if not isinstance(widget, QtWidgets.QWidget):
         raise TypeError("window factory must return QWidget")
-    window = FluentWindow(widget=widget, title=title, hide_on_close=hide_on_close)
+    if owner is not None and not isinstance(owner, QtWidgets.QWidget):
+        raise TypeError("owner must be a QWidget or None")
+    window = FluentWindow(
+        widget=widget,
+        title=title,
+        hide_on_close=hide_on_close,
+        parent=None if owner is None else owner.window(),
+    )
+    if owner is not None:
+        # Parenting alone would make it a CHILD WIDGET inside the owner.
+        # The flag keeps it what it is -- its own movable, closable window
+        # -- while the parent is what the desktop reads as ownership.
+        window.setWindowFlag(QtCore.Qt.Window, True)
     bind_body_close(window, widget)
     if wire is not None:
         wire(window)
@@ -3765,6 +3786,7 @@ def open_fluent_window(
     title: str,
     hide_on_close: bool = False,
     window_ratio: float = WINDOW_SCREEN_FRACTION,
+    owner: QtWidgets.QWidget | None = None,
     wire=None,
 ) -> FluentWindow:
     """Open a human-facing frameless window from a zero-argument body factory.
@@ -3786,6 +3808,7 @@ def open_fluent_window(
         hide_on_close=hide_on_close,
         fixed_size=False,
         window_ratio=float(window_ratio),
+        owner=owner,
         wire=wire,
     )
 

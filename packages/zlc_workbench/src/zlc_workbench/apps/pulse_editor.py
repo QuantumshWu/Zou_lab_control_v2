@@ -345,6 +345,7 @@ def create_bound_window(
     device_use: object,
     path: str = "",
     window_ratio: float | None = None,
+    owner=None,
 ):
     """Open PulseGUI over a sequencer borrowed from an ExperimentSession.
 
@@ -361,7 +362,7 @@ def create_bound_window(
 
     space = workspace if isinstance(workspace, Workspace) else Workspace(workspace)
     window = open_pulse_editor(
-        title="PulseGUI@Zou lab", window_ratio=window_ratio
+        title="PulseGUI@Zou lab", window_ratio=window_ratio, owner=owner
     )
     run_off_thread, close_preview_worker = attach_qt_worker("zlc-pulse-preview")
     run_device_work, close_device_worker = attach_qt_worker("zlc-pulse-command")

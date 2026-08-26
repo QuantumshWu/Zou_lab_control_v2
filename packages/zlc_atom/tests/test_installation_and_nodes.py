@@ -594,3 +594,31 @@ def test_a_device_family_that_cannot_import_is_reported_not_raised(monkeypatch) 
     assert "ModuleNotFoundError" in catalog.unavailable[0].reason
     assert catalog.unavailable[0].family == "notinstalled"
     assert len(walks) == 1, "available and unavailable must be one atomic discovery"
+
+
+def test_every_device_control_window_can_be_owned() -> None:
+    """A control window opened from a console belongs to that console.
+
+    Checked on the factories the device types actually declare, including
+    the lazy shims that forward to them: a shim that does not restate a
+    keyword is a shim that drops it, and the failure surfaces as a
+    swallowed TypeError from a device card rather than at the signature
+    that lost it.
+    """
+
+    import inspect
+
+    from zlc_atom.install.discovery import discover_device_catalog
+
+    seen = 0
+    for descriptor in discover_device_catalog().available:
+        factory = getattr(descriptor, "control_factory", None)
+        if factory is None:
+            continue
+        seen += 1
+        parameters = inspect.signature(factory).parameters
+        assert "owner" in parameters, (
+            f"{descriptor.type_id} control factory cannot be told who owns "
+            "the window it opens"
+        )
+    assert seen, "no device type declared a control factory"
