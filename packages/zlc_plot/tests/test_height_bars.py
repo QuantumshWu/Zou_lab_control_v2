@@ -475,32 +475,108 @@ def test_color_limit_preview_rerenders_the_scene() -> None:
         session.close()
 
 
-def test_drag_preview_keeps_the_dense_lighting_decision() -> None:
-    """The dense-surface decision is about canvas cell size: the drag
-    preview renders at a fraction of the canvas and stretches back, and
-    judging the raster scale alone flipped mid-size grids to the lit
-    surface for the duration of every drag."""
+def test_one_mechanism_draws_every_edge_the_scene_has() -> None:
+    """Edges are vector chrome, and that is the only kind there is.
+
+    A second, raster mechanism darkened box boundaries inside the
+    scanline kernel for the grids the vector path declined -- two looks
+    for one fact, and they swapped mid-gesture, because the vector path
+    was gated on the drag's reduced resolution too.  So: the same scene
+    turned under the hand changed the character of its own lines.
+
+    What the kernel paints is therefore FACES ONLY.  Every line -- bar
+    outlines, pane grids, floor rules, the cage -- is an artist.
+    """
+
+    from zlc_plot._height3d_raster import HeightBarCamera, render_height_bars
+
+    rng = np.random.default_rng(11)
+    heights = rng.random((12, 12))
+    colors = np.repeat(
+        heights[..., None].astype(np.float32).clip(0.0, 1.0), 3, axis=-1
+    )
+    frame, scene = render_height_bars(
+        heights, colors, camera=HeightBarCamera(), value_limits=(0.0, 1.0),
+        width=240, height=200, zero_rgb=(1.0, 1.0, 1.0),
+    )
+    assert not scene.dense, "this grid draws as boxes"
+    # Every drawn pixel is a face colour or the background: a darkened
+    # boundary would show up as a value darker than the darkest face.
+    painted = frame[..., :3][frame[..., 3] > 0].astype(np.float64) / 255.0
+    darkest_face = float(np.min(np.clip(heights, 0.0, 1.0)))
+    assert painted.min() >= darkest_face - 0.02, (
+        "the kernel darkened something that is not a face"
+    )
+
+
+def test_a_drag_draws_the_same_edges_as_the_frame_it_leaves() -> None:
+    """Turning the scene must not change what its lines ARE.
+
+    The drag renders coarser on purpose.  That is a resolution budget,
+    and a budget is not permission to draw a different picture: the
+    edge set is the geometry's, so it survives the divisor unchanged.
+    """
+
+    session = _session(12)
+    try:
+        session.set_parameter("presentation", "height_bars")
+        session.rgba()
+        renderer = session._renderer
+        committed = renderer._artists["image:h3d_outlines"].get_xdata()
+        axis = next(
+            t for t in session._raster_axes_snapshot() if t.role == "image"
+        )
+        _pointer(session, "press", axis, 0.5, 0.5, button=2)
+        _pointer(session, "move", axis, 0.56, 0.52, button=2)
+        assert renderer._height_bars_dragging
+        dragging = renderer._artists["image:h3d_outlines"]
+        assert dragging.get_visible(), "a drag frame dropped its outlines"
+        assert np.asarray(dragging.get_xdata()).size > 0
+        _pointer(session, "release", axis, 0.56, 0.52, button=2)
+        assert renderer._artists["image:h3d_outlines"].get_visible()
+        assert np.asarray(committed).size > 0
+    finally:
+        session.close()
+
+
+def test_what_the_grid_is_drawn_as_follows_the_grid_alone() -> None:
+    """Boxes or a lit surface is a fact about the DATA, not the room.
+
+    Pricing it in canvas pixels made the picture a function of the
+    raster: a drag renders at a fraction of the canvas and the scene
+    brightened while turning, a panel preset changed it, and widening
+    the scene's own region turned mid-size scans that had always been
+    surfaces into a mesh of boxes.  The same grid must read the same way
+    at every raster size -- and zooming in must still walk up to the
+    boxes, because that IS the operator asking to come closer.
+    """
 
     from zlc_plot._height3d_raster import HeightBarCamera, render_height_bars
 
     rng = np.random.default_rng(33)
-    heights = rng.random((48, 64))
+    heights = rng.random((72, 96))          # a 120-cell diagonal
     colors = np.repeat(
         heights[..., None].astype(np.float32).clip(0.0, 1.0), 3, axis=-1
     )
-    camera = HeightBarCamera(azimuth_deg=-55.0)
-    flags = {}
-    for label, width, height, taps, stretch in (
-        ("committed", 320, 240, 3, 1.0),
-        ("drag", 160, 120, 1, 2.0),
-    ):
-        _, scene = render_height_bars(
-            heights, colors, camera=camera, value_limits=(0.0, 1.0),
-            width=width, height=height, supersample=taps,
-            zero_rgb=(1.0, 1.0, 1.0), display_stretch=stretch,
+
+    def drawn(width, height, taps, zoom=1.0):
+        _frame, scene = render_height_bars(
+            heights, colors,
+            camera=HeightBarCamera(azimuth_deg=-55.0, zoom=zoom),
+            value_limits=(0.0, 1.0), width=width, height=height,
+            supersample=taps, zero_rgb=(1.0, 1.0, 1.0),
         )
-        flags[label] = scene.dense
-    assert flags["committed"] == flags["drag"], flags
+        return scene.dense
+
+    committed = drawn(320, 240, 3)
+    assert drawn(160, 120, 1) == committed, "a drag frame redrew it"
+    assert drawn(900, 700, 3) == committed, "a bigger panel redrew it"
+    assert drawn(320, 240, 1) == committed, "the tap count redrew it"
+    # The operator's own zoom is the one thing that moves it, and it
+    # moves it toward the boxes: 120 cells of diagonal read as a surface
+    # until the camera comes close enough for a box to be a box.
+    assert committed is True
+    assert drawn(320, 240, 3, zoom=2.0) is False
 
 
 def test_drag_preview_keeps_the_chrome_typography_in_place() -> None:
@@ -677,12 +753,14 @@ def test_occlusion_is_a_box_test_not_a_centre_depth_proxy() -> None:
     )
     frame, scene = render_height_bars(
         heights, colors, camera=HeightBarCamera(), value_limits=(0.0, 1.0),
-        width=400, height=300, bar_edges=False,
+        width=400, height=300,
     )
-    sampler = MatplotlibRenderer._height_bars_occluded_polyline
+    renderer = object.__new__(MatplotlibRenderer)
 
     def visible_fraction(edge):
-        xs, _ = sampler(None, scene, np.asarray([edge], dtype=np.float64))
+        xs, _ = renderer._height_bars_occluded_polyline(
+            scene, np.asarray([edge], dtype=np.float64)
+        )
         finite = np.isfinite(xs[:-1])
         return finite.mean()
 
@@ -703,7 +781,7 @@ def test_occlusion_is_a_box_test_not_a_centre_depth_proxy() -> None:
     frame, scene = render_height_bars(
         np.asarray([[0.4, 0.4]]), colors,
         camera=HeightBarCamera(), value_limits=(0.0, 1.0),
-        width=400, height=300, bar_edges=False,
+        width=400, height=300,
     )
     a0, b0 = scene.fold_cell(0, 0)
     a1, b1 = scene.fold_cell(0, 1)
@@ -802,7 +880,7 @@ def test_render_is_deterministic_at_exact_crossing_ties() -> None:
         frame, _ = render_height_bars(
             heights.copy(), colors.copy(), camera=camera,
             value_limits=(0.0, 1.0), width=360, height=280,
-            supersample=2, bar_edges=False,
+            supersample=2,
         )
         frames.append(frame)
         del noise
@@ -1029,7 +1107,7 @@ def test_a_drag_reuses_the_pooled_grid_it_was_already_showing() -> None:
             width=max(committed_box // divisor, 8),
             height=max(committed_box // divisor, 8),
             supersample=taps, zero_rgb=(1.0, 1.0, 1.0),
-            pool_cache=cache, display_stretch=float(divisor),
+            pool_cache=cache,
             pool_reference_width=committed_box * 3,
         )
         return cache["value"][0]

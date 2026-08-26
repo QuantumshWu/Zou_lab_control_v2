@@ -138,6 +138,13 @@ class HeightBarScene:
     #: screen a pixel's view ray RISES toward the viewer, so "this pixel's
     #: top face occludes a point" is exactly "its top is above the point".
     top_values: NDArray[np.float64]
+    #: Folded (ny, nx) drawn BASE height per cell in value units
+    #: (min(clipped, 0); +inf where no bar).  Top and base together ARE
+    #: the box this render drew, which is what the outline traces: a
+    #: consumer that re-derived the boxes from the caller's data was a
+    #: second definition of the same thing, free to disagree with the
+    #: picture it was drawn over.
+    base_values: NDArray[np.float64]
     #: True when cells are below outline density and the grid drew as a
     #: lit continuous surface; scene chrome skips floor rules then --
     #: a rule at z=0 under a near-zero surface wins the height tie and
@@ -285,15 +292,12 @@ def render_height_bars(
     height: int,
     supersample: int = 1,
     side_shades: tuple[float, float] = (1.0, 1.0),
-    edge_darken: float = 0.85,
     background_rgb: tuple[float, float, float] = (1.0, 1.0, 1.0),
     zero_rgb: tuple[float, float, float] | None = None,
     z_fraction: float = 0.55,
     pool_pixels_per_cell: float = 2.0,
-    edge_min_cell_px: float = 3.0,
-    bar_edges: bool = True,
+    surface_diagonal_cells: float = 77.0,
     pool_cache: dict | None = None,
-    display_stretch: float = 1.0,
     pool_reference_width: int | None = None,
     origin: str = "lower",
 ) -> tuple[NDArray[np.uint8], HeightBarScene]:
@@ -457,14 +461,25 @@ def render_height_bars(
     # fold, the elevation and the density flag -- never on the azimuth
     # within a quadrant or the zoom -- so an orbit drag reuses them
     # verbatim: an identity cache, bit-exact by construction.
-    # The dense decision is about how big a cell looks ON THE CANVAS.
-    # A drag preview renders at a fraction of the canvas and stretches
-    # back (display_stretch = the drag divisor), so judging the raster
-    # scale alone flipped mid-size grids to the lit dense surface for
-    # the duration of every drag -- the scene brightened while turning
-    # and dimmed on release.
+    # WHAT the grid is drawn as follows the grid, never the room it was
+    # given.  Boxes below a few pixels are not boxes -- they read as a
+    # heightfield, and the honest picture of one is a lit continuous
+    # surface -- but pricing that in canvas pixels made the picture a
+    # function of the raster: a drag renders at a fraction of the canvas
+    # (the scene brightened while turning and dimmed on release), a
+    # panel preset changes it, and widening the scene's own region
+    # turned mid-size scans that had always been surfaces into a mesh of
+    # boxes.  None of that is a fact about the data.  The measure is the
+    # grid's own diagonal, against the camera the operator chose: the
+    # same scan reads the same way in every panel on every screen, and
+    # zooming in still walks up to the boxes.  The number is where the
+    # canvas rule used to land in the panel this presentation shipped
+    # in -- 54 cells across still boxes, 55 already a surface -- so the
+    # anchor moves from the layout to the data without moving the
+    # picture anybody has seen.
     dense_surface = (
-        scale * display_stretch < edge_min_cell_px * supersample
+        math.hypot(source_ny, source_nx)
+        > surface_diagonal_cells * camera.zoom
     )
     # Two cache stages.  Everything the ELEVATION never touches -- the
     # clipped height field, colours, lighting, validity -- caches under
@@ -483,6 +498,7 @@ def render_height_bars(
     if pool_cache is not None and pool_cache.get("derived_key") == derived_key:
         (
             hz, finite_grid, rgb_grid, base_grid, top_grid, top_values,
+            base_values,
         ) = pool_cache["derived_value"]
     else:
         clipped = np.clip(h_grid, value_low, value_high)
@@ -513,6 +529,9 @@ def render_height_bars(
         top_values = np.where(
             finite_grid, np.maximum(clipped, 0.0), -np.inf
         )
+        base_values = np.where(
+            finite_grid, np.minimum(clipped, 0.0), np.inf
+        )
         finite_grid = np.ascontiguousarray(finite_grid)
         rgb_grid = np.ascontiguousarray(rgb_grid)
         base_grid = np.ascontiguousarray(base_grid)
@@ -521,6 +540,7 @@ def render_height_bars(
             pool_cache["derived_key"] = derived_key
             pool_cache["derived_value"] = (
                 hz, finite_grid, rgb_grid, base_grid, top_grid, top_values,
+                base_values,
             )
     z_key = (derived_key, float(ce))
     if pool_cache is not None and pool_cache.get("derived_z_key") == z_key:
@@ -540,7 +560,7 @@ def render_height_bars(
         # The numba analytic engine: exact vertical coverage per column
         # walk, bit-identical to the reference materialization below by
         # the standing contract test.
-        from ._height3d_scanline import _edge_accent, _materialize
+        from ._height3d_scanline import _materialize
 
         out = np.empty((render_h // supersample, int(width), 4), dtype=np.uint8)
         id_taps = np.empty((render_h // supersample, render_w), dtype=np.int32)
@@ -577,17 +597,7 @@ def render_height_bars(
             id_taps,
             np.int64(min(32, (os.cpu_count() or 4) * 2)),
         )
-        if bar_edges and not dense_surface:
-            _edge_accent(
-                id_taps,
-                out,
-                np.int64(supersample),
-                np.float32(edge_darken),
-                np.float32(0.6 / supersample),
-            )
-        edges_pending = False
     else:
-        edges_pending = True
         k = np.arange(nx, dtype=np.float64)[:, None]
         m = np.arange(ny, dtype=np.float64)[:, None]
         t_cross_a = t_a0[None, :] + k / sa
@@ -920,40 +930,6 @@ def render_height_bars(
     out_h = render_h // taps
     mid_tap = taps // 2
     id_plane = np.ascontiguousarray(id_taps[:, mid_tap::taps])
-    # ---- raster edge accents from the tap-resolution id plane
-    # (mid-density grids only: small grids draw vector outlines, dense
-    # grids are a lit continuous surface).  A boundary darkens with a
-    # weight proportional to how much of the pixel it crosses.
-    if bar_edges and not dense_surface and edges_pending:
-        vertical = np.zeros(id_taps.shape, dtype=np.float32)
-        upper = id_taps[:-1]
-        lower = id_taps[1:]
-        vertical[1:] = (
-            (lower != upper)
-            & (lower > 0)
-            & (upper > 0)
-            & ((lower >= 4) | (upper >= 4))
-        ).astype(np.float32)
-        horizontal = np.zeros(id_taps.shape, dtype=np.float32)
-        left = id_taps[:, :-1]
-        right = id_taps[:, 1:]
-        horizontal[:, 1:] = (
-            (left != right)
-            & (left > 0)
-            & (right > 0)
-            & ((left >= 4) | (right >= 4))
-        ).astype(np.float32)
-        weight_taps = vertical + horizontal
-        weight = np.zeros((out_h, width), dtype=np.float32)
-        for tap in range(taps):
-            weight += weight_taps[:, tap::taps]
-        weight *= np.float32(0.6 / taps)
-        np.clip(weight, 0.0, 1.0, out=weight)
-        factor = np.float32(1.0) - np.float32(edge_darken) * weight
-        out[..., :3] = (
-            out[..., :3].astype(np.float32) * factor[..., None]
-        ).astype(np.uint8)
-
     scene_id_plane = id_plane
     scale = scale / taps
 
@@ -981,6 +957,7 @@ def render_height_bars(
         height=int(height),
         id_plane=np.ascontiguousarray(scene_id_plane.astype(np.int32)),
         top_values=top_values,
+        base_values=base_values,
         dense=bool(dense_surface),
     )
     return out, scene

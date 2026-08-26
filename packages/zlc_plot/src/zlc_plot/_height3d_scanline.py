@@ -67,7 +67,7 @@ def _occlusion_samples(  # one edge set, sampled against one scene
 ):
     """The occlusion sampler's math, fused per edge.
 
-    Mirrors ``_height_bars_occluded_polyline`` operation for operation
+    Mirrors ``_height_bars_sampled_polyline`` operation for operation
     (pure float64 with integer lookups, so the mirror is direct): the
     projection, the shown box's ahead-and-below test, the inside-solid
     test with viewer-side cells, and the isolated-sample erosion.
@@ -244,42 +244,6 @@ def main() -> int:
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
-
-
-@njit(cache=True, parallel=True, nogil=True)
-def _edge_accent(  # raster edge accents, mirroring the reference tail
-    id_taps,      # i32 (out_h, render_w) tap-resolution span ids
-    out,          # u8 (out_h, width, 4) composed pixels, darkened in place
-    taps,         # i64 horizontal taps per output pixel
-    edge_darken,  # f32
-    w6,           # f32 == np.float32(0.6 / taps)
-):
-    out_h = out.shape[0]
-    width = out.shape[1]
-    for col in prange(width):
-        for row in range(out_h):
-            weight = np.float32(0.0)
-            for tap in range(taps):
-                x = col * taps + tap
-                me = id_taps[row, x]
-                v = np.float32(0.0)
-                if row > 0:
-                    up = id_taps[row - 1, x]
-                    if me != up and me > 0 and up > 0 and (me >= 4 or up >= 4):
-                        v = np.float32(1.0)
-                h = np.float32(0.0)
-                if x > 0:
-                    lf = id_taps[row, x - 1]
-                    if me != lf and me > 0 and lf > 0 and (me >= 4 or lf >= 4):
-                        h = np.float32(1.0)
-                weight = weight + (v + h)
-            weight = weight * w6
-            if weight > np.float32(1.0):
-                weight = np.float32(1.0)
-            factor = np.float32(1.0) - edge_darken * weight
-            out[row, col, 0] = np.uint8(np.float32(out[row, col, 0]) * factor)
-            out[row, col, 1] = np.uint8(np.float32(out[row, col, 1]) * factor)
-            out[row, col, 2] = np.uint8(np.float32(out[row, col, 2]) * factor)
 
 
 @njit(cache=True, parallel=True, nogil=True)

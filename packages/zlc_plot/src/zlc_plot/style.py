@@ -552,13 +552,12 @@ class RenderPolicyConfig:
     image_origin: str = "upper"
     image_anchor: str = "W"
     #: Height-bar presentation: fixed face shading (x-side, y-side), the
-    #: outline darkening, the scene chrome greys, the bar-height budget as
-    #: a fraction of the ground diagonal, and the quality knobs -- one
-    #: place, so no shading coefficient lives in the renderer.
+    #: scene chrome greys, the bar-height budget as a fraction of the
+    #: ground diagonal, and the quality knobs -- one place, so no
+    #: shading coefficient lives in the renderer.
     #: Interp-shaded sides carry the depth cue; keep both faces unshaded
     #: like the reference (MATLAB shading interp draws no lighting).
     height_bars_side_shades: tuple[float, float] = (1.0, 1.0)
-    height_bars_edge_darken: float = 0.85
     height_bars_background_rgb: tuple[float, float, float] = (1.0, 1.0, 1.0)
     height_bars_axis_color: str = "black"
     #: Pane/floor grid rules: the reference look is a WIDE, translucent
@@ -567,8 +566,6 @@ class RenderPolicyConfig:
     height_bars_grid_line_pt: float = 1.0
     height_bars_grid_alpha: float = 0.1
     height_bars_z_fraction: float = 0.55
-    #: Grids this small draw their outlines as vector artists.
-    height_bars_supersample_tiny_bars: int = 256
     #: The selection cage shares the grid's colour and width -- it is
     #: scene furniture -- and only its stronger alpha marks it out.
     height_bars_cage_alpha: float = 0.2
