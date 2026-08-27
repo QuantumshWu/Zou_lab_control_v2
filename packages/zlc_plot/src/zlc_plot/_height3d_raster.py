@@ -1027,7 +1027,18 @@ def render_height_bars(
     # picture, not to the room, and they cost what they COVER rather than
     # what they belong to -- so a scene with fifty bars a side pays the
     # same two milliseconds as one with ten.
-    _stroke_rims(out, scene_id_plane, rim_rgb, float(rim_width_px))
+    #
+    # A crease separates two faces, so it gets whatever width the bar can
+    # spare and no more: a bar keeps a pixel of face, and the rest, up to
+    # the full line width, is its outline.  Once the bar count is the
+    # DATA's, a camera frame puts a bar under every pixel -- and stroking
+    # a full crease around each of them painted the whole surface black,
+    # which is the outline of a box eating the box.
+    step_a = math.hypot(ca, sa * se)
+    step_b = math.hypot(sa, ca * se)
+    bar_px = scale * min(step_a, step_b)
+    crease_px = min(float(rim_width_px), max(0.0, bar_px - 1.0))
+    _stroke_rims(out, scene_id_plane, rim_rgb, crease_px)
 
     scene = HeightBarScene(
         quadrant=quadrant,
