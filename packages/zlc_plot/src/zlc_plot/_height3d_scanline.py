@@ -348,59 +348,27 @@ if __name__ == "__main__":  # pragma: no cover
 
 
 @njit(cache=True, parallel=True, nogil=True)
-def _colour_plane(
-    heights,   # f64 (ny, nx)
-    low,       # f64  the colour limit the code is measured from
-    span,      # f64  256 / (high - low)
-    lut,       # f32 (256, 3) the colormap's own table
-    out,       # f32 (ny, nx, 3) written
-):
-    """The per-cell top colour, by the same code the heatmap picks.
-
-    Mirrors the caller's numpy operation for operation: the code is the
-    scaled value, clipped to the table and truncated, and a value that is
-    not a number takes the first entry.  It is here for the same reason
-    the derivation is: a live panel rebuilds the whole plane on every
-    shot, and as numpy that is a scaled array, a clip, a NaN fill, a cast
-    and a 2.3-million-element gather -- five passes to look up one row of
-    three floats per cell.
-    """
-
-    ny, nx = heights.shape
-    for row in prange(ny):
-        for column in range(nx):
-            value = (heights[row, column] - low) * span
-            if value != value:
-                code = 0
-            else:
-                if value < 0.0:
-                    value = 0.0
-                elif value > 255.0:
-                    value = 255.0
-                code = int(value)
-            out[row, column, 0] = lut[code, 0]
-            out[row, column, 1] = lut[code, 1]
-            out[row, column, 2] = lut[code, 2]
-
-
-@njit(cache=True, parallel=True, nogil=True)
 def _derive_planes(  # the reference derivation, fused into one walk
     h_grid,      # f64 (ny, nx)
     finite_grid, # bool (ny, nx)
     value_low,   # f64
     value_high,  # f64
     z_unit,      # f64
+    span,        # f64  256 / (value_high - value_low)
+    lut,         # f32 (256, 3) the colormap's own table
     hz,          # f64 (ny, nx) written
     top_values,  # f64 (ny, nx) written
     base_values, # f64 (ny, nx) written
+    rgb,         # f32 (ny, nx, 3) written
 ):
-    """The per-cell planes the elevation never touches, in one pass.
+    """Everything one cell decides, in one pass.
 
     Mirrors the reference in ``_height3d_raster`` operation for operation:
-    clip, then the finite branch.  It exists because a LIVE panel rebuilds
-    all of this on every shot, and as separate numpy statements that is
-    six passes over the grid -- 38 ms at 2.3M cells, measured -- to
-    compute three numbers per cell that never leave the cell.
+    clip, the finite branch, and the colour code the heatmap picks -- the
+    scaled value, clipped to the table and truncated, with a value that is
+    not a number taking the first entry.  It exists because a LIVE panel
+    rebuilds all of this on every shot, and as separate numpy statements
+    it is a dozen passes over the grid to compute what one cell knows.
     """
 
     ny, nx = h_grid.shape
@@ -419,6 +387,18 @@ def _derive_planes(  # the reference derivation, fused into one walk
                 hz[row, column] = 0.0
                 top_values[row, column] = -np.inf
                 base_values[row, column] = np.inf
+            code_value = (clipped - value_low) * span
+            if code_value != code_value:
+                code = 0
+            else:
+                if code_value < 0.0:
+                    code_value = 0.0
+                elif code_value > 255.0:
+                    code_value = 255.0
+                code = int(code_value)
+            rgb[row, column, 0] = lut[code, 0]
+            rgb[row, column, 1] = lut[code, 1]
+            rgb[row, column, 2] = lut[code, 2]
 
 
 @njit(cache=True, parallel=True, nogil=True)

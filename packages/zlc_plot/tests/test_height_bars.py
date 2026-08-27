@@ -72,6 +72,19 @@ def _scan_snapshot(
     return DatasetSnapshot(schema, values, revision=revision)
 
 
+def _flat_table(*rgb: float) -> np.ndarray:
+    """One colour for every value -- what a constant colour plane said."""
+
+    return np.tile(np.asarray(rgb, dtype=np.float32), (256, 1))
+
+
+def _ramp_table() -> np.ndarray:
+    """Grey by value -- what repeating the normalised height said."""
+
+    grey = np.arange(256, dtype=np.float32) / 256.0
+    return np.repeat(grey[:, None], 3, axis=1)
+
+
 def _session(side: int = 10) -> PlotSession:
     session = PlotSession(
         _scan_snapshot(side),
@@ -88,7 +101,7 @@ def test_pick_inverts_projection_in_every_quadrant(azimuth) -> None:
     same bar, whatever fold quadrant the azimuth lands in."""
 
     heights = np.full((6, 9), 0.5)
-    colors = np.ones((6, 9, 3), dtype=np.float32) * 0.5
+    colors = _flat_table(0.5, 0.5, 0.5)
     camera = HeightBarCamera(azimuth_deg=azimuth, elevation_deg=30.0)
     _frame, scene = render_height_bars(
         heights, colors, camera=camera, value_limits=(0.0, 1.0),
@@ -113,7 +126,7 @@ def test_the_scene_is_an_oblique_view_of_the_same_heatmap() -> None:
     from zlc_plot.config import DEFAULTS
 
     heights = np.zeros((4, 5))
-    colors = np.full((4, 5, 3), 0.5, dtype=np.float32)
+    colors = _flat_table(0.5, 0.5, 0.5)
     # azimuth 0, elevation at its ceiling: as close to looking straight
     # down at the picture as the camera goes.
     camera = HeightBarCamera(azimuth_deg=0.0, elevation_deg=80.0)
@@ -149,7 +162,7 @@ def test_bars_clip_to_the_value_limits() -> None:
     saturates in colour: the z axis and the colorbar are one scale."""
 
     heights = np.asarray([[0.5, 2.0]])
-    colors = np.ones((1, 2, 3), dtype=np.float32) * 0.5
+    colors = _flat_table(0.5, 0.5, 0.5)
     camera = HeightBarCamera()
     _frame, scene = render_height_bars(
         heights, colors, camera=camera, value_limits=(0.0, 1.0),
@@ -167,7 +180,7 @@ def test_absent_bars_leave_the_floor() -> None:
     # face of the bar behind it (which a deep hole correctly reveals).
     heights = np.full((4, 4), 0.02)
     heights[1, 2] = np.nan
-    colors = np.ones((4, 4, 3), dtype=np.float32) * 0.5
+    colors = _flat_table(0.5, 0.5, 0.5)
     frame, scene = render_height_bars(
         heights, colors, camera=HeightBarCamera(), value_limits=(0.0, 1.0),
         width=320, height=240,
@@ -180,7 +193,7 @@ def test_absent_bars_leave_the_floor() -> None:
 def test_stress_grid_renders_inside_the_guard() -> None:
     rng = np.random.default_rng(1)
     heights = rng.random((96, 128))
-    colors = np.ones((96, 128, 3), dtype=np.float32) * 0.5
+    colors = _flat_table(0.5, 0.5, 0.5)
     start = perf_counter()
     render_height_bars(
         heights, colors, camera=HeightBarCamera(), value_limits=(0.0, 1.0),
@@ -276,9 +289,7 @@ def test_the_scene_turns_as_one_rigid_object() -> None:
 
     rng = np.random.default_rng(3)
     heights = rng.random((9, 13)) * 100.0
-    colors = np.repeat(
-        (heights / 100.0)[..., None].astype(np.float32), 3, axis=-1
-    )
+    colors = _ramp_table()
 
     def anchors(azimuth):
         _frame, scene = render_height_bars(
@@ -447,9 +458,7 @@ def test_orbit_holds_the_camera_distance_still() -> None:
 
     rng = np.random.default_rng(21)
     heights = rng.random((24, 32))
-    colors = np.repeat(
-        heights[..., None].astype(np.float32).clip(0.0, 1.0), 3, axis=-1
-    )
+    colors = _ramp_table()
     scales = []
     for azimuth in range(-175, 185, 10):
         _, scene = render_height_bars(
@@ -585,9 +594,7 @@ def test_one_mechanism_draws_every_edge_the_scene_has() -> None:
 
     rng = np.random.default_rng(11)
     heights = rng.random((12, 12))
-    colors = np.repeat(
-        heights[..., None].astype(np.float32).clip(0.0, 1.0), 3, axis=-1
-    )
+    colors = _ramp_table()
     frame, scene = render_height_bars(
         heights, colors, camera=HeightBarCamera(), value_limits=(0.0, 1.0),
         width=240, height=200, zero_rgb=(1.0, 1.0, 1.0),
@@ -621,9 +628,7 @@ def test_a_crease_is_stroked_once_and_only_where_the_faces_change() -> None:
     rng = np.random.default_rng(5)
     heights = np.round(rng.random((9, 11)) * 3.0) / 3.0
     heights[2, 3] = np.nan
-    colors = np.repeat(
-        np.nan_to_num(heights)[..., None].astype(np.float32), 3, axis=-1
-    )
+    colors = _ramp_table()
     common = dict(
         camera=HeightBarCamera(), value_limits=(0.0, 1.0),
         width=360, height=280, zero_rgb=(1.0, 1.0, 1.0),
@@ -708,9 +713,7 @@ def test_the_bar_count_is_the_data_and_nothing_else() -> None:
 
     def drawn(rows, columns, width, height, taps=3, zoom=1.0, rim=3.3):
         heights = rng.random((rows, columns))
-        colors = np.repeat(
-            heights[..., None].astype(np.float32).clip(0.0, 1.0), 3, axis=-1
-        )
+        colors = _ramp_table()
         _frame, scene = render_height_bars(
             heights, colors,
             camera=HeightBarCamera(azimuth_deg=-55.0, zoom=zoom),
@@ -902,9 +905,7 @@ def test_occlusion_is_a_box_test_not_a_centre_depth_proxy() -> None:
     from zlc_plot.rendering import MatplotlibRenderer
 
     heights = np.asarray([[0.02, 0.03]])
-    colors = np.tile(
-        np.asarray([0.5, 0.7, 0.9], dtype=np.float32), (1, 2, 1)
-    )
+    colors = _flat_table(0.5, 0.7, 0.9)
     frame, scene = render_height_bars(
         heights, colors, camera=HeightBarCamera(), value_limits=(0.0, 1.0),
         width=400, height=300,
@@ -1024,9 +1025,7 @@ def test_render_is_deterministic_at_exact_crossing_ties() -> None:
 
     rng = np.random.default_rng(11)
     heights = rng.uniform(0.0, 1.0, size=(12, 12))
-    colors = np.tile(
-        np.asarray([0.4, 0.6, 0.9], dtype=np.float32), (12, 12, 1)
-    )
+    colors = _flat_table(0.4, 0.6, 0.9)
     camera = HeightBarCamera(azimuth_deg=-45.0)
     frames = []
     for _ in range(4):
@@ -1162,12 +1161,12 @@ def test_scanline_engine_matches_the_reference_bit_for_bit() -> None:
     previous = raster._ENGINE
     try:
         for heights, limits, camera_kwargs, ss, width, height in cases:
+            # A table that varies along every channel, so a colour that
+            # went to the wrong cell would show.
+            ramp = np.arange(256, dtype=np.float32) / 256.0
             colors = np.ascontiguousarray(
-                np.stack([
-                    np.clip(np.nan_to_num(heights), 0.0, 1.0),
-                    np.full(heights.shape, 0.4),
-                    1.0 - np.clip(np.nan_to_num(heights), 0.0, 1.0),
-                ], axis=-1).astype(np.float32)
+                np.stack([ramp, np.full(256, 0.4, np.float32), 1.0 - ramp],
+                         axis=-1).astype(np.float32)
             )
             frames = {}
             for engine in ("numpy", "numba"):
@@ -1222,9 +1221,7 @@ def test_the_orbit_is_continuous_across_quadrant_boundaries() -> None:
 
     xx, yy = np.meshgrid(np.arange(24), np.arange(12))
     heights = np.exp(-((xx - 6.0) ** 2 + (yy - 3.0) ** 2) / 12.0)
-    colors = np.repeat(
-        heights[..., None].astype(np.float32).clip(0.0, 1.0), 3, axis=-1
-    )
+    colors = _ramp_table()
 
     def frame(azimuth: float) -> np.ndarray:
         rendered, _ = render_height_bars(
