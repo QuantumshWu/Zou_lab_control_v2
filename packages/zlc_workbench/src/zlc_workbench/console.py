@@ -2618,6 +2618,17 @@ class ConsolePresenter:
                 ):
                     live_overlay = None
                 self._cancel_panel_configuration(binding)
+                if binding.port is not None:
+                    # The operator's decision takes effect NOW, not when
+                    # the host finishes redrawing to it: until the port
+                    # is told, the next frame is projected to the setting
+                    # that was just replaced -- which is how an overlay
+                    # switched off came back on the following shot.
+                    binding.port.retarget(
+                        candidate
+                        if fit_override is _UNCHANGED
+                        else replace(candidate, fit=fit_override)
+                    )
                 if vacancy_reason:
                     # Nothing to draw, so nothing to configure: the panel
                     # keeps the operator's table and its last picture, and
