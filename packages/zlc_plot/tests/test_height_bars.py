@@ -308,6 +308,71 @@ def _pointer(session, action, axis, fx, fy, **kwargs):
     )
 
 
+def test_the_scene_turns_as_one_rigid_object() -> None:
+    """A wall stands where the data ends, whichever way the scene faces.
+
+    The rasterizer folds the grid so it only ever walks one octant, and
+    the chrome used to hang its wall rules, its vertical axis and its base
+    labels on FOLDED sides.  A fold is a fact about the walk, not about
+    the data, so crossing one jumped every piece of chrome a quarter turn
+    around a picture that had not moved: the folded corner (0, 0) projects
+    to the top of the frame at azimuth -0.5 degrees and to the bottom at
+    +0.5, while the four projected SOURCE corners move by less than one
+    and a half pixels.
+
+    So the test is on the data: the corner a named cell stands on, and
+    the wall its rules run along, must move continuously with the camera.
+    """
+
+    from zlc_plot._height3d_raster import HeightBarCamera, render_height_bars
+    from zlc_plot.rendering import MatplotlibRenderer
+
+    rng = np.random.default_rng(3)
+    heights = rng.random((9, 13)) * 100.0
+    colors = np.repeat(
+        (heights / 100.0)[..., None].astype(np.float32), 3, axis=-1
+    )
+
+    def anchors(azimuth):
+        _frame, scene = render_height_bars(
+            heights, colors,
+            camera=HeightBarCamera(azimuth_deg=azimuth, elevation_deg=30.0),
+            value_limits=(0.0, 100.0), width=320, height=240,
+            supersample=1, rim_width_px=3.3)
+        anchor = MatplotlibRenderer._height_bars_ground_anchors(scene)
+        return scene, anchor
+
+    def screen(azimuth):
+        scene, anchor = anchors(azimuth)
+        return {
+            "axis corner": scene.project(
+                anchor["axis_a"], anchor["axis_b"], 0.0),
+            "wall corner": scene.project(
+                anchor["wall_a"], anchor["wall_b"], 0.0),
+        }
+
+    # Either side of a fold boundary the camera has moved one degree; no
+    # anchor may move further than the picture does.
+    for boundary in (0.0, 90.0, 180.0, -90.0):
+        before = screen(boundary - 0.5)
+        after = screen(boundary + 0.5)
+        for name in before:
+            moved = max(abs(before[name][index] - after[name][index])
+                        for index in (0, 1))
+            assert moved < 4.0, (
+                "the %s jumped %.1f px across the fold at %g degrees"
+                % (name, moved, boundary)
+            )
+
+    # And the anchor really is the data's own side: the cell at the data
+    # origin sits on the axis corner, at every camera.
+    for azimuth in (-55.0, 5.0, 95.0, 185.0, 275.0):
+        scene, anchor = anchors(azimuth)
+        origin_a, origin_b = scene.fold_cell(0, 0)
+        assert abs(origin_a - anchor["axis_a"]) <= 1.0
+        assert abs(origin_b - anchor["axis_b"]) <= 1.0
+
+
 def test_a_drag_renders_the_resolution_it_leaves_behind() -> None:
     """One resolution, all the way through the gesture.
 

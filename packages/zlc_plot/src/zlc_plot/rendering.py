@@ -4272,6 +4272,45 @@ class MatplotlibRenderer:
 
         return x / max(scene.width, 1), 1.0 - y / max(scene.height, 1)
 
+    @staticmethod
+    def _height_bars_ground_anchors(scene: Any) -> dict[str, float]:
+        """Name the ground rectangle's sides by the DATA on them.
+
+        The scene is one rigid object: turning the camera turns the bars,
+        the walls, the axes and their labels together, and where a wall
+        stands relative to the data never changes -- exactly as an x axis
+        never changes which end of the data it runs along.
+
+        The rasterizer folds the grid so it only ever walks one octant,
+        and the chrome used to hang its wall rules, its vertical axis and
+        its base labels on FOLDED sides -- fixed indices like "the wall at
+        b = ny".  A fold is a fact about the walk, not about the data, so
+        when it changed every one of them jumped a quarter turn around a
+        picture that had not moved: measured, the folded corner (0, 0)
+        projects to the top of the frame at azimuth -0.5 degrees and to
+        the bottom at +0.5, while the four projected SOURCE corners move
+        less than one and a half pixels.
+
+        ``fold_cell`` is the one thing that knows where a data cell went,
+        so it is what answers here: the side each data extreme landed on.
+        """
+
+        origin_a, origin_b = scene.fold_cell(0, 0)
+        first_a = 0.0 if origin_a * 2 < scene.nx else float(scene.nx)
+        first_b = 0.0 if origin_b * 2 < scene.ny else float(scene.ny)
+        last_a = float(scene.nx) - first_a
+        last_b = float(scene.ny) - first_b
+        return {
+            # The walls stand where the data ends, and the axes run along
+            # where it starts -- the same two sides, every camera.
+            "wall_a": last_a, "wall_b": last_b,
+            "axis_a": first_a, "axis_b": first_b,
+            # One step INTO the scene from each axis side, for the
+            # direction a tick label leaves along.
+            "in_a": 1.0 if first_a == 0.0 else -1.0,
+            "in_b": 1.0 if first_b == 0.0 else -1.0,
+        }
+
     def _update_height_bars_chrome(
         self, axes: Any, key: str, scene: Any, box_w: int, box_h: int
     ) -> None:
@@ -4328,6 +4367,13 @@ class MatplotlibRenderer:
         z_low, z_high = scene.value_low, scene.value_high
         wall_low = min(z_low, 0.0)
         wall_high = max(z_high, 0.0)
+        # Every wall, edge and corner below is named by the DATA on it,
+        # never by its folded index -- see _height_bars_ground_anchors.
+        anchor = self._height_bars_ground_anchors(scene)
+        far_a, far_b = anchor["wall_a"], anchor["wall_b"]
+        near_a, near_b = anchor["axis_a"], anchor["axis_b"]
+        left_a, left_b = near_a, near_b
+        in_a, in_b = anchor["in_a"], anchor["in_b"]
         # nbins=2 is the reference's tick sparseness: a [0, 1] scale
         # reads 0 / 0.5 / 1 exactly as the MATLAB panels do (nbins=3
         # picked a 0.4 step whose top tick fell outside the range).
@@ -4338,10 +4384,11 @@ class MatplotlibRenderer:
         ]
         for tick in z_ticks:
             grid_edges.append(
-                ((0.0, float(scene.ny), tick),
-                 (float(scene.nx), float(scene.ny), tick))
+                ((near_a, far_b, tick), (far_a, far_b, tick))
             )
-            grid_edges.append(((0.0, 0.0, tick), (0.0, float(scene.ny), tick)))
+            grid_edges.append(
+                ((far_a, near_b, tick), (far_a, far_b, tick))
+            )
 
         def outward(edge_point, inner_point):
             """Unit direction (axes fractions) pushing a label AWAY from
@@ -4363,17 +4410,23 @@ class MatplotlibRenderer:
             va = "bottom" if uy > 0.4 else ("top" if uy < -0.4 else "center")
             return ha, va
 
-        # ---- z axis along the left pane's front edge, at ground (0, 0)
-        base = scene.project(0.0, 0.0, wall_low)
-        top = scene.project(0.0, 0.0, wall_high)
+        # ---- z axis where the two axis sides meet: the data corner the
+        # x and y axes both start from, whichever way the scene is turned
+        base = scene.project(left_a, left_b, wall_low)
+        top = scene.project(left_a, left_b, wall_high)
         add_segment(base, top)
         for tick in z_ticks:
             # The z labels leave their axis along the projected x
             # direction (the bench's ruling), exactly as the floor labels
-            # leave theirs.
+            # leave theirs -- away from the scene, so toward the corner
+            # opposite the one this axis stands on.
             (ux, uy), f = outward(
-                scene.project(0.0, 0.0, float(tick)),
-                scene.project(1.0, 0.0, float(tick)),
+                scene.project(left_a, left_b, float(tick)),
+                scene.project(
+                    left_a + (1.0 if left_a == 0.0 else -1.0),
+                    left_b + (1.0 if left_b == 0.0 else -1.0),
+                    float(tick),
+                ),
             )
             segments_x.extend(
                 (f[0], f[0] + ux * tick_length_px / box_w, np.nan)
@@ -4412,25 +4465,24 @@ class MatplotlibRenderer:
             # The two front floor edges are the scene's x/y axis lines,
             # carrying the tick marks exactly as a 2D panel's spines do.
             add_segment(
-                scene.project(0.0, 0.0, base_value),
-                scene.project(float(scene.nx), 0.0, base_value),
+                scene.project(far_a, near_b, base_value),
+                scene.project(near_a, near_b, base_value),
             )
             add_segment(
-                scene.project(float(scene.nx), 0.0, base_value),
-                scene.project(float(scene.nx), float(scene.ny), base_value),
+                scene.project(near_a, near_b, base_value),
+                scene.project(near_a, far_b, base_value),
             )
 
             def a_tick(centre: float, value: float) -> None:
                 grid_edges.append(
-                    ((centre, float(scene.ny), wall_low),
-                     (centre, float(scene.ny), wall_high))
+                    ((centre, far_b, wall_low), (centre, far_b, wall_high))
                 )
                 grid_edges.append(
-                    ((centre, 0.0, 0.0), (centre, float(scene.ny), 0.0))
+                    ((centre, near_b, 0.0), (centre, far_b, 0.0))
                 )
                 (ux, uy), f = outward(
-                    scene.project(centre, 0.0, base_value),
-                    scene.project(centre, 1.0, base_value),
+                    scene.project(centre, near_b, base_value),
+                    scene.project(centre, near_b + in_b, base_value),
                 )
                 segments_x.extend(
                     (f[0], f[0] + ux * tick_length_px / box_w, np.nan)
@@ -4451,14 +4503,14 @@ class MatplotlibRenderer:
 
             def b_tick(centre: float, value: float) -> None:
                 grid_edges.append(
-                    ((0.0, centre, wall_low), (0.0, centre, wall_high))
+                    ((far_a, centre, wall_low), (far_a, centre, wall_high))
                 )
                 grid_edges.append(
-                    ((0.0, centre, 0.0), (float(scene.nx), centre, 0.0))
+                    ((far_a, centre, 0.0), (near_a, centre, 0.0))
                 )
                 (ux, uy), f = outward(
-                    scene.project(float(scene.nx), centre, base_value),
-                    scene.project(float(scene.nx) - 1.0, centre, base_value),
+                    scene.project(near_a, centre, base_value),
+                    scene.project(near_a + in_a, centre, base_value),
                 )
                 segments_x.extend(
                     (f[0], f[0] + ux * tick_length_px / box_w, np.nan)
