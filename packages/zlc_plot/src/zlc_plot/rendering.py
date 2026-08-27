@@ -456,6 +456,62 @@ _ANCHOR_FRACTIONS = {
 }
 
 
+def _gesture_ordering(
+    ordered: list[tuple[tuple[int, float, int], Any]],
+    split: int,
+    selector_ids: frozenset[int],
+) -> tuple[list[tuple[tuple[int, float, int], Any]], int]:
+    """Move what the gesture cannot touch below the capture point.
+
+    The split is one index in ONE z-order, and a selector lives on the first
+    axes of its figure -- so everything on every later axes sorted above it
+    and was repainted on every pointer move.  On an image panel that is the
+    colorbar and the distribution rail: six milliseconds of tick and label
+    machinery per move, redrawn because of a stacking relationship with a
+    rectangle they do not share a pixel with.
+
+    An artist on an axes whose box is disjoint from the gesture's axes can be
+    painted in any order relative to it, so it goes into the captured region
+    instead.  Their order among themselves is untouched, and everything that
+    stays is on the gesture's own axes -- so the composed frame is the same
+    frame, drawn once per gesture rather than once per move.
+    """
+
+    owner = next(
+        (
+            getattr(artist, "axes", None)
+            for _key, artist in ordered[split:]
+            if id(artist) in selector_ids
+        ),
+        None,
+    )
+    if owner is None:
+        return ordered, split
+    box = owner.bbox
+    baked: list[tuple[tuple[int, float, int], Any]] = []
+    kept: list[tuple[tuple[int, float, int], Any]] = []
+    for entry in ordered[split:]:
+        axes = getattr(entry[1], "axes", None)
+        if axes is not None and axes is not owner and not _boxes_meet(axes.bbox, box):
+            baked.append(entry)
+        else:
+            kept.append(entry)
+    if not baked:
+        return ordered, split
+    return ordered[:split] + baked + kept, split + len(baked)
+
+
+def _boxes_meet(one: Any, other: Any) -> bool:
+    """Whether two axes boxes share any pixel."""
+
+    return not (
+        float(one.x1) <= float(other.x0)
+        or float(other.x1) <= float(one.x0)
+        or float(one.y1) <= float(other.y0)
+        or float(other.y1) <= float(one.y0)
+    )
+
+
 def _box_on_aspect(
     box_w: int, box_h: int, ratio: float, *, search: int = 64
 ) -> tuple[int, int] | None:
@@ -2035,6 +2091,8 @@ class MatplotlibRenderer:
                 ),
                 None,
             )
+            if split is not None:
+                ordered, split = _gesture_ordering(ordered, split, selector_ids)
         # Every owner call enters the renderer's style once around mutation
         # and compose.  Re-entering here copied the full rcParams mapping for
         # every frame without changing a property on any existing artist.
