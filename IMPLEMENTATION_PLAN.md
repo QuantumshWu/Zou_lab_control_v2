@@ -266,3 +266,36 @@
   把page-local index冒充global index；TaskConsole与FigureViewer复用同一机制。
 - typed Figure仍保存全部cells；页面只是显示状态。导出提供当前页、全部分页PNG或多页PDF，
   不生成一个包含数百微小Axes的单张巨图。
+
+## 7. 当前Goal进度（2026-08-27，branch `height3d`）
+
+用户七项清单。**已完成并提交的不得重做**；每项的证据是当前tree重新取得的实测。
+
+1. **完成 `90ee153`** — `display__title` 切回 Auto 时 `ValueError` 穿出 Qt slot、
+   进程 abort（exit -1073740791）。根因：text handler 用 `field.default`（当前值）
+   当作"允不允许空"的规则，而 `adopt_projection` 正确地把 default 排除在 metadata
+   比较之外，于是新的 `None` 被上一份声明审判。改为读 `field.required`，与
+   int/number/real 的 `blank_allowed` 同一个所有者。红/绿：
+   `packages/zlc_ui/tests/test_settings_layout.py`（变异回旧规则即红）。
+2. **进行中** — 真实链路 orbit 性能。**上一轮的 93 ms/move 是夹具伪影**：
+   `chain/realloop.py` 用 GUI 线程上的 40 ms 定时器调 `session.fire()`，而它
+   `wait_done` 阻塞。产品是 free-running `sequencer.fire(cycles=None)`，在虚拟世界
+   自己的线程上播。按产品方式重测（`chain/movecost2.py`）：
+   move→自己的画面 **中位 33 ms / p90 63**，交付（promote→install）**0.2 ms**，
+   瓶颈在渲染本身。逐段（`chain/dragprof.py`，有无生产者数字一致）：
+   `_compose_frame` 18.5、`render_height_bars` 17.5 gross、
+   `_update_height_bars_artist` 自身 6.7、chrome 2.8、`_pooled` 24.9/次。
+3. 待第 2 项落定后复测 selector 手势。
+4. **完成 `14f140b`** — 柱数=数据格数，LOD 全删。实测：`_pooled` 每帧 24.9 ms，
+   而每格一柱只多 3.9 ms（647×849@1630）/ 9.5 ms（1200×1920@1630）。
+5. **完成 `14f140b` + `a15dd23`** — home azimuth −55→+55（正azimuth=顺时针；
+   实测 home 视角四角 far=a near=c left=d right=b，folded 与源同向不再转置）；
+   墙=ab/ad、轴=cd/bc、z 轴在 d；轴线/刻度/标签与场景一起遮挡。
+   **未修（已知，先于本轮存在）**：z 刻度标签被切（"0.8" 印成 ".8"）——场景 fit
+   只留 4% 几何 margin，那不是文字需要的房间。
+6. 未开工 — rolling 相对 shot 号 + ROI 支持 rolling/curve/histogram/gridplot。
+7. 未开工 — 全 plotkind × selector × ROI × 多面板联动的真实链路测试与 profiling。
+
+工具（本轮新增，`C:\Users\eadri\AppData\Local\Temp\claude\chain\`）：
+`movecost2.py`（真事件循环逐阶段 move 成本）、`dragprof.py`（嵌套自时间）、
+`barcount.py`（柱数代价矩阵）、`h3daxes.py`（四角落位）、`h3dshot.py`（场景抓图）。
