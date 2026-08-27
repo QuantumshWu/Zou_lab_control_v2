@@ -563,7 +563,11 @@ def render_height_bars(
         from ._height3d_scanline import _materialize
 
         out = np.empty((render_h // supersample, int(width), 4), dtype=np.uint8)
-        id_taps = np.empty((render_h // supersample, render_w), dtype=np.int32)
+        # One id per OUTPUT pixel, not per subcolumn.  The picking plane only
+        # ever kept the middle tap, so writing all three and then gathering
+        # every third column out of a thirty-three megabyte plane cost five
+        # milliseconds a frame to throw two thirds of it away.
+        id_taps = np.empty((render_h // supersample, int(width)), dtype=np.int32)
         bg32 = np.asarray(background_rgb, dtype=np.float32)
         _materialize(
             a_at,
@@ -595,6 +599,7 @@ def render_height_bars(
             np.int64(render_h),
             out,
             id_taps,
+            np.int64(supersample // 2),
             np.int64(min(32, (os.cpu_count() or 4) * 2)),
         )
     else:
@@ -902,7 +907,11 @@ def render_height_bars(
         np.clip(coverage, 0.0, 1.0, out=coverage)
         id_plane_full = np.empty((out_h + 1, stride), dtype=np.int32)
         _cumsum_axis0(id_diff.reshape(out_h + 1, stride), id_plane_full)
-        id_taps = id_plane_full[:out_h]
+        # The middle tap, taken here so both engines hand the tail the same
+        # shape: one id per output pixel.
+        id_taps = np.ascontiguousarray(
+            id_plane_full[:out_h, (supersample // 2)::supersample]
+        )
 
         # ---- horizontal: average the taps (sequential adds, exact
         # mirror territory), then complete uncovered fractions with the
@@ -934,9 +943,7 @@ def render_height_bars(
 
     taps = supersample
     out_h = render_h // taps
-    mid_tap = taps // 2
-    id_plane = np.ascontiguousarray(id_taps[:, mid_tap::taps])
-    scene_id_plane = id_plane
+    scene_id_plane = id_taps
     scale = scale / taps
 
     scene = HeightBarScene(
@@ -961,7 +968,7 @@ def render_height_bars(
         value_high=value_high,
         width=int(width),
         height=int(height),
-        id_plane=np.ascontiguousarray(scene_id_plane.astype(np.int32)),
+        id_plane=np.ascontiguousarray(scene_id_plane, dtype=np.int32),
         top_values=top_values,
         base_values=base_values,
         dense=bool(dense_surface),

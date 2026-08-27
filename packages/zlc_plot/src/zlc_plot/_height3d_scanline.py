@@ -276,7 +276,8 @@ def _materialize(  # noqa: C901 - one kernel, mirrored from the reference
     taps,        # i64  horizontal subcolumns per output pixel
     render_h,    # i64  render rows (out_h * taps)
     out,         # u8 (out_h, out_w, 4)   written
-    id_taps,     # i32 (out_h, render_w)  written
+    id_taps,     # i32 (out_h, out_w)  written
+    mid_tap,     # i64  the subcolumn whose ids the picking plane keeps
     n_chunks,    # i64
 ):
     """Analytic-coverage materializer, mirroring the numpy reference.
@@ -702,7 +703,8 @@ def _materialize(  # noqa: C901 - one kernel, mirrored from the reference
                     acc_s2 += np.float32(diff_s[row, 2])
                     acc_c += np.float32(diff_cov[row])
                     acc_id += diff_id[row]
-                    id_taps[row, column] = np.int32(acc_id)
+                    if tap == mid_tap:
+                        id_taps[row, out_col] = np.int32(acc_id)
                     row32 = np.float32(row)
                     v0 = acc_a0 + acc_s0 * row32
                     v0 = v0 + np.float32(extra_rgb[row, 0])
