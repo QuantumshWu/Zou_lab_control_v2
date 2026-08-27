@@ -489,8 +489,12 @@ def test_the_artist_is_handed_the_runs_and_nothing_else() -> None:
         session.rgba()
         renderer = session._renderer
         scene = renderer._height_bars_scene_map
-        edges = renderer._artists["image:h3d_outline_geometry"][1]
-        outline = renderer._artists["image:h3d_outlines"]
+        cells = [(row, column) for row in range(4) for column in range(4)]
+        edges = renderer._height_bars_box_edges(
+            scene, cells,
+            np.zeros(len(cells)), np.full(len(cells), 0.6),
+        )
+        outline = renderer._artists["image:h3d_chrome"]["grid"]
 
         raw = renderer._height_bars_sampled_polyline(scene, edges, 64)
         compact = MatplotlibRenderer._height_bars_visible_runs(*raw)
@@ -579,74 +583,87 @@ def test_one_mechanism_draws_every_edge_the_scene_has() -> None:
     )
 
 
-def test_every_edge_of_the_scene_is_emitted_exactly_once() -> None:
-    """Coincident copies double-stroke an antialiased line into a heavier
-    one, so the edge set must be a SET.
+def test_a_crease_is_stroked_once_and_only_where_the_faces_change() -> None:
+    """The rims belong to the picture, so the picture draws them.
 
-    Neighbouring boxes of equal height share their rim, and a node is
-    shared by four cells.  The emitters own that: whoever emits a shared
-    segment emits it alone.  Asserted on the grid that shares the most --
-    every bar at one height -- and on a broken one, where absent cells
-    and steps put every kind of boundary in the same picture.
+    Coverage is the STRONGEST stamp reaching a pixel, never a sum, so two
+    creases meeting at a corner cannot darken it twice -- the darkest rim
+    pixel is exactly the rim colour.  And a stroked pixel must sit within
+    a stamp radius of a place where the visible face changes: anywhere
+    else is the kernel darkening something that is not a crease.
     """
 
-    from zlc_plot.rendering import MatplotlibRenderer
+    from zlc_plot._height3d_raster import _rim_boundary, _rim_stamp
 
-    renderer = MatplotlibRenderer.__new__(MatplotlibRenderer)
-    renderer._artists = {}
     rng = np.random.default_rng(5)
-    flat = np.full((9, 11), 0.6)
-    steps = np.round(rng.random((9, 11)) * 3.0) / 3.0
-    holes = steps.copy()
-    holes[2, 3] = np.nan
-    holes[5:7, 8] = np.nan
-    for heights in (flat, steps, holes):
-        colors = np.repeat(
-            np.nan_to_num(heights)[..., None].astype(np.float32), 3, axis=-1
-        )
-        _frame, scene = render_height_bars(
-            heights, colors, camera=HeightBarCamera(), value_limits=(0.0, 1.0),
-            width=360, height=280, zero_rgb=(1.0, 1.0, 1.0),
-        )
-        edges = renderer._height_bars_outline_edges(scene)
-        assert edges.shape[0] > 0
-        rounded = np.round(edges, 9)
-        low = np.minimum(rounded[:, 0, :], rounded[:, 1, :])
-        high = np.maximum(rounded[:, 0, :], rounded[:, 1, :])
-        canonical = np.concatenate([low, high], axis=1)
-        unique = np.unique(canonical, axis=0)
-        assert unique.shape[0] == canonical.shape[0], (
-            "%d of %d edges are a second copy of another"
-            % (canonical.shape[0] - unique.shape[0], canonical.shape[0])
-        )
+    heights = np.round(rng.random((9, 11)) * 3.0) / 3.0
+    heights[2, 3] = np.nan
+    colors = np.repeat(
+        np.nan_to_num(heights)[..., None].astype(np.float32), 3, axis=-1
+    )
+    common = dict(
+        camera=HeightBarCamera(), value_limits=(0.0, 1.0),
+        width=360, height=280, zero_rgb=(1.0, 1.0, 1.0),
+    )
+    plain, scene = render_height_bars(heights, colors, **common)
+    rimmed, _scene = render_height_bars(
+        heights, colors, rim_rgb=(0.0, 0.0, 0.0), rim_width_px=3.3, **common
+    )
+    changed = np.any(plain != rimmed, axis=-1)
+    assert changed.any(), "no rim was drawn at all"
+    darkest = rimmed[..., :3][changed].min()
+    assert darkest == 0, "a crease was darkened past its own colour"
+
+    _weights, radius = _rim_stamp(3.3)
+    boundary = _rim_boundary(scene.id_plane)
+    reach = np.zeros_like(boundary)
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            rolled = np.roll(np.roll(boundary, dy, axis=0), dx, axis=1)
+            reach |= rolled
+    assert not (changed & ~reach).any(), (
+        "the kernel darkened a pixel that is not beside a crease"
+    )
 
 
-def test_a_drag_draws_the_same_edges_as_the_frame_it_leaves() -> None:
+def test_a_drag_draws_the_same_rims_as_the_frame_it_leaves() -> None:
     """Turning the scene must not change what its lines ARE.
 
     The drag renders coarser on purpose.  That is a resolution budget,
-    and a budget is not permission to draw a different picture: the
-    edge set is the geometry's, so it survives the divisor unchanged.
+    and a budget is not permission to draw a different picture: the rim
+    is stroked at the preview's own scale, so the picture that is scaled
+    back up carries the same rim the commit does.
     """
+
+    from zlc_plot._height3d_raster import _rim_stamp
 
     session = _session(12)
     try:
         session.set_parameter("presentation", "height_bars")
-        session.rgba()
+        committed = session.rgba().copy()
         renderer = session._renderer
-        committed = renderer._artists["image:h3d_outlines"].get_xdata()
         axis = next(
             t for t in session._raster_axes_snapshot() if t.role == "image"
         )
         _pointer(session, "press", axis, 0.5, 0.5, button=2)
         _pointer(session, "move", axis, 0.56, 0.52, button=2)
         assert renderer._height_bars_dragging
-        dragging = renderer._artists["image:h3d_outlines"]
-        assert dragging.get_visible(), "a drag frame dropped its outlines"
-        assert np.asarray(dragging.get_xdata()).size > 0
+        preview = session.rgba().copy()
         _pointer(session, "release", axis, 0.56, 0.52, button=2)
-        assert renderer._artists["image:h3d_outlines"].get_visible()
-        assert np.asarray(committed).size > 0
+        settled = session.rgba().copy()
+        assert preview.shape == committed.shape == settled.shape
+
+        def rim_share(frame):
+            dark = frame[..., :3].max(axis=-1) < 64
+            return float(dark.mean())
+
+        # Same picture, same amount of line in it: a preview that dropped
+        # its rims, or drew them at the raster's own width, would not be
+        # within a factor of two of the frame it becomes.
+        assert rim_share(preview) > 0.0
+        assert 0.5 < rim_share(preview) / max(rim_share(settled), 1e-9) < 2.0
+        _weights, radius = _rim_stamp(3.3)
+        assert radius >= 1
     finally:
         session.close()
 
@@ -1025,7 +1042,12 @@ def test_the_occlusion_sampler_mirrors_its_reference_bit_for_bit() -> None:
             session.rgba()
             renderer = session._renderer
             scene = renderer._height_bars_scene_map
-            edges = renderer._artists["image:h3d_outline_geometry"][1]
+            cells = [(row, column) for row in range(4)
+                     for column in range(4)]
+            edges = renderer._height_bars_box_edges(
+                scene, cells,
+                np.zeros(len(cells)), np.full(len(cells), 0.6),
+            )
             assert edges.shape[0] > 0
             previous = raster._ENGINE
             try:
@@ -1045,6 +1067,39 @@ def test_the_occlusion_sampler_mirrors_its_reference_bit_for_bit() -> None:
             assert hidden.any(), "this camera must hide something"
     finally:
         session.close()
+
+
+def test_the_rim_stroke_mirrors_its_reference_bit_for_bit() -> None:
+    """The creases are pixels now, so the compiled path that draws them is
+    held to the numpy one exactly as the materializer and the occlusion
+    sampler are: same frame in, same frame out, byte for byte."""
+
+    pytest.importorskip("numba")
+    from zlc_plot import _height3d_raster as raster
+
+    rng = np.random.default_rng(17)
+    for cells, side, width in ((7, 200, 3.3), (23, 480, 2.0), (50, 815, 1.65)):
+        ids = np.ascontiguousarray(np.repeat(np.repeat(
+            rng.integers(0, cells * cells, size=(cells, cells)).astype(np.int32)
+            * 4 + 4, side // cells + 1, axis=0), side // cells + 1,
+            axis=1)[:side, :side])
+        # A few background and floor faces, so the "not the room" rule is
+        # exercised rather than assumed.
+        ids[: side // 8, :] = 1
+        ids[:, : side // 9] = 2
+        base = rng.integers(0, 255, size=(side, side, 4)).astype(np.uint8)
+        frames = {}
+        previous = raster._ENGINE
+        try:
+            for engine in ("numpy", "numba"):
+                raster._ENGINE = engine
+                frame = base.copy()
+                raster._stroke_rims(frame, ids, (0.1, 0.2, 0.3), width)
+                frames[engine] = frame
+        finally:
+            raster._ENGINE = previous
+        np.testing.assert_array_equal(frames["numpy"], frames["numba"])
+        assert not np.array_equal(frames["numpy"], base), "nothing was drawn"
 
 
 def test_scanline_engine_matches_the_reference_bit_for_bit() -> None:

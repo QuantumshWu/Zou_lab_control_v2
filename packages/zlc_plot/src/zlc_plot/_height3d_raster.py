@@ -256,6 +256,121 @@ def _pooled(
     return pooled_h, pooled_rgb, counts > 0, pool_x, pool_y
 
 
+def _rim_stamp(width: float) -> tuple[NDArray[np.float32], int]:
+    """Coverage weights of a round stroke of ``width`` output pixels.
+
+    A crease lies BETWEEN two pixels, and both of them are marked, so the
+    stroke is already one pixel wide before any spreading -- the stamp
+    adds the rest and its shoulders.
+    """
+
+    half = float(width) * 0.5
+    # The radius is where the weights actually stop, not where the width
+    # rounds up: a stamp with a zero border costs every pixel a ring of
+    # multiplies that can never win the maximum.
+    radius = max(1, int(math.ceil(half - 1.0)))
+    offsets = np.arange(-radius, radius + 1, dtype=np.float64)
+    distance = np.hypot(offsets[:, None], offsets[None, :])
+    weights = np.clip(half - distance, 0.0, 1.0).astype(np.float32)
+    return weights, radius
+
+
+def _rim_boundary(id_plane: NDArray[np.int32]) -> NDArray[np.bool_]:
+    """Pixels beside a visible crease of the DRAWN surface.
+
+    The id plane names the face each pixel shows, so a change between
+    neighbours IS a crease -- the exact set the outline traces, already
+    occluded, because a hidden face is not in the plane.  Creases between
+    two background surfaces (the floor meeting a pane) are the room, not
+    the picture, and the room draws its own rules.
+    """
+
+    bar = id_plane >= 4
+    boundary = np.zeros(id_plane.shape, dtype=bool)
+    edge = (id_plane[:, 1:] != id_plane[:, :-1]) & (bar[:, 1:] | bar[:, :-1])
+    boundary[:, 1:] |= edge
+    boundary[:, :-1] |= edge
+    edge = (id_plane[1:, :] != id_plane[:-1, :]) & (bar[1:, :] | bar[:-1, :])
+    boundary[1:, :] |= edge
+    boundary[:-1, :] |= edge
+    return boundary
+
+
+def _rim_coverage_reference(
+    boundary: NDArray[np.bool_],
+    weights: NDArray[np.float32],
+    radius: int,
+) -> NDArray[np.float32]:
+    """The specification: coverage is the strongest stamp reaching here."""
+
+    height, width = boundary.shape
+    coverage = np.zeros(boundary.shape, dtype=np.float32)
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            weight = weights[dy + radius, dx + radius]
+            if weight <= 0.0:
+                continue
+            y0, y1 = max(0, -dy), min(height, height - dy)
+            x0, x1 = max(0, -dx), min(width, width - dx)
+            if y0 >= y1 or x0 >= x1:
+                continue
+            source = boundary[y0 + dy:y1 + dy, x0 + dx:x1 + dx]
+            target = coverage[y0:y1, x0:x1]
+            np.maximum(target, np.where(source, weight, np.float32(0.0)),
+                       out=target)
+    return coverage
+
+
+def _stroke_rims(
+    out: NDArray[np.uint8],
+    id_plane: NDArray[np.int32],
+    rim_rgb: tuple[float, float, float],
+    width: float,
+) -> None:
+    """Draw the surface's own creases into the surface, in place.
+
+    Every rim of every box, at the cost of the PIXELS it covers rather
+    than the boxes it belongs to.  Drawn as vector chrome it cost about
+    forty nanoseconds of Matplotlib stroking per pixel of ink, and the
+    ink grows with the bar count: fifty bars a side covered eighteen per
+    cent of the canvas and spent nineteen milliseconds a frame, which is
+    what made turning a dense scene heavy.  Here the whole pass is two
+    sweeps of the id plane and one blend of the pixels it touched.
+
+    The room -- pane grids, floor rules, the axes, the cage -- is still
+    drawn by artists.  One owner each: the picture draws its own creases,
+    the room draws its own furniture.
+    """
+
+    if width <= 0.0:
+        return
+    weights, radius = _rim_stamp(width)
+    target = np.asarray(rim_rgb, dtype=np.float32) * np.float32(255.0)
+    if _scanline_selected():
+        from ._height3d_scanline import _rim_stroke
+
+        _rim_stroke(
+            np.ascontiguousarray(id_plane, dtype=np.int32),
+            np.ascontiguousarray(weights),
+            np.int64(radius),
+            np.int64(min(32, (os.cpu_count() or 4) * 2)),
+            out,
+            target,
+        )
+        return
+    coverage = _rim_coverage_reference(
+        _rim_boundary(id_plane), weights, radius
+    )[..., None]
+    painted = out[..., :3].astype(np.float32)
+    # Every pixel, not the touched ones: a boolean index over a frame this
+    # size costs more than the whole stamping pass, and zero coverage
+    # rounds each channel back to itself.
+    out[..., :3] = (
+        painted + (target[None, None, :] - painted) * coverage
+        + np.float32(0.5)
+    ).astype(np.uint8)
+
+
 _ENGINE = os.environ.get("ZLC_H3D_ENGINE", "auto")
 
 
@@ -291,6 +406,8 @@ def render_height_bars(
     z_fraction: float = 0.55,
     pool_pixels_per_cell: float = 6.0,
     max_cells_across: int = 54,
+    rim_rgb: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    rim_width_px: float = 0.0,
     pool_cache: dict | None = None,
     pool_reference_width: int | None = None,
     origin: str = "lower",
@@ -913,6 +1030,11 @@ def render_height_bars(
     out_h = render_h // taps
     scene_id_plane = id_taps
     scale = scale / taps
+    # The creases of the drawn surface, drawn into it.  They belong to the
+    # picture, not to the room, and they cost what they COVER rather than
+    # what they belong to -- so a scene with fifty bars a side pays the
+    # same two milliseconds as one with ten.
+    _stroke_rims(out, scene_id_plane, rim_rgb, float(rim_width_px))
 
     scene = HeightBarScene(
         quadrant=quadrant,
