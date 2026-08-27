@@ -570,30 +570,47 @@ def render_height_bars(
             base_values,
         ) = render_cache["derived_value"]
     else:
-        clipped = np.clip(h_grid, value_low, value_high)
-        # A grid with nothing missing -- a camera frame, most scans -- gets
-        # the same numbers without the mask: where(all true, x, y) IS x.
-        # Measured on 2.3M cells, the three masked passes cost 31 ms and
-        # the question costs one.
-        whole = bool(finite_grid.all())
-        hz = np.ascontiguousarray(
-            (clipped if whole else np.where(finite_grid, clipped, 0.0))
-            * z_unit
-        )
         base_grid = rgb_grid if zero_rgb is None else _zero_colour_plane(
             zero_rgb, rgb_grid.shape, render_cache
         )
-        top_values = (
-            np.maximum(clipped, 0.0)
-            if whole
-            else np.where(finite_grid, np.maximum(clipped, 0.0), -np.inf)
-        )
-        base_values = (
-            np.minimum(clipped, 0.0)
-            if whole
-            else np.where(finite_grid, np.minimum(clipped, 0.0), np.inf)
-        )
         finite_grid = np.ascontiguousarray(finite_grid)
+        if _scanline_selected():
+            from ._height3d_scanline import _derive_planes
+
+            hz = np.empty(h_grid.shape, dtype=np.float64)
+            top_values = np.empty(h_grid.shape, dtype=np.float64)
+            base_values = np.empty(h_grid.shape, dtype=np.float64)
+            _derive_planes(
+                np.ascontiguousarray(h_grid),
+                finite_grid,
+                float(value_low),
+                float(value_high),
+                float(z_unit),
+                hz,
+                top_values,
+                base_values,
+            )
+        else:
+            clipped = np.clip(h_grid, value_low, value_high)
+            # A grid with nothing missing -- a camera frame, most scans --
+            # gets the same numbers without the mask: where(all true, x, y)
+            # IS x.  Measured on 2.3M cells, the three masked passes cost
+            # 31 ms and the question costs one.
+            whole = bool(finite_grid.all())
+            hz = np.ascontiguousarray(
+                (clipped if whole else np.where(finite_grid, clipped, 0.0))
+                * z_unit
+            )
+            top_values = (
+                np.maximum(clipped, 0.0)
+                if whole
+                else np.where(finite_grid, np.maximum(clipped, 0.0), -np.inf)
+            )
+            base_values = (
+                np.minimum(clipped, 0.0)
+                if whole
+                else np.where(finite_grid, np.minimum(clipped, 0.0), np.inf)
+            )
         rgb_grid = np.ascontiguousarray(rgb_grid)
         base_grid = np.ascontiguousarray(base_grid)
         if render_cache is not None:
@@ -605,6 +622,12 @@ def render_height_bars(
     z_key = (derived_key, float(ce))
     if render_cache is not None and render_cache.get("derived_z_key") == z_key:
         z_top32, z_bot32 = render_cache["derived_z_value"]
+    elif _scanline_selected():
+        from ._height3d_scanline import _derive_z_planes
+
+        z_top32 = np.empty(hz.shape, dtype=np.float32)
+        z_bot32 = np.empty(hz.shape, dtype=np.float32)
+        _derive_z_planes(hz, float(ce), z_top32, z_bot32)
     else:
         # ``ce`` is positive (the elevation is clamped well inside a
         # quarter turn), so scaling before the split is the same number as

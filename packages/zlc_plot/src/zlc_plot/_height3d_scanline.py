@@ -348,6 +348,62 @@ if __name__ == "__main__":  # pragma: no cover
 
 
 @njit(cache=True, parallel=True, nogil=True)
+def _derive_planes(  # the reference derivation, fused into one walk
+    h_grid,      # f64 (ny, nx)
+    finite_grid, # bool (ny, nx)
+    value_low,   # f64
+    value_high,  # f64
+    z_unit,      # f64
+    hz,          # f64 (ny, nx) written
+    top_values,  # f64 (ny, nx) written
+    base_values, # f64 (ny, nx) written
+):
+    """The per-cell planes the elevation never touches, in one pass.
+
+    Mirrors the reference in ``_height3d_raster`` operation for operation:
+    clip, then the finite branch.  It exists because a LIVE panel rebuilds
+    all of this on every shot, and as separate numpy statements that is
+    six passes over the grid -- 38 ms at 2.3M cells, measured -- to
+    compute three numbers per cell that never leave the cell.
+    """
+
+    ny, nx = h_grid.shape
+    for row in prange(ny):
+        for column in range(nx):
+            clipped = h_grid[row, column]
+            if clipped < value_low:
+                clipped = value_low
+            if clipped > value_high:
+                clipped = value_high
+            if finite_grid[row, column]:
+                hz[row, column] = clipped * z_unit
+                top_values[row, column] = clipped if clipped > 0.0 else 0.0
+                base_values[row, column] = clipped if clipped < 0.0 else 0.0
+            else:
+                hz[row, column] = 0.0
+                top_values[row, column] = -np.inf
+                base_values[row, column] = np.inf
+
+
+@njit(cache=True, parallel=True, nogil=True)
+def _derive_z_planes(
+    hz,          # f64 (ny, nx)
+    ce,          # f64
+    z_top32,     # f32 (ny, nx) written
+    z_bot32,     # f32 (ny, nx) written
+):
+    """The two elevation-scaled planes, kept apart so a vertical orbit
+    pays one cheap pass instead of the whole derivation."""
+
+    ny, nx = hz.shape
+    for row in prange(ny):
+        for column in range(nx):
+            scaled = hz[row, column] * ce
+            z_top32[row, column] = np.float32(scaled if scaled > 0.0 else 0.0)
+            z_bot32[row, column] = np.float32(scaled if scaled < 0.0 else 0.0)
+
+
+@njit(cache=True, parallel=True, nogil=True)
 def _materialize(  # noqa: C901 - one kernel, mirrored from the reference
     a_at,        # f64 (render_w,)
     t_enter,     # f64 (render_w,)
