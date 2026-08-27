@@ -143,8 +143,19 @@ def _area_mean(
     else:
         summed = _reduce_blocks(source, row_starts, column_starts, mean_dtype)
     if all_valid:
-        row_counts = np.diff(np.r_[row_starts, values.shape[0]])
-        column_counts = np.diff(np.r_[column_starts, values.shape[1]])
+        # IN THE SUM'S OWN DTYPE.  ``np.diff`` answers in the index dtype,
+        # and float32 divided by int64 is promoted to float64 for the whole
+        # array and demoted again on the way into ``out`` -- two float64
+        # passes over one and three quarter million cells, which measured
+        # 3.86 ms against 0.55 for the float32 division they stand in for,
+        # and cost more than the block sum they divide.
+        counts_dtype = summed.dtype
+        row_counts = np.diff(np.r_[row_starts, values.shape[0]]).astype(
+            counts_dtype, copy=False
+        )
+        column_counts = np.diff(np.r_[column_starts, values.shape[1]]).astype(
+            counts_dtype, copy=False
+        )
         np.divide(summed, row_counts[:, np.newaxis], out=summed)
         np.divide(summed, column_counts[np.newaxis, :], out=summed)
         return summed

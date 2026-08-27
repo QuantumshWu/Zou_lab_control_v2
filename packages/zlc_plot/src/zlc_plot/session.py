@@ -101,7 +101,12 @@ from .primitives import (
     PulseScanRegion,
     PulseTimelineData,
 )
-from .rendering import MatplotlibRenderer, RenderFrame, _image_coordinate_aspect
+from .rendering import (
+    MatplotlibRenderer,
+    RenderFrame,
+    _image_axis_span,
+    _image_coordinate_aspect,
+)
 from .selectors import (
     CrosshairPoint,
     NumericRange,
@@ -1259,8 +1264,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             cell_count = len(tuple(getattr(payload, "cells", ())))
             topology = FacetTopology(
                 cell_count=max(cell_count, 1),
-                cell_aspect=(
-                    self._drawn_image_aspect(payload)
+                cell_height_over_width=(
+                    self._drawn_image_height_over_width(payload)
                     if isinstance(semantic_spec(spec), ImagePlot)
                     else None
                 ),
@@ -1274,8 +1279,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             topology,
             device_pixel_ratio=self._device_pixel_ratio,
             rolling_side_distribution=side_distribution,
-            image_aspect=(
-                self._drawn_image_aspect(payload)
+            image_height_over_width=(
+                self._drawn_image_height_over_width(payload)
                 if isinstance(spec, ImagePlot)
                 else None
             ),
@@ -1300,19 +1305,22 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             return False
         return str(presentation) == ImagePresentation.HEIGHT_BARS.value
 
-    def _drawn_image_aspect(self, payload: Any) -> float | None:
-        """Return the shape the renderer will actually DRAW an image at.
+    def _drawn_image_height_over_width(self, payload: Any) -> float | None:
+        """The shape the renderer will actually DRAW an image at.
 
-        ``_image_coordinate_aspect`` is the one rule: when the two axes
-        measure the same physical dimension the renderer pads the shorter
-        span and the drawn box is square (1.0 here); when they do not it
-        leaves Matplotlib in ``auto`` and the image fills whatever slot it is
-        given (``None``, which the layout reads as "no preference").
+        ``_image_coordinate_aspect`` says how long one y unit is against one
+        x unit; multiplied by the two spans it gives the drawn box's height
+        over its width.  Where the axes measure unrelated quantities nothing
+        locks the shape, Matplotlib stays in ``auto``, and the answer is
+        ``None`` -- the layout reads that as "no preference".
 
-        Asking a different question -- the pixel counts -- shaped the
-        overview slots for a ratio nothing draws, leaving dead space around
-        every cell.  One payload-level answer serves both surfaces: a facet
-        of image cells asks it of a cell, a standalone image of itself.
+        This used to answer 1.0 for every locked image, because the renderer
+        then padded the shorter span until the view really was square.  Both
+        halves of that arrangement are gone: a 1200x1920 camera frame now
+        gets a 1.6:1 slot and fills it, instead of a square slot with a third
+        of its area empty and a front that could not be copied.  One
+        payload-level answer serves both surfaces: a facet of image cells
+        asks it of a cell, a standalone image of itself.
         """
 
         cells = tuple(getattr(payload, "cells", ()))
@@ -4186,6 +4194,67 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         self._set_viewport_state(selected, emit_change=emit_change)
         return selected
 
+    def _image_viewport_on_pixel_grid(
+        self, selected: RectangleRange | None
+    ) -> RectangleRange | None:
+        """An image viewport is a WHOLE number of source pixels.
+
+        A wheel notch lands the view wherever the cursor was, and the front
+        the renderer prepares covers whole source pixels -- so the picture
+        sat 0.15 px inside its own axes, which is not a rectangle of whole
+        canvas pixels, so the composed front could not be copied and every
+        zoomed-in frame paid Matplotlib's image machinery instead: 27 ms a
+        frame at the operator's density, worse than the un-zoomed picture it
+        was a crop of.
+
+        Snapping here rather than at the point of drawing keeps ONE viewport:
+        the number the session reports, the crop the front is cut to, and the
+        limits the axes carry are the same number.  The move is under half a
+        source pixel -- a thousandth of a 900-pixel view.
+        """
+
+        if selected is None or not isinstance(semantic_spec(self._spec), ImagePlot):
+            return selected
+        payload = self._payload
+        cells = tuple(getattr(payload, "cells", ()))
+        if cells:
+            payload = getattr(cells[0], "payload", None)
+        if payload is None or not hasattr(payload, "x") or not hasattr(payload, "y"):
+            return selected
+        snapped = []
+        for axis_values, span in (
+            (getattr(payload, "x", None), selected.x),
+            (getattr(payload, "y", None), selected.y),
+        ):
+            values = np.asarray(
+                getattr(axis_values, "display", axis_values), dtype=float
+            ).reshape(-1)
+            if values.size < 2:
+                return selected
+            pitch = abs(
+                (float(values[-1]) - float(values[0])) / (values.size - 1)
+            )
+            if not math.isfinite(pitch) or pitch <= 0.0:
+                return selected
+            origin = min(float(values[0]), float(values[-1])) - pitch / 2.0
+            # Outward, not nearest: the requested rectangle stays wholly
+            # visible, and this is the same growth the front store already
+            # applies when it cuts the raster, so the view and the crop are
+            # the same rectangle instead of two that differ by a fraction of
+            # a pixel.  Nearest would also break ties by parity, which sent
+            # x down and y up for the same request.
+            tolerance = pitch * 1e-9
+            low = origin + math.floor(
+                (min(span.low, span.high) - origin) / pitch + tolerance
+            ) * pitch
+            high = origin + math.ceil(
+                (max(span.low, span.high) - origin) / pitch - tolerance
+            ) * pitch
+            if not (high > low):
+                return selected
+            snapped.append(NumericRange(low, high))
+        return RectangleRange(snapped[0], snapped[1])
+
     def _set_viewport_state(
         self,
         selected: RectangleRange | None,
@@ -4196,6 +4265,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
 
         if selected is not None and not isinstance(selected, RectangleRange):
             raise TypeError("selected must be RectangleRange or None")
+        selected = self._image_viewport_on_pixel_grid(selected)
         with self._render_lock:
             with self._lock:
                 self._assert_open()

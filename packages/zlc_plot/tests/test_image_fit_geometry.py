@@ -160,8 +160,15 @@ def test_image_display_unit_change_preserves_canonical_pixel_geometry() -> None:
         assert axes.get_aspect() == 100.0
         np.testing.assert_array_equal(np.asarray(image.get_array()), before_array)
         # The display extent changes by the unit conversion, while the
-        # renderer's physical box and prepared image remain invariant.
-        assert np.isclose(float(image.get_extent()[1]), 100.0 * 2.1)
+        # renderer's physical box and prepared image remain invariant.  The
+        # PICTURE's extent is the one that carries data coordinates: the
+        # artist's is the view it is composed into, which on a square field
+        # reaches past the picture on the letterboxed side.
+        prepared = session._renderer._artists["image:prepared_current"]
+        assert np.isclose(float(prepared.extent[1]), 100.0 * 2.1)
+        assert tuple(map(float, image.get_extent()))[:2] == pytest.approx(
+            tuple(map(float, axes.get_xlim()))
+        )
     finally:
         session.close()
 

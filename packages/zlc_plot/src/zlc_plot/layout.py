@@ -312,17 +312,31 @@ class AxesPlan:
 class FacetTopology:
     """Render topology for homogeneous FacetGrid cells.
 
-    Only the cell count (and optionally the cell aspect) is semantic; the
+    Only the cell count (and optionally the drawn cell shape) is semantic; the
     row/column packing is always the layout's optimization.
+
+    The shape is stated as HEIGHT OVER WIDTH, and the name says so.  It was
+    ``cell_aspect``, and the two readers divided by it in opposite directions
+    -- the packer treating it as width/height, the split as height/width.
+    Both agreed while every image declared 1.0; a camera frame that is not
+    square is where one of them would have been wrong.
     """
 
     cell_count: int
-    cell_aspect: float | None = None
+    cell_height_over_width: float | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "cell_count", integer(self.cell_count, "cell_count", minimum=1))
-        if self.cell_aspect is not None:
-            object.__setattr__(self, "cell_aspect", _finite(self.cell_aspect, "cell_aspect", positive=True))
+        if self.cell_height_over_width is not None:
+            object.__setattr__(
+                self,
+                "cell_height_over_width",
+                _finite(
+                    self.cell_height_over_width,
+                    "cell_height_over_width",
+                    positive=True,
+                ),
+            )
 
 @dataclass(frozen=True, slots=True)
 class FacetTypographyPlan:
@@ -383,6 +397,13 @@ class SurfacePlan:
     #: view carries the standalone kind's complete chrome.
     facet_focus_axes: tuple[AxesPlan, ...] | None
     rolling_side_distribution: bool
+    #: Image kinds only: the drawn box's height over its width, the ONE
+    #: number that shaped the image slot.  The renderer reads the shape from
+    #: here rather than interrogating the axes, because the axes only learns
+    #: its aspect while its artists update -- which is after the box has been
+    #: positioned, so on a first frame the axes had nothing to say and the
+    #: box was left square for Matplotlib to shrink into half a pixel.
+    image_height_over_width: float | None = None
 
     def __post_init__(self) -> None:
         for field in ("logical_size", "raster_size"):
@@ -466,15 +487,17 @@ def facet_shape(cell_count: int, *, max_columns: int) -> tuple[int, int]:
     return (int(math.ceil(count / columns)), columns)
 
 
-def facet_shape_for_aspect(
+def facet_shape_for_cell_shape(
     cell_count: int,
-    cell_aspect: float,
+    cell_height_over_width: float,
     region_px: tuple[int, int],
     *,
     max_columns: int,
 ) -> tuple[int, int]:
     count = integer(cell_count, "cell_count", minimum=1)
-    aspect = _finite(cell_aspect, "cell_aspect", positive=True)
+    aspect = _finite(
+        cell_height_over_width, "cell_height_over_width", positive=True
+    )
     if len(region_px) != 2:
         raise ValueError("region_px must contain width and height")
     region_width, region_height = (
@@ -487,7 +510,7 @@ def facet_shape_for_aspect(
         rows = int(math.ceil(count / columns))
         cell_width = region_width / columns
         cell_height = region_height / rows
-        image_height = min(cell_height, cell_width / aspect)
+        image_height = min(cell_height, cell_width * aspect)
         key = (image_height, -(rows * columns), -abs(rows - columns))
         if best_key is None or key > best_key:
             best_key = key
@@ -645,7 +668,7 @@ def _split_image(
     split: ImageSplit,
     *,
     region_px: tuple[float, float] | None = None,
-    image_aspect: float | None = None,
+    image_height_over_width: float | None = None,
     scene: bool = False,
 ) -> tuple[AxesPlan, ...]:
     """The image and its two strips, measured in units of the IMAGE's width.
@@ -656,8 +679,8 @@ def _split_image(
     wide preset the image drew at the left, the strips sat at the far right,
     and the surplus became a hole between them.
 
-    ``image_aspect`` is the drawn box's height over its width (1.0 for a
-    square image, ``None`` when nothing locks it).  Where it does not bind,
+    ``image_height_over_width`` is the drawn box's height over its width (1.0
+    for a square image, ``None`` when nothing locks it).  Where it does not bind,
     the unit IS the region's width and every box is exactly what it was --
     the split's five ratios sum to one, so the colorbar still ends at the
     region's right edge.  Where it binds, the leftover simply stays unused,
@@ -670,10 +693,11 @@ def _split_image(
     # unit stays the region's width and every box is arithmetically identical
     # to what it was.
     unit = data.width
-    if image_aspect is not None and region_px is not None:
+    if image_height_over_width is not None and region_px is not None:
         width_px, height_px = (float(value) for value in region_px)
-        if width_px > 0.0 and height_px > 0.0 and float(image_aspect) > 0.0:
-            drawn_px = min(width_px * split.image, height_px / float(image_aspect))
+        shape = float(image_height_over_width)
+        if width_px > 0.0 and height_px > 0.0 and shape > 0.0:
+            drawn_px = min(width_px * split.image, height_px / shape)
             drawn = data.width * (drawn_px / width_px)
             if drawn < span:
                 span = drawn
@@ -804,7 +828,7 @@ def resolve_surface(
     device_pixel_ratio: float = 1.0,
     export_scale: float | None = None,
     rolling_side_distribution: bool | None = None,
-    image_aspect: float | None = None,
+    image_height_over_width: float | None = None,
     image_scene: bool = False,
     layout: PlotLayoutConfig,
     style: PlotStyleConfig,
@@ -830,10 +854,14 @@ def resolve_surface(
         raise ValueError(
             "rolling_side_distribution is accepted only for Rolling surfaces"
         )
-    if image_aspect is not None:
+    if image_height_over_width is not None:
         if canonical_kind != "image":
-            raise ValueError("image_aspect is accepted only for Image surfaces")
-        image_aspect = _finite(image_aspect, "image_aspect", positive=True)
+            raise ValueError(
+                "image_height_over_width is accepted only for Image surfaces"
+            )
+        image_height_over_width = _finite(
+            image_height_over_width, "image_height_over_width", positive=True
+        )
     if not isinstance(image_scene, bool):
         raise TypeError("image_scene must be bool")
     if image_scene and canonical_kind not in ("image", "facet_grid"):
@@ -892,7 +920,7 @@ def resolve_surface(
             data,
             layout.image_split,
             region_px=(data_width, data_height),
-            image_aspect=image_aspect,
+            image_height_over_width=image_height_over_width,
             scene=image_scene,
         )
     elif canonical_kind == "rolling":
@@ -909,10 +937,10 @@ def resolve_surface(
                 facet_topology.cell_count,
                 max_columns=layout.facet_max_columns,
             )
-            if facet_topology.cell_aspect is None
-            else facet_shape_for_aspect(
+            if facet_topology.cell_height_over_width is None
+            else facet_shape_for_cell_shape(
                 facet_topology.cell_count,
-                facet_topology.cell_aspect,
+                facet_topology.cell_height_over_width,
                 (data_width, data_height),
                 max_columns=layout.facet_max_columns,
             )
@@ -949,12 +977,17 @@ def resolve_surface(
                 union.width * figure_design_width,
                 union.height * figure_design_height,
             ),
-            image_aspect=facet_topology.cell_aspect,
+            image_height_over_width=facet_topology.cell_height_over_width,
             scene=image_scene,
         )
     else:
         axes = (AxesPlan("main", data),)
     return SurfacePlan(
+        image_height_over_width=(
+            image_height_over_width
+            if facet_topology is None
+            else facet_topology.cell_height_over_width
+        ),
         preset=selected.name,
         kind=canonical_kind,
         logical_size=logical_size,
@@ -1035,7 +1068,7 @@ __all__ = [
     "SurfacePlan",
     "facet_shape",
     "recommended_pulse_preset",
-    "facet_shape_for_aspect",
+    "facet_shape_for_cell_shape",
     "facet_focus_box",
     "recommended_facet_preset",
     "resolve_surface",
