@@ -226,3 +226,74 @@ def histogram_threads() -> int:
     from numba import get_num_threads
 
     return int(get_num_threads())
+
+# ------------------------------------------------------------------ extrema
+@njit(cache=True, parallel=True, nogil=True)
+def finite_extrema(values, valid, use_valid, out):
+    """One pass for ``(finite count, min, max)`` over a masked pool.
+
+    Mirrors ``isfinite`` + ``any`` + ``min(where=)`` + ``max(where=)``: four
+    full reads of a two-million-value pool, and a bool plane the size of it,
+    to answer three numbers.  Extrema are order-independent, so the parallel
+    partials are the same numbers the reductions produce.
+    """
+
+    threads = out.shape[0] - 1
+    chunk = (values.size + threads - 1) // threads
+    for t in prange(threads):
+        stop = min((t + 1) * chunk, values.size)
+        count = 0.0
+        low = np.inf
+        high = -np.inf
+        for p in range(t * chunk, stop):
+            if use_valid and not valid[p]:
+                continue
+            sample = values[p]
+            if not np.isfinite(sample):
+                continue
+            count += 1.0
+            if sample < low:
+                low = sample
+            if sample > high:
+                high = sample
+        out[t, 0] = count
+        out[t, 1] = low
+        out[t, 2] = high
+    total = 0.0
+    lowest = np.inf
+    highest = -np.inf
+    for t in range(threads):
+        total += out[t, 0]
+        if out[t, 1] < lowest:
+            lowest = out[t, 1]
+        if out[t, 2] > highest:
+            highest = out[t, 2]
+    out[threads, 0] = total
+    out[threads, 1] = lowest
+    out[threads, 2] = highest
+
+
+def masked_finite_extrema(values: Any, valid: Any) -> tuple[int, float, float] | None:
+    """``(count, low, high)`` for a flat float pool, or ``None`` to defer."""
+
+    if not engaged():
+        return None
+    flat = np.ascontiguousarray(values).reshape(-1)
+    if flat.dtype.kind != "f" or not flat.size:
+        return None
+    use_valid = valid is not None
+    if use_valid:
+        mask = np.ascontiguousarray(np.asarray(valid, dtype=np.bool_)).reshape(-1)
+        if mask.size != flat.size:
+            return None
+    else:
+        mask = np.zeros(1, dtype=np.bool_)
+    threads = 1
+    if HAVE_NUMBA:
+        from numba import get_num_threads
+
+        threads = int(get_num_threads())
+    out = np.empty((threads + 1, 3), dtype=np.float64)
+    finite_extrema(flat, mask, use_valid, out)
+    return int(out[threads, 0]), float(out[threads, 1]), float(out[threads, 2])
+

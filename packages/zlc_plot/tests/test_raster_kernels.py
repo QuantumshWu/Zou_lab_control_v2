@@ -172,3 +172,52 @@ def test_the_colour_and_gather_kernels_match_their_references() -> None:
     compiled = np.empty((row_map.size, column_map.size, 4), dtype=np.uint8)
     kernels.gather_rows_columns(rgba, row_map, column_map, compiled)
     np.testing.assert_array_equal(rgba[row_map][:, column_map], compiled)
+
+
+def test_the_extrema_kernel_matches_the_masked_reductions() -> None:
+    """Same three numbers as isfinite + any + min(where=) + max(where=).
+
+    Extrema are order-independent, so parallel partials are exact -- the
+    cases that matter are the ones with nothing to reduce: an all-invalid
+    pool, an all-NaN pool, and infinities that must not become extremes.
+    """
+
+    pytest.importorskip("numba")
+    rng = np.random.default_rng(17)
+    pools = (
+        rng.normal(size=200_003),
+        np.concatenate([rng.normal(size=1000), [np.nan, np.inf, -np.inf]]),
+        np.full(500, np.nan),
+        np.array([3.5]),
+    )
+    for pool in pools:
+        for mask in (None, rng.random(pool.size) > 0.3, np.zeros(pool.size, bool)):
+            finite = np.isfinite(pool)
+            if mask is not None:
+                finite = finite & mask
+            expected = (
+                int(finite.sum()),
+                float(np.min(pool, where=finite, initial=np.inf)),
+                float(np.max(pool, where=finite, initial=-np.inf)),
+            )
+            got = kernels.masked_finite_extrema(pool, mask)
+            assert got is not None
+            assert got[0] == expected[0]
+            if expected[0]:
+                assert got[1] == expected[1]
+                assert got[2] == expected[2]
+
+
+def test_the_finite_probe_takes_the_same_leading_values() -> None:
+    """Block-built masks pick the same values, in the same order."""
+
+    from zlc_plot.data_view import _finite_probe, finite_probe
+
+    rng = np.random.default_rng(19)
+    pool = rng.normal(size=200_000)
+    pool[::997] = np.nan
+    mask = rng.random(pool.size) > 0.2
+    finite = np.isfinite(pool) & mask
+    np.testing.assert_array_equal(
+        _finite_probe(pool, finite), finite_probe(pool, mask)
+    )

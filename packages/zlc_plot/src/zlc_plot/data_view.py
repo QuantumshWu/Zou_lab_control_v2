@@ -3463,6 +3463,37 @@ def _stride_zero_all_true(mask: NDArray[np.bool_]) -> bool:
     return bool(mask.flat[0])
 
 
+def finite_probe(
+    flat: NDArray[Any],
+    valid: NDArray[np.bool_] | None = None,
+    limit: int = 65536,
+) -> NDArray[np.float64]:
+    """The first ``limit`` finite values, without a full-pool mask plane.
+
+    Same values, same order as ``_finite_probe`` over a materialised mask --
+    the mask is simply built one block at a time, because a pool whose head
+    is finite (every real pool) stops after the first.
+    """
+
+    collected: list[NDArray[Any]] = []
+    total = 0
+    for start in range(0, int(flat.size), limit):
+        block = flat[start : start + limit]
+        mask = np.isfinite(block)
+        if valid is not None:
+            mask &= valid[start : start + limit]
+        chosen = block[mask]
+        if chosen.size:
+            take = chosen[: limit - total]
+            collected.append(np.asarray(take, dtype=np.float64))
+            total += int(take.size)
+        if total >= limit:
+            break
+    if not collected:
+        return np.empty(0, dtype=np.float64)
+    return np.concatenate(collected)
+
+
 def _finite_probe(
     flat: NDArray[Any],
     finite: NDArray[np.bool_],

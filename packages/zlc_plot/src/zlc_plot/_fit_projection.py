@@ -36,6 +36,7 @@ from .data_view import (
     RollingSample,
     aligned_histogram_edges,
     _finite_probe,
+    finite_probe,
     _sem_from_moments,
 )
 from .fit import (
@@ -810,16 +811,36 @@ class FitProjection:
             # gather: the copy of a two-million-value pool cost more per
             # revision than the whole binning it fed.
             flat = np.asarray(canonical).reshape(-1)
-            finite = np.isfinite(flat)
-            if valid is not None:
-                finite &= np.asarray(valid, dtype=bool).reshape(-1)
-            has_values = bool(np.any(finite))
-            if has_values:
-                data_low = float(np.min(flat, where=finite, initial=np.inf))
-                data_high = float(
-                    np.max(flat, where=finite, initial=-np.inf)
-                )
-            edge_values = _finite_probe(flat, finite)
+            mask = (
+                None
+                if valid is None
+                else np.asarray(valid, dtype=bool).reshape(-1)
+            )
+            # One pass for three numbers.  The reductions below read the pool
+            # four times -- isfinite, any, min, max -- and materialise a bool
+            # plane as large as it, which on a two-million-value histogram
+            # cost more per revision than counting the bins did.
+            from . import _raster_kernels as kernels
+
+            extrema = kernels.masked_finite_extrema(flat, mask)
+            if extrema is not None:
+                finite_count, kernel_low, kernel_high = extrema
+                has_values = finite_count > 0
+                if has_values:
+                    data_low = kernel_low
+                    data_high = kernel_high
+                edge_values = finite_probe(flat, mask)
+            else:
+                finite = np.isfinite(flat)
+                if mask is not None:
+                    finite &= mask
+                has_values = bool(np.any(finite))
+                if has_values:
+                    data_low = float(np.min(flat, where=finite, initial=np.inf))
+                    data_high = float(
+                        np.max(flat, where=finite, initial=-np.inf)
+                    )
+                edge_values = _finite_probe(flat, finite)
         previous = self._histogram_projection
         mode = str(state["relim_mode"])
         retain_domain = (
