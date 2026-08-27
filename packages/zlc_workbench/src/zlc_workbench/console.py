@@ -102,7 +102,7 @@ from .presentation import PlotPanelPort
 from .selection import (
     PlotSelectionSource,
     panel_selection_document,
-    panel_selection_derives_signal,
+    panel_selection_binds_a_revision,
     observation_predates_plot_input,
     same_plot_run,
     same_plot_generation,
@@ -4329,12 +4329,7 @@ class ConsolePresenter:
             return
         initial_selection = panel_selection_from_document(binding.state.selector)
         initial_publication = None
-        bridge_selection = (
-            initial_selection
-            if initial_selection is not None
-            and panel_selection_derives_signal(initial_selection)
-            else None
-        )
+        bridge_selection = initial_selection
         if bridge_selection is not None:
             initial_publication = binding.display_publication
             if initial_publication is None:
@@ -4669,7 +4664,7 @@ class ConsolePresenter:
                     state is not None
                     and same_plot_generation(observation, plot_input)
                     and (
-                        not panel_selection_derives_signal(state)
+                        not panel_selection_binds_a_revision(state)
                         or not observation_predates_plot_input(
                             observation, plot_input
                         )
@@ -5004,13 +4999,10 @@ class ConsolePresenter:
         elif synchronized is not _UNCHANGED:
             assert selection is not None
             if bridge is not None:
-                if panel_selection_derives_signal(selection):
-                    bridge.commit_selection(
-                        selection,
-                        source_publication=publication,
-                    )
-                else:
-                    bridge.clear_selection()
+                bridge.commit_selection(
+                    selection,
+                    source_publication=publication,
+                )
         if synchronized is _UNCHANGED or self._task_science_locked(binding):
             return
         self._route_exact_panel_selection(
@@ -5041,7 +5033,7 @@ class ConsolePresenter:
         )
         if accepted is None:
             return
-        if publication is None and panel_selection_derives_signal(
+        if publication is None and panel_selection_binds_a_revision(
             observation.state
         ):
             # A region something is CUT from must name the exact publication

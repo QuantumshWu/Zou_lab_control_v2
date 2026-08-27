@@ -34,6 +34,7 @@ from zlc_data import (
     REPEAT,
     SCAN_POINT,
     Selection,
+    ValidityContract,
     ValueSchema,
     compact_dataset_validity,
     expand_dataset_validity,
@@ -192,15 +193,29 @@ def _top_10_mean(sample: _Sample) -> float:
     return sample.top_mean()
 
 
+#: The region itself, cut out of the source.  Every geometry has one --
+#: an area on an image, an x range on a curve, a rolling window, a band of
+#: a histogram: the region is a restriction of the signal, and the
+#: restricted signal is what an operator wants downstream.  Only the
+#: scalar REDUCTIONS depend on the geometry, because only an area consumes
+#: axes there is anything to reduce over.
+_SELECTED_FRAME = ("roi_frame", "ROI frame", None)
 _AREA_SELECTION_OUTPUTS = (
-    ("roi_frame", "ROI frame", None),
+    _SELECTED_FRAME,
     ("roi_mean", "Mean", _mean),
     ("roi_min", "Min", _minimum),
     ("roi_max", "Max", _maximum),
     ("roi_min_10_mean", "Min 10 mean", _bottom_10_mean),
     ("roi_max_10_mean", "Max 10 mean", _top_10_mean),
 )
-_RANGE_SELECTION_OUTPUTS = (("roi_mean", "Mean", _mean),)
+_RANGE_SELECTION_OUTPUTS = (_SELECTED_FRAME, ("roi_mean", "Mean", _mean))
+
+#: Bounds that name no Dataset axis, and what each one restricts instead.
+#: A ``value`` bound restricts VALIDITY -- the cells outside it stop
+#: counting and the schema does not change; a ``shot`` bound restricts
+#: which publications the region answers.  Neither can be a Selection
+#: term, because a Selection cuts axes.
+_FILTER_DOMAINS = frozenset({"value", "shot"})
 
 
 def selection_output_catalog(selector_kind: str) -> tuple[tuple[str, str], ...]:
@@ -218,6 +233,18 @@ def selection_output_catalog(selector_kind: str) -> tuple[tuple[str, str], ...]:
     else:
         raise ValueError(f"unsupported derived selector kind {kind!r}")
     return tuple((name, label) for name, label, _reducer in catalog)
+
+
+def _selection_filters(
+    state: "SelectionState",
+) -> tuple[tuple[float, float] | None, tuple[float, float] | None]:
+    """The region's value band and shot window, if it drew either."""
+
+    bounds: dict[str, tuple[float, float]] = {}
+    for item in state.ranges:
+        if item.domain in _FILTER_DOMAINS:
+            bounds[item.domain] = (float(item.lower), float(item.upper))
+    return bounds.get("value"), bounds.get("shot")
 
 
 def _countable(values: np.ndarray, valid: np.ndarray) -> np.ndarray:
@@ -314,13 +341,11 @@ class SelectionRange:
             "point_coordinate",
             "point_dimension",
             "data",
-            # Two bounds cut something the Dataset does not name: the
-            # measured VALUE, and the session's own SHOT ordinal -- the
-            # rolling history's x, which counts publications rather than
-            # rows of any one of them.  Both are real regions an operator
-            # can draw and a panel must remember; neither restricts an
-            # upstream axis, which is what
-            # ``panel_selection_derives_signal`` reads them for.
+            # Two bounds name no Dataset axis: the measured VALUE, and
+            # the session's own SHOT ordinal -- the rolling history's x,
+            # which counts publications rather than rows of any one of
+            # them.  Both still cut the signal, by restricting validity
+            # rather than by selecting axis rows; see _FILTER_DOMAINS.
             "value",
             "shot",
         }:
@@ -1793,10 +1818,6 @@ class SelectionBridge:
         state: SelectionState,
     ) -> Selection:
         def range_term(value: SelectionRange):
-            if value.domain == "value":
-                raise ValueError(
-                    "a measured-value selector has no upstream Dataset axis"
-                )
             _axis_id, axis, _kind = self._resolve_axis(
                 schema,
                 value.domain,
@@ -1814,10 +1835,18 @@ class SelectionBridge:
                 coordinate_frame=frame,
             ).terms[0]
 
+        # A region restricts what its bounds NAME.  Bounds on Dataset axes
+        # become Selection terms; bounds on the measured value or on the
+        # shot ordinal restrict validity instead and are applied where the
+        # values are (see ``_selection_filters``), so a histogram band and a
+        # rolling window cut a signal exactly as an image box does.
+        axis_ranges = tuple(
+            item for item in state.ranges if item.domain not in _FILTER_DOMAINS
+        )
         if state.plot_kind == "image":
-            if state.selector_kind != "area" or len(state.ranges) != 2:
+            if state.selector_kind != "area" or len(axis_ranges) != 2:
                 raise ValueError("image SelectionBridge requires a two-axis area")
-            first, second = state.ranges
+            first, second = axis_ranges
             def axis_kind(value: SelectionRange) -> str:
                 _axis_id, _axis, kind = self._resolve_axis(
                     schema,
@@ -1835,13 +1864,9 @@ class SelectionBridge:
                 raise ValueError(
                     "image area axes must both be point axes or both be tensor axes"
                 )
-            selection = Selection((range_term(first), range_term(second)))
+            terms = [range_term(first), range_term(second)]
         else:
-            if len(state.ranges) != 1:
-                raise ValueError("curve/histogram SelectionBridge requires one x range")
-            selected = state.ranges[0]
-            selection = Selection((range_term(selected),))
-        terms = list(selection.terms)
+            terms = [range_term(item) for item in axis_ranges]
         for facet in state.facets:
             axis_id, axis, kind = self._resolve_axis(
                 schema,
@@ -1875,6 +1900,16 @@ class SelectionBridge:
                         coordinate_frame=frame,
                     ).terms[0]
                 )
+        if not terms:
+            # A region made only of value or shot bounds restricts no axis at
+            # all -- it restricts what COUNTS.  Saying so as a full-range term
+            # keeps one path through the projection instead of a second way to
+            # mean "every row", and a contiguous range indexes as a slice.
+            terms.append(
+                IndexRangeSelection(
+                    schema.repeat_axis.axis_id, 0, schema.repeat_axis.size
+                )
+            )
         if state.repeat_index is not None:
             # Structural, not named: the repeat axis is identified by its
             # role and position in the schema, so the restriction is a plain
@@ -1945,12 +1980,51 @@ class SelectionBridge:
             point_indices,
             data_indices,
         )
+        value_band, shot_window = _selection_filters(state)
+        if value_band is not None:
+            # A band on the measured value cuts no axis: the cells outside
+            # it simply stop counting, which is what the region means on a
+            # histogram (and on the value half of a rolling region).
+            low, high = value_band
+            with np.errstate(invalid="ignore"):
+                valid_values = valid_values & (values >= low) & (values <= high)
+        if shot_window is not None and not (
+            shot_window[0] <= 0.0 <= shot_window[1]
+        ):
+            # A rolling region is drawn in shots-from-latest, and the
+            # publication being derived IS the latest one -- it sits at
+            # zero.  A window that does not reach zero names shots that
+            # have already gone by, so this one is not in it.
+            valid_values = np.zeros_like(valid_values)
         derived_schema = restricted_schema(
             source_schema,
             repeat_indices,
             point_indices,
             data_indices,
         )
+        if value_band is not None:
+            cell = derived_schema.cell_schema
+            # The canonical scalar carrier has no components to vary over --
+            # its value-level validity IS per cell -- and declaring one is
+            # refused by ValueSchema itself.
+            if cell != ValueSchema.scalar(cell.dtype, cell.value_unit):
+                # A band decides cell by cell, so the derived signal's
+                # validity varies along every axis its values do.  Carrying
+                # the source's coarser contract forward would be a claim
+                # the data no longer supports.
+                derived_schema = DatasetSchema(
+                    derived_schema.repeat_axis,
+                    derived_schema.point_table,
+                    derived_schema.grid_topology,
+                    ValueSchema(
+                        cell.data_axes,
+                        ValidityContract.components(
+                            *(axis.axis_id for axis in cell.data_axes)
+                        ),
+                        cell.dtype,
+                        cell.value_unit,
+                    ),
+                )
         catalog = (
             _AREA_SELECTION_OUTPUTS
             if state.selector_kind == "area"

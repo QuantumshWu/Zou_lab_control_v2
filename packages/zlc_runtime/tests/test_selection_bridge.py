@@ -31,6 +31,8 @@ from zlc_data import (
     ValueSchema,
 )
 
+from zlc_data.value import expand_dataset_validity
+
 from zlc_runtime.dataset import DatasetCoverage, MonitorCoverage
 from zlc_runtime.dataset_output import (
     DatasetOutputDeclaration,
@@ -292,6 +294,13 @@ def _wait_for_signal(plane, signal_name: str, revision: int):
         if time.monotonic() >= deadline:
             raise TimeoutError(f"{signal_name} did not reach revision {revision}")
         time.sleep(0.001)
+
+
+def _expanded_validity(snapshot) -> np.ndarray:
+    """One derived block's per-cell validity, in the block's own shape."""
+
+    block = snapshot.block
+    return expand_dataset_validity(block.validity, block.schema)
 
 
 def _close(bridge: SelectionBridge, plane: SignalDataPlane, source: _Source) -> None:
@@ -832,7 +841,11 @@ def test_curve_range_and_facet_condition_select_point_rows_inclusive() -> None:
     values = np.asarray([[[1.0], [2.0], [10.0], [20.0], [30.0]]])
     plane, source, _slot, _state, _initial = _source_setup(schema, values)
     events = _Events()
-    plane.set_front_signals({"camera/frame", "@logic/curve/roi_mean"})
+    plane.set_front_signals({
+        "camera/frame",
+        "@logic/curve/roi_frame",
+        "@logic/curve/roi_mean",
+    })
     bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="curve")
     bridge.start()
     selection = SelectionState(
@@ -859,6 +872,84 @@ def test_curve_range_and_facet_condition_select_point_rows_inclusive() -> None:
             "x": (2.0, 3.0),
             "facet": (1.0, 1.0),
         }
+        # The region itself, not only a number reduced out of it: an x range
+        # cuts a curve exactly as a box cuts an image, and what an operator
+        # wants downstream is the cut.
+        frame = front.value("@logic/curve/roi_frame")
+        assert frame is not None
+        np.testing.assert_array_equal(
+            frame.snapshot.block.values, np.asarray([[[10.0], [20.0]]])
+        )
+    finally:
+        _close(bridge, plane, source)
+
+
+def test_a_value_band_and_a_shot_window_restrict_without_cutting_an_axis() -> None:
+    """Bounds that name no axis still cut the signal.
+
+    A histogram's x is the measured VALUE and a rolling trace's x is the
+    shot ordinal; neither is a Dataset axis, so neither can be a Selection
+    term.  They restrict what COUNTS instead: the cells outside a value
+    band stop being valid, and a shot window that does not reach the newest
+    shot -- the one being derived, which sits at zero -- answers nothing.
+    Refusing to derive from them at all is what left a region drawn on a
+    histogram or a rolling panel with nowhere to go.
+    """
+
+    schema = _image_schema()
+    values = np.arange(12, dtype=np.float64).reshape(1, 1, 4, 3)
+    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    events = _Events()
+    plane.set_front_signals({"camera/frame", "@logic/band/roi_frame"})
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="band")
+    bridge.start()
+    try:
+        events.emit_selection(
+            SelectionChange.COMMITTED,
+            SelectionState(
+                "histogram",
+                "x_range",
+                (SelectionRange("", 3.0, 7.0, domain="value"),),
+                revision=1,
+            ),
+        )
+        frame = plane.freeze().value("@logic/band/roi_frame")
+        assert frame is not None
+        # Nothing was cut out: the band names no axis, so the schema stands
+        # and the cells outside it are simply not valid any more.
+        np.testing.assert_array_equal(frame.snapshot.block.values, values)
+        inside = (values >= 3.0) & (values <= 7.0)
+        np.testing.assert_array_equal(
+            _expanded_validity(frame.snapshot), inside
+        )
+
+        events.emit_selection(
+            SelectionChange.COMMITTED,
+            SelectionState(
+                "rolling",
+                "x_range",
+                (SelectionRange("", -40.0, -10.0, domain="shot"),),
+                revision=2,
+            ),
+        )
+        frame = plane.freeze().value("@logic/band/roi_frame")
+        assert frame is not None
+        assert not _expanded_validity(frame.snapshot).any(), (
+            "a window that stops short of the newest shot does not name this one"
+        )
+
+        events.emit_selection(
+            SelectionChange.COMMITTED,
+            SelectionState(
+                "rolling",
+                "x_range",
+                (SelectionRange("", -40.0, 0.0, domain="shot"),),
+                revision=3,
+            ),
+        )
+        frame = plane.freeze().value("@logic/band/roi_frame")
+        assert frame is not None
+        assert _expanded_validity(frame.snapshot).all()
     finally:
         _close(bridge, plane, source)
 

@@ -22,7 +22,7 @@ from test_console_presenter import (  # noqa: F401 -- fixtures
     session,
 )
 from zlc_workbench.logic import stable_signal_key
-from zlc_workbench.selection import panel_selection_derives_signal
+from zlc_workbench.selection import panel_selection_binds_a_revision
 
 
 def test_a_rolling_region_is_remembered_and_derives_nothing(
@@ -70,7 +70,10 @@ def test_a_rolling_region_is_remembered_and_derives_nothing(
     domains = [str(item["domain"]) for item in document["ranges"]]
     assert domains == ["shot", "value"], domains
 
-    # And nothing upstream is cut by it: a rolling region derives no signal.
+    # It cuts the signal like any other region -- a shot window decides
+    # which publications answer -- but it names no axis, so it means the
+    # same thing on every revision and is not tied to the picture it was
+    # drawn on.
     marked = SelectionState(
         plot_kind="rolling",
         selector_kind="x_range",
@@ -80,7 +83,7 @@ def test_a_rolling_region_is_remembered_and_derives_nothing(
             ),
         ),
     )
-    assert panel_selection_derives_signal(marked) is False
+    assert panel_selection_binds_a_revision(marked) is False
 
 
 def test_the_reportable_kinds_are_a_superset_of_the_derivable_ones() -> None:
