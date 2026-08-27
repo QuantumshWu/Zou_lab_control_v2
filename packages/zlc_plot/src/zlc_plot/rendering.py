@@ -729,6 +729,62 @@ _OCCLUSION_MIN_SAMPLES = 4.0
 _OCCLUSION_MAX_SAMPLES = 512.0
 
 
+def _span_landing_on(
+    origin: float, extent: float, scale: float, base: float
+) -> float:
+    """A span near *base* whose box measures exactly *extent* pixels.
+
+    What Matplotlib tests is the box's WIDTH, not its corners: two corners
+    each an ulp high still subtract to an exact integer, while one high and
+    one low do not.  So the search is over the difference the transform
+    actually produces.
+    """
+
+    if scale == 0.0:
+        return base
+    low = origin * scale
+    candidate = base
+    for _ in range(24):
+        if ((origin + candidate) * scale) - low == extent:
+            return candidate
+        candidate = np.nextafter(candidate, np.inf)
+    candidate = base
+    for _ in range(24):
+        candidate = np.nextafter(candidate, -np.inf)
+        if ((origin + candidate) * scale) - low == extent:
+            return candidate
+    return base
+
+
+def _fraction_landing_on(target: float, scale: float, base: float) -> float:
+    """A fraction near *base* whose product with *scale* IS *target*.
+
+    An axes box is stored as a fraction of the figure and multiplied back
+    out, and ``(k / scale) * scale`` is only within an ulp of ``k``.  That
+    last ulp is not cosmetic: Matplotlib rounds an image's output size UP
+    whenever the box is not an exactly integral float, and scales the
+    transform to match, so a box measuring 93 plus one part in a
+    quadrillion is resampled into 94 rows.  The neighbouring
+    representable fractions are searched for one that lands exactly; if
+    none does, the caller keeps the plain quotient and the compose simply
+    declines its copy.
+    """
+
+    if scale == 0.0:
+        return base
+    candidate = base
+    for _ in range(6):
+        if candidate * scale == target:
+            return candidate
+        candidate = np.nextafter(candidate, np.inf)
+    candidate = base
+    for _ in range(6):
+        candidate = np.nextafter(candidate, -np.inf)
+        if candidate * scale == target:
+            return candidate
+    return base
+
+
 class _PooledStore:
     """One recycled block of bytes, with an identity a weak reference can hold.
 
@@ -897,6 +953,8 @@ class MatplotlibRenderer:
         self._publish_pool = PublishBufferPool()
         #: Consecutive frames whose chrome background could not be reused.
         self._chrome_churn = 0
+        #: The whole-pixel box this renderer last applied per axes.
+        self._quantized_bounds: dict[int, tuple[float, ...]] = {}
         #: One settled opacity answer per composed front, kept beside
         #: the array so its identity cannot be recycled underneath.
         self._front_opacity: dict[int, tuple[Any, bool]] = {}
@@ -1262,6 +1320,7 @@ class MatplotlibRenderer:
                 painted_fit_overlays[0] if len(painted_fit_overlays) == 1 else None
             )
             painted = self.painted_surfaces
+            self._position_axes_for_frame()
             if base_changed:
                 self._update_plot(payload, state)
                 for _key, axes, _index in painted:
@@ -1975,13 +2034,17 @@ class MatplotlibRenderer:
         rows, columns = shown.shape[:2]
         x0, y0 = float(bbox.x0), float(bbox.y0)
         x1, y1 = float(bbox.x1), float(bbox.y1)
-        # Integrality is not pedantry.  On a fractional box Agg resamples
-        # the front into a rectangle whose sample boundaries sit half a
-        # pixel from ours, and nearest neighbour then duplicates or drops
-        # whole columns: a 564.3-pixel box moved three percent of the 3D
-        # scene.  ``test_exact_blit_parity`` composes both ways and
-        # compares, and it is what caught that.  The answer is to put the
-        # box ON whole pixels, which ``_pixel_quantized_bounds`` does.
+        # This is Matplotlib's own question, asked its way.  ``_make_image``
+        # rounds the output UP whenever the box's width or height is not an
+        # exactly integral float, and scales the transform to match -- so a
+        # box measuring 757 plus one part in a trillion is resampled into
+        # 758 rows, stretching the picture by a pixel across its whole
+        # height.  A tolerance of 1e-6 said that box was integral and let the
+        # copy claim a front Matplotlib was quietly stretching; the two
+        # disagreed on three percent of the pixels and only
+        # ``test_exact_blit_parity`` at ratio 1.5 ever saw it.
+        if (float(bbox.width) % 1.0 != 0.0) or (float(bbox.height) % 1.0 != 0.0):
+            return False
         if any(
             abs(value - round(value)) > 1e-6 for value in (x0, y0, x1, y1)
         ):
@@ -5557,12 +5620,51 @@ class MatplotlibRenderer:
                         return bounds
             else:
                 return bounds
-        return (
-            x0 / width,
-            y0 / height,
-            (x1 - x0) / width,
-            (y1 - y0) / height,
-        )
+        # Exactly integral, not nearly: see ``_fraction_landing_on``.
+        left = _fraction_landing_on(float(x0), width, x0 / width)
+        bottom = _fraction_landing_on(float(y0), height, y0 / height)
+        span_x = _span_landing_on(left, float(x1 - x0), width, (x1 - x0) / width)
+        span_y = _span_landing_on(bottom, float(y1 - y0), height, (y1 - y0) / height)
+        return (left, bottom, span_x, span_y)
+
+    def _position_axes_for_frame(self) -> None:
+        """Snap every standalone axes box to whole physical pixels.
+
+        The rule a facet cell already gets, for the reason the cell got it: a
+        box on fractional pixels denies the compose's exact image blit, and
+        Matplotlib resamples the front into a rectangle whose sample
+        boundaries sit off ours.  Snapping moves an edge by under a pixel.
+
+        It runs BEFORE the artists update, because an image front is composed
+        to the box it is about to be copied into; a box that moved afterwards
+        would be a box the front no longer fits.
+        """
+
+        plans_by_role: dict[str, list[Any]] = {}
+        for axes_plan in self.plan.axes:
+            plans_by_role.setdefault(axes_plan.role, []).append(axes_plan)
+        for role, axis_list in self._axes.items():
+            if role == "facet_cell":
+                # Cells carry their own per-frame snapping, against the
+                # focus-aware boxes only that path knows.
+                continue
+            for axis, axes_plan in zip(axis_list, plans_by_role.get(role, ())):
+                bounds = self._pixel_quantized_bounds(
+                    axis, axes_plan.box.matplotlib_bounds()
+                )
+                # Compare against what WE last set, not against the axes'
+                # current position: an aspect-locked axes has its position
+                # adjusted by ``apply_aspect`` during every draw, so asking
+                # the axes re-set it on every frame -- marking the chrome
+                # dirty each time and costing the panel its background cache.
+                applied = self._quantized_bounds.get(id(axis))
+                if applied is None or any(
+                    abs(now - wanted) > 1e-12
+                    for now, wanted in zip(applied, bounds)
+                ):
+                    axis.set_position(bounds)
+                    self._quantized_bounds[id(axis)] = tuple(bounds)
+                    self._mark_axes_chrome_dirty(axis)
 
     def _position_facet_axes_for_frame(self, axes: Sequence[Any]) -> None:
         """Apply final cell boxes before artists resolve pixel-dependent work."""
