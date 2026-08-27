@@ -4181,9 +4181,18 @@ class MatplotlibRenderer:
         # on top of a 3x screen sampled every logical pixel nine times for
         # detail no screen can show, and the panel paid thirty
         # milliseconds a frame for it.
-        supersample = max(1, min(4, int(round(
-            3.0 / max(self.plan.device_pixel_ratio, 1e-9)
-        ))))
+        #
+        # And no finer than a bar can show.  Supersampling resolves an edge
+        # that falls between pixels; once the bar count is the data's, a
+        # camera frame puts a bar under every pixel, so every pixel already
+        # contains several of them and the extra taps average what is
+        # already an average.  The estimate is the drawn bar's own width:
+        # the ground diagonal is what the fit maps into the box.
+        screen_taps = int(round(3.0 / max(self.plan.device_pixel_ratio, 1e-9)))
+        bar_px = min(box_w, box_h) / max(
+            1.0, float(np.hypot(heights.shape[1], heights.shape[0]))
+        )
+        supersample = max(1, min(4, screen_taps, int(bar_px) or 1))
         import matplotlib as _matplotlib
         from matplotlib.colors import to_rgb
 
