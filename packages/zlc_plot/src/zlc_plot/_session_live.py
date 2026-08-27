@@ -34,6 +34,24 @@ if TYPE_CHECKING:
 
 class LiveSessionMixin:
 
+    def holds_live_revision(self, data: PlotInput, revision: int) -> bool:
+        """Whether this session already holds that data, so there is nothing to do.
+
+        The one place the question is answered.  ``prepare_live_frame``
+        REFUSES on it, which is right for a caller asking to advance and
+        wrong for a pipeline that can legitimately be handed the same
+        revision twice -- so the pipeline asks the question instead of
+        catching the refusal, and the two cannot drift apart.
+        """
+
+        generation_changed = (
+            isinstance(data, OwnedSnapshot)
+            and str(snapshot_generation(data)) != str(self.data_generation)
+        )
+        return (not generation_changed) and int(revision) <= int(
+            self.data_revision
+        )
+
     def prepare_live_frame(
         self,
         data: PlotInput,
@@ -86,15 +104,7 @@ class LiveSessionMixin:
                         or indexed_schemas_compatible(previous_schema, next_schema)
                     ):
                         raise ValueError("data schema must remain exactly constant")
-                generation_changed = (
-                    isinstance(data, OwnedSnapshot)
-                    and str(snapshot_generation(data))
-                    != str(self.data_generation)
-                )
-                if (
-                    not generation_changed
-                    and selected_revision <= self.data_revision
-                ):
+                if self.holds_live_revision(data, selected_revision):
                     # A new RUN restarts its revisions; within one run they
                     # are strictly monotonic.  This pipeline only ever saw
                     # one run per host while generations replaced hosts, so

@@ -1196,7 +1196,23 @@ class RasterPlotHost:
                 frame.stage = "prepare"
 
         def stage_prepare() -> Future[object]:
-            return self._require_session().prepare_live_frame(
+            session = self._require_session()
+            # Data the session already holds is nothing to do, not a fault.
+            # ``prepare_live_frame`` refuses it -- rightly, for a caller
+            # asking to advance -- but this caller is a pipeline that can
+            # legitimately be handed the same revision twice: the submitter
+            # records what it handed over only once the render COMPLETES,
+            # and during a gesture the arbiter supersedes renders on
+            # purpose, so a committed frame whose future was cancelled
+            # looked free and went round again.  The operator saw "data
+            # revision must increase" on the card while turning a scene.
+            if frame.revision is not None and session.holds_live_revision(
+                frame.data, frame.revision
+            ):
+                raise _FrameSuperseded(
+                    "the session already holds this data revision"
+                )
+            return session.prepare_live_frame(
                 frame.data,
                 revision=frame.revision,
                 cancelled=frame.cancel.is_set,
@@ -1214,6 +1230,11 @@ class RasterPlotHost:
     ) -> None:
         try:
             prepare_future = dispatched.result().value
+        except (_FrameSuperseded, CancelledError):
+            # The same reading the commit stage already gives it: a frame
+            # the session has moved past is finished, not failed.
+            self._finish_data_frame(frame, cancelled=True)
+            return
         except BaseException as error:
             self._finish_data_frame(frame, error=error)
             return

@@ -5217,6 +5217,14 @@ def test_the_operator_viewport_survives_a_same_geometry_run(
         presenter.beat()
         _time.sleep(0.01)
     assert panel.interaction_viewport is not None
+    # What the panel actually holds, not what was asked for: an image
+    # viewport lands on the source pixel grid, so a request that cuts
+    # pixels in half is widened to the edges around them.  What this
+    # measures is that the rectangle SURVIVES the run, whatever it is.
+    before = panel.host.describe_display().result(timeout=10).value.viewport
+    assert before is not None
+    assert (float(before.x.low), float(before.x.high)) == (29.5, 60.5)
+    assert (float(before.y.low), float(before.y.high)) == (19.5, 50.5)
 
     _one_shot(session, producer="cm")
     _settle_panel_hosts(
@@ -5231,8 +5239,14 @@ def test_the_operator_viewport_survives_a_same_geometry_run(
         timeout=10
     ).value.viewport
     assert viewport is not None
-    assert (float(viewport.x.low), float(viewport.x.high)) == (30.0, 60.0)
-    assert (float(viewport.y.low), float(viewport.y.high)) == (20.0, 50.0)
+    assert (float(viewport.x.low), float(viewport.x.high)) == (
+        float(before.x.low),
+        float(before.x.high),
+    )
+    assert (float(viewport.y.low), float(viewport.y.high)) == (
+        float(before.y.low),
+        float(before.y.high),
+    )
 
 
 def test_a_gesture_survives_a_shot_landing_mid_drag(presenter, session) -> None:
