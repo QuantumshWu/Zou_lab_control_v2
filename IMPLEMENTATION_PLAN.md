@@ -421,6 +421,68 @@ image 5.8 / 3D 53.3 / curve 9.7 / histogram 5.9 / rolling 9.9 / facet 68.0 ms（
   6–10 ms 之间是结构差：heatmap 的手势只是移动一个矩形、图本身不重画，3D 每动一次
   都要把整个场景重新投影一遍；拿 heatmap 真正重画时的 live 帧（37.8 ms）对照，
   3D 的手势帧是同一量级。
+#### 追加一轮（`e99161a`）：第一次把 3D 和 heatmap 放在同一杆秤上称
+
+**先说本轮抓到的自己的错**：`chain/orbitcost.py` / `orbitframe.py` 用
+`host._pointer_event("move", ..., button=None)` 直接驱动 orbit——**这条路上的
+move 会被静默丢掉**：press 建出的确实是 `_OrbitGesture`、`height_bars_dragging`
+也确实为 True，但 12 次 move 之后相机仍是 `(55.0, 30.0)`，一度都没转。
+只有真 Qt 事件（`matrix.py` 那条路：`QMouseEvent` + `MiddleButton`）才真的转。
+所以先前所有"orbit 每帧 xx ms"的拆账，量到的其实是**生产者推的数据帧**，
+不是手推的相机帧。我差点据此报一个"静止数据下 orbit 完全不出帧"的幽灵缺陷。
+**教训：驱动手势只认真事件路径；探针里相机/区域的『之前 → 之后』必须打印出来。**
+
+改用真 Qt 路径、并把源真正静下来（`repeat: 1`，实测 1.5 s 内 0 个新 revision）
+之后，一次相机移动的账（4x4、DPR 3、768×768 格、1630×1630 设备像素）：
+
+| 环节 | self ms/move |
+|---|---|
+| `render_height_bars`（场景光栅） | 18.4 |
+| `_compose_frame`（含场景图精确 blit ~2.2） | 4.1 |
+| `_stroke_rims`（0.5 px 的缝） | 3.7 |
+| `canvas.restore_region` | 1.7 |
+| `present` | 1.2 |
+| `_update_height_bars_artist` | 1.0 |
+| chrome 几何 + 遮挡 + 其余 | ~2.2 |
+| 每次手势抓一次背景，摊到每 move | ~1.7 |
+| **合计** | **≈38** |
+
+**confined 手势是生效的**：整段 16 次 move 里 `canvas.draw` 只有 **2 次**
+（按下抓一次背景），`_dynamic_artists` 0.18 ms、`_selector_artist_ids` 0.00 ms。
+
+**本轮唯一的真缺陷，已修**：`_height_bars_floor_value` 用
+`heights[np.isfinite(heights)].min()` 现算——这是**数据的事实**，却坐在
+**每帧的路径**上，768×768 每 move 白花 1.9 ms 重新回答数据早已定死的数字。
+移进它本来就该在的那个缓存（同一个 `input_key`，与 heights/色表/上下限/zero_rgb
+并列），只把「与色限取 clip」留在每帧——那是两个数的算术。
+实测 `_update_height_bars_artist` 自时间 **3.49 → 1.02 ms/move**。
+
+**决定性的对照实验（先前一直缺的那一杆秤）**：把同一个面板、同一份数据、
+同一个尺寸、同一个 DPR 切成 heatmap，用**同样不能走 overlay 的中键 pan** 测——
+
+| 手势 | hand→picture 中位 |
+|---|---|
+| heatmap **pan**（整幅重画） | **30.3 ms** |
+| 3D **orbit**（整幅重画） | **38.0 ms** |
+| heatmap **选框拖动**（只重画矩形，走 overlay） | 4.4–7.3 ms |
+
+**所以"3D 53 ms vs image 5.8 ms"从来不是同一个问题**：那是拿
+**overlay**（恢复底图+重画一个矩形）去比**整幅帧**。放在同一杆秤上，
+3D 是 heatmap 的 **1.25 倍**，多出来的 8 ms 正是「把 55 万个盒子重新投影一遍」
+比「把一张 RGBA 重采样一遍」贵的那部分。3D 不是异类，它就是这套系统里
+一帧的价钱。
+
+**修完之后的矩阵（master，4x4，free-running 生产者，`chain/matrix.py`）**：
+image 7.3 / **3D 45.7（原 53.3，p90 83.5→71.3）** / curve 9.2 / histogram 10.3 /
+rolling 10.4 ms，全程无 warning/error。静源下 3D 为 38.0 ms，活源下 46.6 ms，
+16/16 次 move 都有画面——**差的那 8.6 ms 是生产者在抢同一台机器，仲裁是好的**。
+
+**没有再动的一项，理由写在这里**：`_stroke_rims` 3.7 ms。缝宽按**设备**像素收
+（`bar_px - 1`），而采样密度按**逻辑**像素收（`3 / dpr`）——同一个「眼睛能分辨多细」
+的问题有两个答案。若把缝也按逻辑像素收，DPR 3 下 1.5 设备像素（=0.5 逻辑像素）
+的柱就不该有缝，能省掉这 3.7 ms。**但那是改画面**：稠密场景会整体变亮变平。
+现行裁决是「3D 是 heatmap 的另一种表示」且「不许有静默的质量退回」，故不改。
+
 - **z 刻度标签被切**（"0.8" 印成 ".8"）：场景 fit 只留 4% 几何 margin，那不是文字
   需要的房间。先于本轮存在。
 - **`test_guard_c_save_semantics` 红**：保存面板图时 matplotlib mathtext
