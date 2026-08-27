@@ -103,6 +103,8 @@ from .selection import (
     PlotSelectionSource,
     panel_selection_document,
     panel_selection_derives_signal,
+    observation_predates_plot_input,
+    same_plot_run,
     same_plot_generation,
     panel_selection_from_document,
     panel_selection_matches_subject,
@@ -3958,6 +3960,10 @@ class ConsolePresenter:
         causal group one shot behind the other half.
         """
 
+        # The turn is claimed before any of its work: a completion that
+        # arrives while this runs must raise a NEW wake rather than find one
+        # still pending and stay silent.
+        self.board.wake.take()
         self._drain_panel_interactions()
         self._poll_retired_plot_hosts()
         if self._closing:
@@ -3982,6 +3988,7 @@ class ConsolePresenter:
         during Pause for the same reason the beat's commit does.
         """
 
+        self.board.wake.take()
         # Plot callbacks carry semantic owner work as well as completed
         # surfaces.  Settle that work first: an Area release must become the
         # canonical PanelState before a Fit click can read/configure it, and a
@@ -4645,11 +4652,28 @@ class ConsolePresenter:
                 # necessarily lags it, could never have a region accepted
                 # at all: the operator drew, the mark appeared, and the
                 # panel forgot it before the next frame.
+                #
+                # And a region something IS cut from is stale when it was
+                # drawn on an OLDER picture -- not when it was drawn on a
+                # newer one.  The host renders every revision it is handed
+                # while this bookkeeping runs on the board's beat, so a
+                # hand draws on a picture that is routinely ahead of the
+                # accepted one: measured on a live camera panel, every
+                # committed region arrived exactly one revision ahead.
+                # Equality refused the future along with the past, so a
+                # deriving region could never be committed on a live panel
+                # at all -- the ROI kept the shape of the first box drawn
+                # and no later box ever reached the bridge.
                 state = getattr(observation, "state", None)
-                identity_matches = (
+                identity_matches = bool(
                     state is not None
-                    and not panel_selection_derives_signal(state)
                     and same_plot_generation(observation, plot_input)
+                    and (
+                        not panel_selection_derives_signal(state)
+                        or not observation_predates_plot_input(
+                            observation, plot_input
+                        )
+                    )
                 )
         if (
             publication is None
@@ -5017,14 +5041,23 @@ class ConsolePresenter:
         )
         if accepted is None:
             return
-        if accepted[0] is not publication and panel_selection_derives_signal(
+        if publication is None and panel_selection_derives_signal(
             observation.state
         ):
             # A region something is CUT from must name the exact publication
-            # it was cut from.  A region that cuts nothing need not: it marks
-            # a place on the picture, and on a live rolling panel the
-            # publication under that picture changes with every shot -- which
-            # is why such a panel could never keep a mark at all.
+            # it was cut from, and the bridge resolved exactly that one by
+            # the observation's own generation and revision.  If it could
+            # not be resolved the picture is gone and the region with it.
+            #
+            # What it may NOT be asked to be is the publication the panel
+            # has ACCEPTED.  The host renders every revision it is handed
+            # while acceptance runs on the board's beat, so on a live panel
+            # those two are routinely different objects -- and requiring
+            # them to be the same refused every region the operator drew
+            # after the first: the ROI kept the first box's shape for ever.
+            # A region that cuts nothing needs no publication at all: it
+            # marks a place on the picture, and on a live rolling panel the
+            # publication under that picture changes with every shot.
             return
         if not panel_selection_matches_subject(
             observation.state, observation.subject
@@ -5033,7 +5066,10 @@ class ConsolePresenter:
         self._apply_selection_observation(
             binding,
             observation,
-            accepted[0],
+            # The one it was drawn on, not the one the bookkeeping had
+            # reached: they are the same object whenever the panel is
+            # settled, and when they differ the region's own is the truth.
+            publication if publication is not None else accepted[0],
             other_host=binding.editor_host,
         )
         self._track_panel_configuration(
@@ -5127,17 +5163,18 @@ class ConsolePresenter:
             )
         snapshot = expected_snapshot
         if snapshot is None:
+            # The dataset the region was drawn on is the one inside its own
+            # publication -- resolved by the observation's identity, which
+            # is the only thing that can name it.  Requiring that to BE the
+            # panel's accepted publication asked the bookkeeping to have
+            # caught up with the hand, and on a live panel it never has.
+            snapshot = getattr(value, "snapshot", None)
             binding = self.panels.get(str(panel_id))
             surface = None if binding is None else binding.accepted_surface
-            if (
-                surface is None
-                or surface.publication is not publication
-            ):
+            if surface is None or not same_plot_run(surface.plot_input, snapshot):
                 raise RuntimeError(
-                    f"{panel_id} selection is not on its accepted publication"
+                    f"{panel_id} selection is not on this panel's run"
                 )
-            shown = surface.plot_input
-            snapshot = getattr(shown, "snapshot", shown)
         if (
             expected_snapshot is not None
             and getattr(snapshot, "ref", None)

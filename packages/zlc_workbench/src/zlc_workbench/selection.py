@@ -65,6 +65,8 @@ __all__ = [
     "panel_selection_derives_signal",
     "panel_selection_output_catalog",
     "observation_matches_plot_input",
+    "observation_predates_plot_input",
+    "same_plot_run",
     "plot_identity_matches_plot_input",
     "panel_plot_selectors",
     "attach_selection_bridge",
@@ -114,6 +116,51 @@ def plot_identity_matches_plot_input(
         generation == str(data_generation)
         and revision == selected_revision
     )
+
+
+def same_plot_run(left: object, right: object) -> bool:
+    """Whether two datasets are two moments of the SAME stream generation."""
+
+    def generation(carrier: object) -> object | None:
+        snapshot = getattr(carrier, "snapshot", carrier)
+        ref = getattr(snapshot, "ref", None)
+        return getattr(getattr(ref, "stream_generation", None), "value", None)
+
+    first = generation(left)
+    return first is not None and first == generation(right)
+
+
+def observation_predates_plot_input(
+    observation: object,
+    plot_input: object,
+) -> bool:
+    """Whether a region was drawn on an OLDER picture than this Dataset.
+
+    Staleness is being older, not being different.  A host renders every
+    revision it is handed, while the bookkeeping that ACCEPTS a surface
+    runs on the board's beat -- so the picture a hand draws on is routinely
+    AHEAD of the one the panel has accepted.  Measured on a live camera
+    panel, every single committed region arrived exactly one revision
+    ahead, idle and streaming alike.
+
+    Demanding the exact revision therefore refused every region an operator
+    committed on a live panel, for ever: the mark appeared on the plot, the
+    panel never heard of it, nothing was cut from the new region, and the
+    remembered old one was re-applied over the top -- which is what "I
+    moved it and it went back" looks like from the outside, and why the
+    published ROI never changed shape again after the first one.
+    """
+
+    snapshot = getattr(plot_input, "snapshot", plot_input)
+    ref = getattr(snapshot, "ref", None)
+    revision = getattr(getattr(ref, "revision", None), "value", None)
+    try:
+        drawn_on = int(getattr(observation, "data_revision", None))
+        accepted = int(revision)
+    except (TypeError, ValueError):
+        # Nothing to compare is not evidence of currency.
+        return True
+    return drawn_on < accepted
 
 
 def same_plot_generation(observation: object, plot_input: object) -> bool:

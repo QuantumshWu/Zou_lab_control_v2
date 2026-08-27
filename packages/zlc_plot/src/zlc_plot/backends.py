@@ -532,6 +532,7 @@ def _qt5_plot_widget_class() -> type[Any]:
             _enable_ipython_qt_loop()
             super().__init__(parent)
             self._host = host
+            self._auto_present = auto_present
             self._closed = False
             self._interaction_gate = _InteractionGate()
             self._dispatch_lock = threading.RLock()
@@ -592,8 +593,16 @@ def _qt5_plot_widget_class() -> type[Any]:
                 self._apply_device_pixel_ratio(
                     self._pixel_ratio_observer.current_ratio
                 )
-                if auto_present:
-                    self._unsubscribe = self._host.subscribe_front(self._on_front)
+                # Always subscribed.  ``auto_present`` says who owns the
+                # picture when NO hand is on it -- a console owns that, so
+                # its panels present on the owner's turn with the rest of a
+                # shot cohort.  A hand holding this surface owns its own
+                # picture: its frames answer nobody else and belong to no
+                # cohort, and waiting for one put a gesture's own reply
+                # behind another panel's data frame.  Measured on a live
+                # console: a front promoted at 27 ms reached the screen at
+                # 122, batched with two other panels.
+                self._unsubscribe = self._host.subscribe_front(self._on_front)
                 initial_front = self._host.front
                 if initial_front is not None:
                     self._install_front(initial_front)
@@ -759,7 +768,9 @@ def _qt5_plot_widget_class() -> type[Any]:
                 front = self._queued_front
                 self._queued_front = None
                 self._front_signal_pending = False
-            if front is not None:
+            if front is not None and (
+                self._auto_present or self._gesture_front is not None
+            ):
                 latest = self._host.front
                 if (
                     latest is not None

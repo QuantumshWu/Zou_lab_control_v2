@@ -1288,7 +1288,6 @@ class MatplotlibRenderer:
         self._composed_generation = -1
         self._focused_facet_index: int | None = None
         self._facet_focus_index: int | None = None
-        self._height_bars_dragging = False
         self._height_bars_rendered_camera = None
         self._height_bars_scene = False
         self._visible_facet_count = 0
@@ -3997,29 +3996,31 @@ class MatplotlibRenderer:
     def set_height_bars_dragging(self, dragging: bool) -> None:
         """Say whether a hand is currently turning the scene.
 
-        This is a RESOLUTION BUDGET and nothing else.  The camera itself
-        has one owner -- the display parameters -- so a drag is not a
-        second, transient place where the view can live: whatever moves
-        the scene writes the parameters, and anything that rebuilds,
-        replaces or re-mounts the surface therefore shows the view the
-        hand is holding rather than the one it left.
+        The camera itself has one owner -- the display parameters -- so a
+        drag is not a second, transient place where the view can live:
+        whatever moves the scene writes the parameters, and anything that
+        rebuilds, replaces or re-mounts the surface therefore shows the
+        view the hand is holding rather than the one it left.
+
+        What a drag DOES change is what the frame has to redraw.  A
+        turning camera changes the scene and nothing else: the colorbar
+        and the distribution rail beside it are the same pixels at the end
+        of the drag as at its start, and repainting them cost seven and a
+        half milliseconds of tick and label machinery on every move.  For
+        the length of the drag they are chrome, not dynamics -- one full
+        draw now to capture them, and none of that work per move after.
         """
 
-        dragging = bool(dragging)
-        if dragging == self._height_bars_dragging:
-            return
-        self._composed_generation = -1
-        self._height_bars_dragging = dragging
-        # A turning camera changes the scene and NOTHING else: the colorbar
-        # and the distribution rail beside it are the same pixels at the end
-        # of the drag as at its start, and repainting them cost seven and a
-        # half milliseconds of tick and label machinery on every single move.
-        # For the length of the drag they are chrome, not dynamics -- which
-        # means one full draw now, to capture them, and none of that work
-        # per move afterwards.
         self.set_view_dragging(
-            self._height_bars_axes() if dragging else None
+            self._height_bars_axes() if bool(dragging) else None
         )
+
+    @property
+    def height_bars_dragging(self) -> bool:
+        """Whether a hand is turning THIS scene right now."""
+
+        axes = self._height_bars_axes()
+        return axes is not None and self._confined_gesture_axes is axes
 
     def set_view_dragging(self, axes: Any | None) -> None:
         """Confine the frame to one axes while a hand drags its view.
@@ -4159,38 +4160,34 @@ class MatplotlibRenderer:
         box = axes.bbox
         box_w = max(int(round(float(box.width))), 8)
         box_h = max(int(round(float(box.height))), 8)
-        divisor = 1
-        if self._height_bars_dragging:
-            # The drag's resolution is a BUDGET, not a constant.  A
-            # fixed divisor renders whatever the data costs: on a 2048x2048
-            # scan that is hundreds of milliseconds a frame, so the drag
-            # collapsed to a few frames per second while the hand kept
-            # moving.  The divisor now tracks what the last drag frame
-            # actually cost, so an interactive frame rate survives any
-            # grid size -- the committed frame is untouched, being drawn
-            # at divisor 1 by definition.
-            divisor = max(int(policy.height_bars_drag_resolution_divisor), 1)
-        # Vertical anti-aliasing is ANALYTIC (exact coverage), so the
-        # only sampling knob left is horizontal: three subcolumn taps per
-        # LOGICAL pixel, whatever the grid size.  The camera DRAG is the
-        # fast lane instead.
+        # One resolution.  A drag used to render at half and the release
+        # repaint at full, so the picture changed character under the hand
+        # -- and it bought 11 ms of a 93 ms move once the rims became
+        # pixels instead of vector chrome.  Not worth a second look.
         #
-        # Per logical pixel, not per device pixel.  Anti-aliasing asks how
-        # fine the DISPLAY is, and that already has an owner -- the device
-        # pixel ratio.  Three taps on top of a 3x screen sampled every
-        # logical pixel nine times for detail no screen can show, and the
-        # operator's panel paid thirty milliseconds a frame for it.
-        committed_supersample = max(1, min(4, int(round(
+        # Vertical anti-aliasing is ANALYTIC (exact coverage), so the only
+        # sampling knob left is horizontal: three subcolumn taps per
+        # LOGICAL pixel, whatever the grid size.  Per logical pixel, not
+        # per device pixel: anti-aliasing asks how fine the DISPLAY is, and
+        # that already has an owner -- the device pixel ratio.  Three taps
+        # on top of a 3x screen sampled every logical pixel nine times for
+        # detail no screen can show, and the panel paid thirty
+        # milliseconds a frame for it.
+        supersample = max(1, min(4, int(round(
             3.0 / max(self.plan.device_pixel_ratio, 1e-9)
         ))))
-        supersample = committed_supersample if divisor == 1 else 1
         import matplotlib as _matplotlib
         from matplotlib.colors import to_rgb
 
         rim_rgb = tuple(float(v) for v in to_rgb(policy.height_bars_axis_color))
+        # The rim is drawn INTO the raster, whose pixels are the surface's
+        # physical ones -- the same pixels axes.bbox is measured in.  Asking
+        # the logical dpi drew it a device-pixel-ratio thinner than every
+        # other line on the canvas, and let the level of detail divide the
+        # scene three times finer than a bar can be seen at.
         rim_width_px = (
             float(_matplotlib.rcParams["axes.linewidth"])
-            * float(self.plan.logical_dpi) / 72.0 / divisor
+            * float(self.plan.dpi) / 72.0
         )
         frame, scene = render_height_bars(
             heights,
@@ -4198,20 +4195,14 @@ class MatplotlibRenderer:
             camera=camera,
             value_limits=(low, high),
             zero_rgb=zero_rgb,
-            width=max(box_w // divisor, 8),
-            height=max(box_h // divisor, 8),
+            width=box_w,
+            height=box_h,
             supersample=supersample,
             pool_cache=self._artists.setdefault("image:h3d_pool_cache", {}),
             side_shades=policy.height_bars_side_shades,
             background_rgb=policy.height_bars_background_rgb,
             z_fraction=policy.height_bars_z_fraction,
-            # Committed geometry decides the pooled grid, so a drag
-            # frame reuses it instead of re-pooling at its own size.
-            pool_reference_width=box_w * committed_supersample,
-            max_cells_across=policy.height_bars_max_cells_across,
-            # The scene draws its own creases.  A preview renders at
-            # 1/divisor and is scaled back up, so its rim is stroked at
-            # 1/divisor too and arrives the same width as the commit.
+            # The scene draws its own creases.
             rim_rgb=rim_rgb,
             rim_width_px=rim_width_px,
             # The scene is an oblique view of THIS surface's heatmap, so
@@ -4281,6 +4272,45 @@ class MatplotlibRenderer:
 
         return x / max(scene.width, 1), 1.0 - y / max(scene.height, 1)
 
+    @staticmethod
+    def _height_bars_ground_anchors(scene: Any) -> dict[str, float]:
+        """Name the ground rectangle's sides by the DATA on them.
+
+        The scene is one rigid object: turning the camera turns the bars,
+        the walls, the axes and their labels together, and where a wall
+        stands relative to the data never changes -- exactly as an x axis
+        never changes which end of the data it runs along.
+
+        The rasterizer folds the grid so it only ever walks one octant,
+        and the chrome used to hang its wall rules, its vertical axis and
+        its base labels on FOLDED sides -- fixed indices like "the wall at
+        b = ny".  A fold is a fact about the walk, not about the data, so
+        when it changed every one of them jumped a quarter turn around a
+        picture that had not moved: measured, the folded corner (0, 0)
+        projects to the top of the frame at azimuth -0.5 degrees and to
+        the bottom at +0.5, while the four projected SOURCE corners move
+        less than one and a half pixels.
+
+        ``fold_cell`` is the one thing that knows where a data cell went,
+        so it is what answers here: the side each data extreme landed on.
+        """
+
+        origin_a, origin_b = scene.fold_cell(0, 0)
+        first_a = 0.0 if origin_a * 2 < scene.nx else float(scene.nx)
+        first_b = 0.0 if origin_b * 2 < scene.ny else float(scene.ny)
+        last_a = float(scene.nx) - first_a
+        last_b = float(scene.ny) - first_b
+        return {
+            # The walls stand where the data ends, and the axes run along
+            # where it starts -- the same two sides, every camera.
+            "wall_a": last_a, "wall_b": last_b,
+            "axis_a": first_a, "axis_b": first_b,
+            # One step INTO the scene from each axis side, for the
+            # direction a tick label leaves along.
+            "in_a": 1.0 if first_a == 0.0 else -1.0,
+            "in_b": 1.0 if first_b == 0.0 else -1.0,
+        }
+
     def _update_height_bars_chrome(
         self, axes: Any, key: str, scene: Any, box_w: int, box_h: int
     ) -> None:
@@ -4323,10 +4353,7 @@ class MatplotlibRenderer:
         )
         label_gap_px = tick_length_px + tick_pad_px
         # Point metrics are CANVAS pixels; fractions must divide by the
-        # canvas box, not the scene raster -- a drag preview renders the
-        # raster at a fraction of the box and stretches it, and dividing
-        # by the reduced raster inflated every tick and label gap by the
-        # divisor: the scene held still while its labels flew out.
+        # canvas box, not the scene raster.
 
         # The pane grid follows the reference (MATLAB) convention: RULES
         # sit at tick positions, and every rule runs the FULL display
@@ -4340,6 +4367,13 @@ class MatplotlibRenderer:
         z_low, z_high = scene.value_low, scene.value_high
         wall_low = min(z_low, 0.0)
         wall_high = max(z_high, 0.0)
+        # Every wall, edge and corner below is named by the DATA on it,
+        # never by its folded index -- see _height_bars_ground_anchors.
+        anchor = self._height_bars_ground_anchors(scene)
+        far_a, far_b = anchor["wall_a"], anchor["wall_b"]
+        near_a, near_b = anchor["axis_a"], anchor["axis_b"]
+        left_a, left_b = near_a, near_b
+        in_a, in_b = anchor["in_a"], anchor["in_b"]
         # nbins=2 is the reference's tick sparseness: a [0, 1] scale
         # reads 0 / 0.5 / 1 exactly as the MATLAB panels do (nbins=3
         # picked a 0.4 step whose top tick fell outside the range).
@@ -4350,10 +4384,11 @@ class MatplotlibRenderer:
         ]
         for tick in z_ticks:
             grid_edges.append(
-                ((0.0, float(scene.ny), tick),
-                 (float(scene.nx), float(scene.ny), tick))
+                ((near_a, far_b, tick), (far_a, far_b, tick))
             )
-            grid_edges.append(((0.0, 0.0, tick), (0.0, float(scene.ny), tick)))
+            grid_edges.append(
+                ((far_a, near_b, tick), (far_a, far_b, tick))
+            )
 
         def outward(edge_point, inner_point):
             """Unit direction (axes fractions) pushing a label AWAY from
@@ -4375,17 +4410,23 @@ class MatplotlibRenderer:
             va = "bottom" if uy > 0.4 else ("top" if uy < -0.4 else "center")
             return ha, va
 
-        # ---- z axis along the left pane's front edge, at ground (0, 0)
-        base = scene.project(0.0, 0.0, wall_low)
-        top = scene.project(0.0, 0.0, wall_high)
+        # ---- z axis where the two axis sides meet: the data corner the
+        # x and y axes both start from, whichever way the scene is turned
+        base = scene.project(left_a, left_b, wall_low)
+        top = scene.project(left_a, left_b, wall_high)
         add_segment(base, top)
         for tick in z_ticks:
             # The z labels leave their axis along the projected x
             # direction (the bench's ruling), exactly as the floor labels
-            # leave theirs.
+            # leave theirs -- away from the scene, so toward the corner
+            # opposite the one this axis stands on.
             (ux, uy), f = outward(
-                scene.project(0.0, 0.0, float(tick)),
-                scene.project(1.0, 0.0, float(tick)),
+                scene.project(left_a, left_b, float(tick)),
+                scene.project(
+                    left_a + (1.0 if left_a == 0.0 else -1.0),
+                    left_b + (1.0 if left_b == 0.0 else -1.0),
+                    float(tick),
+                ),
             )
             segments_x.extend(
                 (f[0], f[0] + ux * tick_length_px / box_w, np.nan)
@@ -4424,25 +4465,24 @@ class MatplotlibRenderer:
             # The two front floor edges are the scene's x/y axis lines,
             # carrying the tick marks exactly as a 2D panel's spines do.
             add_segment(
-                scene.project(0.0, 0.0, base_value),
-                scene.project(float(scene.nx), 0.0, base_value),
+                scene.project(far_a, near_b, base_value),
+                scene.project(near_a, near_b, base_value),
             )
             add_segment(
-                scene.project(float(scene.nx), 0.0, base_value),
-                scene.project(float(scene.nx), float(scene.ny), base_value),
+                scene.project(near_a, near_b, base_value),
+                scene.project(near_a, far_b, base_value),
             )
 
             def a_tick(centre: float, value: float) -> None:
                 grid_edges.append(
-                    ((centre, float(scene.ny), wall_low),
-                     (centre, float(scene.ny), wall_high))
+                    ((centre, far_b, wall_low), (centre, far_b, wall_high))
                 )
                 grid_edges.append(
-                    ((centre, 0.0, 0.0), (centre, float(scene.ny), 0.0))
+                    ((centre, near_b, 0.0), (centre, far_b, 0.0))
                 )
                 (ux, uy), f = outward(
-                    scene.project(centre, 0.0, base_value),
-                    scene.project(centre, 1.0, base_value),
+                    scene.project(centre, near_b, base_value),
+                    scene.project(centre, near_b + in_b, base_value),
                 )
                 segments_x.extend(
                     (f[0], f[0] + ux * tick_length_px / box_w, np.nan)
@@ -4463,14 +4503,14 @@ class MatplotlibRenderer:
 
             def b_tick(centre: float, value: float) -> None:
                 grid_edges.append(
-                    ((0.0, centre, wall_low), (0.0, centre, wall_high))
+                    ((far_a, centre, wall_low), (far_a, centre, wall_high))
                 )
                 grid_edges.append(
-                    ((0.0, centre, 0.0), (float(scene.nx), centre, 0.0))
+                    ((far_a, centre, 0.0), (near_a, centre, 0.0))
                 )
                 (ux, uy), f = outward(
-                    scene.project(float(scene.nx), centre, base_value),
-                    scene.project(float(scene.nx) - 1.0, centre, base_value),
+                    scene.project(near_a, centre, base_value),
+                    scene.project(near_a + in_a, centre, base_value),
                 )
                 segments_x.extend(
                     (f[0], f[0] + ux * tick_length_px / box_w, np.nan)

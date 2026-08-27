@@ -1881,6 +1881,79 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
     )
 
 
+def test_a_second_region_reaches_the_bridge_on_a_live_panel(
+    presenter, session
+) -> None:
+    """Moving the region must move what the region publishes.
+
+    The host renders every revision it is handed while the bookkeeping that
+    ACCEPTS a surface runs on the board's beat, so a hand always draws on a
+    picture at least one revision ahead of the accepted one.  Three places
+    demanded the exact publication, and on a live panel that is never the
+    one the operator drew on: measured, every committed region after the
+    first was refused, the ROI kept the first box's shape for ever, and the
+    remembered old region was re-applied over the new mark.
+    """
+
+    from zlc_workbench.logic import stable_signal_key
+
+    camera_id = presenter.add_logic(
+        "camera_measurement",
+        values={"exposure_seconds": 0.002, "repeat": 0, "frames_per_cycle": 1},
+        device_keys={"camera": "camera"},
+        open_editor=False,
+    )
+    session.load_pulse(PULSE_NAME)
+    assert presenter.start_logic(camera_id)
+    camera_signal = stable_signal_key(camera_id, "frames")
+    deadline = time.monotonic() + 10.0
+    publication = None
+    while publication is None and time.monotonic() < deadline:
+        session.fire(shots=1)
+        presenter.beat()
+        publication = session.signal_plane.latest_publication(camera_signal)
+        time.sleep(0.005)
+    assert publication is not None
+
+    image = presenter.add_panel(
+        camera_signal,
+        publication.value(camera_signal).snapshot,
+        kind="image",
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: image.host is not None and image.bridge is not None,
+    )
+    presenter.set_deriving(True)
+    roi_signal = f"@logic/{image.panel_id}/roi_frame"
+
+    def region(lower, upper):
+        _commit_area(image.host, lower_fraction=lower, upper_fraction=upper)
+        presenter.commit_surfaces()
+        seen = None
+        end = time.monotonic() + 12.0
+        while time.monotonic() < end:
+            session.fire(shots=1)
+            presenter.beat()
+            found = session.signal_plane.latest_publication(roi_signal)
+            if found is not None:
+                seen = found
+                break
+            time.sleep(0.005)
+        assert seen is not None, "the region published nothing at all"
+        return session.signal_plane.current_dataset(roi_signal).block.values.shape
+
+    wide = region(0.15, 0.85)
+    # Drawn well outside the first box, so this is a NEW region rather than
+    # a grab of the old one -- and small enough that its shape cannot be
+    # confused with the first.
+    narrow = region(0.55, 0.70)
+    assert narrow != wide, (
+        "the second region published the first region's shape: %s" % (wide,)
+    )
+    assert narrow[-1] * narrow[-2] < wide[-1] * wide[-2], (narrow, wide)
+
+
 def test_roi_histogram_window_growth_waits_for_current_signal_generation(
     presenter,
     session,

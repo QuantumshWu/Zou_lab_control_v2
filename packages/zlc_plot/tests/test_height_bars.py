@@ -160,7 +160,7 @@ def test_floor_ticks_stand_under_the_bars_they_name_on_a_pooled_grid() -> None:
     _frame, scene = render_height_bars(
         heights, colors, camera=HeightBarCamera(), value_limits=(0.0, 1.0),
         width=252, height=252, pool_cache={}, origin="upper",
-        pool_reference_width=252 * 3,
+        rim_width_px=3.3,
     )
     assert scene.pool_y > 1, "this grid must actually pool"
     shown = min(scene.source_ny, 6)
@@ -308,13 +308,80 @@ def _pointer(session, action, axis, fx, fy, **kwargs):
     )
 
 
-def test_the_release_leaves_the_scene_at_full_resolution() -> None:
-    """The drag's resolution budget ends WITH the drag.
+def test_the_scene_turns_as_one_rigid_object() -> None:
+    """A wall stands where the data ends, whichever way the scene faces.
 
-    A drag renders coarse on purpose; the frame the hand leaves behind
-    must not.  When the budget outlived the release the scene stayed at
-    half resolution until something unrelated -- a zoom, a new shot --
-    happened to redraw it.
+    The rasterizer folds the grid so it only ever walks one octant, and
+    the chrome used to hang its wall rules, its vertical axis and its base
+    labels on FOLDED sides.  A fold is a fact about the walk, not about
+    the data, so crossing one jumped every piece of chrome a quarter turn
+    around a picture that had not moved: the folded corner (0, 0) projects
+    to the top of the frame at azimuth -0.5 degrees and to the bottom at
+    +0.5, while the four projected SOURCE corners move by less than one
+    and a half pixels.
+
+    So the test is on the data: the corner a named cell stands on, and
+    the wall its rules run along, must move continuously with the camera.
+    """
+
+    from zlc_plot._height3d_raster import HeightBarCamera, render_height_bars
+    from zlc_plot.rendering import MatplotlibRenderer
+
+    rng = np.random.default_rng(3)
+    heights = rng.random((9, 13)) * 100.0
+    colors = np.repeat(
+        (heights / 100.0)[..., None].astype(np.float32), 3, axis=-1
+    )
+
+    def anchors(azimuth):
+        _frame, scene = render_height_bars(
+            heights, colors,
+            camera=HeightBarCamera(azimuth_deg=azimuth, elevation_deg=30.0),
+            value_limits=(0.0, 100.0), width=320, height=240,
+            supersample=1, rim_width_px=3.3)
+        anchor = MatplotlibRenderer._height_bars_ground_anchors(scene)
+        return scene, anchor
+
+    def screen(azimuth):
+        scene, anchor = anchors(azimuth)
+        return {
+            "axis corner": scene.project(
+                anchor["axis_a"], anchor["axis_b"], 0.0),
+            "wall corner": scene.project(
+                anchor["wall_a"], anchor["wall_b"], 0.0),
+        }
+
+    # Either side of a fold boundary the camera has moved one degree; no
+    # anchor may move further than the picture does.
+    for boundary in (0.0, 90.0, 180.0, -90.0):
+        before = screen(boundary - 0.5)
+        after = screen(boundary + 0.5)
+        for name in before:
+            moved = max(abs(before[name][index] - after[name][index])
+                        for index in (0, 1))
+            assert moved < 4.0, (
+                "the %s jumped %.1f px across the fold at %g degrees"
+                % (name, moved, boundary)
+            )
+
+    # And the anchor really is the data's own side: the cell at the data
+    # origin sits on the axis corner, at every camera.
+    for azimuth in (-55.0, 5.0, 95.0, 185.0, 275.0):
+        scene, anchor = anchors(azimuth)
+        origin_a, origin_b = scene.fold_cell(0, 0)
+        assert abs(origin_a - anchor["axis_a"]) <= 1.0
+        assert abs(origin_b - anchor["axis_b"]) <= 1.0
+
+
+def test_a_drag_renders_the_resolution_it_leaves_behind() -> None:
+    """One resolution, all the way through the gesture.
+
+    A drag used to render at half resolution and the release repaint at
+    full, so the picture changed character under the hand and changed back
+    when it let go.  That crutch was worth having while every rim was
+    vector chrome priced per bar; once the rims became pixels it bought
+    11 ms of a 93 ms move -- measured on the console's own panel -- and a
+    second look is not worth 11 ms.
     """
 
     session = _session(16)
@@ -333,7 +400,9 @@ def test_the_release_leaves_the_scene_at_full_resolution() -> None:
                 0.5 + 0.02 * (step + 1), 0.5 + 0.01 * (step + 1),
                 button=2,
             )
-        assert renderer._height_bars_scene_map.width < committed
+            assert renderer._height_bars_scene_map.width == committed, (
+                "a drag frame is drawn at another resolution"
+            )
         _pointer(session, "release", axis, 0.62, 0.56, button=2)
         assert renderer._height_bars_scene_map.width == committed
     finally:
@@ -398,15 +467,15 @@ def test_a_hand_still_holding_the_scene_already_owns_the_view() -> None:
         assert turned != start, "the hand's turn is not the panel's view"
         shown = session._renderer.height_bars_camera
         assert shown is not None and shown.azimuth_deg == turned
-        assert session._renderer._height_bars_dragging, (
-            "a drag in flight still renders on the drag's budget"
+        assert session._renderer.height_bars_dragging, (
+            "a drag in flight still holds the frame around the scene"
         )
         # Whatever takes the pointer away -- a replacement surface, a
         # layout rebuild, a window losing focus -- ends the DRAG.  It
         # does not get to move the view back.
         session.cancel_interaction()
         assert float(session.display_state["camera_azimuth"]) == turned
-        assert not session._renderer._height_bars_dragging
+        assert not session._renderer.height_bars_dragging
     finally:
         session.close()
 
@@ -629,10 +698,10 @@ def test_a_crease_is_stroked_once_and_only_where_the_faces_change() -> None:
 def test_a_drag_draws_the_same_rims_as_the_frame_it_leaves() -> None:
     """Turning the scene must not change what its lines ARE.
 
-    The drag renders coarser on purpose.  That is a resolution budget,
-    and a budget is not permission to draw a different picture: the rim
-    is stroked at the preview's own scale, so the picture that is scaled
-    back up carries the same rim the commit does.
+    The drag holds the frame around the scene so the colorbar and the
+    rail beside it are not repainted per move.  Holding pixels still is
+    not permission to draw a different picture: the rims the hand turns
+    are the rims it lets go of.
     """
 
     from zlc_plot._height3d_raster import _rim_stamp
@@ -647,7 +716,7 @@ def test_a_drag_draws_the_same_rims_as_the_frame_it_leaves() -> None:
         )
         _pointer(session, "press", axis, 0.5, 0.5, button=2)
         _pointer(session, "move", axis, 0.56, 0.52, button=2)
-        assert renderer._height_bars_dragging
+        assert renderer.height_bars_dragging
         preview = session.rgba().copy()
         _pointer(session, "release", axis, 0.56, 0.52, button=2)
         settled = session.rgba().copy()
@@ -671,41 +740,39 @@ def test_a_drag_draws_the_same_rims_as_the_frame_it_leaves() -> None:
 def test_how_many_bars_is_a_level_of_detail_not_a_second_picture() -> None:
     """One look -- boxes -- at every density.
 
-    A grid denser than the cap pools INTO that look; it never becomes a
-    different kind of picture.  And the bar count must not follow the
-    raster: a drag frame renders at a fraction of the canvas, and it has
-    to be the same bars the commit draws, only at fewer pixels.  Nor may
-    it follow the camera, or turning the scene would rebuild the picture
-    while the hand is still moving.
+    How finely the scene is divided is a fact about the drawn bar: it has
+    to be several times the line it is drawn with, or the picture is a
+    mesh of rims with no faces between them.  So the rim width and the
+    panel width decide it, and nothing else does -- not the tap count, and
+    not the camera, or turning the scene would rebuild the picture while
+    the hand is still moving.
     """
 
     from zlc_plot._height3d_raster import HeightBarCamera, render_height_bars
 
     rng = np.random.default_rng(33)
-    heights = rng.random((72, 96))
+    heights = rng.random((300, 400))
     colors = np.repeat(
         heights[..., None].astype(np.float32).clip(0.0, 1.0), 3, axis=-1
     )
 
-    def drawn(width, height, taps, zoom=1.0, reference=960):
+    def drawn(width, height, taps, zoom=1.0, rim=3.3):
         _frame, scene = render_height_bars(
             heights, colors,
             camera=HeightBarCamera(azimuth_deg=-55.0, zoom=zoom),
             value_limits=(0.0, 1.0), width=width, height=height,
             supersample=taps, zero_rgb=(1.0, 1.0, 1.0),
-            pool_reference_width=reference,
+            rim_rgb=(0.0, 0.0, 0.0), rim_width_px=rim,
         )
         return scene.nx, scene.ny, scene.pool_x, scene.pool_y
 
     committed = drawn(320, 240, 3)
-    assert drawn(160, 120, 1) == committed, "the drag frame drew other bars"
-    assert drawn(320, 240, 1) == committed, "the tap count changed the bars"
     assert drawn(320, 240, 3, zoom=2.0) == committed, "the camera moved them"
-    assert max(committed[0], committed[1]) <= 54, committed
     assert committed[2] > 1 and committed[3] > 1, "this grid must pool"
-    # A panel with room for fewer bars gets fewer; the cap is an upper
-    # bound, not the answer to every question.
-    assert max(drawn(120, 90, 1, reference=120)[:2]) < committed[0]
+    # A thicker line needs a wider bar to be a bar, so it pools further.
+    assert max(drawn(320, 240, 3, rim=9.9)[:2]) < max(committed[:2])
+    # A panel with room for fewer bars gets fewer.
+    assert max(drawn(120, 90, 3)[:2]) < max(committed[:2])
 
 
 def test_drag_preview_keeps_the_chrome_typography_in_place() -> None:
@@ -1291,46 +1358,6 @@ def test_every_move_of_a_fast_hand_reaches_the_screen() -> None:
         assert rendered == 20, f"{20 - rendered} moves never reached pixels"
     finally:
         session.close()
-
-
-def test_a_drag_reuses_the_pooled_grid_it_was_already_showing() -> None:
-    """Pooling is a DATA-side level of detail, not a preview artifact.
-
-    The pooled grid was derived from the transient render width, so the
-    drag preview (fewer pixels) and the committed frame (three taps)
-    asked for different pools -- and a scan of millions of cells was
-    re-pooled at every drag boundary and on every live frame that landed
-    inside a drag.  The committed surface decides the pool; a preview
-    draws that same grid at fewer pixels.
-    """
-
-    from zlc_plot._height3d_raster import HeightBarCamera, render_height_bars
-
-    rng = np.random.default_rng(5)
-    heights = rng.random((512, 512))
-    colors = np.repeat(
-        heights[..., None].astype(np.float32).clip(0.0, 1.0), 3, axis=-1
-    )
-    camera = HeightBarCamera(azimuth_deg=-55.0)
-    cache: dict = {}
-    committed_box = 320
-
-    def frame(divisor: int, taps: int) -> object:
-        render_height_bars(
-            heights, colors, camera=camera, value_limits=(0.0, 1.0),
-            width=max(committed_box // divisor, 8),
-            height=max(committed_box // divisor, 8),
-            supersample=taps, zero_rgb=(1.0, 1.0, 1.0),
-            pool_cache=cache,
-            pool_reference_width=committed_box * 3,
-        )
-        return cache["value"][0]
-
-    committed = frame(1, 3)
-    preview = frame(2, 1)
-    back = frame(1, 3)
-    assert preview is committed, "the drag re-pooled the scan"
-    assert back is committed, "the release re-pooled the scan"
 
 
 def _long_coordinate_session(side: int = 10):
