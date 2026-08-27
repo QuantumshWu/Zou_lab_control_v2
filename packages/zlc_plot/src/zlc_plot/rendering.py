@@ -7,6 +7,7 @@ artists; fixed-size changes rebuild layout within the same Figure.
 
 from __future__ import annotations
 
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
@@ -19,6 +20,7 @@ from enum import Enum
 from time import perf_counter
 from types import MappingProxyType
 from typing import Any, Iterable, Iterator, Mapping, Sequence
+import weakref
 
 import numpy as np
 
@@ -727,6 +729,86 @@ _OCCLUSION_MIN_SAMPLES = 4.0
 _OCCLUSION_MAX_SAMPLES = 512.0
 
 
+class _PooledStore:
+    """One recycled block of bytes, with an identity a weak reference can hold.
+
+    A ``bytearray`` cannot be weak-referenced, and ``np.frombuffer`` does
+    not retain the memoryview it was handed -- it retains a fresh view over
+    that view's OBJECT.  So the object a derived array keeps alive has to be
+    this wrapper, and the pool's release point has to be this wrapper's
+    death.  Getting that backwards recycles a buffer under a live array,
+    which is exactly what ``test_publish_pool`` reproduces.
+    """
+
+    __slots__ = ("_bytes", "__weakref__")
+
+    def __init__(self, block: bytearray) -> None:
+        self._bytes = block
+
+    def __buffer__(self, flags: int) -> memoryview:
+        # Always read-only: the writer holds its own view, taken from the
+        # pool, and nothing handed to a consumer may be written.
+        return memoryview(self._bytes).toreadonly()
+
+    def __len__(self) -> int:
+        return len(self._bytes)
+
+
+class PublishBufferPool:
+    """Recycled publish buffers whose release point the interpreter owns.
+
+    A published front is eighteen megabytes at the operator's density, and a
+    fresh allocation for each one costs six milliseconds of page faults on
+    the worker that has to keep up with a live camera -- against half a
+    millisecond to write into a block that is already resident.
+
+    The hard part of recycling is knowing when a block is free again, and
+    the answer here is not a protocol anyone has to remember: what is handed
+    out is a read-only view of a wrapper, and the pool asks the interpreter
+    to tell it when that wrapper is gone.  Everything derived from the view
+    -- a numpy array, a QImage, a PIL image -- keeps the wrapper alive, so a
+    block cannot be reissued while anything can still read it.
+
+    A holder that keeps a front forever simply keeps its block: the pool
+    runs dry and allocates another.  The failure mode of every mistake here
+    is "as slow as before", never "the wrong pixels".
+    """
+
+    #: One being written, one on screen, one in flight.
+    DEPTH = 3
+
+    def __init__(self) -> None:
+        # deque: append and popleft are atomic, and the release runs on
+        # whichever thread dropped the last reference -- the GUI thread when
+        # a widget promotes the next front, not the worker that wrote it.
+        self._free: deque = deque()
+        self._nbytes = 0
+
+    def take(self, nbytes: int) -> tuple[Any, Any]:
+        """Return ``(writable, published)`` views of one recycled block."""
+
+        if nbytes != self._nbytes:
+            self._free.clear()
+            self._nbytes = nbytes
+        try:
+            block = self._free.popleft()
+        except IndexError:
+            block = bytearray(nbytes)
+        store = _PooledStore(block)
+        published = memoryview(store)
+        # ``atexit`` is an attribute of the finalizer, not an argument to the
+        # callback: returning a block to a pool during shutdown helps nobody.
+        # The callback holds the BLOCK, never the wrapper -- holding the
+        # wrapper would keep it alive and the finalizer would never fire.
+        returner = weakref.finalize(store, self._release, block, nbytes)
+        returner.atexit = False
+        return memoryview(block), published
+
+    def _release(self, block: bytearray, nbytes: int) -> None:
+        if nbytes == self._nbytes and len(self._free) < self.DEPTH:
+            self._free.append(block)
+
+
 class MatplotlibRenderer:
     """One fixed-layout Figure with persistent artists and selector overlays."""
 
@@ -811,6 +893,8 @@ class MatplotlibRenderer:
         #: and the canvas signature (size/DPR).  ``_update_ticks`` runs the
         #: locator and formatter, and a 35-cell facet paid for seventy such
         #: runs per steady frame in which nothing had moved.
+        #: Recycled publish buffers; see PublishBufferPool.
+        self._publish_pool = PublishBufferPool()
         #: One settled opacity answer per composed front, kept beside
         #: the array so its identity cannot be recycled underneath.
         self._front_opacity: dict[int, tuple[Any, bool]] = {}
@@ -7103,22 +7187,27 @@ class MatplotlibRenderer:
         source = np.asarray(self._figure.canvas.buffer_rgba(), dtype=np.uint8)
         target_width, target_height = self.plan.raster_size
         actual_height, actual_width = source.shape[:2]
+        shape = (target_height, target_width, 4)
+        writable, published = self._publish_pool.take(
+            target_height * target_width * 4
+        )
+        pixels = np.frombuffer(writable, dtype=np.uint8).reshape(shape)
         if (actual_width, actual_height) == (target_width, target_height):
-            return readonly_copy(source)
-
-        # Fractional DPR can put Agg's floor allocation one trailing pixel away
-        # from the rounded frontend contract.  Preserve artist transforms and
-        # adjust only the right and bottom handoff edges.
-        pixels = np.empty((target_height, target_width, 4), dtype=np.uint8)
-        background = np.rint(
-            np.clip(np.asarray(self._figure.get_facecolor()), 0.0, 1.0) * 255.0
-        ).astype(np.uint8)
-        pixels[...] = background
-        copy_width = min(target_width, actual_width)
-        copy_height = min(target_height, actual_height)
-        pixels[:copy_height, :copy_width] = source[:copy_height, :copy_width]
-        pixels.setflags(write=False)
-        return pixels
+            np.copyto(pixels, source)
+        else:
+            # Fractional DPR can put Agg's floor allocation one trailing pixel
+            # away from the rounded frontend contract.  Preserve artist
+            # transforms and adjust only the right and bottom handoff edges.
+            background = np.rint(
+                np.clip(np.asarray(self._figure.get_facecolor()), 0.0, 1.0)
+                * 255.0
+            ).astype(np.uint8)
+            pixels[...] = background
+            copy_width = min(target_width, actual_width)
+            copy_height = min(target_height, actual_height)
+            pixels[:copy_height, :copy_width] = source[:copy_height, :copy_width]
+        del pixels, writable
+        return np.frombuffer(published, dtype=np.uint8).reshape(shape)
 
     def capture_rgba(
         self,
@@ -7148,11 +7237,17 @@ class MatplotlibRenderer:
         target_width, target_height = self.plan.raster_size
         actual_height, actual_width = source.shape[:2]
         if (actual_width, actual_height) == (target_width, target_height):
-            return source.tobytes(order="C"), target_height, target_width
-        # Fractional DPR takes the padded path, which has to build an array
-        # anyway; one copy there is unavoidable and the shape is already right.
+            writable, published = self._publish_pool.take(source.nbytes)
+            np.copyto(
+                np.frombuffer(writable, dtype=np.uint8).reshape(source.shape),
+                source,
+            )
+            del writable
+            return published, target_height, target_width
+        # Fractional DPR takes the padded path, which builds the array on a
+        # pooled buffer anyway; its own read-only view is the front.
         padded = self._rgba_buffer()
-        return padded.tobytes(order="C"), target_height, target_width
+        return padded.data, target_height, target_width
 
     def rgba(self) -> np.ndarray:
         """Return an immutable RGBA snapshot of the current scene.
