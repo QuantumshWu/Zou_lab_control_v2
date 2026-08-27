@@ -4071,7 +4071,11 @@ class MatplotlibRenderer:
         the heatmap.
         """
 
-        from ._height3d_raster import HeightBarCamera, render_height_bars
+        from ._height3d_raster import (
+            HeightBarCamera,
+            _scanline_selected,
+            render_height_bars,
+        )
 
         # The colour-limit preview re-renders the scene with candidate
         # limits (a clim drag moves bar HEIGHTS too -- the z axis and the
@@ -4135,17 +4139,31 @@ class MatplotlibRenderer:
             # A live panel rebuilds all of this on every shot, so each
             # extra full-plane pass is paid at the shot rate: measured on
             # 2.3M cells, the code plane cost 24 ms and the colour gather
-            # 33.  Same numbers, fewer passes -- the clip and the NaN fill
-            # happen in the array they already allocated, and the gather
-            # reads a table that is ALREADY the float the scene wants
-            # rather than gathering four uint8 channels, dropping one,
-            # widening and dividing 2.3M times.
-            with np.errstate(invalid="ignore"):
-                codes = (heights - low) * (256.0 / (high - low))
-            np.clip(codes, 0.0, 255.0, out=codes)
-            np.nan_to_num(codes, copy=False, nan=0.0)
-            codes = codes.astype(np.uint8)
-            top_rgb = self._image_color_lut_rgb(cmap_name, lut)[codes]
+            # 33.  It is one lookup per cell that never looks at a
+            # neighbour, so it goes the way the scene's own derivation
+            # went: one parallel walk, against a table that is ALREADY the
+            # float the scene wants rather than four uint8 channels to
+            # gather, drop one of, widen and divide 2.3M times.  The numpy
+            # form below remains what it means.
+            table = self._image_color_lut_rgb(cmap_name, lut)
+            top_rgb = np.empty((*heights.shape, 3), dtype=np.float32)
+            span = 256.0 / (high - low)
+            if _scanline_selected():
+                from ._height3d_scanline import _colour_plane
+
+                _colour_plane(
+                    np.ascontiguousarray(heights),
+                    float(low),
+                    float(span),
+                    table,
+                    top_rgb,
+                )
+            else:
+                with np.errstate(invalid="ignore"):
+                    codes = (heights - low) * span
+                np.clip(codes, 0.0, 255.0, out=codes)
+                np.nan_to_num(codes, copy=False, nan=0.0)
+                top_rgb = table[codes.astype(np.uint8)]
             with np.errstate(invalid="ignore"):
                 zero_code = int(
                     np.clip((0.0 - low) * (256.0 / (high - low)), 0.0, 255.0)
