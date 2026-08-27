@@ -295,7 +295,7 @@
 | kind | live frame ms | 手势帧 ms | hand→picture ms 中位/p90 |
 |---|---|---|---|
 | image heatmap | 44.9 | 11.9 | 7.8 / 14.5 |
-| image 3D bars | 151.4 | 60.0 | 57.6 / 94.8 |
+| image 3D bars | 146.4 | 56.4 | 53.2 / 111.6 |
 | curve | 14.3 | 10.2 | 9.1 / 14.3 |
 | histogram | 40.1 | 10.4 | 10.7 / 16.3 |
 | rolling | 15.8 | 11.8 | 8.8 / 13.7 |
@@ -307,8 +307,13 @@ ROI 链（camera→roi_frame→3D）：相机上的 ROI 手势 9.7 ms，ROI 3D �
 
 ### 仍然开着的（已知，未修）
 
-- **3D 面板仍是最慢的 kind**：2.3M 柱时 live 帧 151 ms、手势 58 ms。剩余大头是
-  artist 端的 colour code + LUT gather（rendering.py，没有 numba）与 `_compose_frame`。
+- **3D 面板仍是最慢的 kind**：ROI(0.55M) 手势 **42.5 ms**、整幅相机(2.3M) **53.2 ms**。
+  逐段查过：compose 分支健康（81 次里 58 次走可复用背景，逃生舱不触发），剩余是场景
+  光栅本身与 **artist 端的 colour code + LUT gather**（rendering.py，没有 numba，
+  2.3M 时约 30 ms）。**下一刀已定型但未做**：把颜色查表并进派生内核，
+  `render_height_bars` 收 `lut_rgb` 而不是 27 MB 的 `top_rgb` 平面——省掉一次 gather
+  和一整块平面。没做的理由是它改的是这个模块的对外签名、牵动 45 个测试，
+  在本轮末尾动它风险不划算。
 - **z 刻度标签被切**（"0.8" 印成 ".8"）：场景 fit 只留 4% 几何 margin，那不是文字
   需要的房间。先于本轮存在。
 - **`test_guard_c_save_semantics` 红**：保存面板图时 matplotlib mathtext
