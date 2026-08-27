@@ -729,6 +729,55 @@ _OCCLUSION_MIN_SAMPLES = 4.0
 _OCCLUSION_MAX_SAMPLES = 512.0
 
 
+def _exact_box_fractions(
+    low: int, high: int, scale: float
+) -> tuple[float, float, bool]:
+    """Fractions that put a box at *low* measuring exactly ``high - low``.
+
+    A box is stored as a fraction of the figure and multiplied back out, and
+    neither the origin nor the width survives that round trip exactly.  Only
+    the WIDTH has to: Matplotlib rounds an image's output size up unless the
+    box measures an exactly integral number of pixels.  Both fractions are
+    searched -- the origin over a small window, the span over another for
+    each origin -- because fixing the origin alone can leave no reachable
+    span, and the flag says whether an exact pair was found at all.
+    """
+
+    extent = float(high - low)
+    base_left = low / scale
+    base_span = (high - low) / scale
+    origins = [base_left]
+    upward = downward = base_left
+    for _ in range(4):
+        upward = float(np.nextafter(upward, np.inf))
+        downward = float(np.nextafter(downward, -np.inf))
+        origins.append(upward)
+        origins.append(downward)
+    for origin in origins:
+        span = _span_landing_on(origin, extent, scale, base_span)
+        if ((origin + span) * scale) - (origin * scale) == extent:
+            return origin, span, True
+    return base_left, base_span, False
+
+
+def _position_is_the_position(axes: Any) -> Any:
+    """``apply_aspect`` for an axes whose box its owner has already settled.
+
+    Exactly what Matplotlib does when the aspect is ``auto`` -- the original
+    position becomes the active one -- installed on the instance so the
+    aspect the axes REPORTS stays the coordinate aspect its surface asked
+    for, which is what every other reader of it means.
+    """
+
+    def apply_aspect(position: Any = None) -> None:
+        axes._set_position(
+            position if position is not None else axes.get_position(original=True),
+            which="active",
+        )
+
+    return apply_aspect
+
+
 def _span_landing_on(
     origin: float, extent: float, scale: float, base: float
 ) -> float:
@@ -953,6 +1002,12 @@ class MatplotlibRenderer:
         self._publish_pool = PublishBufferPool()
         #: Consecutive frames whose chrome background could not be reused.
         self._chrome_churn = 0
+        #: Axes whose snapped box already honours their aspect, so
+        #: ``apply_aspect`` has nothing left to decide about it.
+        self._owned_box: dict[int, bool] = {}
+        self._owned_axes: set[int] = set()
+        #: Whether the snapped box landed on exactly integral pixels.
+        self._box_exact: dict[int, bool] = {}
         #: The whole-pixel box this renderer last applied per axes.
         self._quantized_bounds: dict[int, tuple[float, ...]] = {}
         #: One settled opacity answer per composed front, kept beside
@@ -1381,6 +1436,7 @@ class MatplotlibRenderer:
                     if cell is None
                     else getattr(cell, "facet_value_canonical", None),
                 )
+            self._settle_owned_boxes()
             self._compose_frame(
                 chrome_stable=not bool(
                     selected_effects
@@ -5580,6 +5636,8 @@ class MatplotlibRenderer:
         an aspect this cannot represent keeps the plan's box unchanged.
         """
 
+        # Every early return below leaves the box to Matplotlib.
+        self._box_exact[id(axis)] = False
         figure_box = self._figure.bbox
         width = float(figure_box.width)
         height = float(figure_box.height)
@@ -5608,6 +5666,12 @@ class MatplotlibRenderer:
             box_h = y1 - y0
             wanted_h = box_w * ratio
             if abs(wanted_h - round(wanted_h)) < 1e-9 and round(wanted_h) >= 2:
+                # The layout takes a box over only where Matplotlib would
+                # have nothing to do with it -- the snapped box is ALREADY on
+                # the aspect.  Reproducing ``shrunk_to_aspect`` and
+                # ``anchored`` here instead made the box depend on whether
+                # Matplotlib had shrunk it yet, and a focus round trip came
+                # back with a different picture.
                 if round(wanted_h) <= box_h:
                     y1 = y0 + int(round(wanted_h))
                 else:
@@ -5620,12 +5684,81 @@ class MatplotlibRenderer:
                         return bounds
             else:
                 return bounds
-        # Exactly integral, not nearly: see ``_fraction_landing_on``.
-        left = _fraction_landing_on(float(x0), width, x0 / width)
-        bottom = _fraction_landing_on(float(y0), height, y0 / height)
-        span_x = _span_landing_on(left, float(x1 - x0), width, (x1 - x0) / width)
-        span_y = _span_landing_on(bottom, float(y1 - y0), height, (y1 - y0) / height)
+        # Exactly integral, not nearly: see ``_exact_box_fractions``.
+        left, span_x, exact_x = _exact_box_fractions(x0, x1, width)
+        bottom, span_y, exact_y = _exact_box_fractions(y0, y1, height)
+        self._box_exact[id(axis)] = bool(exact_x and exact_y)
         return (left, bottom, span_x, span_y)
+
+    def _settle_owned_boxes(self) -> None:
+        """Decide, once the surfaces have spoken, whose box each axes is.
+
+        A surface states its coordinate aspect while its artists update,
+        which is AFTER the layout has positioned it -- so the layout cannot
+        judge its own box on the way past.  This runs at the end of the
+        frame, when the aspect is known and the snapped box is in place, and
+        is the only place the verdict is reached.
+        """
+
+        for axes in self._figure.get_axes():
+            bounds = self._quantized_bounds.get(id(axes))
+            exact = self._box_exact.get(id(axes), False)
+            owned = False
+            if bounds is not None and exact:
+                aspect = axes.get_aspect()
+                if not isinstance(aspect, (int, float)) or isinstance(aspect, bool):
+                    owned = True
+                else:
+                    figure_box = self._figure.bbox
+                    width = float(figure_box.width)
+                    height = float(figure_box.height)
+                    box_w = ((bounds[0] + bounds[2]) * width) - (bounds[0] * width)
+                    box_h = ((bounds[1] + bounds[3]) * height) - (bounds[1] * height)
+                    try:
+                        ratio = float(aspect) * float(axes.get_data_ratio())
+                    except Exception:
+                        ratio = float("nan")
+                    owned = box_w * ratio == box_h
+            self._owned_box[id(axes)] = owned
+            if self._hold_quantized_box(axes) and bounds is not None:
+                # The box Matplotlib rewrote on the way here is not the box
+                # the layout settled on; put it back before anything reads it.
+                axes.set_position(bounds)
+                self._mark_axes_chrome_dirty(axes)
+
+    def _hold_quantized_box(self, axis: Any) -> bool:
+        """Stop ``apply_aspect`` re-deriving a box the layout already settled.
+
+        For an aspect-locked axes Matplotlib recomputes the position on every
+        draw -- ``shrunk_to_aspect`` then ``anchored`` -- and its arithmetic
+        lands a 93-pixel cell on 92.99999999999989.  That last ulp decides
+        everything: ``_make_image`` rounds an image's output size UP unless
+        the box measures an exactly integral number of pixels, so an inexact
+        box means the front is stretched and the compose's copy of it is
+        correctly refused -- sixty-four cells falling back to Matplotlib's
+        whole image machinery every frame.
+
+        Where the snapped box is on whole pixels and already on the aspect,
+        there is nothing left for ``apply_aspect`` to decide, and it is
+        replaced on that axes alone.  Returns whether the arrangement
+        changed, since a box set while Matplotlib still owned it is a box
+        Matplotlib has since rewritten.
+        """
+
+        owned = self._owned_box.get(id(axis), False)
+        installed = id(axis) in self._owned_axes
+        if owned == installed:
+            return False
+        if owned:
+            axis.apply_aspect = _position_is_the_position(axis)
+            self._owned_axes.add(id(axis))
+        else:
+            try:
+                del axis.apply_aspect
+            except AttributeError:
+                pass
+            self._owned_axes.discard(id(axis))
+        return True
 
     def _position_axes_for_frame(self) -> None:
         """Snap every standalone axes box to whole physical pixels.
@@ -5689,6 +5822,7 @@ class MatplotlibRenderer:
                 # (x0+w)-x0, one ulp off the stored fraction, and an exact
                 # compare re-positioned (and now re-captured chrome for)
                 # every cell on every frame.
+                self._quantized_bounds[id(axis)] = tuple(bounds)
                 current = tuple(axis.get_position().bounds)
                 if any(
                     abs(now - wanted) > 1e-12
@@ -5714,6 +5848,10 @@ class MatplotlibRenderer:
             visible = index == selected_index
             if axis.get_visible() != visible:
                 axis.set_visible(visible)
+            # A focused cell takes the split's box, not a snapped one, so the
+            # layout no longer owns it and Matplotlib gets its aspect back.
+            self._quantized_bounds.pop(id(axis), None)
+            self._box_exact[id(axis)] = False
         if tuple(axes[selected_index].get_position().bounds) != tuple(bounds):
             axes[selected_index].set_position(bounds)
 
