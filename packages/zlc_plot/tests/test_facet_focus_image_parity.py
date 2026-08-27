@@ -349,7 +349,12 @@ def test_overview_slots_are_shaped_for_what_the_renderer_draws() -> None:
 
 
 def test_overview_view_limits_apply_to_every_visible_cell() -> None:
-    """An overview shows N views of ONE picture; zooming one is not a view."""
+    """An overview shows N views of ONE picture; zooming one is not a view.
+
+    The requested rectangle grows to the source pixel grid -- an image view
+    is a whole number of pixels, and the request stays wholly inside it.
+    Every cell moves the same way, which is the point here.
+    """
 
     session = PlotSession(_frames_scan_snapshot(), _FACET_SPEC, size="4x4")
     try:
@@ -358,8 +363,8 @@ def test_overview_view_limits_apply_to_every_visible_cell() -> None:
         visible = [axis for axis in cells if axis.get_visible()]
         assert len(visible) == 3
         for axis in visible:
-            assert tuple(map(float, axis.get_xlim())) == (10.0, 30.0)
-            assert tuple(map(float, sorted(axis.get_ylim()))) == (5.0, 25.0)
+            assert tuple(map(float, axis.get_xlim())) == (9.5, 30.5)
+            assert tuple(map(float, sorted(axis.get_ylim()))) == (4.5, 25.5)
         # ...and every cell prepares its RASTER for the view it shows, which
         # is what the standalone image does.  Honouring the request on the
         # selected cell only left the rest showing a full-extent front cropped

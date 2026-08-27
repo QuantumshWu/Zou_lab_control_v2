@@ -4225,6 +4225,67 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         self._set_viewport_state(selected, emit_change=emit_change)
         return selected
 
+    def _image_viewport_on_pixel_grid(
+        self, selected: RectangleRange | None
+    ) -> RectangleRange | None:
+        """An image viewport is a WHOLE number of source pixels.
+
+        A wheel notch lands the view wherever the cursor was, and the front
+        the renderer prepares covers whole source pixels -- so the picture
+        sat 0.15 px inside its own axes, which is not a rectangle of whole
+        canvas pixels, so the composed front could not be copied and every
+        zoomed-in frame paid Matplotlib's image machinery instead: 27 ms a
+        frame at the operator's density, worse than the un-zoomed picture it
+        was a crop of.
+
+        Snapping here rather than at the point of drawing keeps ONE viewport:
+        the number the session reports, the crop the front is cut to, and the
+        limits the axes carry are the same number.  The move is under half a
+        source pixel -- a thousandth of a 900-pixel view.
+        """
+
+        if selected is None or not isinstance(semantic_spec(self._spec), ImagePlot):
+            return selected
+        payload = self._payload
+        cells = tuple(getattr(payload, "cells", ()))
+        if cells:
+            payload = getattr(cells[0], "payload", None)
+        if payload is None or not hasattr(payload, "x") or not hasattr(payload, "y"):
+            return selected
+        snapped = []
+        for axis_values, span in (
+            (getattr(payload, "x", None), selected.x),
+            (getattr(payload, "y", None), selected.y),
+        ):
+            values = np.asarray(
+                getattr(axis_values, "display", axis_values), dtype=float
+            ).reshape(-1)
+            if values.size < 2:
+                return selected
+            pitch = abs(
+                (float(values[-1]) - float(values[0])) / (values.size - 1)
+            )
+            if not math.isfinite(pitch) or pitch <= 0.0:
+                return selected
+            origin = min(float(values[0]), float(values[-1])) - pitch / 2.0
+            # Outward, not nearest: the requested rectangle stays wholly
+            # visible, and this is the same growth the front store already
+            # applies when it cuts the raster, so the view and the crop are
+            # the same rectangle instead of two that differ by a fraction of
+            # a pixel.  Nearest would also break ties by parity, which sent
+            # x down and y up for the same request.
+            tolerance = pitch * 1e-9
+            low = origin + math.floor(
+                (min(span.low, span.high) - origin) / pitch + tolerance
+            ) * pitch
+            high = origin + math.ceil(
+                (max(span.low, span.high) - origin) / pitch - tolerance
+            ) * pitch
+            if not (high > low):
+                return selected
+            snapped.append(NumericRange(low, high))
+        return RectangleRange(snapped[0], snapped[1])
+
     def _set_viewport_state(
         self,
         selected: RectangleRange | None,
@@ -4235,6 +4296,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
 
         if selected is not None and not isinstance(selected, RectangleRange):
             raise TypeError("selected must be RectangleRange or None")
+        selected = self._image_viewport_on_pixel_grid(selected)
         with self._render_lock:
             with self._lock:
                 self._assert_open()
