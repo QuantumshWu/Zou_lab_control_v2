@@ -1,0 +1,60 @@
+{
+  "results": [
+    {
+      "case": "h3d_bars_2M",
+      "notes": "3D height bars over the 10x10 lattice",
+      "points": 2040000,
+      "first_render_ms": 1154.6,
+      "live_serialized": {
+        "n": 12,
+        "median_ms": 26.43,
+        "p90_ms": 28.37,
+        "best_ms": 25.16
+      },
+      "live_25hz": {
+        "submitted_hz": 21.0,
+        "presented_hz": 21.3
+      },
+      "interactions": {
+        "drag_orbit": {
+          "serialized": {
+            "n": 1,
+            "median_ms": 16.85,
+            "p90_ms": 16.85,
+            "best_ms": 16.85,
+            "no_front": 7
+          },
+          "spray": {
+            "sent_hz": 267.3,
+            "presented_hz": 0.0
+          },
+          "camera_moved": true
+        },
+        "drag_clim": {
+          "serialized": {
+            "n": 8,
+            "median_ms": 33.71,
+            "p90_ms": 34.48,
+            "best_ms": 32.54
+          },
+          "spray": {
+            "sent_hz": 243.4,
+            "presented_hz": 31.3
+          }
+        },
+        "click_main": {
+          "n": 6,
+          "median_ms": 14.01,
+          "p90_ms": 15.06,
+          "best_ms": 13.01
+        },
+        "wheel_main": {
+          "n": 6,
+          "median_ms": 18.93,
+          "p90_ms": 19.33,
+          "best_ms": 18.22
+        }
+      }
+    }
+  ]
+}

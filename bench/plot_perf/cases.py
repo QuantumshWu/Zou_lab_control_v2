@@ -20,6 +20,9 @@ class Case:
     spec: Callable[[], object]
     interactions: tuple[str, ...] = ()
     fit: dict | None = None
+    #: Display parameters the case is measured UNDER (a presentation, a
+    #: window): the same spec drawn a different way is a different cost.
+    parameters: dict | None = None
     notes: str = ""
 
 
@@ -73,6 +76,28 @@ def catalog() -> tuple[Case, ...]:
             lambda: ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
             ("drag_main", "drag_clim", "click_main", "pan_drag", "wheel_main"),
             notes="2048x2048 uint16 dense camera frame",
+        ),
+        Case(
+            "h3d_bars_2M",
+            lattice_2m,
+            lambda: ImagePlot(
+                AxisRef.point_dimension("ax"), AxisRef.point_dimension("ay")
+            ),
+            ("drag_orbit", "drag_clim", "click_main", "wheel_main"),
+            parameters={"presentation": "height_bars"},
+            notes="3D height bars over the 10x10 lattice",
+        ),
+        Case(
+            "h3d_bars_dense_2M",
+            lambda: lattice_feed(
+                repeats=4, rows=40000, frames=1, sites=1, dims=(200, 200)
+            ),
+            lambda: ImagePlot(
+                AxisRef.point_dimension("ax"), AxisRef.point_dimension("ay")
+            ),
+            ("drag_orbit",),
+            parameters={"presentation": "height_bars"},
+            notes="3D height bars over a 200x200 grid (pooled)",
         ),
         Case(
             "rolling_2M",

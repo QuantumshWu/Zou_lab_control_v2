@@ -1,0 +1,25 @@
+{
+  "results": [
+    {
+      "case": "h3d_bars_dense_2M",
+      "notes": "3D height bars over a 200x200 grid (pooled)",
+      "points": 160000,
+      "first_render_ms": 1235.0,
+      "live_serialized": {
+        "n": 12,
+        "median_ms": 33.06,
+        "p90_ms": 33.85,
+        "best_ms": 31.53
+      },
+      "live_25hz": {
+        "submitted_hz": 21.1,
+        "presented_hz": 21.4
+      },
+      "interactions": {
+        "drag_orbit": {
+          "error": "AttributeError: 'HostBench' object has no attribute '_do_drag_orbit'"
+        }
+      }
+    }
+  ]
+}

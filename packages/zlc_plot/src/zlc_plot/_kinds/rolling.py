@@ -21,6 +21,7 @@ def build_payload(projection: Any, view: Any, state: Any) -> None:
     history = view.rolling_history_samples(
         group=spec.group,
         aggregation=spec.reduction,
+        uncertainty=uncertainty,
     )
     projection._payload = projection._rolling_payload(
         history,

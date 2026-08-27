@@ -572,7 +572,12 @@ def test_one_mechanism_draws_every_edge_the_scene_has() -> None:
     assert not scene.dense, "this grid draws as boxes"
     # Every drawn pixel is a face colour or the background: a darkened
     # boundary would show up as a value darker than the darkest face.
-    painted = frame[..., :3][frame[..., 3] > 0].astype(np.float64) / 255.0
+    # The frame is opaque by construction -- it is already composited over
+    # its background -- so "drawn" is "differs from that background", which
+    # is the same set the coverage used to name.
+    background = np.array([255, 255, 255], dtype=np.uint8)
+    drawn = (frame[..., :3] != background).any(axis=-1)
+    painted = frame[..., :3][drawn].astype(np.float64) / 255.0
     darkest_face = float(np.min(np.clip(heights, 0.0, 1.0)))
     assert painted.min() >= darkest_face - 0.02, (
         "the kernel darkened something that is not a face"

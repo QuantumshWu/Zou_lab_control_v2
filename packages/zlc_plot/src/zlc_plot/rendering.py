@@ -7,6 +7,7 @@ artists; fixed-size changes rebuild layout within the same Figure.
 
 from __future__ import annotations
 
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
@@ -19,12 +20,14 @@ from enum import Enum
 from time import perf_counter
 from types import MappingProxyType
 from typing import Any, Iterable, Iterator, Mapping, Sequence
+import weakref
 
 import numpy as np
 
 from ._image_raster import ImageFrontStore, PreparedImageFront
 from ._fit_scene import FitOverlay, FitPolyline
-from .data_view import aligned_histogram_edges
+from . import _raster_kernels as kernels
+from .data_view import aligned_histogram_edges, histogram_counts
 from ._kinds import handler_for
 from ._rendering.pulse import update_pulse_timeline
 from ._pulse_time import pulse_time_scale
@@ -726,6 +729,191 @@ _OCCLUSION_MIN_SAMPLES = 4.0
 _OCCLUSION_MAX_SAMPLES = 512.0
 
 
+def _exact_box_fractions(
+    low: int, high: int, scale: float
+) -> tuple[float, float, bool]:
+    """Fractions that put a box at *low* measuring exactly ``high - low``.
+
+    A box is stored as a fraction of the figure and multiplied back out, and
+    neither the origin nor the width survives that round trip exactly.  Only
+    the WIDTH has to: Matplotlib rounds an image's output size up unless the
+    box measures an exactly integral number of pixels.  Both fractions are
+    searched -- the origin over a small window, the span over another for
+    each origin -- because fixing the origin alone can leave no reachable
+    span, and the flag says whether an exact pair was found at all.
+    """
+
+    extent = float(high - low)
+    base_left = low / scale
+    base_span = (high - low) / scale
+    origins = [base_left]
+    upward = downward = base_left
+    for _ in range(4):
+        upward = float(np.nextafter(upward, np.inf))
+        downward = float(np.nextafter(downward, -np.inf))
+        origins.append(upward)
+        origins.append(downward)
+    for origin in origins:
+        span = _span_landing_on(origin, extent, scale, base_span)
+        if ((origin + span) * scale) - (origin * scale) == extent:
+            return origin, span, True
+    return base_left, base_span, False
+
+
+def _position_is_the_position(axes: Any) -> Any:
+    """``apply_aspect`` for an axes whose box its owner has already settled.
+
+    Exactly what Matplotlib does when the aspect is ``auto`` -- the original
+    position becomes the active one -- installed on the instance so the
+    aspect the axes REPORTS stays the coordinate aspect its surface asked
+    for, which is what every other reader of it means.
+    """
+
+    def apply_aspect(position: Any = None) -> None:
+        axes._set_position(
+            position if position is not None else axes.get_position(original=True),
+            which="active",
+        )
+
+    return apply_aspect
+
+
+def _span_landing_on(
+    origin: float, extent: float, scale: float, base: float
+) -> float:
+    """A span near *base* whose box measures exactly *extent* pixels.
+
+    What Matplotlib tests is the box's WIDTH, not its corners: two corners
+    each an ulp high still subtract to an exact integer, while one high and
+    one low do not.  So the search is over the difference the transform
+    actually produces.
+    """
+
+    if scale == 0.0:
+        return base
+    low = origin * scale
+    candidate = base
+    for _ in range(24):
+        if ((origin + candidate) * scale) - low == extent:
+            return candidate
+        candidate = np.nextafter(candidate, np.inf)
+    candidate = base
+    for _ in range(24):
+        candidate = np.nextafter(candidate, -np.inf)
+        if ((origin + candidate) * scale) - low == extent:
+            return candidate
+    return base
+
+
+def _fraction_landing_on(target: float, scale: float, base: float) -> float:
+    """A fraction near *base* whose product with *scale* IS *target*.
+
+    An axes box is stored as a fraction of the figure and multiplied back
+    out, and ``(k / scale) * scale`` is only within an ulp of ``k``.  That
+    last ulp is not cosmetic: Matplotlib rounds an image's output size UP
+    whenever the box is not an exactly integral float, and scales the
+    transform to match, so a box measuring 93 plus one part in a
+    quadrillion is resampled into 94 rows.  The neighbouring
+    representable fractions are searched for one that lands exactly; if
+    none does, the caller keeps the plain quotient and the compose simply
+    declines its copy.
+    """
+
+    if scale == 0.0:
+        return base
+    candidate = base
+    for _ in range(6):
+        if candidate * scale == target:
+            return candidate
+        candidate = np.nextafter(candidate, np.inf)
+    candidate = base
+    for _ in range(6):
+        candidate = np.nextafter(candidate, -np.inf)
+        if candidate * scale == target:
+            return candidate
+    return base
+
+
+class _PooledStore:
+    """One recycled block of bytes, with an identity a weak reference can hold.
+
+    A ``bytearray`` cannot be weak-referenced, and ``np.frombuffer`` does
+    not retain the memoryview it was handed -- it retains a fresh view over
+    that view's OBJECT.  So the object a derived array keeps alive has to be
+    this wrapper, and the pool's release point has to be this wrapper's
+    death.  Getting that backwards recycles a buffer under a live array,
+    which is exactly what ``test_publish_pool`` reproduces.
+    """
+
+    __slots__ = ("_bytes", "__weakref__")
+
+    def __init__(self, block: bytearray) -> None:
+        self._bytes = block
+
+    def __buffer__(self, flags: int) -> memoryview:
+        # Always read-only: the writer holds its own view, taken from the
+        # pool, and nothing handed to a consumer may be written.
+        return memoryview(self._bytes).toreadonly()
+
+    def __len__(self) -> int:
+        return len(self._bytes)
+
+
+class PublishBufferPool:
+    """Recycled publish buffers whose release point the interpreter owns.
+
+    A published front is eighteen megabytes at the operator's density, and a
+    fresh allocation for each one costs six milliseconds of page faults on
+    the worker that has to keep up with a live camera -- against half a
+    millisecond to write into a block that is already resident.
+
+    The hard part of recycling is knowing when a block is free again, and
+    the answer here is not a protocol anyone has to remember: what is handed
+    out is a read-only view of a wrapper, and the pool asks the interpreter
+    to tell it when that wrapper is gone.  Everything derived from the view
+    -- a numpy array, a QImage, a PIL image -- keeps the wrapper alive, so a
+    block cannot be reissued while anything can still read it.
+
+    A holder that keeps a front forever simply keeps its block: the pool
+    runs dry and allocates another.  The failure mode of every mistake here
+    is "as slow as before", never "the wrong pixels".
+    """
+
+    #: One being written, one on screen, one in flight.
+    DEPTH = 3
+
+    def __init__(self) -> None:
+        # deque: append and popleft are atomic, and the release runs on
+        # whichever thread dropped the last reference -- the GUI thread when
+        # a widget promotes the next front, not the worker that wrote it.
+        self._free: deque = deque()
+        self._nbytes = 0
+
+    def take(self, nbytes: int) -> tuple[Any, Any]:
+        """Return ``(writable, published)`` views of one recycled block."""
+
+        if nbytes != self._nbytes:
+            self._free.clear()
+            self._nbytes = nbytes
+        try:
+            block = self._free.popleft()
+        except IndexError:
+            block = bytearray(nbytes)
+        store = _PooledStore(block)
+        published = memoryview(store)
+        # ``atexit`` is an attribute of the finalizer, not an argument to the
+        # callback: returning a block to a pool during shutdown helps nobody.
+        # The callback holds the BLOCK, never the wrapper -- holding the
+        # wrapper would keep it alive and the finalizer would never fire.
+        returner = weakref.finalize(store, self._release, block, nbytes)
+        returner.atexit = False
+        return memoryview(block), published
+
+    def _release(self, block: bytearray, nbytes: int) -> None:
+        if nbytes == self._nbytes and len(self._free) < self.DEPTH:
+            self._free.append(block)
+
+
 class MatplotlibRenderer:
     """One fixed-layout Figure with persistent artists and selector overlays."""
 
@@ -810,6 +998,21 @@ class MatplotlibRenderer:
         #: and the canvas signature (size/DPR).  ``_update_ticks`` runs the
         #: locator and formatter, and a 35-cell facet paid for seventy such
         #: runs per steady frame in which nothing had moved.
+        #: Recycled publish buffers; see PublishBufferPool.
+        self._publish_pool = PublishBufferPool()
+        #: Consecutive frames whose chrome background could not be reused.
+        self._chrome_churn = 0
+        #: Axes whose snapped box already honours their aspect, so
+        #: ``apply_aspect`` has nothing left to decide about it.
+        self._owned_box: dict[int, bool] = {}
+        self._owned_axes: set[int] = set()
+        #: Whether the snapped box landed on exactly integral pixels.
+        self._box_exact: dict[int, bool] = {}
+        #: The whole-pixel box this renderer last applied per axes.
+        self._quantized_bounds: dict[int, tuple[float, ...]] = {}
+        #: One settled opacity answer per composed front, kept beside
+        #: the array so its identity cannot be recycled underneath.
+        self._front_opacity: dict[int, tuple[Any, bool]] = {}
         self._boundary_chrome_cache: dict[
             int, tuple[tuple[Any, Any, float], ...]
         ] = {}
@@ -1172,6 +1375,7 @@ class MatplotlibRenderer:
                 painted_fit_overlays[0] if len(painted_fit_overlays) == 1 else None
             )
             painted = self.painted_surfaces
+            self._position_axes_for_frame()
             if base_changed:
                 self._update_plot(payload, state)
                 for _key, axes, _index in painted:
@@ -1232,6 +1436,7 @@ class MatplotlibRenderer:
                     if cell is None
                     else getattr(cell, "facet_value_canonical", None),
                 )
+            self._settle_owned_boxes()
             self._compose_frame(
                 chrome_stable=not bool(
                     selected_effects
@@ -1563,10 +1768,52 @@ class MatplotlibRenderer:
             for spine in axes.spines.values():
                 if spine.get_visible():
                     entries.append((spine, axes, spine.get_zorder()))
+            # Only what the DATA can cover.  Every dynamic artist of this
+            # axes is clipped to its box, so chrome that lies entirely
+            # outside the box is never overpainted and its background copy
+            # is still exact.  Ticks point OUTWARD by default: a facet of
+            # sixty-four cells was re-stroking two hundred and fifty-six
+            # tick marks per frame that nothing had touched -- ten
+            # milliseconds a frame spent restoring pixels that were
+            # already right.
+            entries = [
+                entry
+                for entry in entries
+                if self._chrome_meets_data(entry[0], axes)
+            ]
             self._boundary_chrome_cache[id(axes)] = tuple(entries)
             for artist, owner, zorder in entries:
                 keyed(artist, owner, zorder)
         return collected
+
+    def _chrome_meets_data(self, artist: Any, axes: Any) -> bool:
+        """Whether this chrome artist shares pixels with its data region.
+
+        The question is asked once per chrome epoch, beside the cache it
+        fills, because ``get_window_extent`` is not free either.  Anything
+        that cannot be measured is repainted: an unknown extent is not a
+        promise that nothing covers it.
+        """
+
+        try:
+            box = axes.bbox
+            extent = artist.get_window_extent(self._figure.canvas.get_renderer())
+        except Exception:
+            return True
+        if extent is None:
+            return True
+        try:
+            # A half-open touch is still a touch: chrome sits ON the
+            # boundary, and Agg's anti-aliasing reaches the pixel either
+            # side of it, so the comparison is deliberately inclusive.
+            return not (
+                float(extent.x1) < float(box.x0) - 1.0
+                or float(extent.x0) > float(box.x1) + 1.0
+                or float(extent.y1) < float(box.y0) - 1.0
+                or float(extent.y0) > float(box.y1) + 1.0
+            )
+        except Exception:
+            return True
 
     def _compose_frame(self, *, chrome_stable: bool) -> None:
         """Compose one complete frame, reusing the cached chrome background.
@@ -1590,12 +1837,18 @@ class MatplotlibRenderer:
             int(round(float(self._figure.bbox.width))),
             int(round(float(self._figure.bbox.height))),
         )
+        # Two different questions.  "Did the chrome change?" decides whether a
+        # cached background could EVER be reused; "is one in hand?" decides
+        # whether one can be reused right now.  Counting the second as churn
+        # made the escape hatch below a one-way door: dropping the background
+        # guaranteed the next frame would also find none.
+        chrome_invalidated = not chrome_stable or bool(self._chrome_dirty_axes)
         reusable = (
-            chrome_stable
+            not chrome_invalidated
             and self._background_region is not None
             and self._background_signature == signature
-            and not self._chrome_dirty_axes
         )
+        self._chrome_churn = self._chrome_churn + 1 if chrome_invalidated else 0
         if not reusable:
             # Anything that invalidates the background (layout, text, chrome
             # effects, limit moves) may also have moved tick geometry through
@@ -1611,6 +1864,30 @@ class MatplotlibRenderer:
         # rather than partitioning by ownership is what keeps the compose
         # full-draw-exact: anything that legitimately draws above a selector
         # stays above it, and is simply repainted with it.
+        if (
+            not reusable
+            and self._chrome_churn > 1
+            and self._selector_gesture_kind is None
+        ):
+            # A cache that keeps missing is not a cache, it is a tax.  The
+            # capture path draws the scene once with the dynamics hidden,
+            # copies the whole figure, restores it, and paints the dynamics
+            # again -- worth it only if the NEXT frame can reuse that copy.
+            # A rolling panel's x axis is the absolute shot number, so its
+            # tick labels are re-laid on every single revision and the copy
+            # is dead on arrival: it was paying eighteen megabytes of capture
+            # and a restore, every frame, to avoid a draw it did anyway.
+            # Two consecutive misses is the evidence; the churn counter goes
+            # back to zero the moment a frame is reusable, so a panel that
+            # settles returns to the fast path by itself.
+            self._native_draw(canvas)
+            self._chrome_dirty_axes.clear()
+            self._background_region = None
+            self._background_signature = None
+            self._forget_gesture_region()
+            self._raster_generation += 1
+            self._composed_generation = self._raster_generation
+            return
         selector_ids = self._selector_artist_ids()
         split = None
         if self._selector_gesture_kind is not None and selector_ids:
@@ -1710,6 +1987,53 @@ class MatplotlibRenderer:
         self._composed_generation = self._raster_generation
         return True
 
+    @staticmethod
+    def _install_image_front(image: Any, front: Any) -> None:
+        """Hand an artist a front this renderer already normalised.
+
+        ``set_data`` runs every array through Matplotlib's normalisation:
+        a full copy, ``isfinite`` over every byte, its inversion, a masked
+        view, then ``min()`` and ``max()`` to decide whether to clip.  For
+        the uint8 RGBA we compose ourselves each of those is provably a
+        no-operation -- integers are finite, and a colour table cannot
+        leave the 0..255 the check is looking for -- and together they cost
+        more per frame than colouring the picture did.  The three
+        attributes assigned here are exactly the three ``set_data`` writes.
+        """
+
+        if (
+            type(front) is np.ndarray
+            and front.dtype == np.uint8
+            and front.dtype.isnative
+            and front.ndim == 3
+            and front.shape[2] == 4
+            and front.flags.c_contiguous
+        ):
+            image._A = front
+            image._imcache = None
+            image.stale = True
+            return
+        image.set_data(front)
+
+    def _front_is_opaque(self, front: Any) -> bool:
+        """Whether every pixel of this composed front is opaque.
+
+        Opacity is settled when the front is composed and cannot change
+        afterwards -- the arrays are handed out read-only.  The blit asked
+        it again, of nine megabytes, on every draw of every image of every
+        frame.
+        """
+
+        token = id(front)
+        remembered = self._front_opacity.get(token)
+        if remembered is not None and remembered[0] is front:
+            return remembered[1]
+        opaque = bool(front[..., 3].min() == 255)
+        if len(self._front_opacity) > 256:
+            self._front_opacity.clear()
+        self._front_opacity[token] = (front, opaque)
+        return opaque
+
     def _blit_exact_rgba_image(self, artist: Any, canvas: Any) -> bool:
         """Copy a 1:1 precomposed RGBA front straight into the Agg buffer.
 
@@ -1748,7 +2072,7 @@ class MatplotlibRenderer:
         # when every pixel is opaque -- a translucent front (the 3D
         # scene outside its pane, a NaN-holed image) must take the real
         # draw or it would punch its transparency into the buffer.
-        if shown[..., 3].min() != 255:
+        if not self._front_is_opaque(shown):
             return False
         if artist.get_interpolation() != "nearest":
             return False
@@ -1766,6 +2090,17 @@ class MatplotlibRenderer:
         rows, columns = shown.shape[:2]
         x0, y0 = float(bbox.x0), float(bbox.y0)
         x1, y1 = float(bbox.x1), float(bbox.y1)
+        # This is Matplotlib's own question, asked its way.  ``_make_image``
+        # rounds the output UP whenever the box's width or height is not an
+        # exactly integral float, and scales the transform to match -- so a
+        # box measuring 757 plus one part in a trillion is resampled into
+        # 758 rows, stretching the picture by a pixel across its whole
+        # height.  A tolerance of 1e-6 said that box was integral and let the
+        # copy claim a front Matplotlib was quietly stretching; the two
+        # disagreed on three percent of the pixels and only
+        # ``test_exact_blit_parity`` at ratio 1.5 ever saw it.
+        if (float(bbox.width) % 1.0 != 0.0) or (float(bbox.height) % 1.0 != 0.0):
+            return False
         if any(
             abs(value - round(value)) > 1e-6 for value in (x0, y0, x1, y1)
         ):
@@ -2140,6 +2475,7 @@ class MatplotlibRenderer:
         x_label: str,
         y_label: str,
         limits: tuple[tuple[float, float], tuple[float, float]] | None = None,
+        x_limits: tuple[float, float] | None = None,
         paint_labels: bool = True,
         isolated_glyphs: bool = False,
     ) -> None:
@@ -2250,10 +2586,20 @@ class MatplotlibRenderer:
             self._set_xlim(axes, *limits[0])
             self._set_ylim(axes, *limits[1])
         else:
+            # ``x_limits`` is a caller that OWNS its x axis -- a rolling panel
+            # frames the configured window, not the shots that have arrived.
+            # It used to let this method set the data's extremes and then
+            # overwrite them, which moved the limits twice per revision, marked
+            # the chrome dirty both times, and cost the panel its whole
+            # background cache: every frame rebuilt what nothing had changed.
             xlim = (
-                _curve_x_limits(extremes[0:2])
-                if math.isfinite(extremes[0])
-                else None
+                x_limits
+                if x_limits is not None
+                else (
+                    _curve_x_limits(extremes[0:2])
+                    if math.isfinite(extremes[0])
+                    else None
+                )
             )
             y_range = (
                 _data_limits(extremes[2:4])
@@ -2592,11 +2938,11 @@ class MatplotlibRenderer:
             values = getattr(payload, "values", payload)
             values = np.asarray(_display_array(values), dtype=float).reshape(-1)
             values = values[np.isfinite(values)]
-            count_values, edge_values = np.histogram(
-                values,
-                bins=aligned_histogram_edges(values, int(state["bin_count"])),
+            edge_values = np.asarray(
+                aligned_histogram_edges(values, int(state["bin_count"])),
+                dtype=float,
             )
-            count_values = count_values.astype(float)
+            count_values = histogram_counts(values, edge_values).astype(float)
         density = bool(state["density"])
         cumulative = bool(state["cumulative"])
         if cumulative:
@@ -3099,7 +3445,7 @@ class MatplotlibRenderer:
             if self._artists.get(applied_key) is not shown:
                 # ``set_data`` copies the front; skip it when the artist
                 # already holds this exact composed object (cache hit).
-                image.set_data(shown)
+                self._install_image_front(image, shown)
                 extent_key = f"{key}:applied_extent"
                 if self._artists.get(extent_key) != prepared.extent:
                     # ``set_extent`` rebuilds transforms and re-autoscales;
@@ -3141,7 +3487,7 @@ class MatplotlibRenderer:
         y_limits: tuple[float, float],
         axes: Any,
     ) -> np.ndarray:
-        """Upsample a small composed RGBA front to its axes' pixel box.
+        """Resize a composed RGBA front to its axes' pixel box.
 
         A 10x10 heatmap cell paid Matplotlib's full image machinery on
         every draw of every cell; at the box size the compose's exact
@@ -3149,8 +3495,15 @@ class MatplotlibRenderer:
         re-rendering 64 images per frame.  Nearest-neighbour placement is
         computed here instead of inside Agg -- boundary rows may land one
         pixel from Agg's fixed-point choice, which changes no value or
-        coordinate semantics.  Anything but a strict integer-box upsample
-        of a view-filling front is returned unchanged.
+        coordinate semantics.  Anything but an integer-box resize of a
+        view-filling front is returned unchanged.
+
+        Both directions, because a camera frame lands just ABOVE its box:
+        the front store's mip level is chosen so one sample is about one
+        display pixel and then refuses a marginal reduction, so a 2048
+        frame in a 504 box arrives as 512 and Agg re-resampled those eight
+        rows on every single draw -- four milliseconds a frame to lose
+        1.6% of a picture we had already composed.
         """
 
         rows, columns = rgba.shape[:2]
@@ -3175,7 +3528,7 @@ class MatplotlibRenderer:
             return rgba
         box_w = int(round(corners[2])) - int(round(corners[0]))
         box_h = int(round(corners[3])) - int(round(corners[1]))
-        if box_w <= columns or box_h <= rows or box_w < 1 or box_h < 1:
+        if box_w < 1 or box_h < 1 or (box_w == columns and box_h == rows):
             return rgba
         cache_name = f"{key}:rgba_box"
         cache_key = (id(rgba), box_w, box_h)
@@ -3190,7 +3543,13 @@ class MatplotlibRenderer:
             ((np.arange(box_w) + 0.5) * (columns / box_w)).astype(np.intp),
             columns - 1,
         )
-        sized = rgba[row_map][:, column_map]
+        if kernels.engaged():
+            sized = np.empty((box_h, box_w, 4), dtype=np.uint8)
+            kernels.gather_rows_columns(
+                np.ascontiguousarray(rgba), row_map, column_map, sized
+            )
+        else:
+            sized = rgba[row_map][:, column_map]
         sized.setflags(write=False)
         self._artists[cache_name] = (cache_key, sized)
         return sized
@@ -3407,7 +3766,7 @@ class MatplotlibRenderer:
             )
             self._artists[key] = image
         else:
-            image.set_data(frame)
+            self._install_image_front(image, frame)
             extent_key = f"{key}:applied_extent"
             if self._artists.get(extent_key) != scene_extent:
                 image.set_extent(scene_extent)
@@ -4644,16 +5003,36 @@ class MatplotlibRenderer:
                     ).astype(np.uint8)
                 ]
                 self._artists["image:direct_color_table"] = (table_key, table)
-            rgba = table[values]
+            if kernels.engaged():
+                rgba = np.empty(values.shape + (4,), dtype=np.uint8)
+                kernels.colour_indexed(
+                    np.ascontiguousarray(values), table, rgba
+                )
+            else:
+                rgba = table[values]
         else:
             # In-place float32 passes; boundary pixels may differ from
             # Matplotlib's float64 normalize by one 256-level step, which is
             # the same quantization the colormap applies anyway.
-            scaled = values.astype(np.float32, copy=True)
-            scaled -= np.float32(vmin)
-            scaled *= np.float32(256.0 / (vmax - vmin))
-            np.clip(scaled, 0.0, 255.0, out=scaled)
-            rgba = lut[scaled.astype(np.uint8)]
+            if kernels.engaged():
+                # One pass instead of six: the copy, the subtract, the
+                # multiply, the clip, the cast and the gather all happen
+                # per pixel, in registers, with nothing materialised
+                # between them but the answer.
+                rgba = np.empty(values.shape + (4,), dtype=np.uint8)
+                kernels.colour_float32(
+                    np.ascontiguousarray(values, dtype=np.float32),
+                    lut,
+                    np.float32(vmin),
+                    np.float32(256.0 / (vmax - vmin)),
+                    rgba,
+                )
+            else:
+                scaled = values.astype(np.float32, copy=True)
+                scaled -= np.float32(vmin)
+                scaled *= np.float32(256.0 / (vmax - vmin))
+                np.clip(scaled, 0.0, 255.0, out=scaled)
+                rgba = lut[scaled.astype(np.uint8)]
         rgba.setflags(write=False)
         self._artists[cache_name] = (cache_key, rgba)
         return rgba
@@ -4917,14 +5296,15 @@ class MatplotlibRenderer:
                 )
                 if not samples.size:
                     samples = np.asarray([histogram_limits[0]], dtype=float)
-                counts, edges = np.histogram(
-                    samples,
-                    bins=aligned_histogram_edges(
+                edges = np.asarray(
+                    aligned_histogram_edges(
                         samples,
                         bin_count,
                         limits=histogram_limits,
                     ),
+                    dtype=float,
                 )
+                counts = histogram_counts(samples, edges)
                 self._artists[cache_name] = (cache_key, counts, edges)
                 distribution_changed = True
 
@@ -5095,6 +5475,21 @@ class MatplotlibRenderer:
             if series
             else ("value" if explicit_y is None else explicit_y)
         )
+        # The shot axis frames the FULL configured window from the first
+        # revision on: it opens at shots [0, window-1] and slides only once
+        # the trace has filled it, so the window parameter is what you see
+        # and the axis never names a negative shot.  It is resolved BEFORE the
+        # series painter runs and handed to it, because an axis with two
+        # owners is an axis that moves twice.
+        shot_values = np.concatenate(
+            [item.x[item.valid] for item in sliced]
+        ) if sliced else np.asarray([], dtype=float)
+        frame = None
+        if shot_values.size:
+            last_shot = float(np.max(shot_values))
+            window = int(state["window"])
+            low = max(0.0, last_shot - window + 1)
+            frame = _curve_x_limits(np.asarray([low, low + window - 1]))
         self._mutate_series_artists(
             history,
             tuple(sliced),
@@ -5102,21 +5497,8 @@ class MatplotlibRenderer:
             f"{key}:history",
             x_label=payload_x if explicit_x is None else explicit_x,
             y_label=y_label,
+            x_limits=frame,
         )
-        # The shot axis frames the FULL configured window from the first
-        # revision on: it opens at shots [0, window-1] and slides only once
-        # the trace has filled it, so the window parameter is what you see
-        # and the axis never names a negative shot.
-        shot_values = np.concatenate(
-            [item.x[item.valid] for item in sliced]
-        ) if sliced else np.asarray([], dtype=float)
-        if shot_values.size:
-            last_shot = float(np.max(shot_values))
-            window = int(state["window"])
-            low = max(0.0, last_shot - window + 1)
-            frame = _curve_x_limits(np.asarray([low, low + window - 1]))
-            if frame is not None:
-                self._set_xlim(history, *frame)
         latest = None
         if sliced:
             usable = sliced[0].y[sliced[0].valid]
@@ -5254,6 +5636,8 @@ class MatplotlibRenderer:
         an aspect this cannot represent keeps the plan's box unchanged.
         """
 
+        # Every early return below leaves the box to Matplotlib.
+        self._box_exact[id(axis)] = False
         figure_box = self._figure.bbox
         width = float(figure_box.width)
         height = float(figure_box.height)
@@ -5282,6 +5666,12 @@ class MatplotlibRenderer:
             box_h = y1 - y0
             wanted_h = box_w * ratio
             if abs(wanted_h - round(wanted_h)) < 1e-9 and round(wanted_h) >= 2:
+                # The layout takes a box over only where Matplotlib would
+                # have nothing to do with it -- the snapped box is ALREADY on
+                # the aspect.  Reproducing ``shrunk_to_aspect`` and
+                # ``anchored`` here instead made the box depend on whether
+                # Matplotlib had shrunk it yet, and a focus round trip came
+                # back with a different picture.
                 if round(wanted_h) <= box_h:
                     y1 = y0 + int(round(wanted_h))
                 else:
@@ -5294,12 +5684,120 @@ class MatplotlibRenderer:
                         return bounds
             else:
                 return bounds
-        return (
-            x0 / width,
-            y0 / height,
-            (x1 - x0) / width,
-            (y1 - y0) / height,
-        )
+        # Exactly integral, not nearly: see ``_exact_box_fractions``.
+        left, span_x, exact_x = _exact_box_fractions(x0, x1, width)
+        bottom, span_y, exact_y = _exact_box_fractions(y0, y1, height)
+        self._box_exact[id(axis)] = bool(exact_x and exact_y)
+        return (left, bottom, span_x, span_y)
+
+    def _settle_owned_boxes(self) -> None:
+        """Decide, once the surfaces have spoken, whose box each axes is.
+
+        A surface states its coordinate aspect while its artists update,
+        which is AFTER the layout has positioned it -- so the layout cannot
+        judge its own box on the way past.  This runs at the end of the
+        frame, when the aspect is known and the snapped box is in place, and
+        is the only place the verdict is reached.
+        """
+
+        for axes in self._figure.get_axes():
+            bounds = self._quantized_bounds.get(id(axes))
+            exact = self._box_exact.get(id(axes), False)
+            owned = False
+            if bounds is not None and exact:
+                aspect = axes.get_aspect()
+                if not isinstance(aspect, (int, float)) or isinstance(aspect, bool):
+                    owned = True
+                else:
+                    figure_box = self._figure.bbox
+                    width = float(figure_box.width)
+                    height = float(figure_box.height)
+                    box_w = ((bounds[0] + bounds[2]) * width) - (bounds[0] * width)
+                    box_h = ((bounds[1] + bounds[3]) * height) - (bounds[1] * height)
+                    try:
+                        ratio = float(aspect) * float(axes.get_data_ratio())
+                    except Exception:
+                        ratio = float("nan")
+                    owned = box_w * ratio == box_h
+            self._owned_box[id(axes)] = owned
+            if self._hold_quantized_box(axes) and bounds is not None:
+                # The box Matplotlib rewrote on the way here is not the box
+                # the layout settled on; put it back before anything reads it.
+                axes.set_position(bounds)
+                self._mark_axes_chrome_dirty(axes)
+
+    def _hold_quantized_box(self, axis: Any) -> bool:
+        """Stop ``apply_aspect`` re-deriving a box the layout already settled.
+
+        For an aspect-locked axes Matplotlib recomputes the position on every
+        draw -- ``shrunk_to_aspect`` then ``anchored`` -- and its arithmetic
+        lands a 93-pixel cell on 92.99999999999989.  That last ulp decides
+        everything: ``_make_image`` rounds an image's output size UP unless
+        the box measures an exactly integral number of pixels, so an inexact
+        box means the front is stretched and the compose's copy of it is
+        correctly refused -- sixty-four cells falling back to Matplotlib's
+        whole image machinery every frame.
+
+        Where the snapped box is on whole pixels and already on the aspect,
+        there is nothing left for ``apply_aspect`` to decide, and it is
+        replaced on that axes alone.  Returns whether the arrangement
+        changed, since a box set while Matplotlib still owned it is a box
+        Matplotlib has since rewritten.
+        """
+
+        owned = self._owned_box.get(id(axis), False)
+        installed = id(axis) in self._owned_axes
+        if owned == installed:
+            return False
+        if owned:
+            axis.apply_aspect = _position_is_the_position(axis)
+            self._owned_axes.add(id(axis))
+        else:
+            try:
+                del axis.apply_aspect
+            except AttributeError:
+                pass
+            self._owned_axes.discard(id(axis))
+        return True
+
+    def _position_axes_for_frame(self) -> None:
+        """Snap every standalone axes box to whole physical pixels.
+
+        The rule a facet cell already gets, for the reason the cell got it: a
+        box on fractional pixels denies the compose's exact image blit, and
+        Matplotlib resamples the front into a rectangle whose sample
+        boundaries sit off ours.  Snapping moves an edge by under a pixel.
+
+        It runs BEFORE the artists update, because an image front is composed
+        to the box it is about to be copied into; a box that moved afterwards
+        would be a box the front no longer fits.
+        """
+
+        plans_by_role: dict[str, list[Any]] = {}
+        for axes_plan in self.plan.axes:
+            plans_by_role.setdefault(axes_plan.role, []).append(axes_plan)
+        for role, axis_list in self._axes.items():
+            if role == "facet_cell":
+                # Cells carry their own per-frame snapping, against the
+                # focus-aware boxes only that path knows.
+                continue
+            for axis, axes_plan in zip(axis_list, plans_by_role.get(role, ())):
+                bounds = self._pixel_quantized_bounds(
+                    axis, axes_plan.box.matplotlib_bounds()
+                )
+                # Compare against what WE last set, not against the axes'
+                # current position: an aspect-locked axes has its position
+                # adjusted by ``apply_aspect`` during every draw, so asking
+                # the axes re-set it on every frame -- marking the chrome
+                # dirty each time and costing the panel its background cache.
+                applied = self._quantized_bounds.get(id(axis))
+                if applied is None or any(
+                    abs(now - wanted) > 1e-12
+                    for now, wanted in zip(applied, bounds)
+                ):
+                    axis.set_position(bounds)
+                    self._quantized_bounds[id(axis)] = tuple(bounds)
+                    self._mark_axes_chrome_dirty(axis)
 
     def _position_facet_axes_for_frame(self, axes: Sequence[Any]) -> None:
         """Apply final cell boxes before artists resolve pixel-dependent work."""
@@ -5324,6 +5822,7 @@ class MatplotlibRenderer:
                 # (x0+w)-x0, one ulp off the stored fraction, and an exact
                 # compare re-positioned (and now re-captured chrome for)
                 # every cell on every frame.
+                self._quantized_bounds[id(axis)] = tuple(bounds)
                 current = tuple(axis.get_position().bounds)
                 if any(
                     abs(now - wanted) > 1e-12
@@ -5349,6 +5848,10 @@ class MatplotlibRenderer:
             visible = index == selected_index
             if axis.get_visible() != visible:
                 axis.set_visible(visible)
+            # A focused cell takes the split's box, not a snapped one, so the
+            # layout no longer owns it and Matplotlib gets its aspect back.
+            self._quantized_bounds.pop(id(axis), None)
+            self._box_exact[id(axis)] = False
         if tuple(axes[selected_index].get_position().bounds) != tuple(bounds):
             axes[selected_index].set_position(bounds)
 
@@ -6130,7 +6633,7 @@ class MatplotlibRenderer:
                     key, prepared, mapping[0], cmap_cache[1], limits
                 )
             if rgba is not None:
-                image.set_data(rgba)
+                self._install_image_front(image, rgba)
                 self._artists[f"{key}:applied_front"] = rgba
             # The artist clim stays authoritative for selector geometry and
             # snapshots in both modes.
@@ -6969,22 +7472,27 @@ class MatplotlibRenderer:
         source = np.asarray(self._figure.canvas.buffer_rgba(), dtype=np.uint8)
         target_width, target_height = self.plan.raster_size
         actual_height, actual_width = source.shape[:2]
+        shape = (target_height, target_width, 4)
+        writable, published = self._publish_pool.take(
+            target_height * target_width * 4
+        )
+        pixels = np.frombuffer(writable, dtype=np.uint8).reshape(shape)
         if (actual_width, actual_height) == (target_width, target_height):
-            return readonly_copy(source)
-
-        # Fractional DPR can put Agg's floor allocation one trailing pixel away
-        # from the rounded frontend contract.  Preserve artist transforms and
-        # adjust only the right and bottom handoff edges.
-        pixels = np.empty((target_height, target_width, 4), dtype=np.uint8)
-        background = np.rint(
-            np.clip(np.asarray(self._figure.get_facecolor()), 0.0, 1.0) * 255.0
-        ).astype(np.uint8)
-        pixels[...] = background
-        copy_width = min(target_width, actual_width)
-        copy_height = min(target_height, actual_height)
-        pixels[:copy_height, :copy_width] = source[:copy_height, :copy_width]
-        pixels.setflags(write=False)
-        return pixels
+            np.copyto(pixels, source)
+        else:
+            # Fractional DPR can put Agg's floor allocation one trailing pixel
+            # away from the rounded frontend contract.  Preserve artist
+            # transforms and adjust only the right and bottom handoff edges.
+            background = np.rint(
+                np.clip(np.asarray(self._figure.get_facecolor()), 0.0, 1.0)
+                * 255.0
+            ).astype(np.uint8)
+            pixels[...] = background
+            copy_width = min(target_width, actual_width)
+            copy_height = min(target_height, actual_height)
+            pixels[:copy_height, :copy_width] = source[:copy_height, :copy_width]
+        del pixels, writable
+        return np.frombuffer(published, dtype=np.uint8).reshape(shape)
 
     def capture_rgba(
         self,
@@ -7014,11 +7522,17 @@ class MatplotlibRenderer:
         target_width, target_height = self.plan.raster_size
         actual_height, actual_width = source.shape[:2]
         if (actual_width, actual_height) == (target_width, target_height):
-            return source.tobytes(order="C"), target_height, target_width
-        # Fractional DPR takes the padded path, which has to build an array
-        # anyway; one copy there is unavoidable and the shape is already right.
+            writable, published = self._publish_pool.take(source.nbytes)
+            np.copyto(
+                np.frombuffer(writable, dtype=np.uint8).reshape(source.shape),
+                source,
+            )
+            del writable
+            return published, target_height, target_width
+        # Fractional DPR takes the padded path, which builds the array on a
+        # pooled buffer anyway; its own read-only view is the front.
         padded = self._rgba_buffer()
-        return padded.tobytes(order="C"), target_height, target_width
+        return padded.data, target_height, target_width
 
     def rgba(self) -> np.ndarray:
         """Return an immutable RGBA snapshot of the current scene.

@@ -65,18 +65,34 @@ _UNSET = object()
 
 @dataclass(frozen=True, slots=True)
 class RasterBuffer:
-    """One tightly packed, owned, immutable RGBA8888 image."""
+    """One tightly packed RGBA8888 image, immutable for as long as it is held.
+
+    The guarantee to a holder has not changed: these bytes cannot be
+    written, and they stay valid and unchanged for exactly as long as the
+    holder keeps a reference.  What changed is who allocated them.  A fresh
+    eighteen-megabyte ``bytes`` per published front costs six milliseconds
+    of page faults on the worker that has to keep up with a live camera, so
+    the renderer writes into a recycled buffer and hands out a READ-ONLY
+    view of it.  The buffer returns to its pool when the last reference to
+    that view is dropped -- the interpreter decides when, not a protocol
+    anyone has to remember -- so a holder can never be reading a buffer that
+    has been handed out again.
+    """
 
     width: int
     height: int
-    pixels: bytes
+    pixels: Any
 
     def __post_init__(self) -> None:
         width = integer(self.width, "raster width", minimum=1)
         height = integer(self.height, "raster height", minimum=1)
-        if not isinstance(self.pixels, bytes):
-            raise TypeError("raster pixels must be owned immutable bytes")
-        if len(self.pixels) != width * height * 4:
+        try:
+            view = memoryview(self.pixels)
+        except TypeError as error:
+            raise TypeError("raster pixels must be a buffer") from error
+        if not view.readonly:
+            raise TypeError("raster pixels must be read-only")
+        if view.nbytes != width * height * 4:
             raise ValueError("RGBA8888 byte length does not match raster dimensions")
 
     def as_rgba(self, *, copy: bool = False) -> np.ndarray:

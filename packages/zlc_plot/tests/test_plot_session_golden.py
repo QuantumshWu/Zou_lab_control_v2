@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from pathlib import Path
 
 import numpy as np
@@ -94,6 +96,10 @@ def test_headless_plot_kinds_have_stable_rgba_goldens(
         # question of whether the raster matches its plan.
         assert first.shape == logical_shape()
         assert np.array_equal(first, second)
+        if os.environ.get("ZLC_WRITE_GOLDENS"):
+            # Re-baselining is a deliberate act, so it is spelled out rather
+            # than inferred from a failure: the layout moved on purpose.
+            Image.fromarray(np.asarray(first)).save(_GOLDEN_ROOT / f"{kind}.png")
         expected = np.asarray(
             Image.open(_GOLDEN_ROOT / f"{kind}.png").convert("RGBA"),
             dtype=np.int16,

@@ -2332,6 +2332,7 @@ class DataView:
         *,
         group: AxisRef | None = None,
         aggregation: Reduction = Reduction.MEAN,
+        uncertainty: bool = True,
     ) -> tuple[RollingSample, ...]:
         """Expand the repeat axis into per-shot rolling samples, oldest first.
 
@@ -2339,12 +2340,18 @@ class DataView:
         repeat reduces to one rolling sample exactly as :meth:`rolling_sample`
         reduces one whole revision.  A snapshot without repeats degenerates to
         the single whole-revision sample.
+
+        ``uncertainty`` is whether the caller will DRAW the band.  Its
+        standard error needs a second pass over every value -- squared,
+        masked and reduced again -- which the rolling panel paid on every
+        revision whether or not the band was switched on.
         """
 
         if self.has_primary_index:
             return self._history_samples_by_primary_index(
                 group=group,
                 aggregation=aggregation,
+                uncertainty=uncertainty,
             )
         repeats = schema_repeat_count(self._schema)
         if repeats <= 1:
@@ -2357,6 +2364,7 @@ class DataView:
             group=group,
             aggregation=aggregation,
             repeats=repeats,
+            uncertainty=uncertainty,
         )
         if tensor is not None:
             return tensor
@@ -2388,7 +2396,10 @@ class DataView:
         values = np.asarray(values).reshape(repeats, domain_size)
         counts = np.asarray(counts).reshape(repeats, domain_size)
         sem = None
-        if aggregation is Reduction.MEAN:
+        if uncertainty and aggregation is Reduction.MEAN:
+            # The band's standard error is a SECOND full pass -- a float64
+            # copy of every value, squared, then reduced again.  The panel
+            # paid it on every revision whether or not the band was drawn.
             mean_square, _ = _aggregate_by_codes(
                 np.square(position_values.astype(np.float64, copy=False)),
                 usable,
@@ -2423,6 +2434,7 @@ class DataView:
         group: AxisRef | None,
         aggregation: Reduction,
         repeats: int,
+        uncertainty: bool = True,
     ) -> tuple[RollingSample, ...] | None:
         """Reduce a regular repeat history once, not once per repeat.
 
@@ -2477,11 +2489,23 @@ class DataView:
         counts = np.asarray(counts, dtype=np.int64)
         reduced = np.where(counts > 0, reduced, np.nan)
         sem = None
-        if aggregation is Reduction.MEAN:
-            mean_square, _ = _masked_leading_reduce(
-                np.moveaxis(np.square(working), -1, 0),
+        if uncertainty and aggregation is Reduction.MEAN:
+            # ``np.square`` on the whole cube materialises a second copy of
+            # every value in the history -- sixteen megabytes on a
+            # two-million-sample pool -- before reducing it.  einsum sums the
+            # products in one pass with no temporary at all, and over the
+            # SAME masked values, so the moment it feeds is identical.
+            masked = np.where(
                 np.moveaxis(usable_cube, -1, 0),
-                Reduction.MEAN,
+                np.moveaxis(working, -1, 0),
+                0.0,
+            )
+            squared_sum = np.einsum("i...,i...->...", masked, masked)
+            mean_square = np.divide(
+                squared_sum,
+                counts,
+                out=np.zeros_like(squared_sum, dtype=np.float64),
+                where=counts > 0,
             )
             sem = _sem_from_moments(
                 reduced,
@@ -2507,6 +2531,7 @@ class DataView:
         *,
         group: AxisRef | None,
         aggregation: Reduction,
+        uncertainty: bool = True,
     ) -> tuple[RollingSample, ...]:
         """Reduce every authored primary-index cell without arrival history."""
 
@@ -2540,7 +2565,10 @@ class DataView:
         values = np.asarray(values).reshape(history_count, domain_size)
         counts = np.asarray(counts).reshape(history_count, domain_size)
         sem = None
-        if aggregation is Reduction.MEAN:
+        if uncertainty and aggregation is Reduction.MEAN:
+            # The band's standard error is a SECOND full pass -- a float64
+            # copy of every value, squared, then reduced again.  The panel
+            # paid it on every revision whether or not the band was drawn.
             mean_square, _ = _aggregate_by_codes(
                 np.square(position_values.astype(np.float64, copy=False)),
                 usable,
@@ -2614,12 +2642,7 @@ class DataView:
             if np.any(np.diff(edges) <= 0):
                 raise ValueError("histogram edges must be strictly increasing")
             canonical_bins = edges
-        counts = (
-            None
-            if isinstance(canonical_bins, int)
-            else _uniform_integer_counts(values, valid, canonical_bins)
-        )
-        if counts is None:
+        if isinstance(canonical_bins, int):
             source = np.asarray(values)
             if valid is None or bool(np.all(valid)):
                 selected = source.reshape(-1)
@@ -2627,6 +2650,7 @@ class DataView:
                 selected = source[np.asarray(valid, dtype=np.bool_)].reshape(-1)
             counts, edges = np.histogram(selected, bins=canonical_bins)
         else:
+            counts = histogram_counts(values, canonical_bins, valid)
             edges = canonical_bins
         centers = (edges[:-1] + edges[1:]) / 2.0
         display_edges = self._samples.value.canonical_unit.convert_value_to(
@@ -3319,6 +3343,116 @@ def _uniform_integer_counts(
     return counts
 
 
+def _uniform_counts(
+    values: NDArray[Any],
+    valid: NDArray[np.bool_] | None,
+    edges: NDArray[Any],
+) -> NDArray[np.int64] | None:
+    """Count a UNIFORMLY binned histogram without sorting every sample.
+
+    ``np.histogram`` given an edge ARRAY must assume the bins are irregular,
+    so it sorts the whole pool: twelve milliseconds a revision on two
+    million values, more than half of what a live histogram panel costs.
+    Our edges are a linspace, and numpy already has the linear path for
+    exactly that shape -- ``bins=count, range=(first, last)`` bincounts the
+    scaled indices and builds the very same edges.  Handing it the count
+    instead of the edges is the same question asked in the form numpy can
+    answer cheaply; the edges it returns are compared before its answer is
+    accepted, so nothing here decides what a bin IS.
+    """
+
+    if edges.ndim != 1 or edges.size < 2:
+        return None
+    first = float(edges[0])
+    last = float(edges[-1])
+    if not (math.isfinite(first) and math.isfinite(last)) or last <= first:
+        return None
+    count = int(edges.size) - 1
+    if not np.array_equal(edges, np.linspace(first, last, edges.size)):
+        return None
+    source = np.asarray(values)
+    if valid is None or bool(np.all(valid)):
+        selected = source.reshape(-1)
+    else:
+        selected = source[np.asarray(valid, dtype=np.bool_)].reshape(-1)
+    kernelled = _kernel_counts(selected, edges, first, last, count)
+    if kernelled is not None:
+        return kernelled
+    counts, produced = np.histogram(selected, bins=count, range=(first, last))
+    if not np.array_equal(produced, edges):
+        return None
+    return counts
+
+
+def _kernel_counts(
+    selected: NDArray[Any],
+    edges: NDArray[Any],
+    first: float,
+    last: float,
+    count: int,
+) -> NDArray[np.int64] | None:
+    """The same equal-bin count, in one pass, or ``None`` to defer.
+
+    numpy walks the pool in blocks and pays five vector passes per block --
+    two range comparisons, a cast, an index plane, two corrections and a
+    bincount.  The kernel does each sample once.  It answers only where its
+    arithmetic is numpy's own: the edge dtype numpy would have picked must
+    be float64, and the edges it would have built must be the edges we were
+    handed, which is the same guard the reference applies afterwards.
+    """
+
+    from . import _raster_kernels as kernels
+
+    if not kernels.engaged():
+        return None
+    bin_type = np.result_type(first, last, selected)
+    if np.issubdtype(bin_type, np.integer):
+        bin_type = np.result_type(bin_type, float)
+    if bin_type != np.float64:
+        return None
+    produced = np.linspace(first, last, count + 1, dtype=bin_type)
+    if not np.array_equal(produced, edges):
+        return None
+    if bool(np.any(produced[:-1] >= produced[1:])):
+        return None
+    flat = np.ascontiguousarray(selected)
+    if flat.ndim != 1:
+        return None
+    threads = kernels.histogram_threads()
+    partials = np.empty((threads, count), dtype=np.int64)
+    counted = np.empty(count, dtype=np.int64)
+    kernels.uniform_histogram(flat, produced, count, partials, counted)
+    return counted
+
+
+def histogram_counts(
+    values: NDArray[Any],
+    edges: NDArray[Any],
+    valid: NDArray[np.bool_] | None = None,
+) -> NDArray[Any]:
+    """Counts for one explicit edge array, the cheapest way that is exact.
+
+    THE one place that turns values plus edges into counts.  Every caller
+    used to hand ``np.histogram`` the edge array, which sorts the whole
+    pool because it must assume irregular bins; every set of edges this
+    library produces is uniform, integer-aligned, or both.
+    """
+
+    edge_array = np.asarray(edges)
+    counts = _uniform_integer_counts(values, valid, edge_array)
+    if counts is None:
+        counts = _uniform_counts(values, valid, edge_array)
+    if counts is not None:
+        return counts
+    source = np.asarray(values)
+    if valid is None or bool(np.all(valid)):
+        selected = source.reshape(-1)
+    else:
+        selected = source[np.asarray(valid, dtype=np.bool_)].reshape(-1)
+    counted, _produced = np.histogram(selected, bins=edge_array)
+    return counted
+
+
 def _stride_zero_all_true(mask: NDArray[np.bool_]) -> bool:
     """True for a stride-0 broadcast plane that is constant True."""
 
@@ -3327,6 +3461,37 @@ def _stride_zero_all_true(mask: NDArray[np.bool_]) -> bool:
     if any(stride != 0 for stride in mask.strides):
         return False
     return bool(mask.flat[0])
+
+
+def finite_probe(
+    flat: NDArray[Any],
+    valid: NDArray[np.bool_] | None = None,
+    limit: int = 65536,
+) -> NDArray[np.float64]:
+    """The first ``limit`` finite values, without a full-pool mask plane.
+
+    Same values, same order as ``_finite_probe`` over a materialised mask --
+    the mask is simply built one block at a time, because a pool whose head
+    is finite (every real pool) stops after the first.
+    """
+
+    collected: list[NDArray[Any]] = []
+    total = 0
+    for start in range(0, int(flat.size), limit):
+        block = flat[start : start + limit]
+        mask = np.isfinite(block)
+        if valid is not None:
+            mask &= valid[start : start + limit]
+        chosen = block[mask]
+        if chosen.size:
+            take = chosen[: limit - total]
+            collected.append(np.asarray(take, dtype=np.float64))
+            total += int(take.size)
+        if total >= limit:
+            break
+    if not collected:
+        return np.empty(0, dtype=np.float64)
+    return np.concatenate(collected)
 
 
 def _finite_probe(

@@ -27,6 +27,8 @@ def run_case(case) -> dict:
     t0 = time.perf_counter()
     session = PlotSession(feed.next(), case.spec())
     session.set_size("4x4")
+    if case.parameters:
+        session.set_parameters(dict(case.parameters))
     session.rgba()
     report["first_render_ms"] = round((time.perf_counter() - t0) * 1e3, 1)
     try:
