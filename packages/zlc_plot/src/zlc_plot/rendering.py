@@ -895,6 +895,8 @@ class MatplotlibRenderer:
         #: runs per steady frame in which nothing had moved.
         #: Recycled publish buffers; see PublishBufferPool.
         self._publish_pool = PublishBufferPool()
+        #: Consecutive frames whose chrome background could not be reused.
+        self._chrome_churn = 0
         #: One settled opacity answer per composed front, kept beside
         #: the array so its identity cannot be recycled underneath.
         self._front_opacity: dict[int, tuple[Any, bool]] = {}
@@ -1720,12 +1722,18 @@ class MatplotlibRenderer:
             int(round(float(self._figure.bbox.width))),
             int(round(float(self._figure.bbox.height))),
         )
+        # Two different questions.  "Did the chrome change?" decides whether a
+        # cached background could EVER be reused; "is one in hand?" decides
+        # whether one can be reused right now.  Counting the second as churn
+        # made the escape hatch below a one-way door: dropping the background
+        # guaranteed the next frame would also find none.
+        chrome_invalidated = not chrome_stable or bool(self._chrome_dirty_axes)
         reusable = (
-            chrome_stable
+            not chrome_invalidated
             and self._background_region is not None
             and self._background_signature == signature
-            and not self._chrome_dirty_axes
         )
+        self._chrome_churn = self._chrome_churn + 1 if chrome_invalidated else 0
         if not reusable:
             # Anything that invalidates the background (layout, text, chrome
             # effects, limit moves) may also have moved tick geometry through
@@ -1741,6 +1749,30 @@ class MatplotlibRenderer:
         # rather than partitioning by ownership is what keeps the compose
         # full-draw-exact: anything that legitimately draws above a selector
         # stays above it, and is simply repainted with it.
+        if (
+            not reusable
+            and self._chrome_churn > 1
+            and self._selector_gesture_kind is None
+        ):
+            # A cache that keeps missing is not a cache, it is a tax.  The
+            # capture path draws the scene once with the dynamics hidden,
+            # copies the whole figure, restores it, and paints the dynamics
+            # again -- worth it only if the NEXT frame can reuse that copy.
+            # A rolling panel's x axis is the absolute shot number, so its
+            # tick labels are re-laid on every single revision and the copy
+            # is dead on arrival: it was paying eighteen megabytes of capture
+            # and a restore, every frame, to avoid a draw it did anyway.
+            # Two consecutive misses is the evidence; the churn counter goes
+            # back to zero the moment a frame is reusable, so a panel that
+            # settles returns to the fast path by itself.
+            self._native_draw(canvas)
+            self._chrome_dirty_axes.clear()
+            self._background_region = None
+            self._background_signature = None
+            self._forget_gesture_region()
+            self._raster_generation += 1
+            self._composed_generation = self._raster_generation
+            return
         selector_ids = self._selector_artist_ids()
         split = None
         if self._selector_gesture_kind is not None and selector_ids:
@@ -2324,6 +2356,7 @@ class MatplotlibRenderer:
         x_label: str,
         y_label: str,
         limits: tuple[tuple[float, float], tuple[float, float]] | None = None,
+        x_limits: tuple[float, float] | None = None,
         paint_labels: bool = True,
         isolated_glyphs: bool = False,
     ) -> None:
@@ -2434,10 +2467,20 @@ class MatplotlibRenderer:
             self._set_xlim(axes, *limits[0])
             self._set_ylim(axes, *limits[1])
         else:
+            # ``x_limits`` is a caller that OWNS its x axis -- a rolling panel
+            # frames the configured window, not the shots that have arrived.
+            # It used to let this method set the data's extremes and then
+            # overwrite them, which moved the limits twice per revision, marked
+            # the chrome dirty both times, and cost the panel its whole
+            # background cache: every frame rebuilt what nothing had changed.
             xlim = (
-                _curve_x_limits(extremes[0:2])
-                if math.isfinite(extremes[0])
-                else None
+                x_limits
+                if x_limits is not None
+                else (
+                    _curve_x_limits(extremes[0:2])
+                    if math.isfinite(extremes[0])
+                    else None
+                )
             )
             y_range = (
                 _data_limits(extremes[2:4])
@@ -5313,6 +5356,21 @@ class MatplotlibRenderer:
             if series
             else ("value" if explicit_y is None else explicit_y)
         )
+        # The shot axis frames the FULL configured window from the first
+        # revision on: it opens at shots [0, window-1] and slides only once
+        # the trace has filled it, so the window parameter is what you see
+        # and the axis never names a negative shot.  It is resolved BEFORE the
+        # series painter runs and handed to it, because an axis with two
+        # owners is an axis that moves twice.
+        shot_values = np.concatenate(
+            [item.x[item.valid] for item in sliced]
+        ) if sliced else np.asarray([], dtype=float)
+        frame = None
+        if shot_values.size:
+            last_shot = float(np.max(shot_values))
+            window = int(state["window"])
+            low = max(0.0, last_shot - window + 1)
+            frame = _curve_x_limits(np.asarray([low, low + window - 1]))
         self._mutate_series_artists(
             history,
             tuple(sliced),
@@ -5320,21 +5378,8 @@ class MatplotlibRenderer:
             f"{key}:history",
             x_label=payload_x if explicit_x is None else explicit_x,
             y_label=y_label,
+            x_limits=frame,
         )
-        # The shot axis frames the FULL configured window from the first
-        # revision on: it opens at shots [0, window-1] and slides only once
-        # the trace has filled it, so the window parameter is what you see
-        # and the axis never names a negative shot.
-        shot_values = np.concatenate(
-            [item.x[item.valid] for item in sliced]
-        ) if sliced else np.asarray([], dtype=float)
-        if shot_values.size:
-            last_shot = float(np.max(shot_values))
-            window = int(state["window"])
-            low = max(0.0, last_shot - window + 1)
-            frame = _curve_x_limits(np.asarray([low, low + window - 1]))
-            if frame is not None:
-                self._set_xlim(history, *frame)
         latest = None
         if sliced:
             usable = sliced[0].y[sliced[0].valid]

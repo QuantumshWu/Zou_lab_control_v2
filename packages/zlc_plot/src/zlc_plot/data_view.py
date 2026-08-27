@@ -2351,6 +2351,7 @@ class DataView:
             return self._history_samples_by_primary_index(
                 group=group,
                 aggregation=aggregation,
+                uncertainty=uncertainty,
             )
         repeats = schema_repeat_count(self._schema)
         if repeats <= 1:
@@ -2395,7 +2396,10 @@ class DataView:
         values = np.asarray(values).reshape(repeats, domain_size)
         counts = np.asarray(counts).reshape(repeats, domain_size)
         sem = None
-        if aggregation is Reduction.MEAN:
+        if uncertainty and aggregation is Reduction.MEAN:
+            # The band's standard error is a SECOND full pass -- a float64
+            # copy of every value, squared, then reduced again.  The panel
+            # paid it on every revision whether or not the band was drawn.
             mean_square, _ = _aggregate_by_codes(
                 np.square(position_values.astype(np.float64, copy=False)),
                 usable,
@@ -2527,6 +2531,7 @@ class DataView:
         *,
         group: AxisRef | None,
         aggregation: Reduction,
+        uncertainty: bool = True,
     ) -> tuple[RollingSample, ...]:
         """Reduce every authored primary-index cell without arrival history."""
 
@@ -2560,7 +2565,10 @@ class DataView:
         values = np.asarray(values).reshape(history_count, domain_size)
         counts = np.asarray(counts).reshape(history_count, domain_size)
         sem = None
-        if aggregation is Reduction.MEAN:
+        if uncertainty and aggregation is Reduction.MEAN:
+            # The band's standard error is a SECOND full pass -- a float64
+            # copy of every value, squared, then reduced again.  The panel
+            # paid it on every revision whether or not the band was drawn.
             mean_square, _ = _aggregate_by_codes(
                 np.square(position_values.astype(np.float64, copy=False)),
                 usable,
