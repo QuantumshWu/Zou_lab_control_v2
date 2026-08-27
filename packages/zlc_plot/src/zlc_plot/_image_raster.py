@@ -14,6 +14,8 @@ from typing import Any
 
 import numpy as np
 
+from . import _raster_kernels as kernels
+
 
 @dataclass(frozen=True, slots=True)
 class ImageFrontPolicy:
@@ -119,7 +121,27 @@ def _area_mean(
                 column_block,
             ).mean(axis=(1, 3), dtype=mean_dtype)
     source = values if all_valid else np.where(valid, values, 0)
-    summed = _reduce_blocks(source, row_starts, column_starts, mean_dtype)
+    if (
+        all_valid
+        and mean_dtype == np.float32
+        and kernels.engaged()
+        and kernels.block_sums_are_exact(
+            values.dtype, row_starts, column_starts, values.shape
+        )
+    ):
+        # The compiled kernel's exact integer sum IS this reduction's answer
+        # while every partial stays exactly representable, which the judge
+        # above establishes from the dtype alone.  ``reduceat`` books a
+        # segment per output cell -- two million of them, each one or two
+        # samples wide -- and that bookkeeping, not the addition, is the cost.
+        summed = np.empty(
+            (row_starts.size, column_starts.size), dtype=np.float32
+        )
+        kernels.block_sum_unsigned(
+            np.ascontiguousarray(source), row_starts, column_starts, summed
+        )
+    else:
+        summed = _reduce_blocks(source, row_starts, column_starts, mean_dtype)
     if all_valid:
         row_counts = np.diff(np.r_[row_starts, values.shape[0]])
         column_counts = np.diff(np.r_[column_starts, values.shape[1]])

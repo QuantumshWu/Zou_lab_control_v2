@@ -24,6 +24,7 @@ import numpy as np
 
 from ._image_raster import ImageFrontStore, PreparedImageFront
 from ._fit_scene import FitOverlay, FitPolyline
+from . import _raster_kernels as kernels
 from .data_view import aligned_histogram_edges, histogram_counts
 from ._kinds import handler_for
 from ._rendering.pulse import update_pulse_timeline
@@ -810,6 +811,9 @@ class MatplotlibRenderer:
         #: and the canvas signature (size/DPR).  ``_update_ticks`` runs the
         #: locator and formatter, and a 35-cell facet paid for seventy such
         #: runs per steady frame in which nothing had moved.
+        #: One settled opacity answer per composed front, kept beside
+        #: the array so its identity cannot be recycled underneath.
+        self._front_opacity: dict[int, tuple[Any, bool]] = {}
         self._boundary_chrome_cache: dict[
             int, tuple[tuple[Any, Any, float], ...]
         ] = {}
@@ -1752,6 +1756,53 @@ class MatplotlibRenderer:
         self._composed_generation = self._raster_generation
         return True
 
+    @staticmethod
+    def _install_image_front(image: Any, front: Any) -> None:
+        """Hand an artist a front this renderer already normalised.
+
+        ``set_data`` runs every array through Matplotlib's normalisation:
+        a full copy, ``isfinite`` over every byte, its inversion, a masked
+        view, then ``min()`` and ``max()`` to decide whether to clip.  For
+        the uint8 RGBA we compose ourselves each of those is provably a
+        no-operation -- integers are finite, and a colour table cannot
+        leave the 0..255 the check is looking for -- and together they cost
+        more per frame than colouring the picture did.  The three
+        attributes assigned here are exactly the three ``set_data`` writes.
+        """
+
+        if (
+            type(front) is np.ndarray
+            and front.dtype == np.uint8
+            and front.dtype.isnative
+            and front.ndim == 3
+            and front.shape[2] == 4
+            and front.flags.c_contiguous
+        ):
+            image._A = front
+            image._imcache = None
+            image.stale = True
+            return
+        image.set_data(front)
+
+    def _front_is_opaque(self, front: Any) -> bool:
+        """Whether every pixel of this composed front is opaque.
+
+        Opacity is settled when the front is composed and cannot change
+        afterwards -- the arrays are handed out read-only.  The blit asked
+        it again, of nine megabytes, on every draw of every image of every
+        frame.
+        """
+
+        token = id(front)
+        remembered = self._front_opacity.get(token)
+        if remembered is not None and remembered[0] is front:
+            return remembered[1]
+        opaque = bool(front[..., 3].min() == 255)
+        if len(self._front_opacity) > 256:
+            self._front_opacity.clear()
+        self._front_opacity[token] = (front, opaque)
+        return opaque
+
     def _blit_exact_rgba_image(self, artist: Any, canvas: Any) -> bool:
         """Copy a 1:1 precomposed RGBA front straight into the Agg buffer.
 
@@ -1790,7 +1841,7 @@ class MatplotlibRenderer:
         # when every pixel is opaque -- a translucent front (the 3D
         # scene outside its pane, a NaN-holed image) must take the real
         # draw or it would punch its transparency into the buffer.
-        if shown[..., 3].min() != 255:
+        if not self._front_is_opaque(shown):
             return False
         if artist.get_interpolation() != "nearest":
             return False
@@ -3141,7 +3192,7 @@ class MatplotlibRenderer:
             if self._artists.get(applied_key) is not shown:
                 # ``set_data`` copies the front; skip it when the artist
                 # already holds this exact composed object (cache hit).
-                image.set_data(shown)
+                self._install_image_front(image, shown)
                 extent_key = f"{key}:applied_extent"
                 if self._artists.get(extent_key) != prepared.extent:
                     # ``set_extent`` rebuilds transforms and re-autoscales;
@@ -3239,7 +3290,13 @@ class MatplotlibRenderer:
             ((np.arange(box_w) + 0.5) * (columns / box_w)).astype(np.intp),
             columns - 1,
         )
-        sized = rgba[row_map][:, column_map]
+        if kernels.engaged():
+            sized = np.empty((box_h, box_w, 4), dtype=np.uint8)
+            kernels.gather_rows_columns(
+                np.ascontiguousarray(rgba), row_map, column_map, sized
+            )
+        else:
+            sized = rgba[row_map][:, column_map]
         sized.setflags(write=False)
         self._artists[cache_name] = (cache_key, sized)
         return sized
@@ -3456,7 +3513,7 @@ class MatplotlibRenderer:
             )
             self._artists[key] = image
         else:
-            image.set_data(frame)
+            self._install_image_front(image, frame)
             extent_key = f"{key}:applied_extent"
             if self._artists.get(extent_key) != scene_extent:
                 image.set_extent(scene_extent)
@@ -4693,16 +4750,36 @@ class MatplotlibRenderer:
                     ).astype(np.uint8)
                 ]
                 self._artists["image:direct_color_table"] = (table_key, table)
-            rgba = table[values]
+            if kernels.engaged():
+                rgba = np.empty(values.shape + (4,), dtype=np.uint8)
+                kernels.colour_indexed(
+                    np.ascontiguousarray(values), table, rgba
+                )
+            else:
+                rgba = table[values]
         else:
             # In-place float32 passes; boundary pixels may differ from
             # Matplotlib's float64 normalize by one 256-level step, which is
             # the same quantization the colormap applies anyway.
-            scaled = values.astype(np.float32, copy=True)
-            scaled -= np.float32(vmin)
-            scaled *= np.float32(256.0 / (vmax - vmin))
-            np.clip(scaled, 0.0, 255.0, out=scaled)
-            rgba = lut[scaled.astype(np.uint8)]
+            if kernels.engaged():
+                # One pass instead of six: the copy, the subtract, the
+                # multiply, the clip, the cast and the gather all happen
+                # per pixel, in registers, with nothing materialised
+                # between them but the answer.
+                rgba = np.empty(values.shape + (4,), dtype=np.uint8)
+                kernels.colour_float32(
+                    np.ascontiguousarray(values, dtype=np.float32),
+                    lut,
+                    np.float32(vmin),
+                    np.float32(256.0 / (vmax - vmin)),
+                    rgba,
+                )
+            else:
+                scaled = values.astype(np.float32, copy=True)
+                scaled -= np.float32(vmin)
+                scaled *= np.float32(256.0 / (vmax - vmin))
+                np.clip(scaled, 0.0, 255.0, out=scaled)
+                rgba = lut[scaled.astype(np.uint8)]
         rgba.setflags(write=False)
         self._artists[cache_name] = (cache_key, rgba)
         return rgba
@@ -6180,7 +6257,7 @@ class MatplotlibRenderer:
                     key, prepared, mapping[0], cmap_cache[1], limits
                 )
             if rgba is not None:
-                image.set_data(rgba)
+                self._install_image_front(image, rgba)
                 self._artists[f"{key}:applied_front"] = rgba
             # The artist clim stays authoritative for selector geometry and
             # snapshots in both modes.

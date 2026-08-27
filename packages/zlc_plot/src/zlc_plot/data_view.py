@@ -3367,10 +3367,54 @@ def _uniform_counts(
         selected = source.reshape(-1)
     else:
         selected = source[np.asarray(valid, dtype=np.bool_)].reshape(-1)
+    kernelled = _kernel_counts(selected, edges, first, last, count)
+    if kernelled is not None:
+        return kernelled
     counts, produced = np.histogram(selected, bins=count, range=(first, last))
     if not np.array_equal(produced, edges):
         return None
     return counts
+
+
+def _kernel_counts(
+    selected: NDArray[Any],
+    edges: NDArray[Any],
+    first: float,
+    last: float,
+    count: int,
+) -> NDArray[np.int64] | None:
+    """The same equal-bin count, in one pass, or ``None`` to defer.
+
+    numpy walks the pool in blocks and pays five vector passes per block --
+    two range comparisons, a cast, an index plane, two corrections and a
+    bincount.  The kernel does each sample once.  It answers only where its
+    arithmetic is numpy's own: the edge dtype numpy would have picked must
+    be float64, and the edges it would have built must be the edges we were
+    handed, which is the same guard the reference applies afterwards.
+    """
+
+    from . import _raster_kernels as kernels
+
+    if not kernels.engaged():
+        return None
+    bin_type = np.result_type(first, last, selected)
+    if np.issubdtype(bin_type, np.integer):
+        bin_type = np.result_type(bin_type, float)
+    if bin_type != np.float64:
+        return None
+    produced = np.linspace(first, last, count + 1, dtype=bin_type)
+    if not np.array_equal(produced, edges):
+        return None
+    if bool(np.any(produced[:-1] >= produced[1:])):
+        return None
+    flat = np.ascontiguousarray(selected)
+    if flat.ndim != 1:
+        return None
+    threads = kernels.histogram_threads()
+    partials = np.empty((threads, count), dtype=np.int64)
+    counted = np.empty(count, dtype=np.int64)
+    kernels.uniform_histogram(flat, produced, count, partials, counted)
+    return counted
 
 
 def histogram_counts(
