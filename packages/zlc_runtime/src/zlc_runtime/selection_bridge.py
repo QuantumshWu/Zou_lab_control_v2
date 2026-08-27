@@ -68,31 +68,127 @@ __all__ = [
 ]
 
 
-def _mean(sample: np.ndarray) -> float:
-    return float(np.mean(sample, dtype=np.float64))
+def _tail_average(tail: np.ndarray) -> float:
+    """The mean of a handful of samples, in an order nothing can change.
+
+    ``partition`` settles WHICH samples are in the tail, never their order
+    among themselves, and floating point addition is not associative -- so
+    the answer moved in its last bit when the partition was asked for both
+    ends at once instead of one at a time.  It had always depended on
+    numpy's internals; it just had no occasion to show it.  Ten values
+    sorted cost nothing and the answer stops depending on how they were
+    found.
+    """
+
+    return float(np.mean(np.sort(tail), dtype=np.float64))
 
 
-def _minimum(sample: np.ndarray) -> float:
-    return float(np.min(sample))
+#: How many of the extreme samples the tail statistics average.
+_TAIL_SAMPLES = 10
 
 
-def _maximum(sample: np.ndarray) -> float:
-    return float(np.max(sample))
+class _Sample:
+    """One region's values, and the summary every scalar reads off it.
+
+    The catalogue asks five questions of the same numbers, and two of them
+    -- the mean of the ten smallest and of the ten largest -- were each
+    answered by partitioning the WHOLE region: two full reorderings of two
+    hundred thousand pixels, or of two million when the box is the frame, to
+    find ten values.  Measured on a 346x345 camera window that was 95 per
+    cent of the reduction; on the whole frame it was twenty of its
+    twenty-two milliseconds.
+
+    A camera frame is small unsigned integers, so it has at most sixty-five
+    thousand distinct values and one ``bincount`` pass answers all five at
+    once.  The array path stays for everything else AND is the
+    specification: ``test_roi_statistics_agree`` asserts the two give
+    identical numbers.
+    """
+
+    __slots__ = ("_values", "_counts", "_size")
+
+    def __init__(self, values: np.ndarray) -> None:
+        self._values = values
+        self._size = int(values.size)
+        self._counts: np.ndarray | None = None
+        if values.dtype.kind == "u" and values.dtype.itemsize <= 2 and self._size:
+            self._counts = np.bincount(np.ravel(values))
+
+    @property
+    def size(self) -> int:
+        return self._size
+
+    def _levels(self) -> np.ndarray:
+        assert self._counts is not None
+        return np.arange(self._counts.size, dtype=np.float64)
+
+    def mean(self) -> float:
+        if self._counts is None:
+            return float(np.mean(self._values, dtype=np.float64))
+        total = float(np.dot(self._counts, self._levels()))
+        return total / float(self._size)
+
+    def minimum(self) -> float:
+        if self._counts is None:
+            return float(np.min(self._values))
+        return float(np.argmax(self._counts > 0))
+
+    def maximum(self) -> float:
+        if self._counts is None:
+            return float(np.max(self._values))
+        present = np.nonzero(self._counts)[0]
+        return float(present[-1])
+
+    def _tail_mean(self, count: int, *, from_top: bool) -> float:
+        counts = self._counts
+        assert counts is not None
+        levels = self._levels()
+        if from_top:
+            counts = counts[::-1]
+            levels = levels[::-1]
+        taken = np.minimum(counts, np.maximum(
+            count - np.concatenate(([0], np.cumsum(counts)[:-1])), 0
+        ))
+        return float(np.dot(taken, levels)) / float(count)
+
+    def bottom_mean(self) -> float:
+        count = min(_TAIL_SAMPLES, self._size)
+        if self._counts is None:
+            # One position at a time.  Asking ``partition`` for both ends in
+            # a single call reorders the region once instead of twice and
+            # sounds obviously better; measured, it is 5 to 25 per cent
+            # SLOWER on the float regions that reach this path at all (uint8
+            # is faster that way and never gets here -- it is counted).
+            ordered = np.partition(self._values, count - 1)[:count]
+            return _tail_average(ordered)
+        return self._tail_mean(count, from_top=False)
+
+    def top_mean(self) -> float:
+        count = min(_TAIL_SAMPLES, self._size)
+        if self._counts is None:
+            ordered = np.partition(self._values, self._size - count)[-count:]
+            return _tail_average(ordered)
+        return self._tail_mean(count, from_top=True)
 
 
-def _bottom_10_mean(sample: np.ndarray) -> float:
-    count = min(10, sample.size)
-    return float(np.mean(np.partition(sample, count - 1)[:count], dtype=np.float64))
+def _mean(sample: _Sample) -> float:
+    return sample.mean()
 
 
-def _top_10_mean(sample: np.ndarray) -> float:
-    count = min(10, sample.size)
-    return float(
-        np.mean(
-            np.partition(sample, sample.size - count)[-count:],
-            dtype=np.float64,
-        )
-    )
+def _minimum(sample: _Sample) -> float:
+    return sample.minimum()
+
+
+def _maximum(sample: _Sample) -> float:
+    return sample.maximum()
+
+
+def _bottom_10_mean(sample: _Sample) -> float:
+    return sample.bottom_mean()
+
+
+def _top_10_mean(sample: _Sample) -> float:
+    return sample.top_mean()
 
 
 _AREA_SELECTION_OUTPUTS = (
@@ -123,6 +219,22 @@ def selection_output_catalog(selector_kind: str) -> tuple[tuple[str, str], ...]:
     return tuple((name, label) for name, label, _reducer in catalog)
 
 
+def _countable(values: np.ndarray, valid: np.ndarray) -> np.ndarray:
+    """Which samples count: valid, and a number.
+
+    ``isfinite`` is a question about floating point.  Asked of an integer
+    frame -- which is what a camera delivers -- it walks every pixel to
+    answer "yes" for all of them, allocates a boolean image to say so, and
+    then the ``and`` walks the pair to allocate another.  Two passes and two
+    megabytes, per shot, for a region whose validity the caller already
+    knows.
+    """
+
+    if values.dtype.kind in "biu":
+        return valid
+    return valid & np.isfinite(values)
+
+
 def _roi_statistics(
     values: np.ndarray,
     finite: np.ndarray,
@@ -135,13 +247,27 @@ def _roi_statistics(
     flat_finite = finite.reshape(*shape, -1)
     result = {name: np.zeros(shape, dtype=np.float64) for name in reducers}
     valid = np.zeros(shape, dtype=np.bool_)
+    # Asked once for the whole set rather than per cell: where nothing is
+    # excluded the sample IS the row, and compacting it through a boolean
+    # mask copies every pixel of the region to arrive at the same numbers.
+    everything_counts = bool(flat_finite.all())
     for index in np.ndindex(shape):
-        sample = flat_values[index][flat_finite[index]]
+        sample = flat_values[index]
+        if not everything_counts:
+            sample = sample[flat_finite[index]]
+        elif not sample.flags.c_contiguous:
+            # A region cut out of a frame is a strided window, and five
+            # reductions plus two partitions each walk it the hard way.  The
+            # boolean compaction this branch replaces happened to leave a
+            # packed copy behind; say so on purpose rather than paying for
+            # it by accident.
+            sample = np.ascontiguousarray(sample)
         if not sample.size:
             continue
         valid[index] = True
+        summary = _Sample(sample)
         for name, reducer in reducers.items():
-            result[name][index] = reducer(sample)
+            result[name][index] = reducer(summary)
     return MappingProxyType(
         {name: (answer, valid) for name, answer in result.items()}
     )
@@ -1852,7 +1978,7 @@ class SelectionBridge:
             return output
         statistics = _roi_statistics(
             values,
-            valid_values & np.isfinite(values),
+            _countable(values, valid_values),
             scalar_outputs,
         )
         scalar_schema = DatasetSchema(

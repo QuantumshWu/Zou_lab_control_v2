@@ -2531,3 +2531,52 @@ def test_a_fit_faceted_over_a_component_axis_publishes() -> None:
         assert column.role == SCAN_POINT
     finally:
         _close(bridge, plane, source)
+
+
+def test_the_histogram_summary_gives_the_array_path_s_numbers_exactly() -> None:
+    """Same region, same five scalars, whichever way they are counted.
+
+    Two of the catalogue's scalars -- the mean of the ten smallest samples
+    and of the ten largest -- were each answered by partitioning the whole
+    region, so ten numbers cost two full reorderings of it.  On a 346x345
+    camera window that was 95 per cent of the reduction, and on a
+    whole-frame selection twenty of its twenty-two milliseconds.
+
+    A camera frame is small unsigned integers, so one ``bincount`` pass
+    answers all five.  The array path stays for every other dtype and is
+    the specification here: the two must agree EXACTLY, ties, degenerate
+    sizes and single-valued regions included.
+    """
+
+    from zlc_runtime.selection_bridge import _Sample
+
+    rng = np.random.default_rng(11)
+    questions = ("mean", "minimum", "maximum", "bottom_mean", "top_mean")
+    regions = [
+        np.array([7], dtype=np.uint8),
+        np.full(5, 3, dtype=np.uint8),
+        np.full(2048, 200, dtype=np.uint8),
+        np.arange(10, dtype=np.uint8),
+        np.array([0, 255] * 7, dtype=np.uint8),
+        np.zeros(1000, dtype=np.uint8),
+        np.full(30, 65535, dtype=np.uint16),
+        rng.integers(0, 4096, size=5000, dtype=np.uint16),
+    ]
+    regions += [
+        rng.integers(0, int(rng.integers(2, 256)),
+                     size=int(rng.integers(1, 3000)), dtype=np.uint8)
+        for _ in range(60)
+    ]
+    for region in regions:
+        counted = _Sample(region)
+        assert counted._counts is not None, (
+            "the histogram path must engage for %s" % region.dtype
+        )
+        # The same values as floats take the array path by construction.
+        measured = _Sample(region.astype(np.float64))
+        assert measured._counts is None
+        for question in questions:
+            assert getattr(counted, question)() == getattr(measured, question)(), (
+                "%s disagrees on a %d-sample %s region"
+                % (question, region.size, region.dtype)
+            )
