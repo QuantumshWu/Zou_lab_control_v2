@@ -1240,6 +1240,9 @@ class MatplotlibRenderer:
         self._owned_axes: set[int] = set()
         #: Whether the snapped box landed on exactly integral pixels.
         self._box_exact: dict[int, bool] = {}
+        #: The axes a gesture is confined to, while one is running.  Artists
+        #: elsewhere cannot change, so for its duration they are background.
+        self._confined_gesture_axes: Any | None = None
         #: The shape each axes' box was snapped to, recorded where it was
         #: decided so the settle reaches the same verdict from the same
         #: number instead of re-deriving one that can disagree.
@@ -1596,6 +1599,20 @@ class MatplotlibRenderer:
             and state_changed
             and bool(selected_effects & RenderEffect.BASE_STYLE)
         )
+        if payload_changed and self._confined_gesture_axes is not None:
+            # A shot landing mid-gesture can move anything, including the
+            # chrome the confinement is holding in the background: a tight
+            # colour limit re-labels the colorbar, and a clim change marks
+            # no axes dirty, so nothing else would notice.  Drop the
+            # background and let this frame capture a fresh one -- WITH the
+            # confinement still on, so the held chrome is drawn into it
+            # rather than hidden out of it.  On the DATA changing, not on
+            # ``base_changed``: a camera parameter carries base geometry too,
+            # and reading it that way recaptured on every single move, which
+            # is the whole cost the confinement exists to avoid.
+            self._background_region = None
+            self._background_signature = None
+            self._chrome_churn = 0
         overview = isinstance(self.spec, FacetGridPlot) and self._facet_focus_index is None
         painted_selectors = SelectorSnapshot(()) if overview else frame.selectors
         painted_fit_overlays = tuple(frame.fit_overlays)
@@ -1907,8 +1924,23 @@ class MatplotlibRenderer:
                 and getattr(value, "axes", None) is not None
                 and id(value.axes) in axes_order
                 and value.axes.get_visible()
+                and touchable(value)
             ):
                 keyed(value, value.axes, value.get_zorder())
+
+        confined = self._confined_gesture_axes
+        if confined is not None and confined not in figure_axes:
+            confined = None
+
+        def touchable(artist: Any) -> bool:
+            """Can the confined gesture change this artist's pixels?"""
+
+            if confined is None:
+                return True
+            axes = getattr(artist, "axes", None)
+            if axes is None or axes is confined:
+                return True
+            return _boxes_meet(axes.bbox, confined.bbox)
 
         for value in self._artists.values():
             add(value)
@@ -1959,6 +1991,10 @@ class MatplotlibRenderer:
             self._boundary_chrome_signature = signature
         for axes in {entry[1].axes for entry in tuple(collected)}:
             if not axes.get_visible():
+                continue
+            if confined is not None and not (
+                axes is confined or _boxes_meet(axes.bbox, confined.bbox)
+            ):
                 continue
             if not getattr(axes, "axison", True):
                 # ``set_axis_off`` (the height-bar scene) removes ticks and
@@ -3923,6 +3959,17 @@ class MatplotlibRenderer:
             return True
         return key.startswith("facet:") and self._facet_focus_index is not None
 
+    def _height_bars_axes(self) -> Any | None:
+        """The axes the height-bar scene was last rendered into."""
+
+        wanted = getattr(self, "_height_bars_axes_id", None)
+        if wanted is None:
+            return None
+        return next(
+            (axes for axes in self._figure.get_axes() if id(axes) == wanted),
+            None,
+        )
+
     def set_height_bars_dragging(self, dragging: bool) -> None:
         """Say whether a hand is currently turning the scene.
 
@@ -3939,6 +3986,19 @@ class MatplotlibRenderer:
             return
         self._composed_generation = -1
         self._height_bars_dragging = dragging
+        # A turning camera changes the scene and NOTHING else: the colorbar
+        # and the distribution rail beside it are the same pixels at the end
+        # of the drag as at its start, and repainting them cost seven and a
+        # half milliseconds of tick and label machinery on every single move.
+        # For the length of the drag they are chrome, not dynamics -- which
+        # means one full draw now, to capture them, and none of that work
+        # per move afterwards.
+        self._confined_gesture_axes = (
+            self._height_bars_axes() if dragging else None
+        )
+        self._background_region = None
+        self._background_signature = None
+        self._chrome_churn = 0
 
     @property
     def height_bars_camera(self) -> "HeightBarCamera | None":

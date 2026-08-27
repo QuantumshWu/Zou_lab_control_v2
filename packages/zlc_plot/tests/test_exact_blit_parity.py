@@ -22,7 +22,7 @@ from zlc_plot import rendering as rendering_module
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
 
 
-def _camera_snapshot(height: int, width: int, revision: int = 1):
+def _camera_snapshot(height: int, width: int, revision: int = 1, scale: float = 1.0):
     rng = np.random.default_rng(4)
     schema = DatasetSchema.create(
         Axis.create("repeat", size=1),
@@ -40,7 +40,9 @@ def _camera_snapshot(height: int, width: int, revision: int = 1):
         / (2 * (height / 6.0) ** 2)
     )
     values = np.clip(
-        blob + rng.normal(scale=90.0, size=(height, width)) + 300.0, 0, 65535
+        (blob + rng.normal(scale=90.0, size=(height, width)) + 300.0) * scale,
+        0,
+        65535,
     ).astype(np.uint16)[None, None]
     return DatasetSnapshot(schema, values, revision=revision)
 
@@ -239,3 +241,59 @@ def test_no_image_front_is_ever_left_to_matplotlib(shape, ratio, presentation) -
         "%d of %d image fronts fell back to Matplotlib's image machinery"
         % (verdicts.count(False), len(verdicts))
     )
+
+
+@pytest.mark.parametrize("ratio", [1.0, 3.0])
+def test_a_confined_gesture_composes_what_a_full_draw_would(ratio) -> None:
+    """A turning camera moves the scene; the frame is still the whole frame.
+
+    For the length of a camera drag the colorbar and the distribution rail
+    are treated as chrome rather than dynamics -- they cannot change, and
+    repainting them cost seven and a half milliseconds a move.  That is only
+    sound while the composed frame stays identical to a full draw, which is
+    what this measures: the same scene, composed and drawn, pixel for pixel.
+    """
+
+    session = PlotSession(
+        _camera_snapshot(48, 64),
+        ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
+        device_pixel_ratio=ratio,
+    )
+    try:
+        session.set_size("4x4")
+        session.set_parameters({"presentation": "height_bars"})
+        session.rgba()
+        renderer = session._renderer
+        renderer.set_height_bars_dragging(True)
+        try:
+            for index, azimuth in enumerate((-40.0, -25.0, -10.0)):
+                session.set_parameter("camera_azimuth", azimuth)
+                if index == 1:
+                    # A shot lands mid-drag.  Its colour limits move the
+                    # colorbar's labels and the rail's range -- both on axes
+                    # the confinement is treating as chrome -- so this is
+                    # where a background captured before it would be stale.
+                    session.update_data(
+                        # A different RANGE, or the colour limits do not move
+                        # and this proves nothing: the whole question is
+                        # whether chrome baked before the shot goes stale.
+                        _camera_snapshot(48, 64, revision=index + 2, scale=0.4)
+                    )
+                composed = np.array(session.rgba(), copy=True)
+                canvas = renderer.figure.canvas
+                renderer._native_draw(canvas)
+                drawn = np.asarray(canvas.buffer_rgba()).copy()
+                assert composed.shape == drawn.shape
+                difference = np.abs(
+                    composed.astype(np.int16) - drawn.astype(np.int16)
+                )
+                assert int(difference.max()) == 0, (
+                    "a confined-gesture compose differs from a full draw on "
+                    "%d pixels at azimuth %s"
+                    % (int((difference.max(axis=2) > 0).sum()), azimuth)
+                )
+                renderer._composed_generation = -1
+        finally:
+            renderer.set_height_bars_dragging(False)
+    finally:
+        session.close()
