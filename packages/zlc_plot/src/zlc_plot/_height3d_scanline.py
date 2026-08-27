@@ -688,17 +688,16 @@ def _materialize(  # noqa: C901 - one kernel, mirrored from the reference
                         rr_bot = np.float64(render_h)
                     if not rr_bot > rr_top:
                         continue
-                    fr_bottom = (y_high - lo) * scale
-                    fr_top = (y_high - hi) * scale
-                    height = fr_bottom - fr_top
-                    if height < 1e-6:
-                        height = 1e-6
+                    # A flat face has ONE colour, so its slope is zero and
+                    # its anchor is that colour -- written out, not derived
+                    # through ``(c - c) / height`` and ``c - 0 * fr_top``.
+                    # The compiler cannot fold that division away (it does
+                    # not know ``height`` is finite and non-zero), so the
+                    # top faces -- the most numerous records in the walk --
+                    # each paid three real divisions to compute zero.
                     for ch in range(3):
-                        c_val = rgb_grid[cbi, cai, ch]
-                        d = c_val - c_val
-                        slp = np.float64(d) / height
-                        rec_s[count, ch] = slp
-                        rec_a[count, ch] = np.float64(c_val) - slp * fr_top
+                        rec_s[count, ch] = 0.0
+                        rec_a[count, ch] = np.float64(rgb_grid[cbi, cai, ch])
                     rec_q0[count] = rr_top * inv_taps64
                     rec_q1[count] = rr_bot * inv_taps64
                     rec_id[count] = (seg_cb[s] * nx + seg_ca[s]) * 4 + 4 + 3
@@ -725,16 +724,9 @@ def _materialize(  # noqa: C901 - one kernel, mirrored from the reference
                         rr_bot = np.float64(render_h)
                     if not rr_bot > rr_top:
                         continue
-                    fr_bottom = (y_high - lo) * scale
-                    fr_top = (y_high - hi) * scale
-                    height = fr_bottom - fr_top
-                    if height < 1e-6:
-                        height = 1e-6
                     for ch in range(3):
-                        c_val = background32[ch]
-                        slp = np.float64(c_val - c_val) / height
-                        rec_s[count, ch] = slp
-                        rec_a[count, ch] = np.float64(c_val) - slp * fr_top
+                        rec_s[count, ch] = 0.0
+                        rec_a[count, ch] = np.float64(background32[ch])
                     rec_q0[count] = rr_top * inv_taps64
                     rec_q1[count] = rr_bot * inv_taps64
                     rec_id[count] = 1
@@ -761,18 +753,9 @@ def _materialize(  # noqa: C901 - one kernel, mirrored from the reference
                     elif rr_bot > render_h:
                         rr_bot = np.float64(render_h)
                     if rr_bot > rr_top:
-                        fr_bottom = (y_high - pane_lo) * scale
-                        fr_top = (y_high - pane_hi) * scale
-                        height = fr_bottom - fr_top
-                        if height < 1e-6:
-                            height = 1e-6
                         for ch in range(3):
-                            c_val = background32[ch]
-                            slp = np.float64(c_val - c_val) / height
-                            rec_s[count, ch] = slp
-                            rec_a[count, ch] = (
-                                np.float64(c_val) - slp * fr_top
-                            )
+                            rec_s[count, ch] = 0.0
+                            rec_a[count, ch] = np.float64(background32[ch])
                         rec_q0[count] = rr_top * inv_taps64
                         rec_q1[count] = rr_bot * inv_taps64
                         rec_id[count] = 2
