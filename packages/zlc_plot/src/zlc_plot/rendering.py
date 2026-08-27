@@ -562,6 +562,50 @@ def _box_on_aspect(
     return (width, height)
 
 
+def _picture_pixel_rect(
+    box_w: int,
+    box_h: int,
+    extent: tuple[float, float, float, float],
+    x_limits: tuple[float, float],
+    y_limits: tuple[float, float],
+    origin: str,
+) -> tuple[int, int, int, int] | None:
+    """Where the picture lands inside its box, in whole pixels.
+
+    ``(row, column, width, height)``, rows counted from the array's own first
+    row -- the picture's top under ``origin="upper"`` and its bottom under
+    ``lower``, which is the convention the artist reads it with.  The picture
+    is not the box whenever the view reaches past it, which a square field
+    showing a wide camera frame always does.
+    """
+
+    if box_w < 1 or box_h < 1:
+        return None
+    x_low, x_high = sorted(float(v) for v in x_limits)
+    y_low, y_high = sorted(float(v) for v in y_limits)
+    if x_high <= x_low or y_high <= y_low:
+        return None
+    left, right, upper, lower = (float(v) for v in extent)
+    pic_x0, pic_x1 = sorted((left, right))
+    pic_y0, pic_y1 = sorted((upper, lower))
+    scale_x = box_w / (x_high - x_low)
+    scale_y = box_h / (y_high - y_low)
+    column = int(round((pic_x0 - x_low) * scale_x))
+    width = int(round((pic_x1 - pic_x0) * scale_x))
+    height = int(round((pic_y1 - pic_y0) * scale_y))
+    if str(origin) == "lower":
+        row = int(round((pic_y0 - y_low) * scale_y))
+    else:
+        row = int(round((y_high - pic_y1) * scale_y))
+    if width < 1 or height < 1:
+        return None
+    column = max(0, min(column, box_w - 1))
+    row = max(0, min(row, box_h - 1))
+    width = max(1, min(width, box_w - column))
+    height = max(1, min(height, box_h - row))
+    return (row, column, width, height)
+
+
 def _image_destination_rect(
     bbox: Any,
     extent: tuple[float, float, float, float],
@@ -3552,13 +3596,32 @@ class MatplotlibRenderer:
         if not isinstance(store, ImageFrontStore):
             store = ImageFrontStore()
             self._artists[store_key] = store
+        # The PICTURE's pixels, not the box's.  Told the box, the store
+        # reduced only the axis the box happened to crowd -- a 1200x1920
+        # camera in a 1512 square field came back 1200x1512, area-meaned
+        # across but merely re-indexed down, and the rows were then
+        # nearest-decimated to 945 on the way into the front.  One picture
+        # filtered two different ways, and a fifth of the reduction done
+        # twice.
+        picture_shape = _picture_pixel_rect(
+            max(display_pixel_shape[0], 1),
+            max(display_pixel_shape[1], 1),
+            extent,
+            tuple(map(float, x_limits)),
+            tuple(map(float, y_limits)),
+            policy.image_origin,
+        )
         prepared: PreparedImageFront = store.prepare(
             values,
             valid,
             extent,
             x_limits=tuple(map(float, x_limits)),
             y_limits=tuple(map(float, y_limits)),
-            display_pixel_shape=display_pixel_shape,
+            display_pixel_shape=(
+                display_pixel_shape
+                if picture_shape is None
+                else (picture_shape[2], picture_shape[3])
+            ),
             policy=policy.image_front,
             revision_token=(
                 self._data_revision,
@@ -3699,33 +3762,13 @@ class MatplotlibRenderer:
         bbox = axes.bbox
         box_w = int(round(float(bbox.width)))
         box_h = int(round(float(bbox.height)))
-        if box_w < 1 or box_h < 1:
+        placed = _picture_pixel_rect(
+            box_w, box_h, extent, x_limits, y_limits,
+            self.style.render.image_origin,
+        )
+        if placed is None:
             return None
-        x_low, x_high = sorted(float(v) for v in x_limits)
-        y_low, y_high = sorted(float(v) for v in y_limits)
-        if x_high <= x_low or y_high <= y_low:
-            return None
-        left, right, upper, lower = (float(v) for v in extent)
-        pic_x0, pic_x1 = sorted((left, right))
-        pic_y0, pic_y1 = sorted((upper, lower))
-        scale_x = box_w / (x_high - x_low)
-        scale_y = box_h / (y_high - y_low)
-        column = int(round((pic_x0 - x_low) * scale_x))
-        width = int(round((pic_x1 - pic_x0) * scale_x))
-        height = int(round((pic_y1 - pic_y0) * scale_y))
-        # Rows are counted from the array's own first row, which is the
-        # picture's top under ``origin="upper"`` and its bottom under
-        # ``lower`` -- the same convention the artist reads it with.
-        if str(self.style.render.image_origin) == "lower":
-            row = int(round((pic_y0 - y_low) * scale_y))
-        else:
-            row = int(round((y_high - pic_y1) * scale_y))
-        if width < 1 or height < 1:
-            return None
-        column = max(0, min(column, box_w - 1))
-        row = max(0, min(row, box_h - 1))
-        width = max(1, min(width, box_w - column))
-        height = max(1, min(height, box_h - row))
+        row, column, width, height = placed
         view_extent = (
             float(x_limits[0]),
             float(x_limits[1]),
