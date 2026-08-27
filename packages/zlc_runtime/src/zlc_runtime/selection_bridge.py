@@ -954,23 +954,32 @@ class SelectionBridge:
                 self._last_fit_batch_revision = event.batch_revision
             self._fit_trigger_revision += 1
             trigger_revision = self._fit_trigger_revision
-            processor = self._fit_processor
             output_names = self._fit_output_names(event)
-            if processor is not None and (
-                source_changed
-                or schema_changed
-                or tuple(
-                    item.name for item in processor.dataset_output_declarations
-                )
-                != output_names
-            ):
-                self._fit_processor = None
-                old_processor = processor
-                processor = None
-            else:
-                old_processor = None
-        if old_processor is not None:
-            self._withdraw_processor(old_processor)
+            replaced = source_changed or schema_changed
+        # Retiring the route this event replaces is the OTHER HALF of the
+        # claim below -- both answer "who owns this role's names" -- so it
+        # runs under the same lock.  Above it, the slot read empty while the
+        # plane still held the names: a second event in flight attached over
+        # them and was refused, "signal '@logic/<panel>/amplitude' is already
+        # owned by '<panel>:fit:1'".  ``_release_route`` was taught this; this
+        # second release site, inline here, was not -- and a fit's sample
+        # coordinates change on ordinary shots, so it is the one the bench
+        # actually walked through.
+        with self._fit_publish_lock:
+            with self._lock:
+                stale = self._fit_processor
+                if stale is not None and not (
+                    replaced
+                    or tuple(
+                        item.name for item in stale.dataset_output_declarations
+                    )
+                    != output_names
+                ):
+                    stale = None
+                if stale is not None:
+                    self._fit_processor = None
+            if stale is not None:
+                self._withdraw_processor(stale)
         if not output_names:
             return
         outputs = self._materialize_fit_outputs(

@@ -2339,6 +2339,88 @@ def test_two_fit_events_in_flight_never_own_one_name_twice() -> None:
         _close(bridge, plane, source)
 
 
+def test_retiring_a_fit_route_frees_its_names_before_the_slot_reads_empty() -> None:
+    """The RELEASE half of one claim, under the claim's own lock.
+
+    A fit whose sample coordinates moved -- an ordinary shot -- replaces
+    its route: the bridge empties the slot and withdraws the processor
+    holding the names.  Done above the publish lock, those two steps are
+    not one operation, and a second event arriving between them reads an
+    empty slot while the plane still holds the names:
+
+        signal '@logic/fit/x0' is already owned by 'fit:fit:1'
+
+    The claim side was serialized and the ``_release_route`` helper was
+    taught the same lock; this release, written inline in the publish
+    path, was not.  It is the one an operator meets, because it fires
+    whenever the fitted samples change.
+    """
+
+    schema = _curve_schema()
+    values = np.asarray([[[0.0], [0.0], [0.0], [0.0], [0.0]]])
+    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    plane.set_front_signals(
+        {"camera/frame", "@logic/fit/x0", "@logic/fit/x0_err"}
+    )
+    events = _Events()
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="fit")
+    bridge.start()
+
+    def moved(value: float, revision: int, coordinate: float) -> FitEventValue:
+        """The same fit, one shot later: same names, moved samples."""
+
+        event = _scalar_fit_event(plane, value, 0.1, revision)
+        return replace(event, sample_coordinates=np.asarray([coordinate]))
+
+    events.emit_fit(_scalar_fit_event(plane, 2.5, 0.1, 1))
+    assert bridge.last_error is None, bridge.last_error
+    assert plane.freeze().value("@logic/fit/x0") is not None
+
+    withdrawing, proceed = Event(), Event()
+    original = bridge._withdraw_processor
+
+    def holding_withdraw(processor):
+        withdrawing.set()
+        proceed.wait(20.0)
+        return original(processor)
+
+    bridge._withdraw_processor = holding_withdraw
+    failures: list[BaseException] = []
+
+    def emit(event: FitEventValue) -> None:
+        try:
+            events.emit_fit(event)
+        except BaseException as caught:  # pragma: no cover - the defect
+            failures.append(caught)
+
+    first = Thread(target=emit, args=(moved(3.5, 2, 1.0),))
+    first.start()
+    try:
+        assert withdrawing.wait(20.0), "the replaced route never withdrew"
+        second = Thread(target=emit, args=(moved(4.5, 3, 1.0),))
+        second.start()
+        # The second must WAIT for the names to be free, not attach over
+        # them: the slot being empty is not the same fact as the plane
+        # having let them go.
+        second.join(0.5)
+        assert second.is_alive(), (
+            "a second fit claimed names the retiring route still held"
+        )
+    finally:
+        proceed.set()
+        first.join(20.0)
+    second.join(20.0)
+    bridge._withdraw_processor = original
+    try:
+        assert not failures, failures
+        assert bridge.last_error is None, bridge.last_error
+        parameter = plane.freeze().value("@logic/fit/x0")
+        assert parameter is not None
+        assert float(parameter.snapshot.block.values.reshape(-1)[0]) == 4.5
+    finally:
+        _close(bridge, plane, source)
+
+
 def _component_schema() -> DatasetSchema:
     """A survival-shaped parent: its data axes carry COMPONENT and SITE."""
 
