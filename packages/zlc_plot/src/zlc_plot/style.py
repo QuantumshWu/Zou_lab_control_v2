@@ -884,7 +884,6 @@ def build_plot_style() -> PlotStyleConfig:
     return PlotStyleConfig(fonts, palette, artists, pulse, render, rc_params)
 
 
-_MATPLOTLIB_COMPOSE_LOCK = threading.RLock()
 _CANONICAL_FONT_REGISTERED = False
 
 
@@ -898,6 +897,84 @@ def _ensure_canonical_font_registered() -> None:
     _CANONICAL_FONT_REGISTERED = True
 
 
+class _RcLane:
+    """One process has one rcParams -- but not one renderer at a time.
+
+    ``matplotlib.rcParams`` is global mutable state, so a renderer that
+    installs its style must not have a second renderer install a different
+    one underneath it.  A lock held around the whole compose answered that
+    by letting exactly one panel draw at a time, and a second panel then
+    cost the SUM of both frames instead of the longer one: measured, a
+    live camera panel and a live height-bar panel fell from 43 and 21 Hz
+    to 13.6 each, with 45 ms a frame spent inside ``present`` holding
+    nothing but the lane.
+
+    Identical values are not a conflict.  Every panel of one console asks
+    for the SAME style, so the lane admits them together and serializes
+    only the part that is genuinely exclusive: installing a DIFFERENT
+    mapping, which waits for the readers of the current one to drain.
+    The last reader out restores what was there before, so a lane at rest
+    leaves the interpreter's rcParams exactly as it found them.
+
+    Entering twice on one thread with different values would wait for a
+    drain that includes itself, so it is refused by name rather than
+    hanging: every owner call enters its style ONCE, around mutation and
+    compose together.
+    """
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._installed: tuple[tuple[str, str], ...] | None = None
+        self._context: Any | None = None
+        self._readers = 0
+        self._local = threading.local()
+
+    @staticmethod
+    def _key(values: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
+        return tuple(sorted((name, repr(value)) for name, value in values.items()))
+
+    @contextmanager
+    def entered(self, values: Mapping[str, Any]) -> Iterator[None]:
+        import matplotlib
+
+        key = self._key(values)
+        held = getattr(self._local, "key", None)
+        if held is not None and held != key:
+            raise RuntimeError(
+                "this thread already holds the plot style lane with different "
+                "values; enter the style once around mutation and compose"
+            )
+        condition = self._condition
+        with condition:
+            while self._installed is not None and self._installed != key:
+                condition.wait()
+            if self._installed is None:
+                _ensure_canonical_font_registered()
+                context = matplotlib.rc_context(values)
+                context.__enter__()
+                self._context = context
+                self._installed = key
+            self._readers += 1
+        self._local.key = key
+        try:
+            yield
+        finally:
+            with condition:
+                self._readers -= 1
+                if self._readers == 0:
+                    context, self._context = self._context, None
+                    self._installed = None
+                    self._local.key = None
+                    if context is not None:
+                        context.__exit__(None, None, None)
+                    condition.notify_all()
+                else:
+                    self._local.key = None
+
+
+_MATPLOTLIB_COMPOSE_LANE = _RcLane()
+
+
 @contextmanager
 def style_context(
     style: PlotStyleConfig,
@@ -907,7 +984,6 @@ def style_context(
 
     if not isinstance(style, PlotStyleConfig):
         raise TypeError("style must be PlotStyleConfig")
-    import matplotlib
     from cycler import cycler
 
     values = style.matplotlib_rc_params()
@@ -916,13 +992,11 @@ def style_context(
         if not isinstance(overrides, Mapping):
             raise TypeError("overrides must be a mapping or None")
         values.update(overrides)
-    with _MATPLOTLIB_COMPOSE_LOCK:
-        # Font registration belongs to the same serialized compose lane as the
-        # rc mutation.  Any renderer that enters this context therefore gets
-        # the package-owned face even when it did not pre-register the asset.
-        _ensure_canonical_font_registered()
-        with matplotlib.rc_context(values):
-            yield
+    # Font registration belongs to the same serialized step as the rc
+    # mutation.  Any renderer that enters this context therefore gets the
+    # package-owned face even when it did not pre-register the asset.
+    with _MATPLOTLIB_COMPOSE_LANE.entered(values):
+        yield
 
 
 __all__ = [

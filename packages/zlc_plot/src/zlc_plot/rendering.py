@@ -4127,10 +4127,19 @@ class MatplotlibRenderer:
             # at divisor 1 by definition.
             divisor = max(int(policy.height_bars_drag_resolution_divisor), 1)
         # Vertical anti-aliasing is ANALYTIC (exact coverage), so the
-        # only sampling knob left is horizontal: three subcolumn taps on
-        # every committed frame, whatever the grid size.  The camera
-        # DRAG is the fast lane instead.
-        supersample = 1 if divisor != 1 else 3
+        # only sampling knob left is horizontal: three subcolumn taps per
+        # LOGICAL pixel, whatever the grid size.  The camera DRAG is the
+        # fast lane instead.
+        #
+        # Per logical pixel, not per device pixel.  Anti-aliasing asks how
+        # fine the DISPLAY is, and that already has an owner -- the device
+        # pixel ratio.  Three taps on top of a 3x screen sampled every
+        # logical pixel nine times for detail no screen can show, and the
+        # operator's panel paid thirty milliseconds a frame for it.
+        supersample = 1
+        if divisor == 1:
+            supersample = int(round(3.0 / max(self.plan.device_pixel_ratio, 1e-9)))
+            supersample = max(1, min(4, supersample))
         frame, scene = render_height_bars(
             heights,
             top_rgb,
