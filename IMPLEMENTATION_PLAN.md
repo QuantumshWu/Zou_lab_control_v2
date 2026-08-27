@@ -333,6 +333,32 @@ ROI 链（camera→roi_frame→3D）：相机上的 ROI 手势 9.7 ms，ROI 3D �
 master 全 kind 矩阵（4x4 单面板，free-running 生产者）：
 image 5.8 / 3D 53.3 / curve 9.7 / histogram 5.9 / rolling 9.9 / facet 68.0 ms（facet 见上，非延迟）。
 
+### 七项在**当前 master**（`2bcdc8f`）上的整体复验
+
+本轮动过 3D 光栅（`e99161a` / `50b26b7` / `c166f42`），所以七项全部重跑，不吃旧证据。
+
+| 项 | 在当前 master 上重新取得的证据 |
+|---|---|
+| 1 | `qt_form.py::_TextHandler.normalize` 读的是 `field.required`（不是 `field.default`），修复在 `90ee153` |
+| 2 | 静源 hand→picture **29.7 / 30.7 / 31.2 ms**（三次复跑），与 heatmap 整幅帧 30.3 ms 持平；你报的是 93 ms |
+| 3 | image / curve / rolling **36/36 有画面、0 次静默、6 次拖动提交同一区域**；histogram 变化是它的 x 就是测量值、活数据值域在动 |
+| 4 | 宽 ROI 数据 1150×1150 / 场景 1150×1150；缩小后 790×1150 / 1150×790——**柱数=格数且随 ROI 变** |
+| 5 | home 相机（origin=upper, azimuth=+55）四角实测 `far=a near=c left=d right=b`；origin=lower 时画面本身翻转，故 `far=d` 是同一关系 |
+| 6 | rolling 的区域是 `('shot', -69.4, -29.9)`——**负数=相对最新一发**；四种 kind 都从区域派生：image 切 770×770 全有效／curve 切 1200×763／histogram **值带** 1153368/2304000 有效／rolling **shot 窗口**（窗口未及那段时 0 有效） |
+| 7 | 全 kind 矩阵、四面板并存、ROI 链、带 fit 的 rolling 全部重跑，见下 |
+
+组合场景（`chain/combos.py`，当前 master）：
+
+| 场景 | hand→picture 中位 | 本轮之前 |
+|---|---|---|
+| 四面板并存 2x2：image / **3D** / curve / rolling | 6.7 / **24.6** / 6.5 / 7.5 ms | 8.6–**39.3** |
+| ROI 链：相机 ROI 手势 / ROI 3D 面板手势 | 6.9 / **32.1** ms | 9.8 / **39.7** |
+| 带 fit 的 rolling | 8.6 ms | 8.9 |
+
+唯一的操作者报告是 `panel-8: fit requires more finite observations than free parameters`，
+**只出现一次**（探针逐条收集不去重）：在 live rolling 上刚挂上 fit、窗口里的点还少于
+自由参数的那一刻。随后 fit 正常求解并跑了 67 帧。这是正确的反馈，不是噪声。
+
 ### 仍然开着的（已知，未修）
 
 - **3D 面板仍是最慢的 kind**：ROI 手势 **42–50 ms**、整幅相机 **53.3 ms**，
