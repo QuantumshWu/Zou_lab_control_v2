@@ -305,6 +305,19 @@
 ROI 链（camera→roi_frame→3D）：相机上的 ROI 手势 9.7 ms，ROI 3D 面板 23.0 ms。
 带 fit 的 rolling：live 帧 10.7 ms，手势 8.7 ms。全程无 warning/error。
 
+### 合并后在 master 上的独立复验（不是开发树的数字）
+
+| 项 | 在 master 上重新取得的证据 |
+|---|---|
+| 4 | 宽 ROI：数据 1150×1150 / 场景 1150×1150；缩小后：数据 790×1150 / 场景 1150×790。**柱数=格数，且随 ROI 变化**（`chain/verify4.py`） |
+| 5 | home 相机四角实测 `far=a near=c left=d right=b`，folded 11×7 与源同向（`chain/h3daxes.py`） |
+| 6a | rolling x = `[-4,-3,-2,-1,0]`，label "Shots from latest"，xlim (-4,0)，**再来一发后完全不变** |
+| 6b | image 切轴 770×770 全有效／curve 切轴 1200×763／histogram 值带 582814 of 2304000 有效／rolling 窗口未及最新一发时 0 有效 |
+| 7 | 全 kind 矩阵与组合场景见下；四面板并存 hand→picture 8.6–39.3 ms，ROI 链 9.8 / 39.7 ms，带 fit 的 rolling 8.9 ms，全程无 warning/error |
+
+master 全 kind 矩阵（4x4 单面板，free-running 生产者）：
+image 5.8 / 3D 53.3 / curve 9.7 / histogram 5.9 / rolling 9.9 / facet 68.0 ms（facet 见上，非延迟）。
+
 ### 仍然开着的（已知，未修）
 
 - **3D 面板仍是最慢的 kind**：ROI 手势 **42–50 ms**、整幅相机 **53.3 ms**，
