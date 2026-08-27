@@ -21,6 +21,7 @@ seam is verified without a display.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
@@ -31,6 +32,8 @@ from zlc_runtime import (
     HarmonicClock,
     SurfaceBatchArbiter,
 )
+
+_LOG = logging.getLogger(__name__)
 
 
 __all__ = [
@@ -280,7 +283,15 @@ def attach_qt(beat: Callable[[], None], *, interval_ms: int) -> Any:
     on screen while passing headlessly.
 
     A timer callback IS the GUI thread, which is the one hop that has to be
-    here and cannot be anywhere else.
+    here and cannot be anywhere else.  It is therefore also the boundary
+    where an exception stops being reportable: PyQt calls qFatal() on
+    anything that leaves a slot, and the process dies where it stands --
+    taking a running experiment, every mounted panel and the traceback with
+    it.  Every view signal in the console is wrapped for exactly that
+    reason; the beat, which runs continuously and touches everything, was
+    connected raw, and a box drawn on a retired run ended the session.  So
+    the guard lives HERE, at the one hop, and covers every timer this
+    project drives.
     """
 
     from PyQt5 import QtCore  # noqa: PLC0415 -- only a Qt application needs this
@@ -290,9 +301,19 @@ def attach_qt(beat: Callable[[], None], *, interval_ms: int) -> Any:
     interval = int(interval_ms)
     if interval <= 0:
         raise ValueError("attach_qt interval_ms must be positive")
+
+    def guarded_beat() -> None:
+        try:
+            beat()
+        except Exception:  # noqa: BLE001 -- the boundary IS total
+            # Logged, not swallowed: the next tick still runs, and the
+            # instrument outlives the defect.  Callers that beat directly
+            # (tests, headless benches) are untouched and still raise.
+            _LOG.exception("Qt-driven beat failed")
+
     timer = QtCore.QTimer()
     timer.setInterval(interval)
-    timer.timeout.connect(beat)
+    timer.timeout.connect(guarded_beat)
     timer.start()
     return timer
 

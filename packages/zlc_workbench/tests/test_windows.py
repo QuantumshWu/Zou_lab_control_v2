@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ast
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -187,3 +188,39 @@ def test_qt_worker_refuses_to_claim_closed_while_vendor_work_is_hung() -> None:
     assert close() is True
     with pytest.raises(RuntimeError, match="closed"):
         run(lambda: None, lambda _value: None, lambda _error: None)
+
+
+def test_a_qt_driven_beat_never_ends_the_process() -> None:
+    """The one hop where a callable becomes a slot is a total boundary.
+
+    Every view signal in the console is wrapped for this reason and the
+    beat -- which runs continuously and touches everything -- was
+    connected raw.  An exception leaving a Qt slot is not reported
+    anywhere: PyQt calls qFatal() and the session is gone, panels,
+    experiment and traceback with it.  A raising beat must cost a log
+    line and the next tick.
+    """
+
+    from PyQt5 import QtCore
+
+    from zlc_ui import ensure_qt_app
+    from zlc_workbench.board import attach_qt
+
+    ensure_qt_app()
+    beats: list[int] = []
+
+    def beat() -> None:
+        beats.append(len(beats))
+        raise LookupError("signal 'x' is not retained")
+
+    timer = attach_qt(beat, interval_ms=1)
+    try:
+        deadline = time.monotonic() + 5.0
+        while len(beats) < 3 and time.monotonic() < deadline:
+            QtCore.QCoreApplication.processEvents()
+            time.sleep(0.002)
+        assert len(beats) >= 3, (
+            "the timer stopped at the first raising beat"
+        )
+    finally:
+        timer.stop()

@@ -3996,7 +3996,14 @@ class ConsolePresenter:
                 return
             try:
                 interaction()
-            except (TypeError, ValueError) as error:
+            except Exception as error:  # noqa: BLE001 -- the boundary IS total
+                # Named exception classes here are a GUESS about what the
+                # layers below can raise, and the guess was wrong: a box
+                # drawn on a retired run raised LookupError, which passed
+                # straight through, out of the beat, out of the Qt timer
+                # slot -- and PyQt ends the process there.  One interaction
+                # failing is one error line; it is never the instrument.
+                _LOG.exception("panel interaction failed")
                 self._report(
                     f"cannot apply panel interaction: {_error_text(error)}",
                     severity="error",
