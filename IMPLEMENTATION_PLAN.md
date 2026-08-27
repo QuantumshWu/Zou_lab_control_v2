@@ -315,6 +315,21 @@ ROI 链（camera→roi_frame→3D）：相机上的 ROI 手势 9.7 ms，ROI 3D �
 | 6b | image 切轴 770×770 全有效／curve 切轴 1200×763／histogram 值带 582814 of 2304000 有效／rolling 窗口未及最新一发时 0 有效 |
 | 7 | 全 kind 矩阵与组合场景见下；四面板并存 hand→picture 8.6–39.3 ms，ROI 链 9.8 / 39.7 ms，带 fit 的 rolling 8.9 ms，全程无 warning/error |
 
+第 3 项点名的三个症状，逐个直接测（`chain/verify3.py`，master，free-running 生产者）：
+
+| kind | 每次 move 有没有画面 | 按下后一帧不出的次数 | 同一个手势提交同一个区域？ |
+|---|---|---|---|
+| image | 36/36 | 0 | **6 次全同** |
+| curve | 36/36 | 0 | **6 次全同** |
+| histogram | 36/36 | 0 | 6 次里 3 种——它的 x **就是测量值**，活数据的值域每一发都在动，这是轴在动不是区域在跳 |
+| rolling | 36/36 | 0 | **6 次全同** |
+
+**探针自身的两次错，记在这里免得再犯**：(1) 用 `panel_state_changed` 发
+`{"selector": {}}` 清区域——`selector` 根本不在 `update_panel_state` 的允许字段里，
+清除被拒绝而我没看返回值；(2) 于是每隔一次拖动其实是**落在已有区域边柄上的 resize**，
+交替出两个矩形，被我一度读成"跳变"。真正的清除路径是
+`host.remove_selector(SelectorKind.AREA / X_RANGE)`。
+
 master 全 kind 矩阵（4x4 单面板，free-running 生产者）：
 image 5.8 / 3D 53.3 / curve 9.7 / histogram 5.9 / rolling 9.9 / facet 68.0 ms（facet 见上，非延迟）。
 
