@@ -673,3 +673,28 @@ def test_two_occupied_roles_trade_places_in_one_edit() -> None:
     )
     assert swapped.x == AxisRef.point("row")
     assert swapped.y == AxisRef.point("x")
+
+
+def test_a_pin_the_run_no_longer_has_never_reaches_the_data() -> None:
+    """A scope fate names a COORDINATE, and this schema decides.
+
+    Composing is the one place a fate becomes a scope term, and it did
+    not check.  A pin left from an earlier run -- another scan plan,
+    another frame count -- composed cleanly and detonated later inside
+    restrict_snapshot ("coordinate selection is empty on axis ..."),
+    from the data layer, with a plot already on screen.  A pin with no
+    referent says nothing about this schema: its row holds no fate, and
+    the vacancy rules speak for what is left.
+    """
+
+    snapshot = _snapshot()
+    schema = snapshot.block.schema
+    name = fate_field_name(AxisRef.point("row"))
+
+    kept = updated_spec(schema, HistogramPlot(), name, scope_fate(1.0))
+    assert kept.scope == ((AxisRef.point("row"), 1.0),)
+
+    dropped = updated_spec(schema, HistogramPlot(), name, scope_fate(7.5))
+    assert dropped.scope == (), (
+        "a coordinate this run does not have must not become a scope term"
+    )
