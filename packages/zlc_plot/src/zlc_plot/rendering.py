@@ -3832,15 +3832,27 @@ class MatplotlibRenderer:
         # straight into its rows -- which are contiguous whenever the band
         # is above and below, the letterboxed case.
         background = self._axes_background_rgba(axes)
-        placement = (box_h, box_w, row, column, height, width, tuple(background))
+        shape = (box_h, box_w, tuple(background))
         cache_name = f"{key}:view_front"
         cached = self._artists.get(cache_name)
-        if cached is not None and cached[0] == placement:
+        if cached is not None and cached[0] == shape:
             front = cached[1]
         else:
             front = np.empty((box_h, box_w, 4), dtype=np.uint8)
-            front[..., :] = background
-            self._artists[cache_name] = (placement, front)
+            self._artists[cache_name] = (shape, front)
+        # Only the band, never the whole buffer.  Every pixel outside the
+        # window is painted here and every pixel inside it is overwritten
+        # by the picture below, so the frame is complete either way -- and
+        # a pan that slides the picture by a pixel stopped repainting nine
+        # megabytes to change the colour of a few thousand.
+        if row:
+            front[:row] = background
+        if row + height < box_h:
+            front[row + height:] = background
+        if column:
+            front[row : row + height, :column] = background
+        if column + width < box_w:
+            front[row : row + height, column + width:] = background
         window = front[row : row + height, column : column + width]
         if window.flags.c_contiguous:
             self._resize_rgba_into(rgba, window)
