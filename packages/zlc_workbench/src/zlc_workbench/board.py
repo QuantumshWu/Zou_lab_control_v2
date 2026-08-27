@@ -218,14 +218,20 @@ class LiveBoard:
     def commit(self, *, admit_new: bool = True) -> None:
         """Put ready boards on screen.  The GUI thread, and only it.
 
-        The wake is claimed first, so a surface finishing while the drain runs
-        notifies again instead of being lost inside the turn it missed.
+        A STEP of the owner's turn, not the turn itself -- the owner claims
+        the wake before it starts working, so that anything arriving while
+        the turn runs raises a fresh one.  Claiming it here instead put the
+        claim in the middle: work enqueued during the drain that runs before
+        this saw a wake still pending, sent no notification, and then had its
+        pending flag cleared out from under it.  Measured on a live console,
+        that lost wake was 96 ms of a 260 ms press -- a hand waiting on the
+        data clock for its own answer.
+
         Pause and close pass ``admit_new=False``: renders already travelling
         may still finish, while a source publication that arrived after Pause
         cannot advance the frozen board.
         """
 
-        self.wake.take()
         self._scheduler.stage_owed(admit_new=admit_new)
         self._arbiter.drain(self._resolve)
         # Accepting a travelling group releases its ports.  Spend any

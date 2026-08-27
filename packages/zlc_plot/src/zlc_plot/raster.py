@@ -385,17 +385,25 @@ class _HandArbiter:
                 )
             self._held[host_key] = (monotonic() + hold, hold)
 
-    def busy_elsewhere(self, host_key: str) -> bool:
-        """Is another host's hand moving right now?"""
+    def busy(self) -> bool:
+        """Is a hand moving right now, on any surface -- including this one?
+
+        A data frame is speculative: the next publication supersedes it, and
+        nobody is waiting for this one in particular.  A hand is not.  The
+        question used to exclude the asking host, so a panel's own frames
+        never stood aside for the hand ON that panel -- and a move that
+        arrived while one was running waited out its whole render.  Measured
+        on a live console, that is most of the 93 ms a move costs there.
+        """
 
         now = monotonic()
         with self._lock:
-            if any(key != host_key for key in self._running):
+            if self._running:
                 return True
             for key, (expires, _hold) in tuple(self._held.items()):
                 if expires <= now:
                     del self._held[key]
-                elif key != host_key:
+                else:
                     return True
         return False
 
@@ -2256,7 +2264,8 @@ class RasterPlotHost:
         return self._pending.popleft()
 
     def _yields_to_hand(self, task: _WorkerTask) -> bool:
-        """Does this task stand aside for a hand on another surface?
+        """Does this task stand aside for a hand -- anybody's, including
+        the one on this very surface?
 
         Only speculative pixels yield -- a data frame or a presentation
         repaint, whose content the next one supersedes anyway.  CONTROL
@@ -2269,7 +2278,7 @@ class RasterPlotHost:
 
         if not task.mode.publishes or self._front is None:
             return False
-        return _HANDS.busy_elsewhere(self._host_id)
+        return _HANDS.busy()
 
     def _run(self) -> None:
         try:

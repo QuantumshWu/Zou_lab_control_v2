@@ -3960,6 +3960,10 @@ class ConsolePresenter:
         causal group one shot behind the other half.
         """
 
+        # The turn is claimed before any of its work: a completion that
+        # arrives while this runs must raise a NEW wake rather than find one
+        # still pending and stay silent.
+        self.board.wake.take()
         self._drain_panel_interactions()
         self._poll_retired_plot_hosts()
         if self._closing:
@@ -3984,6 +3988,7 @@ class ConsolePresenter:
         during Pause for the same reason the beat's commit does.
         """
 
+        self.board.wake.take()
         # Plot callbacks carry semantic owner work as well as completed
         # surfaces.  Settle that work first: an Area release must become the
         # canonical PanelState before a Fit click can read/configure it, and a

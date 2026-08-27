@@ -1402,17 +1402,25 @@ def test_scroll_is_self_relative_and_needs_no_front_currency() -> None:
         host.close(timeout=10)
 
 
-def test_a_hand_on_one_host_stands_every_other_host_down() -> None:
-    """Two surfaces, one machine: the drag wins while it moves.
+def test_a_moving_hand_stands_down_every_speculative_frame() -> None:
+    """One machine: the drag wins while it moves, on every surface.
 
     A panel's Edit surface and its live card render on separate worker
     threads and compete for the same cores.  Measured over 1024x1024
     data, the card's committed frames stalled a drag on the Edit surface
-    to a per-move p90 of 354 ms (46 ms with the card idle).  Every other
-    host's SPECULATIVE work therefore yields to pointer work, and only
-    speculative work does: a caller blocked on a control answer, and a
-    surface that has no front to show yet, never wait on someone else's
-    hand.
+    to a per-move p90 of 354 ms (46 ms with the card idle).
+
+    That included the panel being dragged.  A frame already running on the
+    dragged host itself cannot be pre-empted, so a move that arrived
+    during one waited out its whole render -- measured on a live console,
+    the first move of an orbit took 192 ms against 134 once its own
+    panel's frames stood aside too.  A data frame is speculative wherever
+    it runs: the next publication supersedes it and nobody waits for this
+    one in particular.  A hand is not.
+
+    Only speculative work yields: a caller blocked on a control answer,
+    the pointer work itself, and a surface that has no front to show yet
+    never wait on a hand.
     """
 
     from zlc_plot.raster import _HANDS, _DispatchMode, _WorkerTask
@@ -1434,8 +1442,8 @@ def test_a_hand_on_one_host_stands_every_other_host_down() -> None:
             # a blocked caller is not speculative work
             assert not other._yields_to_hand(task(_DispatchMode.CONTROL))
             assert not other._yields_to_hand(task(_DispatchMode.ADAPTIVE))
-            # nor is the host's own hand
-            assert not hand._yields_to_hand(task(_DispatchMode.PUBLISH))
+            # including the dragged host's own speculative frames
+            assert hand._yields_to_hand(task(_DispatchMode.PUBLISH))
             # nor is a surface still reaching its first front: opening Edit
             # during someone's drag must not wait on it
             fresh = RasterPlotHost.from_plot(
