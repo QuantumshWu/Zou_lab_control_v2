@@ -404,12 +404,9 @@ def render_height_bars(
     background_rgb: tuple[float, float, float] = (1.0, 1.0, 1.0),
     zero_rgb: tuple[float, float, float] | None = None,
     z_fraction: float = 0.55,
-    pool_pixels_per_cell: float = 6.0,
-    max_cells_across: int = 54,
     rim_rgb: tuple[float, float, float] = (0.0, 0.0, 0.0),
     rim_width_px: float = 0.0,
     pool_cache: dict | None = None,
-    pool_reference_width: int | None = None,
     origin: str = "lower",
 ) -> tuple[NDArray[np.uint8], HeightBarScene]:
     """Render the grid as boxes -> ((H, W, 4) uint8 RGBA, scene map).
@@ -453,36 +450,26 @@ def render_height_bars(
     # ---- LOD: how many bars this picture has.
     #
     # There is ONE look -- boxes -- so density cannot decide what the
-    # scene IS, only how finely it is divided.  Two facts bound that,
-    # and both are about the drawn bar rather than the stored grid:
+    # scene IS, only how finely it is divided.  And how finely it CAN be
+    # divided is a fact about the drawn bar, not about a budget: a bar has
+    # to be several times the line it is drawn with, or the picture is a
+    # mesh of rims with no faces left between them.  The rim width is
+    # therefore the only thing this asks.
     #
-    #   * a cell narrower than a few pixels is not a bar, so the panel's
-    #     own width sets a floor on cell size, and
-    #   * every bar costs the outline pass a handful of edges, so the BAR
-    #     COUNT -- not the pixel count -- is what decides whether a live
-    #     frame and a camera drag land inside a frame budget.  Measured on
-    #     the console's own panel: 54 cells a side is 14.6 ms of outline
-    #     work a frame, and it grows with the square of the count.
+    # It used to ask a second question -- a cap on the bar count -- because
+    # every rim was vector chrome priced per bar and fifty a side cost
+    # 14.6 ms a frame.  The rims are pixels now: drawing every point of a
+    # 2.3 megapixel frame costs 16.5 ms against 14.1 for fifty bars a
+    # side, so the cap bought 2.4 ms and cost the operator the detail they
+    # asked to see.  It is gone.
     #
-    # The cap is where the old surface/box threshold stood, so every scene
-    # that already drew as boxes still draws exactly the same boxes; what
-    # changes is that a denser grid now pools INTO that look instead of
-    # turning into a different one.
-    #
-    # Pooling depends only on the inputs and these bounds, never the
-    # camera; the caller may hand a cache whose validity rides on INPUT
-    # IDENTITY -- safe because the caller's own input cache keeps those
-    # arrays alive and unchanged.  Deriving it from the transient render
-    # width made the pooled grid -- and therefore its cache -- change
-    # whenever a drag lowered the preview resolution, so every drag
-    # re-pooled the whole scan (millions of cells) instead of reusing it.
-    # The reference is the committed surface's width; a preview simply
-    # draws that same pooled grid at fewer pixels.
-    pool_width = int(render_w if pool_reference_width is None else pool_reference_width)
-    limit = max(8, min(
-        int(pool_width / max(pool_pixels_per_cell, 0.5)),
-        int(max_cells_across),
-    ))
+    # Pooling depends only on the inputs and this floor, never the camera;
+    # the caller may hand a cache whose validity rides on INPUT IDENTITY --
+    # safe because the caller's own input cache keeps those arrays alive
+    # and unchanged.
+    pool_width = int(render_w)
+    legible_cell_px = max(3.0, 6.0 * float(rim_width_px))
+    limit = max(8, int(pool_width / legible_cell_px))
     pool_key = (id(h_grid), id(rgb_grid), h_grid.shape, limit)
     if pool_cache is not None and pool_cache.get("key") == pool_key:
         h_grid, rgb_grid, finite_grid, pool_x, pool_y = pool_cache["value"]

@@ -1288,7 +1288,6 @@ class MatplotlibRenderer:
         self._composed_generation = -1
         self._focused_facet_index: int | None = None
         self._facet_focus_index: int | None = None
-        self._height_bars_dragging = False
         self._height_bars_rendered_camera = None
         self._height_bars_scene = False
         self._visible_facet_count = 0
@@ -3997,29 +3996,31 @@ class MatplotlibRenderer:
     def set_height_bars_dragging(self, dragging: bool) -> None:
         """Say whether a hand is currently turning the scene.
 
-        This is a RESOLUTION BUDGET and nothing else.  The camera itself
-        has one owner -- the display parameters -- so a drag is not a
-        second, transient place where the view can live: whatever moves
-        the scene writes the parameters, and anything that rebuilds,
-        replaces or re-mounts the surface therefore shows the view the
-        hand is holding rather than the one it left.
+        The camera itself has one owner -- the display parameters -- so a
+        drag is not a second, transient place where the view can live:
+        whatever moves the scene writes the parameters, and anything that
+        rebuilds, replaces or re-mounts the surface therefore shows the
+        view the hand is holding rather than the one it left.
+
+        What a drag DOES change is what the frame has to redraw.  A
+        turning camera changes the scene and nothing else: the colorbar
+        and the distribution rail beside it are the same pixels at the end
+        of the drag as at its start, and repainting them cost seven and a
+        half milliseconds of tick and label machinery on every move.  For
+        the length of the drag they are chrome, not dynamics -- one full
+        draw now to capture them, and none of that work per move after.
         """
 
-        dragging = bool(dragging)
-        if dragging == self._height_bars_dragging:
-            return
-        self._composed_generation = -1
-        self._height_bars_dragging = dragging
-        # A turning camera changes the scene and NOTHING else: the colorbar
-        # and the distribution rail beside it are the same pixels at the end
-        # of the drag as at its start, and repainting them cost seven and a
-        # half milliseconds of tick and label machinery on every single move.
-        # For the length of the drag they are chrome, not dynamics -- which
-        # means one full draw now, to capture them, and none of that work
-        # per move afterwards.
         self.set_view_dragging(
-            self._height_bars_axes() if dragging else None
+            self._height_bars_axes() if bool(dragging) else None
         )
+
+    @property
+    def height_bars_dragging(self) -> bool:
+        """Whether a hand is turning THIS scene right now."""
+
+        axes = self._height_bars_axes()
+        return axes is not None and self._confined_gesture_axes is axes
 
     def set_view_dragging(self, axes: Any | None) -> None:
         """Confine the frame to one axes while a hand drags its view.
@@ -4159,38 +4160,34 @@ class MatplotlibRenderer:
         box = axes.bbox
         box_w = max(int(round(float(box.width))), 8)
         box_h = max(int(round(float(box.height))), 8)
-        divisor = 1
-        if self._height_bars_dragging:
-            # The drag's resolution is a BUDGET, not a constant.  A
-            # fixed divisor renders whatever the data costs: on a 2048x2048
-            # scan that is hundreds of milliseconds a frame, so the drag
-            # collapsed to a few frames per second while the hand kept
-            # moving.  The divisor now tracks what the last drag frame
-            # actually cost, so an interactive frame rate survives any
-            # grid size -- the committed frame is untouched, being drawn
-            # at divisor 1 by definition.
-            divisor = max(int(policy.height_bars_drag_resolution_divisor), 1)
-        # Vertical anti-aliasing is ANALYTIC (exact coverage), so the
-        # only sampling knob left is horizontal: three subcolumn taps per
-        # LOGICAL pixel, whatever the grid size.  The camera DRAG is the
-        # fast lane instead.
+        # One resolution.  A drag used to render at half and the release
+        # repaint at full, so the picture changed character under the hand
+        # -- and it bought 11 ms of a 93 ms move once the rims became
+        # pixels instead of vector chrome.  Not worth a second look.
         #
-        # Per logical pixel, not per device pixel.  Anti-aliasing asks how
-        # fine the DISPLAY is, and that already has an owner -- the device
-        # pixel ratio.  Three taps on top of a 3x screen sampled every
-        # logical pixel nine times for detail no screen can show, and the
-        # operator's panel paid thirty milliseconds a frame for it.
-        committed_supersample = max(1, min(4, int(round(
+        # Vertical anti-aliasing is ANALYTIC (exact coverage), so the only
+        # sampling knob left is horizontal: three subcolumn taps per
+        # LOGICAL pixel, whatever the grid size.  Per logical pixel, not
+        # per device pixel: anti-aliasing asks how fine the DISPLAY is, and
+        # that already has an owner -- the device pixel ratio.  Three taps
+        # on top of a 3x screen sampled every logical pixel nine times for
+        # detail no screen can show, and the panel paid thirty
+        # milliseconds a frame for it.
+        supersample = max(1, min(4, int(round(
             3.0 / max(self.plan.device_pixel_ratio, 1e-9)
         ))))
-        supersample = committed_supersample if divisor == 1 else 1
         import matplotlib as _matplotlib
         from matplotlib.colors import to_rgb
 
         rim_rgb = tuple(float(v) for v in to_rgb(policy.height_bars_axis_color))
+        # The rim is drawn INTO the raster, whose pixels are the surface's
+        # physical ones -- the same pixels axes.bbox is measured in.  Asking
+        # the logical dpi drew it a device-pixel-ratio thinner than every
+        # other line on the canvas, and let the level of detail divide the
+        # scene three times finer than a bar can be seen at.
         rim_width_px = (
             float(_matplotlib.rcParams["axes.linewidth"])
-            * float(self.plan.logical_dpi) / 72.0 / divisor
+            * float(self.plan.dpi) / 72.0
         )
         frame, scene = render_height_bars(
             heights,
@@ -4198,20 +4195,14 @@ class MatplotlibRenderer:
             camera=camera,
             value_limits=(low, high),
             zero_rgb=zero_rgb,
-            width=max(box_w // divisor, 8),
-            height=max(box_h // divisor, 8),
+            width=box_w,
+            height=box_h,
             supersample=supersample,
             pool_cache=self._artists.setdefault("image:h3d_pool_cache", {}),
             side_shades=policy.height_bars_side_shades,
             background_rgb=policy.height_bars_background_rgb,
             z_fraction=policy.height_bars_z_fraction,
-            # Committed geometry decides the pooled grid, so a drag
-            # frame reuses it instead of re-pooling at its own size.
-            pool_reference_width=box_w * committed_supersample,
-            max_cells_across=policy.height_bars_max_cells_across,
-            # The scene draws its own creases.  A preview renders at
-            # 1/divisor and is scaled back up, so its rim is stroked at
-            # 1/divisor too and arrives the same width as the commit.
+            # The scene draws its own creases.
             rim_rgb=rim_rgb,
             rim_width_px=rim_width_px,
             # The scene is an oblique view of THIS surface's heatmap, so
@@ -4323,10 +4314,7 @@ class MatplotlibRenderer:
         )
         label_gap_px = tick_length_px + tick_pad_px
         # Point metrics are CANVAS pixels; fractions must divide by the
-        # canvas box, not the scene raster -- a drag preview renders the
-        # raster at a fraction of the box and stretches it, and dividing
-        # by the reduced raster inflated every tick and label gap by the
-        # divisor: the scene held still while its labels flew out.
+        # canvas box, not the scene raster.
 
         # The pane grid follows the reference (MATLAB) convention: RULES
         # sit at tick positions, and every rule runs the FULL display
