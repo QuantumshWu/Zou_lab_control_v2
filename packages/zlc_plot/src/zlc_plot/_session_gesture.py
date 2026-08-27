@@ -214,6 +214,7 @@ class GestureSessionMixin:
                 NumericRange(*interaction_transform.x_limits),
                 NumericRange(*interaction_transform.y_limits),
             )
+            self._renderer.set_view_dragging(event_axes)
             return
         point = self._event_canonical(
             event,
@@ -1015,7 +1016,13 @@ class GestureSessionMixin:
         if self._gesture is not gesture:
             return
         self._gesture = None
-        if isinstance(gesture, _PanGesture) or self._renderer is None:
+        if self._renderer is None:
+            return
+        if isinstance(gesture, _PanGesture):
+            # Letting go changes no view -- every move was committed -- so
+            # what lifts is the confinement, and the frame the hand leaves
+            # is composed with the whole figure back in play.
+            self._renderer.set_view_dragging(None)
             return
         self._renderer.end_selector_gesture()
 
