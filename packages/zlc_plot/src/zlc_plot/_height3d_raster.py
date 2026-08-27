@@ -224,6 +224,31 @@ class HeightBarScene:
         )
 
 
+def _zero_colour_plane(
+    zero_rgb: tuple[float, float, float],
+    shape: tuple[int, ...],
+    cache: dict | None,
+) -> NDArray[np.float32]:
+    """The flat colour every bar's base is painted in.
+
+    One colour, held as a full plane because that is what the kernels
+    index.  It depends on the colormap and the limits -- never on the
+    data -- so rebuilding it with the data cost 8.9 ms of every live
+    frame at 2.3M cells to write the same three numbers again.
+    """
+
+    key = (tuple(float(value) for value in zero_rgb), tuple(shape))
+    if cache is not None and cache.get("zero_colour_key") == key:
+        return cache["zero_colour_value"]
+    plane = np.ascontiguousarray(
+        np.broadcast_to(np.asarray(zero_rgb, dtype=np.float32), shape)
+    )
+    if cache is not None:
+        cache["zero_colour_key"] = key
+        cache["zero_colour_value"] = plane
+    return plane
+
+
 def _rim_stamp(width: float) -> tuple[NDArray[np.float32], int]:
     """Coverage weights of a round stroke of ``width`` output pixels.
 
@@ -546,20 +571,27 @@ def render_height_bars(
         ) = render_cache["derived_value"]
     else:
         clipped = np.clip(h_grid, value_low, value_high)
+        # A grid with nothing missing -- a camera frame, most scans -- gets
+        # the same numbers without the mask: where(all true, x, y) IS x.
+        # Measured on 2.3M cells, the three masked passes cost 31 ms and
+        # the question costs one.
+        whole = bool(finite_grid.all())
         hz = np.ascontiguousarray(
-            np.where(finite_grid, clipped, 0.0) * z_unit
+            (clipped if whole else np.where(finite_grid, clipped, 0.0))
+            * z_unit
         )
-        if zero_rgb is None:
-            base_grid = rgb_grid
-        else:
-            base_grid = np.ascontiguousarray(np.broadcast_to(
-                np.asarray(zero_rgb, dtype=np.float32), rgb_grid.shape
-            ))
-        top_values = np.where(
-            finite_grid, np.maximum(clipped, 0.0), -np.inf
+        base_grid = rgb_grid if zero_rgb is None else _zero_colour_plane(
+            zero_rgb, rgb_grid.shape, render_cache
         )
-        base_values = np.where(
-            finite_grid, np.minimum(clipped, 0.0), np.inf
+        top_values = (
+            np.maximum(clipped, 0.0)
+            if whole
+            else np.where(finite_grid, np.maximum(clipped, 0.0), -np.inf)
+        )
+        base_values = (
+            np.minimum(clipped, 0.0)
+            if whole
+            else np.where(finite_grid, np.minimum(clipped, 0.0), np.inf)
         )
         finite_grid = np.ascontiguousarray(finite_grid)
         rgb_grid = np.ascontiguousarray(rgb_grid)
@@ -574,11 +606,15 @@ def render_height_bars(
     if render_cache is not None and render_cache.get("derived_z_key") == z_key:
         z_top32, z_bot32 = render_cache["derived_z_value"]
     else:
+        # ``ce`` is positive (the elevation is clamped well inside a
+        # quarter turn), so scaling before the split is the same number as
+        # after it -- and it is one pass over the plane instead of two.
+        scaled = hz * ce
         z_top32 = np.ascontiguousarray(
-            (np.maximum(hz, 0.0) * ce).astype(np.float32)
+            np.maximum(scaled, 0.0).astype(np.float32)
         )
         z_bot32 = np.ascontiguousarray(
-            (np.minimum(hz, 0.0) * ce).astype(np.float32)
+            np.minimum(scaled, 0.0).astype(np.float32)
         )
         if render_cache is not None:
             render_cache["derived_z_key"] = z_key
