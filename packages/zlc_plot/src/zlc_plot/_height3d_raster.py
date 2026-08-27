@@ -145,12 +145,6 @@ class HeightBarScene:
     #: second definition of the same thing, free to disagree with the
     #: picture it was drawn over.
     base_values: NDArray[np.float64]
-    #: True when cells are below outline density and the grid drew as a
-    #: lit continuous surface; scene chrome skips floor rules then --
-    #: a rule at z=0 under a near-zero surface wins the height tie and
-    #: leaks through as bright dashes.
-    dense: bool
-
     def project(self, a: float, b: float, value: float) -> tuple[float, float]:
         """Folded ground point + value -> pixel (x, y), y down."""
 
@@ -262,6 +256,121 @@ def _pooled(
     return pooled_h, pooled_rgb, counts > 0, pool_x, pool_y
 
 
+def _rim_stamp(width: float) -> tuple[NDArray[np.float32], int]:
+    """Coverage weights of a round stroke of ``width`` output pixels.
+
+    A crease lies BETWEEN two pixels, and both of them are marked, so the
+    stroke is already one pixel wide before any spreading -- the stamp
+    adds the rest and its shoulders.
+    """
+
+    half = float(width) * 0.5
+    # The radius is where the weights actually stop, not where the width
+    # rounds up: a stamp with a zero border costs every pixel a ring of
+    # multiplies that can never win the maximum.
+    radius = max(1, int(math.ceil(half - 1.0)))
+    offsets = np.arange(-radius, radius + 1, dtype=np.float64)
+    distance = np.hypot(offsets[:, None], offsets[None, :])
+    weights = np.clip(half - distance, 0.0, 1.0).astype(np.float32)
+    return weights, radius
+
+
+def _rim_boundary(id_plane: NDArray[np.int32]) -> NDArray[np.bool_]:
+    """Pixels beside a visible crease of the DRAWN surface.
+
+    The id plane names the face each pixel shows, so a change between
+    neighbours IS a crease -- the exact set the outline traces, already
+    occluded, because a hidden face is not in the plane.  Creases between
+    two background surfaces (the floor meeting a pane) are the room, not
+    the picture, and the room draws its own rules.
+    """
+
+    bar = id_plane >= 4
+    boundary = np.zeros(id_plane.shape, dtype=bool)
+    edge = (id_plane[:, 1:] != id_plane[:, :-1]) & (bar[:, 1:] | bar[:, :-1])
+    boundary[:, 1:] |= edge
+    boundary[:, :-1] |= edge
+    edge = (id_plane[1:, :] != id_plane[:-1, :]) & (bar[1:, :] | bar[:-1, :])
+    boundary[1:, :] |= edge
+    boundary[:-1, :] |= edge
+    return boundary
+
+
+def _rim_coverage_reference(
+    boundary: NDArray[np.bool_],
+    weights: NDArray[np.float32],
+    radius: int,
+) -> NDArray[np.float32]:
+    """The specification: coverage is the strongest stamp reaching here."""
+
+    height, width = boundary.shape
+    coverage = np.zeros(boundary.shape, dtype=np.float32)
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            weight = weights[dy + radius, dx + radius]
+            if weight <= 0.0:
+                continue
+            y0, y1 = max(0, -dy), min(height, height - dy)
+            x0, x1 = max(0, -dx), min(width, width - dx)
+            if y0 >= y1 or x0 >= x1:
+                continue
+            source = boundary[y0 + dy:y1 + dy, x0 + dx:x1 + dx]
+            target = coverage[y0:y1, x0:x1]
+            np.maximum(target, np.where(source, weight, np.float32(0.0)),
+                       out=target)
+    return coverage
+
+
+def _stroke_rims(
+    out: NDArray[np.uint8],
+    id_plane: NDArray[np.int32],
+    rim_rgb: tuple[float, float, float],
+    width: float,
+) -> None:
+    """Draw the surface's own creases into the surface, in place.
+
+    Every rim of every box, at the cost of the PIXELS it covers rather
+    than the boxes it belongs to.  Drawn as vector chrome it cost about
+    forty nanoseconds of Matplotlib stroking per pixel of ink, and the
+    ink grows with the bar count: fifty bars a side covered eighteen per
+    cent of the canvas and spent nineteen milliseconds a frame, which is
+    what made turning a dense scene heavy.  Here the whole pass is two
+    sweeps of the id plane and one blend of the pixels it touched.
+
+    The room -- pane grids, floor rules, the axes, the cage -- is still
+    drawn by artists.  One owner each: the picture draws its own creases,
+    the room draws its own furniture.
+    """
+
+    if width <= 0.0:
+        return
+    weights, radius = _rim_stamp(width)
+    target = np.asarray(rim_rgb, dtype=np.float32) * np.float32(255.0)
+    if _scanline_selected():
+        from ._height3d_scanline import _rim_stroke
+
+        _rim_stroke(
+            np.ascontiguousarray(id_plane, dtype=np.int32),
+            np.ascontiguousarray(weights),
+            np.int64(radius),
+            np.int64(min(32, (os.cpu_count() or 4) * 2)),
+            out,
+            target,
+        )
+        return
+    coverage = _rim_coverage_reference(
+        _rim_boundary(id_plane), weights, radius
+    )[..., None]
+    painted = out[..., :3].astype(np.float32)
+    # Every pixel, not the touched ones: a boolean index over a frame this
+    # size costs more than the whole stamping pass, and zero coverage
+    # rounds each channel back to itself.
+    out[..., :3] = (
+        painted + (target[None, None, :] - painted) * coverage
+        + np.float32(0.5)
+    ).astype(np.uint8)
+
+
 _ENGINE = os.environ.get("ZLC_H3D_ENGINE", "auto")
 
 
@@ -295,8 +404,10 @@ def render_height_bars(
     background_rgb: tuple[float, float, float] = (1.0, 1.0, 1.0),
     zero_rgb: tuple[float, float, float] | None = None,
     z_fraction: float = 0.55,
-    pool_pixels_per_cell: float = 2.0,
-    surface_diagonal_cells: float = 77.0,
+    pool_pixels_per_cell: float = 6.0,
+    max_cells_across: int = 54,
+    rim_rgb: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    rim_width_px: float = 0.0,
     pool_cache: dict | None = None,
     pool_reference_width: int | None = None,
     origin: str = "lower",
@@ -339,20 +450,39 @@ def render_height_bars(
         raise ValueError("heights must be (ny, nx) and top_rgb (ny, nx, 3)")
     source_ny, source_nx = h_grid.shape
 
-    # ---- LOD: a grid denser than the pixels pools to display resolution.
-    # Pooling depends only on the inputs and the pixel budget, never the
-    # camera, and it dominated large-scan camera commits; the caller may
-    # hand a cache whose validity rides on INPUT IDENTITY -- safe because
-    # the caller's own input cache keeps those arrays alive and unchanged.
-    # Pooling is a DATA-side level of detail: how many cells the panel's
-    # pixels can distinguish.  Deriving it from the transient render width
-    # made the pooled grid -- and therefore its cache -- change whenever a
-    # drag lowered the preview resolution, so every drag re-pooled the
-    # whole scan (millions of cells) instead of reusing it.  The reference
-    # is the committed surface's width; a preview simply draws that same
-    # pooled grid at fewer pixels.
+    # ---- LOD: how many bars this picture has.
+    #
+    # There is ONE look -- boxes -- so density cannot decide what the
+    # scene IS, only how finely it is divided.  Two facts bound that,
+    # and both are about the drawn bar rather than the stored grid:
+    #
+    #   * a cell narrower than a few pixels is not a bar, so the panel's
+    #     own width sets a floor on cell size, and
+    #   * every bar costs the outline pass a handful of edges, so the BAR
+    #     COUNT -- not the pixel count -- is what decides whether a live
+    #     frame and a camera drag land inside a frame budget.  Measured on
+    #     the console's own panel: 54 cells a side is 14.6 ms of outline
+    #     work a frame, and it grows with the square of the count.
+    #
+    # The cap is where the old surface/box threshold stood, so every scene
+    # that already drew as boxes still draws exactly the same boxes; what
+    # changes is that a denser grid now pools INTO that look instead of
+    # turning into a different one.
+    #
+    # Pooling depends only on the inputs and these bounds, never the
+    # camera; the caller may hand a cache whose validity rides on INPUT
+    # IDENTITY -- safe because the caller's own input cache keeps those
+    # arrays alive and unchanged.  Deriving it from the transient render
+    # width made the pooled grid -- and therefore its cache -- change
+    # whenever a drag lowered the preview resolution, so every drag
+    # re-pooled the whole scan (millions of cells) instead of reusing it.
+    # The reference is the committed surface's width; a preview simply
+    # draws that same pooled grid at fewer pixels.
     pool_width = int(render_w if pool_reference_width is None else pool_reference_width)
-    limit = max(8, int(pool_width / max(pool_pixels_per_cell, 0.5)))
+    limit = max(8, min(
+        int(pool_width / max(pool_pixels_per_cell, 0.5)),
+        int(max_cells_across),
+    ))
     pool_key = (id(h_grid), id(rgb_grid), h_grid.shape, limit)
     if pool_cache is not None and pool_cache.get("key") == pool_key:
         h_grid, rgb_grid, finite_grid, pool_x, pool_y = pool_cache["value"]
@@ -458,29 +588,9 @@ def render_height_bars(
     t_b0 = t_enter + ((ib0 + 1.0) - b_at) / ca
     # ---- per-cell colour grids and z planes, shared by both engines.
     # Every plane here depends on the inputs, the limits, the QUADRANT
-    # fold, the elevation and the density flag -- never on the azimuth
-    # within a quadrant or the zoom -- so an orbit drag reuses them
-    # verbatim: an identity cache, bit-exact by construction.
-    # WHAT the grid is drawn as follows the grid, never the room it was
-    # given.  Boxes below a few pixels are not boxes -- they read as a
-    # heightfield, and the honest picture of one is a lit continuous
-    # surface -- but pricing that in canvas pixels made the picture a
-    # function of the raster: a drag renders at a fraction of the canvas
-    # (the scene brightened while turning and dimmed on release), a
-    # panel preset changes it, and widening the scene's own region
-    # turned mid-size scans that had always been surfaces into a mesh of
-    # boxes.  None of that is a fact about the data.  The measure is the
-    # grid's own diagonal, against the camera the operator chose: the
-    # same scan reads the same way in every panel on every screen, and
-    # zooming in still walks up to the boxes.  The number is where the
-    # canvas rule used to land in the panel this presentation shipped
-    # in -- 54 cells across still boxes, 55 already a surface -- so the
-    # anchor moves from the layout to the data without moving the
-    # picture anybody has seen.
-    dense_surface = (
-        math.hypot(source_ny, source_nx)
-        > surface_diagonal_cells * camera.zoom
-    )
+    # fold and the elevation -- never on the azimuth within a quadrant or
+    # the zoom -- so an orbit drag reuses them verbatim: an identity
+    # cache, bit-exact by construction.
     # Two cache stages.  Everything the ELEVATION never touches -- the
     # clipped height field, colours, lighting, validity -- caches under
     # the inputs/quadrant/limits alone; the elevation only scales hz
@@ -493,11 +603,11 @@ def render_height_bars(
     # hand back the other picture's geometry.
     derived_key = (
         pool_key, flip_rows, quadrant, value_low, value_high, zero_rgb,
-        bool(dense_surface), float(z_fraction),
+        float(z_fraction),
     )
     if pool_cache is not None and pool_cache.get("derived_key") == derived_key:
         (
-            hz, finite_grid, rgb_grid, base_grid, top_grid, top_values,
+            hz, finite_grid, rgb_grid, base_grid, top_values,
             base_values,
         ) = pool_cache["derived_value"]
     else:
@@ -511,21 +621,6 @@ def render_height_bars(
             base_grid = np.ascontiguousarray(np.broadcast_to(
                 np.asarray(zero_rgb, dtype=np.float32), rgb_grid.shape
             ))
-        if dense_surface:
-            # Sub-outline density: the grid reads as a heightfield, and
-            # flat per-cell tops lose all depth.  Light the top faces by
-            # the local slope (light from the upper-left of the screen
-            # frame) -- per CELL here, gathered per span below:
-            # elementwise either way, so the two orders are bit-identical.
-            gradient_b, gradient_a = np.gradient(hz)
-            slope_field = gradient_b - gradient_a
-            slope_field = slope_field / np.sqrt(1.0 + np.square(slope_field))
-            lighting = np.clip(
-                1.0 + 0.45 * slope_field, 0.6, 1.2
-            ).astype(np.float32)
-            top_grid = np.clip(rgb_grid * lighting[..., None], 0.0, 1.0)
-        else:
-            top_grid = rgb_grid
         top_values = np.where(
             finite_grid, np.maximum(clipped, 0.0), -np.inf
         )
@@ -535,11 +630,10 @@ def render_height_bars(
         finite_grid = np.ascontiguousarray(finite_grid)
         rgb_grid = np.ascontiguousarray(rgb_grid)
         base_grid = np.ascontiguousarray(base_grid)
-        top_grid = np.ascontiguousarray(top_grid)
         if pool_cache is not None:
             pool_cache["derived_key"] = derived_key
             pool_cache["derived_value"] = (
-                hz, finite_grid, rgb_grid, base_grid, top_grid, top_values,
+                hz, finite_grid, rgb_grid, base_grid, top_values,
                 base_values,
             )
     z_key = (derived_key, float(ce))
@@ -583,8 +677,6 @@ def render_height_bars(
             np.ascontiguousarray(finite_grid),
             np.ascontiguousarray(rgb_grid),
             np.ascontiguousarray(base_grid),
-            np.ascontiguousarray(top_grid),
-            bool(dense_surface),
             np.float32(side_shades[0]),
             np.float32(side_shades[1]),
             float(sa),
@@ -691,13 +783,6 @@ def render_height_bars(
         side_bottom_rgb = np.where(
             positive[..., None], base_rgb_cells, cell_rgb
         ) * shade[..., None]
-        if dense_surface:
-            # A dense grid is a lit continuous surface (see the shared
-            # per-cell colour grids above): tops and sides gather the same
-            # pre-lit colours.
-            top_rgb_cells = top_grid[cell_b, cell_a]
-            side_top_rgb = top_rgb_cells
-            side_bottom_rgb = top_rgb_cells
         background = np.asarray(background_rgb, dtype=np.float32)
 
         span_cols = [
@@ -945,6 +1030,11 @@ def render_height_bars(
     out_h = render_h // taps
     scene_id_plane = id_taps
     scale = scale / taps
+    # The creases of the drawn surface, drawn into it.  They belong to the
+    # picture, not to the room, and they cost what they COVER rather than
+    # what they belong to -- so a scene with fifty bars a side pays the
+    # same two milliseconds as one with ten.
+    _stroke_rims(out, scene_id_plane, rim_rgb, float(rim_width_px))
 
     scene = HeightBarScene(
         quadrant=quadrant,
@@ -971,7 +1061,6 @@ def render_height_bars(
         id_plane=np.ascontiguousarray(scene_id_plane, dtype=np.int32),
         top_values=top_values,
         base_values=base_values,
-        dense=bool(dense_surface),
     )
     return out, scene
 

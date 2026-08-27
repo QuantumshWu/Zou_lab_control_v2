@@ -1944,6 +1944,11 @@ class MatplotlibRenderer:
 
         for value in self._artists.values():
             add(value)
+        if confined is not None and getattr(confined, "axison", True):
+            # Its ticks and labels move with the view being dragged, so
+            # they cannot sit in the held background.
+            add(confined.xaxis)
+            add(confined.yaxis)
         # Error bars are part of their series and their focus alpha moves
         # per hover: dynamic, or the change sits baked into the cached
         # background until the next full draw -- the line dimmed instantly
@@ -2114,7 +2119,14 @@ class MatplotlibRenderer:
         # whether one can be reused right now.  Counting the second as churn
         # made the escape hatch below a one-way door: dropping the background
         # guaranteed the next frame would also find none.
-        chrome_invalidated = not chrome_stable or bool(self._chrome_dirty_axes)
+        dirty = self._chrome_dirty_axes
+        confined = self._confined_gesture_axes
+        if confined is not None and confined in dirty:
+            # The dragged axes keeps its chrome out of the background, so
+            # its chrome moving is not a reason to throw the background
+            # away -- which is what made a pan draw the figure every move.
+            dirty = {candidate for candidate in dirty if candidate is not confined}
+        chrome_invalidated = not chrome_stable or bool(dirty)
         reusable = (
             not chrome_invalidated
             and self._background_region is not None
@@ -3820,15 +3832,27 @@ class MatplotlibRenderer:
         # straight into its rows -- which are contiguous whenever the band
         # is above and below, the letterboxed case.
         background = self._axes_background_rgba(axes)
-        placement = (box_h, box_w, row, column, height, width, tuple(background))
+        shape = (box_h, box_w, tuple(background))
         cache_name = f"{key}:view_front"
         cached = self._artists.get(cache_name)
-        if cached is not None and cached[0] == placement:
+        if cached is not None and cached[0] == shape:
             front = cached[1]
         else:
             front = np.empty((box_h, box_w, 4), dtype=np.uint8)
-            front[..., :] = background
-            self._artists[cache_name] = (placement, front)
+            self._artists[cache_name] = (shape, front)
+        # Only the band, never the whole buffer.  Every pixel outside the
+        # window is painted here and every pixel inside it is overwritten
+        # by the picture below, so the frame is complete either way -- and
+        # a pan that slides the picture by a pixel stopped repainting nine
+        # megabytes to change the colour of a few thousand.
+        if row:
+            front[:row] = background
+        if row + height < box_h:
+            front[row + height:] = background
+        if column:
+            front[row : row + height, :column] = background
+        if column + width < box_w:
+            front[row : row + height, column + width:] = background
         window = front[row : row + height, column : column + width]
         if window.flags.c_contiguous:
             self._resize_rgba_into(rgba, window)
@@ -3993,9 +4017,29 @@ class MatplotlibRenderer:
         # For the length of the drag they are chrome, not dynamics -- which
         # means one full draw now, to capture them, and none of that work
         # per move afterwards.
-        self._confined_gesture_axes = (
+        self.set_view_dragging(
             self._height_bars_axes() if dragging else None
         )
+
+    def set_view_dragging(self, axes: Any | None) -> None:
+        """Confine the frame to one axes while a hand drags its view.
+
+        Everything outside that axes is the same pixels at the end of the
+        drag as at its start, so for the length of it they are chrome, not
+        dynamics: one full draw now to capture them, and none of that work
+        per move afterwards.  The dragged axes goes the other way -- its
+        ticks and labels move with the view, so its Axis becomes a dynamic
+        artist for the length of the gesture, exactly as the distribution
+        rail's own axes always is.
+
+        Without this a pan re-drew the whole figure on every move: the
+        limit change marks the axes chrome-dirty, the background can never
+        be reused, and after two consecutive misses the compose gives up
+        and draws.  Measured, that draw was 63 per cent of an 83 ms move.
+        """
+
+        self._composed_generation = -1
+        self._confined_gesture_axes = axes
         self._background_region = None
         self._background_signature = None
         self._chrome_churn = 0
@@ -4127,10 +4171,27 @@ class MatplotlibRenderer:
             # at divisor 1 by definition.
             divisor = max(int(policy.height_bars_drag_resolution_divisor), 1)
         # Vertical anti-aliasing is ANALYTIC (exact coverage), so the
-        # only sampling knob left is horizontal: three subcolumn taps on
-        # every committed frame, whatever the grid size.  The camera
-        # DRAG is the fast lane instead.
-        supersample = 1 if divisor != 1 else 3
+        # only sampling knob left is horizontal: three subcolumn taps per
+        # LOGICAL pixel, whatever the grid size.  The camera DRAG is the
+        # fast lane instead.
+        #
+        # Per logical pixel, not per device pixel.  Anti-aliasing asks how
+        # fine the DISPLAY is, and that already has an owner -- the device
+        # pixel ratio.  Three taps on top of a 3x screen sampled every
+        # logical pixel nine times for detail no screen can show, and the
+        # operator's panel paid thirty milliseconds a frame for it.
+        committed_supersample = max(1, min(4, int(round(
+            3.0 / max(self.plan.device_pixel_ratio, 1e-9)
+        ))))
+        supersample = committed_supersample if divisor == 1 else 1
+        import matplotlib as _matplotlib
+        from matplotlib.colors import to_rgb
+
+        rim_rgb = tuple(float(v) for v in to_rgb(policy.height_bars_axis_color))
+        rim_width_px = (
+            float(_matplotlib.rcParams["axes.linewidth"])
+            * float(self.plan.logical_dpi) / 72.0 / divisor
+        )
         frame, scene = render_height_bars(
             heights,
             top_rgb,
@@ -4146,7 +4207,13 @@ class MatplotlibRenderer:
             z_fraction=policy.height_bars_z_fraction,
             # Committed geometry decides the pooled grid, so a drag
             # frame reuses it instead of re-pooling at its own size.
-            pool_reference_width=box_w * 3,
+            pool_reference_width=box_w * committed_supersample,
+            max_cells_across=policy.height_bars_max_cells_across,
+            # The scene draws its own creases.  A preview renders at
+            # 1/divisor and is scaled back up, so its rim is stroked at
+            # 1/divisor too and arrives the same width as the commit.
+            rim_rgb=rim_rgb,
+            rim_width_px=rim_width_px,
             # The scene is an oblique view of THIS surface's heatmap, so
             # its ground runs the way the heatmap's picture runs.  The
             # origin is that picture's single authority.
@@ -4205,7 +4272,6 @@ class MatplotlibRenderer:
         self._set_xlim(axes, 0.0, 1.0)
         self._set_ylim(axes, 0.0, 1.0)
         self._update_height_bars_chrome(axes, key, scene, box_w, box_h)
-        self._update_height_bars_outlines(axes, key, scene)
         return image, cmap
 
     def _height_bars_fraction(
@@ -4371,10 +4437,9 @@ class MatplotlibRenderer:
                     ((centre, float(scene.ny), wall_low),
                      (centre, float(scene.ny), wall_high))
                 )
-                if not scene.dense:
-                    grid_edges.append(
-                        ((centre, 0.0, 0.0), (centre, float(scene.ny), 0.0))
-                    )
+                grid_edges.append(
+                    ((centre, 0.0, 0.0), (centre, float(scene.ny), 0.0))
+                )
                 (ux, uy), f = outward(
                     scene.project(centre, 0.0, base_value),
                     scene.project(centre, 1.0, base_value),
@@ -4400,10 +4465,9 @@ class MatplotlibRenderer:
                 grid_edges.append(
                     ((0.0, centre, wall_low), (0.0, centre, wall_high))
                 )
-                if not scene.dense:
-                    grid_edges.append(
-                        ((0.0, centre, 0.0), (float(scene.nx), centre, 0.0))
-                    )
+                grid_edges.append(
+                    ((0.0, centre, 0.0), (float(scene.nx), centre, 0.0))
+                )
                 (ux, uy), f = outward(
                     scene.project(float(scene.nx), centre, base_value),
                     scene.project(float(scene.nx) - 1.0, centre, base_value),
@@ -4567,9 +4631,6 @@ class MatplotlibRenderer:
         cage = self._artists.get(f"{key}:h3d_cage")
         if cage is not None:
             cage.set_visible(False)
-        outline = self._artists.get(f"{key}:h3d_outlines")
-        if outline is not None:
-            outline.set_visible(False)
 
     def height_bars_pick(
         self, canvas_x: float, canvas_y: float
@@ -4870,403 +4931,6 @@ class MatplotlibRenderer:
                     edges.append((bottom[i], bottom[(i + 1) % 4]))
                     edges.append((bottom[i], top[i]))
         return np.asarray(edges, dtype=np.float64)
-
-    def _height_bars_outline_edges(self, scene: Any) -> "np.ndarray":
-        """Every line the DRAWN surface owns, folded (a, b, value).
-
-        The geometry is read from the planes the render itself drew --
-        the scene's own top and base -- so the outline cannot describe a
-        different set of boxes from the picture underneath it.  Deriving
-        it a second time from the caller's grid was exactly that second
-        definition, and it could not speak for a POOLED scene at all,
-        whose boxes are not the caller's cells.
-
-        Heights quantize to the display's own z resolution first: two
-        tops the screen cannot tell apart ARE one surface, and their
-        coincident rims then dedupe to a single stroke instead of
-        double-darkening it.  That quantum is the only threshold here;
-        everything else is the exact geometry of the drawn boxes.
-        """
-
-        top = np.asarray(scene.top_values, dtype=np.float64)
-        base = np.asarray(scene.base_values, dtype=np.float64)
-        present = np.isfinite(top)
-        if not present.any():
-            return np.zeros((0, 2, 3), dtype=np.float64)
-        quantum = 1.0 / max(scene.z_unit * scene.ce * scene.scale, 1e-9)
-        high = np.where(present, np.round(top / quantum) * quantum, 0.0)
-        low = np.where(present, np.round(base / quantum) * quantum, 0.0)
-        edges = np.concatenate(
-            [
-                self._height_bars_rim_edges(present, high, low),
-                self._height_bars_node_verticals(present, high, -low),
-            ],
-            axis=0,
-        )
-        if edges.shape[0] == 0:
-            return edges
-        return self._height_bars_dedupe_edges(edges)
-
-    @staticmethod
-    def _height_bars_rim_edges(
-        present: "np.ndarray", high: "np.ndarray", low: "np.ndarray"
-    ) -> "np.ndarray":
-        """The horizontal creases: every box's top ring, and the foot
-        line where the surface drops to the floor.
-
-        Both are real geometry.  The top ring stays CLOSED at the box's
-        own height (coincident rims of equal boxes dedupe to one), and
-        where the neighbour is absent the foot line closes that face
-        against the floor.
-        """
-
-        ny, nx = present.shape
-        rows, columns = np.nonzero(present)
-        a0 = columns.astype(np.float64)
-        b0 = rows.astype(np.float64)
-        a1, b1 = a0 + 1.0, b0 + 1.0
-        z_high = high[rows, columns]
-        z_low = low[rows, columns]
-        # rim i runs corner[i] -> corner[i + 1] around
-        # (a, b) -> (a+1, b) -> (a+1, b+1) -> (a, b+1), which is the
-        # order the neighbour lookup below is written in.
-        rim_corners = (
-            ((a0, b0), (a1, b0)),
-            ((a1, b0), (a1, b1)),
-            ((a1, b1), (a0, b1)),
-            ((a0, b1), (a0, b0)),
-        )
-        padded = np.zeros((ny + 2, nx + 2), dtype=bool)
-        padded[1:-1, 1:-1] = present
-        rim_neighbours = (
-            padded[rows, columns + 1],          # rim 0: the b - 1 side
-            padded[rows + 1, columns + 2],      # rim 1: the a + 1 side
-            padded[rows + 2, columns + 1],      # rim 2: the b + 1 side
-            padded[rows + 1, columns],          # rim 3: the a - 1 side
-        )
-        standing = z_high > z_low
-        blocks = []
-        for (start, end), neighbour in zip(rim_corners, rim_neighbours):
-            blocks.append(
-                np.stack(
-                    [
-                        np.stack([start[0], start[1], z_high], axis=1),
-                        np.stack([end[0], end[1], z_high], axis=1),
-                    ],
-                    axis=1,
-                )
-            )
-            foot = ~neighbour & standing
-            if not foot.any():
-                continue
-            blocks.append(
-                np.stack(
-                    [
-                        np.stack(
-                            [start[0][foot], start[1][foot], z_low[foot]],
-                            axis=1,
-                        ),
-                        np.stack(
-                            [end[0][foot], end[1][foot], z_low[foot]],
-                            axis=1,
-                        ),
-                    ],
-                    axis=1,
-                )
-            )
-        return np.concatenate(blocks, axis=0)
-
-    @staticmethod
-    def _height_bars_node_verticals(
-        present: "np.ndarray", plus: "np.ndarray", minus: "np.ndarray"
-    ) -> "np.ndarray":
-        """The EXACT vertical edge set of the drawn surface, per node.
-
-        Two kinds of vertical line exist at a grid node, both derived
-        from the four surrounding quadrant heights (absent cells count
-        as floor-height zero) -- no thresholds, no heuristics:
-
-        * CREASES of the box-union surface: at a height where the set
-          of occupied quadrants forms a corner (one quadrant, three
-          quadrants, or two diagonal ones), the surface turns and owns
-          a vertical edge.  Two ADJACENT occupied quadrants make a
-          straight wall through the node -- no edge.
-        * SEAMS between coplanar side faces (the bar3 convention that
-          also draws every cell boundary ON the surface): where the two
-          half-walls on one wall plane both expose faces in the SAME
-          direction, their overlap carries the seam.
-
-        Emitting per NODE keeps every vertical single-stroked: boxes
-        share these edges, and per-box copies double-draw the overlap
-        into a visibly fatter line.
-
-        Every node is decided at once.  What one node needs -- four
-        heights, their order, two wall comparisons -- has a fixed shape,
-        so the whole grid is one array expression instead of the same
-        analysis priced once per cell.  ``plus`` and ``minus`` are the
-        upward and downward magnitudes (both >= 0): the analysis is
-        mirror-symmetric, and that is the mirror.
-        """
-
-        ny, nx = present.shape
-
-        def quadrants(magnitude: "np.ndarray") -> "np.ndarray":
-            padded = np.zeros((ny + 2, nx + 2), dtype=np.float64)
-            padded[1:-1, 1:-1] = np.where(present, magnitude, 0.0)
-            # mm, pm, mp, pp: the four cells touching node (a0, b0),
-            # absent ones standing at floor height.
-            return np.stack([
-                padded[0:ny + 1, 0:nx + 1],
-                padded[0:ny + 1, 1:nx + 2],
-                padded[1:ny + 2, 0:nx + 1],
-                padded[1:ny + 2, 1:nx + 2],
-            ]).reshape(4, -1)
-
-        def slabs(corner_heights: "np.ndarray") -> tuple:
-            """(bottom, top, covered) for the four elementary slabs.
-
-            Every span this analysis can produce -- a corner's slab, a
-            seam's overlap -- has both ends AT one of the four quadrant
-            heights.  So the slabs between consecutive heights are the
-            finest division either kind needs, and the union of the
-            spans is just which slabs something covers.
-            """
-
-            order = np.sort(corner_heights, axis=0)
-            bottom = np.concatenate(
-                [np.zeros((1, corner_heights.shape[1])), order[:-1]], axis=0
-            )
-            top = order
-            live = top > bottom + 1e-12
-            occupied = corner_heights[None, :, :] >= (top[:, None, :] - 1e-12)
-            count = occupied.sum(axis=1)
-            diagonal = (occupied[:, 0] & occupied[:, 3]) | (
-                occupied[:, 1] & occupied[:, 2]
-            )
-            covered = live & (
-                (count == 1) | (count == 3) | ((count == 2) & diagonal)
-            )
-            for near, far in (((0, 1), (2, 3)), ((0, 2), (1, 3))):
-                step_near = corner_heights[near[1]] - corner_heights[near[0]]
-                step_far = corner_heights[far[1]] - corner_heights[far[0]]
-                exposed = (
-                    (step_near != 0.0)
-                    & (step_far != 0.0)
-                    & ((step_near > 0.0) == (step_far > 0.0))
-                )
-                seam_low = np.maximum(
-                    np.minimum(corner_heights[near[0]], corner_heights[near[1]]),
-                    np.minimum(corner_heights[far[0]], corner_heights[far[1]]),
-                )
-                seam_high = np.minimum(
-                    np.maximum(corner_heights[near[0]], corner_heights[near[1]]),
-                    np.maximum(corner_heights[far[0]], corner_heights[far[1]]),
-                )
-                exposed &= seam_high > seam_low
-                covered |= (
-                    live
-                    & exposed[None, :]
-                    & (bottom >= seam_low[None, :] - 1e-12)
-                    & (top <= seam_high[None, :] + 1e-12)
-                )
-            return bottom, top, covered, live
-
-        def runs(
-            bottom: "np.ndarray",
-            top: "np.ndarray",
-            covered: "np.ndarray",
-            live: "np.ndarray",
-        ):
-            """Slabs that TOUCH in z are one stroke, so a run is named by
-            where it starts and how far up it reaches.
-
-            Touching is not adjacency in the slab index: two quadrants at
-            the same height make an empty slab between them, and an empty
-            slab joins nothing and separates nothing -- its bottom IS its
-            top.  Chaining through them is what keeps one stroke one
-            stroke.
-            """
-
-            linked = covered | ~live
-            below = [np.zeros(covered.shape[1:], dtype=bool)]
-            for level in (1, 2, 3):
-                below.append(
-                    linked[level - 1] & (covered[level - 1] | below[level - 1])
-                )
-            starts = [covered[level] & ~below[level] for level in range(4)]
-            reach = [None, None, None, top[3]]
-            for level in (2, 1, 0):
-                reach[level] = np.where(
-                    linked[level + 1], reach[level + 1], top[level]
-                )
-            return starts, reach
-
-        up_bottom, up_top, up_covered, up_live = slabs(quadrants(plus))
-        down_bottom, down_top, down_covered, down_live = slabs(
-            quadrants(minus)
-        )
-        up_starts, up_reach = runs(up_bottom, up_top, up_covered, up_live)
-        down_starts, down_reach = runs(
-            down_bottom, down_top, down_covered, down_live
-        )
-
-        node_b, node_a = np.meshgrid(
-            np.arange(ny + 1, dtype=np.float64),
-            np.arange(nx + 1, dtype=np.float64),
-            indexing="ij",
-        )
-        node_a = node_a.reshape(-1)
-        node_b = node_b.reshape(-1)
-        blocks: list = []
-
-        def emit(mask: "np.ndarray", z_low: "np.ndarray", z_high: "np.ndarray") -> None:
-            if not mask.any():
-                return
-            blocks.append(
-                np.stack(
-                    [
-                        np.stack(
-                            [node_a[mask], node_b[mask], z_low[mask]], axis=1
-                        ),
-                        np.stack(
-                            [node_a[mask], node_b[mask], z_high[mask]], axis=1
-                        ),
-                    ],
-                    axis=1,
-                )
-            )
-
-        # The run standing ON the floor reaches THROUGH it: a box hanging
-        # below zero and one standing above it share that node's
-        # vertical, and two strokes meeting at zero would darken it.
-        # Which run that is cannot be assumed to be the lowest slab --
-        # a quadrant at floor height leaves that one empty -- so it is
-        # the run whose bottom is the floor, whichever slab that is.
-        def floor_run(starts, bottom, reach):
-            standing = np.zeros(bottom.shape[1:], dtype=bool)
-            height = np.zeros(bottom.shape[1:], dtype=np.float64)
-            for level in range(4):
-                on_floor = starts[level] & (bottom[level] <= 1e-12)
-                standing |= on_floor
-                height = np.where(on_floor, reach[level], height)
-            return standing, height
-
-        up_standing, up_height = floor_run(up_starts, up_bottom, up_reach)
-        down_standing, down_height = floor_run(
-            down_starts, down_bottom, down_reach
-        )
-        emit(up_standing | down_standing, -down_height, up_height)
-        for level in range(4):
-            above = up_starts[level] & (up_bottom[level] > 1e-12)
-            emit(above, up_bottom[level], up_reach[level])
-            below = down_starts[level] & (down_bottom[level] > 1e-12)
-            emit(below, -down_reach[level], -down_bottom[level])
-        if not blocks:
-            return np.zeros((0, 2, 3), dtype=np.float64)
-        return np.concatenate(blocks, axis=0)
-
-    def _height_bars_dedupe_edges(self, edges: "np.ndarray") -> np.ndarray:
-        """Draw every coincident edge ONCE.
-
-        Neighbouring equal-height boxes share edges; each box emitting
-        its own copy double-strokes the antialiased line into a heavier
-        one.  Occlusion is a local test, so which copy survives cannot
-        matter.
-        """
-
-        if edges.shape[0] < 2:
-            return edges
-        rounded = np.round(edges, 9)
-        p0, p1 = rounded[:, 0, :], rounded[:, 1, :]
-        flip = (
-            (p1[:, 0] < p0[:, 0])
-            | ((p1[:, 0] == p0[:, 0]) & (p1[:, 1] < p0[:, 1]))
-            | (
-                (p1[:, 0] == p0[:, 0])
-                & (p1[:, 1] == p0[:, 1])
-                & (p1[:, 2] < p0[:, 2])
-            )
-        )
-        low = np.where(flip[:, None], p1, p0)
-        high = np.where(flip[:, None], p0, p1)
-        key = np.concatenate([low, high], axis=1)
-        order = np.lexsort((
-            key[:, 5], key[:, 4], key[:, 3],
-            key[:, 2], key[:, 1], key[:, 0],
-        ))
-        ordered = key[order]
-        first = np.ones(order.shape[0], dtype=bool)
-        first[1:] = np.any(ordered[1:] != ordered[:-1], axis=1)
-        return edges[order[first]]
-
-    def _update_height_bars_outlines(
-        self, axes: Any, key: str, scene: Any
-    ) -> None:
-        """The scene's edges, as anti-aliased artist lines.
-
-        ONE mechanism draws every edge this presentation has: vector
-        chrome at the style's axes line width, sampled against the
-        scene's id plane so it hides behind the geometry in front of it.
-        The raster accent that used to darken box boundaries for grids
-        the vector path declined was a SECOND look for the same fact --
-        and the two swapped mid-gesture, because the vector path was
-        also gated on the drag's reduced resolution: the edges changed
-        character the moment the operator started turning the scene.
-
-        A grid below outline density draws no edges at all, because it
-        is not drawn as boxes -- it is a lit continuous surface, and a
-        surface has no rims.
-        """
-
-        outline = self._artists.get(f"{key}:h3d_outlines")
-        if scene.dense:
-            if outline is not None:
-                outline.set_visible(False)
-            return
-        # The edge SET depends on the drawn planes and the fold quadrant
-        # alone -- an azimuth orbit inside one quadrant replays it, so
-        # only the occlusion SAMPLING reruns per camera.
-        quantum = 1.0 / max(scene.z_unit * scene.ce * scene.scale, 1e-9)
-        geometry_key = (
-            id(scene.top_values),
-            id(scene.base_values),
-            scene.top_values.shape,
-            scene.quadrant,
-            repr(quantum),
-        )
-        cached = self._artists.get(f"{key}:h3d_outline_geometry")
-        if cached is not None and cached[0] == geometry_key:
-            edges = cached[1]
-        else:
-            edges = self._height_bars_outline_edges(scene)
-            self._artists[f"{key}:h3d_outline_geometry"] = (
-                geometry_key, edges
-            )
-        if edges.shape[0] == 0:
-            if outline is not None:
-                outline.set_visible(False)
-            return
-        xs, ys = self._height_bars_occluded_polyline(scene, edges)
-        outline = self._height_bars_outline_artist(axes, key)
-        outline.set_data(xs, ys)
-        outline.set_visible(True)
-
-    def _height_bars_outline_artist(self, axes: Any, key: str) -> Any:
-        import matplotlib as _matplotlib
-
-        outline = self._artists.get(f"{key}:h3d_outlines")
-        if outline is None:
-            (outline,) = axes.plot(
-                [], [],
-                transform=axes.transAxes,
-                color=self.style.render.height_bars_axis_color,
-                linewidth=float(_matplotlib.rcParams["axes.linewidth"]),
-                solid_capstyle="butt",
-                zorder=6,
-                clip_on=True,
-            )
-            self._artists[f"{key}:h3d_outlines"] = outline
-        return outline
 
     def _update_height_bars_cage(self, snapshot: Any) -> None:
         """A wireframe cage over the crosshair-selected bar, full z span.

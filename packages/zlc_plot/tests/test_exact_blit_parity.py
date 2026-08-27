@@ -297,3 +297,63 @@ def test_a_confined_gesture_composes_what_a_full_draw_would(ratio) -> None:
             renderer.set_height_bars_dragging(False)
     finally:
         session.close()
+
+
+@pytest.mark.parametrize("ratio", [1.0, 3.0])
+def test_a_confined_pan_composes_what_a_full_draw_would(ratio) -> None:
+    """A hand dragging the view moves the ticks and labels with it.
+
+    So the dragged axes cannot sit in the held background -- its Axis is a
+    dynamic artist for the length of the gesture -- while everything else
+    (colorbar, distribution rail, titles) can.  Before that, the limit
+    change marked the axes chrome-dirty on every single move, the
+    background could never be reused, and after two misses the compose
+    gave up and drew the whole figure: measured, 63 per cent of an 83 ms
+    move.  Sound only while the composed frame is still the frame a full
+    draw would produce, which is what this measures.
+    """
+
+    from zlc_plot.selectors import NumericRange
+
+    session = PlotSession(
+        _camera_snapshot(48, 64),
+        ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
+        device_pixel_ratio=ratio,
+    )
+    try:
+        session.set_size("4x4")
+        session.rgba()
+        renderer = session._renderer
+        axes = renderer.primary_axes
+        renderer.set_view_dragging(axes)
+        try:
+            for index, low in enumerate((4.0, 7.0, 11.0)):
+                session.set_viewport(
+                    NumericRange(low, low + 30.0),
+                    NumericRange(low, low + 24.0),
+                )
+                if index == 1:
+                    # A shot lands mid-drag, and its colour limits move the
+                    # colorbar's labels and the rail's range -- both on axes
+                    # the confinement is holding as chrome.
+                    session.update_data(
+                        _camera_snapshot(48, 64, revision=index + 2, scale=0.4)
+                    )
+                composed = np.array(session.rgba(), copy=True)
+                canvas = renderer.figure.canvas
+                renderer._native_draw(canvas)
+                drawn = np.asarray(canvas.buffer_rgba()).copy()
+                assert composed.shape == drawn.shape
+                difference = np.abs(
+                    composed.astype(np.int16) - drawn.astype(np.int16)
+                )
+                assert int(difference.max()) == 0, (
+                    "a confined pan composes %d pixels differently from a "
+                    "full draw at viewport %s"
+                    % (int((difference.max(axis=2) > 0).sum()), low)
+                )
+                renderer._composed_generation = -1
+        finally:
+            renderer.set_view_dragging(None)
+    finally:
+        session.close()
