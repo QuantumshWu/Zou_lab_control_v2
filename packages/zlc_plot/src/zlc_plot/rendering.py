@@ -1859,6 +1859,13 @@ class MatplotlibRenderer:
         rows, columns = shown.shape[:2]
         x0, y0 = float(bbox.x0), float(bbox.y0)
         x1, y1 = float(bbox.x1), float(bbox.y1)
+        # Integrality is not pedantry.  On a fractional box Agg resamples
+        # the front into a rectangle whose sample boundaries sit half a
+        # pixel from ours, and nearest neighbour then duplicates or drops
+        # whole columns: a 564.3-pixel box moved three percent of the 3D
+        # scene.  ``test_exact_blit_parity`` composes both ways and
+        # compares, and it is what caught that.  The answer is to put the
+        # box ON whole pixels, which ``_pixel_quantized_bounds`` does.
         if any(
             abs(value - round(value)) > 1e-6 for value in (x0, y0, x1, y1)
         ):

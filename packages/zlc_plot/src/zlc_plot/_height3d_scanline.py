@@ -775,6 +775,7 @@ def _materialize(  # noqa: C901 - one kernel, mirrored from the reference
                 out[row, out_col, 0] = np.uint8(r0 + np.float32(0.5))
                 out[row, out_col, 1] = np.uint8(r1 + np.float32(0.5))
                 out[row, out_col, 2] = np.uint8(r2 + np.float32(0.5))
-                alpha = c * np.float32(255.0)
-                out[row, out_col, 3] = np.uint8(alpha + np.float32(0.5))
+                # Mirrors the reference: the frame is finished over the
+                # background, so it is opaque.
+                out[row, out_col, 3] = np.uint8(255)
 

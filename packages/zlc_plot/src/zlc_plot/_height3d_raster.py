@@ -923,8 +923,14 @@ def render_height_bars(
         np.clip(rgb_acc, 0.0, 255.0, out=rgb_acc)
         out = np.empty((out_h, width, 4), dtype=np.uint8)
         out[..., :3] = (rgb_acc + np.float32(0.5)).astype(np.uint8)
-        alpha = cov_acc * np.float32(255.0)
-        out[..., 3] = (alpha + np.float32(0.5)).astype(np.uint8)
+        # The frame is FINISHED: the line above already completed every
+        # uncovered fraction with ``background_rgb``, so a partly covered
+        # pixel already holds its blend.  Reporting the coverage as alpha
+        # made the compositor apply it a second time -- an edge pixel came
+        # out at bg + (face - bg) * coverage**2, visibly pale -- and denied
+        # the exact blit, which then paid Matplotlib's whole image machinery
+        # for a picture that was ready.
+        out[..., 3] = 255
 
     taps = supersample
     out_h = render_h // taps
