@@ -4116,7 +4116,7 @@ class MatplotlibRenderer:
         )
         cached_inputs = self._artists.get("image:h3d_inputs")
         if cached_inputs is not None and cached_inputs[0] == input_key:
-            heights, table, low, high, zero_rgb = cached_inputs[1]
+            heights, table, low, high, zero_rgb, lowest = cached_inputs[1]
         else:
             heights = np.asarray(values, dtype=np.float64)
             if valid is not None:
@@ -4151,9 +4151,18 @@ class MatplotlibRenderer:
             zero_rgb = tuple(
                 float(v) for v in lut[zero_code][:3].astype(np.float32) / 255.0
             )
+            # The lowest value the data holds is a fact ABOUT THE DATA, so
+            # it belongs beside the other four -- not in the per-frame path,
+            # where a 768x768 scene paid 1.9 ms to re-answer it on every
+            # single camera move.  The clip against the colour limit stays
+            # per frame: it is arithmetic on two numbers.
+            finite_mask = np.isfinite(heights)
+            lowest = (
+                float(heights[finite_mask].min()) if finite_mask.any() else 0.0
+            )
             self._artists["image:h3d_inputs"] = (
                 input_key,
-                (heights, table, low, high, zero_rgb),
+                (heights, table, low, high, zero_rgb, lowest),
             )
 
         camera = HeightBarCamera(
@@ -4228,8 +4237,6 @@ class MatplotlibRenderer:
         self._height_bars_scene_map = scene
         self._height_bars_values = heights
         self._height_bars_axes_id = id(axes)
-        finite_heights = heights[np.isfinite(heights)]
-        lowest = float(finite_heights.min()) if finite_heights.size else 0.0
         self._height_bars_floor_value = float(np.clip(min(lowest, 0.0), low, 0.0))
         self._height_bars_data_frame = (
             tuple(float(v) for v in extent),
