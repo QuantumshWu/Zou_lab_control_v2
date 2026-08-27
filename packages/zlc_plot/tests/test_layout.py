@@ -163,7 +163,7 @@ def test_an_aspect_locked_image_keeps_its_strips_beside_it() -> None:
         plan = resolve_surface(
             preset,
             "image",
-            image_aspect=aspect,
+            image_height_over_width=aspect,
             layout=DEFAULTS.layout,
             style=DEFAULTS.style,
         )
@@ -193,8 +193,12 @@ def test_an_aspect_locked_image_keeps_its_strips_beside_it() -> None:
     )
 
 
-def test_the_image_aspect_belongs_to_image_surfaces_only() -> None:
-    with pytest.raises(ValueError, match="image_aspect"):
+def test_the_image_shape_belongs_to_image_surfaces_only() -> None:
+    with pytest.raises(ValueError, match="image_height_over_width"):
         resolve_surface(
-            "2x2", "curve", image_aspect=1.0, layout=DEFAULTS.layout, style=DEFAULTS.style
+            "2x2",
+            "curve",
+            image_height_over_width=1.0,
+            layout=DEFAULTS.layout,
+            style=DEFAULTS.style,
         )

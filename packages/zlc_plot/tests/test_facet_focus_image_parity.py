@@ -324,12 +324,16 @@ def test_overview_slots_are_shaped_for_what_the_renderer_draws() -> None:
     The layout used to answer "what shape is an image" from the pixel counts
     (60x40 -> 1.5) while the renderer squared the same cell, so every slot
     kept a third of its width as dead space around the drawn cell.
+
+    Height over width, and the field says so: the same number used to be
+    read as width/height here and as height/width by the split, which agreed
+    only while every image declared a square 1.0.
     """
 
     session = PlotSession(_frames_scan_snapshot(), _FACET_SPEC, size="4x4")
     try:
         session._renderer.figure.canvas.draw()
-        declared = session.surface_plan.facet_topology.cell_aspect
+        declared = session.surface_plan.facet_topology.cell_height_over_width
         drawn = [
             axis.get_window_extent().bounds
             for axis in session._renderer.axes["facet_cell"]
@@ -338,7 +342,7 @@ def test_overview_slots_are_shaped_for_what_the_renderer_draws() -> None:
         assert len(drawn) == 3
         for _x, _y, width, height in drawn:
             assert math.isclose(
-                declared, float(width) / float(height), rel_tol=1e-9
+                declared, float(height) / float(width), rel_tol=1e-9
             ), (declared, width, height)
     finally:
         session.close()

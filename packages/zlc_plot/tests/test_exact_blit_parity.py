@@ -126,3 +126,63 @@ def test_a_curve_panel_is_unaffected_by_the_fast_path(ratio) -> None:
     finally:
         session.close()
     np.testing.assert_array_equal(fast, drawn)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [(1200, 1920), (1920, 1200), (1200, 1200), (2048, 2048), (40, 60), (3, 2)],
+    ids=lambda shape: "%dx%d" % shape,
+)
+@pytest.mark.parametrize("ratio", [1.0, 1.5, 3.0])
+def test_no_image_front_is_ever_left_to_matplotlib(shape, ratio) -> None:
+    """The copy is not a lucky case: a refused front is a REGRESSION.
+
+    The copy used to require the front to fill its axes, which a square
+    field with a non-square frame letterboxed in it never does -- so the
+    operator's 1200x1920 camera silently paid Matplotlib's whole image
+    machinery on every frame, twenty milliseconds of it, while the bench
+    matrix (square frames, every one) reported the fast path working.  The
+    preconditions are established upstream now: the box is sized so the
+    letterboxed picture lands on whole pixels, and the copy addresses the
+    picture's rectangle rather than the whole box.
+
+    So this asserts the absence of the fallback, not the presence of the
+    fast path.  A shape that lands back on Matplotlib fails here.
+    """
+
+    height, width = shape
+    renderer_class = rendering_module.MatplotlibRenderer
+    original = renderer_class._blit_exact_rgba_image
+    verdicts: list[bool] = []
+
+    def watched(self, artist, canvas):
+        from matplotlib.image import AxesImage
+
+        answer = original(self, artist, canvas)
+        if isinstance(artist, AxesImage):
+            verdicts.append(bool(answer))
+        return answer
+
+    renderer_class._blit_exact_rgba_image = watched
+    try:
+        session = PlotSession(
+            _camera_snapshot(height, width),
+            ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
+            device_pixel_ratio=ratio,
+        )
+        try:
+            session.set_size("4x4")
+            session.rgba()
+            verdicts.clear()
+            for revision in range(2, 6):
+                session.update_data(_camera_snapshot(height, width, revision))
+                session.rgba()
+        finally:
+            session.close()
+    finally:
+        renderer_class._blit_exact_rgba_image = original
+    assert verdicts, "no image front reached the compose at all"
+    assert all(verdicts), (
+        "%d of %d image fronts fell back to Matplotlib's image machinery"
+        % (verdicts.count(False), len(verdicts))
+    )
