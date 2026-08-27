@@ -4292,23 +4292,36 @@ class MatplotlibRenderer:
         less than one and a half pixels.
 
         ``fold_cell`` is the one thing that knows where a data cell went,
-        so it is what answers here: the side each data extreme landed on.
+        so it is what answers here: the side each data corner landed on.
+
+        The corners are the HEATMAP's, named clockwise from its top left:
+        a, b, c, d.  The walls stand on ab and ad, the axes run along cd
+        and bc, and the z axis rises at d -- the ruling, and the reason
+        every side here is asked for by a picture corner rather than by an
+        array index.  Which array row is the picture's top is the image
+        origin's business, which ``flip_rows`` already carries.
         """
 
-        origin_a, origin_b = scene.fold_cell(0, 0)
-        first_a = 0.0 if origin_a * 2 < scene.nx else float(scene.nx)
-        first_b = 0.0 if origin_b * 2 < scene.ny else float(scene.ny)
-        last_a = float(scene.nx) - first_a
-        last_b = float(scene.ny) - first_b
+        def sides(row: int, column: int) -> tuple[float, float]:
+            a, b = scene.fold_cell(row, column)
+            return (
+                0.0 if a * 2 < scene.nx else float(scene.nx),
+                0.0 if b * 2 < scene.ny else float(scene.ny),
+            )
+
+        top_row = 0 if scene.flip_rows else scene.source_ny - 1
+        bottom_row = scene.source_ny - 1 - top_row
+        wall_a, wall_b = sides(top_row, 0)                        # a
+        axis_a, axis_b = sides(bottom_row, scene.source_nx - 1)   # c
+        z_a, z_b = sides(bottom_row, 0)                           # d
         return {
-            # The walls stand where the data ends, and the axes run along
-            # where it starts -- the same two sides, every camera.
-            "wall_a": last_a, "wall_b": last_b,
-            "axis_a": first_a, "axis_b": first_b,
+            "wall_a": wall_a, "wall_b": wall_b,
+            "axis_a": axis_a, "axis_b": axis_b,
+            "z_a": z_a, "z_b": z_b,
             # One step INTO the scene from each axis side, for the
             # direction a tick label leaves along.
-            "in_a": 1.0 if first_a == 0.0 else -1.0,
-            "in_b": 1.0 if first_b == 0.0 else -1.0,
+            "in_a": 1.0 if axis_a == 0.0 else -1.0,
+            "in_b": 1.0 if axis_b == 0.0 else -1.0,
         }
 
     def _update_height_bars_chrome(
@@ -4333,12 +4346,14 @@ class MatplotlibRenderer:
 
         segments_x: list[float] = []
         segments_y: list[float] = []
-
-        def add_segment(p0, p1):
-            f0 = self._height_bars_fraction(scene, *p0)
-            f1 = self._height_bars_fraction(scene, *p1)
-            segments_x.extend((f0[0], f1[0], np.nan))
-            segments_y.extend((f0[1], f1[1], np.nan))
+        # The axis LINES are geometry standing on the ground, so they are
+        # hidden by whatever stands in front of them, exactly as the pane
+        # and floor rules are.  They used to be painted straight over the
+        # scene, so turning it far enough left the axes floating on top of
+        # the bars they run behind.  The tick MARKS leave the box outward
+        # and are drawn plainly.
+        axis_edges: list[tuple[tuple[float, float, float],
+                               tuple[float, float, float]]] = []
 
         wanted_texts: list[tuple[float, float, str, str, str]] = []
         # The SAME chrome metrics every 2D panel runs under: tick length,
@@ -4372,7 +4387,9 @@ class MatplotlibRenderer:
         anchor = self._height_bars_ground_anchors(scene)
         far_a, far_b = anchor["wall_a"], anchor["wall_b"]
         near_a, near_b = anchor["axis_a"], anchor["axis_b"]
-        left_a, left_b = near_a, near_b
+        # The z axis rises at the picture's bottom-left corner d, where a
+        # wall meets an axis -- not at the corner the two axes share.
+        left_a, left_b = anchor["z_a"], anchor["z_b"]
         in_a, in_b = anchor["in_a"], anchor["in_b"]
         # nbins=2 is the reference's tick sparseness: a [0, 1] scale
         # reads 0 / 0.5 / 1 exactly as the MATLAB panels do (nbins=3
@@ -4410,39 +4427,32 @@ class MatplotlibRenderer:
             va = "bottom" if uy > 0.4 else ("top" if uy < -0.4 else "center")
             return ha, va
 
-        # ---- z axis where the two axis sides meet: the data corner the
-        # x and y axes both start from, whichever way the scene is turned
-        base = scene.project(left_a, left_b, wall_low)
-        top = scene.project(left_a, left_b, wall_high)
-        add_segment(base, top)
+        # A tick belongs to the point of the axis it stands on, so it is
+        # visible exactly when that point is: one rule for the mark, its
+        # label and the line they sit on.  Collected first and emitted
+        # after one batched occlusion test, because the test is a raster
+        # lookup and asking it per tick would walk the scene thirty times.
+        ticks: list[tuple[tuple[float, float, float],
+                          tuple[float, float],
+                          tuple[float, float],
+                          str]] = []
+
+        def add_tick(anchor, direction, at, text):
+            ticks.append((anchor, direction, at, text))
+
+        # ---- z axis at the picture's d corner
+        axis_edges.append(
+            ((left_a, left_b, wall_low), (left_a, left_b, wall_high))
+        )
         for tick in z_ticks:
-            # The z labels leave their axis along the projected x
-            # direction (the bench's ruling), exactly as the floor labels
-            # leave theirs -- away from the scene, so toward the corner
-            # opposite the one this axis stands on.
+            # The z ticks leave along c -> d, the ruling: the direction the
+            # cd axis departs the scene in, carried up the vertical axis.
             (ux, uy), f = outward(
                 scene.project(left_a, left_b, float(tick)),
-                scene.project(
-                    left_a + (1.0 if left_a == 0.0 else -1.0),
-                    left_b + (1.0 if left_b == 0.0 else -1.0),
-                    float(tick),
-                ),
+                scene.project(near_a, near_b, float(tick)),
             )
-            segments_x.extend(
-                (f[0], f[0] + ux * tick_length_px / box_w, np.nan)
-            )
-            segments_y.extend(
-                (f[1], f[1] + uy * tick_length_px / box_h, np.nan)
-            )
-            ha, va = anchored((ux, uy))
-            wanted_texts.append(
-                (
-                    f[0] + ux * label_gap_px / box_w,
-                    f[1] + uy * label_gap_px / box_h,
-                    f"{tick:g}",
-                    ha,
-                    va,
-                )
+            add_tick(
+                (left_a, left_b, float(tick)), (ux, uy), f, f"{tick:g}"
             )
 
         # ---- base coordinate labels along the two front edges
@@ -4464,13 +4474,11 @@ class MatplotlibRenderer:
 
             # The two front floor edges are the scene's x/y axis lines,
             # carrying the tick marks exactly as a 2D panel's spines do.
-            add_segment(
-                scene.project(far_a, near_b, base_value),
-                scene.project(near_a, near_b, base_value),
+            axis_edges.append(
+                ((far_a, near_b, base_value), (near_a, near_b, base_value))
             )
-            add_segment(
-                scene.project(near_a, near_b, base_value),
-                scene.project(near_a, far_b, base_value),
+            axis_edges.append(
+                ((near_a, near_b, base_value), (near_a, far_b, base_value))
             )
 
             def a_tick(centre: float, value: float) -> None:
@@ -4484,21 +4492,8 @@ class MatplotlibRenderer:
                     scene.project(centre, near_b, base_value),
                     scene.project(centre, near_b + in_b, base_value),
                 )
-                segments_x.extend(
-                    (f[0], f[0] + ux * tick_length_px / box_w, np.nan)
-                )
-                segments_y.extend(
-                    (f[1], f[1] + uy * tick_length_px / box_h, np.nan)
-                )
-                ha, va = anchored((ux, uy))
-                wanted_texts.append(
-                    (
-                        f[0] + ux * label_gap_px / box_w,
-                        f[1] + uy * label_gap_px / box_h,
-                        f"{value:g}",
-                        ha,
-                        va,
-                    )
+                add_tick(
+                    (centre, near_b, base_value), (ux, uy), f, f"{value:g}"
                 )
 
             def b_tick(centre: float, value: float) -> None:
@@ -4512,21 +4507,8 @@ class MatplotlibRenderer:
                     scene.project(near_a, centre, base_value),
                     scene.project(near_a + in_a, centre, base_value),
                 )
-                segments_x.extend(
-                    (f[0], f[0] + ux * tick_length_px / box_w, np.nan)
-                )
-                segments_y.extend(
-                    (f[1], f[1] + uy * tick_length_px / box_h, np.nan)
-                )
-                ha, va = anchored((ux, uy))
-                wanted_texts.append(
-                    (
-                        f[0] + ux * label_gap_px / box_w,
-                        f[1] + uy * label_gap_px / box_h,
-                        f"{value:g}",
-                        ha,
-                        va,
-                    )
+                add_tick(
+                    (near_a, centre, base_value), (ux, uy), f, f"{value:g}"
                 )
 
             # The rot90 fold hands each source axis to a DIFFERENT front
@@ -4560,6 +4542,37 @@ class MatplotlibRenderer:
                     b_tick(b + 0.5, value)
                 else:
                     a_tick(a + 0.5, value)
+
+        # ---- what the scene does not hide of its own ticks
+        if ticks:
+            anchors = np.asarray(
+                [(tick[0], tick[0]) for tick in ticks], dtype=np.float64
+            )
+            sampled, _sampled_y = self._height_bars_sampled_polyline(
+                scene, anchors, 2
+            )
+            standing = np.isfinite(sampled.reshape(len(ticks), 3)[:, 0])
+        else:
+            standing = ()
+        for (_anchor, (ux, uy), f, text), shown in zip(ticks, standing):
+            if not shown:
+                continue
+            segments_x.extend(
+                (f[0], f[0] + ux * tick_length_px / box_w, np.nan)
+            )
+            segments_y.extend(
+                (f[1], f[1] + uy * tick_length_px / box_h, np.nan)
+            )
+            ha, va = anchored((ux, uy))
+            wanted_texts.append(
+                (
+                    f[0] + ux * label_gap_px / box_w,
+                    f[1] + uy * label_gap_px / box_h,
+                    text,
+                    ha,
+                    va,
+                )
+            )
 
         # ---- the pane/floor grid, occluded like real geometry
         grid = artists["grid"]
@@ -4596,6 +4609,12 @@ class MatplotlibRenderer:
                 clip_on=True,
             )
             artists["lines"] = line
+        if axis_edges:
+            axis_x, axis_y = self._height_bars_occluded_polyline(
+                scene, np.asarray(axis_edges, dtype=np.float64)
+            )
+            segments_x = list(axis_x) + [np.nan] + segments_x
+            segments_y = list(axis_y) + [np.nan] + segments_y
         line.set_data(segments_x, segments_y)
         line.set_visible(True)
 

@@ -255,7 +255,7 @@ def _pointer(session, action, axis, fx, fy, **kwargs):
 
 
 def test_the_scene_turns_as_one_rigid_object() -> None:
-    """A wall stands where the data ends, whichever way the scene faces.
+    """A wall stands on the picture's own edge, whichever way it faces.
 
     The rasterizer folds the grid so it only ever walks one octant, and
     the chrome used to hang its wall rules, its vertical axis and its base
@@ -266,8 +266,9 @@ def test_the_scene_turns_as_one_rigid_object() -> None:
     +0.5, while the four projected SOURCE corners move by less than one
     and a half pixels.
 
-    So the test is on the data: the corner a named cell stands on, and
-    the wall its rules run along, must move continuously with the camera.
+    So the test is on the data: the walls stand on the heatmap's ab and
+    ad edges, the axes run along cd and bc, and the z axis rises at d --
+    and each must move continuously with the camera.
     """
 
     from zlc_plot._height3d_raster import HeightBarCamera, render_height_bars
@@ -310,13 +311,20 @@ def test_the_scene_turns_as_one_rigid_object() -> None:
                 % (name, moved, boundary)
             )
 
-    # And the anchor really is the data's own side: the cell at the data
-    # origin sits on the axis corner, at every camera.
+    # And the anchors really are the picture's own corners: a carries the
+    # walls, c the axes and d the z axis, at every camera.
     for azimuth in (-55.0, 5.0, 95.0, 185.0, 275.0):
         scene, anchor = anchors(azimuth)
-        origin_a, origin_b = scene.fold_cell(0, 0)
-        assert abs(origin_a - anchor["axis_a"]) <= 1.0
-        assert abs(origin_b - anchor["axis_b"]) <= 1.0
+        top_row = 0 if scene.flip_rows else scene.source_ny - 1
+        bottom_row = scene.source_ny - 1 - top_row
+        for corner, prefix in (
+            ((top_row, 0), "wall"),                          # a
+            ((bottom_row, scene.source_nx - 1), "axis"),     # c
+            ((bottom_row, 0), "z"),                          # d
+        ):
+            cell_a, cell_b = scene.fold_cell(*corner)
+            assert abs(cell_a - anchor[prefix + "_a"]) <= 1.0
+            assert abs(cell_b - anchor[prefix + "_b"]) <= 1.0
 
 
 def test_a_drag_renders_the_resolution_it_leaves_behind() -> None:
