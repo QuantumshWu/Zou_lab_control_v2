@@ -4198,7 +4198,7 @@ class MatplotlibRenderer:
             width=box_w,
             height=box_h,
             supersample=supersample,
-            pool_cache=self._artists.setdefault("image:h3d_pool_cache", {}),
+            render_cache=self._artists.setdefault("image:h3d_cache", {}),
             side_shades=policy.height_bars_side_shades,
             background_rgb=policy.height_bars_background_rgb,
             z_fraction=policy.height_bars_z_fraction,
