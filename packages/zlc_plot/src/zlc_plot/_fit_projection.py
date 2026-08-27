@@ -674,11 +674,16 @@ class FitProjection:
             for key in sample.group_keys:
                 if key not in keys:
                     keys.append(key)
-        # x is the absolute shot index each history point owns, so the axis
-        # slides forward as the window fills instead of counting negative
-        # "shots ago".
+        # x is how many shots ago each point is: 0 is the newest, and the
+        # ones behind it count back.  A rolling window shows the last N
+        # shots, so what a point MEANS is its distance from now -- the
+        # absolute shot number is a fact about the run, not about the
+        # picture, and using it slid every label forward on every single
+        # revision.  Once the window is full the axis stops moving, which
+        # is also what lets a composed frame keep its cached chrome
+        # instead of re-laying the tick labels on each shot.
         start = len(history) - visible_size
-        x_values = np.asarray(
+        absolute = np.asarray(
             [
                 sample.source_index
                 if sample.source_index is not None
@@ -687,6 +692,7 @@ class FitProjection:
             ],
             dtype=float,
         )
+        x_values = absolute - absolute[-1]
         unit = self._view.samples.value.display_unit
         canonical_unit = self._view.samples.value.canonical_unit
         x_unit = resolve_unit("1", DEFAULT_UNITS)
@@ -725,7 +731,9 @@ class FitProjection:
                 x_values,
                 x_unit,
                 x_unit,
-                "Shot",
+                # Not a shot NUMBER: the axis says how far back a point is
+                # from the newest one, which is what a rolling window shows.
+                "Shots from latest",
             )
             y = QuantityArray(
                 canonical_values,

@@ -2156,13 +2156,12 @@ class MatplotlibRenderer:
             # capture path draws the scene once with the dynamics hidden,
             # copies the whole figure, restores it, and paints the dynamics
             # again -- worth it only if the NEXT frame can reuse that copy.
-            # A rolling panel's x axis is the absolute shot number, so its
-            # tick labels are re-laid on every single revision and the copy
-            # is dead on arrival: it was paying eighteen megabytes of capture
-            # and a restore, every frame, to avoid a draw it did anyway.
-            # Two consecutive misses is the evidence; the churn counter goes
-            # back to zero the moment a frame is reusable, so a panel that
-            # settles returns to the fast path by itself.
+            # A panel whose tick labels are re-laid on every revision makes
+            # the copy dead on arrival: it pays eighteen megabytes of
+            # capture and a restore, every frame, to avoid a draw it does
+            # anyway.  Two consecutive misses is the evidence; the churn
+            # counter goes back to zero the moment a frame is reusable, so a
+            # panel that settles returns to the fast path by itself.
             self._native_draw(canvas)
             self._chrome_dirty_axes.clear()
             self._background_region = None
@@ -5623,21 +5622,15 @@ class MatplotlibRenderer:
             if series
             else ("value" if explicit_y is None else explicit_y)
         )
-        # The shot axis frames the FULL configured window from the first
-        # revision on: it opens at shots [0, window-1] and slides only once
-        # the trace has filled it, so the window parameter is what you see
-        # and the axis never names a negative shot.  It is resolved BEFORE the
-        # series painter runs and handed to it, because an axis with two
-        # owners is an axis that moves twice.
-        shot_values = np.concatenate(
-            [item.x[item.valid] for item in sliced]
-        ) if sliced else np.asarray([], dtype=float)
-        frame = None
-        if shot_values.size:
-            last_shot = float(np.max(shot_values))
-            window = int(state["window"])
-            low = max(0.0, last_shot - window + 1)
-            frame = _curve_x_limits(np.asarray([low, low + window - 1]))
+        # The shot axis frames the FULL configured window and then stands
+        # still: x counts back from the newest shot at 0, so the frame is
+        # [-(window - 1), 0] whatever the run has reached.  The window
+        # parameter is what you see, from the first revision on, and the
+        # axis stops re-laying its tick labels once it is full.  It is
+        # resolved BEFORE the series painter runs and handed to it,
+        # because an axis with two owners is an axis that moves twice.
+        window = int(state["window"])
+        frame = _curve_x_limits(np.asarray([1.0 - window, 0.0]))
         self._mutate_series_artists(
             history,
             tuple(sliced),
