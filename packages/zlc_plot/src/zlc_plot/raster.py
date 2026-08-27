@@ -614,6 +614,22 @@ class RasterPlotHost:
             return self._session
 
     @property
+    def closing(self) -> bool:
+        """Whether this host can still serve, answered without raising.
+
+        Everything else that reports it -- ``defaults``, ``_require_session``,
+        ``_dispatch_session`` -- reports it by RAISING, which is the right
+        answer to a caller that asked for work and a fatal one to a Qt event
+        handler: PyQt aborts the process on an exception that escapes a slot,
+        with no traceback.  A widget outliving its host is ordinary (the
+        console retires a host when a panel retargets), so the widget needs a
+        question it can ask, not an exception it must catch.
+        """
+
+        with self._condition:
+            return bool(self._closing or self._closed)
+
+    @property
     def front(self) -> RasterFront | None:
         with self._condition:
             return self._front
@@ -2470,6 +2486,21 @@ class RasterPlotHost:
             frame.completion.cancel()
         if thread is not None and thread is not current_thread():
             thread.join(timeout)
+        # The host made the widget and keeps it, so the host ends it: a
+        # widget left mounted on a closed host goes on delivering mouse
+        # events, and the first question it asks -- the selector handle
+        # radius, out of ``defaults`` -- raises inside ``mouseMoveEvent``
+        # and takes the whole application down.  Only from the widget's own
+        # thread; from anywhere else the widget's own guard stands.
+        widget = self._qt_widget
+        if widget is not None:
+            try:
+                from PyQt5 import QtCore as _QtCore
+
+                if _QtCore.QThread.currentThread() == widget.thread():
+                    widget.close_adapter()
+            except Exception:
+                pass
         stopped = thread is None or not thread.is_alive()
         if stopped:
             with self._condition:

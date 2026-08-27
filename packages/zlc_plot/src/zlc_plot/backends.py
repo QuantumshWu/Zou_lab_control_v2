@@ -964,7 +964,7 @@ def _qt5_plot_widget_class() -> type[Any]:
             return super().eventFilter(watched, event)
 
         def _apply_device_pixel_ratio(self, ratio: float) -> None:
-            if self._closed:
+            if not self._host_can_serve():
                 return
             selected = float(ratio)
             if self._requested_dpr == selected:
@@ -1047,6 +1047,31 @@ def _qt5_plot_widget_class() -> type[Any]:
                 QtCore.Qt.RightButton: 3,
             }.get(button)
 
+        def _host_can_serve(self) -> bool:
+            """Whether there is still a host behind this widget.
+
+            A widget outliving its host is ordinary -- the console retires a
+            host whenever a panel retargets -- and everything the host
+            reports it by raising.  An exception that escapes a Qt handler
+            aborts the process, so every path from an event to the host asks
+            this first and returns quietly when the answer is no.
+            """
+
+            return not self._closed and self._host_is_open()
+
+        def _host_is_open(self) -> bool:
+            """Whether the host itself is still open, ignoring this widget.
+
+            A widget being detached from a LIVE host still owes it the
+            cancellation of any gesture in flight, so that path asks about
+            the host alone.
+            """
+
+            try:
+                return not self._host.closing
+            except Exception:
+                return False
+
         def _submit_pointer(
             self,
             action: str,
@@ -1057,6 +1082,8 @@ def _qt5_plot_widget_class() -> type[Any]:
             step: float = 0.0,
             key: str | None = None,
         ) -> None:
+            if not self._host_can_serve():
+                return
             if not self._interaction_gate.enabled:
                 return
             gate_generation = self._interaction_gate.generation
@@ -1138,7 +1165,7 @@ def _qt5_plot_widget_class() -> type[Any]:
                     or self._candidate is not None
                 )
                 self._clear_interaction()
-                if active:
+                if active and self._host_is_open():
                     self._track(
                         self._host._pointer_event(
                             "cancel",
@@ -1323,7 +1350,7 @@ def _qt5_plot_widget_class() -> type[Any]:
                 or self._candidate is not None
             )
             self._clear_interaction()
-            if active or force:
+            if (active or force) and self._host_is_open():
                 self._track(
                     self._host._pointer_event(
                         "cancel",
