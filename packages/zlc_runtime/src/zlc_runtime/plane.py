@@ -2446,6 +2446,24 @@ class SignalDataPlane:
             state = self._state_for_signal_locked(name)
             return state is not None and not state.retired and not state.terminal
 
+    def retains(self, signal_name: str) -> bool:
+        """Whether this signal's data is still HERE to be derived from.
+
+        ``is_generation_live`` answers two of the three states a signal can
+        be in -- it says False both for a run that finished with its data
+        retained and for one whose data is gone.  A consumer choosing how
+        to derive reads that single False as "finished", takes the terminal
+        path, and only discovers the difference when materializing raises
+        ``LookupError``: a box drawn on a panel whose run has been retired
+        took the console down that way.  The third state is a fact this
+        plane owns, so it answers it here instead of by exception.
+        """
+
+        name = canonical_text(signal_name, "signal name")
+        with self._lock:
+            state = self._state_for_signal_locked(name)
+            return state is not None and not state.retired
+
     def latest_publication(self, signal_name: str) -> SignalPublication | None:
         name = canonical_text(signal_name, "signal name")
         with self._lock:

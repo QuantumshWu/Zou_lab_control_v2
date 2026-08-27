@@ -2086,6 +2086,33 @@ def test_roi_histogram_window_growth_waits_for_current_signal_generation(
     )
 
 
+def test_one_failing_panel_interaction_is_a_line_not_the_instrument(
+    presenter,
+) -> None:
+    """The drain names no exception classes, because the guess was wrong.
+
+    A box drawn on a run whose data had been retired raised LookupError
+    from the plane.  The drain caught TypeError and ValueError, so it
+    passed through, left the beat, and left the Qt timer slot -- where
+    PyQt ends the process.  Whatever an interaction raises, it is one
+    error line and the next interaction still runs.
+    """
+
+    ran: list[str] = []
+
+    def exploding() -> None:
+        raise LookupError("signal 'x' is not retained")
+
+    presenter._enqueue_panel_interaction(exploding)
+    presenter._enqueue_panel_interaction(lambda: ran.append("after"))
+    presenter._drain_panel_interactions()
+
+    assert ran == ["after"], "one failure must not eat the queue behind it"
+    errors = [text for severity, text in presenter.view.status if severity == "error"]
+    assert any("cannot apply panel interaction" in text for text in errors), errors
+    assert any("not retained" in text for text in errors), errors
+
+
 def test_committed_selection_outputs_enter_the_real_occupancy_input(
     presenter, session, tmp_path
 ) -> None:

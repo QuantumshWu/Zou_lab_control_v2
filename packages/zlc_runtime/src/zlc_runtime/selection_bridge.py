@@ -982,6 +982,13 @@ class SelectionBridge:
                 self._withdraw_processor(stale)
         if not output_names:
             return
+        if not self._source_retained():
+            self._record_error(
+                RuntimeError(
+                    "this run is no longer held, so its fit derives nothing"
+                )
+            )
+            return
         outputs = self._materialize_fit_outputs(
             self._source_snapshot(publication),
             event,
@@ -1099,6 +1106,17 @@ class SelectionBridge:
         publication = source_publication
         outputs = None
         if output_names:
+            if not self._source_retained():
+                # A real answer, not a failure: the picture is still on the
+                # panel, the run behind it is not.  Nothing can be cut from
+                # data the plane has let go.
+                self._record_error(
+                    RuntimeError(
+                        "this run is no longer held, so a selection drawn "
+                        "on it derives nothing"
+                    )
+                )
+                return
             source = publication.value(self._source_signal)
             if source is None:
                 raise RuntimeError(
@@ -1314,6 +1332,19 @@ class SelectionBridge:
             else self._materialize_fit_outputs(snapshot, event)
         )
         return _TriggeredOutputs(outputs, trigger)
+
+    def _source_retained(self) -> bool:
+        """Is the run this bridge derives from still HERE?
+
+        A panel keeps its last picture after its run is retired, and its
+        selectors keep working: a box drawn there asks for a dataset the
+        plane no longer holds.  Asked as an exception, that answer left the
+        bridge as ``LookupError`` -- a class the console's interaction
+        drain did not name -- and killed the process from inside a Qt slot.
+        The plane knows; ask it before materializing anything.
+        """
+
+        return bool(self._plane.retains(self._source_signal))
 
     def _source_snapshot(
         self,

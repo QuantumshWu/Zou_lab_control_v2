@@ -2421,6 +2421,57 @@ def test_retiring_a_fit_route_frees_its_names_before_the_slot_reads_empty() -> N
         _close(bridge, plane, source)
 
 
+def test_a_box_drawn_on_a_retired_run_answers_instead_of_raising() -> None:
+    """A panel outlives its run, and its selectors go with it.
+
+    The picture stays on the card after the camera measurement ends and
+    its data is retired; the box the operator then drags asks the plane
+    for a dataset it no longer holds.  Asked as an exception, the answer
+    arrived as ``LookupError`` -- a class the console's interaction drain
+    did not name -- and left a Qt slot, which is where PyQt ends the
+    process.  It is not a defect at all: it is what "this run is gone"
+    looks like from inside a derivation, and it is reported.
+    """
+
+    schema = _image_schema()
+    values = np.arange(12, dtype=float).reshape(1, 1, 4, 3)
+    plane, source, _slot, _state, initial = _source_setup(schema, values)
+    plane.set_front_signals({"camera/frame", "@logic/box/roi_frame"})
+    events = _Events()
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="box")
+    bridge.start()
+    try:
+        assert plane.retains("camera/frame")
+        assert plane.is_generation_live("camera/frame")
+
+        publication = initial.publication("camera/frame")
+        assert publication is not None
+        plane.retire(source)
+        # The two questions a derivation has to tell apart: a run that
+        # ENDED still holds its data; a run that was retired does not.
+        assert not plane.is_generation_live("camera/frame")
+        assert not plane.retains("camera/frame")
+
+        bridge.commit_selection(
+            SelectionState(
+                "image",
+                "area",
+                (
+                    SelectionRange("x", 0.0, 1.0, domain="data"),
+                    SelectionRange("y", 20.0, 30.0, domain="data"),
+                ),
+                revision=1,
+            ),
+            source_publication=publication,
+        )
+        assert bridge.last_error is not None
+        assert "no longer held" in str(bridge.last_error)
+        assert plane.freeze().value("@logic/box/roi_frame") is None
+    finally:
+        bridge.close()
+        plane.close()
+
+
 def _component_schema() -> DatasetSchema:
     """A survival-shaped parent: its data axes carry COMPONENT and SITE."""
 
