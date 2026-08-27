@@ -100,8 +100,32 @@ def default_spec(schema: Any) -> CurvePlot | None:
         for axis in schema.cell_schema.data_axes
         if axis.size > 1 and AxisRef.data(str(axis.axis_id)) != x
     )
-    group = AxisRef.data(str(data_axes[0].axis_id)) if len(data_axes) == 1 else None
+    group = None
+    if len(data_axes) == 1 and _tellable_apart(data_axes[0].size):
+        group = AxisRef.data(str(data_axes[0].axis_id))
     return CurvePlot(x, group=group, reduction=Reduction.MEAN)
+
+
+def _tellable_apart(count: int) -> bool:
+    """Can a picture show this many lines AS separate lines?
+
+    A group exists so its members can be told apart, and what tells them
+    apart is their colour: past the end of the line cycle the colours
+    repeat and the lines are a fog.  So the cycle is the bound, and it is
+    the palette's to state -- not a number invented here.
+
+    A camera frame is the case that made this matter: 1920 columns as x
+    leaves 1200 rows as the single dense axis, which the rule grouped.
+    Measured, Matplotlib draws one noisy 1920-point line in 46 ms, so
+    that default asked for a picture costing 24 SECONDS a frame and
+    showing 1200 indistinguishable lines.  Collapsed under the declared
+    reduction it is one line, which is what the reduction is for; an
+    operator who wants the rows apart still asks for them by name.
+    """
+
+    from ..config import DEFAULTS
+
+    return int(count) <= len(DEFAULTS.style.palette.line_cycle)
 
 
 HANDLER = KindHandler(
