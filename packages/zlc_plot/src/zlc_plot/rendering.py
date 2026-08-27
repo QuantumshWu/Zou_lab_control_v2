@@ -4116,7 +4116,7 @@ class MatplotlibRenderer:
         )
         cached_inputs = self._artists.get("image:h3d_inputs")
         if cached_inputs is not None and cached_inputs[0] == input_key:
-            heights, top_rgb, low, high, zero_rgb = cached_inputs[1]
+            heights, table, low, high, zero_rgb = cached_inputs[1]
         else:
             heights = np.asarray(values, dtype=np.float64)
             if valid is not None:
@@ -4136,34 +4136,14 @@ class MatplotlibRenderer:
                 if high <= low:
                     high = low + 1.0
             lut = self._image_color_lut(cmap_name, cmap)
-            # A live panel rebuilds all of this on every shot, so each
-            # extra full-plane pass is paid at the shot rate: measured on
-            # 2.3M cells, the code plane cost 24 ms and the colour gather
-            # 33.  It is one lookup per cell that never looks at a
-            # neighbour, so it goes the way the scene's own derivation
-            # went: one parallel walk, against a table that is ALREADY the
-            # float the scene wants rather than four uint8 channels to
-            # gather, drop one of, widen and divide 2.3M times.  The numpy
-            # form below remains what it means.
+            # The scene takes the TABLE, and decides each cell's colour
+            # from the same value and limits it takes the height from.
+            # Building one colour per cell here cost a plane three times
+            # the size of the data on every shot -- a scaled array, a
+            # clip, a NaN fill, a cast and a 2.3-million-element gather --
+            # which the renderer then folded and carried, all to say what
+            # 256 rows already say.
             table = self._image_color_lut_rgb(cmap_name, lut)
-            top_rgb = np.empty((*heights.shape, 3), dtype=np.float32)
-            span = 256.0 / (high - low)
-            if _scanline_selected():
-                from ._height3d_scanline import _colour_plane
-
-                _colour_plane(
-                    np.ascontiguousarray(heights),
-                    float(low),
-                    float(span),
-                    table,
-                    top_rgb,
-                )
-            else:
-                with np.errstate(invalid="ignore"):
-                    codes = (heights - low) * span
-                np.clip(codes, 0.0, 255.0, out=codes)
-                np.nan_to_num(codes, copy=False, nan=0.0)
-                top_rgb = table[codes.astype(np.uint8)]
             with np.errstate(invalid="ignore"):
                 zero_code = int(
                     np.clip((0.0 - low) * (256.0 / (high - low)), 0.0, 255.0)
@@ -4173,7 +4153,7 @@ class MatplotlibRenderer:
             )
             self._artists["image:h3d_inputs"] = (
                 input_key,
-                (heights, top_rgb, low, high, zero_rgb),
+                (heights, table, low, high, zero_rgb),
             )
 
         camera = HeightBarCamera(
@@ -4226,7 +4206,7 @@ class MatplotlibRenderer:
         )
         frame, scene = render_height_bars(
             heights,
-            top_rgb,
+            table,
             camera=camera,
             value_limits=(low, high),
             zero_rgb=zero_rgb,

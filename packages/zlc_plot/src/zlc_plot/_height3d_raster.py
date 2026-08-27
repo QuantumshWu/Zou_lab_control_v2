@@ -386,7 +386,7 @@ def _scanline_selected() -> bool:
 
 def render_height_bars(
     heights: NDArray[np.floating],
-    top_rgb: NDArray[np.floating],
+    colours: NDArray[np.floating],
     *,
     camera: HeightBarCamera,
     value_limits: tuple[float, float],
@@ -403,6 +403,13 @@ def render_height_bars(
     origin: str = "lower",
 ) -> tuple[NDArray[np.uint8], HeightBarScene]:
     """Render the grid as boxes -> ((H, W, 4) uint8 RGBA, scene map).
+
+    ``colours`` is the colormap's own 256-row table, and a cell takes the
+    row its value lands on -- the same code the heatmap picks, from the
+    same value and the same limits.  The colour is decided here rather
+    than handed in per cell because a live panel rebuilds it on every
+    shot: one colour per cell is a plane three times the size of the data
+    to build, fold and carry, for what 256 rows already say.
 
     NaN heights are absent bars.  Bar heights anchor to ``value_limits``
     (the colour limits): values clip to them exactly as colours saturate,
@@ -435,14 +442,17 @@ def render_height_bars(
         raise ValueError("height-bar raster needs at least 8x8 pixels")
 
     h_grid = np.asarray(heights, dtype=np.float64)
-    rgb_grid = np.asarray(top_rgb, dtype=np.float32)
-    if h_grid.ndim != 2 or rgb_grid.shape != (*h_grid.shape, 3):
-        raise ValueError("heights must be (ny, nx) and top_rgb (ny, nx, 3)")
+    lut = np.ascontiguousarray(colours, dtype=np.float32)
+    if h_grid.ndim != 2 or lut.shape != (256, 3):
+        raise ValueError("heights must be (ny, nx) and colours (256, 3)")
     source_ny, source_nx = h_grid.shape
-    # The caller's own input cache keeps these arrays alive and unchanged
-    # for as long as they are current, so their identity is what the
-    # derived planes below cache under.
-    input_key = (id(h_grid), id(rgb_grid), h_grid.shape)
+    # The caller's own input cache keeps this array alive and unchanged for
+    # as long as it is current, so its identity is what the derived planes
+    # below cache under.  The colour a cell takes is decided HERE, from the
+    # same value and the same limits the height is: handing in one colour
+    # per cell instead meant the caller built, folded and carried a plane
+    # three times the size of the data to say what a 256-row table says.
+    input_key = (id(h_grid), h_grid.shape, id(colours))
 
     # ---- one bar per cell of the grid the heatmap draws.
     #
@@ -462,7 +472,6 @@ def render_height_bars(
     # ---- the picture's own row direction
     if flip_rows:
         h_grid = h_grid[::-1]
-        rgb_grid = rgb_grid[::-1]
         finite_grid = finite_grid[::-1]
 
     # ---- fold the azimuth into [0, 90) by rotating the grid
@@ -476,7 +485,6 @@ def render_height_bars(
         # grid to turn with it.  Flipping alone kept the axes in place,
         # so the scene snapped ninety degrees at every boundary.
         h_grid = np.rot90(h_grid, quadrant)
-        rgb_grid = np.rot90(rgb_grid, quadrant, axes=(0, 1))
         finite_grid = np.rot90(finite_grid, quadrant)
     # AFTER the fold: odd quadrants swap the folded dimensions.
     ny, nx = h_grid.shape
@@ -570,25 +578,28 @@ def render_height_bars(
             base_values,
         ) = render_cache["derived_value"]
     else:
-        base_grid = rgb_grid if zero_rgb is None else _zero_colour_plane(
-            zero_rgb, rgb_grid.shape, render_cache
-        )
         finite_grid = np.ascontiguousarray(finite_grid)
+        span = 256.0 / (value_high - value_low)
+        shape = (*h_grid.shape, 3)
         if _scanline_selected():
             from ._height3d_scanline import _derive_planes
 
             hz = np.empty(h_grid.shape, dtype=np.float64)
             top_values = np.empty(h_grid.shape, dtype=np.float64)
             base_values = np.empty(h_grid.shape, dtype=np.float64)
+            rgb_grid = np.empty(shape, dtype=np.float32)
             _derive_planes(
                 np.ascontiguousarray(h_grid),
                 finite_grid,
                 float(value_low),
                 float(value_high),
                 float(z_unit),
+                float(span),
+                lut,
                 hz,
                 top_values,
                 base_values,
+                rgb_grid,
             )
         else:
             clipped = np.clip(h_grid, value_low, value_high)
@@ -611,8 +622,14 @@ def render_height_bars(
                 if whole
                 else np.where(finite_grid, np.minimum(clipped, 0.0), np.inf)
             )
-        rgb_grid = np.ascontiguousarray(rgb_grid)
-        base_grid = np.ascontiguousarray(base_grid)
+            with np.errstate(invalid="ignore"):
+                codes = (clipped - value_low) * span
+            np.clip(codes, 0.0, 255.0, out=codes)
+            np.nan_to_num(codes, copy=False, nan=0.0)
+            rgb_grid = np.ascontiguousarray(lut[codes.astype(np.uint8)])
+        base_grid = rgb_grid if zero_rgb is None else _zero_colour_plane(
+            zero_rgb, shape, render_cache
+        )
         if render_cache is not None:
             render_cache["derived_key"] = derived_key
             render_cache["derived_value"] = (
