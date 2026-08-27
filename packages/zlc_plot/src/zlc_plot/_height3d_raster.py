@@ -268,6 +268,46 @@ def _rim_stamp(width: float) -> tuple[NDArray[np.float32], int]:
     return weights, radius
 
 
+def _scratch(
+    cache: dict | None, name: str, shape: tuple, dtype: object
+) -> NDArray:
+    """A buffer to render into, alternating between two, reused per frame.
+
+    Fresh pages are not free.  A 1630x1630 frame and its face-id plane are
+    21 MB, and touching them for the first time -- the operating system
+    mapping and zeroing every page -- costs about 4.6 ms of every camera
+    move, a fifth of the walk itself.  Measured: allocate-and-fill 5.27 ms,
+    refill-in-place 0.67 ms; the ``np.empty`` call is 0.03 ms of that, so
+    what is being paid for is the pages, not the allocation.
+
+    Safe because both buffers are written in FULL on every frame -- the
+    combine loop walks every row of the frame, and the middle tap writes
+    every row of the id plane, background rows included.  Nothing stale
+    can survive into a picture.
+
+    Two, not one: the frame just rendered is still on the artist and its
+    id plane still answers picks until the next one replaces them, so the
+    render in flight must not write over what the last one published.  One
+    frame of grace is exactly their lifetime.  The pair is replaced whole
+    when the box is resized, so a panel holds two and never a history.
+    """
+
+    if cache is None:
+        return np.empty(shape, dtype=dtype)
+    key = "scratch:" + name
+    pair = cache.get(key)
+    if (
+        pair is None
+        or pair[0].shape != shape
+        or pair[0].dtype != np.dtype(dtype)
+    ):
+        pair = [np.empty(shape, dtype=dtype), np.empty(shape, dtype=dtype), 0]
+        cache[key] = pair
+    index = pair[2] ^ 1
+    pair[2] = index
+    return pair[index]
+
+
 def _rim_boundary(id_plane: NDArray[np.int32]) -> NDArray[np.bool_]:
     """Pixels beside a visible crease of the DRAWN surface.
 
@@ -666,12 +706,22 @@ def render_height_bars(
         # the standing contract test.
         from ._height3d_scanline import _materialize
 
-        out = np.empty((render_h // supersample, int(width), 4), dtype=np.uint8)
+        out = _scratch(
+            render_cache,
+            "frame",
+            (render_h // supersample, int(width), 4),
+            np.uint8,
+        )
         # One id per OUTPUT pixel, not per subcolumn.  The picking plane only
         # ever kept the middle tap, so writing all three and then gathering
         # every third column out of a thirty-three megabyte plane cost five
         # milliseconds a frame to throw two thirds of it away.
-        id_taps = np.empty((render_h // supersample, int(width)), dtype=np.int32)
+        id_taps = _scratch(
+            render_cache,
+            "ids",
+            (render_h // supersample, int(width)),
+            np.int32,
+        )
         bg32 = np.asarray(background_rgb, dtype=np.float32)
         _materialize(
             a_at,
@@ -1025,7 +1075,7 @@ def render_height_bars(
             (np.float32(1.0) - cov_acc)[..., None] * background255[None, None]
         )
         np.clip(rgb_acc, 0.0, 255.0, out=rgb_acc)
-        out = np.empty((out_h, width, 4), dtype=np.uint8)
+        out = _scratch(render_cache, "frame", (out_h, width, 4), np.uint8)
         out[..., :3] = (rgb_acc + np.float32(0.5)).astype(np.uint8)
         # The frame is FINISHED: the line above already completed every
         # uncovered fraction with ``background_rgb``, so a partly covered
