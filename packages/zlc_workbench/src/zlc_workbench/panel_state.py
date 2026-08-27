@@ -466,21 +466,24 @@ def project_panel_state(
             raise KeyError(key)
         value = restore_semantic_choice(description, key, saved)
         field = description.field(key)
+        if key.startswith(FATE_PREFIX) and is_scope_fate(value):
+            # A scope pin names a COORDINATE, and the row's dropdown is
+            # capped -- so "is it offered?" answers the wrong question.
+            # Ask the DATA, and ask it for EVERY pin: the describer adds
+            # the row's current value to its own offer list (so a pin on
+            # an axis too large to list stays visible), which means a pin
+            # already on the spec proved itself legal by being there.  A
+            # coordinate the run no longer has then rode the projection
+            # into restrict_snapshot and raised "coordinate selection is
+            # empty on axis ..." from inside the data layer -- out of a
+            # Qt slot, which ends the session.  A pin with no referent is
+            # the same shape as a fate naming an axis that is not here:
+            # its row falls back to the axis's default fate.
+            ref = _fate_row_axis(description, key)
+            if ref is not None and axis_admits_scope(schema, ref, value):
+                wanted[key] = scope_fate(scope_coordinate_from_fate(value))
+            continue
         if not any(value == choice for choice in field.choice_values):
-            if key.startswith(FATE_PREFIX) and is_scope_fate(value):
-                # A scope pin names a COORDINATE, and the row's dropdown is
-                # capped -- so "not in the list" answers the wrong question.
-                # Ask the data instead: a coordinate the axis has is legal
-                # however long the axis is, and one it no longer has is a
-                # statement with no referent, exactly like a fate naming an
-                # axis that is not here.  A camera restarted with another
-                # frame count rebuilds the pair axis; the pin the operator
-                # left on the pair that is gone must fall back to the row's
-                # default fate, not raise on every projection for ever.
-                ref = _fate_row_axis(description, key)
-                if ref is not None and axis_admits_scope(schema, ref, value):
-                    wanted[key] = scope_fate(scope_coordinate_from_fate(value))
-                continue
             raise ValueError(
                 f"semantic field {key!r} value is outside this plot vocabulary"
             )

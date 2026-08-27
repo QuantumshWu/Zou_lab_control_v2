@@ -845,6 +845,18 @@ def composed_spec(
 
         for axis, value in fate_values.items():
             if is_scope_fate(value):
+                if not axis_admits_scope(schema, axis, value):
+                    # A pin names a COORDINATE, and this is the one place a
+                    # fate becomes one.  Nothing checked it here, so a pin
+                    # the run no longer has -- a rerun with another plan, a
+                    # camera restarted with another frame count -- composed
+                    # cleanly and detonated later inside restrict_snapshot:
+                    # "coordinate selection is empty on axis ...", raised
+                    # from the data layer with a plot on screen.  A pin with
+                    # no referent says nothing about THIS schema, exactly
+                    # like a fate naming an axis that is not here, so its
+                    # row simply holds no fate and the vacancy rules speak.
+                    continue
                 scope[axis] = scope_coordinate_from_fate(value)
             elif value in (FATE_REDUCE, FATE_POOL):
                 if _declares_reduced(candidate):
