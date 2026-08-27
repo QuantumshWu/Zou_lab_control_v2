@@ -211,7 +211,7 @@ def test_a_sliding_shot_history_is_not_a_new_geometry_under_a_drag() -> None:
         front = widget.presented_front
         assert front is not None
         axis = front.interaction.axes[0]
-        opened = axis.x_limits
+        opened_revision = front.identity.data_revision
         left, top, right, bottom = axis.bounds
 
         def at(fx: float, fy: float):
@@ -248,8 +248,14 @@ def test_a_sliding_shot_history_is_not_a_new_geometry_under_a_drag() -> None:
                 "history was read as a new geometry"
             )
 
-        # the window really did slide while the drag was held
-        assert widget.presented_front.interaction.axes[0].x_limits != opened
+        # the window really did slide while the drag was held.  Its LIMITS
+        # do not say so any more: a rolling axis counts back from the newest
+        # shot, so a full window keeps the same coordinates as it slides --
+        # which is what makes a shot arriving mid-drag harmless.  What moved
+        # is the data behind them.
+        assert (
+            widget.presented_front.identity.data_revision > opened_revision
+        )
         send(
             QtGui.QMouseEvent.MouseButtonRelease, at(0.85, 0.85),
             QtCore.Qt.LeftButton, QtCore.Qt.NoButton,

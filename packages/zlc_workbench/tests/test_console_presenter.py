@@ -1585,8 +1585,11 @@ def test_panel_publisher_edit_owns_stable_output_selection(
     _settle_panel_hosts(
         presenter, lambda: histogram.accepted_display is not None
     )
-    assert presenter._panel_publisher_fields(histogram) == (), (
-        "a value-domain Histogram range has no upstream Dataset ROI outputs"
+    assert [
+        name for name, _label in presenter._panel_publisher_fields(histogram)
+    ] == ["roi_frame", "roi_mean"], (
+        "a Histogram range is a band on the measured value: it cuts no axis, "
+        "but it decides which cells count, so the cut signal is offered"
     )
 
 
@@ -1767,18 +1770,25 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
 
     rolling_session = rolling.host._session
     validity = np.asarray(rolling_session._payload.series[0].valid)
-    def rolling_indices() -> tuple[int, ...]:
+    def rolling_offsets() -> tuple[int, ...]:
         return tuple(
             int(value)
             for value in rolling.host._session._payload.series[0].x.canonical
         )
 
-    source_indices = rolling_indices()
-    assert source_indices == tuple(
-        range(source_indices[0], source_indices[-1] + 1)
+    # Rolling x counts back from the newest shot at zero, so a shot's place
+    # in the trace is its distance from the newest one.
+    offsets = rolling_offsets()
+    assert offsets == tuple(range(offsets[0], 1))
+    newest = max(
+        failed_source.event_ref.sequence, recovered_source.event_ref.sequence
     )
-    gap_index = source_indices.index(failed_source.event_ref.sequence)
-    recovered_index = source_indices.index(recovered_source.event_ref.sequence)
+
+    def place_of(sequence: int) -> int:
+        return offsets.index(sequence - newest)
+
+    gap_index = place_of(failed_source.event_ref.sequence)
+    recovered_index = place_of(recovered_source.event_ref.sequence)
     assert not validity[gap_index]
     assert validity[recovered_index]
     previous_valid = int(np.flatnonzero(validity[:gap_index])[-1])
@@ -1823,10 +1833,10 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
         lambda: (
             rolling.configuration is None
             and rolling.port.presentation_current
-            and rolling_indices() == source_indices[-2:]
+            and rolling_offsets() == offsets[-2:]
         ),
     )
-    retained_indices = source_indices[-2:]
+    retained_offsets = offsets[-2:]
     assert _accepted(rolling.port, "publication") is shown_before_edit
     assert presenter.update_panel_state(
         rolling.panel_id,
@@ -1837,7 +1847,7 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
         lambda: (
             rolling.configuration is None
             and rolling.port.presentation_current
-            and rolling_indices() == retained_indices
+            and rolling_offsets() == retained_offsets
         ),
     )
     from zlc_data import LATEST_COORDINATE
@@ -1856,7 +1866,7 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
         lambda: (
             rolling.configuration is None
             and rolling.port.presentation_current
-            and rolling_indices() == retained_indices[-1:]
+            and rolling_offsets() == (0,)
         ),
     )
     assert presenter.update_panel_state(
@@ -1868,7 +1878,7 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
         lambda: (
             rolling.configuration is None
             and rolling.port.presentation_current
-            and rolling_indices() == retained_indices
+            and rolling_offsets() == retained_offsets
         ),
     )
     lease = rolling.history_lease

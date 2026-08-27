@@ -80,7 +80,15 @@ def _cumsum_axis0(diff: NDArray, out: NDArray) -> None:
 class HeightBarCamera:
     """The presentation camera: orbit angles plus a zoom factor."""
 
-    azimuth_deg: float = -55.0
+    #: Positive azimuth turns the ground CLOCKWISE, which is the ruling:
+    #: the scene's top view is the heatmap rectangle turned clockwise, so
+    #: its top-left corner stands far, its bottom-right near, its
+    #: bottom-left to the left and its top-right to the right.  The home
+    #: view used to be the same angle the other way, which put the
+    #: picture a quarter turn from the heatmap it represents (and, on the
+    #: odd quadrant that lands in, with its long side across the short
+    #: one).
+    azimuth_deg: float = 55.0
     elevation_deg: float = 30.0
     zoom: float = 1.0
 
@@ -117,15 +125,12 @@ class HeightBarScene:
     y_high: float
     nx: int
     ny: int
+    #: The caller's own grid shape, BEFORE the azimuth fold, and whether
+    #: its rows were reversed to stand the grid up the way the heatmap
+    #: draws it.  Both live here so every index mapping below speaks the
+    #: caller's ORIGINAL (row, column) whatever the fold did.
     source_nx: int
     source_ny: int
-    pool_x: int
-    pool_y: int
-    #: Pooled row count BEFORE the azimuth fold, and whether the source
-    #: rows were reversed to stand the grid up the way the heatmap draws
-    #: it.  Both live here so every index mapping below speaks the
-    #: caller's ORIGINAL (row, column) whatever the renderer did.
-    pooled_rows: int
     flip_rows: bool
     z_unit: float
     value_low: float
@@ -166,9 +171,9 @@ class HeightBarScene:
         for one index pair.
         """
 
-        col_p, row_p = int(column) // self.pool_x, int(row) // self.pool_y
+        col_p, row_p = int(column), int(row)
         if self.flip_rows:
-            row_p = self.pooled_rows - 1 - row_p
+            row_p = self.source_ny - 1 - row_p
         if self.quadrant == 0:
             return col_p, row_p
         if self.quadrant == 1:
@@ -178,7 +183,7 @@ class HeightBarScene:
         return self.nx - 1 - row_p, col_p
 
     def unfold_cell(self, a: int, b: int) -> tuple[int, int]:
-        """Folded (a_cell, b_cell) -> pooled source (row_p, col_p)."""
+        """Folded (a_cell, b_cell) -> the caller's (row, column)."""
 
         a, b = int(a), int(b)
         if self.quadrant == 0:
@@ -190,7 +195,7 @@ class HeightBarScene:
         else:
             row_p, col_p = self.nx - 1 - a, b
         if self.flip_rows:
-            row_p = self.pooled_rows - 1 - row_p
+            row_p = self.source_ny - 1 - row_p
         return row_p, col_p
 
     def pick(self, x: float, y: float) -> tuple[int, int] | None:
@@ -205,8 +210,7 @@ class HeightBarScene:
             return None
         cell = (face - 4) // 4
         a, b = cell % self.nx, cell // self.nx
-        row_p, col_p = self.unfold_cell(a, b)
-        return row_p * self.pool_y, col_p * self.pool_x
+        return self.unfold_cell(a, b)
 
     def cell_corners(
         self, row: int, column: int
@@ -220,40 +224,29 @@ class HeightBarScene:
         )
 
 
-def _pooled(
-    grid: NDArray[np.float64],
-    rgb: NDArray[np.float32],
-    finite: NDArray[np.bool_],
-    limit: int,
-) -> tuple[NDArray, NDArray, NDArray, int, int]:
-    """Mean-pool a grid denser than its pixels down to display resolution."""
+def _zero_colour_plane(
+    zero_rgb: tuple[float, float, float],
+    shape: tuple[int, ...],
+    cache: dict | None,
+) -> NDArray[np.float32]:
+    """The flat colour every bar's base is painted in.
 
-    ny, nx = grid.shape
-    pool_y = max(1, -(-ny // max(limit, 1)))
-    pool_x = max(1, -(-nx // max(limit, 1)))
-    if pool_x == 1 and pool_y == 1:
-        return grid, rgb, finite, 1, 1
-    pad_y = (-ny) % pool_y
-    pad_x = (-nx) % pool_x
-    if pad_y or pad_x:
-        grid = np.pad(grid, ((0, pad_y), (0, pad_x)), constant_values=np.nan)
-        rgb = np.pad(rgb, ((0, pad_y), (0, pad_x), (0, 0)))
-        finite = np.pad(finite, ((0, pad_y), (0, pad_x)))
-    blocks_y = grid.shape[0] // pool_y
-    blocks_x = grid.shape[1] // pool_x
-    shaped = grid.reshape(blocks_y, pool_y, blocks_x, pool_x)
-    counts = finite.reshape(blocks_y, pool_y, blocks_x, pool_x).sum(
-        axis=(1, 3)
+    One colour, held as a full plane because that is what the kernels
+    index.  It depends on the colormap and the limits -- never on the
+    data -- so rebuilding it with the data cost 8.9 ms of every live
+    frame at 2.3M cells to write the same three numbers again.
+    """
+
+    key = (tuple(float(value) for value in zero_rgb), tuple(shape))
+    if cache is not None and cache.get("zero_colour_key") == key:
+        return cache["zero_colour_value"]
+    plane = np.ascontiguousarray(
+        np.broadcast_to(np.asarray(zero_rgb, dtype=np.float32), shape)
     )
-    pooled_h = (
-        np.nansum(np.where(np.isfinite(shaped), shaped, 0.0), axis=(1, 3))
-        / np.maximum(counts, 1)
-    )
-    pooled_h = np.where(counts > 0, pooled_h, np.nan)
-    pooled_rgb = rgb.reshape(blocks_y, pool_y, blocks_x, pool_x, 3).mean(
-        axis=(1, 3), dtype=np.float32
-    )
-    return pooled_h, pooled_rgb, counts > 0, pool_x, pool_y
+    if cache is not None:
+        cache["zero_colour_key"] = key
+        cache["zero_colour_value"] = plane
+    return plane
 
 
 def _rim_stamp(width: float) -> tuple[NDArray[np.float32], int]:
@@ -406,7 +399,7 @@ def render_height_bars(
     z_fraction: float = 0.55,
     rim_rgb: tuple[float, float, float] = (0.0, 0.0, 0.0),
     rim_width_px: float = 0.0,
-    pool_cache: dict | None = None,
+    render_cache: dict | None = None,
     origin: str = "lower",
 ) -> tuple[NDArray[np.uint8], HeightBarScene]:
     """Render the grid as boxes -> ((H, W, 4) uint8 RGBA, scene map).
@@ -446,48 +439,27 @@ def render_height_bars(
     if h_grid.ndim != 2 or rgb_grid.shape != (*h_grid.shape, 3):
         raise ValueError("heights must be (ny, nx) and top_rgb (ny, nx, 3)")
     source_ny, source_nx = h_grid.shape
+    # The caller's own input cache keeps these arrays alive and unchanged
+    # for as long as they are current, so their identity is what the
+    # derived planes below cache under.
+    input_key = (id(h_grid), id(rgb_grid), h_grid.shape)
 
-    # ---- LOD: how many bars this picture has.
+    # ---- one bar per cell of the grid the heatmap draws.
     #
-    # There is ONE look -- boxes -- so density cannot decide what the
-    # scene IS, only how finely it is divided.  And how finely it CAN be
-    # divided is a fact about the drawn bar, not about a budget: a bar has
-    # to be several times the line it is drawn with, or the picture is a
-    # mesh of rims with no faces left between them.  The rim width is
-    # therefore the only thing this asks.
+    # The scene IS the heatmap in another form, so it divides the ground
+    # the same way: as many boxes as the picture has cells, and an ROI
+    # that halves the data halves the bars.  A level of detail here was a
+    # second answer to a question the data already answers -- and it was
+    # invisible in the worst way, because a shrinking ROI kept producing
+    # the same bar count under a changing range.
     #
-    # It used to ask a second question -- a cap on the bar count -- because
-    # every rim was vector chrome priced per bar and fifty a side cost
-    # 14.6 ms a frame.  The rims are pixels now: drawing every point of a
-    # 2.3 megapixel frame costs 16.5 ms against 14.1 for fifty bars a
-    # side, so the cap bought 2.4 ms and cost the operator the detail they
-    # asked to see.  It is gone.
-    #
-    # Pooling depends only on the inputs and this floor, never the camera;
-    # the caller may hand a cache whose validity rides on INPUT IDENTITY --
-    # safe because the caller's own input cache keeps those arrays alive
-    # and unchanged.
-    pool_width = int(render_w)
-    legible_cell_px = max(3.0, 6.0 * float(rim_width_px))
-    limit = max(8, int(pool_width / legible_cell_px))
-    pool_key = (id(h_grid), id(rgb_grid), h_grid.shape, limit)
-    if pool_cache is not None and pool_cache.get("key") == pool_key:
-        h_grid, rgb_grid, finite_grid, pool_x, pool_y = pool_cache["value"]
-    else:
-        finite_grid = np.isfinite(h_grid)
-        h_grid, rgb_grid, finite_grid, pool_x, pool_y = _pooled(
-            h_grid, rgb_grid, finite_grid, limit
-        )
-        if pool_cache is not None:
-            pool_cache["key"] = pool_key
-            pool_cache["value"] = (
-                h_grid, rgb_grid, finite_grid, pool_x, pool_y
-            )
+    # It cost more than it saved.  The pooling pass alone was 24.9 ms on
+    # every arriving frame of a 647x849 ROI (measured on the real chain),
+    # against 3.9 ms more per drag frame for drawing all 549k boxes
+    # instead of 107x108 -- and 9.5 ms more at 1200x1920.
+    finite_grid = np.isfinite(h_grid)
 
-    # ---- the picture's own row direction, AFTER pooling so the pooled
-    # blocks stay aligned with the source rows -- and so the pool cache,
-    # whose key is the input arrays' identity, keeps hitting.
-    pooled_rows = int(h_grid.shape[0])
+    # ---- the picture's own row direction
     if flip_rows:
         h_grid = h_grid[::-1]
         rgb_grid = rgb_grid[::-1]
@@ -589,53 +561,87 @@ def render_height_bars(
     # of those inputs -- a cache shared across two origins would otherwise
     # hand back the other picture's geometry.
     derived_key = (
-        pool_key, flip_rows, quadrant, value_low, value_high, zero_rgb,
+        input_key, flip_rows, quadrant, value_low, value_high, zero_rgb,
         float(z_fraction),
     )
-    if pool_cache is not None and pool_cache.get("derived_key") == derived_key:
+    if render_cache is not None and render_cache.get("derived_key") == derived_key:
         (
             hz, finite_grid, rgb_grid, base_grid, top_values,
             base_values,
-        ) = pool_cache["derived_value"]
+        ) = render_cache["derived_value"]
     else:
-        clipped = np.clip(h_grid, value_low, value_high)
-        hz = np.ascontiguousarray(
-            np.where(finite_grid, clipped, 0.0) * z_unit
-        )
-        if zero_rgb is None:
-            base_grid = rgb_grid
-        else:
-            base_grid = np.ascontiguousarray(np.broadcast_to(
-                np.asarray(zero_rgb, dtype=np.float32), rgb_grid.shape
-            ))
-        top_values = np.where(
-            finite_grid, np.maximum(clipped, 0.0), -np.inf
-        )
-        base_values = np.where(
-            finite_grid, np.minimum(clipped, 0.0), np.inf
+        base_grid = rgb_grid if zero_rgb is None else _zero_colour_plane(
+            zero_rgb, rgb_grid.shape, render_cache
         )
         finite_grid = np.ascontiguousarray(finite_grid)
+        if _scanline_selected():
+            from ._height3d_scanline import _derive_planes
+
+            hz = np.empty(h_grid.shape, dtype=np.float64)
+            top_values = np.empty(h_grid.shape, dtype=np.float64)
+            base_values = np.empty(h_grid.shape, dtype=np.float64)
+            _derive_planes(
+                np.ascontiguousarray(h_grid),
+                finite_grid,
+                float(value_low),
+                float(value_high),
+                float(z_unit),
+                hz,
+                top_values,
+                base_values,
+            )
+        else:
+            clipped = np.clip(h_grid, value_low, value_high)
+            # A grid with nothing missing -- a camera frame, most scans --
+            # gets the same numbers without the mask: where(all true, x, y)
+            # IS x.  Measured on 2.3M cells, the three masked passes cost
+            # 31 ms and the question costs one.
+            whole = bool(finite_grid.all())
+            hz = np.ascontiguousarray(
+                (clipped if whole else np.where(finite_grid, clipped, 0.0))
+                * z_unit
+            )
+            top_values = (
+                np.maximum(clipped, 0.0)
+                if whole
+                else np.where(finite_grid, np.maximum(clipped, 0.0), -np.inf)
+            )
+            base_values = (
+                np.minimum(clipped, 0.0)
+                if whole
+                else np.where(finite_grid, np.minimum(clipped, 0.0), np.inf)
+            )
         rgb_grid = np.ascontiguousarray(rgb_grid)
         base_grid = np.ascontiguousarray(base_grid)
-        if pool_cache is not None:
-            pool_cache["derived_key"] = derived_key
-            pool_cache["derived_value"] = (
+        if render_cache is not None:
+            render_cache["derived_key"] = derived_key
+            render_cache["derived_value"] = (
                 hz, finite_grid, rgb_grid, base_grid, top_values,
                 base_values,
             )
     z_key = (derived_key, float(ce))
-    if pool_cache is not None and pool_cache.get("derived_z_key") == z_key:
-        z_top32, z_bot32 = pool_cache["derived_z_value"]
+    if render_cache is not None and render_cache.get("derived_z_key") == z_key:
+        z_top32, z_bot32 = render_cache["derived_z_value"]
+    elif _scanline_selected():
+        from ._height3d_scanline import _derive_z_planes
+
+        z_top32 = np.empty(hz.shape, dtype=np.float32)
+        z_bot32 = np.empty(hz.shape, dtype=np.float32)
+        _derive_z_planes(hz, float(ce), z_top32, z_bot32)
     else:
+        # ``ce`` is positive (the elevation is clamped well inside a
+        # quarter turn), so scaling before the split is the same number as
+        # after it -- and it is one pass over the plane instead of two.
+        scaled = hz * ce
         z_top32 = np.ascontiguousarray(
-            (np.maximum(hz, 0.0) * ce).astype(np.float32)
+            np.maximum(scaled, 0.0).astype(np.float32)
         )
         z_bot32 = np.ascontiguousarray(
-            (np.minimum(hz, 0.0) * ce).astype(np.float32)
+            np.minimum(scaled, 0.0).astype(np.float32)
         )
-        if pool_cache is not None:
-            pool_cache["derived_z_key"] = z_key
-            pool_cache["derived_z_value"] = (z_top32, z_bot32)
+        if render_cache is not None:
+            render_cache["derived_z_key"] = z_key
+            render_cache["derived_z_value"] = (z_top32, z_bot32)
 
     if _scanline_selected():
         # The numba analytic engine: exact vertical coverage per column
@@ -1036,9 +1042,6 @@ def render_height_bars(
         ny=ny,
         source_nx=source_nx,
         source_ny=source_ny,
-        pool_x=pool_x,
-        pool_y=pool_y,
-        pooled_rows=pooled_rows,
         flip_rows=flip_rows,
         z_unit=z_unit,
         value_low=value_low,

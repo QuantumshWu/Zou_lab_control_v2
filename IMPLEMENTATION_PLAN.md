@@ -266,3 +266,56 @@
   把page-local index冒充global index；TaskConsole与FigureViewer复用同一机制。
 - typed Figure仍保存全部cells；页面只是显示状态。导出提供当前页、全部分页PNG或多页PDF，
   不生成一个包含数百微小Axes的单张巨图。
+
+## 7. 当前Goal进度（2026-08-27，branch `height3d`）
+
+用户七项清单，全部完成。**已完成并提交的不得重做**；每项的证据是当前tree重新取得的实测。
+
+1. **`90ee153`** — `display__title` 切回 Auto 时 `ValueError` 穿出 Qt slot、进程 abort
+   （exit -1073740791）。根因：text handler 用 `field.default`（当前值）当作"允不允许空"
+   的规则，而 `adopt_projection` 正确地把 default 排除在 metadata 比较之外，于是新的
+   `None` 被上一份声明审判。改为读 `field.required`，与 int/number/real 的
+   `blank_allowed` 同一个所有者。红/绿：`test_settings_layout.py`（变异回旧规则即红）。
+2. **性能，`0dbf943` + `e6f3a40` + `3a891bc`**。**上一轮报的 93 ms/move 是夹具伪影**：
+   `chain/realloop.py` 用 GUI 线程上的定时器调阻塞的 `session.fire()`。产品是
+   free-running `sequencer.fire(cycles=None)`。按产品方式重测后交付只占 0.2 ms，
+   瓶颈全在渲染。见下表。
+3. **selector 手势已不再卡**：真实链路 hand→picture 中位 image 7.8 / curve 9.1 /
+   histogram 10.7 / rolling 8.8 / 3D 57.6 ms。facet_grid 的 68 ms 是量法产物——
+   overview 上的左拖按设计不成手势，测到的是下一帧 live 到达。
+4. **`14f140b`** — 柱数=数据格数，LOD 全删。
+5. **`14f140b` + `a15dd23`** — home azimuth −55→+55（正 azimuth=顺时针；实测 home
+   四角 far=a near=c left=d right=b）；墙=ab/ad、轴=cd/bc、z 轴在 d；轴线/刻度/标签
+   与场景一起遮挡。
+6. **`f809e4d`（rolling 相对 shot 号）+ `a359bd8`（每种 kind 都能从区域派生）**。
+7. **组合矩阵已跑**（`chain/matrix.py`、`chain/combos.py`）。
+
+### 真实链路实测（4x4 单面板，free-running 生产者）
+
+| kind | live frame ms | 手势帧 ms | hand→picture ms 中位/p90 |
+|---|---|---|---|
+| image heatmap | 44.9 | 11.9 | 7.8 / 14.5 |
+| image 3D bars | 151.4 | 60.0 | 57.6 / 94.8 |
+| curve | 14.3 | 10.2 | 9.1 / 14.3 |
+| histogram | 40.1 | 10.4 | 10.7 / 16.3 |
+| rolling | 15.8 | 11.8 | 8.8 / 13.7 |
+| facet grid | 21.1 | 19.3 | 68.3 / 89.7（见上，非延迟） |
+
+四面板并存（2x2）：hand→picture image 9.7 / 3D 41.2 / curve 10.1 / rolling 9.3。
+ROI 链（camera→roi_frame→3D）：相机上的 ROI 手势 9.7 ms，ROI 3D 面板 23.0 ms。
+带 fit 的 rolling：live 帧 10.7 ms，手势 8.7 ms。全程无 warning/error。
+
+### 仍然开着的（已知，未修）
+
+- **3D 面板仍是最慢的 kind**：2.3M 柱时 live 帧 151 ms、手势 58 ms。剩余大头是
+  artist 端的 colour code + LUT gather（rendering.py，没有 numba）与 `_compose_frame`。
+- **z 刻度标签被切**（"0.8" 印成 ".8"）：场景 fit 只留 4% 几何 margin，那不是文字
+  需要的房间。先于本轮存在。
+- **`test_guard_c_save_semantics` 红**：保存面板图时 matplotlib mathtext
+  `ParseException`。**在 master 上同样红**，与本轮无关。
+
+工具（本轮新增，在 C:\Users\eadri\AppData\Local\Temp\claude\chain\）：
+`matrix.py`（全 kind × 手势）、`combos.py`（多面板/ROI 链/fit）、`movecost2.py`
+（真事件循环逐阶段 move 成本）、`dragprof.py`（嵌套自时间）、`h3dlevers.py`
+（渲染代价矩阵）、`derivecost.py`（派生逐语句）、`h3daxes.py`（四角落位）、
+`h3dshot.py`（场景抓图）、`roikinds.py`（每种 kind 的 ROI 派生）。

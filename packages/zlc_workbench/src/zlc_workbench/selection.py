@@ -62,7 +62,7 @@ __all__ = [
     "panel_selection_document",
     "panel_selection_from_document",
     "panel_selection_matches_subject",
-    "panel_selection_derives_signal",
+    "panel_selection_binds_a_revision",
     "panel_selection_output_catalog",
     "observation_matches_plot_input",
     "observation_predates_plot_input",
@@ -182,24 +182,24 @@ def same_plot_generation(observation: object, plot_input: object) -> bool:
     return generation == str(getattr(observation, "data_generation", None))
 
 
-#: Plot kinds the runtime can derive from.  Rolling x is a plot-owned display
-#: ordinal over Runtime history, not an upstream source axis, so it is absent.
+#: Plot kinds the runtime can derive from -- all of them.  A region cuts
+#: the signal it was drawn on whatever surface drew it.
 _PLOT_KINDS = {
     "image": "image",
     "curve": "curve",
     "histogram": "histogram",
-    # A rolling trace reports its region like any other surface.  Whether
-    # anything upstream can be CUT by it is a separate question, answered
-    # by ``panel_selection_derives_signal`` -- see there.
     "rolling": "rolling",
 }
 
 #: Selector kinds that describe a region.
 _SELECTOR_KINDS = {"area": "area", "x_range": "x_range"}
 
-#: Bounds that cut something no upstream axis names, so nothing derives
-#: from them.  They are still regions: drawn, remembered, and mirrored.
-_NON_UPSTREAM_DOMAINS = frozenset({"value", "shot"})
+#: Bounds that name no upstream axis: the measured value and the shot
+#: ordinal.  They still cut the signal -- a value band decides which cells
+#: count, a shot window which publications answer -- but they cut it the
+#: same way on every revision, so a region made only of them is not tied to
+#: the exact picture it was drawn on.
+_NON_AXIS_DOMAINS = frozenset({"value", "shot"})
 
 
 def _rolling_ranges(
@@ -457,33 +457,42 @@ def panel_selection_matches_subject(
 def panel_selection_output_catalog(
     subject: SelectionSubject | None,
 ) -> tuple[tuple[str, str], ...]:
-    """Runtime outputs this accepted surface can actually derive."""
+    """Runtime outputs this accepted surface can actually derive.
+
+    Every surface that can carry a region can derive from it: an axis bound
+    slices, a value band invalidates what falls outside it, a shot window
+    decides which publications answer.  Requiring the x bound to name an
+    upstream axis offered nothing at all on a histogram or a rolling panel
+    -- the two whose x is the measured value and the shot ordinal.
+    """
 
     if subject is None:
         return ()
     if not isinstance(subject, SelectionSubject):
         raise TypeError("subject must be SelectionSubject or None")
-    if subject.x is None:
-        return ()
     selector_kind = "area" if subject.y is not None else "x_range"
     return selection_output_catalog(selector_kind)
 
 
-def panel_selection_derives_signal(selection: SelectionState) -> bool:
-    """Whether this panel-local selector also names upstream Dataset axes.
+def panel_selection_binds_a_revision(selection: SelectionState) -> bool:
+    """Whether this region's meaning depends on the picture it was drawn on.
 
-    Answered by what the ranges NAME, not by which kind drew them: a bound
-    on the measured value or on the session's shot ordinal restricts no
-    upstream axis, so nothing can be cut from it.  A rolling region is
-    entirely of that sort -- its x counts publications, its y is the value
-    -- and it is still the panel's region: remembered, and shown the same
-    on both surfaces.  Reading "cannot derive" as "did not happen" is what
-    dropped it on the floor.
+    Answered by what the ranges NAME, not by which kind drew them.  A bound
+    on a Dataset axis is a bound on coordinates that can move between
+    revisions, so the region has to be checked against the exact
+    publication it was cut from.  A bound on the measured value or on the
+    shot ordinal means the same thing on every revision: it restricts what
+    counts, not where -- so demanding a matching revision of it only ever
+    threw the region away.
+
+    This is NOT "can anything be derived from it".  Every region cuts the
+    signal it was drawn on: an axis bound slices, a value band invalidates
+    what falls outside it, a shot window decides which publications answer.
     """
 
     if not isinstance(selection, SelectionState):
         raise TypeError("selection must be SelectionState")
-    return all(item.domain not in _NON_UPSTREAM_DOMAINS for item in selection.ranges)
+    return any(item.domain not in _NON_AXIS_DOMAINS for item in selection.ranges)
 
 
 def _apply_panel_selection(host: Any, selection: SelectionState) -> object:
@@ -832,41 +841,35 @@ class PlotSelectionSource:
                 revision=int(selector.revision),
             )
         if selector_kind == "area":
-            # A bound axis resolves to None when it cuts the measured VALUE
-            # rather than a named upstream axis -- a curve's y, a histogram's
-            # x.  That is a description, not a failure: the region the
-            # operator can select is the interval on whichever axis IS named,
-            # so one named axis translates as a single-range selection.  Only
-            # a box naming nothing has nothing to select on.
-            named = tuple(
-                (axis, bounds, role, frame)
-                for axis, bounds, role, frame in (
-                    (
-                        subject.x,
-                        selector.value.x,
-                        "x",
-                        subject.x_coordinate_frame,
-                    ),
-                    (
+            # A drag always draws a box; what the box MEANS is the surface's
+            # business.  Its x bound always says something -- the interval on
+            # a named axis, or, when the x is the measured value as a
+            # histogram's is, a band on that value.  Its y bound says
+            # something only when it names an axis: a curve's y is the value
+            # its x already carries and a histogram's y is a bin COUNT, which
+            # restricts nothing upstream.  So one named y makes it an area,
+            # and everything else is the x range -- the same rule
+            # ``panel_selection_output_catalog`` offers outputs by.
+            ranges = [
+                _range(
+                    subject.x,
+                    selector.value.x,
+                    "x",
+                    subject.x_coordinate_frame,
+                )
+            ]
+            if subject.y is not None:
+                ranges.append(
+                    _range(
                         subject.y,
                         selector.value.y,
                         "y",
                         subject.y_coordinate_frame,
-                    ),
+                    )
                 )
-                if axis is not None
-            )
-            if not named:
-                raise _Unbridgeable(
-                    "this plot's bounds cut no named upstream axis, so there "
-                    "is nothing to select on"
-                )
-            ranges = tuple(
-                _range(axis, bounds, role, frame)
-                for axis, bounds, role, frame in named
-            )
-            if len(ranges) == 1:
+            else:
                 selector_kind = "x_range"
+            ranges = tuple(ranges)
         else:
             ranges = (
                 _range(

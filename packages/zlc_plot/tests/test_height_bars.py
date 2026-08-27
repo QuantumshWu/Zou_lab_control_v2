@@ -144,42 +144,6 @@ def test_the_scene_is_an_oblique_view_of_the_same_heatmap() -> None:
     assert plain(0, 0)[1] > plain(3, 0)[1]
 
 
-def test_floor_ticks_stand_under_the_bars_they_name_on_a_pooled_grid() -> None:
-    """A scan dense enough to pool must still label its own cells.
-
-    ``picks`` returns SOURCE indices and fold_cell speaks source indices --
-    it does the pooling divide itself -- so multiplying by the pool factor
-    first cancelled that divide.  Every tick but the first stood at up to
-    pool times its own position and the far ones fell off the scene
-    entirely, on exactly the large scans pooling exists for.
-    """
-
-    side = 401
-    heights = np.zeros((side, side))
-    colors = np.zeros((side, side, 3), dtype=np.float32)
-    _frame, scene = render_height_bars(
-        heights, colors, camera=HeightBarCamera(), value_limits=(0.0, 1.0),
-        width=252, height=252, pool_cache={}, origin="upper",
-        rim_width_px=3.3,
-    )
-    assert scene.pool_y > 1, "this grid must actually pool"
-    shown = min(scene.source_ny, 6)
-    for row in sorted({
-        int(round(v)) for v in np.linspace(0, scene.source_ny - 1, shown)
-    }):
-        folded = scene.fold_cell(row, 0)
-        assert 0 <= folded[0] < scene.nx and 0 <= folded[1] < scene.ny, (
-            row, folded
-        )
-        # the slot the tick stands on holds a bar of the row it names
-        landed_row, _landed_column = scene.unfold_cell(*folded)
-        assert landed_row * scene.pool_y == (row // scene.pool_y) * scene.pool_y
-        # and the way it used to be placed does not
-        stale = scene.fold_cell(row * scene.pool_y, 0)
-        if row:
-            assert stale != folded
-
-
 def test_bars_clip_to_the_value_limits() -> None:
     """A value beyond the colour limits saturates in HEIGHT exactly as it
     saturates in colour: the z axis and the colorbar are one scale."""
@@ -211,24 +175,6 @@ def test_absent_bars_leave_the_floor() -> None:
     a, b = scene.fold_cell(1, 2)
     x, y = scene.project(a + 0.5, b + 0.5, 0.0)
     assert scene.pick(x, y) is None
-
-
-def test_dense_grids_pool_to_display_resolution() -> None:
-    rng = np.random.default_rng(0)
-    heights = rng.random((400, 800))
-    colors = np.ones((400, 800, 3), dtype=np.float32) * 0.5
-    _frame, scene = render_height_bars(
-        heights, colors, camera=HeightBarCamera(), value_limits=(0.0, 1.0),
-        width=300, height=220,
-    )
-    assert scene.pool_x > 1 and scene.pool_y > 1
-    assert scene.nx <= 300 and scene.ny <= 300
-    # Picks still speak SOURCE indices (of the pooled block's origin).
-    a, b = scene.fold_cell(100, 200)
-    x, y = scene.project(a + 0.5, b + 0.5, 0.5)
-    picked = scene.pick(x, y)
-    assert picked is not None
-    assert picked[0] % scene.pool_y == 0 and picked[1] % scene.pool_x == 0
 
 
 def test_stress_grid_renders_inside_the_guard() -> None:
@@ -309,7 +255,7 @@ def _pointer(session, action, axis, fx, fy, **kwargs):
 
 
 def test_the_scene_turns_as_one_rigid_object() -> None:
-    """A wall stands where the data ends, whichever way the scene faces.
+    """A wall stands on the picture's own edge, whichever way it faces.
 
     The rasterizer folds the grid so it only ever walks one octant, and
     the chrome used to hang its wall rules, its vertical axis and its base
@@ -320,8 +266,9 @@ def test_the_scene_turns_as_one_rigid_object() -> None:
     +0.5, while the four projected SOURCE corners move by less than one
     and a half pixels.
 
-    So the test is on the data: the corner a named cell stands on, and
-    the wall its rules run along, must move continuously with the camera.
+    So the test is on the data: the walls stand on the heatmap's ab and
+    ad edges, the axes run along cd and bc, and the z axis rises at d --
+    and each must move continuously with the camera.
     """
 
     from zlc_plot._height3d_raster import HeightBarCamera, render_height_bars
@@ -364,13 +311,20 @@ def test_the_scene_turns_as_one_rigid_object() -> None:
                 % (name, moved, boundary)
             )
 
-    # And the anchor really is the data's own side: the cell at the data
-    # origin sits on the axis corner, at every camera.
+    # And the anchors really are the picture's own corners: a carries the
+    # walls, c the axes and d the z axis, at every camera.
     for azimuth in (-55.0, 5.0, 95.0, 185.0, 275.0):
         scene, anchor = anchors(azimuth)
-        origin_a, origin_b = scene.fold_cell(0, 0)
-        assert abs(origin_a - anchor["axis_a"]) <= 1.0
-        assert abs(origin_b - anchor["axis_b"]) <= 1.0
+        top_row = 0 if scene.flip_rows else scene.source_ny - 1
+        bottom_row = scene.source_ny - 1 - top_row
+        for corner, prefix in (
+            ((top_row, 0), "wall"),                          # a
+            ((bottom_row, scene.source_nx - 1), "axis"),     # c
+            ((bottom_row, 0), "z"),                          # d
+        ):
+            cell_a, cell_b = scene.fold_cell(*corner)
+            assert abs(cell_a - anchor[prefix + "_a"]) <= 1.0
+            assert abs(cell_b - anchor[prefix + "_b"]) <= 1.0
 
 
 def test_a_drag_renders_the_resolution_it_leaves_behind() -> None:
@@ -429,7 +383,7 @@ def test_middle_drag_orbits_and_left_drag_is_inert() -> None:
         _pointer(session, "move", axis, 0.7, 0.6, button=2)
         _pointer(session, "release", axis, 0.7, 0.6, button=2)
         state = session.display_state
-        assert float(state["camera_azimuth"]) != -55.0
+        assert float(state["camera_azimuth"]) != HeightBarCamera().azimuth_deg
         assert session.selectors == ()
         committed = float(state["camera_azimuth"])
         _pointer(session, "press", axis, 0.5, 0.5, button=1)
@@ -737,26 +691,26 @@ def test_a_drag_draws_the_same_rims_as_the_frame_it_leaves() -> None:
         session.close()
 
 
-def test_how_many_bars_is_a_level_of_detail_not_a_second_picture() -> None:
-    """One look -- boxes -- at every density.
+def test_the_bar_count_is_the_data_and_nothing_else() -> None:
+    """As many boxes as the heatmap has cells, at every camera and size.
 
-    How finely the scene is divided is a fact about the drawn bar: it has
-    to be several times the line it is drawn with, or the picture is a
-    mesh of rims with no faces between them.  So the rim width and the
-    panel width decide it, and nothing else does -- not the tap count, and
-    not the camera, or turning the scene would rebuild the picture while
-    the hand is still moving.
+    The scene is the heatmap in another form, so what divides the ground
+    is what divides the picture.  A level of detail here answered a
+    question the data already answers, and it answered it invisibly: an
+    ROI shrinking from 849 columns to 200 kept drawing the same hundred
+    bars under a range that moved, so the operator saw the extent change
+    and the structure stand still.
     """
 
     from zlc_plot._height3d_raster import HeightBarCamera, render_height_bars
 
     rng = np.random.default_rng(33)
-    heights = rng.random((300, 400))
-    colors = np.repeat(
-        heights[..., None].astype(np.float32).clip(0.0, 1.0), 3, axis=-1
-    )
 
-    def drawn(width, height, taps, zoom=1.0, rim=3.3):
+    def drawn(rows, columns, width, height, taps=3, zoom=1.0, rim=3.3):
+        heights = rng.random((rows, columns))
+        colors = np.repeat(
+            heights[..., None].astype(np.float32).clip(0.0, 1.0), 3, axis=-1
+        )
         _frame, scene = render_height_bars(
             heights, colors,
             camera=HeightBarCamera(azimuth_deg=-55.0, zoom=zoom),
@@ -764,15 +718,18 @@ def test_how_many_bars_is_a_level_of_detail_not_a_second_picture() -> None:
             supersample=taps, zero_rgb=(1.0, 1.0, 1.0),
             rim_rgb=(0.0, 0.0, 0.0), rim_width_px=rim,
         )
-        return scene.nx, scene.ny, scene.pool_x, scene.pool_y
+        # Odd fold quadrants swap the folded axes; the pair is the count.
+        return tuple(sorted((scene.nx, scene.ny)))
 
-    committed = drawn(320, 240, 3)
-    assert drawn(320, 240, 3, zoom=2.0) == committed, "the camera moved them"
-    assert committed[2] > 1 and committed[3] > 1, "this grid must pool"
-    # A thicker line needs a wider bar to be a bar, so it pools further.
-    assert max(drawn(320, 240, 3, rim=9.9)[:2]) < max(committed[:2])
-    # A panel with room for fewer bars gets fewer.
-    assert max(drawn(120, 90, 3)[:2]) < max(committed[:2])
+    assert drawn(300, 400, 320, 240) == (300, 400)
+    # Neither the camera, the taps, the line width nor the panel size is
+    # allowed a say in it.
+    assert drawn(300, 400, 320, 240, zoom=2.0) == (300, 400)
+    assert drawn(300, 400, 320, 240, rim=9.9) == (300, 400)
+    assert drawn(300, 400, 120, 90) == (300, 400)
+    assert drawn(300, 400, 1200, 900, taps=1) == (300, 400)
+    # And an ROI that shrinks draws fewer bars, which is the whole point.
+    assert drawn(75, 100, 320, 240) == (75, 100)
 
 
 def test_drag_preview_keeps_the_chrome_typography_in_place() -> None:
@@ -836,7 +793,8 @@ def test_middle_double_click_restores_the_home_camera() -> None:
         _pointer(session, "press", axis, 0.5, 0.5, button=2)
         _pointer(session, "release", axis, 0.5, 0.5, button=2)
         state = session.display_state
-        assert float(state["camera_azimuth"]) == -55.0
+        home = HeightBarCamera()
+        assert float(state["camera_azimuth"]) == home.azimuth_deg
         assert float(state["camera_elevation"]) == 30.0
         assert float(state["camera_zoom"]) == 1.0
     finally:

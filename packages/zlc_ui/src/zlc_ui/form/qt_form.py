@@ -152,7 +152,15 @@ class _StaticHandler(FormWidgetHandler):
 
 class _TextHandler(_StaticHandler):
     def normalize(self, field: FormFieldProps, value: object) -> str:
-        if value is None and field.default is None:
+        if value is None:
+            # Whether a field may be empty is declared by the field, exactly
+            # once, the way ``blank_allowed`` declares it for the scalars.
+            # Reading it off ``default`` -- the CURRENT value -- made the same
+            # field accept None while its title was automatic and reject it
+            # the moment an operator had typed one, so switching a label back
+            # to Auto raised out of a Qt slot and aborted the process.
+            if field.required:
+                raise _value_error(field, "value must be str")
             return ""
         if not isinstance(value, str):
             raise _value_error(field, "value must be str")

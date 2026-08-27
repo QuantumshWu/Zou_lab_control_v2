@@ -1,4 +1,10 @@
-"""Rolling x is the absolute shot index, never a negative countdown."""
+"""Rolling x counts back from the newest shot, which sits at zero.
+
+A rolling window shows the last N shots, so what a point MEANS is its
+distance from now.  The absolute shot number is a fact about the run,
+not about the picture: using it slid every tick label forward on every
+single revision, so a full window never held still.
+"""
 
 from __future__ import annotations
 
@@ -22,15 +28,15 @@ def _snapshot(revision: int, repeats: int = 6) -> DatasetSnapshot:
     return DatasetSnapshot(schema, values, revision=revision)
 
 
-def test_seeded_history_numbers_shots_from_zero() -> None:
+def test_seeded_history_ends_at_zero_and_counts_back() -> None:
     session = PlotSession(_snapshot(0), RollingPlot())
     try:
         series = session._payload.series[0]
         np.testing.assert_array_equal(
-            np.asarray(series.x.canonical), np.arange(6.0)
+            np.asarray(series.x.canonical), np.arange(-5.0, 1.0)
         )
-        assert series.x.label == "Shot"
-        assert float(np.asarray(series.x.canonical).min()) >= 0.0
+        assert series.x.label == "Shots from latest"
+        assert float(np.asarray(series.x.canonical).max()) == 0.0
     finally:
         session.close()
 
@@ -41,7 +47,7 @@ def test_nonindexed_revisions_replace_instead_of_extending_the_shot_axis() -> No
         session.update_data(_snapshot(1))
         session.update_data(_snapshot(2))
         x = np.asarray(session._payload.series[0].x.canonical)
-        np.testing.assert_array_equal(x, np.arange(6.0))
+        np.testing.assert_array_equal(x, np.arange(-5.0, 1.0))
     finally:
         session.close()
 
@@ -73,7 +79,7 @@ def test_area_selector_display_coordinates_are_identity() -> None:
         session.close()
 
 
-def test_window_slides_forward_keeping_absolute_indices() -> None:
+def test_a_full_window_holds_the_same_coordinates_as_it_slides() -> None:
     window = 100
     total = window + 8
     session = PlotSession(
@@ -84,18 +90,19 @@ def test_window_slides_forward_keeping_absolute_indices() -> None:
     try:
         x = np.asarray(session._payload.series[0].x.canonical)
         assert x.size == min(window, total)
-        # The window shows the most recent shots with their absolute indices.
-        np.testing.assert_array_equal(x, np.arange(total - x.size, total))
+        # The window shows the most recent shots, the newest at zero -- the
+        # same coordinates however far the run has got.
+        np.testing.assert_array_equal(x, np.arange(1.0 - x.size, 1.0))
     finally:
         session.close()
 
 
 def test_shot_axis_frames_the_full_window_from_the_first_revision() -> None:
-    """The axis spans exactly ``window`` shots even while the trace fills.
+    """The axis spans exactly ``window`` shots and then stands still.
 
-    What you configure is what you see: the frame opens at shots
-    ``[0, window - 1]`` -- never naming a negative shot -- the young trace
-    grows rightward inside it, and the frame slides only once it is full.
+    What you configure is what you see: the frame is always
+    ``[-(window - 1), 0]``, the young trace grows rightward inside it to
+    the newest shot at zero, and the frame never moves again.
     """
 
     session = PlotSession(
@@ -105,7 +112,7 @@ def test_shot_axis_frames_the_full_window_from_the_first_revision() -> None:
     )
     try:
         axes = session._renderer.primary_axes
-        assert tuple(map(float, axes.get_xlim())) == (10.0, 29.0)
+        assert tuple(map(float, axes.get_xlim())) == (-19.0, 0.0)
     finally:
         session.close()
 
@@ -122,12 +129,12 @@ def test_window_selects_display_without_truncating_retention() -> None:
     try:
         session.set_parameter("window", 4)
         x = np.asarray(session._payload.series[0].x.canonical)
-        np.testing.assert_array_equal(x, np.arange(10.0, 14.0))
+        np.testing.assert_array_equal(x, np.arange(-3.0, 1.0))
 
         # Shrinking changes only the view over this Runtime-supplied Dataset.
         session.set_parameter("window", 100)
         x = np.asarray(session._payload.series[0].x.canonical)
-        np.testing.assert_array_equal(x, np.arange(14.0))
+        np.testing.assert_array_equal(x, np.arange(-13.0, 1.0))
     finally:
         session.close()
 
@@ -143,11 +150,11 @@ def test_replace_spec_keeps_history_for_an_equivalent_rolling_spec() -> None:
     try:
         session.replace_spec(RollingPlot())
         x = np.asarray(session._payload.series[0].x.canonical)
-        np.testing.assert_array_equal(x, np.arange(10.0))
+        np.testing.assert_array_equal(x, np.arange(-9.0, 1.0))
 
         session.replace_spec(RollingPlot(reduction=Reduction.MIN))
         x = np.asarray(session._payload.series[0].x.canonical)
-        np.testing.assert_array_equal(x, np.arange(10.0))
+        np.testing.assert_array_equal(x, np.arange(-9.0, 1.0))
     finally:
         session.close()
 

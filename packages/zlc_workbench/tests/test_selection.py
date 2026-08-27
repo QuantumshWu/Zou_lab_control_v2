@@ -61,11 +61,11 @@ from zlc_runtime import SelectionChange as RuntimeSelectionChange
 from zlc_runtime import SelectionRange, SelectionState
 from zlc_workbench.selection import (
     PlotSelectionSource,
-    panel_selection_derives_signal,
+    panel_selection_binds_a_revision,
     attach_selection_bridge,
     panel_plot_selectors,
     panel_selection_document,
-    panel_selection_derives_signal,
+    panel_selection_binds_a_revision,
     panel_selection_from_document,
     panel_selection_matches_subject,
 )
@@ -188,13 +188,11 @@ def _commit_x_range(host, low: float, high: float) -> None:
 def _commit_observation(bridge, observation, publication) -> None:
     if observation.change is RuntimeSelectionChange.REMOVED:
         bridge.clear_selection()
-    elif panel_selection_derives_signal(observation.state):
+    else:
         bridge.commit_selection(
             observation.state,
             source_publication=publication,
         )
-    else:
-        bridge.clear_selection()
 
 
 def test_a_committed_box_publishes_a_signal_cut_from_the_drawn_axes(
@@ -925,7 +923,7 @@ def test_rolling_viewport_survives_without_claiming_an_upstream_axis() -> None:
         marked = seen[0].state
         assert [item.domain for item in marked.ranges] == ["shot"]
         assert all(not item.axis for item in marked.ranges)
-        assert panel_selection_derives_signal(marked) is False
+        assert panel_selection_binds_a_revision(marked) is False
         assert viewports
         assert viewports[-1].subject.plot_kind is plot.PlotKind.ROLLING
         assert viewports[-1].subject.x is None

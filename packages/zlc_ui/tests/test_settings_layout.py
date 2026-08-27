@@ -220,5 +220,19 @@ form.auto_switch_for('offset').setChecked(False)
 assert form.read_value('offset') == -2.0, (
     'leaving Auto must choose a value inside a negative-only domain'
 )
+# Switching a text label back to Auto publishes None against a declaration
+# still carrying the typed title as its default.  Whether the field may be
+# empty is the field's own declaration; reading it off that default raised
+# out of the Qt slot that published the panel, which aborts the process.
+titled = FormSpec((
+    FormFieldProps('title', 'text', 'Title', default='mot camera', automatic=True),
+))
+form = FluentParameterForm(titled, {'title': 'mot camera'})
+automatic = FormSpec((
+    FormFieldProps('title', 'text', 'Title', default=None, automatic=True),
+))
+assert form.adopt_projection(automatic, {'title': None}) is False
+form.reconcile(automatic, {'title': None})
+assert form.auto_switch_for('title').isChecked()
 """
     )
