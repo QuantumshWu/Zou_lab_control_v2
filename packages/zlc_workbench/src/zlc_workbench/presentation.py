@@ -618,15 +618,23 @@ class PlotPanelPort:
                 # a drag apart whenever a shot landed mid-gesture -- the
                 # mouse stayed grabbed by a widget whose host had been
                 # retired, and the drag went dead until release.
-                replace_current_host = (
-                    surface is None
-                    or (
-                        publication_generation != shown_generation
-                        and not _same_geometry(
-                            _schema_fingerprint_of(plot_input),
-                            _schema_fingerprint_of(surface.plot_input),
-                        )
-                    )
+                #
+                # A new presentation EPOCH is the same story told by a
+                # different trigger, and it used to replace the host
+                # unconditionally.  Turning Selectors on takes a history
+                # lease, which moves the signal from windowed to indexed,
+                # which invalidates every panel on it -- so the gesture the
+                # operator started next went nowhere and the box they had
+                # just drawn came back where the remembered one was.  The
+                # epoch says RE-PROJECT; the geometry says what came out.
+                # A host holds a shape, so the shape decides, whichever
+                # trigger asked.
+                same_shape = surface is not None and _same_geometry(
+                    _schema_fingerprint_of(plot_input),
+                    _schema_fingerprint_of(surface.plot_input),
+                )
+                replace_current_host = surface is None or not same_shape and (
+                    publication_generation != shown_generation
                     or presentation_epoch != surface.presentation_epoch
                 )
                 held_generation = self._held_generation
