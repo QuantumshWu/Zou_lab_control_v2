@@ -684,6 +684,27 @@ def _materialize(  # noqa: C901 - one kernel, mirrored from the reference
                     if ic1 < ic0:
                         ic1 = ic0
                     diff_id[ic1] += -rec_id[record]
+                # ---- where this subcolumn's picture starts.  Every
+                # accumulator is zero until the first row a span touches, so
+                # the rows above it add zero to zero and write background --
+                # exactly what they hold already.  A bar scene is mostly sky,
+                # and the walk was paying full height for every one of five
+                # thousand subcolumns.  Skipping is bit-exact: adding 0.0
+                # changes no float.
+                first_row = out_h
+                for record in range(count):
+                    q0 = rec_q0[record]
+                    top = np.int64(np.ceil(q0))
+                    floor_top = np.int64(np.floor(q0))
+                    if floor_top < top:
+                        top = floor_top
+                    centre = np.int64(np.ceil(q0 - 0.5))
+                    if centre < top:
+                        top = centre
+                    if top < 0:
+                        top = np.int64(0)
+                    if top < first_row:
+                        first_row = top
                 # ---- the walk: float32 prefix sums exactly as the
                 # reference's cast-then-cumsum planes.
                 acc_a0 = np.float32(0.0)
@@ -694,7 +715,10 @@ def _materialize(  # noqa: C901 - one kernel, mirrored from the reference
                 acc_s2 = np.float32(0.0)
                 acc_c = np.float32(0.0)
                 acc_id = np.int64(0)
-                for row in range(out_h):
+                if tap == mid_tap:
+                    for row in range(first_row):
+                        id_taps[row, out_col] = np.int32(0)
+                for row in range(first_row, out_h):
                     acc_a0 += np.float32(diff_a[row, 0])
                     acc_a1 += np.float32(diff_a[row, 1])
                     acc_a2 += np.float32(diff_a[row, 2])
