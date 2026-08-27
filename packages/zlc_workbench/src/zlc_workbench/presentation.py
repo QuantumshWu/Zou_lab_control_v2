@@ -153,6 +153,14 @@ class PlotPanelPort:
         #: until the next shot arrived.
         self._staged_generation: object | None = None
         self._staged_revision: int | None = None
+        #: What the HOST has been handed, which is a different fact from
+        #: what the screen shows: a render reaches the host on the
+        #: projection worker and reaches the screen on the owner thread,
+        #: so between those two moments the host holds something the
+        #: surface does not yet show.  Only the call that hands data over
+        #: can state this, so only it writes here.
+        self._held_generation: object | None = None
+        self._held_revision: int | None = None
         self._staged_front_refs: tuple[object, ...] = ()
         self._staged_presentation_epoch = -1
         self._serial = 0
@@ -195,6 +203,36 @@ class PlotPanelPort:
             raise ValueError("a display interval must be positive")
         self._interval_ms = interval
 
+    def retarget(self, target: object) -> None:
+        """The panel is configured differently from now on.
+
+        A projection reads the panel's target when it RUNS, which is a
+        moment after it was staged, so a decision the operator has just
+        made must reach the port before the next projection -- and the
+        work already staged under the decision it replaces has to go.
+        That work is not a picture the panel wants: it would draw the
+        setting the operator just turned off, over the top of the
+        configure that turned it off, and stay there until the producer
+        published again.
+
+        Unlike ``invalidate_presentation`` this keeps the host and the
+        picture on screen: only the projection target moves.
+        """
+
+        pending: tuple[Future, ...]
+        with self._state_lock:
+            if self._closed or self._projection_target is target:
+                return
+            self._projection_target = target
+            pending = tuple(
+                prepared.completion
+                for prepared in self._pending.values()
+                if prepared.completion is not None
+                and prepared.target is not target
+            )
+        for completion in pending:
+            completion.cancel()
+
     def invalidate_presentation(
         self,
         target: object = _UNCHANGED_TARGET,
@@ -215,6 +253,8 @@ class PlotPanelPort:
             self._staged_revision = None
             self._staged_generation = None
             self._staged_presentation_epoch = -1
+            self._held_generation = None
+            self._held_revision = None
             pending = tuple(
                 prepared.completion
                 for prepared in self._pending.values()
@@ -498,12 +538,14 @@ class PlotPanelPort:
                 self._serial += 1
                 serial = self._serial
                 host_token = self._host_token_locked()
-                target = (
-                    self._projection_target
-                    if surface is None
-                    or surface.presentation_epoch != presentation_epoch
-                    else surface.target
-                )
+                # HOW this panel is projected has one owner, and it is
+                # not the picture already on screen.  Reading the shown
+                # surface's target answered "how was the last frame
+                # made", which is the same answer right up to the moment
+                # the operator changes something -- and then it is the
+                # old answer, so the next frame was drawn to a setting
+                # that had just been revoked.
+                target = self._projection_target
                 self._pending[serial] = _Prepared(
                     publication,
                     value.snapshot,
@@ -519,6 +561,10 @@ class PlotPanelPort:
                 self._on_presented(notify_presented)
             return None
         assert serial is not None and host_token is not None
+
+        #: What this render handed to the host, recorded only if the
+        #: host's own operation then completed.
+        handed: list[tuple[object, int | None]] = []
 
         def project_and_stage() -> object:
             if self._project_input is None:
@@ -583,12 +629,8 @@ class PlotPanelPort:
                     )
                     or presentation_epoch != surface.presentation_epoch
                 )
-                shown_revision = (
-                    None if surface is None else _revision_of(surface.plot_input)
-                )
-                is_presented = (
-                    surface is not None and publication is surface.publication
-                )
+                held_generation = self._held_generation
+                held_revision = self._held_revision
 
             # Host construction/configuration can be substantial.  Keeping it
             # on this same projection job preserves ordering without holding
@@ -609,15 +651,44 @@ class PlotPanelPort:
                     raise TypeError(
                         "panel host replacement must return a plotting host"
                     )
-            elif (
-                is_presented
-                and _revision_of(plot_input) == shown_revision
-                and hasattr(plot_input, "overlay")
-                and callable(getattr(host, "configure", None))
-            ):
-                rendered = host.configure(image_overlay=plot_input.overlay)
+                # A fresh host holds exactly what it was built from.
+                handed.append(
+                    (
+                        publication_generation,
+                        self._revision_value(_revision_of(plot_input)),
+                    )
+                )
             else:
-                rendered = host.update_data(plot_input)
+                # What the host HOLDS decides what can be done to it, and
+                # only the code that hands it data knows that.  Asking
+                # instead whether this publication is the one on screen
+                # answered a different question: a shot can leave the
+                # screen between staging a render and running it, and the
+                # answer flipped to "no" for an input whose data the host
+                # already had -- which was then pushed as DATA, refused
+                # ("data revision must increase") and shown on the card.
+                incoming = self._revision_value(_revision_of(plot_input))
+                same_stream = (
+                    held_revision is not None
+                    and incoming is not None
+                    and held_generation == publication_generation
+                )
+                if same_stream and incoming < held_revision:
+                    # The picture this describes is gone and is not coming
+                    # back.  There is nothing to draw.
+                    raise CancelledError()
+                if same_stream and incoming == held_revision:
+                    if not (
+                        hasattr(plot_input, "overlay")
+                        and callable(getattr(host, "configure", None))
+                    ):
+                        raise CancelledError()
+                    # Same data, so the only thing that can have changed
+                    # is what is drawn OVER it.
+                    rendered = host.configure(image_overlay=plot_input.overlay)
+                else:
+                    rendered = host.update_data(plot_input)
+                    handed.append((publication_generation, incoming))
 
             with self._state_lock:
                 current = self._pending.get(serial)
@@ -659,6 +730,11 @@ class PlotPanelPort:
                 except InvalidStateError:
                     pass
             else:
+                # The host COMMITTED it.  Handing data over is not the
+                # same event: a render cancelled while queued never
+                # reached the session, and its revision is still free.
+                if handed:
+                    self._note_held(*handed[-1])
                 try:
                     completion.set_result(operation)
                 except InvalidStateError:
@@ -752,6 +828,19 @@ class PlotPanelPort:
                 and prepared is not None
                 and prepared.presentation_epoch == self._presentation_epoch
             )
+
+    def _note_held(self, generation: object, revision: object) -> None:
+        """Record what the plotting host now holds."""
+
+        value = self._revision_value(revision)
+        with self._state_lock:
+            if self._held_generation != generation:
+                self._held_generation = generation
+                self._held_revision = value
+            elif value is not None and (
+                self._held_revision is None or value > self._held_revision
+            ):
+                self._held_revision = value
 
     def _advance_staged(
         self,
