@@ -1284,11 +1284,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 if isinstance(spec, ImagePlot)
                 else None
             ),
-            image_picture_height_over_width=(
-                self._picture_height_over_width(payload)
-                if isinstance(semantic_spec(spec), ImagePlot)
-                else None
-            ),
             # A 3D scene of the image is laid out as a scene: one region
             # for the picture AND its labels, since a turned camera puts
             # a label wherever it likes and no margin can be reserved for
@@ -1336,32 +1331,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         return (
             1.0 if _image_coordinate_aspect(payload.x, payload.y) is not None else None
         )
-
-    def _picture_height_over_width(self, payload: Any) -> float | None:
-        """The PICTURE's own shape inside that square field.
-
-        The slot and the view are square by requirement, so a 1200x1920 frame
-        is letterboxed: it fills the box's width and five eighths of its
-        height.  That fraction is what decides whether the letterboxed
-        picture lands on whole pixels -- and only a whole-pixel picture can
-        be copied into the frame instead of being resampled by Matplotlib on
-        every draw.  The layout is where the box size is chosen, so the
-        layout is told the fraction.
-        """
-
-        cells = tuple(getattr(payload, "cells", ()))
-        if cells:
-            payload = getattr(cells[0], "payload", None)
-        if payload is None or not hasattr(payload, "x") or not hasattr(payload, "y"):
-            return None
-        aspect = _image_coordinate_aspect(payload.x, payload.y)
-        if aspect is None:
-            return None
-        x_span = _image_axis_span(payload.x)
-        y_span = _image_axis_span(payload.y)
-        if x_span is None or y_span is None:
-            return None
-        return float(aspect) * y_span / x_span
 
     def _update_renderer(
         self,

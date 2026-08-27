@@ -128,13 +128,67 @@ def test_a_curve_panel_is_unaffected_by_the_fast_path(ratio) -> None:
     np.testing.assert_array_equal(fast, drawn)
 
 
+def _states(session, feed_shape):
+    """Drive one surface through the states an operator drives it through.
+
+    Steady-state revisions alone were not enough.  The height-bar scene took
+    the fallback only DURING a drag -- the preview renders at a fraction of
+    the box, and a front that is not the size of its rectangle cannot be
+    copied -- and a zoom left the picture a seventh of a pixel inside its
+    own axes.  Both were invisible to a test that only pushed data through.
+    """
+
+    height, width = feed_shape
+    revision = [2]
+
+    def revisions(count=3):
+        for _ in range(count):
+            session.update_data(_camera_snapshot(height, width, revision[0]))
+            revision[0] += 1
+            session.rgba()
+
+    def bounds_point(transform, fx, fy):
+        left, top, right, bottom = transform.bounds
+        return (left + (right - left) * fx, top + (bottom - top) * fy)
+
+    def gesture(transform, actions, button):
+        for action, fx, fy in actions:
+            x, y = bounds_point(transform, fx, fy)
+            session._raster_pointer_event(
+                action, x, y, button=button, axes_snapshot=transform
+            )
+            session.rgba()
+
+    revisions()
+    main = session._raster_axes_snapshot()[0]
+    drag = [("press", .35, .35)]
+    drag += [("move", .35 + .02 * step, .35 + .02 * step) for step in range(1, 9)]
+    drag += [("release", .51, .51)]
+    gesture(main, drag, 1)
+    pan = [("press", .5, .5)]
+    pan += [("move", .5 + .02 * step, .5 + .01 * step) for step in range(1, 9)]
+    pan += [("release", .66, .58)]
+    gesture(main, pan, 2)
+    for direction in (-1.0, -1.0, -1.0, 1.0, 1.0):
+        x, y = bounds_point(main, 0.5, 0.5)
+        session._raster_pointer_event(
+            "scroll", x, y, step=direction, axes_snapshot=main
+        )
+        session.rgba()
+        revisions(1)
+    revisions()
+
+
+@pytest.mark.parametrize(
+    "presentation", ["heatmap", "height_bars"], ids=["heatmap", "3d"]
+)
 @pytest.mark.parametrize(
     "shape",
-    [(1200, 1920), (1920, 1200), (1200, 1200), (2048, 2048), (40, 60), (3, 2)],
+    [(1200, 1920), (1920, 1200), (1200, 1200), (40, 60), (3, 2)],
     ids=lambda shape: "%dx%d" % shape,
 )
 @pytest.mark.parametrize("ratio", [1.0, 1.5, 3.0])
-def test_no_image_front_is_ever_left_to_matplotlib(shape, ratio) -> None:
+def test_no_image_front_is_ever_left_to_matplotlib(shape, ratio, presentation) -> None:
     """The copy is not a lucky case: a refused front is a REGRESSION.
 
     The copy used to require the front to fill its axes, which a square
@@ -142,12 +196,12 @@ def test_no_image_front_is_ever_left_to_matplotlib(shape, ratio) -> None:
     operator's 1200x1920 camera silently paid Matplotlib's whole image
     machinery on every frame, twenty milliseconds of it, while the bench
     matrix (square frames, every one) reported the fast path working.  The
-    preconditions are established upstream now: the box is sized so the
-    letterboxed picture lands on whole pixels, and the copy addresses the
-    picture's rectangle rather than the whole box.
+    front is composed AT THE BOX now, with the picture placed on whole
+    pixels and the band beside it taking the axes' own background, so the
+    extent, the limits and the box are one rectangle whatever the view.
 
     So this asserts the absence of the fallback, not the presence of the
-    fast path.  A shape that lands back on Matplotlib fails here.
+    fast path.  Any state that lands back on Matplotlib fails here.
     """
 
     height, width = shape
@@ -172,11 +226,10 @@ def test_no_image_front_is_ever_left_to_matplotlib(shape, ratio) -> None:
         )
         try:
             session.set_size("4x4")
+            session.set_parameters({"presentation": presentation})
             session.rgba()
             verdicts.clear()
-            for revision in range(2, 6):
-                session.update_data(_camera_snapshot(height, width, revision))
-                session.rgba()
+            _states(session, shape)
         finally:
             session.close()
     finally:

@@ -457,12 +457,7 @@ _ANCHOR_FRACTIONS = {
 
 
 def _box_on_aspect(
-    box_w: int,
-    box_h: int,
-    ratio: float,
-    *,
-    picture: float | None = None,
-    search: int = 64,
+    box_w: int, box_h: int, ratio: float, *, search: int = 64
 ) -> tuple[int, int] | None:
     """The largest whole-pixel box inside ``box_w x box_h`` drawn at *ratio*.
 
@@ -483,35 +478,12 @@ def _box_on_aspect(
 
     if box_w < 2 or box_h < 2 or not math.isfinite(ratio) or ratio <= 0.0:
         return None
-    short = None
-    if picture is not None and math.isfinite(picture) and picture > 0.0:
-        # The letterboxed picture's short side, as a fraction of the box.
-        short = min(float(picture), 1.0 / float(picture))
-
-    def carries_picture(size: int) -> bool:
-        """Does the picture inside a box this size land on whole pixels?
-
-        Both its span and the band beside it: the band is split evenly, so
-        an odd leftover puts the picture on a half pixel however exact its
-        own span is -- which is precisely the 1512-pixel square field with a
-        945-pixel frame in it, 283.5 above and below.
-        """
-
-        if short is None:
-            return True
-        span = size * short
-        if abs(span - round(span)) > 1e-9:
-            return False
-        return (size - int(round(span))) % 2 == 0
-
     best: tuple[int, int] | None = None
     for width in range(box_w, max(2, box_w - search) - 1, -1):
         height = width * ratio
         if (
             abs(height - round(height)) < 1e-9
             and 2 <= round(height) <= box_h
-            and carries_picture(width)
-            and carries_picture(int(round(height)))
         ):
             best = (width, int(round(height)))
             break
@@ -520,8 +492,6 @@ def _box_on_aspect(
         if (
             abs(width - round(width)) < 1e-9
             and 2 <= round(width) <= box_w
-            and carries_picture(height)
-            and carries_picture(int(round(width)))
         ):
             candidate = (int(round(width)), height)
             if best is None or candidate[0] * candidate[1] > best[0] * best[1]:
@@ -3556,8 +3526,9 @@ class MatplotlibRenderer:
         self._artists[f"{key}:color_mode"] = (
             "scalar" if rgba_front is None else "rgba"
         )
+        drawn_extent = prepared.extent
         if rgba_front is not None:
-            rgba_front = self._box_sized_rgba_front(
+            composed = self._view_filling_rgba_front(
                 key,
                 rgba_front,
                 prepared.extent,
@@ -3565,6 +3536,8 @@ class MatplotlibRenderer:
                 y_limits,
                 axes,
             )
+            if composed is not None:
+                rgba_front, drawn_extent = composed
         shown: Any = prepared.values if rgba_front is None else rgba_front
         applied_key = f"{key}:applied_front"
         image = self._artists.get(key)
@@ -3582,7 +3555,7 @@ class MatplotlibRenderer:
                 shown,
                 origin=policy.image_origin,
                 aspect="auto" if coordinate_aspect is None else coordinate_aspect,
-                extent=prepared.extent,
+                extent=drawn_extent,
                 interpolation="nearest",
                 **scalar_options,
             )
@@ -3595,17 +3568,21 @@ class MatplotlibRenderer:
             self._artists[key] = image
             self._artists[applied_key] = shown
         else:
-            if self._artists.get(applied_key) is not shown:
-                # ``set_data`` copies the front; skip it when the artist
-                # already holds this exact composed object (cache hit).
-                self._install_image_front(image, shown)
-                extent_key = f"{key}:applied_extent"
-                if self._artists.get(extent_key) != prepared.extent:
-                    # ``set_extent`` rebuilds transforms and re-autoscales;
-                    # a live feed re-sets the same extent per revision.
-                    image.set_extent(prepared.extent)
-                    self._artists[extent_key] = prepared.extent
-                self._artists[applied_key] = shown
+            # Unconditionally, because the composed front is now a KEPT
+            # buffer written in place: "the artist already holds this
+            # object" stopped meaning "and its contents are unchanged", and
+            # reading it that way left the extent at the previous view --
+            # the picture drawn in metres on axes labelled in centimetres.
+            # ``_install_image_front`` assigns rather than copies, so this
+            # costs nothing to repeat.
+            self._install_image_front(image, shown)
+            self._artists[applied_key] = shown
+            extent_key = f"{key}:applied_extent"
+            if self._artists.get(extent_key) != drawn_extent:
+                # ``set_extent`` rebuilds transforms and re-autoscales;
+                # a live feed re-sets the same extent per revision.
+                image.set_extent(drawn_extent)
+                self._artists[extent_key] = drawn_extent
             # The artist's cmap/clim stay authoritative in both modes: RGBA
             # rendering ignores them, but selector handles, rail guides and
             # pointer snapshots all read the painted limits off the artist.
@@ -3630,6 +3607,137 @@ class MatplotlibRenderer:
         self._set_xlim(axes, *x_limits)
         self._set_ylim(axes, *y_limits)
         return image, cmap
+
+    def _view_filling_rgba_front(
+        self,
+        key: str,
+        rgba: np.ndarray,
+        extent: tuple[float, float, float, float],
+        x_limits: tuple[float, float],
+        y_limits: tuple[float, float],
+        axes: Any,
+    ) -> tuple[np.ndarray, tuple[float, float, float, float]] | None:
+        """Compose the front AT THE BOX, with the picture on whole pixels.
+
+        The front used to be the picture, and the picture is not always the
+        view: a square field shows a wide camera frame with a band above and
+        below, and a zoom lands the crop wherever the wheel put it.  Matplotlib
+        then placed that front by transform, on half pixels, and rounded its
+        output size up -- which is a resample, twenty milliseconds of it a
+        frame, of an image we had already composed.
+
+        Sizing the front to the box removes the question instead of answering
+        it.  The picture goes in at a whole-pixel rectangle computed here, the
+        band beside it takes the axes' own background, and the artist's extent
+        becomes the VIEW -- so extent, limits and box are one rectangle and the
+        copy always applies.  Nothing has to give: the field stays square, the
+        picture keeps its shape, and it is now placed exactly rather than
+        resampled onto a half-pixel grid.
+
+        Returns ``(front, extent)``, or ``None`` when the geometry cannot be
+        measured.
+        """
+
+        bbox = axes.bbox
+        box_w = int(round(float(bbox.width)))
+        box_h = int(round(float(bbox.height)))
+        if box_w < 1 or box_h < 1:
+            return None
+        x_low, x_high = sorted(float(v) for v in x_limits)
+        y_low, y_high = sorted(float(v) for v in y_limits)
+        if x_high <= x_low or y_high <= y_low:
+            return None
+        left, right, upper, lower = (float(v) for v in extent)
+        pic_x0, pic_x1 = sorted((left, right))
+        pic_y0, pic_y1 = sorted((upper, lower))
+        scale_x = box_w / (x_high - x_low)
+        scale_y = box_h / (y_high - y_low)
+        column = int(round((pic_x0 - x_low) * scale_x))
+        width = int(round((pic_x1 - pic_x0) * scale_x))
+        height = int(round((pic_y1 - pic_y0) * scale_y))
+        # Rows are counted from the array's own first row, which is the
+        # picture's top under ``origin="upper"`` and its bottom under
+        # ``lower`` -- the same convention the artist reads it with.
+        if str(self.style.render.image_origin) == "lower":
+            row = int(round((pic_y0 - y_low) * scale_y))
+        else:
+            row = int(round((y_high - pic_y1) * scale_y))
+        if width < 1 or height < 1:
+            return None
+        column = max(0, min(column, box_w - 1))
+        row = max(0, min(row, box_h - 1))
+        width = max(1, min(width, box_w - column))
+        height = max(1, min(height, box_h - row))
+        view_extent = (
+            float(x_limits[0]),
+            float(x_limits[1]),
+            float(y_limits[0]),
+            float(y_limits[1]),
+        )
+        if (row, column, height, width) == (0, 0, box_h, box_w):
+            return self._resized_rgba(rgba, width, height), view_extent
+        # The band does not change between frames and the buffer is nine
+        # megabytes; filling it per frame cost eight milliseconds to paint
+        # pixels that were already the right colour.  It is kept, refilled
+        # only when the picture moves in it, and the picture is gathered
+        # straight into its rows -- which are contiguous whenever the band
+        # is above and below, the letterboxed case.
+        background = self._axes_background_rgba(axes)
+        placement = (box_h, box_w, row, column, height, width, tuple(background))
+        cache_name = f"{key}:view_front"
+        cached = self._artists.get(cache_name)
+        if cached is not None and cached[0] == placement:
+            front = cached[1]
+        else:
+            front = np.empty((box_h, box_w, 4), dtype=np.uint8)
+            front[..., :] = background
+            self._artists[cache_name] = (placement, front)
+        window = front[row : row + height, column : column + width]
+        if window.flags.c_contiguous:
+            self._resize_rgba_into(rgba, window)
+        else:
+            window[...] = self._resized_rgba(rgba, width, height)
+        return front, view_extent
+
+    @staticmethod
+    def _axes_background_rgba(axes: Any) -> np.ndarray:
+        """The axes' own face, as the eight-bit pixel a full draw fills with."""
+
+        colour = np.asarray(axes.get_facecolor(), dtype=float).reshape(-1)
+        if colour.size == 3:
+            colour = np.append(colour, 1.0)
+        return np.clip(np.rint(colour * 255.0), 0, 255).astype(np.uint8)
+
+    def _resized_rgba(
+        self, rgba: np.ndarray, width: int, height: int
+    ) -> np.ndarray:
+        """Nearest-neighbour resize of a composed front, in one gather."""
+
+        if rgba.shape[0] == height and rgba.shape[1] == width:
+            return rgba
+        sized = np.empty((height, width, 4), dtype=np.uint8)
+        self._resize_rgba_into(rgba, sized)
+        return sized
+
+    @staticmethod
+    def _resize_rgba_into(rgba: np.ndarray, out: np.ndarray) -> None:
+        """Gather *rgba* into *out* at its size, nearest neighbour."""
+
+        rows, columns = rgba.shape[:2]
+        height, width = out.shape[:2]
+        row_map = np.minimum(
+            ((np.arange(height) + 0.5) * (rows / height)).astype(np.intp),
+            rows - 1,
+        )
+        column_map = np.minimum(
+            ((np.arange(width) + 0.5) * (columns / width)).astype(np.intp),
+            columns - 1,
+        )
+        source = np.ascontiguousarray(rgba)
+        if kernels.engaged() and out.flags.c_contiguous:
+            kernels.gather_rows_columns(source, row_map, column_map, out)
+            return
+        out[...] = source[row_map][:, column_map]
 
     def _box_sized_rgba_front(
         self,
@@ -3907,6 +4015,21 @@ class MatplotlibRenderer:
             )
             self._artists[key] = image
         else:
+            # A drag frame is rendered at a fraction of the box, and a front
+            # that is not the size of the rectangle it lands in cannot be
+            # copied -- so Matplotlib scaled it up on every draw instead, and
+            # the budget that saved 20 ms of scene paid 29 ms for the
+            # resample.  Scale it here, with the same nearest-neighbour
+            # gather the heatmap's box-sizing uses, and the copy applies to
+            # a preview exactly as it does to a committed frame.
+            frame = self._box_sized_rgba_front(
+                f"{key}:scene",
+                frame,
+                scene_extent,
+                tuple(map(float, axes.get_xlim())),
+                tuple(map(float, axes.get_ylim())),
+                axes,
+            )
             self._install_image_front(image, frame)
             extent_key = f"{key}:applied_extent"
             if self._artists.get(extent_key) != scene_extent:
@@ -5841,12 +5964,7 @@ class MatplotlibRenderer:
             # aspect.  Reproducing ``shrunk_to_aspect`` and ``anchored``
             # instead made the box depend on whether Matplotlib had shrunk it
             # yet, and a focus round trip came back with a different picture.
-            sized = _box_on_aspect(
-                x1 - x0,
-                y1 - y0,
-                ratio,
-                picture=self.plan.image_picture_height_over_width,
-            )
+            sized = _box_on_aspect(x1 - x0, y1 - y0, ratio)
             if sized is None:
                 return bounds
             fraction_x, fraction_y = _ANCHOR_FRACTIONS.get(

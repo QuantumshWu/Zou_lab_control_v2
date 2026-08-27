@@ -404,11 +404,6 @@ class SurfacePlan:
     #: positioned, so on a first frame the axes had nothing to say and the
     #: box was left square for Matplotlib to shrink into half a pixel.
     image_height_over_width: float | None = None
-    #: Image kinds only: the PICTURE's own height over its width, which is
-    #: not the box's whenever the two differ -- the field is square by
-    #: requirement and a frame that is not square is letterboxed in it.  The
-    #: box size is chosen so that letterboxed picture lands on whole pixels.
-    image_picture_height_over_width: float | None = None
 
     def __post_init__(self) -> None:
         for field in ("logical_size", "raster_size"):
@@ -834,7 +829,6 @@ def resolve_surface(
     export_scale: float | None = None,
     rolling_side_distribution: bool | None = None,
     image_height_over_width: float | None = None,
-    image_picture_height_over_width: float | None = None,
     image_scene: bool = False,
     layout: PlotLayoutConfig,
     style: PlotStyleConfig,
@@ -989,7 +983,6 @@ def resolve_surface(
     else:
         axes = (AxesPlan("main", data),)
     return SurfacePlan(
-        image_picture_height_over_width=image_picture_height_over_width,
         image_height_over_width=(
             image_height_over_width
             if facet_topology is None

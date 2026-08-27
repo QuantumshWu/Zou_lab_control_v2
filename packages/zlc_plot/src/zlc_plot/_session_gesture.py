@@ -989,6 +989,12 @@ class GestureSessionMixin:
         if moved is None:
             return False
         selected = RectangleRange(self._viewport_x_from_axes(moved.x), moved.y)
+        # The same grid the wheel and every other viewport writer lands on.
+        # A pan left the view a third of a pixel off it, and an image whose
+        # front does not land on whole canvas pixels cannot be copied -- so
+        # the pan itself was drawn through Matplotlib's image machinery, and
+        # the view it left behind kept the NEXT zoom off the grid too.
+        selected = self._image_viewport_on_pixel_grid(selected)
         current = gesture.candidate or self._projected.viewport
         if current is not None and np.allclose(
             (current.x.low, current.x.high, current.y.low, current.y.high),
