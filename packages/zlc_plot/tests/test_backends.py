@@ -171,3 +171,108 @@ def test_a_widget_outliving_its_host_refuses_input_instead_of_raising() -> None:
     finally:
         sys.excepthook = original
     assert not escaped, "an exception escaped a Qt handler: %r" % (escaped[0],)
+
+
+def test_a_gesture_is_not_cancelled_by_the_fronts_it_causes() -> None:
+    """Turning a scene must not stop it turning.
+
+    A camera drag WRITES display state, so every frame it causes carries a
+    new display revision.  The widget read that as "the surface changed
+    under me" and cancelled the gesture on its own first front: the scene
+    turned twice -- for the moves already in flight -- and then answered
+    nothing until the button came up, which is what "it moves a little and
+    then stops" looks like.  A live panel does the same thing to a selector
+    drag, because a tight colour limit re-derives from every shot.
+
+    Kind, preset, layout, size and device pixel ratio are what a gesture's
+    transform depends on.  This drives eighteen real middle-button moves
+    and requires the camera to answer every one of them.
+    """
+
+    from PyQt5 import QtCore, QtGui, QtWidgets
+
+    from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+    from zlc_plot import (
+        AxisRef,
+        ImagePlot,
+        RasterPlotHost,
+        ensure_qt5_application,
+    )
+
+    rows, columns = 40, 60
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns({"shot": np.asarray([0.0])}),
+        data_axes=(
+            Axis.create("y", values=[float(i) for i in range(rows)], unit="pixel"),
+            Axis.create("x", values=[float(i) for i in range(columns)], unit="pixel"),
+        ),
+        dtype=np.uint8,
+        generation="orbit-keeps-turning",
+    )
+
+    def snapshot(revision: int):
+        rng = np.random.default_rng(revision)
+        return DatasetSnapshot(
+            schema,
+            rng.integers(0, 255, size=(rows, columns), dtype=np.uint8)[None, None],
+            revision=revision,
+        )
+
+    app = ensure_qt5_application([])
+    # The screen's OWN ratio: a widget that observes a scale different from
+    # its host's rightly cancels the gesture, since the surface really did
+    # change under it.  That is a different question from this one.
+    screen = app.primaryScreen()
+    host = RasterPlotHost.from_plot(
+        snapshot(1),
+        ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
+        parameters={"presentation": "height_bars"},
+        device_pixel_ratio=(
+            1.0 if screen is None else float(screen.devicePixelRatio())
+        ),
+    )
+    try:
+        host.wait_for_front(20.0)
+        widget = host.qt_widget()
+        widget.resize(480, 360)
+        widget.show()
+        for _ in range(40):
+            app.processEvents()
+        widget.set_interaction_enabled(True)
+
+        def azimuth() -> float:
+            values = host.describe_display().result(
+                timeout=10
+            ).value.display_state.values
+            return round(float(values["camera_azimuth"]), 3)
+
+        def at(fx: float, fy: float) -> QtCore.QPointF:
+            return QtCore.QPointF(widget.width() * fx, widget.height() * fy)
+
+        def send(kind, position, button, buttons) -> None:
+            QtWidgets.QApplication.sendEvent(
+                widget,
+                QtGui.QMouseEvent(
+                    kind, position, button, buttons, QtCore.Qt.NoModifier
+                ),
+            )
+            for _ in range(10):
+                app.processEvents()
+
+        send(QtCore.QEvent.MouseButtonPress, at(0.5, 0.5),
+             QtCore.Qt.MiddleButton, QtCore.Qt.MiddleButton)
+        seen = []
+        for step in range(1, 19):
+            host.update_data(snapshot(1 + step))
+            send(QtCore.QEvent.MouseMove, at(0.5 + 0.02 * step, 0.5),
+                 QtCore.Qt.NoButton, QtCore.Qt.MiddleButton)
+            seen.append(azimuth())
+        send(QtCore.QEvent.MouseButtonRelease, at(0.86, 0.5),
+             QtCore.Qt.MiddleButton, QtCore.Qt.NoButton)
+    finally:
+        host.close(timeout=10.0)
+    assert len(set(seen)) == len(seen), (
+        "the scene stopped following the hand after %d of %d moves: %s"
+        % (len(set(seen)), len(seen), seen)
+    )

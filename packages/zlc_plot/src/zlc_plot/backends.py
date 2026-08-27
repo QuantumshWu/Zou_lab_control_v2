@@ -794,11 +794,19 @@ def _qt5_plot_widget_class() -> type[Any]:
                 self._clear_interaction()
                 return self._promote_front(front)
             if gesture_front is not None and gesture_axes is not None:
+                # What the SURFACE is, not what its parameters say.  The
+                # display revision counts changes to the display state, and
+                # a gesture that WRITES display state -- turning a
+                # height-bar scene writes the camera -- advances it with
+                # every frame it causes.  Reading that as "the surface
+                # changed under me" made such a gesture cancel itself on its
+                # own first front: the scene turned twice, for the moves
+                # already in flight, and then answered nothing until the
+                # button came up.  Kind, preset, layout, size and pixel
+                # ratio are what a gesture's transform actually depends on.
                 surface_compatible = (
                     front.identity.kind == gesture_front.identity.kind
                     and front.identity.preset == gesture_front.identity.preset
-                    and front.identity.display_revision
-                    == gesture_front.identity.display_revision
                     and front.identity.layout_revision
                     == gesture_front.identity.layout_revision
                     and front.logical_size == gesture_front.logical_size
