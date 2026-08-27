@@ -127,12 +127,16 @@ assert 'ambient temperature' in legend.toolTip()
 def test_fluent_combo_popup_is_lazy_single_owned_and_keyboard_selectable() -> None:
     _run_qt_smoke(
         """
-from PyQt5 import QtCore, QtTest, QtWidgets
+from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
 from zlc_ui.qt import ensure_qt_app
-from zlc_ui.fluent import FluentComboBox, FluentTreeComboBox
+from zlc_ui.fluent import FluentComboBox, FluentTreeComboBox, scaled_px
 app = ensure_qt_app(['combo-lifecycle'])
 flat = FluentComboBox()
-flat.addItems(('short', 'a considerably longer choice'))
+flat.addItems((
+    'short', 'a considerably longer choice',
+    'Measurement: Camera Measurement',
+    *(f'choice {index}' for index in range(9)),
+))
 tree = FluentTreeComboBox()
 tree.set_choice_tree((
     ('camera', (('frames', '@logic/camera/frames', 'camera · frames'),)),
@@ -145,6 +149,7 @@ flat.addItem('new widest choice of the complete model')
 assert flat.sizeHint().width() > initial_width
 font = flat.font(); font.setPointSize(font.pointSize() + 2); flat.setFont(font)
 assert flat.sizeHint().width() > initial_width
+flat.setFixedWidth(scaled_px(170, minimum=130))
 
 flat.show(); tree.show(); app.processEvents()
 assert not flat.findChildren(QtWidgets.QAbstractItemView)
@@ -152,6 +157,9 @@ assert not tree.findChildren(QtWidgets.QAbstractItemView)
 flat.showPopup(); app.processEvents()
 flat_view = flat.view()
 assert type(flat_view).__name__ == 'QListView'
+assert flat_view.verticalScrollBar().maximum() > 0
+assert flat_view.sizeHintForColumn(0) <= flat_view.viewport().width()
+assert flat_view.horizontalScrollBar().maximum() == 0
 flat_events = []
 flat.activated.connect(flat_events.append)
 flat_view.setCurrentIndex(flat.model().index(1, 0))
@@ -165,13 +173,50 @@ assert flat_view.styleSheet() == tree_view.styleSheet() != ''
 assert tree.current_choice_key() == '@logic/camera/frames'
 tree_index = tree.model().index(0, 0, tree.model().index(0, 0))
 tree_view.setExpanded(tree_index.parent(), True)
+app.processEvents()
+assert tree_view.sizeHintForColumn(0) <= tree_view.viewport().width()
+assert tree_view.horizontalScrollBar().maximum() == 0
 tree_view.setCurrentIndex(tree_index)
 QtTest.QTest.keyClick(tree_view, QtCore.Qt.Key_Return)
 assert tree.current_choice_key() == '@logic/camera/frames'
 flat.showPopup(); app.processEvents(); flat.hidePopup()
 tree.showPopup(); app.processEvents()
 assert flat.view() is flat_view and tree.view() is tree_view
-flat.hidePopup(); tree.hidePopup(); flat.close(); tree.close()
+
+# A model change while the popup is open re-measures the real delegate and
+# viewport rather than leaving a stale width owner behind.
+before = tree._popup.width()
+tree.model().item(0).appendRow(QtGui.QStandardItem(
+    'a newly inserted and significantly wider tree choice'))
+app.processEvents()
+assert tree._popup.width() >= before
+assert tree_view.sizeHintForColumn(0) <= tree_view.viewport().width()
+assert tree_view.horizontalScrollBar().maximum() == 0
+expanded_width = tree._popup.width()
+tree_view.setExpanded(tree.model().index(0, 0), False); app.processEvents()
+assert tree._popup.width() <= expanded_width
+assert tree_view.horizontalScrollBar().maximum() == 0
+tree_view.setExpanded(tree.model().index(0, 0), True); app.processEvents()
+assert tree_view.sizeHintForColumn(0) <= tree_view.viewport().width()
+
+# Exactly the shared visible-row limit needs neither scrollbar.
+twelve = FluentComboBox(); twelve.addItems(tuple(f'row {i}' for i in range(12)))
+twelve.setFixedWidth(scaled_px(170, minimum=130))
+twelve.show(); app.processEvents(); twelve.showPopup(); app.processEvents()
+assert twelve.view().verticalScrollBar().maximum() == 0
+assert twelve.view().horizontalScrollBar().maximum() == 0
+
+# Horizontal scrolling remains valid at the physical screen boundary: the
+# popup grows to the available width, then and only then exposes overflow.
+capped = FluentComboBox(); capped.addItem('x' * 5000)
+capped.show(); app.processEvents(); capped.showPopup(); app.processEvents()
+assert capped._popup.width() == capped.screen().availableGeometry().width()
+assert capped.view().sizeHintForColumn(0) > capped.view().viewport().width()
+assert capped.view().horizontalScrollBar().maximum() > 0
+assert capped.view().horizontalScrollBar().isVisible()
+
+flat.hidePopup(); tree.hidePopup(); twelve.hidePopup(); capped.hidePopup()
+flat.close(); tree.close(); twelve.close(); capped.close()
 """
     )
 

@@ -1852,6 +1852,7 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         self._popup_view: QtWidgets.QAbstractItemView | None = None
         self._popup: FluentPopup | None = None
         self._popup_anchor: FluentSettingsPopupAnchor | None = None
+        self._popup_refit_pending = False
         self._cached_content_width: int | None = None
         self._bind_width_model(self._model)
         self.clicked.connect(self._toggle_popup)
@@ -1962,6 +1963,7 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         if selected != self._minimum_contents_length:
             self._minimum_contents_length = selected
             self.updateGeometry()
+            self._schedule_popup_refit()
 
     def _create_popup_view(self) -> QtWidgets.QAbstractItemView:
         """Create this combo family's one popup view, on first use only."""
@@ -2074,6 +2076,7 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         if was_measured:
             self.updateGeometry()
             self.update()
+        self._schedule_popup_refit()
 
     def changeEvent(self, event) -> None:  # noqa: N802 - Qt API name
         super().changeEvent(event)
@@ -2224,18 +2227,19 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         popup = self._popup
         if popup is None:
             raise RuntimeError("Fluent combo popup owner was not constructed")
-        width = self._desired_popup_width()
-        view.setFixedWidth(width)
         view.setMinimumHeight(0)
         view.setMaximumHeight(QtWidgets.QWIDGETSIZE_MAX)
         popup.setMinimumHeight(0)
         popup.setMaximumHeight(QtWidgets.QWIDGETSIZE_MAX)
         self._sync_popup_selection()
         self._resize_popup_to_contents()
-        popup.setFixedWidth(width)
         self._place_popup()
         popup.show()
         popup.raise_()
+        # A visible Qt.Popup has its final native frame/scrollbar geometry.
+        # Re-measure in the same owner turn; no paint occurs between these
+        # calls, and the second pass closes any platform/DPR rounding delta.
+        self._resize_popup_to_contents()
         view.setFocus(QtCore.Qt.PopupFocusReason)
 
     def hidePopup(self) -> None:  # noqa: N802 - Qt API name
@@ -2249,21 +2253,24 @@ class FluentComboBox(QtWidgets.QAbstractButton):
             raise RuntimeError("Fluent combo popup anchor was not constructed")
         anchor.toggle(view, present=self.showPopup)
 
-    def _popup_text_width(self) -> int:
-        view = self._popup_view
-        if view is None:
-            return 0
-        metrics = view.fontMetrics()
-        measure = getattr(metrics, "horizontalAdvance", metrics.width)
-        return max((measure(self.itemText(i)) for i in range(self.count())), default=0)
+    def _popup_available_geometry(self) -> QtCore.QRect | None:
+        """The screen containing the anchor, shared by cap/space/placement."""
 
-    def _desired_popup_width(self) -> int:
-        chrome = 2 * (popup_gap() + scaled_px(6, minimum=4))
-        chrome += self.style().pixelMetric(QtWidgets.QStyle.PM_ScrollBarExtent)
-        width = max(self.width(), self._popup_text_width() + chrome)
-        screen = self.screen() if hasattr(self, "screen") else None
-        available = screen.availableGeometry() if screen is not None else None
-        return int(min(width, available.width()) if available is not None else width)
+        app = QtWidgets.QApplication.instance()
+        center = self.mapToGlobal(self.rect().center())
+        screen_at = getattr(app, "screenAt", None) if app is not None else None
+        screen = screen_at(center) if callable(screen_at) else None
+        if screen is None and hasattr(self, "screen"):
+            screen = self.screen()
+        return screen.availableGeometry() if screen is not None else None
+
+    def _popup_width_cap(self) -> int:
+        available = self._popup_available_geometry()
+        return (
+            QtWidgets.QWIDGETSIZE_MAX
+            if available is None
+            else int(available.width())
+        )
 
     def _popup_space_below(self) -> tuple[int, QtCore.QRect | None]:
         """Return usable space below the field on its active screen.
@@ -2275,8 +2282,7 @@ class FluentComboBox(QtWidgets.QAbstractButton):
         bottom of a screen.
         """
 
-        screen = self.screen() if hasattr(self, "screen") else None
-        available = screen.availableGeometry() if screen is not None else None
+        available = self._popup_available_geometry()
         if available is None:
             return (QtWidgets.QWIDGETSIZE_MAX, None)
         bottom = self.mapToGlobal(QtCore.QPoint(0, self.height())).y()
@@ -2291,8 +2297,7 @@ class FluentComboBox(QtWidgets.QAbstractButton):
             if popup_width <= self.width()
             else anchor_bottom.x() + self.width() - popup_width
         )
-        screen = self.screen() if hasattr(self, "screen") else None
-        available = screen.availableGeometry() if screen is not None else None
+        available = self._popup_available_geometry()
         top = anchor_bottom.y() + popup_gap()
         if available is not None:
             left = max(available.left(), min(left, available.right() - popup_width + 1))
@@ -2332,20 +2337,119 @@ class FluentComboBox(QtWidgets.QAbstractButton):
             return int(desired)
         return int(min(desired, below))
 
-    def _resize_popup_to_contents(self, *_) -> None:
-        """Apply one content/available-space height contract to list and tree popups."""
+    def _apply_popup_geometry(self, width: int, height: int) -> None:
+        """Apply one candidate geometry and force Qt's real viewport layout."""
 
         view = self._popup_view
         popup = self._popup
         if view is None or popup is None:
             return
-        desired = self._desired_popup_height()
+        selected_width = max(1, int(width))
+        selected_height = max(0, int(height))
         top_inset = popup_gap()
         layout = popup.layout()
         if layout is not None:
             layout.setContentsMargins(0, top_inset, 0, 0)
-        view.setFixedHeight(max(0, desired - top_inset))
-        popup.setFixedHeight(desired)
+        popup.setFixedSize(selected_width, selected_height)
+        # The popup is the sole geometry owner.  Its zero-horizontal-margin
+        # layout gives the view the exact remaining rectangle; fixing both
+        # parent and child would create two competing width authorities.
+        view.setMinimumSize(0, 0)
+        view.setMaximumSize(
+            QtWidgets.QWIDGETSIZE_MAX,
+            QtWidgets.QWIDGETSIZE_MAX,
+        )
+        popup.ensurePolished()
+        view.ensurePolished()
+        if layout is not None:
+            layout.activate()
+        view.doItemsLayout()
+
+    def _resize_popup_to_contents(self, *_) -> None:
+        """Measure the laid-out item view and converge its popup geometry.
+
+        Width is not inferred from font metrics or hand-counted padding.  The
+        delegate first lays out the real list/tree at its final row height;
+        ``sizeHintForColumn`` then states the content width, while
+        ``view.width - viewport.width`` states the platform/DPR-specific frame
+        and vertical-scrollbar chrome.  A few fixed-point passes are necessary
+        because each scrollbar changes the opposite viewport dimension.
+
+        The horizontal scrollbar remains ``AsNeeded``.  It appears only when
+        this measured requirement exceeds the active screen's width cap.
+        """
+
+        view = self._popup_view
+        popup = self._popup
+        if view is None or popup is None:
+            return
+        base_height = self._desired_popup_height()
+        below, _available = self._popup_space_below()
+        width_cap = self._popup_width_cap()
+        if popup.isVisible() and popup.width() > 0:
+            width = min(width_cap, max(1, popup.width()))
+            height = max(0, popup.height())
+        else:
+            width = min(width_cap, max(1, self.width()))
+            height = base_height
+        horizontal_extent = view.horizontalScrollBar().sizeHint().height()
+        seen: set[tuple[int, int]] = set()
+        for _pass in range(4):
+            geometry = (width, height)
+            seen.add(geometry)
+            self._apply_popup_geometry(width, height)
+            content_width = max(0, int(view.sizeHintForColumn(self.modelColumn())))
+            chrome_width = max(0, int(view.width() - view.viewport().width()))
+            target_width = min(
+                width_cap,
+                max(self.width(), content_width + chrome_width),
+            )
+            target_viewport_width = max(0, target_width - chrome_width)
+            needs_horizontal = content_width > target_viewport_width
+            target_height = min(
+                below,
+                base_height + (horizontal_extent if needs_horizontal else 0),
+            )
+            target = (target_width, target_height)
+            if target == geometry:
+                if popup.isVisible():
+                    self._place_popup()
+                return
+            if target in seen:
+                # A vertical/horizontal scrollbar can theoretically toggle a
+                # two-state geometry on a platform boundary.  The wider/taller
+                # member is the only state that cannot hide reachable content.
+                stable = (
+                    max(item[0] for item in (*seen, target)),
+                    max(item[1] for item in (*seen, target)),
+                )
+                if stable != geometry:
+                    self._apply_popup_geometry(*stable)
+                if popup.isVisible():
+                    self._place_popup()
+                return
+            width, height = target_width, target_height
+        # Only the not-yet-applied candidate from the pass limit remains.
+        self._apply_popup_geometry(width, height)
+        if popup.isVisible():
+            self._place_popup()
+
+    def _schedule_popup_refit(self) -> None:
+        popup = getattr(self, "_popup", None)
+        if (
+            popup is None
+            or not popup.isVisible()
+            or self._popup_refit_pending
+        ):
+            return
+        self._popup_refit_pending = True
+        QtCore.QTimer.singleShot(0, self._refit_open_popup)
+
+    def _refit_open_popup(self) -> None:
+        self._popup_refit_pending = False
+        popup = self._popup
+        if popup is not None and popup.isVisible():
+            self._resize_popup_to_contents()
 
     def _display_text(self) -> str:
         """The text painted in the COLLAPSED combo (the seam a tree combo overrides to show a
@@ -2496,30 +2600,6 @@ class FluentTreeComboBox(FluentComboBox):
         # (Qt sizes the popup once at open and never re-fits a tree expand) -- the box "变长".
         view.expanded.connect(self._resize_popup_to_contents)
         view.collapsed.connect(self._resize_popup_to_contents)
-
-    def _popup_text_width(self) -> int:
-        view = self._popup_view
-        if not isinstance(view, QtWidgets.QTreeView):
-            return super()._popup_text_width()
-        metrics = view.fontMetrics()
-        measure = getattr(metrics, "horizontalAdvance", metrics.width)
-        widest = 0
-
-        def visit(parent, depth: int) -> None:
-            nonlocal widest
-            for row in range(self._model.rowCount(parent)):
-                index = self._model.index(row, 0, parent)
-                item = self._model.itemFromIndex(index)
-                if item is None:
-                    continue
-                widest = max(
-                    widest,
-                    measure(item.text()) + (depth + 1) * view.indentation(),
-                )
-                visit(index, depth + 1)
-
-        visit(QtCore.QModelIndex(), 0)
-        return int(widest)
 
     def _collapsed_text_candidates(self) -> tuple[str, ...]:
         none_labels = tuple(
