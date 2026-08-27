@@ -614,6 +614,22 @@ class RasterPlotHost:
             return self._session
 
     @property
+    def closing(self) -> bool:
+        """Whether this host can still serve, answered without raising.
+
+        Everything else that reports it -- ``defaults``, ``_require_session``,
+        ``_dispatch_session`` -- reports it by RAISING, which is the right
+        answer to a caller that asked for work and a fatal one to a Qt event
+        handler: PyQt aborts the process on an exception that escapes a slot,
+        with no traceback.  A widget outliving its host is ordinary (the
+        console retires a host when a panel retargets), so the widget needs a
+        question it can ask, not an exception it must catch.
+        """
+
+        with self._condition:
+            return bool(self._closing or self._closed)
+
+    @property
     def front(self) -> RasterFront | None:
         with self._condition:
             return self._front
@@ -1180,7 +1196,23 @@ class RasterPlotHost:
                 frame.stage = "prepare"
 
         def stage_prepare() -> Future[object]:
-            return self._require_session().prepare_live_frame(
+            session = self._require_session()
+            # Data the session already holds is nothing to do, not a fault.
+            # ``prepare_live_frame`` refuses it -- rightly, for a caller
+            # asking to advance -- but this caller is a pipeline that can
+            # legitimately be handed the same revision twice: the submitter
+            # records what it handed over only once the render COMPLETES,
+            # and during a gesture the arbiter supersedes renders on
+            # purpose, so a committed frame whose future was cancelled
+            # looked free and went round again.  The operator saw "data
+            # revision must increase" on the card while turning a scene.
+            if frame.revision is not None and session.holds_live_revision(
+                frame.data, frame.revision
+            ):
+                raise _FrameSuperseded(
+                    "the session already holds this data revision"
+                )
+            return session.prepare_live_frame(
                 frame.data,
                 revision=frame.revision,
                 cancelled=frame.cancel.is_set,
@@ -1198,6 +1230,11 @@ class RasterPlotHost:
     ) -> None:
         try:
             prepare_future = dispatched.result().value
+        except (_FrameSuperseded, CancelledError):
+            # The same reading the commit stage already gives it: a frame
+            # the session has moved past is finished, not failed.
+            self._finish_data_frame(frame, cancelled=True)
+            return
         except BaseException as error:
             self._finish_data_frame(frame, error=error)
             return
@@ -2470,6 +2507,21 @@ class RasterPlotHost:
             frame.completion.cancel()
         if thread is not None and thread is not current_thread():
             thread.join(timeout)
+        # The host made the widget and keeps it, so the host ends it: a
+        # widget left mounted on a closed host goes on delivering mouse
+        # events, and the first question it asks -- the selector handle
+        # radius, out of ``defaults`` -- raises inside ``mouseMoveEvent``
+        # and takes the whole application down.  Only from the widget's own
+        # thread; from anywhere else the widget's own guard stands.
+        widget = self._qt_widget
+        if widget is not None:
+            try:
+                from PyQt5 import QtCore as _QtCore
+
+                if _QtCore.QThread.currentThread() == widget.thread():
+                    widget.close_adapter()
+            except Exception:
+                pass
         stopped = thread is None or not thread.is_alive()
         if stopped:
             with self._condition:

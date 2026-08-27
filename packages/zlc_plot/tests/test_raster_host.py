@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from concurrent.futures import Future
+from concurrent.futures import CancelledError, Future
 from threading import Event
 from pathlib import Path
 import time
@@ -1497,3 +1497,45 @@ def test_yielded_frames_are_never_lost_only_deferred() -> None:
     finally:
         hand.close(timeout=10)
         other.close(timeout=10)
+
+
+def test_a_revision_the_session_already_holds_is_nothing_to_do() -> None:
+    """Handing the same data twice is a no-op, not a fault on the card.
+
+    The submitter records what it handed over only once the render
+    COMPLETES, and a gesture makes the arbiter supersede renders on purpose
+    -- so a frame that committed but whose future was cancelled looked free
+    and went round again.  ``prepare_live_frame`` refuses it, rightly, for a
+    caller asking to advance; here the refusal reached the operator as "data
+    revision must increase" on a panel they were only turning.
+
+    A frame the session already holds is superseded.  That is a cancelled
+    future, which the pipeline already knows how to ignore, not an error.
+    """
+
+    host = RasterPlotHost.from_plot(_snapshot(), CurvePlot(AxisRef.point("x")))
+    try:
+        host.wait_for_front(10.0)
+        schema = DatasetSchema.create(
+            Axis.create("repeat", size=1),
+            PointTable.from_columns({"x": [0.0, 1.0, 2.0]}),
+            dtype=np.float64,
+            generation="raster-host-test",
+        )
+        fresh = DatasetSnapshot(schema, np.array([[2.0, 3.0, 4.0]]), revision=1)
+        host.update_data(fresh).result(10.0)
+
+        repeated = host.update_data(
+            DatasetSnapshot(schema, np.array([[9.0, 9.0, 9.0]]), revision=1)
+        )
+        try:
+            repeated.result(10.0)
+        except CancelledError:
+            pass
+        except Exception as error:  # pragma: no cover - the regression
+            raise AssertionError(
+                "re-handing a held revision surfaced %r instead of being "
+                "ignored" % (error,)
+            ) from None
+    finally:
+        host.close(timeout=10.0)
