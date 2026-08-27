@@ -296,9 +296,13 @@ class SelectionMapping:
     plot_kind: str
     selector_kind: str
     draft_fields: tuple[str, ...]
+    #: Answers None when the region names nothing this producer can be set
+    #: from -- a box drawn off the sensor is a place, not a crop.  "Nothing
+    #: to set" is an answer; expressed as an exception it escaped a worker
+    #: mid-gesture and the gesture never replied.
     map_patch: Callable[
         [SelectionState, Mapping[str, Any], Mapping[str, Any]],
-        Mapping[str, Any],
+        Mapping[str, Any] | None,
     ]
     #: The same fields, read back from what the run is actually set to.  A
     #: drawn region overwrites them, so taking the region away has to leave
@@ -526,7 +530,10 @@ class LogicNodeDescriptor:
                 selection.plot_kind == mapping.plot_kind
                 and selection.selector_kind == mapping.selector_kind
             ):
-                result = dict(mapping.map_patch(selection, draft, context))
+                mapped = mapping.map_patch(selection, draft, context)
+                if mapped is None:
+                    return None
+                result = dict(mapped)
                 if set(result) != set(mapping.draft_fields):
                     raise ValueError(
                         "selection mapping must return its declared draft fields"

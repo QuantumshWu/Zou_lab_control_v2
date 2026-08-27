@@ -34,6 +34,7 @@ from .selection import (
     # identity is a shared contract nobody declared.
     IndexSelection,
     Selection,
+    EmptySelection,
     SelectionChange,
     resolve_selection_indices,
 )
@@ -87,6 +88,7 @@ from .snapshot_projection import (
 __all__ = [
     "IndexSelection",
     "is_intrinsically_immutable_array",
+    "EmptySelection",
     "SelectionChange",
     "resolve_selection_indices",
     "snapshot_from_manifest",

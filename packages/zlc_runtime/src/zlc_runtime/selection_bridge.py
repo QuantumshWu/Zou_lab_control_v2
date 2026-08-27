@@ -26,6 +26,7 @@ from zlc_data import (
     DatasetRevision,
     DatasetRevisionRef,
     DatasetSchema,
+    EmptySelection,
     OwnedSnapshot,
     PointColumn,
     point_domain_admits,
@@ -1248,10 +1249,20 @@ class SelectionBridge:
                 raise RuntimeError(
                     "exact source publication has no selected signal"
                 )
-            outputs = self._materialize_selection_outputs(
-                self._source_snapshot(publication),
-                state,
-            )
+            try:
+                outputs = self._materialize_selection_outputs(
+                    self._source_snapshot(publication),
+                    state,
+                )
+            except EmptySelection as error:
+                # A real answer, not a failure: a box drawn in the band
+                # beside the picture -- or past the edge of the sensor --
+                # names no data, and "no data there" is what it means.
+                # Raised out of a worker it escaped uncaught and the panel
+                # silently kept the region it already had, so the operator
+                # saw a mark move and nothing follow it.
+                self._record_error(error)
+                return
         # From here the plane's output NAMES are claimed, and only afterwards
         # can this commit learn whether its claim is still wanted -- the same
         # sequence the fit route runs, and the same reason it is serialized:

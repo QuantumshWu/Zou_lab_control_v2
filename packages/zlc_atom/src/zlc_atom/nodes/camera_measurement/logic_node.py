@@ -52,11 +52,10 @@ def _spatial_range(selection: SelectionState, role: str) -> SelectionRange:
 
 def _selected_sensor_interval(
     value: SelectionRange,
-    role: str,
     *,
     binning: int,
     sensor_size: int,
-) -> tuple[int, int]:
+) -> tuple[int, int] | None:
     # A frame's axes carry the sensor pixels it covers, so a region drawn on
     # it is already stated in sensor pixels and needs no conversion: it is the
     # ROI.  This used to add the current ROI's origin, because the picture was
@@ -71,7 +70,11 @@ def _selected_sensor_interval(
     start = max(0, math.ceil(value.lower))
     stop = min(sensor_size, math.floor(value.upper) + binning)
     if stop <= start:
-        raise ValueError(f"{role} selection does not intersect the camera sensor")
+        # A region drawn entirely off the sensor -- in the band beside the
+        # picture, or past its edge -- names no crop.  That is an answer,
+        # not a fault: raised, it escaped a worker thread while a gesture
+        # was in flight and took the gesture's reply with it.
+        return None
     return start, stop
 
 
@@ -129,24 +132,26 @@ def _image_area_to_roi_patch(
     selection: SelectionState,
     draft: Mapping[str, object],
     context: Mapping[str, object],
-) -> dict[str, int]:
+) -> dict[str, int] | None:
     x_range = _spatial_range(selection, SPATIAL_X.value)
     y_range = _spatial_range(selection, SPATIAL_Y.value)
     del draft
     sensor_height, sensor_width = _current_sensor_shape(context)
     binning_y, binning_x = _current_binning(context)
-    x_start, x_stop = _selected_sensor_interval(
+    horizontal = _selected_sensor_interval(
         x_range,
-        SPATIAL_X.value,
         binning=binning_x,
         sensor_size=sensor_width,
     )
-    y_start, y_stop = _selected_sensor_interval(
+    vertical = _selected_sensor_interval(
         y_range,
-        SPATIAL_Y.value,
         binning=binning_y,
         sensor_size=sensor_height,
     )
+    if horizontal is None or vertical is None:
+        return None
+    x_start, x_stop = horizontal
+    y_start, y_stop = vertical
     return {
         "roi_x": x_start,
         "roi_y": y_start,

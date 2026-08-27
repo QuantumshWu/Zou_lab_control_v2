@@ -208,6 +208,17 @@ def take_indices(
     return np.take(array, indices, axis=axis)
 
 
+class EmptySelection(ValueError):
+    """A selection that names no coordinate of the axis it speaks about.
+
+    It is a fact about where the region was drawn, not a fault: a box in
+    the letterbox band beside a picture selects nothing, and a caller that
+    can say so to the operator needs to tell this apart from a genuine
+    programming error.  Unnamed, it escaped a worker thread as a bare
+    ValueError and the panel silently kept the region it had.
+    """
+
+
 def resolve_selection_indices(
     axis: AxisSpec,
     term: SelectionTerm,
@@ -253,7 +264,9 @@ def resolve_selection_indices(
         lower = max(0, ceil(term.lower - axis.index_origin))
         upper = min(axis.size - 1, floor(term.upper - axis.index_origin))
         if upper < lower:
-            raise ValueError(f"coordinate selection is empty on axis {axis.axis_id}")
+            raise EmptySelection(
+                f"coordinate selection is empty on axis {axis.axis_id}"
+            )
         return range(lower, upper + 1), False
     if isinstance(term.lower, (int, float)) and isinstance(
         term.upper, (int, float)
@@ -276,7 +289,9 @@ def resolve_selection_indices(
             if value == term.lower
         )
     if not indices:
-        raise ValueError(f"coordinate selection is empty on axis {axis.axis_id}")
+        raise EmptySelection(
+            f"coordinate selection is empty on axis {axis.axis_id}"
+        )
     if indices[-1] - indices[0] + 1 == len(indices):
         return range(indices[0], indices[-1] + 1), False
     return indices, False
@@ -284,6 +299,7 @@ def resolve_selection_indices(
 
 __all__ = [
     "CoordinateRangeSelection",
+    "EmptySelection",
     "SelectionChange",
     "IndexRangeSelection",
     "IndexSelection",
