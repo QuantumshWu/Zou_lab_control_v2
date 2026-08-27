@@ -4136,10 +4136,10 @@ class MatplotlibRenderer:
         # pixel ratio.  Three taps on top of a 3x screen sampled every
         # logical pixel nine times for detail no screen can show, and the
         # operator's panel paid thirty milliseconds a frame for it.
-        supersample = 1
-        if divisor == 1:
-            supersample = int(round(3.0 / max(self.plan.device_pixel_ratio, 1e-9)))
-            supersample = max(1, min(4, supersample))
+        committed_supersample = max(1, min(4, int(round(
+            3.0 / max(self.plan.device_pixel_ratio, 1e-9)
+        ))))
+        supersample = committed_supersample if divisor == 1 else 1
         frame, scene = render_height_bars(
             heights,
             top_rgb,
@@ -4155,7 +4155,8 @@ class MatplotlibRenderer:
             z_fraction=policy.height_bars_z_fraction,
             # Committed geometry decides the pooled grid, so a drag
             # frame reuses it instead of re-pooling at its own size.
-            pool_reference_width=box_w * 3,
+            pool_reference_width=box_w * committed_supersample,
+            max_cells_across=policy.height_bars_max_cells_across,
             # The scene is an oblique view of THIS surface's heatmap, so
             # its ground runs the way the heatmap's picture runs.  The
             # origin is that picture's single authority.
@@ -4380,10 +4381,9 @@ class MatplotlibRenderer:
                     ((centre, float(scene.ny), wall_low),
                      (centre, float(scene.ny), wall_high))
                 )
-                if not scene.dense:
-                    grid_edges.append(
-                        ((centre, 0.0, 0.0), (centre, float(scene.ny), 0.0))
-                    )
+                grid_edges.append(
+                    ((centre, 0.0, 0.0), (centre, float(scene.ny), 0.0))
+                )
                 (ux, uy), f = outward(
                     scene.project(centre, 0.0, base_value),
                     scene.project(centre, 1.0, base_value),
@@ -4409,10 +4409,9 @@ class MatplotlibRenderer:
                 grid_edges.append(
                     ((0.0, centre, wall_low), (0.0, centre, wall_high))
                 )
-                if not scene.dense:
-                    grid_edges.append(
-                        ((0.0, centre, 0.0), (float(scene.nx), centre, 0.0))
-                    )
+                grid_edges.append(
+                    ((0.0, centre, 0.0), (float(scene.nx), centre, 0.0))
+                )
                 (ux, uy), f = outward(
                     scene.project(float(scene.nx), centre, base_value),
                     scene.project(float(scene.nx) - 1.0, centre, base_value),
@@ -4891,9 +4890,9 @@ class MatplotlibRenderer:
         whose boxes are not the caller's cells.
 
         Heights quantize to the display's own z resolution first: two
-        tops the screen cannot tell apart ARE one surface, and their
-        coincident rims then dedupe to a single stroke instead of
-        double-darkening it.  That quantum is the only threshold here;
+        tops the screen cannot tell apart ARE one surface, so the rim
+        between them is one stroke owned by one of them rather than two
+        drawn over each other.  That quantum is the only threshold here;
         everything else is the exact geometry of the drawn boxes.
         """
 
@@ -4912,9 +4911,7 @@ class MatplotlibRenderer:
             ],
             axis=0,
         )
-        if edges.shape[0] == 0:
-            return edges
-        return self._height_bars_dedupe_edges(edges)
+        return edges
 
     @staticmethod
     def _height_bars_rim_edges(
@@ -4924,9 +4921,17 @@ class MatplotlibRenderer:
         line where the surface drops to the floor.
 
         Both are real geometry.  The top ring stays CLOSED at the box's
-        own height (coincident rims of equal boxes dedupe to one), and
-        where the neighbour is absent the foot line closes that face
-        against the floor.
+        own height, and where the neighbour is absent the foot line
+        closes that face against the floor.
+
+        A shared rim is emitted by ONE of the two boxes that own it.  The
+        b-1 and a-1 sides always emit; the opposite two emit only where
+        the neighbour is missing or stands at another height, which is
+        exactly when the segment is not already somebody else's.  Every
+        box emitting its whole ring and a later pass removing the copies
+        cost a six-column lexsort of twice the edges -- two thirds of the
+        geometry on a scene with fifty bars a side -- to arrive at this
+        same set.
         """
 
         ny, nx = present.shape
@@ -4953,18 +4958,52 @@ class MatplotlibRenderer:
             padded[rows + 2, columns + 1],      # rim 2: the b + 1 side
             padded[rows + 1, columns],          # rim 3: the a - 1 side
         )
+        # The neighbour's own top, so "already emitted by the other box"
+        # can be answered without building the copy first.  Absent cells
+        # take a height no present box can equal.
+        padded_high = np.full((ny + 2, nx + 2), np.inf)
+        padded_high[1:-1, 1:-1] = high
+        rim_neighbour_high = (
+            padded_high[rows, columns + 1],
+            padded_high[rows + 1, columns + 2],
+            padded_high[rows + 2, columns + 1],
+            padded_high[rows + 1, columns],
+        )
+        # Rims 0 and 3 own every segment they touch; rims 1 and 2 emit
+        # only what their neighbour did not.
+        rim_emits = (
+            np.ones(rows.shape, dtype=bool),
+            ~(rim_neighbours[1] & (rim_neighbour_high[1] == z_high)),
+            ~(rim_neighbours[2] & (rim_neighbour_high[2] == z_high)),
+            np.ones(rows.shape, dtype=bool),
+        )
         standing = z_high > z_low
         blocks = []
-        for (start, end), neighbour in zip(rim_corners, rim_neighbours):
-            blocks.append(
-                np.stack(
-                    [
-                        np.stack([start[0], start[1], z_high], axis=1),
-                        np.stack([end[0], end[1], z_high], axis=1),
-                    ],
-                    axis=1,
+        for (start, end), neighbour, emits in zip(
+            rim_corners, rim_neighbours, rim_emits
+        ):
+            if emits.all():
+                blocks.append(
+                    np.stack(
+                        [
+                            np.stack([start[0], start[1], z_high], axis=1),
+                            np.stack([end[0], end[1], z_high], axis=1),
+                        ],
+                        axis=1,
+                    )
                 )
-            )
+            elif emits.any():
+                blocks.append(
+                    np.stack(
+                        [
+                            np.stack([start[0][emits], start[1][emits],
+                                      z_high[emits]], axis=1),
+                            np.stack([end[0][emits], end[1][emits],
+                                      z_high[emits]], axis=1),
+                        ],
+                        axis=1,
+                    )
+                )
             foot = ~neighbour & standing
             if not foot.any():
                 continue
@@ -5174,40 +5213,6 @@ class MatplotlibRenderer:
             return np.zeros((0, 2, 3), dtype=np.float64)
         return np.concatenate(blocks, axis=0)
 
-    def _height_bars_dedupe_edges(self, edges: "np.ndarray") -> np.ndarray:
-        """Draw every coincident edge ONCE.
-
-        Neighbouring equal-height boxes share edges; each box emitting
-        its own copy double-strokes the antialiased line into a heavier
-        one.  Occlusion is a local test, so which copy survives cannot
-        matter.
-        """
-
-        if edges.shape[0] < 2:
-            return edges
-        rounded = np.round(edges, 9)
-        p0, p1 = rounded[:, 0, :], rounded[:, 1, :]
-        flip = (
-            (p1[:, 0] < p0[:, 0])
-            | ((p1[:, 0] == p0[:, 0]) & (p1[:, 1] < p0[:, 1]))
-            | (
-                (p1[:, 0] == p0[:, 0])
-                & (p1[:, 1] == p0[:, 1])
-                & (p1[:, 2] < p0[:, 2])
-            )
-        )
-        low = np.where(flip[:, None], p1, p0)
-        high = np.where(flip[:, None], p0, p1)
-        key = np.concatenate([low, high], axis=1)
-        order = np.lexsort((
-            key[:, 5], key[:, 4], key[:, 3],
-            key[:, 2], key[:, 1], key[:, 0],
-        ))
-        ordered = key[order]
-        first = np.ones(order.shape[0], dtype=bool)
-        first[1:] = np.any(ordered[1:] != ordered[:-1], axis=1)
-        return edges[order[first]]
-
     def _update_height_bars_outlines(
         self, axes: Any, key: str, scene: Any
     ) -> None:
@@ -5222,16 +5227,11 @@ class MatplotlibRenderer:
         also gated on the drag's reduced resolution: the edges changed
         character the moment the operator started turning the scene.
 
-        A grid below outline density draws no edges at all, because it
-        is not drawn as boxes -- it is a lit continuous surface, and a
-        surface has no rims.
+        Every scene has rims, because every scene is boxes: how many
+        boxes is the level of detail, not a second kind of picture.
         """
 
         outline = self._artists.get(f"{key}:h3d_outlines")
-        if scene.dense:
-            if outline is not None:
-                outline.set_visible(False)
-            return
         # The edge SET depends on the drawn planes and the fold quadrant
         # alone -- an azimuth orbit inside one quadrant replays it, so
         # only the occlusion SAMPLING reruns per camera.

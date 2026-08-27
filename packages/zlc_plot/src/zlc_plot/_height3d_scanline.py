@@ -48,7 +48,7 @@ except Exception:  # pragma: no cover
     prange = range  # type: ignore[assignment]
 
 
-@njit(cache=True, nogil=True)
+@njit(cache=True, parallel=True, nogil=True)
 def _occlusion_samples(  # one edge set, sampled against one scene
     edges,       # f64 (E, 2, 3) folded (a, b, value) endpoints
     id_plane,    # i32 (H, W)
@@ -81,7 +81,13 @@ def _occlusion_samples(  # one edge set, sampled against one scene
     z_slack = 0.5 / max(z_unit * ce * scale, 1e-9)
     rise = se / (z_unit * ce)
     stride = samples + 1
-    for e in range(E):
+    # One edge knows nothing about another: it reads the finished scene
+    # and writes its own slice of the output.  The walk was serial while
+    # a small ROI drawn as boxes spent twelve milliseconds a frame in it,
+    # which is most of what made "not many bars" feel heavy.  Splitting by
+    # edge changes no arithmetic -- every sample is computed exactly where
+    # it was, in the same order within its edge.
+    for e in prange(E):
         a0 = edges[e, 0, 0]
         b0 = edges[e, 0, 1]
         z0 = edges[e, 0, 2]
@@ -261,8 +267,6 @@ def _materialize(  # noqa: C901 - one kernel, mirrored from the reference
     finite_grid, # bool (ny, nx)
     rgb_grid,    # f32 (ny, nx, 3) bar colours
     base_grid,   # f32 (ny, nx, 3) zero-end colours
-    top_grid,    # f32 (ny, nx, 3) top-face colours (lit when dense)
-    dense,       # bool
     shade_x,     # f32
     shade_y,     # f32
     sa,          # f64
@@ -464,25 +468,18 @@ def _materialize(  # noqa: C901 - one kernel, mirrored from the reference
                     height = fr_bottom - fr_top
                     if height < 1e-6:
                         height = 1e-6
-                    if dense:
-                        shade = np.float32(1.0)
+                    if seg_ent[s]:
+                        shade = shade_x
                     else:
-                        if seg_ent[s]:
-                            shade = shade_x
-                        else:
-                            shade = shade_y
+                        shade = shade_y
                     positive = z_top32[cbi, cai] > np.float32(0.0)
                     for ch in range(3):
-                        if dense:
-                            c_hi = top_grid[cbi, cai, ch]
-                            c_lo = top_grid[cbi, cai, ch]
+                        if positive:
+                            c_hi = rgb_grid[cbi, cai, ch] * shade
+                            c_lo = base_grid[cbi, cai, ch] * shade
                         else:
-                            if positive:
-                                c_hi = rgb_grid[cbi, cai, ch] * shade
-                                c_lo = base_grid[cbi, cai, ch] * shade
-                            else:
-                                c_hi = base_grid[cbi, cai, ch] * shade
-                                c_lo = rgb_grid[cbi, cai, ch] * shade
+                            c_hi = base_grid[cbi, cai, ch] * shade
+                            c_lo = rgb_grid[cbi, cai, ch] * shade
                         d = c_lo - c_hi
                         slp = np.float64(d) / height
                         rec_s[count, ch] = slp
@@ -530,7 +527,7 @@ def _materialize(  # noqa: C901 - one kernel, mirrored from the reference
                     if height < 1e-6:
                         height = 1e-6
                     for ch in range(3):
-                        c_val = top_grid[cbi, cai, ch]
+                        c_val = rgb_grid[cbi, cai, ch]
                         d = c_val - c_val
                         slp = np.float64(d) / height
                         rec_s[count, ch] = slp

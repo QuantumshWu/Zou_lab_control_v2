@@ -572,6 +572,12 @@ class RenderPolicyConfig:
     #: While the camera is being dragged the raster renders at 1/divisor
     #: resolution and the release repaints at full resolution.
     height_bars_drag_resolution_divisor: int = 2
+    #: How many bars the scene may divide into along either axis.  There
+    #: is one look -- boxes -- so a denser grid pools INTO it rather than
+    #: becoming a different picture, and the bar count is what the rim
+    #: pass is priced by: measured on the console panel, 54 a side costs
+    #: 14.6 ms of outline work a frame and grows with the square.
+    height_bars_max_cells_across: int = 54
     axes_title_pad_pt: float = 2.5
     compact_axes_title_pad_pt: float = 1.5
     figure_title_y: float = 0.992

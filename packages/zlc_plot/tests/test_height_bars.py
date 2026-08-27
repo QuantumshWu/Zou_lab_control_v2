@@ -416,8 +416,7 @@ def test_orbit_holds_the_camera_distance_still() -> None:
 
     A fit against the current projected footprint widens and narrows
     with the azimuth, which read as the scene lurching nearer and
-    farther during a drag -- and flipped the dense-surface threshold
-    (the lighting) with it.  The scale fits the invariant envelope
+    farther during a drag.  The scale fits the invariant envelope
     instead, so every azimuth at one elevation shares one scale.
     """
 
@@ -429,7 +428,6 @@ def test_orbit_holds_the_camera_distance_still() -> None:
         heights[..., None].astype(np.float32).clip(0.0, 1.0), 3, axis=-1
     )
     scales = []
-    dense_flags = []
     for azimuth in range(-175, 185, 10):
         _, scene = render_height_bars(
             heights, colors,
@@ -438,9 +436,7 @@ def test_orbit_holds_the_camera_distance_still() -> None:
             supersample=1, zero_rgb=(1.0, 1.0, 1.0),
         )
         scales.append(scene.scale)
-        dense_flags.append(scene.dense)
     assert len(set(scales)) == 1, scales
-    assert len(set(dense_flags)) == 1
 
 
 def test_color_limit_preview_rerenders_the_scene() -> None:
@@ -569,7 +565,6 @@ def test_one_mechanism_draws_every_edge_the_scene_has() -> None:
         heights, colors, camera=HeightBarCamera(), value_limits=(0.0, 1.0),
         width=240, height=200, zero_rgb=(1.0, 1.0, 1.0),
     )
-    assert not scene.dense, "this grid draws as boxes"
     # Every drawn pixel is a face colour or the background: a darkened
     # boundary would show up as a value darker than the darkest face.
     # The frame is opaque by construction -- it is already composited over
@@ -582,6 +577,48 @@ def test_one_mechanism_draws_every_edge_the_scene_has() -> None:
     assert painted.min() >= darkest_face - 0.02, (
         "the kernel darkened something that is not a face"
     )
+
+
+def test_every_edge_of_the_scene_is_emitted_exactly_once() -> None:
+    """Coincident copies double-stroke an antialiased line into a heavier
+    one, so the edge set must be a SET.
+
+    Neighbouring boxes of equal height share their rim, and a node is
+    shared by four cells.  The emitters own that: whoever emits a shared
+    segment emits it alone.  Asserted on the grid that shares the most --
+    every bar at one height -- and on a broken one, where absent cells
+    and steps put every kind of boundary in the same picture.
+    """
+
+    from zlc_plot.rendering import MatplotlibRenderer
+
+    renderer = MatplotlibRenderer.__new__(MatplotlibRenderer)
+    renderer._artists = {}
+    rng = np.random.default_rng(5)
+    flat = np.full((9, 11), 0.6)
+    steps = np.round(rng.random((9, 11)) * 3.0) / 3.0
+    holes = steps.copy()
+    holes[2, 3] = np.nan
+    holes[5:7, 8] = np.nan
+    for heights in (flat, steps, holes):
+        colors = np.repeat(
+            np.nan_to_num(heights)[..., None].astype(np.float32), 3, axis=-1
+        )
+        _frame, scene = render_height_bars(
+            heights, colors, camera=HeightBarCamera(), value_limits=(0.0, 1.0),
+            width=360, height=280, zero_rgb=(1.0, 1.0, 1.0),
+        )
+        edges = renderer._height_bars_outline_edges(scene)
+        assert edges.shape[0] > 0
+        rounded = np.round(edges, 9)
+        low = np.minimum(rounded[:, 0, :], rounded[:, 1, :])
+        high = np.maximum(rounded[:, 0, :], rounded[:, 1, :])
+        canonical = np.concatenate([low, high], axis=1)
+        unique = np.unique(canonical, axis=0)
+        assert unique.shape[0] == canonical.shape[0], (
+            "%d of %d edges are a second copy of another"
+            % (canonical.shape[0] - unique.shape[0], canonical.shape[0])
+        )
 
 
 def test_a_drag_draws_the_same_edges_as_the_frame_it_leaves() -> None:
@@ -614,44 +651,44 @@ def test_a_drag_draws_the_same_edges_as_the_frame_it_leaves() -> None:
         session.close()
 
 
-def test_what_the_grid_is_drawn_as_follows_the_grid_alone() -> None:
-    """Boxes or a lit surface is a fact about the DATA, not the room.
+def test_how_many_bars_is_a_level_of_detail_not_a_second_picture() -> None:
+    """One look -- boxes -- at every density.
 
-    Pricing it in canvas pixels made the picture a function of the
-    raster: a drag renders at a fraction of the canvas and the scene
-    brightened while turning, a panel preset changed it, and widening
-    the scene's own region turned mid-size scans that had always been
-    surfaces into a mesh of boxes.  The same grid must read the same way
-    at every raster size -- and zooming in must still walk up to the
-    boxes, because that IS the operator asking to come closer.
+    A grid denser than the cap pools INTO that look; it never becomes a
+    different kind of picture.  And the bar count must not follow the
+    raster: a drag frame renders at a fraction of the canvas, and it has
+    to be the same bars the commit draws, only at fewer pixels.  Nor may
+    it follow the camera, or turning the scene would rebuild the picture
+    while the hand is still moving.
     """
 
     from zlc_plot._height3d_raster import HeightBarCamera, render_height_bars
 
     rng = np.random.default_rng(33)
-    heights = rng.random((72, 96))          # a 120-cell diagonal
+    heights = rng.random((72, 96))
     colors = np.repeat(
         heights[..., None].astype(np.float32).clip(0.0, 1.0), 3, axis=-1
     )
 
-    def drawn(width, height, taps, zoom=1.0):
+    def drawn(width, height, taps, zoom=1.0, reference=960):
         _frame, scene = render_height_bars(
             heights, colors,
             camera=HeightBarCamera(azimuth_deg=-55.0, zoom=zoom),
             value_limits=(0.0, 1.0), width=width, height=height,
             supersample=taps, zero_rgb=(1.0, 1.0, 1.0),
+            pool_reference_width=reference,
         )
-        return scene.dense
+        return scene.nx, scene.ny, scene.pool_x, scene.pool_y
 
     committed = drawn(320, 240, 3)
-    assert drawn(160, 120, 1) == committed, "a drag frame redrew it"
-    assert drawn(900, 700, 3) == committed, "a bigger panel redrew it"
-    assert drawn(320, 240, 1) == committed, "the tap count redrew it"
-    # The operator's own zoom is the one thing that moves it, and it
-    # moves it toward the boxes: 120 cells of diagonal read as a surface
-    # until the camera comes close enough for a box to be a box.
-    assert committed is True
-    assert drawn(320, 240, 3, zoom=2.0) is False
+    assert drawn(160, 120, 1) == committed, "the drag frame drew other bars"
+    assert drawn(320, 240, 1) == committed, "the tap count changed the bars"
+    assert drawn(320, 240, 3, zoom=2.0) == committed, "the camera moved them"
+    assert max(committed[0], committed[1]) <= 54, committed
+    assert committed[2] > 1 and committed[3] > 1, "this grid must pool"
+    # A panel with room for fewer bars gets fewer; the cap is an upper
+    # bound, not the answer to every question.
+    assert max(drawn(120, 90, 1, reference=120)[:2]) < committed[0]
 
 
 def test_drag_preview_keeps_the_chrome_typography_in_place() -> None:
@@ -966,13 +1003,57 @@ def test_render_is_deterministic_at_exact_crossing_ties() -> None:
         np.testing.assert_array_equal(frames[0], frame)
 
 
+def test_the_occlusion_sampler_mirrors_its_reference_bit_for_bit() -> None:
+    """The compiled sampler is a SPEED path for the outlines, like the
+    materializer is for the pixels -- and until now only the materializer
+    had a contract holding it to its reference.
+
+    The numpy walk is the specification.  Compare them on a scene that
+    really hides things, at several sample counts and from several
+    cameras, so a change to either one cannot drift quietly.
+    """
+
+    pytest.importorskip("numba")
+    from zlc_plot import _height3d_raster as raster
+
+    session = _session(12)
+    try:
+        session.set_parameter("presentation", "height_bars")
+        for azimuth, elevation in ((-55.0, 30.0), (40.0, 12.0), (220.0, 62.0)):
+            session.set_parameter("camera_azimuth", azimuth)
+            session.set_parameter("camera_elevation", elevation)
+            session.rgba()
+            renderer = session._renderer
+            scene = renderer._height_bars_scene_map
+            edges = renderer._artists["image:h3d_outline_geometry"][1]
+            assert edges.shape[0] > 0
+            previous = raster._ENGINE
+            try:
+                walks = {}
+                for engine in ("numpy", "numba"):
+                    raster._ENGINE = engine
+                    walks[engine] = tuple(
+                        renderer._height_bars_sampled_polyline(scene, edges, count)
+                        for count in (4, 16, 64)
+                    )
+            finally:
+                raster._ENGINE = previous
+            for reference, compiled in zip(walks["numpy"], walks["numba"]):
+                np.testing.assert_array_equal(reference[0], compiled[0])
+                np.testing.assert_array_equal(reference[1], compiled[1])
+            hidden = np.isnan(walks["numpy"][2][0])
+            assert hidden.any(), "this camera must hide something"
+    finally:
+        session.close()
+
+
 def test_scanline_engine_matches_the_reference_bit_for_bit() -> None:
     """The numba scanline engine is a SPEED path, never a semantics path.
 
     The numpy kernel is the specification; the compiled engine must
     reproduce it bit for bit -- frame and pick map both -- across folds,
     exact crossing ties (azimuth 45), clipping limits, NaN holes,
-    hanging negative bars and the pooled dense surface.
+    hanging negative bars and a pooled grid.
     """
 
     pytest.importorskip("numba")
