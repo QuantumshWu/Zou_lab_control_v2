@@ -232,28 +232,80 @@ def test_the_seam_list_is_derived_from_the_renderer_not_typed_out() -> None:
 
 
 def test_the_bench_shows_the_product_s_own_window() -> None:
-    """A measurement taken at a size the product never opens at is a guess.
+    """The bench has no window size of its own, and no way to acquire one.
 
-    ``ConsoleBench.start`` pinned 1600x1000 unconditionally, for run-to-run
-    comparability.  The card's size decides the Setting frame's height cap,
-    so every acceptance measurement of that frame was taken in a regime the
-    operator never reaches -- which is how a whole class of frame behaviour
-    went unseen.  Pinning is now something a benchmark asks for.
+    It pinned 1600x1000 for run-to-run comparability.  Card size decides
+    the Setting frame's height cap, the square field's box and how much of
+    a frame is dynamic, so every acceptance measurement was taken in a
+    regime the operator never reaches -- which is how a whole class of
+    frame behaviour went unseen.
+
+    The first repair only made the pin a parameter, and the entry point
+    went on passing 1600x1000, so nothing changed for anyone actually
+    running it.  This asserts the whole knob is gone: an unused one is an
+    invitation to pin again.
+    """
+
+    import ast
+    import inspect
+    import textwrap
+
+    from bench.plot_perf.run_console import ConsoleBench, main
+
+    assert "window_size" not in inspect.signature(ConsoleBench.start).parameters
+    for owner in (ConsoleBench.start, main):
+        # THE PARSED CODE, not the text.  A guard that greps the source
+        # fires on the comment explaining why the pin is gone, which is
+        # the one place the number SHOULD still appear.
+        tree = ast.parse(textwrap.dedent(inspect.getsource(owner)))
+        resizes = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "resize"
+        ]
+        assert not resizes, (
+            "the bench must open the window the product opens: %s" % owner
+        )
+        assert not [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and node.value == 1600
+        ]
+
+
+def test_the_gesture_measurement_asks_whether_the_picture_followed_the_hand() -> None:
+    """A live console presents frames whether or not the hand did anything.
+
+    ``gesture`` waited for "one more front", which on a beating console is
+    satisfied by the producer's next frame.  Measured that way, the first
+    move of a pan came out at 0.63 ms against 33.66 for the later ones --
+    a harness saying a gesture is fastest before it starts, which is a
+    statement about the producer's phase and nothing else.
+
+    The view and the selectors carry their own revisions on the front's
+    identity and a data frame does not touch them, so that is what the
+    wait has to read.
     """
 
     import inspect
 
-    from bench.plot_perf.run_console import ConsoleBench, main
+    from bench.plot_perf.run_console import ConsoleBench
 
-    signature = inspect.signature(ConsoleBench.start)
-    assert "window_size" in signature.parameters, sorted(signature.parameters)
-    assert signature.parameters["window_size"].default is None
-
-    body = inspect.getsource(ConsoleBench.start)
-    assert "if window_size is not None:" in body
-    assert "window.resize(1600, 1000)" not in body, (
-        "a fixed size must not be the default"
+    body = inspect.getsource(ConsoleBench.gesture)
+    assert "display_revision" in body and "image_overlay_revision" in body, (
+        "the gesture must wait on the hand's own revisions"
     )
-    # ... and the performance entry point, which does need two runs to be
-    # comparable, asks for one.
-    assert "window_size=(1600, 1000)" in inspect.getsource(main)
+    assert "presented.count > baseline" not in body, (
+        "counting fronts measures the producer, not the hand"
+    )
+    # Three quantities, because the start is the complaint and pooling it
+    # with the steady state is what hid it.
+    for key in ("first_move_to_picture", "later_move_to_picture",
+                "missed_catches"):
+        assert key in body, key
+    # And it runs against a console that is actually running.
+    assert "ProductBeat" in body, (
+        "a gesture measured on a frozen console competes with nothing"
+    )

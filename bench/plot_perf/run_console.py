@@ -170,7 +170,6 @@ class ConsoleBench:
         camera: str = "mot_camera",
         exposure: float = 0.01,
         clear_preview_panels: bool = True,
-        window_size: tuple[int, int] | None = None,
     ):
         from pulse_fixtures import PULSE_NAME, write_ordinary_pulse
         from zlc_workbench.apps.task_console import build_console
@@ -222,16 +221,14 @@ class ConsoleBench:
         # A REAL window -- the console's own, with its real device pixel
         # ratio, which is the whole point of this layer.
         #
-        # AND THE PRODUCT'S OWN SIZE BY DEFAULT.  This used to pin 1600x1000
-        # unconditionally, "so the card geometry is the same on every run".
-        # It also meant every acceptance measurement was taken at a size the
-        # operator never sees -- and card size decides the Setting frame's
-        # height cap, so a whole class of frame behaviour was measured in a
-        # regime that does not occur.  A benchmark that needs two runs to be
-        # comparable asks for a size explicitly; looking at the product does
-        # not.
-        if window_size is not None:
-            window.resize(int(window_size[0]), int(window_size[1]))
+        # AND THE PRODUCT'S OWN SIZE.  This pinned 1600x1000 "so the card
+        # geometry is the same on every run", which meant every measurement
+        # was taken at a size the operator never sees.  Card size decides
+        # the Setting frame's height cap, the square field's box and how
+        # much of a frame is dynamic, so that is not a detail -- a whole
+        # class of behaviour was being measured in a regime that does not
+        # occur.  Two runs on one machine are comparable anyway: it is the
+        # same product opening on the same screen.
         window.show()
         self._pump(1.2)
         self.view._view.tabs.setCurrentIndex(0)
@@ -845,52 +842,95 @@ class ConsoleBench:
                 )
             return guards.committed_region(panel)
 
+        def hand_stamp():
+            """What a front says about the HAND, not about the data.
+
+            A live console presents frames the whole time a gesture runs,
+            so "one more front appeared" is satisfied by the producer's
+            next frame and measures the producer's phase.  Taken that way
+            the first move of a pan came out at 0.63 ms against 33.66 for
+            the later ones -- the picture had not moved at all, and a
+            harness reporting that a gesture is fastest before it starts
+            is reporting its own artefact.
+
+            The view and the selectors have their own revisions on the
+            front's identity, and a data frame does not touch them.  So
+            this is the exact question: did the picture follow the hand.
+            """
+
+            front = getattr(widget, "presented_front", None)
+            if front is None:
+                return None
+            identity = front.identity
+            return (
+                identity.display_revision,
+                identity.image_overlay_revision,
+            )
+
         def paint_after(send) -> float | None:
             """Send one pointer event; return the seconds until it shows."""
 
-            baseline = presented.count
+            baseline = hand_stamp()
             sent = time.perf_counter()
             send()
-            got = pump_until(
-                self.app,
-                lambda: (presented.poll() or presented.count > baseline),
-                1.0,
-            )
-            if got and presented.stamps:
-                return presented.stamps[-1] - sent
+            deadline = sent + 1.0
+            while time.perf_counter() < deadline:
+                self.app.processEvents()
+                presented.poll()
+                if hand_stamp() != baseline:
+                    return time.perf_counter() - sent
+                time.sleep(0.0003)
             return None
+
+        if motion == "pan":
+            # A HOME VIEW HAS NOWHERE TO PAN.  Fully zoomed out the frame
+            # already shows everything, so the drag is clamped to a no-op
+            # and the run ends with 'the gesture left the view limits
+            # unchanged' -- which is the harness telling the truth about a
+            # gesture that really did nothing.  Zoom in first, the way an
+            # operator has already done before they start dragging.
+            for _notch in range(8):
+                pointer.wheel(0.35, 0.40, -1)
+                pump(self.app, 0.05)
+            self._pump(0.5)
 
         before = owned()
         first_moves: list[float] = []
         later_moves: list[float] = []
         missed_catches = 0
-        for trial in range(trials):
-            # NOT pumped to quiescence first.  A press that only ever
-            # arrives on an idle machine is a press that never waits for
-            # anything, which is exactly the fiction this was measuring.
-            reaction = self._REACTION_MS[trial % len(self._REACTION_MS)] / 1e3
-            pointer.press(0.35, 0.40, button=button)
-            pump(self.app, reaction)
-            answered = paint_after(
-                lambda: pointer.move(0.35 + 0.05, 0.40 + 0.03)
-            )
-            if answered is None:
-                # The hand went down, moved, and the picture did not
-                # follow.  This is the "it does not catch" report, and it
-                # has to be COUNTED, not dropped for having no latency.
-                missed_catches += 1
-            else:
-                first_moves.append(answered)
-            for step in range(2, moves + 1):
+        # THE CONSOLE KEEPS RUNNING WHILE THE HAND DOES.  Without this the
+        # beat never ticks for the length of the gesture, so no live frame
+        # is ever started and the press competes with nothing -- which is
+        # the whole mechanism under investigation.  Everything below pumps
+        # through processEvents, which is what fires this timer.
+        with guards.ProductBeat(self.app, self.presenter):
+            for trial in range(trials):
+                # NOT pumped to quiescence first.  A press that only ever
+                # arrives on an idle machine is a press that never waits for
+                # anything, which is exactly the fiction this was measuring.
+                reaction = self._REACTION_MS[trial % len(self._REACTION_MS)] / 1e3
+                pointer.press(0.35, 0.40, button=button)
+                pump(self.app, reaction)
                 answered = paint_after(
-                    lambda step=step: pointer.move(
-                        0.35 + 0.05 * step, 0.40 + 0.03 * step
-                    )
+                    lambda: pointer.move(0.35 + 0.05, 0.40 + 0.03)
                 )
-                if answered is not None:
-                    later_moves.append(answered)
-            pointer.release(0.35 + 0.05 * moves, 0.40 + 0.03 * moves, button=button)
-            pump(self.app, 0.15)
+                if answered is None:
+                    # The hand went down, moved, and the picture did not
+                    # follow.  This is the "it does not catch" report, and it
+                    # has to be COUNTED, not dropped for having no latency.
+                    missed_catches += 1
+                else:
+                    first_moves.append(answered)
+                for step in range(2, moves + 1):
+                    answered = paint_after(
+                        lambda step=step: pointer.move(
+                            0.35 + 0.05 * step, 0.40 + 0.03 * step
+                        )
+                    )
+                    if answered is not None:
+                        later_moves.append(answered)
+                pointer.release(0.35 + 0.05 * moves, 0.40 + 0.03 * moves, button=button)
+                pump(self.app, 0.15)
         guards.require_effect(
             before,
             owned(),
@@ -914,7 +954,7 @@ class ConsoleBench:
             "start_penalty": (
                 None
                 if not first_moves or not later_moves
-                else round(first["p50"] / later["p50"], 2)
+                else round(first["median_ms"] / later["median_ms"], 2)
             ),
             "answered": len(first_moves) + len(later_moves),
         }
@@ -1128,7 +1168,7 @@ def main() -> None:
         # the card geometry is identical, and the product's own size follows
         # whatever screen it lands on.  Anything looking at behaviour uses
         # the default, which is the product's.
-        bench.start(window_size=(1600, 1000))
+        bench.start()
         if layout:
             panels = bench.add_panels(layout, size=args.size)
             payload = {
