@@ -5409,7 +5409,12 @@ class ConsolePresenter:
             # as a field instead, which put a control-shaped thing that is
             # not a control under the controls it was about.
             refused = _refused_expression(binding)
-            standing = binding.vacancy or binding.unapplied_display or refused
+            standing = (
+                binding.vacancy
+                or binding.unapplied_display
+                or refused
+                or str(getattr(binding.bridge, "last_condition", "") or "")
+            )
             if error is None and standing:
                 # An authored table that cannot draw is a CONDITION of this
                 # panel, not a failure of it: the picture on screen is the

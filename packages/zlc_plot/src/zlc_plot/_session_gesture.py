@@ -273,9 +273,21 @@ class GestureSessionMixin:
             state.kind,
         )
         with self._renderer.raster_transaction():
+            # INSTALL, THEN COMPOSE ONCE.  The install used to come second,
+            # so the render above could not compose under the gesture it was
+            # starting and ``begin_selector_gesture`` composed again behind
+            # it: two frames' work at the press, for one picture.
             if hit is None:
+                self._renderer.begin_selector_gesture(state.kind, compose=False)
+                # ONE compose, and it is this one.  Adding the explicit
+                # capture the view gestures need made this WORSE -- 26 ms
+                # to 47 on the first move -- because a selector press
+                # already composes here, and the press and the move that
+                # follows it run back to back on one worker: work added at
+                # the press is work the first move waits for.
                 self._render_current(RenderEffect.OVERLAY)
-            self._renderer.begin_selector_gesture(state.kind)
+            else:
+                self._renderer.begin_selector_gesture(state.kind)
 
 
     def _start_pointer_selection(

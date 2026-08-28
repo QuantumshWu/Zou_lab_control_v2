@@ -78,10 +78,19 @@ def test_band_shrinks_as_shots_accumulate() -> None:
     assert band_height(160) < band_height(10) / 2.5
 
 
-def test_no_band_without_the_request() -> None:
+def test_no_band_when_it_is_switched_off() -> None:
+    """The band is on by default, so absence is now something ASKED for.
+
+    A mean drawn without its spread reads as an exact number, and the
+    operator had to know the switch existed to learn otherwise -- so the
+    switch defaults on and this pins the other half: switched off, nothing
+    is drawn and the statistic is not even computed.
+    """
+
     session = PlotSession(
         _snapshot(24, 1, 0.2),
         CurvePlot(AxisRef.point("x")),
+        parameters={"uncertainty": False},
     )
     try:
         session._renderer.draw()

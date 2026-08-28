@@ -2680,3 +2680,67 @@ def test_the_histogram_summary_gives_the_array_path_s_numbers_exactly() -> None:
                 "%s disagrees on a %d-sample %s region"
                 % (question, region.size, region.dtype)
             )
+
+
+def test_a_box_that_names_no_sample_is_a_condition_that_clears() -> None:
+    """An ROI too small to contain a sample centre is an ANSWER.
+
+    The bridge's own comment says so -- "a box drawn in the band beside the
+    picture, or past the edge of the sensor, names no data, and 'no data
+    there' is what it means" -- and the next line used to hand it to the
+    failure channel, which has no clear anywhere in the repository.  The
+    console reads that channel as an instrument failure: the panel's
+    parameter surface degraded to the schema-only projection with an empty
+    fit column, the red mark never cleared because its clear is gated on
+    the error being None, and widening the ROI could not undo any of it.
+
+    So it is a CONDITION now: a level with a clear, which a working commit
+    ends.
+    """
+
+    schema = _image_schema()
+    values = np.arange(12, dtype=np.float64).reshape(1, 1, 4, 3)
+    plane, source, _slot, _state, _initial = _source_setup(schema, values)
+    events = _Events()
+    plane.set_front_signals(
+        {"camera/frame", "@logic/image/roi_frame", "@logic/image/roi_mean"}
+    )
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="image")
+    bridge.start()
+
+    def area(x_low, x_high, revision):
+        return SelectionState(
+            "image",
+            "area",
+            (
+                SelectionRange("x", x_low, x_high, domain="data"),
+                SelectionRange("y", 20.0, 30.0, domain="data"),
+            ),
+            revision=revision,
+        )
+
+    try:
+        # A good box first, so the assertions below are about a change.
+        events.emit_selection(SelectionChange.COMMITTED, area(0.0, 1.0, 1))
+        assert bridge.last_error is None
+        assert bridge.last_condition == ""
+        assert plane.freeze().value("@logic/image/roi_mean") is not None
+
+        # Now one drawn between two sample centres: 0.2 to 0.8 contains no
+        # sample coordinate, so it names nothing.
+        events.emit_selection(SelectionChange.COMMITTED, area(0.2, 0.8, 2))
+        assert bridge.last_condition, "an unanswerable box must say so"
+        assert "empty" in bridge.last_condition.lower(), bridge.last_condition
+        # ... and it is NOT a failure of the instrument.
+        assert bridge.last_error is None, (
+            "an answer routed through the failure channel ends the panel: "
+            "that channel has no clear"
+        )
+
+        # The operator widens it, and the condition ends.
+        events.emit_selection(SelectionChange.COMMITTED, area(0.0, 1.0, 3))
+        assert bridge.last_condition == "", "the condition never cleared"
+        assert bridge.last_error is None
+        assert plane.freeze().value("@logic/image/roi_mean") is not None
+    finally:
+        _close(bridge, plane, source)

@@ -916,12 +916,32 @@ class SelectionBridge:
         self._block_revision = 0
         self._subscriptions: list[Callable[[], None]] = []
         self._last_error: Exception | None = None
+        #: What this bridge cannot currently answer, as opposed to what
+        #: went wrong in it.  A box that names no sample is the standing
+        #: example: the instrument is fine, the question has no answer
+        #: where it was asked, and widening the box answers it.  A level,
+        #: so it clears itself the moment it stops being true.
+        self._last_condition: str = ""
         self._output_enabled: dict[str, bool] = {}
 
     @property
     def last_error(self) -> Exception | None:
         with self._lock:
             return self._last_error
+
+    @property
+    def last_condition(self) -> str:
+        """What this bridge cannot answer right now, or "".
+
+        Separate from :attr:`last_error` because they are separate facts and
+        the console treats them separately: an error says the instrument
+        failed, a condition says the question has no answer where it was
+        asked.  Reading the two through one channel is how an ROI a shade
+        too small became a broken panel.
+        """
+
+        with self._lock:
+            return self._last_condition
 
     def configure_outputs(self, enabled: Mapping[str, bool]) -> None:
         """Replace output switches and immediately replay held answers."""
@@ -1375,9 +1395,16 @@ class SelectionBridge:
                 # Raised out of a worker it escaped uncaught and the panel
                 # silently kept the region it already had, so the operator
                 # saw a mark move and nothing follow it.
-                self._record_error(error)
+                #
+                # Said as a CONDITION, which is what that paragraph
+                # describes.  It used to be handed to the failure channel on
+                # the very next line, and that channel has no clear: a box
+                # one pixel too small ended the panel's Setting form for the
+                # rest of the session, widening it again included.
+                self._record_condition(str(error))
                 self._retire_selection_outputs()
                 return
+        self._selection_succeeded()
         # From here the plane's output NAMES are claimed, and only afterwards
         # can this commit learn whether its claim is still wanted -- the same
         # sequence the fit route runs, and the same reason it is serialized:
@@ -1801,6 +1828,26 @@ class SelectionBridge:
     def _record_error(self, error: Exception) -> None:
         with self._lock:
             self._last_error = error
+
+    def _record_condition(self, condition: str) -> None:
+        """Say what cannot be answered right now.  Empty means nothing."""
+
+        with self._lock:
+            self._last_condition = str(condition)
+
+    def _selection_succeeded(self) -> None:
+        """A commit that worked ends whatever the last one could not do.
+
+        THE CONDITION ONLY.  ``_last_error`` is shared with the fit route,
+        which reports its own refusals through it, so a selection has no
+        business clearing one -- that is why the condition is a separate
+        level in the first place.  What made an ROI a shade too small end
+        the panel for the session was routing it into a channel that has no
+        clear at all; it now has its own, and this is it.
+        """
+
+        with self._lock:
+            self._last_condition = ""
 
     def _processor_wake(self) -> None:
         with self._lock:

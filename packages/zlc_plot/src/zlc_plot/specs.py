@@ -1020,12 +1020,18 @@ def _parameter_schema_for_context(
         # own pooled spread (or the trailing error when averaging).  On a
         # non-MEAN reduction the statistic does not exist and the switch
         # is inert.
+        #
+        # ON by default.  A mean drawn without its spread is a number
+        # presented as if it were exact, and the operator had to know the
+        # switch existed to find out otherwise.  Where the statistic does
+        # not exist the switch is inert, so defaulting it on costs nothing
+        # and never draws a band that is not there.
         entries.append(
             ParameterSpec(
                 "uncertainty",
                 bool,
                 _UNCERTAINTY_EFFECTS,
-                default=False,
+                default=True,
                 label="Uncertainty band",
             )
         )
