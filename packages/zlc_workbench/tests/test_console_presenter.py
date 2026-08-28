@@ -1296,13 +1296,21 @@ def test_an_invalid_overlay_choice_is_rejected_without_mutating_the_panel(
 def test_a_contradictory_display_state_is_refused_at_the_write(
     presenter, session
 ) -> None:
-    """What no host could ever accept must never be STORED.
+    """What no host could ever accept must never be STORED, and said once.
 
     An inverted limit pair used to pass through update_panel_state, fail
     the host at its next start, and lock the operator out of every surface
     that could repair it.  It is refused at the write with the contract's
     own sentence -- while an INCOMPLETE state still passes, because fixed
     limits materialize on the next configure.
+
+    The sentence is a WARNING and a standing condition, not an error, and
+    not one per keystroke.  Every Setting field applies as it is typed, so
+    the road to a valid number runs through invalid ones: typing 0.5 into a
+    colour maximum whose minimum is 0 passes through "0", and that used to
+    report "color_min must be smaller than color_max" in red, twice, on the
+    way to a value the schema was always going to take.  A value that is
+    not in effect YET is the shape a vacant semantic role already has.
     """
 
     node, snapshot = _one_shot(session)
@@ -1317,16 +1325,33 @@ def test_a_contradictory_display_state_is_refused_at_the_write(
         {"display": {"relim_mode": "fixed", "color_min": 5.0, "color_max": 1.0}},
     ) is False
     assert binding.state is before, "a refused write must store nothing"
-    assert any(
-        "must be smaller" in text
+    said = [
+        (severity, text)
         for severity, text in presenter.view.status
-        if severity == "error"
-    )
+        if "must be smaller" in text
+    ]
+    assert said, presenter.view.status
+    assert all(severity == "warning" for severity, _text in said), said
+    assert binding.unapplied_display, "the reason must stand, not scroll away"
+    assert "must be smaller" in binding.unapplied_display
 
-    # Incomplete is not contradictory: the mode alone is a legal write.
+    # The next keystroke on the way to a valid number carries the SAME
+    # refusal, and the operator is not told twice.
+    before_repeat = len(presenter.view.status)
+    assert presenter.update_panel_state(
+        binding.panel_id,
+        {"display": {"relim_mode": "fixed", "color_min": 5.0, "color_max": 2.0}},
+    ) is False
+    assert len(presenter.view.status) == before_repeat, presenter.view.status[
+        before_repeat:
+    ]
+
+    # Incomplete is not contradictory: the mode alone is a legal write, and
+    # a write that lands clears the condition.
     assert presenter.update_panel_state(
         binding.panel_id, {"display": {"relim_mode": "fixed"}}
     ) is True
+    assert binding.unapplied_display == ""
 
 
 def test_a_wedged_display_state_cannot_lock_the_editor_that_repairs_it(

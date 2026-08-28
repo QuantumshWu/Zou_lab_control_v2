@@ -240,6 +240,14 @@ class PanelBinding:
     #: some axis takes the role -- and a status line the operator scrolled
     #: past is not an answer to "why is my setting not applied".
     vacancy: str = ""
+    #: The last display value the operator wrote that no host could accept,
+    #: in the schema's own words -- empty when everything they wrote is in
+    #: effect.  It is a sibling of ``vacancy`` and for the same reason: a
+    #: half-typed number is a value that is not in effect YET, not a failure
+    #: of the panel, and the operator needs to see why for as long as it
+    #: stays true rather than in one line that scrolls away while they are
+    #: still typing the rest of it.
+    unapplied_display: str = ""
     #: Image annotation has its own presentation revision while its data remains
     #: an explicit sibling in the selected publication.
     overlay_revision: int = -1
@@ -2396,10 +2404,28 @@ class ConsolePresenter:
                     facet_cell_kind=resolved_cell,
                 )
             except (TypeError, ValueError, KeyError) as error:
-                self._report(
-                    f"{panel_id}: {_error_text(error)}", severity="error"
-                )
+                # NOT an error, and not once per keystroke.  Every field in
+                # the Setting form applies as it is typed, so the way to a
+                # valid number runs through invalid ones: typing 0.5 into a
+                # colour maximum whose minimum is 0 passes through "0", and
+                # that reported "color_min must be smaller than color_max"
+                # in red, twice, on the way to a value the schema was always
+                # going to accept.
+                #
+                # The value is still not STORED -- the comment above says
+                # why, and it is right: an inverted pair that reaches disk
+                # fails the host at its next start and locks the operator
+                # out of the surface that could repair it.  What changes is
+                # what the operator is told.  This is the shape a vacant
+                # semantic role already has: the picture stays the last one
+                # that could be drawn, and the panel says why for as long as
+                # it is true.
+                reason = _error_text(error)
+                if binding.unapplied_display != reason:
+                    binding.unapplied_display = reason
+                    self._report(f"{panel_id}: {reason}", severity="warning")
                 return False
+            binding.unapplied_display = ""
         plot_changed = any(
             getattr(candidate, name) != getattr(current, name)
             for name in (
@@ -5323,16 +5349,15 @@ class ConsolePresenter:
                 or getattr(binding.bridge, "last_error", None)
                 or getattr(binding.port, "last_error", None)
             )
-            if error is None and binding.vacancy:
+            standing = binding.vacancy or binding.unapplied_display
+            if error is None and standing:
                 # An authored table that cannot draw is a CONDITION of this
                 # panel, not a failure of it: the picture on screen is the
                 # last one that could be drawn, and the settings the
                 # operator just wrote are not in it.  The card says so for
                 # as long as it stays true -- the status line said it once
                 # and scrolled away.
-                condition = (
-                    f"settings not applied -- {binding.vacancy}"
-                )
+                condition = f"settings not applied -- {standing}"
                 if binding.reported_condition != condition:
                     binding.reported_condition = condition
                     if panel_id in self.view.panel_ids():
