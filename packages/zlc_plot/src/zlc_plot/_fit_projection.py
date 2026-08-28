@@ -37,7 +37,7 @@ from .data_view import (
     aligned_histogram_edges,
     _finite_probe,
     finite_probe,
-    _sem_from_moments,
+    _sem_reference,
 )
 from .fit import (
     FitModelSpec,
@@ -125,43 +125,58 @@ def _trailing_trace(
     sums = np.zeros(total, dtype=float)
     squares = np.zeros(total, dtype=float)
     ungrouped = key == ()
+    contributions: list[tuple[int, float, float, float]] = []
     for index, sample in enumerate(history):
         try:
             source_index = sample.group_keys.index(key)
         except ValueError:
             continue
-        if bool(sample.valid[source_index]):
-            value = float(sample.values[source_index])
-            if ungrouped:
-                count = float(sample.counts[source_index])
-                if count <= 0.0:
-                    continue
-                sem = (
-                    np.nan
-                    if sample.sem is None
-                    else float(sample.sem[source_index])
-                )
-                mean_square = value * value
-                if count > 1.0 and np.isfinite(sem):
-                    mean_square += sem * sem * (count - 1.0)
-                n[index] = count
-                sums[index] = count * value
-                squares[index] = count * mean_square
-            else:
-                n[index], sums[index], squares[index] = (
-                    1.0,
-                    value,
-                    value * value,
-                )
+        if not bool(sample.valid[source_index]):
+            continue
+        value = float(sample.values[source_index])
+        if ungrouped:
+            count = float(sample.counts[source_index])
+            if count <= 0.0:
+                continue
+            sem = (
+                np.nan
+                if sample.sem is None
+                else float(sample.sem[source_index])
+            )
+        else:
+            # One per-key value per shot: for a per-site trace that IS the
+            # shot's one sample, so it has no spread of its own.
+            count, sem = 1.0, np.nan
+        contributions.append((index, count, value, sem))
+
+    # Square about the data, not about zero -- the same reason every bucket
+    # reduction does.  A shot counter's values are small; a fitted optical
+    # frequency's are not, and E[x^2] - mean^2 about zero would report a
+    # spread made entirely of rounding.
+    reference = _sem_reference(
+        np.asarray([value for _, _, value, _ in contributions], dtype=float)
+    )
+    for index, count, value, sem in contributions:
+        centred = value - reference
+        mean_square = centred * centred
+        if count > 1.0 and np.isfinite(sem):
+            # sem = s / sqrt(count), and E[x^2] about the shot's own mean is
+            # mean^2 + s^2 (count - 1) / count.  Shifting the origin does not
+            # change a spread, so the same term rides the centred mean.
+            mean_square += sem * sem * (count - 1.0)
+        n[index] = count
+        sums[index] = count * centred
+        squares[index] = count * mean_square
     running_n = _window_totals(np.cumsum(n), span)
     running_sum = _window_totals(np.cumsum(sums), span)
     running_squares = _window_totals(np.cumsum(squares), span)
     with np.errstate(invalid="ignore", divide="ignore"):
-        mean = running_sum / running_n
+        centred_mean = running_sum / running_n
         spread = np.clip(
-            running_squares / running_n - np.square(mean), 0.0, None
+            running_squares / running_n - np.square(centred_mean), 0.0, None
         )
         sem = np.sqrt(spread / (running_n - 1.0))
+        mean = centred_mean + reference
     sem[running_n < 2.0] = np.nan
     valid = (running_n > 0.0) & np.isfinite(mean)
     mean = np.where(valid, mean, np.nan)

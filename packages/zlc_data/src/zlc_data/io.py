@@ -34,6 +34,7 @@ _FORMAT = "zlc.dataset"
 _MANIFEST = "manifest"
 _VALUES = "values"
 _VALIDITY = "validity"
+_SIGMA = "sigma"
 
 
 class NPZFormatError(ValueError):
@@ -110,6 +111,7 @@ def snapshot_manifest(
     *,
     values_key: str = _VALUES,
     validity_key: str = _VALIDITY,
+    sigma_key: str = _SIGMA,
 ) -> dict[str, Any]:
     """One snapshot's identity as plain data, putting its arrays in ``arrays``.
 
@@ -125,10 +127,10 @@ def snapshot_manifest(
 
     if not isinstance(snapshot, OwnedSnapshot):
         raise TypeError("snapshot must be OwnedSnapshot")
-    if values_key == validity_key:
-        raise ValueError("values and validity need distinct array keys")
+    if len({values_key, validity_key, sigma_key}) != 3:
+        raise ValueError("values, validity and sigma need distinct array keys")
     arrays[values_key] = snapshot.block.values
-    return {
+    manifest = {
         "format": _FORMAT,
         "schema": dataset_schema_to_tree(snapshot.block.schema),
         "ref": dataset_revision_ref_to_tree(snapshot.ref),
@@ -137,6 +139,13 @@ def snapshot_manifest(
             snapshot.block.validity, arrays, validity_key
         ),
     }
+    # Present only when the block states one.  A missing key reads as "no
+    # uncertainty stated", which is what it is; writing zeros instead
+    # would turn silence into a claim of certainty.
+    if snapshot.block.sigma is not None:
+        arrays[sigma_key] = snapshot.block.sigma
+        manifest["sigma_key"] = sigma_key
+    return manifest
 
 
 def manifest_array_keys(manifest: Mapping[str, Any]) -> tuple[str, ...]:
@@ -146,6 +155,8 @@ def manifest_array_keys(manifest: Mapping[str, Any]) -> tuple[str, ...]:
     validity = manifest.get("validity")
     if isinstance(validity, Mapping) and isinstance(validity.get("mask_key"), str):
         keys.append(validity["mask_key"])
+    if isinstance(manifest.get("sigma_key"), str):
+        keys.append(manifest["sigma_key"])
     return tuple(keys)
 
 
@@ -161,11 +172,10 @@ def snapshot_from_manifest(
         raise TypeError("embedded must be bool")
     if not isinstance(manifest, Mapping):
         raise NPZFormatError("manifest root must be an object")
-    _exact_keys(
-        manifest,
-        {"format", "schema", "ref", "values_key", "validity"},
-        "manifest",
-    )
+    expected = {"format", "schema", "ref", "values_key", "validity"}
+    if "sigma_key" in manifest:
+        expected.add("sigma_key")
+    _exact_keys(manifest, expected, "manifest")
     if manifest["format"] != _FORMAT:
         raise NPZFormatError(f"unsupported data format {manifest['format']!r}")
     referenced: set[str] = set()
@@ -183,7 +193,15 @@ def snapshot_from_manifest(
     ref = dataset_revision_ref_from_tree(ref_tree)
     values = _array(arrays, manifest["values_key"], referenced, "manifest.values_key")
     validity = _validity_from_manifest(manifest["validity"], arrays, referenced)
-    block = DataBlock(ref.block_id, ref.revision, values, validity, schema)
+    sigma_key = manifest.get("sigma_key")
+    if sigma_key is not None and not isinstance(sigma_key, str):
+        raise NPZFormatError("manifest.sigma_key must be a string")
+    sigma = (
+        None
+        if sigma_key is None
+        else _array(arrays, sigma_key, referenced, "manifest.sigma_key")
+    )
+    block = DataBlock(ref.block_id, ref.revision, values, validity, schema, sigma)
     return OwnedSnapshot(ref, block)
 
 

@@ -550,10 +550,26 @@ def restrict_snapshot(
         point_indices,
         data_indices,
     )
+    # Every plane of a sample is cut by the same indices, because a
+    # restriction is about WHICH SAMPLES survive and says nothing about
+    # what is known of each.  Cutting the values alone is how a fitted
+    # parameter arrived at a scoped panel with its error removed.
+    sigma = (
+        None
+        if snapshot.block.sigma is None
+        else restricted_values(
+            snapshot.block.sigma,
+            schema,
+            repeat_indices,
+            point_indices,
+            data_indices,
+        )
+    )
     return materialize_derived_dataset(
         snapshot.ref,
         values,
         schema=derived,
         validity=compact_dataset_validity(mask, derived),
+        sigma=sigma,
         reference_for=reference_for,
     )

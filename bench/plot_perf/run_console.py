@@ -783,52 +783,140 @@ class ConsoleBench:
             "slips": slips,
         }
 
-    def gesture(self, panel, *, kind: str, moves: int = 8, trials: int = 6) -> dict:
-        """Press-move-release with REAL Qt events, and prove it landed."""
+    #: How long a hand takes between putting the button down and starting
+    #: to move it.  Not a constant: the point of the measurement is to land
+    #: the press at every phase of the producer's cycle, because that phase
+    #: is what decides whether the press waits out a frame that is already
+    #: running.  These are milliseconds, walked in order so two runs see
+    #: the same hand.
+    _REACTION_MS = (17, 143, 61, 210, 34, 96, 178, 8, 122, 249, 45, 79)
+
+    def gesture(
+        self,
+        panel,
+        *,
+        kind: str,
+        motion: str = "auto",
+        moves: int = 8,
+        trials: int = 12,
+    ) -> dict:
+        """Press-move-release with REAL Qt events, and prove it landed.
+
+        Three quantities, not one.  A drag whose button is already down is
+        smooth; what an operator complains about is the beginning, so the
+        press and the first move are reported SEPARATELY from the steady
+        state they are supposed to resemble.  Pooling them, as this did,
+        buries the six first-moves of a run under forty-two later ones
+        where no median and barely a p90 can find them.
+        """
 
         from PyQt5 import QtCore, QtGui
 
         widget = self.surface(panel)
         pointer = Pointer(widget, self.app, QtCore, QtGui)
         presented = Presented(widget)
-        orbit = kind == "height_bars"
-        button = QtCore.Qt.MiddleButton if orbit else QtCore.Qt.LeftButton
+        if motion == "auto":
+            motion = "orbit" if kind == "height_bars" else "pan"
+        if motion not in {"orbit", "pan", "area"}:
+            raise ValueError("gesture motion must be orbit, pan or area")
+        # The operator's gesture is the middle button: on height bars it
+        # turns the camera, on everything else it pans the view.  The left
+        # button draws an area, which is a different complaint.
+        button = (
+            QtCore.Qt.LeftButton
+            if motion == "area"
+            else QtCore.Qt.MiddleButton
+        )
 
         def owned():
-            if orbit:
+            if motion == "orbit":
                 camera = self.renderer(panel).height_bars_camera
                 return None if camera is None else (
                     round(camera.azimuth_deg, 3),
                     round(camera.elevation_deg, 3),
                 )
+            if motion == "pan":
+                limits = panel.host.describe_display().result().value.limits
+                return (
+                    round(float(limits.x.low), 6),
+                    round(float(limits.x.high), 6),
+                    round(float(limits.y.low), 6),
+                    round(float(limits.y.high), 6),
+                )
             return guards.committed_region(panel)
 
+        def paint_after(send) -> float | None:
+            """Send one pointer event; return the seconds until it shows."""
+
+            baseline = presented.count
+            sent = time.perf_counter()
+            send()
+            got = pump_until(
+                self.app,
+                lambda: (presented.poll() or presented.count > baseline),
+                1.0,
+            )
+            if got and presented.stamps:
+                return presented.stamps[-1] - sent
+            return None
+
         before = owned()
-        latencies: list[float] = []
-        for _ in range(trials):
+        first_moves: list[float] = []
+        later_moves: list[float] = []
+        missed_catches = 0
+        for trial in range(trials):
+            # NOT pumped to quiescence first.  A press that only ever
+            # arrives on an idle machine is a press that never waits for
+            # anything, which is exactly the fiction this was measuring.
+            reaction = self._REACTION_MS[trial % len(self._REACTION_MS)] / 1e3
             pointer.press(0.35, 0.40, button=button)
-            pump(self.app, 0.05)
-            for step in range(1, moves + 1):
-                sent = time.perf_counter()
-                baseline = presented.count
-                pointer.move(0.35 + 0.05 * step, 0.40 + 0.03 * step)
-                got = pump_until(
-                    self.app,
-                    lambda: (presented.poll() or presented.count > baseline),
-                    1.0,
+            pump(self.app, reaction)
+            answered = paint_after(
+                lambda: pointer.move(0.35 + 0.05, 0.40 + 0.03)
+            )
+            if answered is None:
+                # The hand went down, moved, and the picture did not
+                # follow.  This is the "it does not catch" report, and it
+                # has to be COUNTED, not dropped for having no latency.
+                missed_catches += 1
+            else:
+                first_moves.append(answered)
+            for step in range(2, moves + 1):
+                answered = paint_after(
+                    lambda step=step: pointer.move(
+                        0.35 + 0.05 * step, 0.40 + 0.03 * step
+                    )
                 )
-                if got and presented.stamps:
-                    latencies.append(presented.stamps[-1] - sent)
+                if answered is not None:
+                    later_moves.append(answered)
             pointer.release(0.35 + 0.05 * moves, 0.40 + 0.03 * moves, button=button)
             pump(self.app, 0.15)
         guards.require_effect(
-            before, owned(), "the camera" if orbit else "the committed region"
+            before,
+            owned(),
+            {
+                "orbit": "the camera",
+                "pan": "the view limits",
+                "area": "the committed region",
+            }[motion],
         )
+        first = stats(first_moves)
+        later = stats(later_moves)
         return {
-            "gesture": "orbit" if orbit else "area",
-            "moves": moves * trials,
-            "answered": len(latencies),
-            "hand_to_picture": stats(latencies),
+            "gesture": motion,
+            "trials": trials,
+            "panels_in_console": len(self.presenter.panels),
+            "missed_catches": missed_catches,
+            # The number the operator feels at the start of a drag.
+            "first_move_to_picture": first,
+            # What it is supposed to cost once the hand is already down.
+            "later_move_to_picture": later,
+            "start_penalty": (
+                None
+                if not first_moves or not later_moves
+                else round(first["p50"] / later["p50"], 2)
+            ),
+            "answered": len(first_moves) + len(later_moves),
         }
 
     # ------------------------------------------------------------- teardown
@@ -1018,6 +1106,11 @@ def main() -> None:
     parser.add_argument("--size", default=SIZE_PRESET)
     parser.add_argument("--seconds", type=float, default=8.0)
     parser.add_argument("--gesture", action="store_true")
+    parser.add_argument("--motion", default="auto",
+                        choices=("auto", "pan", "area", "orbit"),
+                        help="which hand to drive: the middle-button view "
+                             "pan (default for every 2-D kind), the orbit "
+                             "on height bars, or the left-button area")
     parser.add_argument("--edits", action="store_true",
                         help="time the small Setting-form edits (title, bins, "
                              "clim) that an operator makes mid-run")
@@ -1047,6 +1140,14 @@ def main() -> None:
             for panel in panels:
                 bench.instrument(panel)
             payload["together"] = bench.live_all(panels, args.seconds)
+            if args.gesture:
+                # WITH THE SIBLINGS LIVE.  The arbiter exists because a
+                # hand competes with the other panels for one machine, so
+                # a pointer measurement taken alone cannot see the thing
+                # the arbiter was built for.
+                payload["gesture"] = bench.gesture(
+                    panels[0], kind=layout[0], motion=args.motion
+                )
         elif args.chain:
             source = bench.add_panel(args.kind, size=args.size)
             guards.require_panels(bench.presenter, 1)
@@ -1085,7 +1186,9 @@ def main() -> None:
             if args.edits:
                 payload["edits"] = bench.edit_run(panel, kind=args.kind)
             if args.gesture:
-                payload["gesture"] = bench.gesture(panel, kind=args.kind)
+                payload["gesture"] = bench.gesture(
+                    panel, kind=args.kind, motion=args.motion
+                )
     if "edits" in payload:
         block = payload["edits"]
         print("")

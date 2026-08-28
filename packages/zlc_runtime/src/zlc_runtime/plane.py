@@ -32,7 +32,6 @@ import numpy as np
 from zlc_data import (
     PRIMARY_INDEX,
     BlockId,
-    DataBlock,
     DatasetRevision,
     DatasetSchema,
     GridTopology,
@@ -620,15 +619,12 @@ def _restamp_snapshot(
 ) -> OwnedSnapshot:
     """Give committed immutable bytes their Runtime-owned content identity."""
 
-    block = DataBlock(
-        BlockId(block_id),
-        DatasetRevision(revision),
-        snapshot.block.values,
-        snapshot.block.validity,
-        snapshot.block.schema,
-        # A restamp changes the IDENTITY, never the content -- so every
-        # plane of it travels, the sample's own uncertainty included.
-        snapshot.block.sigma,
+    # A restamp changes the IDENTITY, never the content, so it names only
+    # the identity: every plane of the content travels because none of them
+    # is mentioned here.
+    block = snapshot.block.replacing(
+        block_id=BlockId(block_id),
+        revision=DatasetRevision(revision),
     )
     return OwnedSnapshot(block.ref(generation), block)
 
@@ -711,29 +707,71 @@ def _materialize_indexed_dataset(
     start = max(first_index, latest_index - capacity + 1)
     indices = tuple(range(start, latest_index + 1))
     schema = _indexed_schema(event_schema, indices)
-    values = np.zeros(schema.physical_shape, dtype=event_schema.cell_schema.dtype)
-    validity = np.zeros(schema.physical_shape, dtype=np.bool_)
     point_count = event_schema.point_table.row_count
     trailing = (slice(None),) * len(event_schema.cell_schema.data_axes)
-    for primary_index, snapshot in events:
-        if not start <= primary_index <= latest_index:
-            continue
-        point_start = (primary_index - start) * point_count
-        target = (
-            slice(None),
-            slice(point_start, point_start + point_count),
-            *trailing,
-        )
-        values[target] = snapshot.block.values
-        validity[target] = snapshot.expanded_validity()
+
+    def placements():
+        for primary_index, snapshot in events:
+            if not start <= primary_index <= latest_index:
+                continue
+            point_start = (primary_index - start) * point_count
+            yield (
+                (
+                    slice(None),
+                    slice(point_start, point_start + point_count),
+                    *trailing,
+                ),
+                snapshot,
+            )
+
+    values, validity, sigma = _assembled_planes(
+        schema.physical_shape,
+        event_schema.cell_schema.dtype,
+        placements(),
+    )
     return owned_snapshot_from_arrays(
         schema,
         values,
         revision,
         validity=validity,
+        sigma=sigma,
         block_id=BlockId(f"{signal_name}.indexed"),
         stream_generation=generation,
     )
+
+
+def _assembled_planes(
+    shape: tuple[int, ...],
+    dtype: object,
+    placements: object,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    """Allocate and fill EVERY plane of a rebuilt dataset, as a set.
+
+    Both materializers wrote out "allocate values, allocate validity, fill
+    values, fill validity" in their own words, and both were therefore
+    blind to the sigma plane on the day it arrived -- one on the leased
+    rolling path, one on the exact path, the same omission typed twice.
+    Assembling the planes in one place is what makes the next one arrive
+    in both.
+
+    Sigma is allocated only if some contributing snapshot states one, and
+    the cells no snapshot covered are NaN rather than zero: an error
+    nobody stated is unknown, and zero would read as certainty.
+    """
+
+    values = np.zeros(shape, dtype=dtype)
+    validity = np.zeros(shape, dtype=np.bool_)
+    sigma: np.ndarray | None = None
+    for target, snapshot in placements:
+        values[target] = snapshot.block.values
+        validity[target] = snapshot.expanded_validity()
+        stated = snapshot.block.sigma
+        if stated is None:
+            continue
+        if sigma is None:
+            sigma = np.full(shape, np.nan, dtype=np.float64)
+        sigma[target] = stated
+    return values, validity, sigma
 
 
 _IndexedHistory: TypeAlias = tuple[
@@ -1763,25 +1801,32 @@ class SignalDataPlane:
         generation: StreamGenerationId,
         chunks: tuple[tuple[OwnedSnapshot, tuple[int, int]], ...],
     ) -> OwnedSnapshot:
-        values = np.zeros(schema.physical_shape, dtype=schema.cell_schema.dtype)
-        validity = np.zeros(schema.physical_shape, dtype=np.bool_)
-        for chunk, origin in chunks:
-            repeat_origin, point_origin = origin
-            chunk_schema = chunk.block.schema
-            repeat_stop = repeat_origin + chunk_schema.repeat_axis.size
-            point_stop = point_origin + chunk_schema.point_table.row_count
-            target = (
-                slice(repeat_origin, repeat_stop),
-                slice(point_origin, point_stop),
-                *(slice(None) for _axis in schema.cell_schema.data_axes),
-            )
-            values[target] = chunk.block.values
-            validity[target] = chunk.expanded_validity()
+        def placements():
+            for chunk, origin in chunks:
+                repeat_origin, point_origin = origin
+                chunk_schema = chunk.block.schema
+                repeat_stop = repeat_origin + chunk_schema.repeat_axis.size
+                point_stop = point_origin + chunk_schema.point_table.row_count
+                yield (
+                    (
+                        slice(repeat_origin, repeat_stop),
+                        slice(point_origin, point_stop),
+                        *(slice(None) for _axis in schema.cell_schema.data_axes),
+                    ),
+                    chunk,
+                )
+
+        values, validity, sigma = _assembled_planes(
+            schema.physical_shape,
+            schema.cell_schema.dtype,
+            placements(),
+        )
         return owned_snapshot_from_arrays(
             schema,
             values,
             sequence,
             validity=validity,
+            sigma=sigma,
             block_id=BlockId(f"{signal_name}.run"),
             stream_generation=generation,
         )

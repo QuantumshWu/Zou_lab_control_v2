@@ -46,6 +46,22 @@ def snapshot_values(snapshot: OwnedSnapshot) -> NDArray[Any]:
     return snapshot.block.values
 
 
+def snapshot_sigma(snapshot: OwnedSnapshot) -> NDArray[np.float64] | None:
+    """The uncertainty of the samples themselves, or None if none is stated.
+
+    Not the uncertainty of a reduction over them: that one is derived where
+    the reduction happens, from the samples and their validity, and is
+    never transported.  This is the other kind -- a property of one sample,
+    which a fitted parameter has and a camera pixel does not -- and it
+    cannot be recovered downstream, so the producer sends it along.
+    """
+
+    if not isinstance(snapshot, OwnedSnapshot):
+        raise TypeError("snapshot must be zlc_data.OwnedSnapshot")
+    sigma = snapshot.block.sigma
+    return None if sigma is None else np.asarray(sigma, dtype=np.float64)
+
+
 def snapshot_validity(snapshot: OwnedSnapshot) -> NDArray[np.bool_]:
     if not isinstance(snapshot, OwnedSnapshot):
         raise TypeError("snapshot must be zlc_data.OwnedSnapshot")

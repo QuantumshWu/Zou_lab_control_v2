@@ -15,7 +15,6 @@ from zlc_data import (
     READOUT_EVENT,
     SPATIAL_X,
     SPATIAL_Y,
-    DataBlock,
     DatasetComponentValidity,
     DatasetSchema,
     OwnedSnapshot,
@@ -187,12 +186,9 @@ def _with_component_validity(
             cell.value_unit,
         ),
     )
-    block = DataBlock(
-        source.block_id,
-        source.revision,
-        source.values,
-        DatasetComponentValidity(axis_ids, np.asarray(mask, dtype=bool)),
-        schema,
+    block = source.replacing(
+        validity=DatasetComponentValidity(axis_ids, np.asarray(mask, dtype=bool)),
+        schema=schema,
     )
     return OwnedSnapshot(block.ref(snapshot.ref.stream_generation), block)
 

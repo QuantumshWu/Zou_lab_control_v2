@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -130,6 +131,24 @@ class DataBlock:
             revision=self.revision,
         )
 
+    def replacing(self, **changes: object) -> "DataBlock":
+        """This block with some fields changed and every other one KEPT.
+
+        A rebuild that re-lists the fields it wants is a rebuild that
+        drops the field added after it was written.  That is not a
+        hypothetical: the day the sigma plane arrived, three separate
+        rebuilds -- Runtime's restamp, a calibration output's validity
+        swap, and the npz round trip -- each carried five fields forward
+        and left the sixth behind, so a fitted parameter's own error
+        vanished somewhere between the fit and the picture with nothing
+        raising anywhere.
+
+        Changing a block goes through here so the next plane travels by
+        construction instead of by three people remembering.
+        """
+
+        return dataclasses.replace(self, **changes)
+
 
 @dataclass(frozen=True)
 class OwnedSnapshot:
@@ -159,7 +178,21 @@ class OwnedSnapshot:
             and self.block.schema == other.block.schema
             and np.array_equal(self.block.values, other.block.values, equal_nan=True)
             and np.array_equal(self.expanded_validity(), other.expanded_validity())
+            and _same_sigma(self.block.sigma, other.block.sigma)
         )
+
+
+def _same_sigma(left: np.ndarray | None, right: np.ndarray | None) -> bool:
+    """Two sigma planes agree, absence included.
+
+    Absent is not the same as zero: no uncertainty stated is not a claim
+    of certainty, so a block that carries one and a block that does not
+    are different blocks even where every value matches.
+    """
+
+    if left is None or right is None:
+        return left is None and right is None
+    return bool(np.array_equal(left, right, equal_nan=True))
 
 
 def owned_snapshot_from_arrays(

@@ -38,6 +38,7 @@ from .data_contract import (
     schema_shape,
     schema_value_unit,
     snapshot_generation,
+    snapshot_sigma,
     snapshot_revision,
     snapshot_schema,
     snapshot_validity,
@@ -225,12 +226,22 @@ class SampleProjection:
     shape: tuple[int, ...]
     value: QuantityArray
     valid_mask: NDArray[np.bool_] | ArrayLike
+    #: The uncertainty of each SAMPLE, canonical-unit, or None when the
+    #: producer states none.  It rides beside the values through every
+    #: reduction so a mean of samples that know their own error can say so
+    #: even where there is only one of them to scatter.
+    sigma: NDArray[np.float64] | ArrayLike | None = None
 
     def __post_init__(self) -> None:
         shape = tuple(self.shape)
         valid = _readonly(self.valid_mask, dtype=np.bool_)
         if self.value.canonical.shape != shape or valid.shape != shape:
             raise ValueError("sample value and validity must match projection shape")
+        if self.sigma is not None:
+            sigma = _readonly(self.sigma, dtype=np.float64)
+            if sigma.shape != shape:
+                raise ValueError("sample sigma must match projection shape")
+            object.__setattr__(self, "sigma", sigma)
         object.__setattr__(self, "shape", shape)
         object.__setattr__(self, "valid_mask", valid)
 
@@ -642,6 +653,7 @@ class DataView:
                 label="value",
             ),
             valid_mask=valid,
+            sigma=snapshot_sigma(snapshot),
         )
         # Fail early for misspelled or undeclared override keys.
         for ref in overrides:
@@ -935,6 +947,7 @@ class DataView:
             self._samples.valid_mask,
             aggregation,
             uncertainty,
+            self._samples.sigma,
         )
 
     def _dense_curve_data(
@@ -945,17 +958,20 @@ class DataView:
         usable: NDArray[np.bool_],
         aggregation: Reduction,
         uncertainty: bool = False,
+        sigma: NDArray[Any] | None = None,
     ) -> CurveData:
         """One dense curve out of one (possibly row-sliced) value tensor."""
 
         x_canonical = np.asarray(x_resolved.domain_canonical)
         nx = int(x_canonical.size)
-        moved = np.reshape(
-            np.moveaxis(values, x_resolved.dimension, -1), (-1, nx), order="C"
-        )
-        moved_usable = np.reshape(
-            np.moveaxis(usable, x_resolved.dimension, -1), (-1, nx), order="C"
-        )
+
+        def laid_out(array: NDArray[Any]) -> NDArray[Any]:
+            return np.reshape(
+                np.moveaxis(array, x_resolved.dimension, -1), (-1, nx), order="C"
+            )
+
+        moved = laid_out(values)
+        moved_usable = laid_out(usable)
         y, counts = _masked_leading_reduce(moved, moved_usable, aggregation)
         y = np.asarray(y, dtype=np.float64)
         sem = None
@@ -963,15 +979,22 @@ class DataView:
             # The SEM is the SAME reduction run over the squares: no second
             # kernel, no binomial special case -- for a boolean column the
             # sample spread sqrt(p(1-p)) IS the binomial spread.
-            reference = _sem_reference(y)
-            squares = np.square(
-                moved.astype(np.float64, copy=False) - reference
-            )
-            mean_sq, _sq_counts = _masked_leading_reduce(
-                squares, moved_usable, Reduction.MEAN
-            )
-            sem = _sem_from_moments(
-                y - reference, np.asarray(mean_sq, np.float64), counts
+            def mean_of_squares(plane: Any, offset: float) -> Any:
+                reduced, _ = _masked_leading_reduce(
+                    np.square(
+                        np.asarray(plane, dtype=np.float64) - offset
+                    ),
+                    moved_usable,
+                    Reduction.MEAN,
+                )
+                return reduced
+
+            sem = _sem_of_mean(
+                y,
+                counts,
+                moved,
+                None if sigma is None else laid_out(sigma),
+                mean_of_squares,
             )
         valid = (counts > 0) & np.isfinite(y)
         y_display = self._samples.value.canonical_unit.convert_value_to(
@@ -1457,30 +1480,6 @@ class DataView:
                             else -np.inf
                         ),
                     )
-        squares_pg = None
-        sem_reference = 0.0
-        if uncertainty:
-            # Squared about the data, not about zero: see _sem_reference.
-            sem_reference = _sem_reference(as_double)
-            if all_valid:
-                letters = "abcdefghijklmnopqrstuvwxyz"[: values.ndim]
-                output = "".join(
-                    letters[axis]
-                    for axis in range(values.ndim)
-                    if axis == 1 or axis in kept_dims
-                )
-                centred = as_double - sem_reference
-                squares_pg = np.einsum(
-                    f"{letters},{letters}->{output}", centred, centred
-                )
-            else:
-                squares_pg = np.sum(
-                    np.square(as_double - sem_reference),
-                    axis=reduce_axes,
-                    where=usable,
-                    dtype=np.float64,
-                )
-
         # The reductions keep the surviving dims in ORIGINAL tensor order
         # (the repeat dim precedes the rows dim when it is grouped); the
         # fold and the series walk both speak (rows, *groups-as-given).
@@ -1504,8 +1503,6 @@ class DataView:
 
         counts_pg = code_ordered(counts_pg)
         moments_pg = code_ordered(moments_pg)
-        if squares_pg is not None:
-            squares_pg = code_ordered(squares_pg)
 
         # Fold the residue by the combined row key with the SAME grouped
         # kernel the generic path uses, at (rows x series) scale instead
@@ -1550,21 +1547,48 @@ class DataView:
             )
             y_flat = np.where(counts > 0, y_flat, np.nan)
         sem_flat = None
-        if squares_pg is not None:
-            sq_fold, _ = _aggregate_by_codes(
-                squares_pg.reshape(-1),
-                np.ones(fold_codes.shape, dtype=np.bool_),
-                fold_codes,
-                buckets,
-                Reduction.SUM,
+        if uncertainty:
+            # Per (row, group) first, then folded by the same combined row
+            # key as the means: one kernel, two stages, and einsum fuses the
+            # square into the sum so no copy of the tensor is materialised.
+            letters = "abcdefghijklmnopqrstuvwxyz"[: values.ndim]
+            output = "".join(
+                letters[axis]
+                for axis in range(values.ndim)
+                if axis == 1 or axis in kept_dims
             )
-            sq_fold = np.nan_to_num(sq_fold, nan=0.0)
-            with np.errstate(invalid="ignore", divide="ignore"):
-                mean_sq = np.where(counts > 0, sq_fold / counts, np.nan)
-            sem_flat = _sem_from_moments(
-                np.asarray(y_flat, np.float64) - sem_reference,
-                mean_sq,
+
+            def mean_of_squares(plane: Any, offset: float) -> Any:
+                plane = np.asarray(plane, dtype=np.float64)
+                if all_valid:
+                    centred = plane - offset
+                    per_group = np.einsum(
+                        f"{letters},{letters}->{output}", centred, centred
+                    )
+                else:
+                    per_group = np.sum(
+                        np.square(plane - offset),
+                        axis=reduce_axes,
+                        where=usable,
+                        dtype=np.float64,
+                    )
+                folded, _ = _aggregate_by_codes(
+                    code_ordered(per_group).reshape(-1),
+                    np.ones(fold_codes.shape, dtype=np.bool_),
+                    fold_codes,
+                    buckets,
+                    Reduction.SUM,
+                )
+                folded = np.nan_to_num(folded, nan=0.0)
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    return np.where(counts > 0, folded / counts, np.nan)
+
+            sem_flat = _sem_of_mean(
+                np.asarray(y_flat, np.float64),
                 counts,
+                as_double,
+                self._samples.sigma,
+                mean_of_squares,
             )
 
         x_canonical = np.asarray(x_domain.canonical)
@@ -1674,20 +1698,24 @@ class DataView:
             sem = None
             if uncertainty:
                 # Same kernel over the squares (see _dense_curve_data).
-                reference = _sem_reference(np.asarray(y, np.float64))
-                mean_sq, _sq_counts = _aggregate_by_codes(
-                    np.square(
-                        group_values.astype(np.float64, copy=False) - reference
-                    ),
-                    usable,
-                    x_domain.codes,
-                    x_domain.size,
-                    Reduction.MEAN,
-                )
-                sem = _sem_from_moments(
-                    np.asarray(y, np.float64) - reference,
-                    np.asarray(mean_sq, np.float64),
+                def mean_of_squares(plane: Any, offset: float) -> Any:
+                    reduced, _ = _aggregate_by_codes(
+                        np.square(
+                            np.asarray(plane, dtype=np.float64) - offset
+                        ),
+                        usable,
+                        x_domain.codes,
+                        x_domain.size,
+                        Reduction.MEAN,
+                    )
+                    return reduced
+
+                sem = _sem_of_mean(
+                    np.asarray(y, np.float64),
                     counts,
+                    group_values,
+                    self._flat_sigma_at(group_positions),
+                    mean_of_squares,
                 )
             y_display = self._samples.value.canonical_unit.convert_value_to(
                 y, self._samples.value.display_unit
@@ -2217,19 +2245,47 @@ class DataView:
         cached = self._pooled_cache
         if cached is not None:
             return cached
-        valid = self._samples.valid_mask
-        values = self._samples.value.canonical
-        if (
-            valid.size
-            and all(stride == 0 for stride in valid.strides)
-            and bool(valid.flat[0])
-        ) or bool(np.all(valid)):
-            pooled = values.reshape(-1).view()
-        else:
-            pooled = values[valid].reshape(-1)
+        pooled = self._pool(self._samples.value.canonical)
         pooled.setflags(write=False)
         self._pooled_cache = pooled
         return pooled
+
+    def _pool(self, plane: NDArray[Any]) -> NDArray[Any]:
+        """One plane of this revision, flattened to what a pool contains.
+
+        Which samples a whole-revision reduction pools is a fact about the
+        VALIDITY, not about the plane being pooled, so values and the
+        samples' own sigma go through the same door and come back the same
+        length.  Two doors is how the sigma of a 900-sample pool ended up
+        beside the values of an 870-sample one.
+        """
+
+        valid = self._samples.valid_mask
+        plane = np.asarray(plane)
+        if _stride_zero_all_true(valid) or bool(np.all(valid)):
+            return plane.reshape(-1).view()
+        return plane[valid].reshape(-1)
+
+    def _pooled_sigma(self) -> NDArray[np.float64] | None:
+        """The samples' own sigma, pooled exactly as the values are."""
+
+        sigma = self._samples.sigma
+        return None if sigma is None else self._pool(sigma)
+
+    def _flat_sigma_at(
+        self, positions: NDArray[np.int64]
+    ) -> NDArray[np.float64] | None:
+        """The samples' own sigma gathered at the SAME positions as values.
+
+        Every generic bucket reduction gathers ``flat_values[positions]``;
+        this is that gather for the other plane, so the two can never come
+        back indexed differently.
+        """
+
+        sigma = self._samples.sigma
+        if sigma is None:
+            return None
+        return np.asarray(sigma, dtype=np.float64).reshape(-1)[positions]
 
     def validate_rolling(self, group: AxisRef | None) -> None:
         """Check a rolling projection without computing it (see validate_curve)."""
@@ -2260,36 +2316,35 @@ class DataView:
             sem = None
             if uncertainty:
                 # Sum first: a finite total proves a hole-free pool, whose
-                # square sum is one BLAS dot -- no isfinite scan, no
-                # ``square`` temporary.  Masked sums otherwise, never a
-                # gather of the finite subset: the copy cost more than
+                # square sum is one BLAS dot.  Masked sums otherwise, never
+                # a gather of the finite subset: the copy cost more than
                 # the moment.
-                count = None
-                if pooled.size and math.isfinite(
+                hole_free = bool(pooled.size) and math.isfinite(
                     float(np.sum(pooled, dtype=np.float64))
-                ):
-                    squares = float(np.dot(pooled.reshape(-1), pooled.reshape(-1)))
-                    if math.isfinite(squares):
-                        count = int(pooled.size)
-                        mean_square = squares / count
-                if count is None:
-                    finite = np.isfinite(pooled)
-                    count = int(np.count_nonzero(finite))
-                    with np.errstate(invalid="ignore", divide="ignore"):
-                        mean_square = (
-                            np.sum(
-                                np.square(pooled),
-                                where=finite,
-                                dtype=np.float64,
-                            )
-                            / count
-                            if count
-                            else np.nan
-                        )
-                sem = _sem_from_moments(
+                )
+                finite = None if hole_free else np.isfinite(pooled).reshape(-1)
+                count = (
+                    int(pooled.size)
+                    if hole_free
+                    else int(np.count_nonzero(finite))
+                )
+
+                def mean_of_squares(plane: Any, offset: float) -> Any:
+                    if not count:
+                        return np.asarray([np.nan])
+                    total = _centred_square_sum(
+                        np.asarray(plane).reshape(-1),
+                        offset,
+                        None if hole_free else finite,
+                    )
+                    return np.asarray([total / count])
+
+                sem = _sem_of_mean(
                     np.asarray([value], dtype=np.float64),
-                    np.asarray([mean_square], dtype=np.float64),
                     np.asarray([count], dtype=np.int64),
+                    pooled,
+                    self._pooled_sigma(),
+                    mean_of_squares,
                 )
             return RollingSample(
                 revision=self._samples.revision,
@@ -2318,20 +2373,22 @@ class DataView:
         )
         sem = None
         if uncertainty:
-            reference = _sem_reference(np.asarray(values, np.float64))
-            mean_sq, _sq_counts = _aggregate_by_codes(
-                np.square(
-                    group_values.astype(np.float64, copy=False) - reference
-                ),
-                usable,
-                codes,
-                domain_size,
-                Reduction.MEAN,
-            )
-            sem = _sem_from_moments(
-                np.asarray(values, np.float64) - reference,
-                np.asarray(mean_sq, np.float64),
+            def mean_of_squares(plane: Any, offset: float) -> Any:
+                reduced, _ = _aggregate_by_codes(
+                    np.square(np.asarray(plane, dtype=np.float64) - offset),
+                    usable,
+                    codes,
+                    domain_size,
+                    Reduction.MEAN,
+                )
+                return reduced
+
+            sem = _sem_of_mean(
+                np.asarray(values, np.float64),
                 counts,
+                group_values,
+                self._flat_sigma_at(positions),
+                mean_of_squares,
             )
         valid = (counts > 0) & np.isfinite(values)
         return RollingSample(
@@ -2417,22 +2474,24 @@ class DataView:
             # The band's standard error is a SECOND full pass -- a float64
             # copy of every value, squared, then reduced again.  The panel
             # paid it on every revision whether or not the band was drawn.
-            reference = _sem_reference(np.asarray(values, dtype=np.float64))
-            mean_square, _ = _aggregate_by_codes(
-                np.square(
-                    position_values.astype(np.float64, copy=False) - reference
-                ),
-                usable,
-                combined,
-                bucket_count,
-                Reduction.MEAN,
-            )
-            sem = _sem_from_moments(
-                np.asarray(values, dtype=np.float64) - reference,
-                np.asarray(mean_square, dtype=np.float64).reshape(
+            def mean_of_squares(plane: Any, offset: float) -> Any:
+                reduced, _ = _aggregate_by_codes(
+                    np.square(np.asarray(plane, dtype=np.float64) - offset),
+                    usable,
+                    combined,
+                    bucket_count,
+                    Reduction.MEAN,
+                )
+                return np.asarray(reduced, dtype=np.float64).reshape(
                     repeats, domain_size
-                ),
+                )
+
+            sem = _sem_of_mean(
+                np.asarray(values, dtype=np.float64),
                 counts,
+                position_values,
+                self._flat_sigma_at(positions),
+                mean_of_squares,
             )
         valid = (counts > 0) & np.isfinite(values)
         return tuple(
@@ -2471,8 +2530,10 @@ class DataView:
         if group is None:
             group_count = 1
             keys: tuple[tuple[AxisValue, ...], ...] = ((),)
-            value_cube = values.reshape(repeats, 1, -1)
-            usable_cube = usable.reshape(repeats, 1, -1)
+
+            def cube(plane: Any) -> NDArray[Any]:
+                return np.asarray(plane).reshape(repeats, 1, -1)
+
         else:
             if group.domain is not AxisDomain.DATA:
                 return None
@@ -2490,12 +2551,16 @@ class DataView:
             ):
                 return None
             keys = tuple((value,) for value in domain.values)
-            value_cube = np.moveaxis(values, dimension, 1).reshape(
-                repeats, group_count, -1
-            )
-            usable_cube = np.moveaxis(usable, dimension, 1).reshape(
-                repeats, group_count, -1
-            )
+
+            def cube(plane: Any) -> NDArray[Any]:
+                return np.moveaxis(np.asarray(plane), dimension, 1).reshape(
+                    repeats, group_count, -1
+                )
+
+        # One layout, applied to every plane: values, validity and the
+        # samples' own sigma cannot end up shaped differently.
+        value_cube = cube(values)
+        usable_cube = cube(usable)
 
         # The generic bucket reducer always accumulates numerics in float64;
         # matching that here also prevents integer SUM/square overflow.
@@ -2513,24 +2578,32 @@ class DataView:
             # ``np.square`` on the whole cube materialises a second copy of
             # every value in the history -- sixteen megabytes on a
             # two-million-sample pool -- before reducing it.  einsum sums the
-            # products in one pass with no temporary at all, and over the
-            # SAME masked values, so the moment it feeds is identical.
-            masked = np.where(
-                np.moveaxis(usable_cube, -1, 0),
-                np.moveaxis(working, -1, 0),
-                0.0,
-            )
-            squared_sum = np.einsum("i...,i...->...", masked, masked)
-            mean_square = np.divide(
-                squared_sum,
-                counts,
-                out=np.zeros_like(squared_sum, dtype=np.float64),
-                where=counts > 0,
-            )
-            sem = _sem_from_moments(
+            # products in one pass, and over the SAME masked values, so the
+            # moment it feeds is identical.
+            leading_usable = np.moveaxis(usable_cube, -1, 0)
+
+            def mean_of_squares(plane: Any, offset: float) -> Any:
+                leading = np.moveaxis(
+                    cube(np.asarray(plane, dtype=np.float64)), -1, 0
+                )
+                # Invalid entries become the offset so the shift below
+                # leaves them at zero -- one temporary, not two.
+                masked = np.where(leading_usable, leading, offset)
+                masked -= offset
+                squared_sum = np.einsum("i...,i...->...", masked, masked)
+                return np.divide(
+                    squared_sum,
+                    counts,
+                    out=np.zeros_like(squared_sum, dtype=np.float64),
+                    where=counts > 0,
+                )
+
+            sem = _sem_of_mean(
                 reduced,
-                np.asarray(mean_square, dtype=np.float64),
                 counts,
+                values,
+                self._samples.sigma,
+                mean_of_squares,
             )
         valid = (counts > 0) & np.isfinite(reduced)
         return tuple(
@@ -2586,25 +2659,24 @@ class DataView:
         counts = np.asarray(counts).reshape(history_count, domain_size)
         sem = None
         if uncertainty and aggregation is Reduction.MEAN:
-            # The band's standard error is a SECOND full pass -- a float64
-            # copy of every value, squared, then reduced again.  The panel
-            # paid it on every revision whether or not the band was drawn.
-            reference = _sem_reference(np.asarray(values, dtype=np.float64))
-            mean_square, _ = _aggregate_by_codes(
-                np.square(
-                    position_values.astype(np.float64, copy=False) - reference
-                ),
-                usable,
-                combined,
-                bucket_count,
-                Reduction.MEAN,
-            )
-            sem = _sem_from_moments(
-                np.asarray(values, dtype=np.float64) - reference,
-                np.asarray(mean_square, dtype=np.float64).reshape(
+            def mean_of_squares(plane: Any, offset: float) -> Any:
+                reduced, _ = _aggregate_by_codes(
+                    np.square(np.asarray(plane, dtype=np.float64) - offset),
+                    usable,
+                    combined,
+                    bucket_count,
+                    Reduction.MEAN,
+                )
+                return np.asarray(reduced, dtype=np.float64).reshape(
                     history_count, domain_size
-                ),
+                )
+
+            sem = _sem_of_mean(
+                np.asarray(values, dtype=np.float64),
                 counts,
+                position_values,
+                self._flat_sigma_at(positions),
+                mean_of_squares,
             )
         valid = (counts > 0) & np.isfinite(values)
         return tuple(
@@ -2941,12 +3013,15 @@ class DataView:
                 if contiguous
                 else selector
             )
-            if slice_axis == 0:
-                cell_values = values[selected]
-                cell_valid = valid_mask[selected]
-            else:
-                cell_values = values[:, selected]
-                cell_valid = valid_mask[:, selected]
+            def sliced(plane: Any) -> Any:
+                if plane is None:
+                    return None
+                return (
+                    plane[selected] if slice_axis == 0 else plane[:, selected]
+                )
+
+            cell_values = sliced(values)
+            cell_valid = sliced(valid_mask)
             if isinstance(cell, CurvePlot):
                 payload: FacetPayload = self._dense_curve_data(
                     cell.x,
@@ -2955,6 +3030,7 @@ class DataView:
                     cell_valid,
                     cell.reduction,
                     uncertainty,
+                    sliced(self._samples.sigma),
                 )
             elif isinstance(cell, ImagePlot):
                 payload = self._dense_image_data(
@@ -3691,6 +3767,88 @@ def _sem_reference(mean: NDArray[np.float64]) -> float:
         array = array[:: max(1, array.size // _SEM_REFERENCE_SAMPLE)]
     finite = array[np.isfinite(array)]
     return float(finite.mean()) if finite.size else 0.0
+
+
+#: How many samples one centring pass shifts at a time.  Small enough that
+#: the scratch buffer is a rounding error against a megapixel pool, large
+#: enough that the per-block overhead disappears into the arithmetic.
+_CENTRING_BLOCK = 1 << 17
+
+
+def _centred_square_sum(
+    flat: NDArray[Any],
+    offset: float,
+    where: NDArray[np.bool_] | None = None,
+) -> float:
+    """Sum of ``(x - offset)**2`` without materialising ``x - offset``.
+
+    The whole-revision pool is the one place where that copy is a real
+    cost: it is every sample of the revision, and the rolling path has a
+    memory budget precisely so a per-shot reduction cannot double the
+    footprint of the data it reduces.  Blocking through one small buffer
+    keeps both the conditioning and the budget.
+    """
+
+    total = 0.0
+    size = int(flat.size)
+    if size == 0:
+        return total
+    scratch = np.empty(min(_CENTRING_BLOCK, size), dtype=np.float64)
+    for start in range(0, size, _CENTRING_BLOCK):
+        stop = min(start + _CENTRING_BLOCK, size)
+        piece = scratch[: stop - start]
+        np.subtract(flat[start:stop], offset, out=piece)
+        if where is None:
+            total += float(np.dot(piece, piece))
+        else:
+            np.square(piece, out=piece)
+            total += float(
+                np.sum(piece, where=where[start:stop], dtype=np.float64)
+            )
+    return total
+
+
+def _sem_of_mean(
+    means: NDArray[np.float64],
+    counts: NDArray[np.int64],
+    samples: NDArray[Any],
+    sigma: NDArray[Any] | None,
+    mean_of_squares: Callable[[Any, float], Any],
+) -> NDArray[np.float64]:
+    """The standard error of a mean, formed the ONE way this repo forms it.
+
+    Every plot kind that draws a band arrives here.  What differs between
+    them is only how a bucket is summed -- a strided tensor reduction, a
+    bincount over codes, an einsum, a dot -- so that is all a caller brings:
+    ``mean_of_squares(plane, offset)`` returns, per bucket, the mean of
+    ``(plane - offset)**2`` over exactly the samples that formed the mean.
+
+    What does NOT differ, and therefore lives here:
+
+      * the squares are taken about a reference near the data, because
+        ``E[x^2] - mean^2`` about zero subtracts two nearly equal numbers
+        and a resonance centre at 6.834 GHz loses six of sixteen digits;
+
+      * the samples' own sigma is offered to the estimator, which uses it
+        only where the scatter cannot speak.  A sigma is already a
+        difference about zero, so it is squared about zero -- passing the
+        value reference there would be a category error.
+
+    Written out at each call site instead, this rule had already drifted:
+    two of the eight sites still squared about zero, and none of the eight
+    passed the sigma at all.
+    """
+
+    reference = _sem_reference(means)
+    mean_square = np.asarray(mean_of_squares(samples, reference), dtype=np.float64)
+    mean_sigma_square = (
+        None
+        if sigma is None
+        else np.asarray(mean_of_squares(sigma, 0.0), dtype=np.float64)
+    )
+    return _sem_from_moments(
+        means - reference, mean_square, counts, mean_sigma_square
+    )
 
 
 def _sem_from_moments(

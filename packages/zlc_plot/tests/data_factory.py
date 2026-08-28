@@ -210,22 +210,35 @@ def DatasetSnapshot(
     revision: int,
     *,
     validity: Any | None = None,
+    sigma: Any | None = None,
     metadata: object | None = None,
 ) -> OwnedSnapshot:
     del metadata
     array = np.asarray(values)
     physical_shape = schema.physical_shape
+
+    def as_cells(plane: Any) -> Any:
+        """A scalar-cell plane given without its trailing axis gets one."""
+
+        if plane is None:
+            return None
+        dense = np.asarray(plane)
+        if dense.shape == physical_shape[:-1]:
+            return dense[..., None]
+        return dense
+
     if schema.cell_schema.is_scalar and array.shape == physical_shape[:-1]:
         array = array[..., None]
         if validity is not None:
-            valid_array = np.asarray(validity)
-            if valid_array.shape == physical_shape[:-1]:
-                validity = valid_array[..., None]
+            validity = as_cells(validity)
+        if sigma is not None:
+            sigma = as_cells(sigma)
     return owned_snapshot_from_arrays(
         schema=schema,
         values=array,
         revision=revision,
         validity=validity,
+        sigma=sigma,
     )
 
 
