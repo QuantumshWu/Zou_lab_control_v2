@@ -549,6 +549,12 @@ def _qt5_plot_widget_class() -> type[Any]:
             self._gesture_kind: SceneKind | None = None
             self._candidate: SelectorState | ColorLimitCandidate | None = None
             self._pointer_button: int | None = None
+            #: Every pointer submission in order, and the one that latched
+            #: the button.  An answer is only entitled to undo state that
+            #: existed when it was computed.
+            self._pointer_serial = 0
+            self._latch_serial = 0
+            self._clearing_because = "?"
             self._requested_dpr: float | None = None
             self.setAttribute(QtCore.Qt.WA_OpaquePaintEvent, True)
             self.setFocusPolicy(QtCore.Qt.StrongFocus)
@@ -1108,6 +1114,15 @@ def _qt5_plot_widget_class() -> type[Any]:
             if not self._interaction_gate.enabled:
                 return
             gate_generation = self._interaction_gate.generation
+            self._pointer_serial += 1
+            serial = self._pointer_serial
+            if _GESTURE_LOG.on:
+                _GESTURE_LOG.widget(
+                    self,
+                    "submit %s button=%s held=%s serial=%d"
+                    % (action, button, held, serial),
+                    None,
+                )
             x, y = (0.0, 0.0) if event is None else self._normalized(event)
             source_front = (
                 self._gesture_front
@@ -1160,7 +1175,8 @@ def _qt5_plot_widget_class() -> type[Any]:
                     return
                 except Exception as error:
                     self._gesture_ready.emit(
-                        (gate_generation, action, None, None, str(error))
+                        (gate_generation, action, None, None, str(error),
+                         serial)
                     )
                 else:
                     self._gesture_ready.emit(
@@ -1170,6 +1186,7 @@ def _qt5_plot_widget_class() -> type[Any]:
                             operation.value,
                             operation.front,
                             None,
+                            serial,
                         )
                     )
 
@@ -1177,7 +1194,13 @@ def _qt5_plot_widget_class() -> type[Any]:
 
         @QtCore.pyqtSlot(object)
         def _finish_pointer(self, result: object) -> None:
-            gate_generation, action, state, operation_front, error = result
+            gate_generation, action, state, operation_front, error, serial = (
+                result
+            )
+            if _GESTURE_LOG.on and self._pointer_button is not None:
+                self._clearing_because = "%s serial=%d error=%s" % (
+                    action, serial, error,
+                )
             if gate_generation != self._interaction_gate.generation:
                 return
             if error is not None:
@@ -1219,18 +1242,18 @@ def _qt5_plot_widget_class() -> type[Any]:
                 return
             if candidate is None or role is None:
                 if action in {"release", "cancel", "key"} or not active_pan:
-                    if _GESTURE_LOG.on and self._pointer_button is not None:
-                        # THE LATCH IS BEING DROPPED WHILE A BUTTON IS
-                        # DOWN.  Every move after this is submitted with
-                        # no button and is routed as a hover, so it never
-                        # reaches the gesture -- which is what a drag
-                        # that does not catch looks like from the log.
-                        _GESTURE_LOG.widget(
-                            self,
-                            "latch cleared by %s (active_pan=%s, button=%s)"
-                            % (action, active_pan, self._pointer_button),
-                            None,
-                        )
+                    if serial < self._latch_serial:
+                        # AN ANSWER OLDER THAN THE BUTTON IT WOULD DROP.
+                        # A hover submitted on the way to the panel is
+                        # computed before any gesture exists, so it
+                        # carries no candidate, no role and no pan; if it
+                        # lands after the press it would clear the latch,
+                        # and every move after that is submitted with no
+                        # button and routed as a hover -- the drag never
+                        # reaches the gesture at all.  Measured on the
+                        # operator's console: four drags in twenty-five,
+                        # each one preceded by exactly this.
+                        return
                     self._clear_interaction()
                 elif action == "move":
                     # A pan front is already complete when it reaches this
@@ -1291,6 +1314,7 @@ def _qt5_plot_widget_class() -> type[Any]:
                 # late may have been late before the product ever saw it.
                 _GESTURE_LOG.widget(self, "press", event)
             self._submit_pointer("press", event, button=button)
+            self._latch_serial = self._pointer_serial
             event.accept()
 
         def mouseDoubleClickEvent(self, event: object) -> None:
@@ -1310,6 +1334,7 @@ def _qt5_plot_widget_class() -> type[Any]:
                 button=button,
                 double=True,
             )
+            self._latch_serial = self._pointer_serial
             event.accept()
 
         def mouseMoveEvent(self, event: object) -> None:
@@ -1317,6 +1342,8 @@ def _qt5_plot_widget_class() -> type[Any]:
             if self._closed:
                 super().mouseMoveEvent(event)
                 return
+            if _GESTURE_LOG.on and not self._interaction_gate.enabled:
+                _GESTURE_LOG.widget(self, "move refused: gate closed", None)
             self._submit_pointer(
                 "move",
                 event,
@@ -1389,6 +1416,23 @@ def _qt5_plot_widget_class() -> type[Any]:
                 return False
 
         def _clear_interaction(self) -> None:
+            if _GESTURE_LOG.on and self._pointer_button is not None:
+                import traceback as _tb
+
+                _GESTURE_LOG.widget(
+                    self,
+                    "CLEAR while button=%s from %s"
+                    % (
+                        self._pointer_button,
+                        " <- ".join(
+                            frame.name
+                            for frame in _tb.extract_stack()[-4:-1]
+                        )
+                        + " answering "
+                        + str(getattr(self, "_clearing_because", "?")),
+                    ),
+                    None,
+                )
             try:
                 if self.mouseGrabber() is self:
                     self.releaseMouse()
