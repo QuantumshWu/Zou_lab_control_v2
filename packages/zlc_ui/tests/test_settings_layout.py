@@ -236,3 +236,84 @@ form.reconcile(automatic, {'title': None})
 assert form.auto_switch_for('title').isChecked()
 """
     )
+
+
+def test_every_field_applies_as_it_is_typed_and_none_is_written_over() -> None:
+    """One rule for the whole form, and the operator owns their cursor.
+
+    Text was the single commit-on-defocus kind in the registry -- a Y label
+    applied when you clicked away while the colour maximum beside it applied
+    per keystroke, so one popup answered two rules depending on the row.
+
+    Live editing then needs the other half.  Every keystroke round-trips
+    through the owner and comes back as a projection, and reconcile writes
+    projections into widgets: written into the box being typed in, that
+    installs a value the operator never typed and can disable the box
+    mid-word when an emptied optional field flips to Auto.
+    """
+
+    _run_qt(
+        """
+import zou_lab_control
+from PyQt5 import QtCore, QtTest, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.form.form import FormFieldProps, FormSpec
+from zlc_ui.form.qt_form import FluentParameterForm, FORM_WIDGET_HANDLERS
+
+app = ensure_qt_app(['test'])
+
+# Every kind the panel Setting popup can produce.
+LIVE_KINDS = ('text', 'number', 'int', 'bool', 'choice')
+for kind in LIVE_KINDS:
+    assert kind in FORM_WIDGET_HANDLERS, kind
+
+spec = FormSpec((
+    FormFieldProps('label', 'text', 'Y label'),
+    FormFieldProps('ceiling', 'number', 'Value maximum'),
+))
+values = {'label': 'start', 'ceiling': 100.0}
+form = FluentParameterForm(spec, values)
+window = QtWidgets.QMainWindow()
+window.setCentralWidget(form)
+window.show()
+app.processEvents()
+
+seen = []
+form.changed.connect(seen.append)
+
+# TEXT applies as it is typed, exactly as the number beside it does.
+label = form._widgets['label']
+label.setFocus(QtCore.Qt.MouseFocusReason)
+label.selectAll()
+QtTest.QTest.keyClicks(label, 'ab')
+app.processEvents()
+assert seen.count('label') >= 2, seen
+
+# And the owner writing a projection back does not touch the box the
+# operator is inside: this is the half-typed value the round trip would
+# otherwise normalise away.
+seen.clear()
+ceiling = form._widgets['ceiling']
+ceiling.setFocus(QtCore.Qt.MouseFocusReason)
+ceiling.selectAll()
+QtTest.QTest.keyClicks(ceiling, '0')
+app.processEvents()
+assert ceiling.hasFocus()
+form.reconcile(spec, {'label': 'ab', 'ceiling': 100.0})
+app.processEvents()
+assert ceiling.text() == '0', (
+    'the form wrote the stored value over the operator: %r' % ceiling.text()
+)
+# The field they are NOT in still takes the projection.
+assert form._widgets['label'].text() == 'ab', form._widgets['label'].text()
+
+# Leave the field, and the projection lands.
+form._widgets['label'].setFocus(QtCore.Qt.MouseFocusReason)
+app.processEvents()
+form.reconcile(spec, {'label': 'ab', 'ceiling': 100.0})
+app.processEvents()
+assert ceiling.text() == '100.0', ceiling.text()
+window.close()
+print('ok')
+"""
+    )

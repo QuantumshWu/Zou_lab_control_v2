@@ -102,6 +102,30 @@ def _connect_change(signal, on_change: Callable[[], None]) -> None:
     signal.connect(lambda *_args: on_change())
 
 
+def _being_edited(widget: QtWidgets.QWidget) -> bool:
+    """Is the operator typing in this widget right now?
+
+    Live editing means every keystroke round-trips through the owner and
+    comes back as a new projection, and reconcile writes projections into
+    the widgets.  Written into the box the operator is inside, that is not
+    an update, it is a fight: type "0." into a number and the round trip
+    normalises it to 0, writes back "0", and the decimal point the operator
+    just pressed is gone -- a value they never typed, installed under their
+    cursor.  Clearing an optional field is worse: the value becomes None,
+    the Auto switch takes it, and the box is DISABLED mid-word.
+
+    So the rule is one sentence: while the operator is inside a widget, that
+    widget's value, its Auto switch and its enabled state are theirs.  The
+    projection lands the moment they leave.  Composite editors are checked by
+    ancestry, because focus sits on the inner spin box, not the host.
+    """
+
+    focused = QtWidgets.QApplication.focusWidget()
+    if focused is None:
+        return False
+    return focused is widget or widget.isAncestorOf(focused)
+
+
 class FormWidgetHandler(ABC):
     """The complete typed lifecycle for one field kind."""
 
@@ -173,7 +197,15 @@ class _TextHandler(_StaticHandler):
         edit.setPlaceholderText(field.description[:48])
         edit.setToolTip(field.description)
         self.write(field, edit, value)
-        _connect_change(edit.editingFinished, on_change)
+        # As it is TYPED.  Every other kind in this registry is live -- a
+        # number on textChanged, a switch on toggled, a choice on activated --
+        # and text alone waited for Return or a click elsewhere, so the same
+        # popup answered two different rules depending on which row you were
+        # in.  What makes this safe is the focus rule in reconcile(): the
+        # value comes straight back as a new projection, and a form that
+        # wrote it into the box you are typing in would eat the half-typed
+        # character it normalised away.
+        _connect_change(edit.textChanged, on_change)
         return edit
 
     def read(self, field, widget):
@@ -1226,18 +1258,26 @@ class FluentParameterForm(QtWidgets.QWidget):
                         field.key in self._auto_switches
                         and incoming[field.key] is None
                     )
-                    if not selected and not _widget_has_value(
-                        handler, field, widget, prepared[field.key]
+                    editing = _being_edited(widget)
+                    if (
+                        not editing
+                        and not selected
+                        and not _widget_has_value(
+                            handler, field, widget, prepared[field.key]
+                        )
                     ):
                         handler.write(field, widget, prepared[field.key])
                     automatic = self._auto_switches.get(field.key)
                     if automatic is not None:
-                        automatic.setChecked(selected)
-                        automatic.setText(_automatic_label(field, selected))
+                        if not editing:
+                            automatic.setChecked(selected)
+                            automatic.setText(_automatic_label(field, selected))
                         automatic.setEnabled(not field.unavailable)
-                        widget.setEnabled(not selected and not field.unavailable)
+                        widget.setEnabled(
+                            editing or (not selected and not field.unavailable)
+                        )
                     else:
-                        widget.setEnabled(not field.unavailable)
+                        widget.setEnabled(editing or not field.unavailable)
 
             desired_keys = set(spec.keys)
             replaced_keys = set(replacements)
