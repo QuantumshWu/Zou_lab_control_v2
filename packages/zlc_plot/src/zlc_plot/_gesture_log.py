@@ -2,7 +2,8 @@
 
 Every synthesized hand this was chased with measured something other than
 what the operator sees.  A real hand is the only instrument that has been
-right so far, so this rides along with it: switched off by default, and
+right so far, so this rides along with it, always on -- the fault is
+intermittent, so the recording has to be running before it happens, and
 when switched on it writes one line per gesture -- press to release --
 saying what the product did at each step.
 
@@ -24,7 +25,6 @@ a gesture that did not catch can be read rather than guessed at.
 from __future__ import annotations
 
 import json
-import os
 import pathlib
 import threading
 import time
@@ -34,25 +34,32 @@ from typing import Any
 LINE_END = chr(10)
 
 
-def _enabled() -> str | None:
-    value = os.environ.get("ZLC_GESTURE_LOG")
-    if not value:
-        return None
-    if value in ("1", "true", "True", "yes", "on"):
-        return str(pathlib.Path.cwd() / "gesture_log.jsonl")
-    return value
+def _log_path() -> str:
+    """Where the recording goes.  Always on: this is a temporary probe.
+
+    A switch would be one more thing to remember at the moment the fault
+    happens, and the fault is intermittent -- the recording has to already
+    be running when it does.  Beside the checkout rather than in whatever
+    directory the console happened to be started from, so there is one
+    file to hand over.
+    """
+
+    here = pathlib.Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "packages").is_dir():
+            return str(parent / "gesture_log.jsonl")
+    return str(pathlib.Path.cwd() / "gesture_log.jsonl")
 
 
 class GestureLog:
     """One line per gesture, appended when the button comes up.
 
-    Costs nothing while off: every entry point returns immediately on a
-    None path, which is what the whole product sees unless the operator
-    asked for a recording.
+    A temporary probe, so it is simply on.  The cost is a dict per
+    gesture and one line written when the button comes up.
     """
 
     def __init__(self) -> None:
-        self._path = _enabled()
+        self._path = _log_path()
         self._lock = threading.Lock()
         self._open: dict[int, dict[str, Any]] = {}
 
