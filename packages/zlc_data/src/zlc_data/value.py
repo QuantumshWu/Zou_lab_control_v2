@@ -81,6 +81,16 @@ class DataBlock:
     values: np.ndarray
     validity: Valid | Invalid | CellValidity | DatasetComponentValidity
     schema: DatasetSchema
+    #: The uncertainty OF THESE SAMPLES, one per value, or None.
+    #:
+    #: Not the uncertainty of a reduction over them -- that one is derived
+    #: where the reduction happens and is never transported, because it
+    #: answers a question the operator can change by moving the scope.
+    #: This is the other kind: a property of the sample itself, which a
+    #: fitted parameter has (its covariance) and a camera pixel does not.
+    #: It cannot be recovered downstream, so it travels here, beside the
+    #: values, sliced by the same code that slices them.
+    sigma: np.ndarray | None = None
     __hash__ = None
 
     def __post_init__(self) -> None:
@@ -97,6 +107,20 @@ class DataBlock:
             shape=self.schema.physical_shape,
         )
         object.__setattr__(self, "values", array)
+        if self.sigma is not None:
+            # Same shape, because it is one number per value; float, because
+            # an uncertainty is a magnitude; immutable, because everything
+            # in a block is.  Negative is not a small uncertainty, it is a
+            # wrong one, so it is refused rather than absolved.
+            sigma = immutable_array(
+                self.sigma,
+                dtype=np.float64,
+                shape=self.schema.physical_shape,
+            )
+            finite = np.isfinite(sigma)
+            if bool(np.any(finite & (sigma < 0.0))):
+                raise ValueError("sample sigma must be non-negative")
+            object.__setattr__(self, "sigma", sigma)
 
     def ref(self, stream_generation: StreamGenerationId) -> DatasetRevisionRef:
         return DatasetRevisionRef(
@@ -148,6 +172,7 @@ def owned_snapshot_from_arrays(
     point_table: PointTable | None = None,
     grid_topology: GridTopology | None = None,
     validity: object | None = None,
+    sigma: object | None = None,
     block_id: BlockId | str | None = None,
     stream_generation: StreamGenerationId | str | None = None,
 ) -> OwnedSnapshot:
@@ -157,6 +182,12 @@ def owned_snapshot_from_arrays(
     with the dataset carrier axes via ``repeat_axis``, ``point_table``, and
     optionally ``grid_topology``.  A dense validity array is compacted under
     the schema's declared validity contract before the DataBlock is created.
+
+    ``sigma`` is the uncertainty OF THESE SAMPLES -- one per value -- for a
+    producer whose samples carry their own, a fitted parameter being the
+    case that exists.  It is not the uncertainty of a reduction over them:
+    that one is derived where the reduction happens, from the samples and
+    their validity, and is never transported.
     """
 
     if values is None:
@@ -234,6 +265,7 @@ def owned_snapshot_from_arrays(
         values,
         resolved_validity,
         resolved_schema,
+        sigma,
     )
     return OwnedSnapshot(block.ref(resolved_generation), block)
 

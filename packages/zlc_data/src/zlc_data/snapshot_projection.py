@@ -190,9 +190,15 @@ def materialize_derived_dataset(
     *,
     schema: DatasetSchema,
     validity: Valid | Invalid | CellValidity | DatasetComponentValidity,
+    sigma: object | None = None,
     reference_for: Callable[[DatasetSchema], DatasetRevisionRef],
 ) -> OwnedSnapshot:
-    """Materialize one typed derived Dataset without interpreting its domain."""
+    """Materialize one typed derived Dataset without interpreting its domain.
+
+    ``sigma`` rides with the values because it belongs to them: a sample's
+    own uncertainty survives every scope the operator can choose, which is
+    exactly why it is not recomputed downstream the way a reduction's is.
+    """
 
     if not isinstance(schema, DatasetSchema):
         raise TypeError("derived dataset schema must be DatasetSchema")
@@ -205,6 +211,7 @@ def materialize_derived_dataset(
             np.asarray(values),
             validity,
             schema,
+            None if sigma is None else np.asarray(sigma),
         ),
     )
 
