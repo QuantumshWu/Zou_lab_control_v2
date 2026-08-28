@@ -1042,15 +1042,20 @@ surface = {
          'choices': (('Pixel', 'pixel'), ('Millimetre', 'mm')),
          'minimum': None, 'maximum': None, 'step': None,
          'automatic': True, 'unavailable_reason': ''},
+        # co_edited_with is the workbench's join: a limit pair is validated
+        # as a pair, so an editor sends both ends.  Written out here because
+        # this surface is hand-built; the real one comes from
+        # zlc_workbench.panel_state.control_document, which is where the
+        # join is pinned.
         {'key': 'color_min', 'label': 'Color minimum', 'kind': 'number',
          'value': None, 'allow_none': True, 'choices': (),
          'minimum': None, 'maximum': None, 'step': None,
-         'automatic': False,
+         'automatic': False, 'co_edited_with': 'color_max',
          'unavailable_reason': 'Choose Fixed color limits to edit.'},
         {'key': 'color_max', 'label': 'Color maximum', 'kind': 'number',
          'value': None, 'allow_none': True, 'choices': (),
          'minimum': None, 'maximum': None, 'step': None,
-         'automatic': False,
+         'automatic': False, 'co_edited_with': 'color_min',
          'unavailable_reason': 'Choose Fixed color limits to edit.'},
         {'key': 'colormap', 'label': 'Colormap', 'kind': 'choice',
          'value': 'viridis', 'allow_none': False,

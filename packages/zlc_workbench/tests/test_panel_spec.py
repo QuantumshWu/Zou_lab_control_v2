@@ -67,3 +67,63 @@ def test_image_specs_pass_through_untouched() -> None:
     schema = _camera_frame_schema()
     spec = fitting_panel_spec(schema, "image")
     assert spec is not None and spec.kind is PlotKind.IMAGE
+
+
+def test_the_workbench_joins_the_parameters_that_move_together() -> None:
+    """The view layer cannot see the declaration, so this seam answers.
+
+    A limit pair is validated as a pair: moving (0, 10) to (12, 20) passes
+    through (12, 10), which no owner accepts, so an editor has to send both
+    ends as the operator currently sees them.  Which names form a pair is
+    declared in zlc_plot, and zlc_plot is a forbidden import root for the
+    view -- guarded mechanically in zlc_ui's own tests.
+
+    The view therefore recovered the relationship from how the names were
+    SPELLED, pairing any *_min with its *_max.  That is the same fact with a
+    second and weaker owner: it agreed with the declaration only by luck,
+    and would have paired the first *_min that was not a limit.  This seam
+    turns a plot control into a frontend-neutral row and may ask; the join
+    is made here, once, and travels on the row.
+    """
+
+    from zlc_plot.specs import limit_pairs, parameter_schema_for_kind
+    from zlc_plot.style import build_plot_style
+    from zlc_plot.ui import parameter_controls
+    from zlc_workbench.panel_state import control_document
+
+    style = build_plot_style()
+    for kind, expected in (
+        ("image", {"color_min": "color_max", "color_max": "color_min"}),
+        (
+            "histogram",
+            {
+                "y_min": "y_max",
+                "y_max": "y_min",
+                "x_min": "x_max",
+                "x_max": "x_min",
+            },
+        ),
+        ("curve", {"y_min": "y_max", "y_max": "y_min"}),
+    ):
+        schema = parameter_schema_for_kind(kind, style=style)
+        values = {name: spec.default for name, spec in schema.items()}
+        joined = {}
+        for control in parameter_controls(schema, values):
+            row = control_document(control)
+            assert "co_edited_with" in row, row["key"]
+            if row["co_edited_with"]:
+                joined[row["key"]] = row["co_edited_with"]
+        assert joined == expected, (kind, joined)
+
+    # And the join is the DECLARATION's, not a guess that happens to agree:
+    # every name it pairs is one of the declared pairs.
+    declared = set()
+    for _mode, low, high in limit_pairs():
+        declared.add((low, high))
+        declared.add((high, low))
+    schema = parameter_schema_for_kind("histogram", style=style)
+    values = {name: spec.default for name, spec in schema.items()}
+    for control in parameter_controls(schema, values):
+        row = control_document(control)
+        if row["co_edited_with"]:
+            assert (row["key"], row["co_edited_with"]) in declared

@@ -157,7 +157,27 @@ def decode_parameter_value(field: Mapping[str, object], edited: object) -> objec
 
 
 def parameter_edit_values(fields: object, key: str, read_value) -> dict[str, object]:
-    """Read one edit, plus the other half of an authored limit pair."""
+    """Read the parameter the operator edited, and anything edited WITH it.
+
+    Which parameters have to move together is declared where the parameters
+    are and reaches this layer on the descriptor, as ``co_edited_with``.
+    This used to recover the relationship from how the names were SPELLED --
+    any ``*_min`` paired with its ``*_max`` -- which is the same fact with a
+    second, weaker owner.  It agreed with the declaration by luck, and would
+    have paired the first ``*_min`` that was not a limit at all.  zlc_plot
+    is a forbidden import root here, so the view cannot ask; the seam that
+    can see both packages answers instead.
+
+    A limit pair IS validated as a pair, which is why one end cannot go
+    alone: moving (0, 10) to (12, 20) passes through (12, 10), and no owner
+    accepts that.  So both ends go, as the operator currently sees them.
+
+    A companion that cannot be read is not a reason to lose the edit they
+    actually made.  It used to be: with "1e" left in the colour minimum,
+    typing 70 into the colour maximum threw the 70 away and put
+    "display__color_min must be a finite decimal number" on the card -- an
+    error about a field the operator had not touched.
+    """
 
     if not callable(read_value):
         raise TypeError("read_value must be callable")
@@ -167,19 +187,22 @@ def parameter_edit_values(fields: object, key: str, read_value) -> dict[str, obj
     selected = str(key)
     if selected not in declared:
         raise KeyError(selected)
-    names = [selected]
-    for suffix, other_suffix in (("_min", "_max"), ("_max", "_min")):
-        if not selected.endswith(suffix):
-            continue
-        other = f"{selected[:-len(suffix)]}{other_suffix}"
-        if other in declared:
-            names.append(other)
-        break
-    return {
-        name: decode_parameter_value(declared[name], read_value(name))
-        for name in names
+    edited = {
+        selected: decode_parameter_value(
+            declared[selected], read_value(selected)
+        )
     }
-
+    companion = str(declared[selected].get("co_edited_with") or "")
+    if companion and companion in declared:
+        try:
+            edited[companion] = decode_parameter_value(
+                declared[companion], read_value(companion)
+            )
+        except (KeyError, TypeError, ValueError):
+            # Theirs stands; the companion joins the next edit that can be
+            # read.
+            pass
+    return edited
 
 def signal_form_runtime(groups_for) -> FormRuntimeContext:
     """Project producer groups into the existing keyed tree-choice form seam."""

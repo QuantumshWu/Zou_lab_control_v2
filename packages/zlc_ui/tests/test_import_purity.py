@@ -89,3 +89,41 @@ def test_package_modules_are_nonempty_and_import_pure() -> None:
 
     for module_name, _ in modules:
         importlib.import_module(module_name)
+
+
+def test_the_view_layer_does_not_infer_parameter_relationships_from_spelling() -> None:
+    """What relates two parameters is declared, and this layer cannot see it.
+
+    zlc_plot is a forbidden import root here -- the test above enforces it --
+    so which parameters form an authored limit pair, and which mode governs
+    them, reaches this package only as field descriptors.  Recovering the
+    relationship from how the names are SPELLED is the same fact with a
+    second, weaker owner.
+
+    It was done once, in parameter_edit_values, which paired any ``*_min``
+    with its ``*_max`` and read BOTH on every edit.  It agreed with the
+    declaration by luck; it was unnecessary, because a patch carrying one end
+    alone lands with the pair still complete; and it was harmful, because the
+    partner was read inside the same guard as the operator's own edit -- with
+    "1e" left in the colour minimum, typing 70 into the colour maximum threw
+    that 70 away and reported an error about the field they had not touched.
+
+    The rule is not "pair them somewhere else": nothing at this layer needs
+    to pair them at all.
+    """
+
+    offenders = []
+    for path in sorted(PACKAGE.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        for number, line in enumerate(text.splitlines(), start=1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if '"_min"' in line or "'_min'" in line or '"_max"' in line or "'_max'" in line:
+                offenders.append(
+                    "%s:%d: %s" % (path.relative_to(SRC), number, stripped)
+                )
+    assert not offenders, "\n".join(
+        ["the view layer is inferring a parameter relationship from spelling:"]
+        + offenders
+    )

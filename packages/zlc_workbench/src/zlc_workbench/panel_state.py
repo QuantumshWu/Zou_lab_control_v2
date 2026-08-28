@@ -13,6 +13,7 @@ from zlc_plot import (
     describe_semantics,
     normalize_classifier_threshold_targets,
 )
+from zlc_plot.specs import limit_pair_for
 from zlc_plot.semantics import (
     FATE_PREFIX,
     SemanticVacancy,
@@ -146,8 +147,26 @@ def control_document(control: object) -> dict[str, object]:
             value, label = choice, str(choice).replace("_", " ").title()
         choices.append((str(label), value))
     kind = getattr(getattr(control, "kind", ""), "value", None)
+    name = str(getattr(control, "name"))
+    # WHICH parameters have to be edited as ONE, joined here.
+    #
+    # A limit pair is validated as a pair: moving (0, 10) to (12, 20)
+    # passes through (12, 10), which no owner will accept, so an editor
+    # has to send both ends as the operator currently sees them.  Which
+    # names form a pair is declared in zlc_plot, and zlc_plot is a
+    # forbidden import root for the view layer -- so the view recovered
+    # the relationship from how the names were SPELLED, which is the
+    # same fact with a second and weaker owner.
+    #
+    # This is the seam that can see both: it turns a plot control into a
+    # frontend-neutral row, and it may ask the declaration.
+    pair = limit_pair_for(name)
+    co_edited_with = ""
+    if pair is not None:
+        _mode, low_name, high_name = pair
+        co_edited_with = high_name if name == low_name else low_name
     return {
-        "key": str(getattr(control, "name")),
+        "key": name,
         "label": str(getattr(control, "label")),
         "kind": str(kind or getattr(control, "kind", "text")),
         "value": getattr(control, "value", None),
@@ -160,6 +179,7 @@ def control_document(control: object) -> dict[str, object]:
         "unavailable_reason": str(
             getattr(control, "unavailable_reason", "")
         ),
+        "co_edited_with": co_edited_with,
     }
 
 
