@@ -240,6 +240,95 @@ class ConsoleBench:
             "seams": probe.rows(elapsed),
         }
 
+    def attribute_stalls(self, panel, seconds: float = 12.0) -> dict:
+        """Who lost the frame: the producer, the beat, or the render?
+
+        A panel publishes on its beat, so a visible stutter is one cycle that
+        produced no picture.  Three clocks say which of them stopped:
+
+        * the SOURCE's revision stamps -- was there new data to draw?
+        * the BEAT's tick stamps -- did the cycle fire, and on time?
+        * the front install stamps -- did pixels follow?
+
+        Without all three the answer is a guess.  With them, a gap is
+        attributable: no new revision is the producer, a late tick is the
+        event loop, and a tick with data and no front is the render.
+        """
+
+        presented = Presented(self.surface(panel))
+        guards.free_running(self.session)
+        self._pump(1.0)
+
+        beats: list[float] = []
+        revisions: list[tuple[float, int]] = []
+        rate = guards.SourceRate(self.session, self.signal)
+        original_beat = self.presenter.beat
+
+        def timed_beat():
+            beats.append(time.perf_counter())
+            return original_beat()
+
+        self.presenter.beat = timed_beat
+        try:
+            presented.count = 0
+            presented.stamps.clear()
+            last_revision = None
+
+            def tick():
+                nonlocal last_revision
+                presented.poll()
+                revision = rate._revision()
+                if revision is not None and revision != last_revision:
+                    last_revision = revision
+                    revisions.append((time.perf_counter(), revision))
+
+            with guards.ProductBeat(self.app, self.presenter) as beat:
+                elapsed = beat.run(seconds, tick=tick)
+        finally:
+            self.presenter.beat = original_beat
+
+        beat_s = self.presenter.board.base_interval_ms / 1000.0
+        gaps = [
+            (a, b - a) for a, b in zip(presented.stamps, presented.stamps[1:])
+        ]
+        slips = []
+        for start, gap in gaps:
+            if gap <= 1.5 * beat_s:
+                continue
+            end = start + gap
+            ticks = [t for t in beats if start < t <= end]
+            fresh = [t for t, _r in revisions if start < t <= end]
+            longest_tick_gap = max(
+                (b - a for a, b in zip([start] + ticks, ticks + [end])),
+                default=gap,
+            )
+            if not fresh:
+                blame = "producer: no new revision in the gap"
+            elif longest_tick_gap > 1.5 * beat_s:
+                blame = "event loop: the beat itself did not fire on time"
+            else:
+                blame = "render: beats fired with data and no front followed"
+            slips.append(
+                {
+                    "gap_ms": round(gap * 1e3, 1),
+                    "beats_in_gap": len(ticks),
+                    "new_revisions_in_gap": len(fresh),
+                    "longest_tick_gap_ms": round(longest_tick_gap * 1e3, 1),
+                    "blame": blame,
+                }
+            )
+        beat_gaps = [b - a for a, b in zip(beats, beats[1:])]
+        return {
+            "window_s": round(elapsed, 2),
+            "beat_ms": round(beat_s * 1e3, 1),
+            "frames": presented.count,
+            "source_revisions": len(revisions),
+            "beat_ticks": len(beats),
+            "beat_tick_gap": stats(beat_gaps),
+            "frame_gap": stats([gap for _start, gap in gaps]),
+            "slips": slips,
+        }
+
     def gesture(self, panel, *, kind: str, moves: int = 8, trials: int = 6) -> dict:
         """Press-move-release with REAL Qt events, and prove it landed."""
 
@@ -301,6 +390,9 @@ def main() -> None:
     parser.add_argument("--size", default=SIZE_PRESET)
     parser.add_argument("--seconds", type=float, default=8.0)
     parser.add_argument("--gesture", action="store_true")
+    parser.add_argument("--stalls", action="store_true",
+                        help="attribute every slipped cycle to producer, "
+                             "event loop or render")
     parser.add_argument("--allow-low-density", action="store_true")
     parser.add_argument("--top", type=int, default=18)
     args = parser.parse_args()
@@ -316,6 +408,8 @@ def main() -> None:
     }
     bench.instrument(panel)
     payload["live"] = bench.live(panel, args.seconds)
+    if args.stalls:
+        payload["stalls"] = bench.attribute_stalls(panel, args.seconds)
     if args.gesture:
         payload["gesture"] = bench.gesture(panel, kind=args.kind)
     bench.close()
@@ -336,6 +430,24 @@ def main() -> None:
     print("      %d stalls past two beats; worst gaps %s ms" % (
         live["stalls_over_two_beats"], live["worst_gaps_ms"],
     ))
+    if "stalls" in payload:
+        st = payload["stalls"]
+        print()
+        print("%d frames, %d source revisions, %d beat ticks in %.1f s"
+              % (st["frames"], st["source_revisions"], st["beat_ticks"],
+                 st["window_s"]))
+        print("beat tick gap %s" % (st["beat_tick_gap"],))
+        print("frame gap     %s" % (st["frame_gap"],))
+        if st["slips"]:
+            print("slipped cycles:")
+            for slip in st["slips"]:
+                print("   %6.1f ms  beats=%d revisions=%d  worst tick gap "
+                      "%6.1f ms  -> %s"
+                      % (slip["gap_ms"], slip["beats_in_gap"],
+                         slip["new_revisions_in_gap"],
+                         slip["longest_tick_gap_ms"], slip["blame"]))
+        else:
+            print("no cycle slipped past 1.5 beats")
     if "gesture" in payload:
         print("gesture: %s" % (payload["gesture"],))
     print()

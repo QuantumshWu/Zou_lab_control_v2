@@ -141,14 +141,20 @@ def free_running(session) -> None:
     than half of it.
     """
 
+    # Idempotent in both halves.  A bench measures several things in one
+    # process and asks for acquisition before each; the second ask would
+    # otherwise raise DeviceUseBusy against the claim the first one took,
+    # and the second fire would raise against the pulse already playing.
+    # Already running is the state this function exists to reach.
     try:
         session._acquire_pulse_device()
     except Exception:
-        # Idempotent: a bench that measures several panels in one process
-        # calls this once per panel, and the second call would otherwise
-        # raise DeviceUseBusy against the claim the first one took.
         pass
-    session.sequencer.fire(cycles=None)
+    try:
+        session.sequencer.fire(cycles=None)
+    except RuntimeError as error:
+        if "still playing" not in str(error):
+            raise
 
 
 class SourceRate:
