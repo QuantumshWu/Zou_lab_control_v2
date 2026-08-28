@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ._axis_scale import LINEAR, LOG, midpoint
+
 from dataclasses import dataclass
 from enum import Enum
 from typing import ClassVar, TypeAlias
@@ -129,6 +131,13 @@ class SelectorItemContext:
     threshold_label_rgba: RGBA
     threshold_uses_x: bool
     threshold_text: str = ""
+    #: How each axis divides the space between its limits.  The scene
+    #: draws in DATA coordinates, so Matplotlib places what it is given
+    #: correctly whatever the scale -- but where a handle BELONGS is a
+    #: screen question, and answering it from the limits alone put the
+    #: side handles of a log box nowhere near its sides.
+    x_scale: str = LINEAR
+    y_scale: str = LINEAR
     x_label_factor: float = 1.0
     sample_value: float | str | None = None
     sample_span: float | None = None
@@ -208,8 +217,28 @@ def _selector_primitives(
     y0, y1 = context.y_limits
     xp = _selector_precision(abs(x1 - x0) * context.x_label_factor)
     yp = _selector_precision(abs(y1 - y0))
-    fx = lambda value: _selector_number(value * context.x_label_factor, xp)
-    fy = lambda value: _selector_number(value, yp)
+
+    # How many decimals a number deserves depends on what the axis can
+    # RESOLVE there.  A linear axis resolves the same absolute step
+    # everywhere, so one precision taken from the span serves all of it.
+    # A log axis resolves a constant ratio instead: across counts from
+    # 0.8 to 1200 the span-derived precision prints the bottom of the
+    # range as a bare integer, which there is the whole reading.
+    def _decimals(value: float, span_precision: int, scale: str) -> int:
+        if scale != LOG:
+            return span_precision
+        return _selector_precision(abs(float(value)))
+
+    def fx(value: float) -> str:
+        scaled = value * context.x_label_factor
+        return _selector_number(
+            scaled, _decimals(scaled, xp, context.x_scale)
+        )
+
+    def fy(value: float) -> str:
+        return _selector_number(
+            value, _decimals(value, yp, context.y_scale)
+        )
     target, zorder = context.target, style.selector_zorder
     line_color = (*context.selector_rgba[:3],
                   context.selector_rgba[3] * style.line_alpha)
@@ -232,7 +261,7 @@ def _selector_primitives(
     if state.kind is SelectorKind.X_RANGE:
         value = state.value
         assert isinstance(value, NumericRange)
-        middle_y = (y0 + y1) / 2
+        middle_y = midpoint(y0, y1, context.y_scale)
         return (
             line("low", ((value.low, y0), (value.low, y1))),
             line("high", ((value.high, y0), (value.high, y1))),
@@ -251,7 +280,8 @@ def _selector_primitives(
         low_x, high_x, low_y, high_y = (
             value.x.low, value.x.high, value.y.low, value.y.high
         )
-        middle_x, middle_y = (low_x + high_x) / 2, (low_y + high_y) / 2
+        middle_x = midpoint(low_x, high_x, context.x_scale)
+        middle_y = midpoint(low_y, high_y, context.y_scale)
         handles = (
             (low_x, low_y), (middle_x, low_y), (high_x, low_y),
             (high_x, middle_y), (high_x, high_y), (middle_x, high_y),

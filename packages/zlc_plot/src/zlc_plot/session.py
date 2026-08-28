@@ -793,6 +793,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             display_y,
             canonical_x,
             canonical_y,
+            # The one fact the limits cannot carry.  Read here because this
+            # is the only place an AxisTransform is ever built, and the axis
+            # is in hand; downstream nobody has the axis to ask.
+            str(axis.get_xscale()),
+            str(axis.get_yscale()),
         )
 
     def _axis_for_transform(self, transform: AxisTransform) -> Any | None:

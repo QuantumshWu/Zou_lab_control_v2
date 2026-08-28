@@ -6951,6 +6951,8 @@ class MatplotlibRenderer:
                 label_target=self._selector_target_for_axis(axis),
                 x_limits=tuple(map(float, axis.get_xlim())),
                 y_limits=tuple(map(float, axis.get_ylim())),
+                x_scale=str(axis.get_xscale()),
+                y_scale=str(axis.get_yscale()),
                 selector_rgba=selector_rgba,
                 color_limit_rgba=(selector_rgba, selector_rgba),
                 threshold_rgba=threshold_rgba,

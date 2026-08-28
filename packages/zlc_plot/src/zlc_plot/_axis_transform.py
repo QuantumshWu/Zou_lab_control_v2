@@ -7,6 +7,14 @@ from typing import Any
 
 import math
 
+from ._axis_scale import (
+    LINEAR,
+    LOG,
+    axis_space,
+    axis_value,
+    fraction_of as _fraction,
+    interpolate as _interpolate,
+)
 from .selectors import CrosshairPoint
 
 
@@ -46,6 +54,13 @@ class AxisTransform:
     y_limits: tuple[float, float]
     canonical_x_limits: tuple[float, float]
     canonical_y_limits: tuple[float, float]
+    #: How each axis maps value to position.  It is a field because it is a
+    #: fact about the drawn axis that nothing downstream can recover: the
+    #: limits alone say where the ends are, never how the space between them
+    #: is divided.  Defaulted so a caller that does not know cannot silently
+    #: claim an axis is logarithmic.
+    x_scale: str = LINEAR
+    y_scale: str = LINEAR
 
     def display_to_normalized(self, x: float, y: float) -> tuple[float, float]:
         """Map display-space axes data into top-origin widget coordinates."""
@@ -53,8 +68,8 @@ class AxisTransform:
         left, top, right, bottom = self.bounds
         x0, x1 = self.x_limits
         y0, y1 = self.y_limits
-        nx = left + (float(x) - x0) / (x1 - x0) * (right - left)
-        ny = top + (float(y) - y1) / (y0 - y1) * (bottom - top)
+        nx = left + _fraction(x, x0, x1, self.x_scale) * (right - left)
+        ny = top + _fraction(y, y1, y0, self.y_scale) * (bottom - top)
         return nx, ny
 
     def canonical_from_normalized(self, nx: float, ny: float) -> CrosshairPoint:
@@ -66,10 +81,12 @@ class AxisTransform:
         x0, x1 = self.canonical_x_limits
         y0, y1 = self.canonical_y_limits
         if self.role == "distribution":
-            return CrosshairPoint(x1 + ty * (x0 - x1), 0.0)
+            # The rail is the value axis stood on its side: its vertical
+            # extent is the X pair, so it is the X scale that divides it.
+            return CrosshairPoint(_interpolate(x1, x0, ty, self.x_scale), 0.0)
         return CrosshairPoint(
-            x0 + tx * (x1 - x0),
-            y1 + ty * (y0 - y1),
+            _interpolate(x0, x1, tx, self.x_scale),
+            _interpolate(y1, y0, ty, self.y_scale),
         )
 
     def display_from_normalized(self, nx: float, ny: float) -> CrosshairPoint:
@@ -81,11 +98,17 @@ class AxisTransform:
         x0, x1 = self.x_limits
         y0, y1 = self.y_limits
         if self.role == "distribution":
-            return CrosshairPoint(y1 + ty * (y0 - y1), 0.0)
+            return CrosshairPoint(_interpolate(y1, y0, ty, self.y_scale), 0.0)
         return CrosshairPoint(
-            x0 + tx * (x1 - x0),
-            y1 + ty * (y0 - y1),
+            _interpolate(x0, x1, tx, self.x_scale),
+            _interpolate(y1, y0, ty, self.y_scale),
         )
+
+    def screen_span(self, low: float, high: float, *, axis: str) -> float:
+        """How far apart two values are ON SCREEN, in axis space."""
+
+        scale = self.x_scale if axis == "x" else self.y_scale
+        return abs(axis_space(high, scale) - axis_space(low, scale))
 
     @staticmethod
     def _event_normalized(event: Any, canvas: Any) -> tuple[float, float] | None:
@@ -125,4 +148,11 @@ class AxisTransform:
         return nx * width, (1.0 - ny) * height
 
 
-__all__ = ["AxisTransform", "canvas_physical_size"]
+__all__ = [
+    "LINEAR",
+    "LOG",
+    "AxisTransform",
+    "axis_space",
+    "axis_value",
+    "canvas_physical_size",
+]

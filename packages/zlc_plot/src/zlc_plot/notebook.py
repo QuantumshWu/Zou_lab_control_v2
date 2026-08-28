@@ -37,6 +37,13 @@ def _axis_to_dict(axis: AxisTransform) -> dict[str, object]:
         "y_limits": list(axis.y_limits),
         "canonical_x_limits": list(axis.canonical_x_limits),
         "canonical_y_limits": list(axis.canonical_y_limits),
+        # The limits say where the ends are; only these say how the
+        # space between them is divided.  Left out, the browser rebuilds
+        # a linear map and stays broken after Qt is fixed -- two
+        # frontends failing the same way is exactly what one shared
+        # AxisTransform exists to prevent.
+        "x_scale": axis.x_scale,
+        "y_scale": axis.y_scale,
     }
 
 

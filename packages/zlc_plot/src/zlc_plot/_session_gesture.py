@@ -388,16 +388,21 @@ class GestureSessionMixin:
         canvas = axes.figure.canvas
 
         def pixel_point(coordinate: tuple[float, float]) -> np.ndarray:
-            shown = (
-                axes.transData.transform(coordinate)
-                if transform is None
-                else transform.display_to_pixel(
+            # ONE owner.  This used to fall back to axes.transData when
+            # no transform was carried -- a second answer to the same
+            # question, and the only correct one while the transform was
+            # scale-blind.  The fallback was also unreachable: the only
+            # caller returns before this when the press carried no
+            # transform.  A dead branch that is right, beside a live one
+            # that is wrong, is how the defect stayed invisible.
+            return np.asarray(
+                transform.display_to_pixel(
                     coordinate[0],
                     coordinate[1],
                     canvas,
-                )
+                ),
+                dtype=float,
             )
-            return np.asarray(shown, dtype=float)
 
         return area_drag_handle(
             displayed.value,
@@ -781,6 +786,11 @@ class GestureSessionMixin:
             point.y,
             x_bounds=self._selector_x_bounds(gesture.transform),
             y_bounds=self._selector_y_bounds(gesture.transform),
+            # The gesture began on THIS transform, so it is that
+            # transform's scales the drag has to slide under -- not
+            # whatever the axes happen to carry when it lands.
+            x_scale=gesture.transform.x_scale,
+            y_scale=gesture.transform.y_scale,
         )
         if updated is not None and updated != current:
             assert self._renderer is not None
@@ -909,6 +919,8 @@ class GestureSessionMixin:
                 point.y,
                 x_bounds=self._selector_x_bounds(gesture.transform),
                 y_bounds=self._selector_y_bounds(gesture.transform),
+                x_scale=gesture.transform.x_scale,
+                y_scale=gesture.transform.y_scale,
             )
         except Exception:
             self._cancel_gesture()

@@ -55,25 +55,38 @@ def area_drag_handle(
 
     x0, x1 = value.x.low, value.x.high
     y0, y1 = value.y.low, value.y.high
-    xm, ym = (x0 + x1) / 2.0, (y0 + y1) / 2.0
 
-    def distance(coordinate: tuple[float, float]) -> float:
-        return float(np.linalg.norm(pixel_point(coordinate) - mouse))
+    # Every handle is placed in PIXELS.  The four corners are the box's
+    # own values; the four edge middles are the middles of those corners
+    # ON SCREEN, which is the average of their pixels whatever scale the
+    # axis has.  Averaging the DATA values named the visual middle only
+    # on a linear axis -- between counts 0.8 and 1200 the arithmetic
+    # mean sits at 90.5 per cent of the box height, so a side handle was
+    # nowhere near the side it belongs to.  This keeps the engine free
+    # of Matplotlib exactly as the docstring above requires:
+    # ``pixel_point`` is still the only injected operation.
+    bottom_left = pixel_point((x0, y0))
+    bottom_right = pixel_point((x1, y0))
+    top_right = pixel_point((x1, y1))
+    top_left = pixel_point((x0, y1))
+
+    def middle(first: np.ndarray, second: np.ndarray) -> np.ndarray:
+        return (first + second) / 2.0
 
     handles = (
-        ((x0, y0), DragHandle.BOTTOM_LEFT),
-        ((xm, y0), DragHandle.BOTTOM),
-        ((x1, y0), DragHandle.BOTTOM_RIGHT),
-        ((x1, ym), DragHandle.RIGHT),
-        ((x1, y1), DragHandle.TOP_RIGHT),
-        ((xm, y1), DragHandle.TOP),
-        ((x0, y1), DragHandle.TOP_LEFT),
-        ((x0, ym), DragHandle.LEFT),
+        (bottom_left, DragHandle.BOTTOM_LEFT),
+        (middle(bottom_left, bottom_right), DragHandle.BOTTOM),
+        (bottom_right, DragHandle.BOTTOM_RIGHT),
+        (middle(bottom_right, top_right), DragHandle.RIGHT),
+        (top_right, DragHandle.TOP_RIGHT),
+        (middle(top_left, top_right), DragHandle.TOP),
+        (top_left, DragHandle.TOP_LEFT),
+        (middle(bottom_left, top_left), DragHandle.LEFT),
     )
     handle_hit = min(
         (
-            (distance(coordinate) / handle_radius, handle)
-            for coordinate, handle in handles
+            (float(np.linalg.norm(point - mouse)) / handle_radius, handle)
+            for point, handle in handles
         ),
         key=lambda item: item[0],
     )
@@ -81,7 +94,7 @@ def area_drag_handle(
         return handle_hit
 
     corners = np.asarray(
-        tuple(pixel_point(coordinate) for coordinate, _handle in handles[::2]),
+        (bottom_left, bottom_right, top_right, top_left),
         dtype=float,
     )
     low = np.min(corners, axis=0)

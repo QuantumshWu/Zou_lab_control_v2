@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ._axis_scale import LINEAR, LOG, axis_space, axis_value
+
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -360,12 +362,20 @@ def _drag_numeric_range(
     position: float,
     minimum_span: float | None = None,
     bounds: NumericRange | None = None,
+    scale: str = LINEAR,
 ) -> NumericRange:
     """Resolve every bounded numeric-range drag.
 
     ``minimum_span`` is optional for data selectors and explicit for color
     limits.  Keeping that policy in this one primitive prevents selector and
     display-control drags from developing different clamping behavior.
+
+    ``scale`` is how the axis divides the space between its ends.  Only the
+    BODY handle needs it: dragging a body means SLIDE, and sliding is a
+    screen operation.  Adding a data delta to both ends slides on a linear
+    axis and stretches on a logarithmic one, where equal screen distances
+    are equal ratios.  Every other handle sets an end to the value under the
+    pointer, which is already the right value whatever the scale.
     """
 
     if not isinstance(original, NumericRange):
@@ -412,6 +422,14 @@ def _drag_numeric_range(
         if bounds is not None:
             high = min(high, bounds.high)
         return NumericRange(original.low, high)
+    if scale == LOG:
+        # The same slide, expressed where the axis is straight.
+        moved = axis_space(position, scale) - axis_space(origin, scale)
+        shifted = NumericRange(
+            axis_value(axis_space(original.low, scale) + moved, scale),
+            axis_value(axis_space(original.high, scale) + moved, scale),
+        )
+        return _clamp_range(shifted, bounds)
     return _clamp_range(original.shifted(position - origin), bounds)
 
 
@@ -626,6 +644,8 @@ class _SelectorController:
         *,
         x_bounds: NumericRange | None = None,
         y_bounds: NumericRange | None = None,
+        x_scale: str = LINEAR,
+        y_scale: str = LINEAR,
     ) -> SelectorState | None:
         point = CrosshairPoint(x, y)
         with self._lock:
@@ -643,6 +663,8 @@ class _SelectorController:
                 point,
                 x_bounds=x_bounds,
                 y_bounds=y_bounds,
+                x_scale=x_scale,
+                y_scale=y_scale,
             )
             if value == gesture.candidate_value:
                 return replace(
@@ -671,6 +693,8 @@ class _SelectorController:
         *,
         x_bounds: NumericRange | None = None,
         y_bounds: NumericRange | None = None,
+        x_scale: str = LINEAR,
+        y_scale: str = LINEAR,
     ) -> SelectorState | None:
         """Return the final transient value without committing controller state."""
 
@@ -680,6 +704,8 @@ class _SelectorController:
                 y,
                 x_bounds=x_bounds,
                 y_bounds=y_bounds,
+                x_scale=x_scale,
+                y_scale=y_scale,
             )
         finally:
             with self._lock:
@@ -733,6 +759,8 @@ def _dragged_value(
     *,
     x_bounds: NumericRange | None,
     y_bounds: NumericRange | None,
+    x_scale: str = LINEAR,
+    y_scale: str = LINEAR,
 ) -> SelectorValue:
     handle = gesture.handle
     origin = gesture.origin
@@ -745,6 +773,7 @@ def _dragged_value(
             origin=origin.x,
             position=point.x,
             bounds=x_bounds,
+            scale=x_scale,
         )
     if kind is SelectorKind.AREA:
         assert isinstance(original, RectangleRange)
@@ -756,6 +785,7 @@ def _dragged_value(
                     origin=origin.x,
                     position=point.x,
                     bounds=x_bounds,
+            scale=x_scale,
                 ),
                 _drag_numeric_range(
                     original.y,
@@ -763,6 +793,7 @@ def _dragged_value(
                     origin=origin.y,
                     position=point.y,
                     bounds=y_bounds,
+            scale=y_scale,
                 ),
             )
         x = original.x
@@ -774,6 +805,7 @@ def _dragged_value(
                 origin=origin.x,
                 position=point.x,
                 bounds=x_bounds,
+            scale=x_scale,
             )
             y = _drag_numeric_range(
                 y,
@@ -781,6 +813,7 @@ def _dragged_value(
                 origin=origin.y,
                 position=point.y,
                 bounds=y_bounds,
+            scale=y_scale,
             )
         else:
             if handle in {DragHandle.LEFT, DragHandle.BOTTOM_LEFT, DragHandle.TOP_LEFT}:
@@ -790,6 +823,7 @@ def _dragged_value(
                     origin=origin.x,
                     position=point.x,
                     bounds=x_bounds,
+            scale=x_scale,
                 )
             if handle in {DragHandle.RIGHT, DragHandle.BOTTOM_RIGHT, DragHandle.TOP_RIGHT}:
                 x = _drag_numeric_range(
@@ -798,6 +832,7 @@ def _dragged_value(
                     origin=origin.x,
                     position=point.x,
                     bounds=x_bounds,
+            scale=x_scale,
                 )
             if handle in {DragHandle.BOTTOM, DragHandle.BOTTOM_LEFT, DragHandle.BOTTOM_RIGHT}:
                 y = _drag_numeric_range(
@@ -806,6 +841,7 @@ def _dragged_value(
                     origin=origin.y,
                     position=point.y,
                     bounds=y_bounds,
+            scale=y_scale,
                 )
             if handle in {DragHandle.TOP, DragHandle.TOP_LEFT, DragHandle.TOP_RIGHT}:
                 y = _drag_numeric_range(
@@ -814,6 +850,7 @@ def _dragged_value(
                     origin=origin.y,
                     position=point.y,
                     bounds=y_bounds,
+            scale=y_scale,
                 )
         return RectangleRange(x, y)
     if kind is SelectorKind.CROSSHAIR:
