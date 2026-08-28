@@ -735,14 +735,43 @@ class ConsoleBench:
                 }
             )
         beat_gaps = [b - a for a, b in zip(beats, beats[1:])]
+        only_gaps = [gap for _start, gap in gaps]
+        # How far the CONTENT moved between two presented frames.  A camera
+        # producing three frames per beat means the panel shows every third
+        # one, and a steady 9 fps of every-third looks smooth.  The same 9
+        # fps of two-then-five does not, and nothing in a frame rate, a gap
+        # distribution or a stall count can tell the two apart -- the frame
+        # arrived on time either way, carrying a picture from further ahead
+        # or further behind than the last one.
+        strides = []
+        stamps = presented.stamps
+        for start, end in zip(stamps, stamps[1:]):
+            strides.append(
+                sum(1 for moment, _r in revisions if start < moment <= end)
+            )
+        # Everything live() reports, plus the attribution -- so this can BE
+        # the measurement window instead of following one.  Two windows put
+        # the hitch in the first and the attribution in the second, and
+        # divided two windows of seam time by one window's frames.
         return {
             "window_s": round(elapsed, 2),
             "beat_ms": round(beat_s * 1e3, 1),
             "frames": presented.count,
+            "frames_per_second": round(presented.count / elapsed, 1),
+            "frame_gap": stats(only_gaps),
+            "stalls_over_two_beats": sum(
+                1 for gap in only_gaps if gap > 2 * beat_s
+            ),
+            "worst_gaps_ms": [
+                round(gap * 1e3, 1) for gap in sorted(only_gaps, reverse=True)[:5]
+            ],
             "source_revisions": len(revisions),
             "beat_ticks": len(beats),
             "beat_tick_gap": stats(beat_gaps),
-            "frame_gap": stats([gap for _start, gap in gaps]),
+            "content_stride": stats([float(value) for value in strides]),
+            "content_stride_counts": {
+                str(value): strides.count(value) for value in sorted(set(strides))
+            },
             "slips": slips,
         }
 
@@ -1035,11 +1064,14 @@ def main() -> None:
                 "density": bench.density(panel),
             }
             bench.instrument(panel)
-            payload["live"] = bench.live(panel, args.seconds)
+            if args.stalls:
+                # One window, measured and attributed.
+                payload["stalls"] = bench.attribute_stalls(panel, args.seconds)
+                payload["live"] = payload["stalls"]
+            else:
+                payload["live"] = bench.live(panel, args.seconds)
             if args.edits:
                 payload["edits"] = bench.edit_run(panel, kind=args.kind)
-            if args.stalls:
-                payload["stalls"] = bench.attribute_stalls(panel, args.seconds)
             if args.gesture:
                 payload["gesture"] = bench.gesture(panel, kind=args.kind)
     if "edits" in payload:
@@ -1120,6 +1152,8 @@ def main() -> None:
                  st["window_s"]))
         print("beat tick gap %s" % (st["beat_tick_gap"],))
         print("frame gap     %s" % (st["frame_gap"],))
+        print("content stride (source revisions skipped between two shown "
+              "frames): %s" % (st["content_stride_counts"],))
         if st["slips"]:
             print("slipped cycles:")
             for slip in st["slips"]:
