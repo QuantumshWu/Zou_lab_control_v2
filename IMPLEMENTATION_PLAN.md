@@ -293,19 +293,29 @@
 
 | kind | live 帧 中位/p90 | 手势帧 中位/p90 | hand→picture 中位/p90 |
 |---|---|---|---|
-| image heatmap | 36.8 / 41.7 | 11.0 / 39.4 | **6.5 / 12.5** |
-| image 3D bars | 85.8 / 94.6 | 38.9 / 87.5 | **42.9 / 138.2** |
-| curve | 13.3 / 15.4 | 8.9 / 18.7 | **9.1 / 12.3** |
-| histogram | 36.2 / 43.9 | 12.1 / 45.3 | **10.6 / 16.9** |
-| rolling | 12.6 / 16.2 | 10.2 / 20.3 | **9.9 / 14.0** |
-| facet grid | 17.5 / 19.3 | 15.0 / 22.9 | **72.9 / 85.7** |
+| image heatmap | 41.5 / 47.4 | 11.5 / 43.0 | **8.2 / 16.8** |
+| image 3D bars | 85.8 / 89.9 | 35.8 / 86.5 | **34.7 / 135.3** |
+| curve | 12.3 / 15.1 | 10.7 / 21.4 | **9.3 / 13.3** |
+| histogram | 33.9 / 40.4 | 12.4 / 47.7 | **6.4 / 15.2** |
+| rolling | 14.1 / 16.3 | 10.1 / 17.7 | **8.1 / 13.6** |
+| facet grid | 20.7 / 23.7 | 11.1 / 45.3 | **8.6 / 14.4** |
 
-组合场景（`chain/combos.py`）：四面板并存 2x2 手势 image 6.7 / 3D 24.6 / curve 6.5 /
-rolling 7.5 ms；ROI 链 相机 6.9、ROI 3D 面板 32.1 ms；带 fit 的 rolling 8.6 ms。
+组合场景（`chain/combos.py`）：四面板并存 2x2 手势 image 7.2 / 3D 30.9 / curve 6.3 /
+rolling 6.3 ms；ROI 链 相机 9.0、ROI 3D 面板 38.5 ms；带 fit 的 rolling 6.3 ms。
 
 **同一杆秤的对照**：heatmap 的选框手势走 overlay（只重画矩形）4.4–7.3 ms；
 heatmap 的**中键 pan**（同样整幅重画）**30.3 ms**；静源 3D orbit **29.7 / 30.7 / 31.2 ms**。
 3D 与 heatmap 的整幅帧持平——那是这套系统重画一幅画的地板。
+
+### CPU 与内存（`chain/cpusplit2.py`，free-running）
+
+| 阶段 | 修 `OMP_WAIT_POLICY` 前 | 后 |
+|---|---|---|
+| 只有生产者、零面板 | 1016% of one core | **82%** |
+| 四个 2x2 面板 | 874% | **138%** |
+| 单个 image 面板 4x4 | 846% | **115%** |
+
+内存：四面板约 **360 MB**，稳定不涨（面板删除后回落）。
 
 ### 已做出的裁决（不再重开）
 
@@ -319,15 +329,26 @@ heatmap 的**中键 pan**（同样整幅重画）**30.3 ms**；静源 3D orbit *
 
 ### 仍然开着的
 
-- **facet grid 的手势走错车道**：ADAPTIVE 帧只有 0.5 ms（什么都没做），手实际在等
-  下一个 PRESENTATION 帧，hand→picture 72.9 ms。全表最大的单点异常。
-- **3D 的 p90 138 ms**：手势期间 87 ms 的 live 帧插队。中位被仲裁保住了，尾巴没有。
-- **ROI 链上两个 p90 异常**：126 / 130 ms。
-- **histogram 的 live 帧 36.2 ms**：每帧重新分箱 230 万个值。
+- **3D 的 live 帧 86 ms**，是它 p90 高的原因：一帧新数据要重算派生面（59 万格）再光栅化，
+  一次 live 帧插进手势中间就把那一拍拉到 130 ms。手势本身（静源 30 ms）已与 heatmap 持平。
+- **rolling 的区域切不到过去的 shot**：窗口是"距最新多少发"，而派生只看得到当下这一发，
+  所以只有触到最新一发的窗口才有数据。现在会明说，不再发布一整帧无效数据（`ea462c6`）。
+  要真的切到那些 shot，需要用面板已经租下的 indexed history 重新派生——那是能力，不是修补。
 - **`_reduce_blocks` 4.2 ms 出现在半数 image 帧上**（裁决见上，记录在此备查）。
 - **z 刻度标签被切**（"0.8" 印成 ".8"）：场景 fit 只留 4% 几何 margin。先于本轮存在。
 - **`test_guard_c_save_semantics` 红**：保存面板图时 matplotlib mathtext
   `ParseException`。**在 master 上同样红**，与本轮无关。
+- **`Github\zlc_*` 是拆包残留的旧副本**（`zlc_runtime/selection_bridge.py` 56KB vs 树内 96KB，
+  8 月 3 日），pip editable 全部指向它们。走 `zou_lab_control` bootstrap 时不受影响
+  （它把 checkout 置顶），但**裸 `import zlc_runtime` 会拿到旧副本**。删不删是用户的事。
+
+### 已经查清、不是缺陷的
+
+- **facet grid 先前那个 78 ms 是探针假象**：facet 的 overview 是"选择器"，
+  按设计只认左双击进入单元格，别的手势一律忽略——探针在它上面拖，量到的是下一帧 live 到达。
+  探针改成先进入单元格后，facet 是 **8.6 ms**，与其它 kind 同级。
+- **live rolling 刚挂 fit 时的 `fit requires more finite observations than free parameters`**
+  只出现一次：窗口里的点还少于自由参数的那一刻。随后正常求解。是正确反馈。
 
 ### 探针（`C:\Users\eadri\AppData\Local\Temp\claude\chain\`）
 
