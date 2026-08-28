@@ -22,9 +22,17 @@ constantly: a function whose own work is 0.4 ms was reported at 4.8 ms of
 wall time, and read as "this is slow" when it was "this waited".  The two
 columns are the difference between an optimisation target and a scheduling
 fact -- ``time.thread_time`` is per-thread CPU, so waiting does not count.
+
+ONE TRAP in that column: ``time.thread_time`` counts the CALLING thread only.
+A seam that hands work to a compiled ``parallel=True`` kernel does its work on
+libomp's worker threads, so it reads like a seam that waited -- 4 per cent for
+``_view_filling_rgba_front``, whose whole job is to call one.  Low cpu% means
+"this thread was not running": either it waited, OR it is a compiled parallel
+region.  Which one it is, is a fact about the callee, not about the number.
 """
 from __future__ import annotations
 
+import inspect
 import threading
 import time
 from collections import defaultdict
@@ -97,14 +105,25 @@ def watch(instance, *names: str, prefix: str = "") -> list[str]:
         original = getattr(type(instance), name, None)
         if original is None or not callable(original):
             continue
+        # A STATICMETHOD reached through the class is a plain function, and
+        # binding a wrapper as an instance attribute means the call site no
+        # longer supplies the instance -- so passing one injects an argument
+        # the function does not take.  Wrapping _native_draw that way raised
+        # inside every full draw, the panels stopped presenting, and the
+        # bench reported 0.1 frames per second as if it were a measurement.
+        raw = inspect.getattr_static(type(instance), name, None)
+        takes_self = not isinstance(raw, (staticmethod, classmethod))
 
-        def make(function, seam):
-            def call(*args, **kwargs):
-                return _timed(seam, function)(instance, *args, **kwargs)
-
+        def make(function, seam, pass_self):
+            if pass_self:
+                def call(*args, **kwargs):
+                    return _timed(seam, function)(instance, *args, **kwargs)
+            else:
+                def call(*args, **kwargs):
+                    return _timed(seam, function)(*args, **kwargs)
             return call
 
-        setattr(instance, name, make(original, f"{label}.{name}"))
+        setattr(instance, name, make(original, f"{label}.{name}", takes_self))
         bound.append(name)
     return bound
 
@@ -161,7 +180,8 @@ def report(seconds: float, top: int = 20) -> str:
 
     ``cpu%`` is what separates a slow seam from a waiting one: at 100 per
     cent the thread ran the whole time and the number is work; well below
-    it the thread was descheduled, and optimising the seam buys nothing.
+    it the thread was not running -- descheduled, or inside a compiled
+    parallel region whose work is on other threads.  See the module note.
     """
 
     lines = [

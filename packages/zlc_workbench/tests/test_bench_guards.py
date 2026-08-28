@@ -147,3 +147,49 @@ def test_a_console_bench_cannot_be_left_open() -> None:
         for thread in threading.enumerate()
         if thread.name in survivors
     )
+
+
+def test_a_probe_must_not_break_what_it_measures() -> None:
+    """Binding a wrapper as an instance attribute drops the implicit self.
+
+    A staticmethod reached through the class is a plain function; wrapping
+    it and passing the instance injects an argument it does not take.  That
+    is what happened to ``_native_draw``: every full draw raised, the panels
+    stopped presenting, and the bench reported 0.1 frames per second as a
+    performance number instead of a broken renderer.
+    """
+
+    from bench.plot_perf import probe
+
+    class Subject:
+        def __init__(self):
+            self.seen = []
+
+        def method(self, value):
+            self.seen.append(("method", value))
+            return value
+
+        @staticmethod
+        def helper(value):
+            return value * 2
+
+        @classmethod
+        def maker(cls, value):
+            return (cls.__name__, value)
+
+    subject = Subject()
+    probe.reset()
+    assert set(probe.watch(subject, "method", "helper", "maker")) == {
+        "method", "helper", "maker"
+    }
+
+    assert subject.method(3) == 3
+    assert subject.seen == [("method", 3)]
+    # These are the ones that used to raise.
+    assert subject.helper(4) == 8
+    assert subject.maker(5) == ("Subject", 5)
+
+    assert probe.calls("Subject.method") == 1
+    assert probe.calls("Subject.helper") == 1
+    assert probe.calls("Subject.maker") == 1
+    probe.reset()

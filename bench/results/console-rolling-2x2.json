@@ -1,7 +1,7 @@
 {
   "kind": "rolling",
   "size": "2x2",
-  "panels_in_console": 2,
+  "panels_in_console": 1,
   "density": {
     "figure_px": [
       1470,
@@ -12,96 +12,98 @@
     "megapixels": 1.57
   },
   "live": {
-    "window_s": 6.0,
-    "frames": 56,
-    "frames_per_second": 9.3,
+    "window_s": 8.0,
+    "frames": 75,
+    "frames_per_second": 9.4,
     "beat_ms": 100.0,
     "frame_gap": {
-      "n": 55,
-      "median_ms": 110.76,
-      "p90_ms": 116.68,
-      "p99_ms": 126.59,
-      "max_ms": 127.04,
-      "best_ms": 31.87
+      "n": 74,
+      "median_ms": 109.91,
+      "p90_ms": 119.45,
+      "p99_ms": 122.88,
+      "max_ms": 124.05,
+      "best_ms": 9.11
     },
     "stalls_over_two_beats": 0,
     "worst_gaps_ms": [
-      127.0,
-      126.2,
-      125.8,
-      121.2,
-      119.3
+      124.1,
+      122.5,
+      122.0,
+      121.8,
+      121.0
     ],
     "seams": [
       {
         "seam": "MatplotlibRenderer._compose_frame",
-        "calls": 55,
-        "self_ms_total": 603.5,
-        "self_ms_per_call": 10.97,
-        "per_second": 9.2
-      },
-      {
-        "seam": "_image_raster._area_mean",
-        "calls": 55,
-        "self_ms_total": 196.9,
-        "self_ms_per_call": 3.58,
+        "calls": 74,
+        "self_ms_total": 424.3,
+        "self_ms_per_call": 5.73,
+        "cpu_ms_per_call": 6.12,
+        "cpu_share": 1.07,
         "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer.present",
-        "calls": 55,
-        "self_ms_total": 36.7,
-        "self_ms_per_call": 0.67,
-        "per_second": 9.2
-      },
-      {
-        "seam": "MatplotlibRenderer._dynamic_artists",
-        "calls": 55,
-        "self_ms_total": 15.5,
-        "self_ms_per_call": 0.28,
-        "per_second": 9.2
-      },
-      {
-        "seam": "_image_raster.prepare_image_front",
-        "calls": 55,
-        "self_ms_total": 4.7,
-        "self_ms_per_call": 0.09,
+        "calls": 74,
+        "self_ms_total": 69.3,
+        "self_ms_per_call": 0.94,
+        "cpu_ms_per_call": 0.21,
+        "cpu_share": 0.23,
         "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer._update_horizontal_histogram",
-        "calls": 55,
-        "self_ms_total": 4.6,
+        "calls": 73,
+        "self_ms_total": 5.5,
         "self_ms_per_call": 0.08,
-        "per_second": 9.2
+        "cpu_ms_per_call": 0.21,
+        "cpu_share": 2.85,
+        "per_second": 9.1
       },
       {
-        "seam": "MatplotlibRenderer._update_selectors",
-        "calls": 55,
+        "seam": "MatplotlibRenderer._dynamic_artists",
+        "calls": 73,
         "self_ms_total": 3.5,
-        "self_ms_per_call": 0.06,
-        "per_second": 9.2
+        "self_ms_per_call": 0.05,
+        "cpu_ms_per_call": 0.21,
+        "cpu_share": 4.49,
+        "per_second": 9.1
       },
       {
         "seam": "MatplotlibRenderer._blit_exact_rgba_image",
-        "calls": 1430,
-        "self_ms_total": 1.5,
+        "calls": 1905,
+        "self_ms_total": 2.3,
         "self_ms_per_call": 0.0,
-        "per_second": 238.3
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 238.1
+      },
+      {
+        "seam": "MatplotlibRenderer._update_selectors",
+        "calls": 73,
+        "self_ms_total": 2.3,
+        "self_ms_per_call": 0.03,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.1
       },
       {
         "seam": "MatplotlibRenderer._settle_owned_boxes",
-        "calls": 55,
-        "self_ms_total": 0.3,
+        "calls": 73,
+        "self_ms_total": 0.4,
         "self_ms_per_call": 0.01,
-        "per_second": 9.2
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.1
       },
       {
         "seam": "MatplotlibRenderer._update_fit",
-        "calls": 55,
+        "calls": 73,
         "self_ms_total": 0.2,
         "self_ms_per_call": 0.0,
-        "per_second": 9.2
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.1
       }
     ]
   },

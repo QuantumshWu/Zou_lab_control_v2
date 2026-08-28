@@ -1,7 +1,7 @@
 {
   "kind": "curve",
   "size": "2x2",
-  "panels_in_console": 2,
+  "panels_in_console": 1,
   "density": {
     "figure_px": [
       1470,
@@ -12,96 +12,98 @@
     "megapixels": 1.57
   },
   "live": {
-    "window_s": 6.0,
-    "frames": 57,
-    "frames_per_second": 9.5,
+    "window_s": 8.0,
+    "frames": 74,
+    "frames_per_second": 9.2,
     "beat_ms": 100.0,
     "frame_gap": {
-      "n": 56,
-      "median_ms": 107.45,
-      "p90_ms": 119.64,
-      "p99_ms": 126.45,
-      "max_ms": 129.42,
-      "best_ms": 9.87
+      "n": 73,
+      "median_ms": 110.19,
+      "p90_ms": 118.51,
+      "p99_ms": 127.73,
+      "max_ms": 131.86,
+      "best_ms": 12.52
     },
     "stalls_over_two_beats": 0,
     "worst_gaps_ms": [
-      129.4,
-      124.0,
-      122.7,
+      131.9,
+      126.1,
+      124.9,
       120.9,
-      120.7
+      119.9
     ],
     "seams": [
       {
         "seam": "MatplotlibRenderer._compose_frame",
-        "calls": 55,
-        "self_ms_total": 299.8,
-        "self_ms_per_call": 5.45,
-        "per_second": 9.2
-      },
-      {
-        "seam": "_image_raster._area_mean",
-        "calls": 55,
-        "self_ms_total": 95.7,
-        "self_ms_per_call": 1.74,
-        "per_second": 9.2
-      },
-      {
-        "seam": "MatplotlibRenderer._update_curve",
-        "calls": 55,
-        "self_ms_total": 43.7,
-        "self_ms_per_call": 0.79,
-        "per_second": 9.2
+        "calls": 73,
+        "self_ms_total": 312.6,
+        "self_ms_per_call": 4.28,
+        "cpu_ms_per_call": 5.35,
+        "cpu_share": 1.25,
+        "per_second": 9.1
       },
       {
         "seam": "MatplotlibRenderer.present",
-        "calls": 55,
-        "self_ms_total": 14.5,
-        "self_ms_per_call": 0.26,
-        "per_second": 9.2
+        "calls": 73,
+        "self_ms_total": 42.0,
+        "self_ms_per_call": 0.57,
+        "cpu_ms_per_call": 0.21,
+        "cpu_share": 0.37,
+        "per_second": 9.1
       },
       {
-        "seam": "_image_raster.prepare_image_front",
-        "calls": 55,
-        "self_ms_total": 3.9,
-        "self_ms_per_call": 0.07,
-        "per_second": 9.2
-      },
-      {
-        "seam": "MatplotlibRenderer._update_selectors",
-        "calls": 55,
-        "self_ms_total": 2.1,
-        "self_ms_per_call": 0.04,
-        "per_second": 9.2
+        "seam": "MatplotlibRenderer._update_curve",
+        "calls": 73,
+        "self_ms_total": 34.6,
+        "self_ms_per_call": 0.47,
+        "cpu_ms_per_call": 0.43,
+        "cpu_share": 0.9,
+        "per_second": 9.1
       },
       {
         "seam": "MatplotlibRenderer._dynamic_artists",
-        "calls": 55,
-        "self_ms_total": 1.9,
+        "calls": 73,
+        "self_ms_total": 3.8,
+        "self_ms_per_call": 0.05,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.1
+      },
+      {
+        "seam": "MatplotlibRenderer._update_selectors",
+        "calls": 73,
+        "self_ms_total": 2.3,
         "self_ms_per_call": 0.03,
-        "per_second": 9.2
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.1
       },
       {
         "seam": "MatplotlibRenderer._blit_exact_rgba_image",
-        "calls": 770,
-        "self_ms_total": 1.0,
+        "calls": 1022,
+        "self_ms_total": 1.4,
         "self_ms_per_call": 0.0,
-        "per_second": 128.3
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 127.7
       },
       {
         "seam": "MatplotlibRenderer._settle_owned_boxes",
-        "calls": 55,
+        "calls": 73,
         "self_ms_total": 0.3,
         "self_ms_per_call": 0.0,
-        "per_second": 9.2
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.1
       },
       {
         "seam": "MatplotlibRenderer._update_fit",
-        "calls": 55,
+        "calls": 73,
         "self_ms_total": 0.2,
         "self_ms_per_call": 0.0,
-        "per_second": 9.2
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.1
       }
     ]
   },
