@@ -441,7 +441,9 @@ class ConsoleBench:
             ]
             rows.append(
                 {
-                    "panel": panel.state.kind,
+                    # The label the probe prefixes with, so the seam
+                    # roll-up joins to these rows.
+                    "panel": self._kinds.get(panel.panel_id) or panel.state.kind,
                     "frames": counter.count,
                     "frames_per_second": round(counter.count / elapsed, 1),
                     "frame_gap": stats(gaps),
@@ -906,6 +908,50 @@ class ConsoleBench:
         return tuple(sorted(thread.name for thread in left))
 
 
+def render_cost(seams, frames_by_panel: dict) -> list[dict]:
+    """Per-frame render cost per panel, rolled up from the self-times.
+
+    Self-times sum to the frame by construction, so grouping them by the
+    panel prefix gives what one panel costs to draw once -- which is the
+    number the session and host layers report, and the only way to put a
+    console panel beside a standalone plot.  The frame gap cannot do it:
+    the console is beat-paced, so every panel reports the beat.
+    """
+
+    totals: dict[str, list] = {}
+    for row in seams:
+        seam = row["seam"]
+        if "[" not in seam or "]" not in seam:
+            continue
+        panel = seam[seam.index("[") + 1:seam.index("]")]
+        entry = totals.setdefault(panel, [0.0, 0.0])
+        entry[0] += row["self_ms_total"]
+        entry[1] += row["self_ms_per_call"] * row["calls"] * row["cpu_share"]
+    out = []
+    for panel, (wall, cpu) in sorted(totals.items(), key=lambda i: -i[1][0]):
+        frames = max(1, frames_by_panel.get(panel, 0))
+        out.append({
+            "panel": panel,
+            "frames": frames,
+            "wall_ms_per_frame": round(wall / frames, 2),
+            "cpu_ms_per_frame": round(cpu / frames, 2),
+        })
+    return out
+
+
+def _print_render_cost(payload: dict, seconds: float, frames_by_panel: dict) -> None:
+    rows = render_cost(probe.rows(seconds), frames_by_panel)
+    if not rows:
+        return
+    payload["render_cost"] = rows
+    print()
+    print("render cost per frame (self-times rolled up per panel)")
+    for row in rows:
+        print("   %-12s %7.2f ms wall   %7.2f ms cpu   over %d frames"
+              % (row["panel"], row["wall_ms_per_frame"],
+                 row["cpu_ms_per_frame"], row["frames"]))
+
+
 def _print_problems(payload: dict) -> None:
     problems = payload.get("problems") or []
     print()
@@ -1043,6 +1089,11 @@ def main() -> None:
             together["rss_mb_before"], together["rss_mb_after"]))
         print()
         print(probe.report(together["window_s"], top=args.top))
+        _print_render_cost(
+            payload,
+            together["window_s"],
+            {row["panel"]: row["frames"] for row in together["panels"]},
+        )
         _print_problems(payload)
         left = payload["threads_left_running"]
         print()
@@ -1083,6 +1134,7 @@ def main() -> None:
         print("gesture: %s" % (payload["gesture"],))
     print()
     print(probe.report(live["window_s"], top=args.top))
+    _print_render_cost(payload, live["window_s"], {args.kind: live["frames"]})
     _print_problems(payload)
     left = payload["threads_left_running"]
     print()

@@ -25,11 +25,11 @@
         "frames_per_second": 9.2,
         "frame_gap": {
           "n": 109,
-          "median_ms": 111.3,
-          "p90_ms": 125.94,
-          "p99_ms": 141.65,
-          "max_ms": 154.91,
-          "best_ms": 49.32
+          "median_ms": 109.66,
+          "p90_ms": 132.67,
+          "p99_ms": 162.52,
+          "max_ms": 165.18,
+          "best_ms": 59.1
         },
         "stalls_over_two_beats": 0
       },
@@ -39,11 +39,11 @@
         "frames_per_second": 9.2,
         "frame_gap": {
           "n": 109,
-          "median_ms": 111.31,
-          "p90_ms": 125.93,
-          "p99_ms": 141.65,
-          "max_ms": 154.9,
-          "best_ms": 49.32
+          "median_ms": 109.65,
+          "p90_ms": 132.67,
+          "p99_ms": 162.75,
+          "max_ms": 165.18,
+          "best_ms": 59.1
         },
         "stalls_over_two_beats": 0
       },
@@ -53,11 +53,11 @@
         "frames_per_second": 9.2,
         "frame_gap": {
           "n": 109,
-          "median_ms": 111.31,
-          "p90_ms": 125.93,
-          "p99_ms": 141.65,
-          "max_ms": 154.9,
-          "best_ms": 49.32
+          "median_ms": 109.65,
+          "p90_ms": 132.67,
+          "p99_ms": 162.97,
+          "max_ms": 165.17,
+          "best_ms": 59.1
         },
         "stalls_over_two_beats": 0
       },
@@ -67,366 +67,366 @@
         "frames_per_second": 9.2,
         "frame_gap": {
           "n": 109,
-          "median_ms": 111.32,
-          "p90_ms": 125.93,
-          "p99_ms": 141.65,
-          "max_ms": 154.9,
-          "best_ms": 49.31
+          "median_ms": 109.64,
+          "p90_ms": 132.67,
+          "p99_ms": 163.2,
+          "max_ms": 165.17,
+          "best_ms": 59.1
         },
         "stalls_over_two_beats": 0
       }
     ],
     "beat_ms": 100.0,
-    "cpu_percent_of_one_core": 153.0,
-    "rss_mb_before": 832.0,
-    "rss_mb_after": 871.7,
+    "cpu_percent_of_one_core": 164.0,
+    "rss_mb_before": 726.0,
+    "rss_mb_after": 852.3,
     "seams": [
       {
         "seam": "MatplotlibRenderer[rolling]._compose_frame",
         "calls": 109,
-        "self_ms_total": 3354.7,
-        "self_ms_per_call": 30.78,
-        "cpu_ms_per_call": 6.31,
-        "cpu_share": 0.2,
+        "self_ms_total": 4297.4,
+        "self_ms_per_call": 39.43,
+        "cpu_ms_per_call": 6.45,
+        "cpu_share": 0.16,
         "per_second": 9.1
       },
       {
         "seam": "MatplotlibRenderer[histogram]._native_draw",
-        "calls": 94,
-        "self_ms_total": 3349.3,
-        "self_ms_per_call": 35.63,
-        "cpu_ms_per_call": 10.47,
-        "cpu_share": 0.29,
-        "per_second": 7.8
+        "calls": 92,
+        "self_ms_total": 4104.7,
+        "self_ms_per_call": 44.62,
+        "cpu_ms_per_call": 12.06,
+        "cpu_share": 0.27,
+        "per_second": 7.7
       },
       {
         "seam": "MatplotlibRenderer[image]._compose_frame",
         "calls": 109,
-        "self_ms_total": 1849.2,
-        "self_ms_per_call": 16.96,
-        "cpu_ms_per_call": 9.17,
-        "cpu_share": 0.54,
+        "self_ms_total": 2355.5,
+        "self_ms_per_call": 21.61,
+        "cpu_ms_per_call": 11.47,
+        "cpu_share": 0.53,
         "per_second": 9.1
       },
       {
         "seam": "MatplotlibRenderer[image]._update_image_chrome",
         "calls": 109,
-        "self_ms_total": 1262.5,
-        "self_ms_per_call": 11.58,
-        "cpu_ms_per_call": 2.44,
-        "cpu_share": 0.21,
+        "self_ms_total": 1433.7,
+        "self_ms_per_call": 13.15,
+        "cpu_ms_per_call": 3.73,
+        "cpu_share": 0.28,
         "per_second": 9.1
       },
       {
         "seam": "MatplotlibRenderer[image]._view_filling_rgba_front",
         "calls": 110,
-        "self_ms_total": 935.2,
-        "self_ms_per_call": 8.5,
-        "cpu_ms_per_call": 1.28,
-        "cpu_share": 0.15,
+        "self_ms_total": 1166.3,
+        "self_ms_per_call": 10.6,
+        "cpu_ms_per_call": 0.85,
+        "cpu_share": 0.08,
         "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[curve]._compose_frame",
         "calls": 110,
-        "self_ms_total": 689.4,
-        "self_ms_per_call": 6.27,
-        "cpu_ms_per_call": 2.98,
-        "cpu_share": 0.48,
+        "self_ms_total": 867.5,
+        "self_ms_per_call": 7.89,
+        "cpu_ms_per_call": 3.41,
+        "cpu_share": 0.43,
         "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[histogram]._dynamic_artists",
         "calls": 110,
-        "self_ms_total": 607.3,
-        "self_ms_per_call": 5.52,
-        "cpu_ms_per_call": 2.41,
-        "cpu_share": 0.44,
+        "self_ms_total": 732.3,
+        "self_ms_per_call": 6.66,
+        "cpu_ms_per_call": 3.12,
+        "cpu_share": 0.47,
         "per_second": 9.2
       },
       {
         "seam": "_image_raster._area_mean",
-        "calls": 109,
-        "self_ms_total": 533.0,
-        "self_ms_per_call": 4.89,
-        "cpu_ms_per_call": 1.72,
+        "calls": 110,
+        "self_ms_total": 619.2,
+        "self_ms_per_call": 5.63,
+        "cpu_ms_per_call": 1.99,
         "cpu_share": 0.35,
-        "per_second": 9.1
-      },
-      {
-        "seam": "MatplotlibRenderer[image]._image_rgba_front",
-        "calls": 109,
-        "self_ms_total": 378.0,
-        "self_ms_per_call": 3.47,
-        "cpu_ms_per_call": 0.29,
-        "cpu_share": 0.08,
-        "per_second": 9.1
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[curve]._update_curve",
-        "calls": 109,
-        "self_ms_total": 267.7,
-        "self_ms_per_call": 2.46,
-        "cpu_ms_per_call": 0.29,
-        "cpu_share": 0.12,
-        "per_second": 9.1
+        "calls": 110,
+        "self_ms_total": 410.8,
+        "self_ms_per_call": 3.73,
+        "cpu_ms_per_call": 0.57,
+        "cpu_share": 0.15,
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[image]._image_rgba_front",
+        "calls": 110,
+        "self_ms_total": 371.0,
+        "self_ms_per_call": 3.37,
+        "cpu_ms_per_call": 0.71,
+        "cpu_share": 0.21,
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[image]._cached_image_range",
-        "calls": 109,
-        "self_ms_total": 150.7,
-        "self_ms_per_call": 1.38,
-        "cpu_ms_per_call": 0.86,
-        "cpu_share": 0.62,
-        "per_second": 9.1
+        "calls": 110,
+        "self_ms_total": 170.4,
+        "self_ms_per_call": 1.55,
+        "cpu_ms_per_call": 0.28,
+        "cpu_share": 0.18,
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[histogram]._compose_frame",
-        "calls": 109,
-        "self_ms_total": 103.0,
-        "self_ms_per_call": 0.94,
-        "cpu_ms_per_call": 1.86,
-        "cpu_share": 1.97,
-        "per_second": 9.1
+        "calls": 110,
+        "self_ms_total": 146.7,
+        "self_ms_per_call": 1.33,
+        "cpu_ms_per_call": 1.85,
+        "cpu_share": 1.38,
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[image]._blit_exact_rgba_image",
         "calls": 2943,
-        "self_ms_total": 91.8,
-        "self_ms_per_call": 0.03,
-        "cpu_ms_per_call": 0.04,
-        "cpu_share": 1.19,
+        "self_ms_total": 121.4,
+        "self_ms_per_call": 0.04,
+        "cpu_ms_per_call": 0.06,
+        "cpu_share": 1.54,
         "per_second": 245.2
       },
       {
         "seam": "MatplotlibRenderer[image].present",
         "calls": 109,
-        "self_ms_total": 73.0,
-        "self_ms_per_call": 0.67,
+        "self_ms_total": 82.0,
+        "self_ms_per_call": 0.75,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
         "per_second": 9.1
       },
       {
         "seam": "MatplotlibRenderer[rolling].canvas.restore_region",
-        "calls": 109,
-        "self_ms_total": 67.2,
-        "self_ms_per_call": 0.62,
-        "cpu_ms_per_call": 0.29,
-        "cpu_share": 0.47,
-        "per_second": 9.1
-      },
-      {
-        "seam": "MatplotlibRenderer[curve].canvas.restore_region",
-        "calls": 109,
-        "self_ms_total": 63.4,
-        "self_ms_per_call": 0.58,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
-        "per_second": 9.1
+        "calls": 110,
+        "self_ms_total": 81.7,
+        "self_ms_per_call": 0.74,
+        "cpu_ms_per_call": 0.99,
+        "cpu_share": 1.34,
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[image]._mutate_image_artists",
         "calls": 109,
-        "self_ms_total": 60.9,
-        "self_ms_per_call": 0.56,
-        "cpu_ms_per_call": 1.15,
-        "cpu_share": 2.05,
+        "self_ms_total": 78.2,
+        "self_ms_per_call": 0.72,
+        "cpu_ms_per_call": 0.43,
+        "cpu_share": 0.6,
         "per_second": 9.1
+      },
+      {
+        "seam": "MatplotlibRenderer[curve].canvas.restore_region",
+        "calls": 110,
+        "self_ms_total": 75.4,
+        "self_ms_per_call": 0.69,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[image].canvas.restore_region",
         "calls": 109,
-        "self_ms_total": 55.6,
-        "self_ms_per_call": 0.51,
-        "cpu_ms_per_call": 0.29,
-        "cpu_share": 0.56,
+        "self_ms_total": 68.5,
+        "self_ms_per_call": 0.63,
+        "cpu_ms_per_call": 0.72,
+        "cpu_share": 1.14,
         "per_second": 9.1
       },
       {
         "seam": "MatplotlibRenderer[histogram].canvas.copy_from_bbox",
-        "calls": 30,
-        "self_ms_total": 53.2,
-        "self_ms_per_call": 1.77,
-        "cpu_ms_per_call": 1.04,
-        "cpu_share": 0.59,
-        "per_second": 2.5
+        "calls": 36,
+        "self_ms_total": 53.8,
+        "self_ms_per_call": 1.49,
+        "cpu_ms_per_call": 2.17,
+        "cpu_share": 1.45,
+        "per_second": 3.0
       },
       {
         "seam": "MatplotlibRenderer[image]._update_image_artist",
         "calls": 110,
-        "self_ms_total": 42.2,
-        "self_ms_per_call": 0.38,
-        "cpu_ms_per_call": 0.14,
-        "cpu_share": 0.37,
-        "per_second": 9.2
-      },
-      {
-        "seam": "MatplotlibRenderer[histogram].present",
-        "calls": 109,
-        "self_ms_total": 37.3,
-        "self_ms_per_call": 0.34,
-        "cpu_ms_per_call": 0.14,
-        "cpu_share": 0.42,
-        "per_second": 9.1
-      },
-      {
-        "seam": "MatplotlibRenderer[rolling]._update_rolling",
-        "calls": 109,
-        "self_ms_total": 37.2,
-        "self_ms_per_call": 0.34,
+        "self_ms_total": 46.9,
+        "self_ms_per_call": 0.43,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.1
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[histogram]._update_histogram",
-        "calls": 109,
-        "self_ms_total": 29.5,
-        "self_ms_per_call": 0.27,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
-        "per_second": 9.1
-      },
-      {
-        "seam": "MatplotlibRenderer[curve].present",
         "calls": 110,
-        "self_ms_total": 26.4,
-        "self_ms_per_call": 0.24,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
+        "self_ms_total": 45.7,
+        "self_ms_per_call": 0.42,
+        "cpu_ms_per_call": 0.14,
+        "cpu_share": 0.34,
         "per_second": 9.2
       },
       {
-        "seam": "MatplotlibRenderer[image]._update_selectors",
-        "calls": 109,
-        "self_ms_total": 25.1,
-        "self_ms_per_call": 0.23,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
-        "per_second": 9.1
-      },
-      {
-        "seam": "MatplotlibRenderer[rolling].present",
-        "calls": 109,
-        "self_ms_total": 24.6,
-        "self_ms_per_call": 0.23,
-        "cpu_ms_per_call": 0.14,
-        "cpu_share": 0.64,
-        "per_second": 9.1
-      },
-      {
-        "seam": "MatplotlibRenderer[histogram].canvas.restore_region",
-        "calls": 45,
-        "self_ms_total": 22.0,
-        "self_ms_per_call": 0.49,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
-        "per_second": 3.7
-      },
-      {
-        "seam": "MatplotlibRenderer[curve]._dynamic_artists",
-        "calls": 109,
-        "self_ms_total": 20.2,
-        "self_ms_per_call": 0.19,
-        "cpu_ms_per_call": 0.14,
-        "cpu_share": 0.77,
-        "per_second": 9.1
-      },
-      {
-        "seam": "MatplotlibRenderer[image]._update_horizontal_histogram",
+        "seam": "MatplotlibRenderer[rolling]._update_rolling",
         "calls": 110,
-        "self_ms_total": 18.0,
-        "self_ms_per_call": 0.16,
+        "self_ms_total": 43.5,
+        "self_ms_per_call": 0.4,
         "cpu_ms_per_call": 0.14,
-        "cpu_share": 0.87,
+        "cpu_share": 0.36,
         "per_second": 9.2
       },
       {
         "seam": "_image_raster.prepare_image_front",
+        "calls": 110,
+        "self_ms_total": 36.9,
+        "self_ms_per_call": 0.34,
+        "cpu_ms_per_call": 0.57,
+        "cpu_share": 1.69,
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[histogram].present",
+        "calls": 110,
+        "self_ms_total": 34.1,
+        "self_ms_per_call": 0.31,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[histogram].canvas.restore_region",
+        "calls": 54,
+        "self_ms_total": 32.8,
+        "self_ms_per_call": 0.61,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 4.5
+      },
+      {
+        "seam": "MatplotlibRenderer[curve].present",
+        "calls": 110,
+        "self_ms_total": 30.6,
+        "self_ms_per_call": 0.28,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[rolling].present",
         "calls": 109,
-        "self_ms_total": 15.1,
-        "self_ms_per_call": 0.14,
-        "cpu_ms_per_call": 0.14,
+        "self_ms_total": 30.3,
+        "self_ms_per_call": 0.28,
+        "cpu_ms_per_call": 0.29,
         "cpu_share": 1.03,
         "per_second": 9.1
       },
       {
-        "seam": "MatplotlibRenderer[rolling]._update_horizontal_histogram",
+        "seam": "MatplotlibRenderer[image]._update_selectors",
         "calls": 109,
-        "self_ms_total": 8.3,
-        "self_ms_per_call": 0.08,
-        "cpu_ms_per_call": 0.14,
-        "cpu_share": 1.88,
+        "self_ms_total": 27.6,
+        "self_ms_per_call": 0.25,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
         "per_second": 9.1
+      },
+      {
+        "seam": "MatplotlibRenderer[image]._update_horizontal_histogram",
+        "calls": 109,
+        "self_ms_total": 23.1,
+        "self_ms_per_call": 0.21,
+        "cpu_ms_per_call": 0.14,
+        "cpu_share": 0.68,
+        "per_second": 9.1
+      },
+      {
+        "seam": "MatplotlibRenderer[rolling]._update_horizontal_histogram",
+        "calls": 110,
+        "self_ms_total": 10.0,
+        "self_ms_per_call": 0.09,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[image]._dynamic_artists",
         "calls": 109,
-        "self_ms_total": 7.6,
-        "self_ms_per_call": 0.07,
+        "self_ms_total": 8.9,
+        "self_ms_per_call": 0.08,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
         "per_second": 9.1
       },
       {
         "seam": "MatplotlibRenderer[rolling]._dynamic_artists",
-        "calls": 109,
-        "self_ms_total": 5.4,
-        "self_ms_per_call": 0.05,
+        "calls": 110,
+        "self_ms_total": 7.1,
+        "self_ms_per_call": 0.06,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.1
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[curve]._update_selectors",
-        "calls": 109,
-        "self_ms_total": 4.7,
-        "self_ms_per_call": 0.04,
+        "calls": 110,
+        "self_ms_total": 5.0,
+        "self_ms_per_call": 0.05,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.1
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[rolling]._blit_exact_rgba_image",
-        "calls": 2834,
-        "self_ms_total": 4.0,
+        "calls": 2853,
+        "self_ms_total": 4.8,
         "self_ms_per_call": 0.0,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 236.1
+        "per_second": 237.7
       },
       {
         "seam": "MatplotlibRenderer[rolling]._update_selectors",
-        "calls": 109,
-        "self_ms_total": 3.4,
-        "self_ms_per_call": 0.03,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
-        "per_second": 9.1
+        "calls": 110,
+        "self_ms_total": 4.3,
+        "self_ms_per_call": 0.04,
+        "cpu_ms_per_call": 0.14,
+        "cpu_share": 3.67,
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[histogram]._update_selectors",
-        "calls": 109,
-        "self_ms_total": 3.0,
+        "calls": 110,
+        "self_ms_total": 3.8,
         "self_ms_per_call": 0.03,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.1
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[curve]._dynamic_artists",
+        "calls": 110,
+        "self_ms_total": 3.7,
+        "self_ms_per_call": 0.03,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[curve]._blit_exact_rgba_image",
-        "calls": 1530,
-        "self_ms_total": 2.0,
+        "calls": 1540,
+        "self_ms_total": 2.8,
         "self_ms_per_call": 0.0,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 127.5
+        "per_second": 128.3
       },
       {
         "seam": "MatplotlibRenderer[image]._update_image",
         "calls": 109,
-        "self_ms_total": 1.9,
+        "self_ms_total": 2.1,
         "self_ms_per_call": 0.02,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
@@ -435,7 +435,7 @@
       {
         "seam": "MatplotlibRenderer[image]._update_image_point_overlay",
         "calls": 109,
-        "self_ms_total": 1.3,
+        "self_ms_total": 1.6,
         "self_ms_per_call": 0.01,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
@@ -443,6 +443,33 @@
       },
       {
         "seam": "MatplotlibRenderer[curve]._update_plot",
+        "calls": 110,
+        "self_ms_total": 1.4,
+        "self_ms_per_call": 0.01,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[histogram]._blit_exact_rgba_image",
+        "calls": 963,
+        "self_ms_total": 1.4,
+        "self_ms_per_call": 0.0,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 80.2
+      },
+      {
+        "seam": "MatplotlibRenderer[image]._resolve_image_limits",
+        "calls": 110,
+        "self_ms_total": 1.3,
+        "self_ms_per_call": 0.01,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[image]._settle_owned_boxes",
         "calls": 109,
         "self_ms_total": 1.3,
         "self_ms_per_call": 0.01,
@@ -451,7 +478,16 @@
         "per_second": 9.1
       },
       {
-        "seam": "MatplotlibRenderer[image]._resolve_image_limits",
+        "seam": "MatplotlibRenderer[histogram]._update_plot",
+        "calls": 110,
+        "self_ms_total": 1.1,
+        "self_ms_per_call": 0.01,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[image]._update_plot",
         "calls": 109,
         "self_ms_total": 1.1,
         "self_ms_per_call": 0.01,
@@ -460,52 +496,43 @@
         "per_second": 9.1
       },
       {
-        "seam": "MatplotlibRenderer[image]._update_plot",
-        "calls": 109,
-        "self_ms_total": 1.0,
-        "self_ms_per_call": 0.01,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
-        "per_second": 9.1
-      },
-      {
-        "seam": "MatplotlibRenderer[histogram]._blit_exact_rgba_image",
-        "calls": 804,
-        "self_ms_total": 1.0,
-        "self_ms_per_call": 0.0,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
-        "per_second": 67.0
-      },
-      {
-        "seam": "MatplotlibRenderer[histogram]._update_plot",
-        "calls": 109,
-        "self_ms_total": 1.0,
-        "self_ms_per_call": 0.01,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
-        "per_second": 9.1
-      },
-      {
-        "seam": "MatplotlibRenderer[image]._settle_owned_boxes",
-        "calls": 109,
-        "self_ms_total": 1.0,
-        "self_ms_per_call": 0.01,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
-        "per_second": 9.1
-      },
-      {
         "seam": "MatplotlibRenderer[rolling]._update_plot",
-        "calls": 109,
+        "calls": 110,
+        "self_ms_total": 1.0,
+        "self_ms_per_call": 0.01,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[rolling]._settle_owned_boxes",
+        "calls": 110,
+        "self_ms_total": 0.9,
+        "self_ms_per_call": 0.01,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[curve]._update_height_bars_cage",
+        "calls": 110,
         "self_ms_total": 0.8,
         "self_ms_per_call": 0.01,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.1
+        "per_second": 9.2
       },
       {
-        "seam": "MatplotlibRenderer[rolling]._settle_owned_boxes",
+        "seam": "MatplotlibRenderer[rolling]._update_height_bars_cage",
+        "calls": 110,
+        "self_ms_total": 0.7,
+        "self_ms_per_call": 0.01,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[image]._update_height_bars_cage",
         "calls": 109,
         "self_ms_total": 0.7,
         "self_ms_per_call": 0.01,
@@ -514,67 +541,49 @@
         "per_second": 9.1
       },
       {
-        "seam": "MatplotlibRenderer[image]._update_height_bars_cage",
-        "calls": 109,
-        "self_ms_total": 0.6,
-        "self_ms_per_call": 0.01,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
-        "per_second": 9.1
-      },
-      {
-        "seam": "MatplotlibRenderer[rolling]._update_height_bars_cage",
-        "calls": 109,
-        "self_ms_total": 0.6,
-        "self_ms_per_call": 0.01,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
-        "per_second": 9.1
-      },
-      {
-        "seam": "MatplotlibRenderer[curve]._update_height_bars_cage",
-        "calls": 109,
-        "self_ms_total": 0.6,
-        "self_ms_per_call": 0.01,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
-        "per_second": 9.1
-      },
-      {
         "seam": "MatplotlibRenderer[curve]._settle_owned_boxes",
-        "calls": 109,
-        "self_ms_total": 0.5,
-        "self_ms_per_call": 0.0,
+        "calls": 110,
+        "self_ms_total": 0.7,
+        "self_ms_per_call": 0.01,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.1
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[histogram]._update_height_bars_cage",
-        "calls": 109,
-        "self_ms_total": 0.5,
-        "self_ms_per_call": 0.0,
+        "calls": 110,
+        "self_ms_total": 0.6,
+        "self_ms_per_call": 0.01,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.1
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[histogram]._settle_owned_boxes",
-        "calls": 109,
-        "self_ms_total": 0.4,
-        "self_ms_per_call": 0.0,
+        "calls": 110,
+        "self_ms_total": 0.6,
+        "self_ms_per_call": 0.01,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.1
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[curve]._update_fit",
-        "calls": 109,
+        "calls": 110,
         "self_ms_total": 0.4,
         "self_ms_per_call": 0.0,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.1
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[rolling]._update_fit",
+        "calls": 110,
+        "self_ms_total": 0.4,
+        "self_ms_per_call": 0.0,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[image]._update_fit",
@@ -586,63 +595,27 @@
         "per_second": 9.1
       },
       {
-        "seam": "MatplotlibRenderer[rolling]._update_fit",
-        "calls": 109,
-        "self_ms_total": 0.4,
-        "self_ms_per_call": 0.0,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
-        "per_second": 9.1
-      },
-      {
         "seam": "MatplotlibRenderer[histogram]._update_classifier",
-        "calls": 109,
+        "calls": 110,
         "self_ms_total": 0.4,
         "self_ms_per_call": 0.0,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.1
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[histogram]._update_fit",
+        "calls": 110,
+        "self_ms_total": 0.4,
+        "self_ms_per_call": 0.0,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[image]._update_single_fit",
         "calls": 109,
         "self_ms_total": 0.3,
-        "self_ms_per_call": 0.0,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
-        "per_second": 9.1
-      },
-      {
-        "seam": "MatplotlibRenderer[rolling]._update_single_fit",
-        "calls": 109,
-        "self_ms_total": 0.3,
-        "self_ms_per_call": 0.0,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
-        "per_second": 9.1
-      },
-      {
-        "seam": "MatplotlibRenderer[curve]._update_classifier",
-        "calls": 109,
-        "self_ms_total": 0.3,
-        "self_ms_per_call": 0.0,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
-        "per_second": 9.1
-      },
-      {
-        "seam": "MatplotlibRenderer[curve]._update_single_fit",
-        "calls": 109,
-        "self_ms_total": 0.2,
-        "self_ms_per_call": 0.0,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
-        "per_second": 9.1
-      },
-      {
-        "seam": "MatplotlibRenderer[image]._update_classifier",
-        "calls": 109,
-        "self_ms_total": 0.2,
         "self_ms_per_call": 0.0,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
@@ -650,35 +623,53 @@
       },
       {
         "seam": "MatplotlibRenderer[rolling]._update_classifier",
-        "calls": 109,
-        "self_ms_total": 0.2,
+        "calls": 110,
+        "self_ms_total": 0.3,
         "self_ms_per_call": 0.0,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.1
+        "per_second": 9.2
       },
       {
-        "seam": "MatplotlibRenderer[image]._update_single_fit",
-        "calls": 109,
-        "self_ms_total": 0.2,
+        "seam": "MatplotlibRenderer[curve]._update_classifier",
+        "calls": 110,
+        "self_ms_total": 0.3,
         "self_ms_per_call": 0.0,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.1
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[rolling]._update_single_fit",
+        "calls": 110,
+        "self_ms_total": 0.3,
+        "self_ms_per_call": 0.0,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[histogram]._update_single_fit",
-        "calls": 109,
-        "self_ms_total": 0.2,
+        "calls": 110,
+        "self_ms_total": 0.3,
         "self_ms_per_call": 0.0,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.1
+        "per_second": 9.2
       },
       {
-        "seam": "MatplotlibRenderer[curve]._update_image_point_overlay",
+        "seam": "MatplotlibRenderer[curve]._update_single_fit",
+        "calls": 110,
+        "self_ms_total": 0.3,
+        "self_ms_per_call": 0.0,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[image]._update_classifier",
         "calls": 109,
-        "self_ms_total": 0.1,
+        "self_ms_total": 0.3,
         "self_ms_per_call": 0.0,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
@@ -686,24 +677,59 @@
       },
       {
         "seam": "MatplotlibRenderer[rolling]._update_image_point_overlay",
-        "calls": 109,
-        "self_ms_total": 0.1,
+        "calls": 110,
+        "self_ms_total": 0.3,
         "self_ms_per_call": 0.0,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.1
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[histogram]._update_image_point_overlay",
-        "calls": 109,
+        "calls": 110,
+        "self_ms_total": 0.2,
+        "self_ms_per_call": 0.0,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[curve]._update_image_point_overlay",
+        "calls": 110,
         "self_ms_total": 0.1,
         "self_ms_per_call": 0.0,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.1
+        "per_second": 9.2
       }
     ]
   },
   "threads_left_running": [],
-  "problems": []
+  "problems": [],
+  "render_cost": [
+    {
+      "panel": "image",
+      "frames": 110,
+      "wall_ms_per_frame": 55.36,
+      "cpu_ms_per_frame": 20.32
+    },
+    {
+      "panel": "histogram",
+      "frames": 110,
+      "wall_ms_per_frame": 46.9,
+      "cpu_ms_per_frame": 15.89
+    },
+    {
+      "panel": "rolling",
+      "frames": 110,
+      "wall_ms_per_frame": 41.62,
+      "cpu_ms_per_frame": 8.1
+    },
+    {
+      "panel": "curve",
+      "frames": 110,
+      "wall_ms_per_frame": 12.73,
+      "cpu_ms_per_frame": 3.95
+    }
+  ]
 }

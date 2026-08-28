@@ -13,184 +13,184 @@
     "megapixels": 1.57
   },
   "live": {
-    "window_s": 5.0,
-    "frames": 48,
-    "frames_per_second": 9.6,
+    "window_s": 12.0,
+    "frames": 111,
+    "frames_per_second": 9.2,
     "beat_ms": 100.0,
     "frame_gap": {
-      "n": 47,
-      "median_ms": 108.73,
-      "p90_ms": 117.92,
-      "p99_ms": 122.92,
-      "max_ms": 122.94,
-      "best_ms": 14.43
+      "n": 110,
+      "median_ms": 109.55,
+      "p90_ms": 118.61,
+      "p99_ms": 125.8,
+      "max_ms": 128.1,
+      "best_ms": 4.81
     },
     "stalls_over_two_beats": 0,
     "worst_gaps_ms": [
-      122.9,
-      122.9,
-      122.6,
-      120.6,
-      118.2
+      128.1,
+      125.8,
+      125.4,
+      125.3,
+      121.9
     ],
     "seams": [
       {
         "seam": "MatplotlibRenderer[image]._compose_frame",
-        "calls": 47,
-        "self_ms_total": 388.5,
-        "self_ms_per_call": 8.27,
-        "cpu_ms_per_call": 6.98,
-        "cpu_share": 0.84,
-        "per_second": 9.4
+        "calls": 110,
+        "self_ms_total": 921.3,
+        "self_ms_per_call": 8.38,
+        "cpu_ms_per_call": 7.1,
+        "cpu_share": 0.85,
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[image]._update_image_chrome",
-        "calls": 47,
-        "self_ms_total": 151.3,
-        "self_ms_per_call": 3.22,
-        "cpu_ms_per_call": 3.99,
-        "cpu_share": 1.24,
-        "per_second": 9.4
+        "calls": 109,
+        "self_ms_total": 337.5,
+        "self_ms_per_call": 3.1,
+        "cpu_ms_per_call": 3.58,
+        "cpu_share": 1.16,
+        "per_second": 9.1
       },
       {
         "seam": "_image_raster._area_mean",
-        "calls": 46,
-        "self_ms_total": 53.7,
-        "self_ms_per_call": 1.17,
-        "cpu_ms_per_call": 0.68,
-        "cpu_share": 0.58,
+        "calls": 110,
+        "self_ms_total": 132.9,
+        "self_ms_per_call": 1.21,
+        "cpu_ms_per_call": 0.71,
+        "cpu_share": 0.59,
         "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[image]._cached_image_range",
-        "calls": 46,
-        "self_ms_total": 51.6,
-        "self_ms_per_call": 1.12,
-        "cpu_ms_per_call": 0.34,
-        "cpu_share": 0.3,
+        "calls": 110,
+        "self_ms_total": 130.4,
+        "self_ms_per_call": 1.19,
+        "cpu_ms_per_call": 0.28,
+        "cpu_share": 0.24,
         "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[image]._view_filling_rgba_front",
-        "calls": 46,
-        "self_ms_total": 43.5,
-        "self_ms_per_call": 0.95,
-        "cpu_ms_per_call": 1.36,
-        "cpu_share": 1.44,
+        "calls": 110,
+        "self_ms_total": 97.1,
+        "self_ms_per_call": 0.88,
+        "cpu_ms_per_call": 1.28,
+        "cpu_share": 1.45,
         "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[image].present",
-        "calls": 47,
-        "self_ms_total": 34.1,
-        "self_ms_per_call": 0.73,
-        "cpu_ms_per_call": 0.66,
-        "cpu_share": 0.92,
-        "per_second": 9.4
+        "calls": 110,
+        "self_ms_total": 76.3,
+        "self_ms_per_call": 0.69,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[image]._image_rgba_front",
-        "calls": 46,
-        "self_ms_total": 29.8,
-        "self_ms_per_call": 0.65,
-        "cpu_ms_per_call": 0.68,
-        "cpu_share": 1.05,
+        "calls": 110,
+        "self_ms_total": 72.4,
+        "self_ms_per_call": 0.66,
+        "cpu_ms_per_call": 0.14,
+        "cpu_share": 0.22,
         "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[image].canvas.restore_region",
-        "calls": 47,
-        "self_ms_total": 25.3,
+        "calls": 109,
+        "self_ms_total": 59.3,
         "self_ms_per_call": 0.54,
-        "cpu_ms_per_call": 0.33,
-        "cpu_share": 0.62,
-        "per_second": 9.4
+        "cpu_ms_per_call": 0.29,
+        "cpu_share": 0.53,
+        "per_second": 9.1
       },
       {
         "seam": "MatplotlibRenderer[image]._update_image_artist",
-        "calls": 46,
-        "self_ms_total": 17.2,
+        "calls": 110,
+        "self_ms_total": 40.7,
         "self_ms_per_call": 0.37,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
+        "cpu_ms_per_call": 0.28,
+        "cpu_share": 0.77,
         "per_second": 9.2
-      },
-      {
-        "seam": "MatplotlibRenderer[image]._blit_exact_rgba_image",
-        "calls": 1269,
-        "self_ms_total": 14.2,
-        "self_ms_per_call": 0.01,
-        "cpu_ms_per_call": 0.02,
-        "cpu_share": 2.2,
-        "per_second": 253.8
       },
       {
         "seam": "MatplotlibRenderer[image]._mutate_image_artists",
-        "calls": 47,
-        "self_ms_total": 12.6,
-        "self_ms_per_call": 0.27,
-        "cpu_ms_per_call": 0.66,
-        "cpu_share": 2.47,
-        "per_second": 9.4
+        "calls": 109,
+        "self_ms_total": 38.9,
+        "self_ms_per_call": 0.36,
+        "cpu_ms_per_call": 0.29,
+        "cpu_share": 0.8,
+        "per_second": 9.1
       },
       {
-        "seam": "MatplotlibRenderer[image]._update_horizontal_histogram",
-        "calls": 46,
-        "self_ms_total": 12.3,
-        "self_ms_per_call": 0.27,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
-        "per_second": 9.2
+        "seam": "MatplotlibRenderer[image]._blit_exact_rgba_image",
+        "calls": 2945,
+        "self_ms_total": 38.5,
+        "self_ms_per_call": 0.01,
+        "cpu_ms_per_call": 0.04,
+        "cpu_share": 2.84,
+        "per_second": 245.4
       },
       {
         "seam": "MatplotlibRenderer[image]._update_selectors",
-        "calls": 47,
-        "self_ms_total": 9.3,
-        "self_ms_per_call": 0.2,
-        "cpu_ms_per_call": 0.33,
-        "cpu_share": 1.69,
-        "per_second": 9.4
+        "calls": 109,
+        "self_ms_total": 23.5,
+        "self_ms_per_call": 0.22,
+        "cpu_ms_per_call": 0.14,
+        "cpu_share": 0.66,
+        "per_second": 9.1
       },
       {
-        "seam": "MatplotlibRenderer[image]._dynamic_artists",
-        "calls": 47,
-        "self_ms_total": 3.1,
-        "self_ms_per_call": 0.07,
+        "seam": "MatplotlibRenderer[image]._update_horizontal_histogram",
+        "calls": 109,
+        "self_ms_total": 20.5,
+        "self_ms_per_call": 0.19,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.4
+        "per_second": 9.1
       },
       {
         "seam": "_image_raster.prepare_image_front",
-        "calls": 46,
-        "self_ms_total": 2.9,
-        "self_ms_per_call": 0.06,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
+        "calls": 110,
+        "self_ms_total": 7.6,
+        "self_ms_per_call": 0.07,
+        "cpu_ms_per_call": 0.43,
+        "cpu_share": 6.14,
         "per_second": 9.2
       },
       {
-        "seam": "MatplotlibRenderer[image]._update_image",
-        "calls": 47,
-        "self_ms_total": 0.8,
-        "self_ms_per_call": 0.02,
+        "seam": "MatplotlibRenderer[image]._dynamic_artists",
+        "calls": 109,
+        "self_ms_total": 7.3,
+        "self_ms_per_call": 0.07,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.4
+        "per_second": 9.1
+      },
+      {
+        "seam": "MatplotlibRenderer[image]._update_image",
+        "calls": 109,
+        "self_ms_total": 2.7,
+        "self_ms_per_call": 0.03,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.1
       },
       {
         "seam": "MatplotlibRenderer[image]._update_image_point_overlay",
-        "calls": 47,
-        "self_ms_total": 0.5,
+        "calls": 109,
+        "self_ms_total": 1.2,
         "self_ms_per_call": 0.01,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.4
+        "per_second": 9.1
       },
       {
         "seam": "MatplotlibRenderer[image]._resolve_image_limits",
-        "calls": 46,
-        "self_ms_total": 0.5,
+        "calls": 110,
+        "self_ms_total": 1.2,
         "self_ms_per_call": 0.01,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
@@ -198,197 +198,68 @@
       },
       {
         "seam": "MatplotlibRenderer[image]._settle_owned_boxes",
-        "calls": 47,
-        "self_ms_total": 0.4,
+        "calls": 109,
+        "self_ms_total": 1.0,
         "self_ms_per_call": 0.01,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.4
+        "per_second": 9.1
       },
       {
         "seam": "MatplotlibRenderer[image]._update_plot",
-        "calls": 47,
-        "self_ms_total": 0.4,
+        "calls": 109,
+        "self_ms_total": 0.9,
         "self_ms_per_call": 0.01,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.4
+        "per_second": 9.1
       },
       {
         "seam": "MatplotlibRenderer[image]._update_height_bars_cage",
-        "calls": 47,
-        "self_ms_total": 0.3,
+        "calls": 109,
+        "self_ms_total": 0.6,
         "self_ms_per_call": 0.01,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.4
+        "per_second": 9.1
       },
       {
         "seam": "MatplotlibRenderer[image]._update_fit",
-        "calls": 47,
-        "self_ms_total": 0.2,
+        "calls": 109,
+        "self_ms_total": 0.4,
         "self_ms_per_call": 0.0,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.4
-      },
-      {
-        "seam": "MatplotlibRenderer[image]._update_classifier",
-        "calls": 47,
-        "self_ms_total": 0.1,
-        "self_ms_per_call": 0.0,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
-        "per_second": 9.4
+        "per_second": 9.1
       },
       {
         "seam": "MatplotlibRenderer[image]._update_single_fit",
-        "calls": 47,
-        "self_ms_total": 0.1,
+        "calls": 109,
+        "self_ms_total": 0.3,
         "self_ms_per_call": 0.0,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.4
+        "per_second": 9.1
+      },
+      {
+        "seam": "MatplotlibRenderer[image]._update_classifier",
+        "calls": 109,
+        "self_ms_total": 0.3,
+        "self_ms_per_call": 0.0,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.1
       }
     ]
   },
-  "edits": {
-    "kind": "image",
-    "edits": [
-      {
-        "section": "display",
-        "values": {
-          "camera_azimuth": 68.75
-        },
-        "refused": null,
-        "answered": true,
-        "to_next_front_ms": 35.81
-      },
-      {
-        "section": "display",
-        "values": {
-          "camera_elevation": 37.5
-        },
-        "refused": null,
-        "answered": true,
-        "to_next_front_ms": 27.68
-      },
-      {
-        "section": "display",
-        "values": {
-          "camera_zoom": 1.25
-        },
-        "refused": null,
-        "answered": true,
-        "to_next_front_ms": 39.06
-      },
-      {
-        "section": "display",
-        "values": {
-          "colormap": "magma"
-        },
-        "refused": null,
-        "answered": true,
-        "to_next_front_ms": 77.72
-      },
-      {
-        "section": "display",
-        "values": {
-          "show_colorbar": false
-        },
-        "refused": null,
-        "answered": true,
-        "to_next_front_ms": 65.31
-      },
-      {
-        "section": "display",
-        "values": {
-          "show_grid": true
-        },
-        "refused": null,
-        "answered": true,
-        "to_next_front_ms": 17.79
-      },
-      {
-        "section": "display",
-        "values": {
-          "show_point_labels": false
-        },
-        "refused": null,
-        "answered": true,
-        "to_next_front_ms": 44.75
-      },
-      {
-        "section": "display",
-        "values": {
-          "title": "edited while live"
-        },
-        "refused": null,
-        "answered": true,
-        "to_next_front_ms": 72.67
-      },
-      {
-        "section": "display",
-        "values": {
-          "value_label": "edited while live"
-        },
-        "refused": null,
-        "answered": true,
-        "to_next_front_ms": 63.14
-      },
-      {
-        "section": "display",
-        "values": {
-          "x_label": "edited while live"
-        },
-        "refused": null,
-        "answered": true,
-        "to_next_front_ms": 50.09
-      },
-      {
-        "section": "display",
-        "values": {
-          "y_label": "edited while live"
-        },
-        "refused": null,
-        "answered": true,
-        "to_next_front_ms": 49.33
-      }
-    ],
-    "skipped": [
-      {
-        "field": "color_max",
-        "why": "unset, so the bench cannot tell the type"
-      },
-      {
-        "field": "color_min",
-        "why": "unset, so the bench cannot tell the type"
-      },
-      {
-        "field": "presentation",
-        "why": "str is an enum owned by the product"
-      },
-      {
-        "field": "relim_mode",
-        "why": "str is an enum owned by the product"
-      },
-      {
-        "field": "value_display_unit",
-        "why": "unset, so the bench cannot tell the type"
-      },
-      {
-        "field": "x_display_unit",
-        "why": "unset, so the bench cannot tell the type"
-      },
-      {
-        "field": "y_display_unit",
-        "why": "unset, so the bench cannot tell the type"
-      }
-    ],
-    "answered": 11,
-    "of": 11,
-    "worst_ms": 77.72
-  },
   "threads_left_running": [],
-  "problems": []
+  "problems": [],
+  "render_cost": [
+    {
+      "panel": "image",
+      "frames": 111,
+      "wall_ms_per_frame": 16.97,
+      "cpu_ms_per_frame": 13.97
+    }
+  ]
 }
