@@ -328,9 +328,11 @@ def fit_output_fields(
                 getattr(parameter, "symbol", None)
                 or name.replace("_", " ").title()
             )
-            # Only the label moves.  The name half of each pair is the
-            # published signal id and the persisted toggle key.
-            fit_outputs.extend(((name, label), (f"{name}_err", f"{label} error")))
+            # ONE switch per parameter.  There used to be a second, for a
+            # separately published "<name>_err" signal; a parameter now
+            # carries its own uncertainty, so there is one thing to publish
+            # and one thing to switch.
+            fit_outputs.append((name, label))
         break
     return tuple(fit_outputs)
 

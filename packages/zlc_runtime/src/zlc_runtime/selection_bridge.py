@@ -1862,8 +1862,12 @@ class SelectionBridge:
     def _contract_id(role: str, name: str) -> str:
         if role == "selection":
             return f"zlc.selection.{name}"
-        if name.endswith("_err"):
-            return "zlc.selection.fit.error"
+        # Every fit output is a PARAMETER now.  The contract used to be
+        # decided by a string suffix, so a model with a parameter whose own
+        # name ended in "_err" had its VALUE labelled an error -- and there
+        # is no second contract to decide between any more, because a
+        # parameter carries its uncertainty rather than being published
+        # beside one.
         return "zlc.selection.fit.parameter"
 
     def _selection_output_names(self, state: SelectionState) -> tuple[str, ...]:
@@ -1885,10 +1889,7 @@ class SelectionBridge:
 
     @staticmethod
     def _unfiltered_fit_output_names(event: FitEventValue) -> tuple[str, ...]:
-        names: list[str] = []
-        for parameter in event.parameter_names:
-            names.append(str(parameter))
-            names.append(f"{parameter}_err")
+        names = [str(parameter) for parameter in event.parameter_names]
         if len(set(names)) != len(names):
             raise ValueError("fit output names must be unique")
         return tuple(names)
@@ -2352,14 +2353,6 @@ class SelectionBridge:
             schema_point_table = PointTable(sample_count, tuple(point_columns))
         cell_shape = (schema_repeat.size, schema_point_table.row_count)
         value_validity = CellValidity(event.success.reshape(cell_shape))
-        error_validity = {
-            parameter: CellValidity(
-                (event.success & np.isfinite(event.parameter_errors[parameter])).reshape(
-                    cell_shape
-                )
-            )
-            for parameter in event.parameter_names
-        }
         fit_source_ref = DatasetRevisionRef(
             source.ref.block_id,
             source.ref.stream_generation,
@@ -2377,33 +2370,31 @@ class SelectionBridge:
                 None,
                 ValueSchema.scalar(np.dtype("float64"), unit),
             )
-            for suffix, values, contract_id, validity in (
-                (
-                    "",
-                    event.parameter_values[parameter],
-                    "zlc.selection.fit.parameter",
-                    value_validity,
-                ),
-                (
-                    "_err",
-                    event.parameter_errors[parameter],
-                    "zlc.selection.fit.error",
-                    error_validity[parameter],
-                ),
-            ):
-                name = f"{parameter}{suffix}"
-                if name not in enabled:
-                    continue
-                output[name] = self._materialize_fit_vector(
-                    source,
-                    fit_source_ref,
-                    name,
-                    values,
-                    schema,
-                    validity,
-                    contract_id,
-                    coverage,
-                )
+            if parameter not in enabled:
+                continue
+            # ONE output, carrying its own uncertainty.  This used to be a
+            # loop over ("", values) and ("_err", errors), publishing two
+            # signals that nothing ever related to each other.
+            #
+            # A solver reports no error for a parameter it could not pin
+            # down, and NaN is what "no error" is: it must not read as zero,
+            # which would claim certainty.  It is left as NaN rather than
+            # invalidating the sample, because the VALUE is still a real
+            # answer -- only its uncertainty is unknown.
+            errors = np.asarray(
+                event.parameter_errors[parameter], dtype=np.float64
+            )
+            output[parameter] = self._materialize_fit_vector(
+                source,
+                fit_source_ref,
+                parameter,
+                event.parameter_values[parameter],
+                schema,
+                value_validity,
+                "zlc.selection.fit.parameter",
+                coverage,
+                sigma=errors,
+            )
         return output
 
     def _materialize_fit_vector(
@@ -2416,12 +2407,16 @@ class SelectionBridge:
         validity: CellValidity,
         contract_id: str,
         coverage: MonitorCoverage,
+        sigma: np.ndarray | None = None,
     ) -> LiveDatasetOutput:
         derived = materialize_derived_dataset(
             fit_source_ref,
             values.reshape(schema.physical_shape),
             schema=schema,
             validity=validity,
+            sigma=(
+                None if sigma is None else sigma.reshape(schema.physical_shape)
+            ),
             reference_for=lambda derived_schema: self._next_reference(
                 source,
                 name,

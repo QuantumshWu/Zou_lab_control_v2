@@ -2282,12 +2282,18 @@ def test_committed_selection_outputs_enter_the_real_occupancy_input(
         not row.name.rsplit("/", 1)[-1].startswith("fit_")
         for row in fit_signals
     )
-    error_signal = next(
-        row
+    # ONE signal per parameter, carrying its own error.  There used to be a
+    # second, "center_x_err", published beside it under its own contract --
+    # two signals nothing related to each other, so a panel reducing the
+    # parameter never saw the error at all.
+    assert not any(
+        row.name.rsplit("/", 1)[-1].endswith("_err")
         for row in session.signal_plane.describe_signals()
-        if row.name.rsplit("/", 1)[-1] == "center_x_err"
     )
-    assert error_signal.contract_id == "zlc.selection.fit.error"
+    assert all(
+        row.contract_id != "zlc.selection.fit.error"
+        for row in session.signal_plane.describe_signals()
+    )
     projection = presenter.logic_editor_projection(consumer_id)
     assert projection is not None
     assert any(

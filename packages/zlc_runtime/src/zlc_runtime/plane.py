@@ -626,6 +626,9 @@ def _restamp_snapshot(
         snapshot.block.values,
         snapshot.block.validity,
         snapshot.block.schema,
+        # A restamp changes the IDENTITY, never the content -- so every
+        # plane of it travels, the sample's own uncertainty included.
+        snapshot.block.sigma,
     )
     return OwnedSnapshot(block.ref(generation), block)
 

@@ -963,14 +963,21 @@ def test_a_value_band_and_a_shot_window_restrict_without_cutting_an_axis() -> No
         _close(bridge, plane, source)
 
 
-def test_fit_event_publishes_parameter_and_error_scalars() -> None:
+def test_a_fitted_parameter_is_published_carrying_its_own_error() -> None:
+    """One signal, not two that nothing relates to each other.
+
+    `x0` and `x0_err` used to be independent outputs joined only by a
+    string suffix, so a panel plotting the parameter could not reach its
+    error at all -- reducing it gave the between-shot scatter of a fitted
+    quantity, and with one fit per shot it gave NaN while a perfectly good
+    error sat in the signal beside it.
+    """
+
     schema = _curve_schema()
     values = np.asarray([[[0.0], [0.0], [0.0], [0.0], [0.0]]])
     plane, source, _slot, _state, _initial = _source_setup(schema, values)
     events = _Events()
-    plane.set_front_signals(
-        {"camera/frame", "@logic/fit/x0", "@logic/fit/x0_err"}
-    )
+    plane.set_front_signals({"camera/frame", "@logic/fit/x0"})
     bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="fit")
     bridge.start()
     try:
@@ -979,17 +986,20 @@ def test_fit_event_publishes_parameter_and_error_scalars() -> None:
         )
         front = plane.freeze()
         parameter = front.value("@logic/fit/x0")
-        error = front.value("@logic/fit/x0_err")
-        assert parameter is not None and error is not None
+        assert parameter is not None
         assert float(parameter.snapshot.block.values.reshape(-1)[0]) == 2.5
-        assert float(error.snapshot.block.values.reshape(-1)[0]) == 0.1
+        # THE UNCERTAINTY RIDES WITH THE VALUE.
+        sigma = parameter.snapshot.block.sigma
+        assert sigma is not None, "a fitted parameter must carry its error"
+        assert float(np.asarray(sigma).reshape(-1)[0]) == 0.1
+        # ... and there is no second signal to disagree with it.
+        assert front.value("@logic/fit/x0_err") is None
         publication = front.publication("@logic/fit/x0")
         assert publication is not None
         assert publication.direct_parent_refs[0].sequence == 1
         bridge.configure_outputs({"x0": False})
         hidden = plane.freeze()
         assert hidden.value("@logic/fit/x0") is None
-        assert hidden.value("@logic/fit/x0_err") is not None
         bridge.configure_outputs({"x0": True})
         replayed = plane.freeze().value("@logic/fit/x0")
         assert replayed is not None
@@ -1073,7 +1083,7 @@ def test_a_withdrawn_fit_takes_its_outputs_with_it() -> None:
     values = np.asarray([[[0.0], [0.0], [0.0], [0.0], [0.0]]])
     plane, _source, _slot, _state, _initial = _source_setup(schema, values)
     events = _Events()
-    plane.set_front_signals({"camera/frame", "@logic/fit/x0", "@logic/fit/x0_err"})
+    plane.set_front_signals({"camera/frame", "@logic/fit/x0"})
     bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="fit")
     bridge.start()
     try:
@@ -1086,7 +1096,6 @@ def test_a_withdrawn_fit_takes_its_outputs_with_it() -> None:
         events.emit_fit(None)
         withdrawn = plane.freeze()
         assert withdrawn.value("@logic/fit/x0") is None
-        assert withdrawn.value("@logic/fit/x0_err") is None
 
         emit(3.5, 2)
         replayed = plane.freeze().value("@logic/fit/x0")
@@ -1105,9 +1114,7 @@ def test_fit_event_batch_publishes_vectors_with_units_validity_and_lineage() -> 
         {
             "camera/frame",
             "@logic/batch/center",
-            "@logic/batch/center_err",
             "@logic/batch/width",
-            "@logic/batch/width_err",
         }
     )
     bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="batch")
@@ -1117,7 +1124,7 @@ def test_fit_event_batch_publishes_vectors_with_units_validity_and_lineage() -> 
             _batch_fit_event(plane, source_revision=1)
         )
         front = plane.freeze()
-        for name in ("center", "center_err", "width", "width_err"):
+        for name in ("center", "width"):
             signal = front.value(f"@logic/batch/{name}")
             publication = front.publication(f"@logic/batch/{name}")
             assert signal is not None and publication is not None
@@ -1128,9 +1135,8 @@ def test_fit_event_batch_publishes_vectors_with_units_validity_and_lineage() -> 
             )
 
         center = front.value("@logic/batch/center")
-        center_error = front.value("@logic/batch/center_err")
         width = front.value("@logic/batch/width")
-        assert center is not None and center_error is not None and width is not None
+        assert center is not None and width is not None
         np.testing.assert_allclose(
             center.snapshot.block.values.reshape(-1),
             np.asarray([1.0, np.nan, 3.0]),
@@ -1140,15 +1146,16 @@ def test_fit_event_batch_publishes_vectors_with_units_validity_and_lineage() -> 
             center.snapshot.block.validity.mask,
             np.asarray([[True, False, True]]),
         )
+        # THE ERROR RIDES WITH THE VALUE, one per sample, and a solver that
+        # could not pin a parameter down reports NaN -- which must not read
+        # as zero, and must not invalidate the value, which is still an
+        # answer.
         np.testing.assert_allclose(
-            center_error.snapshot.block.values.reshape(-1),
+            np.asarray(center.snapshot.block.sigma).reshape(-1),
             np.asarray([0.1, np.nan, np.nan]),
             equal_nan=True,
         )
-        np.testing.assert_array_equal(
-            center_error.snapshot.block.validity.mask,
-            np.asarray([[True, False, False]]),
-        )
+        assert front.value("@logic/batch/center_err") is None
         assert center.snapshot.block.schema.cell_schema.value_unit == "pixel"
         assert width.snapshot.block.schema.cell_schema.value_unit is None
         column = center.snapshot.block.schema.point_table.columns[0]
@@ -1156,7 +1163,7 @@ def test_fit_event_batch_publishes_vectors_with_units_validity_and_lineage() -> 
         assert column.values == (10.0, 20.0, 35.0)
         assert column.unit == "V"
 
-        for name in ("center", "center_err", "width", "width_err"):
+        for name in ("center", "width"):
             signal = front.value(f"@logic/batch/{name}")
             assert signal is not None
             values = signal.snapshot.block.values.reshape(1, -1)
@@ -1228,7 +1235,7 @@ def test_single_cell_facet_is_a_valid_vector_fit() -> None:
     plane, source, _slot, _state, _initial = _source_setup(schema, values)
     events = _Events()
     plane.set_front_signals(
-        {"camera/frame", "@logic/one/center", "@logic/one/center_err"}
+        {"camera/frame", "@logic/one/center"}
     )
     bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="one")
     bridge.start()
@@ -1242,12 +1249,13 @@ def test_single_cell_facet_is_a_valid_vector_fit() -> None:
         )
         front = plane.freeze()
         value = front.value("@logic/one/center")
-        error = front.value("@logic/one/center_err")
-        assert value is not None and error is not None
+        assert value is not None
         assert value.snapshot.block.schema.point_table.columns[0].name == "facet"
         assert value.snapshot.block.schema.point_table.columns[0].values == (42.0,)
         assert float(value.snapshot.block.values.reshape(-1)[0]) == 4.0
-        assert float(error.snapshot.block.values.reshape(-1)[0]) == 0.25
+        assert float(
+            np.asarray(value.snapshot.block.sigma).reshape(-1)[0]
+        ) == 0.25
     finally:
         _close(bridge, plane, source)
 

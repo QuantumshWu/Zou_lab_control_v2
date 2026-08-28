@@ -150,7 +150,10 @@ def test_a_publisher_switch_never_prints_latex() -> None:
         for name, label in fields:
             assert "$" not in label and "\\" not in label, (model.model_id, label)
         # The name half is the published signal id and the persisted toggle
-        # key -- it is an identity and does not follow the label.
-        for parameter in model.parameters:
-            assert parameter.name in published, (model.model_id, parameter.name)
-            assert f"{parameter.name}_err" in published
+        # key -- it is an identity and does not follow the label.  ONE per
+        # parameter: the second switch published a separate "<name>_err"
+        # signal that nothing related to its value, and a parameter now
+        # carries its own uncertainty on the value plane instead.
+        assert published == {
+            str(parameter.name) for parameter in model.parameters
+        }, (model.model_id, published)

@@ -75,3 +75,50 @@ def test_the_answer_does_not_depend_on_where_zero_is() -> None:
     near, _ = _drawn_sem(1.0e3, scatter)
     far, _ = _drawn_sem(6.834e9, scatter)
     np.testing.assert_allclose(near, far, rtol=1e-9)
+
+
+def test_the_mean_of_samples_that_carry_their_own_error() -> None:
+    """The scatter already contains the errors; the sigma fills its silence.
+
+    Var(m) = (<sigma_i^2> + sigma_pop^2)/n, and E[s^2] is exactly that
+    numerator -- so s^2/n is unbiased for the WHOLE of it and adding the
+    measurement error again would count it twice.  Substituting the clipped
+    moment estimate of sigma_pop^2 instead gives max(<sigma_i^2>, s^2)/n,
+    which is the rule physics often uses and is biased high: measured over
+    400k Monte Carlo buckets with no genuine variation, 22 per cent high in
+    the error bar at n = 2.
+
+    So the per-sample sigma is used where the scatter cannot speak at all.
+    """
+
+    from zlc_plot.data_view import _sem_from_moments
+
+    def sem(values, sigmas=None):
+        values = np.asarray(values, dtype=float)
+        n = np.asarray([values.size])
+        mean = np.asarray([values.mean()])
+        mean_sq = np.asarray([(values ** 2).mean()])
+        sigma_sq = (
+            None
+            if sigmas is None
+            else np.asarray([(np.asarray(sigmas, dtype=float) ** 2).mean()])
+        )
+        return float(_sem_from_moments(mean, mean_sq, n, sigma_sq)[0])
+
+    values = [10.0, 11.0, 12.0, 13.0]
+    scatter = float(np.std(values, ddof=1) / np.sqrt(len(values)))
+
+    # 1. NO per-sample sigma: exactly what it always was.
+    assert sem(values) == scatter
+    assert np.isnan(sem([7.0]))
+
+    # 2 and 3. WITH per-sample sigmas, large or small, a bucket that HAS a
+    #    scatter answers with it: the scatter already contains them, and
+    #    taking the larger of the two biases the bar high.
+    assert sem(values, [1e-6] * 4) == scatter
+    assert sem(values, [50.0] * 4) == scatter
+
+    # 4. ONE sample that knows its own error -- the shape of one fit per
+    #    shot, where the answer used to be NaN with the error sitting in a
+    #    signal beside it.
+    assert sem([6.834e9], [1.0e3]) == 1.0e3
