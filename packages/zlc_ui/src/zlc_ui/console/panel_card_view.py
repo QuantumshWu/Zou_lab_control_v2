@@ -484,6 +484,38 @@ class PanelCardView(FluentGroupBox):
             rebuild_form=state_changed or form_changed,
         )
 
+    def _caption(self) -> str:
+        """What the strip calls this panel: which card, showing what.
+
+        DISPLAY ONLY.  The title is also the panel's editable name, and the
+        console decides whether the operator has renamed a panel by asking
+        whether its title still equals its signal -- so a decoration written
+        into the state would permanently answer "renamed" and freeze
+        auto-retitling when the signal changes.  This composes the caption at
+        paint time and leaves ``_base_title`` alone; the rename field and the
+        Setting form's "Panel name" go on showing the name itself.
+
+        A signal-bound panel's title IS the signal's name, and every logic
+        signal's name begins "@logic/" -- a segment that is the same on every
+        panel and so tells the reader nothing.  It collapses to the "@" it
+        already carries, and the card's own id goes in front, because "which
+        of these cards am I looking at" is the question the strip could not
+        answer before.
+
+        The id is minted from a running serial and is never persisted, so it
+        names a card within this board session, not across saves.
+        """
+
+        title = str(self._base_title)
+        signal_prefix = "@logic/"
+        if title.startswith(signal_prefix):
+            return f"{self.panel_id}@{title[len(signal_prefix):]}"
+        if title.startswith("@"):
+            return f"{self.panel_id}{title}"
+        # A panel with no signal is named for its kind ("Image 2"), and an
+        # "@" in front of that would claim it is bound to something.
+        return f"{self.panel_id} {title}"
+
     def _band_fragments(self) -> tuple[tuple, tuple]:
         """The strip's two lines as coloured fragments: sizes, then names.
 
@@ -496,7 +528,7 @@ class PanelCardView(FluentGroupBox):
 
         structure = tuple(self._parameter_surface.get("data_structure") or ())
         scope = tuple(self._parameter_surface.get("data_scope") or ())
-        sizes: list[tuple[str, str | None]] = [(str(self._base_title), None)]
+        sizes: list[tuple[str, str | None]] = [(self._caption(), None)]
         names: list[tuple[str, str | None]] = []
         for index, group in enumerate(structure):
             colour = AXIS_GROUP_COLORS[index % len(AXIS_GROUP_COLORS)]

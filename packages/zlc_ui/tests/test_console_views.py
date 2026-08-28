@@ -2207,3 +2207,69 @@ editor.update_projection(dict(projection, preview_offered=False))
 assert not switch.isVisible(), 'no switch where the node opens nothing'
 """
     )
+
+
+def test_the_card_caption_names_the_card_and_drops_the_logic_segment() -> None:
+    """The strip says WHICH card, and stops repeating what never varies.
+
+    Every logic signal's name begins "@logic/", so that segment is identical
+    on every panel and tells the reader nothing; the card's own id is what
+    the strip could not say before.
+
+    Display only.  The title is also the panel's editable name, and the
+    console decides whether the operator has renamed a panel by asking
+    whether the title still equals the signal -- so the decoration must
+    never reach the state, the rename field, or the Setting form.
+    """
+
+    _run_qt(
+        """
+import zou_lab_control
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.console import panel_card_view as tested_module
+PanelCardView = tested_module.PanelCardView
+app = ensure_qt_app(['test'])
+
+
+def project(card, title, signal):
+    card.set_panel_projection(
+        {
+            'signal': signal, 'kind': 'image', 'size': '2x2',
+            'interval_ms': 100, 'title': title, 'semantic': {},
+            'display': {}, 'fit': {}, 'overlay_signal': '',
+        },
+        {'semantic': (), 'display': (), 'fit': ()},
+    )
+
+
+card = PanelCardView('panel-2', 'Card')
+card.set_size_choices(('1x2', '2x2', '1x4'), '2x2')
+card.set_signal_choices((('source', (('Frames', '@logic/camera_measurement/frames'),)),))
+
+# A signal-bound panel: the title IS the signal's name.
+project(card, '@logic/camera_measurement/frames', '@logic/camera_measurement/frames')
+assert card._caption() == 'panel-2@camera_measurement/frames', card._caption()
+line = card._band_fragments()[0][0][0]
+assert line == 'panel-2@camera_measurement/frames', line
+
+# The name itself is untouched, everywhere it is the NAME and not a caption.
+assert card._base_title == '@logic/camera_measurement/frames'
+assert card.title_edit.text() == '@logic/camera_measurement/frames'
+
+# A signal from somewhere other than logic keeps its own prefix.
+project(card, '@device/mot_camera/frames', '@device/mot_camera/frames')
+assert card._caption() == 'panel-2@device/mot_camera/frames', card._caption()
+
+# A panel with no signal is named for its kind; an "@" would claim a
+# binding it does not have.
+project(card, 'Image 2', '')
+assert card._caption() == 'panel-2 Image 2', card._caption()
+
+# And an operator's own name still shows, with the card it belongs to.
+project(card, 'MOT shot', '@logic/camera_measurement/frames')
+assert card._caption() == 'panel-2 MOT shot', card._caption()
+assert card.title_edit.text() == 'MOT shot'
+card.deleteLater()
+print('ok')
+"""
+    )
