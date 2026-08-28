@@ -1,67 +1,41 @@
 """Where compiled kernels are cached on disk.  One answer, one place.
 
 Numba writes machine code beside a fingerprint of the source and the
-toolchain that produced it.  Two facts decide where that belongs, and
-neither of them is "next to the source":
+toolchain that produced it.  It lives in the checkout, under a plainly
+named ``numba_cache`` folder: it belongs to this checkout's sources, a
+second checkout should build its own rather than share one, and a folder
+an operator can see is a folder they can delete when they want it rebuilt.
 
-  * It is per-MACHINE.  The bytes are compiled for this CPU, this numba and
-    this LLVM; carrying them anywhere else is at best waste and at worst a
-    stale hit.  So it goes in the user's LOCAL (non-roaming) cache area, the
-    place every platform reserves for exactly this.
-
-  * A checkout is often inside a synced folder -- this one lives under
-    Dropbox -- and a directory of machine code that is rewritten on every
-    compile is then uploaded continuously, forever, for nothing.  That is
-    what a cache in the working tree costs, and it is why the tree is the
-    wrong home even though the folder was already git-ignored.
-
-Numba keys each entry by the source file's own path, so several checkouts
-or git worktrees on one machine share this directory without colliding:
-each simply gets its own entries.
+Three places used to spell this path out -- both kernel modules and
+``bin/warm_numba_cache.bat`` -- so moving it needed all three edited
+together, or the warmer filled a directory nothing read.  Now they ask
+here.
 
 ``NUMBA_CACHE_DIR`` remains the override.  Set it and nothing here applies
--- which is what a sandbox, a CI runner or a read-only home needs.
+-- which is what a sandbox, a CI runner or a read-only checkout needs.
 """
 
 from __future__ import annotations
 
 import os
 import pathlib
-import tempfile
 
-#: The folder name under the platform's cache root.  The product's name, so
-#: an operator finding it knows what wrote it.
-CACHE_NAMESPACE = "zou_lab_control"
+#: The folder, at the repository root.  No leading dot: this is not a
+#: private dotfile, it is a build product of the checkout it sits in, and
+#: hiding it only makes it harder to find and clear.
+CACHE_DIRECTORY_NAME = "numba_cache"
 
 
-def _user_cache_root() -> pathlib.Path:
-    """The platform's per-user, non-roaming cache directory."""
+def _checkout_root() -> pathlib.Path:
+    """The repository root: this module is packages/zlc_plot/src/zlc_plot/."""
 
-    if os.name == "nt":
-        # LOCALAPPDATA, not APPDATA: the roaming one would carry machine
-        # code between machines on a domain profile.
-        base = os.environ.get("LOCALAPPDATA") or os.environ.get("TEMP")
-        if not base:
-            profile = os.environ.get("USERPROFILE")
-            base = (
-                str(pathlib.Path(profile) / "AppData" / "Local")
-                if profile
-                else tempfile.gettempdir()
-            )
-        return pathlib.Path(base)
-    base = os.environ.get("XDG_CACHE_HOME")
-    if base:
-        return pathlib.Path(base)
-    home = os.environ.get("HOME")
-    return pathlib.Path(home) / ".cache" if home else pathlib.Path(
-        tempfile.gettempdir()
-    )
+    return pathlib.Path(__file__).resolve().parents[4]
 
 
 def kernel_cache_dir() -> pathlib.Path:
     """The directory compiled kernels cache in, whether or not it exists."""
 
-    return _user_cache_root() / CACHE_NAMESPACE / "numba"
+    return _checkout_root() / CACHE_DIRECTORY_NAME
 
 
 def install() -> str:
@@ -80,7 +54,7 @@ def install() -> str:
     try:
         path.mkdir(parents=True, exist_ok=True)
     except OSError:
-        # An unwritable cache root is not a reason to fail to import: numba
+        # A read-only checkout is not a reason to fail to import: numba
         # falls back to compiling every time, which is slow, not wrong.
         return ""
     os.environ["NUMBA_CACHE_DIR"] = str(path)

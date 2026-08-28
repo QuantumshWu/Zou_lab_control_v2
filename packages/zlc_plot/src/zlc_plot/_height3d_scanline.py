@@ -16,7 +16,7 @@ pixel once, with the per-column bookkeeping in registers and small
 per-chunk scratch.
 
 Compilation caches on disk in the directory :mod:`zlc_plot._kernel_cache`
-owns -- the user's local cache area, not the checkout -- see
+owns -- ``numba_cache`` at the checkout root, see
 ``bin/warm_numba_cache.bat``.  The first call on a fresh machine compiles
 once; afterwards every process loads machine code in milliseconds.
 """
@@ -298,7 +298,7 @@ def warm(force: bool = False) -> str:
 
     import numba
 
-    # install() leaves the variable unset when the cache root cannot be
+    # install() leaves the variable unset when the checkout cannot be
     # written; ask the owner rather than the environment it may not have set.
     cache_dir = pathlib.Path(
         os.environ.get("NUMBA_CACHE_DIR") or _kernel_cache.kernel_cache_dir()

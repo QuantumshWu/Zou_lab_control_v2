@@ -324,14 +324,13 @@ def test_the_masked_block_mean_counts_what_it_summed() -> None:
     )
 
 
-def test_the_kernel_cache_lives_outside_the_checkout() -> None:
-    """Compiled machine code is a per-machine artefact, not a source file.
+def test_the_kernel_cache_is_a_plainly_named_folder_in_the_checkout() -> None:
+    """It belongs to this checkout, and it is not a hidden dotfile.
 
-    It used to be written to ``.numba_cache`` in the repository root.  That is
-    wrong twice over: the bytes are compiled for THIS cpu and toolchain, so
-    they must never travel with the tree, and a checkout is often inside a
-    synced folder -- this one is -- where a directory rewritten on every
-    compile is uploaded forever for nothing.
+    The cache holds machine code compiled from THESE sources, so it sits in
+    the checkout beside them rather than in some per-user cache area.  It is
+    named without a leading dot on purpose: it is a build product an operator
+    may want to find and delete, not a private dotfile to hide from them.
 
     Two modules and one batch file each carried their own copy of the path,
     which is why this asserts there is one owner and that everyone asks it.
@@ -344,14 +343,15 @@ def test_the_kernel_cache_lives_outside_the_checkout() -> None:
 
     chosen = pathlib.Path(_kernel_cache.kernel_cache_dir()).resolve()
     checkout = pathlib.Path(_kernel_cache.__file__).resolve().parents[4]
-    assert checkout.name  # the repository root, four levels up from the module
-    assert checkout not in chosen.parents and chosen != checkout, (
-        "the kernel cache is inside the checkout: %s" % chosen
+    assert chosen.parent == checkout, (
+        "the kernel cache is not at the checkout root: %s" % chosen
     )
-    assert _kernel_cache.CACHE_NAMESPACE in chosen.parts
+    assert not chosen.name.startswith("."), (
+        "the kernel cache is hidden behind a leading dot: %s" % chosen.name
+    )
 
     # And the environment override still wins, which is what a sandbox or a
-    # read-only home needs.
+    # read-only checkout needs.
     previous = os.environ.get("NUMBA_CACHE_DIR")
     try:
         os.environ["NUMBA_CACHE_DIR"] = "somewhere/else"
