@@ -5,6 +5,13 @@ that stays the specification.  These tests run the same input through both
 engines and assert bit equality -- not closeness -- so a kernel cannot
 drift from its reference silently.  ``ZLC_PLOT_KERNELS`` is the switch the
 comparison turns.
+
+ONE kernel cannot promise that, and says so where it is tested: summing a
+floating plane in a different order is a different answer in the last
+bits, always.  Its contract is the stronger one that bit equality was
+standing in for -- it must be at least as close to a float64 reduction as
+the reference is -- because the reference accumulates float32 planes in
+float32, and the kernel does not.
 """
 from __future__ import annotations
 
@@ -56,8 +63,9 @@ def test_the_block_mean_kernel_matches_reduceat_bit_for_bit() -> None:
         np.testing.assert_array_equal(reference, compiled)
         assert reference.dtype == compiled.dtype
 
-    # A partly invalid plane is not the kernel's question: it must fall
-    # through to the reference, which counts the contributing samples.
+    # A partly invalid plane sums and counts in one compiled pass rather
+    # than materialising np.where(valid, values, 0) and reducing twice.
+    # For exact integers that is the reference's answer, bit for bit.
     values = rng.integers(0, 4095, size=(128, 128), dtype=np.uint16)
     valid = np.ones(values.shape, dtype=bool)
     valid[3:9, 4:20] = False
@@ -220,4 +228,97 @@ def test_the_finite_probe_takes_the_same_leading_values() -> None:
     finite = np.isfinite(pool) & mask
     np.testing.assert_array_equal(
         _finite_probe(pool, finite), finite_probe(pool, mask)
+    )
+
+
+def test_the_float_block_mean_is_no_further_from_the_truth_than_reduceat() -> None:
+    """A floating plane cannot promise bit equality, so it promises more.
+
+    ``np.add.reduceat`` on a float32 plane accumulates in float32 and lands
+    about 1e-7 relative away from a float64 reduction of the same numbers.
+    The kernel accumulates in float64 and lands on it.  Asserting closeness
+    alone would let a future kernel get worse and still pass, so the
+    assertion is the comparison itself: for every case, the compiled answer
+    is at least as near the float64 truth as the reference answer is.
+    """
+
+    pytest.importorskip("numba")
+    rng = np.random.default_rng(29)
+    cases = (
+        (np.float32, 512, 378),
+        (np.float32, 512, 256),
+        (np.float32, 300, 97),
+        (np.float64, 512, 378),
+        (np.float64, 300, 97),
+    )
+    improved = 0
+    for dtype, source, target in cases:
+        values = (rng.random((source, source)) * 4000.0).astype(dtype)
+        starts = _reduction_starts(source, target, 1.25)
+        valid = np.broadcast_to(np.True_, values.shape)
+        reference, compiled = _both_engines(
+            lambda: _area_mean(values, valid, starts, starts)
+        )
+        assert reference.dtype == compiled.dtype
+        truth = _area_mean(
+            values.astype(np.float64), valid, starts, starts
+        )
+        reference_error = np.abs(np.asarray(reference, dtype=np.float64) - truth)
+        compiled_error = np.abs(np.asarray(compiled, dtype=np.float64) - truth)
+        assert compiled_error.max() <= reference_error.max(), (
+            "%s %d->%d: the kernel is further from a float64 reduction "
+            "(%.3e) than reduceat is (%.3e)"
+            % (np.dtype(dtype).name, source, target,
+               compiled_error.max(), reference_error.max())
+        )
+        if compiled_error.max() < reference_error.max():
+            improved += 1
+        # And still the same picture: a relative difference far below
+        # anything a colour LUT or a bar height can show.
+        scale = np.abs(truth).max()
+        assert np.abs(
+            np.asarray(compiled, dtype=np.float64) - np.asarray(reference,
+                                                                dtype=np.float64)
+        ).max() <= 1e-6 * scale
+    assert improved, (
+        "no case improved: the float32 comparison is not exercising the "
+        "float32 accumulator this kernel exists to beat"
+    )
+
+
+def test_the_masked_block_mean_counts_what_it_summed() -> None:
+    """Sum and count come out of one pass, so they cannot disagree.
+
+    The path this replaced built a whole zero-filled plane and reduced it
+    twice, once for each.  A cell with nothing valid in it must still come
+    back masked, not as a division by zero.
+    """
+
+    pytest.importorskip("numba")
+    rng = np.random.default_rng(31)
+    values = (rng.random((128, 128)) * 100.0).astype(np.float32)
+    valid = np.ones(values.shape, dtype=bool)
+    valid[3:9, 4:20] = False
+    starts = _reduction_starts(128, 90, 1.25)
+    reference, compiled = _both_engines(
+        lambda: _area_mean(values, valid, starts, starts)
+    )
+    np.testing.assert_allclose(
+        np.asarray(compiled, dtype=np.float64),
+        np.asarray(reference, dtype=np.float64),
+        rtol=1e-6,
+    )
+
+    # A block with no valid sample at all: masked on both engines, and the
+    # mask must agree cell for cell.
+    valid[:] = True
+    valid[:16, :16] = False
+    reference, compiled = _both_engines(
+        lambda: _area_mean(values, valid, starts, starts)
+    )
+    assert isinstance(compiled, np.ma.MaskedArray), (
+        "an empty block must come back masked, not divided by zero"
+    )
+    np.testing.assert_array_equal(
+        np.ma.getmaskarray(compiled), np.ma.getmaskarray(reference)
     )
