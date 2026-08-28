@@ -127,7 +127,9 @@ from .specs import (
     ImagePresentation,
     PlotSpec,
     PulseTimelinePlot,
+    RelimMode,
     RollingPlot,
+    limit_pairs,
     parameter_schema_for,
     semantic_spec,
 )
@@ -446,27 +448,44 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         if parameters is not None and not isinstance(parameters, Mapping):
             raise TypeError("parameters must be a mapping or None")
         initial_parameters = {} if parameters is None else dict(parameters)
+        # A fixed pair with a MISSING END cannot go straight into the store:
+        # its own validator refuses to start on one, and a host that refuses
+        # to start takes the panel's whole display vocabulary with it -- which
+        # is what collapsed the Setting popup around an operator who was
+        # deleting a colour maximum one character at a time.  It is deferred
+        # until the renderer exists and can say what the picture currently
+        # shows, and then materialised.
+        #
+        # EITHER end, not only both.  Both-ends-missing is what choosing Fixed
+        # produces; one-end-missing is what clearing a value produces, and the
+        # rule was written for the first entrance only.  The pairs and the
+        # mode that governs each come from the schema's own declaration, so a
+        # new pair cannot be forgotten by one of these walks and not another.
         deferred_fixed_limits: dict[str, object] | None = None
-        if initial_parameters.get("relim_mode") == "fixed":
-            for low_name, high_name in (
-                ("color_min", "color_max"),
-                ("y_min", "y_max"),
+        for mode_name, low_name, high_name in limit_pairs():
+            if (
+                mode_name not in self._parameter_schema
+                or low_name not in self._parameter_schema
+                or high_name not in self._parameter_schema
             ):
-                if (
-                    low_name in self._parameter_schema
-                    and high_name in self._parameter_schema
-                    and initial_parameters.get(low_name) is None
-                    and initial_parameters.get(high_name) is None
-                ):
-                    deferred_fixed_limits = {
-                        "relim_mode": "fixed",
-                        low_name: None,
-                        high_name: None,
-                    }
-                    initial_parameters.pop("relim_mode", None)
-                    initial_parameters.pop(low_name, None)
-                    initial_parameters.pop(high_name, None)
-                    break
+                continue
+            if initial_parameters.get(mode_name) != RelimMode.FIXED.value:
+                continue
+            if (
+                initial_parameters.get(low_name) is not None
+                and initial_parameters.get(high_name) is not None
+            ):
+                continue
+            if deferred_fixed_limits is None:
+                deferred_fixed_limits = {}
+            deferred_fixed_limits[mode_name] = RelimMode.FIXED.value
+            # The end the operator DID author is carried through; deferring
+            # the pair as two Nones threw their own number away.
+            deferred_fixed_limits[low_name] = initial_parameters.get(low_name)
+            deferred_fixed_limits[high_name] = initial_parameters.get(high_name)
+            initial_parameters.pop(mode_name, None)
+            initial_parameters.pop(low_name, None)
+            initial_parameters.pop(high_name, None)
         self._display_store = DisplayStateStore(
             self._parameter_schema,
             initial_parameters,
@@ -1997,31 +2016,53 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             converted = source_unit.convert_value_to((float(current),), target_unit)
             prepared[name] = float(np.asarray(converted).reshape(-1)[0])
 
+    def _current_limits_for(self, low_name: str) -> tuple[float, float]:
+        """What a missing fixed limit takes: the picture as it stands.
+
+        Each pair names its own source.  The walk this replaces asked "is it
+        color_min?" and gave everything else the Y axis, which was right
+        while colour and y were the only pairs and silently wrong the moment
+        a third existed -- the histogram's value axis would have been fixed
+        to the count axis's range.  An unknown pair raises rather than
+        inheriting somebody else's numbers.
+        """
+
+        renderer = self._renderer
+        assert renderer is not None
+        if low_name == "color_min":
+            return tuple(sorted(renderer.resolved_color_limits()))
+        axes = renderer.primary_axes
+        if low_name == "y_min":
+            return tuple(sorted(map(float, axes.get_ylim())))
+        if low_name == "x_min":
+            return tuple(sorted(map(float, axes.get_xlim())))
+        raise KeyError(
+            f"{low_name!r} is an authored limit pair with nowhere to take its "
+            "current value from; say where it materialises from here"
+        )
+
     def _materialize_fixed_limits(
         self,
         prepared: dict[str, object],
         previous: DisplayState,
     ) -> None:
-        if "relim_mode" not in self._parameter_schema:
-            return
-        mode = prepared.get("relim_mode", previous.values["relim_mode"])
-        if mode != "fixed":
-            return
         candidate = dict(previous.values)
         candidate.update(prepared)
         assert self._renderer is not None
-        for low_name in self._parameter_schema.names:
-            if not low_name.endswith("_min"):
+        for mode_name, low_name, high_name in limit_pairs():
+            if (
+                mode_name not in self._parameter_schema
+                or low_name not in self._parameter_schema
+                or high_name not in self._parameter_schema
+            ):
                 continue
-            high_name = f"{low_name[:-4]}_max"
-            if high_name not in self._parameter_schema:
+            # The pair's OWN mode.  One `relim_mode` answered for every pair
+            # until the value axis got a mode of its own.
+            if candidate.get(mode_name) != RelimMode.FIXED.value:
                 continue
             if candidate[low_name] is not None and candidate[high_name] is not None:
                 continue
-            if low_name == "color_min":
-                low, high = sorted(self._renderer.resolved_color_limits())
-            else:
-                low, high = sorted(map(float, self._renderer.primary_axes.get_ylim()))
+            low, high = self._current_limits_for(low_name)
             if candidate[low_name] is None:
                 prepared[low_name] = low
             if candidate[high_name] is None:
@@ -2144,17 +2185,32 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._materialize_fixed_limits(prepared, previous)
                 if authored_values is not None:
                     transition_values = dict(authored)
-                    if transition_values.get("relim_mode") == "fixed":
-                        for low_name in self._parameter_schema.names:
-                            if not low_name.endswith("_min"):
-                                continue
-                            high_name = f"{low_name[:-4]}_max"
-                            if high_name not in self._parameter_schema:
-                                continue
-                            if transition_values.get(low_name) is None:
-                                transition_values[low_name] = prepared[low_name]
-                            if transition_values.get(high_name) is None:
-                                transition_values[high_name] = prepared[high_name]
+                    for mode_name, low_name, high_name in limit_pairs():
+                        if (
+                            mode_name not in self._parameter_schema
+                            or low_name not in self._parameter_schema
+                            or high_name not in self._parameter_schema
+                        ):
+                            continue
+                        # The EFFECTIVE mode, not the patch's.  An operator
+                        # clearing one limit sends {"color_max": None} and
+                        # nothing else, so asking the patch what the mode is
+                        # answered "nothing" and this walk stood down -- and
+                        # the half-authored pair went on to the full-state
+                        # validator, which refuses to configure on one.  That
+                        # is what took the panel's display vocabulary away
+                        # and collapsed the Setting popup around it.
+                        if (
+                            prepared.get(
+                                mode_name, previous.values[mode_name]
+                            )
+                            != RelimMode.FIXED.value
+                        ):
+                            continue
+                        if transition_values.get(low_name) is None:
+                            transition_values[low_name] = prepared[low_name]
+                        if transition_values.get(high_name) is None:
+                            transition_values[high_name] = prepared[high_name]
                     authored_candidate = self._parameter_schema._transition_prepared(
                         previous.values,
                         transition_values,

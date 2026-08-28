@@ -780,6 +780,19 @@ LIMIT_MODE_NAMES = tuple(dict.fromkeys(mode for mode, _low, _high
                                        in _LIMIT_PARAMETER_PAIRS))
 
 
+def limit_pairs() -> tuple[tuple[str, str, str], ...]:
+    """Every authored limit pair, with the mode that governs it.
+
+    The pairing was rediscovered by string surgery in three separate walks
+    ("_min" -> name[:-4] + "_max"), each keyed on ``relim_mode`` alone.  That
+    was survivable while there was one mode and two pairs; it stopped being
+    survivable the moment the histogram's value axis got a mode of its own,
+    because the walks would have handed the x pair the y axis's limits.
+    """
+
+    return _LIMIT_PARAMETER_PAIRS
+
+
 def limit_pair_for(name: str) -> tuple[str, str, str] | None:
     """The (mode, low, high) triple this authored limit belongs to."""
 

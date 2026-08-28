@@ -73,6 +73,97 @@ def test_initial_fixed_color_mode_materializes_the_visible_limits() -> None:
         session.close()
 
 
+def test_one_cleared_end_of_a_fixed_pair_materializes_like_two() -> None:
+    """Half-authored is the state an operator's backspace produces.
+
+    Choosing Fixed with nothing authored was handled -- the visible limits
+    were materialised into both ends.  Clearing ONE end of an already-fixed
+    pair was not, and the same schema that materialises the first refuses to
+    configure on the second: "fixed relim_mode requires color_min and
+    color_max".  A host that will not configure has no display vocabulary,
+    so the panel's whole Setting form collapsed from twenty-nine fields to
+    eleven, around an operator who was deleting a colour maximum one
+    character at a time.
+
+    Both entrances now ask the same question of the same declaration.
+    """
+
+    session = PlotSession(
+        image_snapshot(),
+        ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
+        parameters={
+            "relim_mode": "fixed",
+            "color_min": None,
+            "color_max": None,
+        },
+    )
+    try:
+        authored = dict(session.display_state.values)
+        low = float(authored["color_min"])
+
+        # Clear the top end alone, the way a backspace does, through the
+        # call the console actually makes: a complete target plus the
+        # AUTHORED delta.  The delta carries no mode, so anything that asks
+        # the delta what the mode is decides this pair is not fixed -- and
+        # the half-authored pair then reaches the full-state validator,
+        # which refuses to configure.
+        cleared = dict(authored)
+        cleared["color_max"] = None
+        session.configure(
+            parameters=cleared,
+            parameter_updates={"color_max": None},
+        )
+        values = session.display_state.values
+        assert values["relim_mode"] == "fixed"
+        assert float(values["color_min"]) == low, "the authored end was kept"
+        assert values["color_max"] is not None, (
+            "a cleared end must materialise, not reach the store as None"
+        )
+
+        # And the bottom end alone.
+        cleared = dict(session.display_state.values)
+        cleared["color_min"] = None
+        session.configure(
+            parameters=cleared,
+            parameter_updates={"color_min": None},
+        )
+        values = session.display_state.values
+        assert values["color_min"] is not None
+        assert float(values["color_min"]) < float(values["color_max"])
+    finally:
+        session.close()
+
+
+def test_a_fixed_pair_takes_its_own_axis_limits_and_says_so() -> None:
+    """Every pair names where it materialises from; none inherits.
+
+    The walk this replaced asked "is it color_min?" and gave everything else
+    the Y axis.  That was right while colour and y were the only pairs and
+    silently wrong the moment a third existed: the histogram's value axis
+    would have been fixed to its count axis's range.  An unknown pair raises
+    rather than quietly taking somebody else's numbers.
+    """
+
+    from zlc_plot.specs import limit_pairs
+
+    pairs = limit_pairs()
+    assert ("relim_mode", "color_min", "color_max") in pairs
+    assert ("x_relim_mode", "x_min", "x_max") in pairs
+
+    session = PlotSession(
+        image_snapshot(),
+        ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
+    )
+    try:
+        assert session._current_limits_for("color_min")
+        assert session._current_limits_for("y_min")
+        assert session._current_limits_for("x_min")
+        with pytest.raises(KeyError):
+            session._current_limits_for("elevation_min")
+    finally:
+        session.close()
+
+
 _GOLDEN_ROOT = Path(__file__).with_name("goldens")
 
 
