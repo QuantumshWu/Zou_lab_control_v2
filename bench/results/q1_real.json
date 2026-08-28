@@ -1,0 +1,89 @@
+{
+  "results": [
+    {
+      "case": "image_camera_4M",
+      "notes": "2048x2048 uint16 dense camera frame",
+      "points": 4194304,
+      "first_render_ms": 1709.6,
+      "live_serialized": {
+        "n": 12,
+        "median_ms": 31.27,
+        "p90_ms": 33.33,
+        "p99_ms": 34.74,
+        "max_ms": 34.91,
+        "best_ms": 27.57
+      },
+      "live_25hz": {
+        "submitted_hz": 21.1,
+        "presented_hz": 21.1
+      },
+      "interactions": {
+        "drag_main": {
+          "serialized": {
+            "n": 8,
+            "median_ms": 8.0,
+            "p90_ms": 9.42,
+            "p99_ms": 11.58,
+            "max_ms": 11.82,
+            "best_ms": 4.99
+          },
+          "spray": {
+            "sent_hz": 124.5,
+            "presented_hz": 120.5
+          },
+          "selectors_after": [
+            "area"
+          ]
+        },
+        "drag_clim": {
+          "serialized": {
+            "n": 8,
+            "median_ms": 49.47,
+            "p90_ms": 59.41,
+            "p99_ms": 60.1,
+            "max_ms": 60.18,
+            "best_ms": 38.18
+          },
+          "spray": {
+            "sent_hz": 170.2,
+            "presented_hz": 23.3
+          }
+        },
+        "click_main": {
+          "n": 6,
+          "median_ms": 17.2,
+          "p90_ms": 21.63,
+          "p99_ms": 23.81,
+          "max_ms": 24.06,
+          "best_ms": 12.04
+        },
+        "pan_drag": {
+          "serialized": {
+            "n": 8,
+            "median_ms": 25.74,
+            "p90_ms": 40.77,
+            "p99_ms": 65.59,
+            "max_ms": 68.35,
+            "best_ms": 23.58
+          },
+          "spray": {
+            "sent_hz": 216.9,
+            "presented_hz": 43.9
+          }
+        },
+        "wheel_main": {
+          "n": 6,
+          "median_ms": 47.14,
+          "p90_ms": 52.34,
+          "p99_ms": 54.31,
+          "max_ms": 54.52,
+          "best_ms": 45.21
+        }
+      },
+      "live_plus_drag": {
+        "submitted_hz": 21.1,
+        "presented_hz": 63.5
+      }
+    }
+  ]
+}

@@ -198,9 +198,32 @@ class ConsoleBench:
 
     # ---------------------------------------------------------- measurement
     def instrument(self, panel, *, seams=RENDERER_SEAMS) -> list[str]:
-        """Bind self-time probes to THIS panel's renderer only."""
+        """Bind self-time probes to THIS panel's renderer, and to the
+        module-level work a frame does outside it.
 
-        return probe.watch(self.renderer(panel), *seams)
+        A renderer-only tap hides the front store: the source reduction, the
+        pyramid and the block mean all live in ``_image_raster`` as plain
+        functions, and they were a third of some frames while every visible
+        row said the renderer was cheap.  Module functions have exactly one
+        instance, so watching them is safe where watching a class is not.
+        """
+
+        bound = probe.watch(self.renderer(panel), *seams)
+        import zlc_plot._image_raster as raster
+        import zlc_plot._height3d_raster as h3d
+
+        if not getattr(ConsoleBench, "_module_seams_bound", False):
+            for module, names in (
+                (raster, ("prepare_image_front", "_area_mean", "_reduce_blocks")),
+                (h3d, ("render_height_bars", "_stroke_rims")),
+            ):
+                for name in names:
+                    try:
+                        probe.watch_module(module, name)
+                    except Exception:
+                        continue
+            ConsoleBench._module_seams_bound = True
+        return bound
 
     def density(self, panel) -> dict:
         renderer = self.renderer(panel)
