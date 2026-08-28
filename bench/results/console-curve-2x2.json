@@ -1,4 +1,5 @@
 {
+  "scenario": "solo",
   "kind": "curve",
   "size": "2x2",
   "panels_in_console": 1,
@@ -12,100 +13,239 @@
     "megapixels": 1.57
   },
   "live": {
-    "window_s": 8.0,
-    "frames": 74,
-    "frames_per_second": 9.2,
+    "window_s": 5.0,
+    "frames": 47,
+    "frames_per_second": 9.4,
     "beat_ms": 100.0,
     "frame_gap": {
-      "n": 73,
-      "median_ms": 110.19,
-      "p90_ms": 118.51,
-      "p99_ms": 127.73,
-      "max_ms": 131.86,
-      "best_ms": 12.52
+      "n": 46,
+      "median_ms": 109.44,
+      "p90_ms": 118.81,
+      "p99_ms": 126.91,
+      "max_ms": 127.1,
+      "best_ms": 34.33
     },
     "stalls_over_two_beats": 0,
     "worst_gaps_ms": [
-      131.9,
-      126.1,
-      124.9,
-      120.9,
-      119.9
+      127.1,
+      126.7,
+      123.2,
+      121.4,
+      119.1
     ],
     "seams": [
       {
-        "seam": "MatplotlibRenderer._compose_frame",
-        "calls": 73,
-        "self_ms_total": 312.6,
-        "self_ms_per_call": 4.28,
-        "cpu_ms_per_call": 5.35,
-        "cpu_share": 1.25,
-        "per_second": 9.1
+        "seam": "MatplotlibRenderer[curve]._compose_frame",
+        "calls": 46,
+        "self_ms_total": 174.7,
+        "self_ms_per_call": 3.8,
+        "cpu_ms_per_call": 3.06,
+        "cpu_share": 0.8,
+        "per_second": 9.2
       },
       {
-        "seam": "MatplotlibRenderer.present",
-        "calls": 73,
-        "self_ms_total": 42.0,
-        "self_ms_per_call": 0.57,
-        "cpu_ms_per_call": 0.21,
-        "cpu_share": 0.37,
-        "per_second": 9.1
-      },
-      {
-        "seam": "MatplotlibRenderer._update_curve",
-        "calls": 73,
-        "self_ms_total": 34.6,
-        "self_ms_per_call": 0.47,
-        "cpu_ms_per_call": 0.43,
-        "cpu_share": 0.9,
-        "per_second": 9.1
-      },
-      {
-        "seam": "MatplotlibRenderer._dynamic_artists",
-        "calls": 73,
-        "self_ms_total": 3.8,
-        "self_ms_per_call": 0.05,
+        "seam": "MatplotlibRenderer[curve].present",
+        "calls": 46,
+        "self_ms_total": 24.9,
+        "self_ms_per_call": 0.54,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.1
+        "per_second": 9.2
       },
       {
-        "seam": "MatplotlibRenderer._update_selectors",
-        "calls": 73,
-        "self_ms_total": 2.3,
+        "seam": "MatplotlibRenderer[curve].canvas.restore_region",
+        "calls": 46,
+        "self_ms_total": 23.2,
+        "self_ms_per_call": 0.5,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[curve]._update_curve",
+        "calls": 46,
+        "self_ms_total": 14.6,
+        "self_ms_per_call": 0.32,
+        "cpu_ms_per_call": 0.34,
+        "cpu_share": 1.07,
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[curve]._dynamic_artists",
+        "calls": 46,
+        "self_ms_total": 3.2,
+        "self_ms_per_call": 0.07,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[curve]._update_selectors",
+        "calls": 46,
+        "self_ms_total": 1.5,
         "self_ms_per_call": 0.03,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.1
+        "per_second": 9.2
       },
       {
-        "seam": "MatplotlibRenderer._blit_exact_rgba_image",
-        "calls": 1022,
-        "self_ms_total": 1.4,
+        "seam": "MatplotlibRenderer[curve]._blit_exact_rgba_image",
+        "calls": 644,
+        "self_ms_total": 0.8,
         "self_ms_per_call": 0.0,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 127.7
+        "per_second": 128.8
       },
       {
-        "seam": "MatplotlibRenderer._settle_owned_boxes",
-        "calls": 73,
-        "self_ms_total": 0.3,
-        "self_ms_per_call": 0.0,
+        "seam": "MatplotlibRenderer[curve]._update_plot",
+        "calls": 46,
+        "self_ms_total": 0.5,
+        "self_ms_per_call": 0.01,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.1
+        "per_second": 9.2
       },
       {
-        "seam": "MatplotlibRenderer._update_fit",
-        "calls": 73,
+        "seam": "MatplotlibRenderer[curve]._update_height_bars_cage",
+        "calls": 46,
+        "self_ms_total": 0.2,
+        "self_ms_per_call": 0.01,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[curve]._settle_owned_boxes",
+        "calls": 46,
         "self_ms_total": 0.2,
         "self_ms_per_call": 0.0,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.1
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[curve]._update_fit",
+        "calls": 46,
+        "self_ms_total": 0.1,
+        "self_ms_per_call": 0.0,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[curve]._update_single_fit",
+        "calls": 46,
+        "self_ms_total": 0.1,
+        "self_ms_per_call": 0.0,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[curve]._update_classifier",
+        "calls": 46,
+        "self_ms_total": 0.1,
+        "self_ms_per_call": 0.0,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[curve]._update_image_point_overlay",
+        "calls": 46,
+        "self_ms_total": 0.0,
+        "self_ms_per_call": 0.0,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
       }
     ]
   },
-  "threads_left_running": []
+  "edits": {
+    "kind": "curve",
+    "edits": [
+      {
+        "section": "display",
+        "values": {
+          "show_grid": true
+        },
+        "refused": null,
+        "answered": true,
+        "to_next_front_ms": 56.31
+      },
+      {
+        "section": "display",
+        "values": {
+          "title": "edited while live"
+        },
+        "refused": null,
+        "answered": true,
+        "to_next_front_ms": 52.52
+      },
+      {
+        "section": "display",
+        "values": {
+          "uncertainty": true
+        },
+        "refused": null,
+        "answered": true,
+        "to_next_front_ms": 82.03
+      },
+      {
+        "section": "display",
+        "values": {
+          "value_label": "edited while live"
+        },
+        "refused": null,
+        "answered": true,
+        "to_next_front_ms": 50.11
+      },
+      {
+        "section": "display",
+        "values": {
+          "x_label": "edited while live"
+        },
+        "refused": null,
+        "answered": true,
+        "to_next_front_ms": 52.86
+      },
+      {
+        "section": "display",
+        "values": {
+          "y_label": "edited while live"
+        },
+        "refused": null,
+        "answered": true,
+        "to_next_front_ms": 36.38
+      }
+    ],
+    "skipped": [
+      {
+        "field": "relim_mode",
+        "why": "str is an enum owned by the product"
+      },
+      {
+        "field": "value_display_unit",
+        "why": "unset, so the bench cannot tell the type"
+      },
+      {
+        "field": "x_display_unit",
+        "why": "unset, so the bench cannot tell the type"
+      },
+      {
+        "field": "y_max",
+        "why": "unset, so the bench cannot tell the type"
+      },
+      {
+        "field": "y_min",
+        "why": "unset, so the bench cannot tell the type"
+      }
+    ],
+    "answered": 6,
+    "of": 6,
+    "worst_ms": 82.03
+  },
+  "threads_left_running": [],
+  "problems": []
 }

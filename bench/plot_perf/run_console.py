@@ -61,31 +61,58 @@ def _console_paths() -> None:
 
 #: Seams worth timing on a panel's renderer.  Absent ones are skipped, so
 #: one list covers every kind and a new kind only has to add its own.
-RENDERER_SEAMS = (
+# The seams a frame is made of, DERIVED from the renderer rather than typed
+# out here.  A hand-kept list goes blind exactly when it matters: it had no
+# _update_rolling, so a rolling panel's 31.6 ms per frame sat in
+# _compose_frame's self-time with no child to blame, and a plot kind added
+# tomorrow would be invisible the same way.  Every ``_update_*`` the product
+# defines is a seam by construction; these are the ones whose names do not
+# follow that shape.
+_COMPOSE_SEAMS = (
     "present",
     "_compose_frame",
     "_native_draw",
-    "_update_image_artist",
     "_image_rgba_front",
     "_view_filling_rgba_front",
-    "_update_image_chrome",
+    "_box_sized_rgba_front",
     "_mutate_image_artists",
-    "_update_selectors",
     "_cached_image_range",
     "_blit_exact_rgba_image",
     "_dynamic_artists",
-    "_box_sized_rgba_front",
-    "_update_height_bars_artist",
-    "_update_height_bars_chrome",
     "_thin_overlapping_chrome",
     "_height_bars_occluded_polyline",
-    "_update_curve",
-    "_update_histogram",
-    "_update_horizontal_histogram",
-    "_update_fit",
     "_settle_owned_boxes",
     "_resolve_image_limits",
 )
+
+
+def renderer_seams(renderer_type=None) -> tuple[str, ...]:
+    """Every timeable seam on the renderer, product-derived."""
+
+    if renderer_type is None:
+        from zlc_plot.rendering import MatplotlibRenderer as renderer_type
+    updates = tuple(
+        sorted(
+            name
+            for name in vars(renderer_type)
+            if name.startswith("_update_")
+            and callable(vars(renderer_type)[name])
+        )
+    )
+    missing = tuple(
+        name for name in _COMPOSE_SEAMS if not hasattr(renderer_type, name)
+    )
+    if missing:
+        raise HarnessSeamError(
+            "the bench names seams the renderer no longer has: %s. A probe "
+            "that binds nothing reports zero and reads like free work."
+            % ", ".join(missing)
+        )
+    return _COMPOSE_SEAMS + updates
+
+
+class HarnessSeamError(RuntimeError):
+    """The bench's idea of the renderer no longer matches the renderer."""
 
 
 class _PanelFronts:
@@ -276,7 +303,7 @@ class ConsoleBench:
         return panel.host._session._renderer
 
     # ---------------------------------------------------------- measurement
-    def instrument(self, panel, *, seams=RENDERER_SEAMS) -> list[str]:
+    def instrument(self, panel, *, seams=None) -> list[str]:
         """Bind self-time probes to THIS panel's renderer, and to the
         module-level work a frame does outside it.
 
@@ -294,7 +321,23 @@ class ConsoleBench:
             type(self.renderer(panel)).__name__,
             self._kinds.get(panel.panel_id) or panel.panel_id,
         )
-        bound = probe.watch(self.renderer(panel), *seams, prefix=label)
+        renderer = self.renderer(panel)
+        if seams is None:
+            seams = renderer_seams(type(renderer))
+        bound = probe.watch(renderer, *seams, prefix=label)
+        # The three things compose does that are NOT renderer methods: the
+        # full-figure capture, the restore, and the per-artist draws.  A
+        # rolling panel spent 32 ms per frame in compose's own body with
+        # every named child under one millisecond, and there was no way to
+        # say which of the three it was.  Capture and restore are canvas
+        # methods, so the instance tap reaches them; what is left after
+        # subtracting them is the artist loop.
+        bound += probe.watch(
+            renderer.figure.canvas,
+            "copy_from_bbox",
+            "restore_region",
+            prefix="%s.canvas" % label,
+        )
         import zlc_plot._image_raster as raster
         import zlc_plot._height3d_raster as h3d
 
@@ -482,7 +525,7 @@ class ConsoleBench:
         self._kinds[panel.panel_id] = kind
         return panel
 
-    def edit_setting(self, panel, section: str, **values) -> dict:
+    def edit_setting(self, panel, section: str, strict: bool = True, **values) -> dict:
         """Change a panel parameter the way the Setting form changes it.
 
         The form does not send the one field the operator touched: it sends
@@ -513,66 +556,101 @@ class ConsoleBench:
             time.sleep(0.002)
         self._pump(0.5)
         applied = dict(getattr(panel.state, section, {}) or {})
-        for name, wanted in values.items():
-            if applied.get(name) != wanted:
-                raise guards.HarnessError(
-                    "%s.%s did not take: asked %r, panel holds %r. The edit "
-                    "was refused, and any timing here describes the old "
-                    "picture." % (section, name, wanted, applied.get(name))
-                )
+        refused = {
+            name: applied.get(name)
+            for name, wanted in values.items()
+            if applied.get(name) != wanted
+        }
+        if refused and strict:
+            # A refused edit's timing describes the OLD picture, so a caller
+            # that asked for one value and measured another is measuring
+            # nothing.  A sweep over every field is the exception: the
+            # product legitimately refuses some of them (a classifier with
+            # no threshold to classify), and that is a fact to record, not
+            # a reason to abandon the other twelve fields.
+            raise guards.HarnessError(
+                "%s did not take: asked %r, panel holds %r. The edit was "
+                "refused, and any timing here describes the old picture."
+                % (section, dict(values), refused)
+            )
         return {
             "section": section,
             "values": dict(values),
+            "refused": refused or None,
             "answered": answered is not None,
             "to_next_front_ms": None if answered is None else round(answered * 1e3, 2),
         }
 
-    # What an operator actually retypes mid-run, per kind.  Each entry is a
-    # section and the fields the Setting form would send together.
-    EDIT_MENU = {
-        "image": (
-            ("display", {"title": "retitled while live"}),
-            ("display", {"colormap": "magma"}),
-            ("display", {"show_distribution": False}),
-        ),
-        "curve": (
-            ("display", {"title": "retitled while live"}),
-            ("display", {"marker_size": 9.0}),
-        ),
-        "histogram": (
-            ("display", {"title": "retitled while live"}),
-            ("semantic", {"bin_count": 96}),
-            ("semantic", {"bin_count": 24}),
-        ),
-        "rolling": (
-            ("display", {"title": "retitled while live"}),
-            ("semantic", {"window": 10}),
-            ("semantic", {"window": 1}),
-        ),
-        "height_bars": (
-            ("display", {"title": "retitled while live"}),
-            ("display", {"colormap": "magma"}),
-        ),
-    }
+    # Strings the bench is allowed to invent a different value for.  Every
+    # other string field is an enum whose vocabulary belongs to the product,
+    # and guessing a member is how a bench reports a refused edit as a
+    # product defect.
+    _FREE_TEXT = ("title", "x_label", "y_label", "value_label")
+    _COLORMAPS = ("gray", "magma", "viridis")
 
-    def edit_run(self, panel, *, kind: str) -> dict:
-        """Every small edit for this kind, timed while the panel is live.
+    @classmethod
+    def _different_value(cls, field: str, current):
+        """A valid, different value for this field -- or why not.
 
-        These are the changes that feel instant or do not, and none of them
-        appear in a frame-rate number: the panel keeps its cadence either
-        way, what changes is how long the operator stares at the OLD
-        picture after committing the form.
+        Derived from what the panel is holding, so a display field added
+        with a new plot kind is exercised without being typed out here.
+        A hand-kept menu named bin_count under the wrong section and
+        invented two fields that do not exist.
         """
 
-        menu = self.EDIT_MENU.get(kind)
-        if not menu:
-            raise guards.HarnessError("no edit menu declared for kind %r" % kind)
-        rows = []
-        for section, values in menu:
-            rows.append(self.edit_setting(panel, section, **values))
-        answered = [row["to_next_front_ms"] for row in rows if row["answered"]]
+        if isinstance(current, bool):
+            return not current, None
+        if field in cls._FREE_TEXT:
+            return "edited while live", None
+        if field == "colormap":
+            other = [name for name in cls._COLORMAPS if name != current]
+            return (other[0], None) if other else (None, "no other colormap")
+        if isinstance(current, int):
+            return (max(2, current // 2) if current > 3 else current + 8), None
+        if isinstance(current, float):
+            return (current * 1.25 if current else 1.25), None
+        if current is None:
+            return None, "unset, so the bench cannot tell the type"
+        return None, "%s is an enum owned by the product" % type(current).__name__
+
+    def edit_run(self, panel, *, kind: str) -> dict:
+        """Every display field this panel holds, edited while it is live.
+
+        These are the changes that feel instant or do not, and none of them
+        move a frame-rate number: the panel keeps its cadence either way,
+        what changes is how long the operator stares at the OLD picture
+        after committing the form.
+        """
+
+        held = dict(getattr(panel.state, "display", {}) or {})
+        rows, skipped = [], []
+        for field in sorted(held):
+            value, refusal = self._different_value(field, held[field])
+            if refusal is not None:
+                skipped.append({"field": field, "why": refusal})
+                continue
+            rows.append(
+                self.edit_setting(panel, "display", strict=False, **{field: value})
+            )
+            # Put it back before the next one.  Without this each field is
+            # timed on a panel already deformed by every field before it,
+            # and the panel refused a threshold classifier because an
+            # earlier edit in the same sweep had made it cumulative.
+            self.edit_setting(
+                panel, "display", strict=False, **{field: held[field]}
+            )
+        # A refused edit redraws nothing and must not be averaged in with
+        # the ones that did.
+        answered = [
+            row["to_next_front_ms"]
+            for row in rows
+            if row["answered"] and not row["refused"]
+        ]
         return {
+            "kind": kind,
             "edits": rows,
+            # Never a silent cap: what was not exercised, and why.
+            "skipped": skipped,
             "answered": len(answered),
             "of": len(rows),
             "worst_ms": max(answered) if answered else None,
@@ -923,12 +1001,17 @@ def main() -> None:
         print("")
         print("Setting-form edits while live  (%d of %d redrew)"
               % (block["answered"], block["of"]))
-        for row in block["edits"]:
+        for row in sorted(block["edits"],
+                          key=lambda item: -(item["to_next_front_ms"] or 0.0)):
             field = ", ".join("%s=%r" % item for item in row["values"].items())
-            print("   %-9s %-34s %s"
-                  % (row["section"], field,
+            print("   %-44s %s"
+                  % (field,
+                     "REFUSED by the panel (holds %r)" % row["refused"]
+                     if row["refused"] else
                      "no redraw" if not row["answered"]
                      else "%7.1f ms to the new picture" % row["to_next_front_ms"]))
+        for item in block["skipped"]:
+            print("   %-44s not exercised: %s" % (item["field"], item["why"]))
     payload["threads_left_running"] = list(bench.surviving_threads())
     payload["problems"] = [
         {"severity": severity, "message": message}

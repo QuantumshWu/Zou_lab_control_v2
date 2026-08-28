@@ -193,3 +193,39 @@ def test_a_probe_must_not_break_what_it_measures() -> None:
     assert probe.calls("Subject.helper") == 1
     assert probe.calls("Subject.maker") == 1
     probe.reset()
+
+
+def test_the_seam_list_is_derived_from_the_renderer_not_typed_out() -> None:
+    """A hand-kept list goes blind exactly where a new plot kind lands.
+
+    The typed-out list had no ``_update_rolling``, so a rolling panel's
+    31.6 ms per frame sat in ``_compose_frame``'s self-time with nothing to
+    blame it on -- and the same hole would swallow any plot kind added
+    after the list was written.
+    """
+
+    from bench.plot_perf.run_console import (
+        HarnessSeamError,
+        renderer_seams,
+        _COMPOSE_SEAMS,
+    )
+    from zlc_plot.rendering import MatplotlibRenderer
+
+    seams = renderer_seams(MatplotlibRenderer)
+    every_update = {
+        name for name in vars(MatplotlibRenderer) if name.startswith("_update_")
+    }
+    assert every_update <= set(seams)
+    assert set(_COMPOSE_SEAMS) <= set(seams)
+    # The ones the hole was found through.
+    for name in ("_update_rolling", "_update_plot", "_update_facets"):
+        assert name in seams
+
+    # And a compose seam that the renderer stopped having must be loud: a
+    # probe that binds nothing reports zero, which reads like free work.
+    class Drifted:
+        pass
+
+    with pytest.raises(HarnessSeamError) as refused:
+        renderer_seams(Drifted)
+    assert "_compose_frame" in str(refused.value)
