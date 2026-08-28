@@ -222,11 +222,21 @@ class ConsoleBench:
         gaps = [
             b - a for a, b in zip(presented.stamps, presented.stamps[1:])
         ]
+        # A "stall" is a gap the operator can see: the console publishes on
+        # its beat, so anything past two beats is a frame that did not
+        # appear when the next one was due.
+        beat_s = self.presenter.board.base_interval_ms / 1000.0
+        stalls = [gap for gap in gaps if gap > 2 * beat_s]
         return {
             "window_s": round(elapsed, 2),
             "frames": presented.count,
             "frames_per_second": round(presented.count / elapsed, 1),
+            "beat_ms": round(beat_s * 1e3, 1),
             "frame_gap": stats(gaps),
+            "stalls_over_two_beats": len(stalls),
+            "worst_gaps_ms": [
+                round(gap * 1e3, 1) for gap in sorted(gaps, reverse=True)[:5]
+            ],
             "seams": probe.rows(elapsed),
         }
 
@@ -318,9 +328,13 @@ def main() -> None:
         payload["panels_in_console"],
     ))
     live = payload["live"]
-    print("live: %d frames in %.1f s = %.1f/s, gap %s" % (
+    print("live: %d frames in %.1f s = %.1f/s (beat %s ms)" % (
         live["frames"], live["window_s"], live["frames_per_second"],
-        live["frame_gap"],
+        live["beat_ms"],
+    ))
+    print("      gap %s" % (live["frame_gap"],))
+    print("      %d stalls past two beats; worst gaps %s ms" % (
+        live["stalls_over_two_beats"], live["worst_gaps_ms"],
     ))
     if "gesture" in payload:
         print("gesture: %s" % (payload["gesture"],))

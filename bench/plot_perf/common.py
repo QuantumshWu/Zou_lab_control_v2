@@ -340,6 +340,14 @@ def axis_center(transform) -> tuple[float, float]:
 
 
 def stats(samples: list[float]) -> dict:
+    """Median, tail and worst -- always the tail.
+
+    A median alone hides the thing an operator actually notices.  Every
+    distribution in this pipeline is bimodal in the same way: most frames
+    take one path and a few take a different, slower one, so p90 and max
+    are where the story is and reporting p50 alone loses it.
+    """
+
     if not samples:
         return {"n": 0}
     array = np.asarray(samples, dtype=float)
@@ -347,6 +355,8 @@ def stats(samples: list[float]) -> dict:
         "n": int(array.size),
         "median_ms": round(float(np.median(array)) * 1e3, 2),
         "p90_ms": round(float(np.percentile(array, 90)) * 1e3, 2),
+        "p99_ms": round(float(np.percentile(array, 99)) * 1e3, 2),
+        "max_ms": round(float(array.max()) * 1e3, 2),
         "best_ms": round(float(array.min()) * 1e3, 2),
     }
 
