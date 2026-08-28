@@ -1971,34 +1971,53 @@ class FitProjection:
         model: FitModelSpec,
         expression: str,
     ) -> dict[str, object]:
-        """Parse one compact display-unit expression into a canonical target."""
+        """Parse one compact display-unit expression into a canonical target.
+
+        The operator writes the SYMBOLS the formula prints -- A, tau, x_0 --
+        not the internal parameter names.  Those two vocabularies used to be
+        different, and only one of them was ever on screen: the model drew
+        f(t)=A e^{-(t-t_0)/tau}+B above a box that would only accept
+        "amplitude" and "decay_time".
+
+        The canonical target this returns still keys on the internal name,
+        which is the identity the solver, the stored fit and every report
+        use.  Only what is typed and read back changes.
+        """
 
         if not isinstance(expression, str) or "\n" in expression or "\r" in expression:
             raise ValueError("fit expression must be one line of text")
         fixed: dict[str, float] = {}
         initial: dict[str, float] = {}
-        by_name = {parameter.name: parameter for parameter in model.parameters}
         assignments = tuple(map(str.strip, expression.split(",")))
         if expression.strip() and not all(assignments):
             raise ValueError("use comma-separated name=value assignments")
         for assignment in filter(None, assignments):
             if assignment.count("=") != 1:
                 raise ValueError("use name=value or name=guess(value)")
-            name, raw = (part.strip() for part in assignment.split("="))
-            if name not in by_name or name in fixed or name in initial:
-                raise ValueError(f"unknown or repeated fit parameter {name!r}")
+            symbol, raw = (part.strip() for part in assignment.split("="))
+            parameter = model.parameter_for_symbol(symbol)
+            if parameter is None:
+                # Say what this model DOES take.  A formula full of symbols
+                # over a box that answers "unknown parameter" and stops is
+                # the same silence that made the two vocabularies possible.
+                raise ValueError(
+                    f"{symbol!r} is not a parameter of this model; it takes "
+                    + ", ".join(model.symbols)
+                )
+            name = parameter.name
+            if name in fixed or name in initial:
+                raise ValueError(f"repeated fit parameter {symbol!r}")
             guessed = raw.startswith("guess(") and raw.endswith(")")
             try:
                 displayed = float(raw[6:-1] if guessed else raw)
             except ValueError as error:
                 raise ValueError("use name=value or name=guess(value)") from error
-            parameter = by_name[name]
             offset = self._display_fit_parameter_value(parameter, 0.0)[0]
             scale = self._display_fit_parameter_value(parameter, 1.0)[0] - offset
             converted = (displayed - offset) / scale
             lower, upper = parameter.bounds
             if not math.isfinite(converted) or not lower <= converted <= upper:
-                raise ValueError(f"fit parameter {name!r} is outside its domain")
+                raise ValueError(f"fit parameter {symbol!r} is outside its domain")
             (initial if guessed else fixed)[name] = converted
         return {
             **{"model": model.model_id},
@@ -2011,7 +2030,12 @@ class FitProjection:
         model: FitModelSpec,
         target: Any,
     ) -> str:
-        """Format a canonical fixed/initial target in current painted units."""
+        """Format a canonical fixed/initial target in current painted units.
+
+        In the SYMBOLS the formula prints, because this text goes straight
+        back into the box the operator types in: what it writes out has to
+        be something it would accept.
+        """
 
         values = dict(target or {})
         fixed, initial = dict(values.get("fixed") or {}), dict(values.get("initial") or {})
@@ -2024,10 +2048,11 @@ class FitProjection:
                 parameter, float(source[parameter.name])
             )[0]
             literal = "0" if value == 0.0 else repr(value)
+            symbol = str(parameter.symbol)
             terms.append(
-                f"{parameter.name}={literal}"
+                f"{symbol}={literal}"
                 if source is fixed
-                else f"{parameter.name}=guess({literal})"
+                else f"{symbol}=guess({literal})"
             )
         return ", ".join(terms)
 

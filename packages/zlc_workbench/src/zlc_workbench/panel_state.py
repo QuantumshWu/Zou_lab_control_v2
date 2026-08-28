@@ -222,6 +222,35 @@ def panel_surface_from_description(
         },
     ] if resolved_models or current_model is not None else [])
     if current_model is not None:
+        # NAME THE PARAMETERS.  The hint said "name=value" and never said
+        # which names, so the only way to learn them was to guess one and
+        # read the refusal.  They are the symbols the formula prints, and
+        # they go first because the placeholder is truncated to the width of
+        # the box while the tooltip shows the whole line.
+        selected_model = next(
+            (
+                model
+                for model in resolved_models
+                if str(model.model_id) == str(current_model)
+            ),
+            None,
+        )
+        symbols = (
+            ", ".join(selected_model.symbols)
+            if selected_model is not None
+            else ""
+        )
+        # The example uses THIS model's own first symbol: "A=1" means
+        # nothing on a Lorentzian, whose amplitude is H.  When the model
+        # cannot be resolved -- a saved layout naming a model feasibility
+        # filtering dropped -- there is no vocabulary to quote, so the hint
+        # says the shape without inventing a parameter that may not exist.
+        syntax = (
+            f"{selected_model.symbols[0]}=1 fixes it, "
+            f"{selected_model.symbols[0]}=guess(1) seeds it"
+            if selected_model is not None and selected_model.symbols
+            else "symbol=value fixes it, symbol=guess(value) seeds it"
+        )
         fit_fields.append(
             {
                 "key": "expression",
@@ -233,7 +262,9 @@ def panel_surface_from_description(
                 "minimum": None,
                 "maximum": None,
                 "step": None,
-                "description": "name=value fixes; name=guess(value) sets the initial guess",
+                "description": (
+                    f"{symbols}  --  {syntax}" if symbols else syntax
+                ),
             }
         )
     fit = tuple(fit_fields)
@@ -269,10 +300,17 @@ def fit_output_fields(
             continue
         for parameter in tuple(model.parameters):
             name = str(parameter.name)
+            # THE SYMBOL, not the label.  These labels are painted into a
+            # plain QLabel beside each publisher switch, and nothing on that
+            # path renders mathtext -- so a display_label put the literal
+            # characters "$\tau$ error" on screen.  The symbol is the same
+            # parameter written the way the operator can also type it.
             label = str(
-                getattr(parameter, "display_label", None)
+                getattr(parameter, "symbol", None)
                 or name.replace("_", " ").title()
             )
+            # Only the label moves.  The name half of each pair is the
+            # published signal id and the persisted toggle key.
             fit_outputs.extend(((name, label), (f"{name}_err", f"{label} error")))
         break
     return tuple(fit_outputs)

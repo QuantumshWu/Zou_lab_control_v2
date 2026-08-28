@@ -970,7 +970,9 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         real_view.dpr = 2.25
         real_presenter.update_panel(
             panel_id,
-            {"fit": {"expression": f"center_x=guess({center_x})"}},
+            # x_0 is what the formula prints for center_x; the stored
+            # target below still keys on the internal name.
+            {"fit": {"expression": f"x_0=guess({center_x})"}},
         )
         _wait_until(lambda: not real_presenter._busy)
         active = _active_record(real_presenter)

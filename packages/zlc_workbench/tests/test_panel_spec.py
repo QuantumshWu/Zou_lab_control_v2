@@ -127,3 +127,30 @@ def test_the_workbench_joins_the_parameters_that_move_together() -> None:
         row = control_document(control)
         if row["co_edited_with"]:
             assert (row["key"], row["co_edited_with"]) in declared
+
+
+def test_a_publisher_switch_never_prints_latex() -> None:
+    r"""The Outputs switches are plain QLabels; nothing renders mathtext there.
+
+    They took ``display_label`` verbatim, so the operator read the literal
+    characters ``$\tau$`` and ``$\mathrm{FWHM}$ error`` beside a switch.
+    The symbol is the same parameter written the way it is also typed into
+    the Parameters box and printed in the formula above the plot.
+    """
+
+    from zlc_plot.fit import builtin_fit_models
+    from zlc_workbench.panel_state import fit_output_fields
+
+    models = builtin_fit_models()
+    assert models
+    for model in models:
+        fields = fit_output_fields({"model": model.model_id}, models)
+        assert fields, model.model_id
+        published = {name for name, _label in fields}
+        for name, label in fields:
+            assert "$" not in label and "\\" not in label, (model.model_id, label)
+        # The name half is the published signal id and the persisted toggle
+        # key -- it is an identity and does not follow the label.
+        for parameter in model.parameters:
+            assert parameter.name in published, (model.model_id, parameter.name)
+            assert f"{parameter.name}_err" in published

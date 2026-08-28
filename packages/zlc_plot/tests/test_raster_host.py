@@ -746,14 +746,14 @@ def test_complete_configuration_fits_clears_and_noops_as_one_front(
         expressed = host.configure(
             fit={
                 "model": "gaussian_offset",
-                "expression": "center=0.3, sigma=guess(0.9)",
+                "expression": "x_0=0.3, sigma=guess(0.9)",
             },
             **desired,
         ).result(timeout=30)
         assert expressed.value.fit["fixed"] == {"center": 0.3}
         assert expressed.value.fit["initial"] == {"sigma": 0.9}
         assert expressed.value.fit_expression == (
-            "sigma=guess(0.9), center=0.3"
+            "sigma=guess(0.9), x_0=0.3"
         )
         assert expressed.value.fit_expression_error == ""
 
@@ -766,7 +766,10 @@ def test_complete_configuration_fits_clears_and_noops_as_one_front(
         ).result(timeout=30)
         assert automatic.value.fit == {"model": "gaussian_offset"}
         assert automatic.value.fit_expression == "missing=1"
-        assert "fit parameter" in automatic.value.fit_expression_error
+        assert "is not a parameter of this model" in automatic.value.fit_expression_error
+        # The refusal says what this model DOES take, so the operator
+        # is not left guessing at a vocabulary nothing shows.
+        assert "sigma" in automatic.value.fit_expression_error
         assert automatic.front is not expressed.front
 
         cleared = host.configure(fit={}, **desired).result(timeout=30)

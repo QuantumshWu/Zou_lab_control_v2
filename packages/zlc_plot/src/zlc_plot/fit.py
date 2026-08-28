@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from enum import Enum
 import math
+import re
 from numbers import Real
 import threading
 import time
@@ -117,6 +118,32 @@ class FitParameterDisplay:
         )
 
 
+#: A symbol has to survive being typed into a one-line box and split on
+#: commas and equals signs, so it is a bare word.
+_SYMBOL_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*")
+
+
+def formula_symbols(formula: str) -> frozenset[str]:
+    """Every symbol a rendered formula shows, as an operator would type it.
+
+    The formula is LaTeX for Matplotlib's mathtext.  Reading it back is one
+    rule, not a table of aliases: a command becomes its own name (\\tau is
+    tau), a \\mathrm{} wrapper is only a font instruction, and braces group
+    without meaning anything to a reader.  What is left is the words.
+
+    Used to CHECK the declared symbols, never to invent them -- which is why
+    it may be generous: extra tokens like frac or sin cost nothing, while a
+    parameter whose symbol is absent from its own formula is caught.
+    """
+
+    text = str(formula)
+    text = text.replace("$", " ")
+    text = re.sub(r"\\mathrm\s*\{([^{}]*)\}", r" \1 ", text)
+    text = re.sub(r"\\([A-Za-z]+)", r" \1", text)
+    text = re.sub(r"[{}]", " ", text)
+    return frozenset(_SYMBOL_PATTERN.findall(text))
+
+
 @dataclass(frozen=True, slots=True)
 class FitParameterSpec:
     """One solver parameter and its renderer-facing display semantics.
@@ -126,6 +153,23 @@ class FitParameterSpec:
     as differences and therefore never consume a unit offset.
     ``solver_unit_relation`` records the canonical unit used by the evaluator
     when it differs from the parameter's painted axis relation.
+
+    ``symbol`` is what the operator TYPES, and it is the same thing the
+    formula prints.  The model showed f(t)=A e^{-(t-t_0)/tau}+B and then
+    asked for "amplitude" and "decay_time": two names for one parameter,
+    one on screen and one in the box under it, and nothing on screen said
+    the second existed.
+
+    It is READ OFF the display label, by the same function that reads a
+    formula.  A label is one symbol by construction, not an expression, so
+    reading it is exact rather than a guess -- and a label that does not
+    resolve to exactly one word is refused here instead of being guessed
+    at.  Deriving it also means the symbol cannot be mistyped into
+    disagreeing with the label beside it.
+
+    The NAME stays the identity.  It is what the solver, the stored fit
+    target, the saved panel and every report key on; only what the operator
+    types and reads changes here.
     """
 
     name: str
@@ -134,6 +178,7 @@ class FitParameterSpec:
     display_label: str | None = None
     affine_point: bool = False
     solver_unit_relation: UnitRelation | None = None
+    symbol: str | None = None
 
     def __post_init__(self) -> None:
         name = _text(self.name, "fit parameter name")
@@ -151,9 +196,34 @@ class FitParameterSpec:
             solver_unit_relation = self.unit_relation
         if not isinstance(solver_unit_relation, UnitRelation):
             raise TypeError("solver_unit_relation must be UnitRelation or None")
+        symbol = self.symbol
+        if symbol is None and display_label is None:
+            # Nothing is printed for this one, so there are not two
+            # vocabularies to disagree: its own name is what an operator
+            # would type.  A model that DOES print a formula still has to
+            # write this name in it, which is where a real divergence is
+            # caught.
+            symbol = name
+        if symbol is None and display_label is not None:
+            found = formula_symbols(display_label)
+            if len(found) != 1:
+                raise ValueError(
+                    f"fit parameter {name!r} has display label "
+                    f"{display_label!r}, which reads as {sorted(found)} -- a "
+                    "label is one symbol, so say which one with symbol="
+                )
+            symbol = next(iter(found))
+        if symbol is not None:
+            symbol = _text(symbol, "fit parameter symbol")
+            if not _SYMBOL_PATTERN.fullmatch(symbol):
+                raise ValueError(
+                    f"fit parameter symbol {symbol!r} must be a bare word an "
+                    "operator can type: letters, digits and underscores"
+                )
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "display_label", display_label)
         object.__setattr__(self, "solver_unit_relation", solver_unit_relation)
+        object.__setattr__(self, "symbol", symbol)
 
     @property
     def bounds(self) -> tuple[float, float]:
@@ -289,6 +359,34 @@ class FitModelSpec:
             or not set(defaults).issubset(targets)
         ):
             raise ValueError("default_for must be unique members of targets")
+        # WHAT THE FORMULA WRITES IS WHAT THE OPERATOR MAY TYPE.
+        #
+        # The formula on screen said A and tau while the box under it wanted
+        # "amplitude" and "decay_time", and nothing on screen said so.  The
+        # two vocabularies could only stay together by somebody remembering
+        # to move both, so the model refuses to exist unless they agree.
+        symbols = tuple(item.symbol for item in parameters)
+        unnamed = tuple(
+            item.name for item in parameters if not item.symbol
+        )
+        if unnamed:
+            raise ValueError(
+                "every fit parameter needs the symbol the formula prints; "
+                f"these have none: {list(unnamed)}"
+            )
+        if len(symbols) != len(set(symbols)):
+            raise ValueError(
+                f"fit parameter symbols must be unique within a model: "
+                f"{list(symbols)}"
+            )
+        if self.formula is not None:
+            printed = formula_symbols(self.formula)
+            absent = tuple(symbol for symbol in symbols if symbol not in printed)
+            if absent:
+                raise ValueError(
+                    f"fit model {self.model_id!r} asks the operator for "
+                    f"{list(absent)}, which its own formula never writes"
+                )
         capabilities = frozenset(str(value).strip() for value in self.capabilities)
         if any(not value for value in capabilities):
             raise ValueError("fit capabilities must be non-empty text")
@@ -351,6 +449,21 @@ class FitModelSpec:
     @property
     def parameter_names(self) -> tuple[str, ...]:
         return tuple(item.name for item in self.parameters)
+
+    @property
+    def symbols(self) -> tuple[str, ...]:
+        """What the operator may type, in the order the formula reads."""
+
+        return tuple(str(item.symbol) for item in self.parameters)
+
+    def parameter_for_symbol(self, symbol: str) -> FitParameterSpec | None:
+        """The parameter an operator named, or None if this model has no such."""
+
+        wanted = str(symbol)
+        for item in self.parameters:
+            if item.symbol == wanted:
+                return item
+        return None
 
     def parameter_index(self, name: str) -> int:
         parameter_name = _text(name, "fit parameter name")
@@ -2807,7 +2920,7 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             _init_doublet,
             (FitTarget.SERIES,),
             formula=(
-                r"$f(x)=H[L(x;x_0-\delta/2)+L(x;x_0+\delta/2)]+B$"
+                r"$f(x)=H[L(x;x_0-\delta/2,\mathrm{FWHM})+L(x;x_0+\delta/2,\mathrm{FWHM})]+B$"
             ),
             jacobian=_symmetric_lorentzian_doublet_jacobian,
             candidate_initializer=_doublet_candidates,
@@ -2833,14 +2946,14 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
                 FitParameterSpec(
                     "decay_time", AXIS_0, POSITIVE, display_label=r"$\tau$"
                 ),
-                FitParameterSpec("phase", RADIAN, PHASE, display_label=r"$\varphi$"),
+                FitParameterSpec("phase", RADIAN, PHASE, display_label=r"$\phi$"),
             ),
             "decay_time",
             _damped_sine,
             _init_damped_sine,
             (FitTarget.SERIES,),
             formula=(
-                r"$f(t)=A\sin(2\pi f (t-t_0)+\varphi)e^{-(t-t_0)/\tau}+B$"
+                r"$f(t)=A\sin(2\pi f (t-t_0)+\phi)e^{-(t-t_0)/\tau}+B$"
             ),
             jacobian=_damped_sine_jacobian,
             candidate_initializer=_damped_sine_candidates,
@@ -2864,7 +2977,7 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             _exponential_decay,
             _init_exponential,
             (FitTarget.SERIES,),
-            formula=r"$f(t)=Ae^{-(t-t_0)/\tau}+B$",
+            formula=r"$f(t)=A e^{-(t-t_0)/\tau}+B$",
             jacobian=_exponential_decay_jacobian,
             candidate_initializer=_exponential_candidates,
             bounds_initializer=_exponential_bounds,
@@ -2900,7 +3013,7 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             _init_anisotropic,
             (FitTarget.IMAGE,),
             formula=(
-                r"$f(x,y)=Ae^{-((x-x_0)^2/R_x^2+(y-y_0)^2/R_y^2)}+B$"
+                r"$f(x,y)=A e^{-((x-x_0)^2/R_x^2+(y-y_0)^2/R_y^2)}+B$"
             ),
             jacobian=_anisotropic_gaussian_center_jacobian,
             candidate_initializer=_anisotropic_candidates,
@@ -2941,7 +3054,7 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             _radial_gaussian_center,
             _init_radial,
             (FitTarget.IMAGE,),
-            formula=r"$f(x,y)=Ae^{-((x-x_0)^2+(y-y_0)^2)/R^2}+B$",
+            formula=r"$f(x,y)=A e^{-((x-x_0)^2+(y-y_0)^2)/R^2}+B$",
             jacobian=_radial_gaussian_center_jacobian,
             candidate_initializer=_radial_candidates,
             bounds_initializer=_radial_bounds,
@@ -2973,6 +3086,7 @@ __all__ = [
     "FitOptions",
     "FitParameterDisplay",
     "FitParameterSpec",
+    "formula_symbols",
     "FitPresentationSpec",
     "FitEllipseGlyphSpec",
     "FitResult",

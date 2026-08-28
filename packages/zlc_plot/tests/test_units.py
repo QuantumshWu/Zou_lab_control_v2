@@ -57,7 +57,7 @@ def test_selector_round_trip_and_fit_parameters_follow_display_units() -> None:
         session.configure(
             fit={
                 "model": "gaussian_offset",
-                "expression": "amplitude=2000, center=guess(150)",
+                "expression": "A=2000, x_0=guess(150)",
             },
             fit_live=False,
         )
@@ -65,13 +65,13 @@ def test_selector_round_trip_and_fit_parameters_follow_display_units() -> None:
         assert description.fit["fixed"] == {"amplitude": 2.0}
         assert description.fit["initial"] == {"center": 1.5}
         assert description.fit_expression == (
-            "amplitude=2000.0, center=guess(150.0)"
+            "A=2000.0, x_0=guess(150.0)"
         )
 
         session.set_axis_unit(AxisRef.point("x"), "m")
         session.set_value_unit("V")
         assert session.describe_display().fit_expression == (
-            "amplitude=2.0, center=guess(1.5)"
+            "A=2.0, x_0=guess(1.5)"
         )
     finally:
         release()

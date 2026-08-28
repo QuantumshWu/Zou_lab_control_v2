@@ -3328,6 +3328,17 @@ class ConsolePresenter:
                         kind="bool",
                         label=label,
                         default=True,
+                        # A fit output is LABELLED by the symbol its formula
+                        # prints (tau) and ADDRESSED by its parameter name
+                        # (decay_time).  Two vocabularies with two jobs is
+                        # fine; leaving the operator to discover the second
+                        # one is not, so the switch names the signal it
+                        # actually publishes.  Derived from the key here, so
+                        # it stays true for selection outputs too.
+                        description=(
+                            "publishes as "
+                            + stable_signal_key(binding.panel_id, name)
+                        ),
                     )
                     for name, label in fields
                 )

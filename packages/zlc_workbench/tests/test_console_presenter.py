@@ -1194,9 +1194,29 @@ def test_arming_a_fit_from_setting_reaches_the_panels_pixels(
             for field in binding.parameter_surface["fit"]
         ),
     )
+    # In the model's own printed symbols -- resolved from the model this
+    # test picked, since it takes whichever one the panel offers first.
+    from zlc_plot.fit import builtin_fit_models
+
+    chosen = next(
+        model
+        for model in builtin_fit_models()
+        if str(model.model_id) == str(fit_model)
+    )
+    symbol_of = {
+        str(parameter.name): str(parameter.symbol)
+        for parameter in chosen.parameters
+    }
     assert presenter.update_panel_state(
         binding.panel_id,
-        {"fit": {"expression": "offset=0, amplitude=guess(1)"}},
+        {
+            "fit": {
+                "expression": (
+                    f"{symbol_of['offset']}=0, "
+                    f"{symbol_of['amplitude']}=guess(1)"
+                )
+            }
+        },
     )
     _settle_panel_hosts(
         presenter,

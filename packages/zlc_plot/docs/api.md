@@ -486,9 +486,16 @@ future = curve_session.fit_async("gaussian_offset")
 
 `fit(..., fixed={"offset": 0.0}, initial={"sigma": 1.0})` uses two distinct
 semantics: `fixed` parameters are removed from the optimizer exactly, while
-`initial` only replaces the corresponding starting guess. The Panel editor
-projects the same contract as one display-unit expression: `offset=0,
-sigma=guess(1)`. Invalid optional expression text falls back to the selected
+`initial` only replaces the corresponding starting guess. Those mappings are
+keyed by parameter *name*, which is also the published signal id and what a
+saved layout stores.
+
+The Panel editor projects the same contract as one display-unit expression,
+written in the *symbols the model's formula prints* rather than those names --
+`gaussian_offset` draws $f(x)=A e^{-(x-x_0)^2/2\sigma^2}+B$, so its box takes
+`B=0, sigma=guess(1)`. `FitModelSpec.symbols` lists them and the editor shows
+them in the field's own hint; `parameter_for_symbol` maps one back to the
+parameter it names. Invalid optional expression text falls back to the selected
 model's automatic fit and reports a warning; it is never persisted into the
 canonical Panel/Figure fit target.
 
