@@ -210,22 +210,41 @@ _AREA_SELECTION_OUTPUTS = (
     ("roi_max_10_mean", "Max 10 mean", _top_10_mean),
 )
 _RANGE_SELECTION_OUTPUTS = (_SELECTED_FRAME, ("roi_mean", "Mean", _mean))
+#: Every name a selection route could ever claim, whatever the geometry.
+#: Enabling and disabling outputs is bookkeeping over the whole vocabulary,
+#: not over the one catalog the current region happens to offer.
+_EVERY_SELECTION_OUTPUT = frozenset(
+    name for name, _label, _reducer in _AREA_SELECTION_OUTPUTS
+)
 
-#: Bounds that name no Dataset axis, and what each one restricts instead.
-#: A ``value`` bound restricts VALIDITY -- the cells outside it stop
-#: counting and the schema does not change; a ``shot`` bound restricts
-#: which publications the region answers.  Neither can be a Selection
-#: term, because a Selection cuts axes.
-_FILTER_DOMAINS = frozenset({"value", "shot"})
+#: A bound that names no Dataset axis and restricts VALIDITY instead: the
+#: cells outside it stop counting and the schema does not change.  It cannot
+#: be a Selection term, because a Selection cuts axes.
+#:
+#: The shot ordinal is NOT one of these.  It names which PUBLICATION answers,
+#: and a derivation only ever sees the newest one, so a rolling region
+#: derives nothing at all; its bounds are carried for the panel alone.
+_FILTER_DOMAINS = frozenset({"value"})
 
 
-def selection_output_catalog(selector_kind: str) -> tuple[tuple[str, str], ...]:
-    """Stable derived-output names for one selector geometry.
+def selection_output_catalog(
+    selector_kind: str,
+    plot_kind: str,
+) -> tuple[tuple[str, str], ...]:
+    """Stable derived-output names for one region.
 
-    Runtime reduces a selected area or a selected x range; it does not need
-    to know which Plot kind happened to produce that canonical selector.
+    Almost always a question about geometry alone -- Runtime reduces a
+    selected area or a selected x range, and which Plot kind drew it does
+    not matter.  A ROLLING region is the exception, and it is a fact about
+    the DATA, not the drawing: its x is how many shots back a point is,
+    counted from the newest, and the derivation only ever sees the newest
+    publication.  Nothing it could publish would be the shots the operator
+    boxed, so it publishes nothing and the region stays what it also is on
+    every other kind -- the panel's own mark, which Fit and restore read.
     """
 
+    if str(plot_kind) == "rolling":
+        return ()
     kind = str(selector_kind)
     if kind == "area":
         catalog = _AREA_SELECTION_OUTPUTS
@@ -238,14 +257,13 @@ def selection_output_catalog(selector_kind: str) -> tuple[tuple[str, str], ...]:
 
 def _selection_filters(
     state: "SelectionState",
-) -> tuple[tuple[float, float] | None, tuple[float, float] | None]:
-    """The region's value band and shot window, if it drew either."""
+) -> tuple[float, float] | None:
+    """The region's value band, if it drew one."""
 
-    bounds: dict[str, tuple[float, float]] = {}
     for item in state.ranges:
         if item.domain in _FILTER_DOMAINS:
-            bounds[item.domain] = (float(item.lower), float(item.upper))
-    return bounds.get("value"), bounds.get("shot")
+            return float(item.lower), float(item.upper)
+    return None
 
 
 def _countable(values: np.ndarray, valid: np.ndarray) -> np.ndarray:
@@ -920,9 +938,7 @@ class SelectionBridge:
             selection_publication = self._selection_publication
             fit_event = self._fit_event
             fit_publication = self._fit_publication
-            selection_names = {
-                name for name, _label in selection_output_catalog("area")
-            }
+            selection_names = set(_EVERY_SELECTION_OUTPUT)
             fit_names = (
                 set()
                 if fit_event is None
@@ -1806,7 +1822,10 @@ class SelectionBridge:
     def _selection_output_names(self, state: SelectionState) -> tuple[str, ...]:
         return tuple(
             name
-            for name, _label in selection_output_catalog(state.selector_kind)
+            for name, _label in selection_output_catalog(
+                state.selector_kind,
+                state.plot_kind,
+            )
             if self._output_enabled.get(name, True)
         )
 
@@ -2090,7 +2109,7 @@ class SelectionBridge:
             point_indices,
             data_indices,
         )
-        value_band, shot_window = _selection_filters(state)
+        value_band = _selection_filters(state)
         if value_band is not None:
             # A band on the measured value cuts no axis: the cells outside
             # it simply stop counting, which is what the region means on a
@@ -2098,29 +2117,6 @@ class SelectionBridge:
             low, high = value_band
             with np.errstate(invalid="ignore"):
                 valid_values = valid_values & (values >= low) & (values <= high)
-        if shot_window is not None and not (
-            shot_window[0] <= 0.0 <= shot_window[1]
-        ):
-            # A rolling region is drawn in shots-from-latest, and the
-            # publication being derived IS the latest one -- it sits at
-            # zero.  A window that does not reach zero names shots that
-            # have already gone by, and this publication is not one of
-            # them.
-            #
-            # Zeroing the validity and publishing anyway said something
-            # FALSE: that the shots the operator boxed hold no data.  They
-            # hold exactly the data the box was drawn around; this
-            # publication simply is not among them.  Because a rolling
-            # window slides, no arriving publication ever is -- so every
-            # frame came out empty and the region looked broken rather
-            # than out of reach.  "No data HERE" is what EmptySelection
-            # says, and both routes already turn it into a reason the
-            # operator can read.
-            raise EmptySelection(
-                "this region names shots that have already gone by; only a "
-                "window reaching the newest shot can be cut from the live "
-                "stream"
-            )
         derived_schema = restricted_schema(
             source_schema,
             repeat_indices,

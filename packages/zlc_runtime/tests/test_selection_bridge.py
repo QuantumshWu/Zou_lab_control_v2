@@ -18,7 +18,6 @@ from zlc_data import (
     AxisId,
     AxisSpec,
     BlockId,
-    EmptySelection,
     CellValidity,
     DataBlock,
     DatasetRevision,
@@ -361,7 +360,9 @@ def test_image_area_catalog_statistics_and_publication_choice_share_one_owner() 
     values = np.arange(12, dtype=np.float64).reshape(1, 1, 4, 3)
     plane, source, _slot, _state, _initial = _source_setup(schema, values)
     events = _Events()
-    derived = {name for name, _label in selection_output_catalog("area")}
+    derived = {
+        name for name, _label in selection_output_catalog("area", "image")
+    }
     assert derived == {
         "roi_frame",
         "roi_mean",
@@ -886,24 +887,21 @@ def test_curve_range_and_facet_condition_select_point_rows_inclusive() -> None:
 
 
 def test_a_value_band_and_a_shot_window_restrict_without_cutting_an_axis() -> None:
-    """Bounds that name no axis still cut the signal.
+    """A value band cuts the signal without cutting an axis; a rolling
+    region cuts nothing at all.
 
-    A histogram's x is the measured VALUE and a rolling trace's x is the
-    shot ordinal; neither is a Dataset axis, so neither can be a Selection
-    term.  They restrict what COUNTS instead: the cells outside a value
-    band stop being valid.  Refusing to derive from them at all is what
-    left a region drawn on a histogram or a rolling panel with nowhere to
-    go.
+    A histogram's x is the measured VALUE: not a Dataset axis, so not a
+    Selection term, but it still restricts what COUNTS -- the cells outside
+    it stop being valid and the schema stands.  Refusing to derive from it
+    is what left a region drawn on a histogram with nowhere to go.
 
-    A shot window is the one that cannot be answered from the shot in
-    hand.  The publication being derived IS the newest one, so it sits at
-    zero; a window that stops short of zero names shots that have already
-    gone by.  Publishing a frame with nothing valid claimed those shots
-    hold no data, which is false -- they hold exactly what the box was
-    drawn around -- and because a rolling window slides, EVERY arriving
-    publication came out empty.  The region derives nothing, and what the
-    previous region derived is taken down rather than left standing as
-    though it answered the new box.
+    A rolling trace's x is the shot ordinal, counted back from the newest,
+    and the derivation only ever sees the newest publication.  Nothing it
+    could publish would be the shots the operator boxed, so a rolling
+    region offers NO outputs -- and committing one takes down whatever the
+    previous region derived rather than leaving it standing as though it
+    answered the new box.  The region itself is still kept: Fit and
+    restore read it.
     """
 
     schema = _image_schema()
@@ -942,13 +940,11 @@ def test_a_value_band_and_a_shot_window_restrict_without_cutting_an_axis() -> No
                 revision=2,
             ),
         )
+        assert selection_output_catalog("x_range", "rolling") == ()
         assert plane.freeze().value("@logic/band/roi_frame") is None, (
-            "a window that stops short of the newest shot derives nothing, "
-            "and nothing is what it must publish -- neither a frame of "
-            "invalid cells nor the frame the previous region derived"
+            "a rolling region derives nothing, and what the region before "
+            "it derived must come down with it"
         )
-        assert isinstance(bridge.last_error, EmptySelection)
-        assert "already gone by" in str(bridge.last_error)
 
         events.emit_selection(
             SelectionChange.COMMITTED,
@@ -959,9 +955,10 @@ def test_a_value_band_and_a_shot_window_restrict_without_cutting_an_axis() -> No
                 revision=3,
             ),
         )
-        frame = plane.freeze().value("@logic/band/roi_frame")
-        assert frame is not None
-        assert _expanded_validity(frame.snapshot).all()
+        assert plane.freeze().value("@logic/band/roi_frame") is None, (
+            "reaching the newest shot changes nothing: a rolling region "
+            "derives nothing whatever it covers"
+        )
     finally:
         _close(bridge, plane, source)
 

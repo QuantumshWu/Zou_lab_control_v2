@@ -518,11 +518,13 @@ def panel_selection_output_catalog(
 ) -> tuple[tuple[str, str], ...]:
     """Runtime outputs this accepted surface can actually derive.
 
-    Every surface that can carry a region can derive from it: an axis bound
-    slices, a value band invalidates what falls outside it, a shot window
-    decides which publications answer.  Requiring the x bound to name an
-    upstream axis offered nothing at all on a histogram or a rolling panel
-    -- the two whose x is the measured value and the shot ordinal.
+    An axis bound slices and a value band invalidates what falls outside
+    it, so an image, a curve and a histogram all derive from a region.  A
+    ROLLING trace does not: its x says how many shots back a point is, and
+    the derivation only ever sees the newest publication, so nothing it
+    could publish would be the shots the operator boxed.  The region is
+    still drawn and still kept -- Fit and restore read it -- it simply
+    offers nothing downstream.  Runtime owns that rule; this asks it.
     """
 
     if subject is None:
@@ -530,7 +532,10 @@ def panel_selection_output_catalog(
     if not isinstance(subject, SelectionSubject):
         raise TypeError("subject must be SelectionSubject or None")
     selector_kind = "area" if subject.y is not None else "x_range"
-    return selection_output_catalog(selector_kind)
+    return selection_output_catalog(
+        selector_kind,
+        _name_of(subject.plot_kind),
+    )
 
 
 def panel_selection_binds_a_revision(selection: SelectionState) -> bool:
