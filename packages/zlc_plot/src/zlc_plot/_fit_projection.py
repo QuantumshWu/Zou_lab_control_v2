@@ -279,7 +279,23 @@ class FitSelection:
 
 @dataclass(frozen=True, slots=True)
 class HistogramProjection:
+    #: How many bins this projection HAS.  Not how many were asked for:
+    #: integer-valued samples bin on integer boundaries, so a request for
+    #: sixty bins over a span of twenty-nine counts produces twenty-nine.
     bin_count: int
+    #: How many were asked for -- what this domain was cut FOR.  The two
+    #: were the same field once, and the retention test below compared the
+    #: produced count against the request: on a camera they never matched,
+    #: so a domain that was written to be held was re-fitted on every
+    #: revision for as long as both meanings shared one name.
+    requested_bins: int
+    #: The span the edges were cut FROM.  Also not the same as the span they
+    #: cover: integer-aligned bins round the domain up to a whole number of
+    #: them, so ``edges[0], edges[-1]`` is wider than what was asked for.
+    #: Holding the edges' own span as the next revision's domain therefore
+    #: widened it again, and again -- a live histogram's value axis grew
+    #: from 30 counts to 1200 in ninety frames.
+    domain: tuple[float, float]
     edges: np.ndarray
 
     def __post_init__(self) -> None:
@@ -288,6 +304,23 @@ class HistogramProjection:
             "histogram projection bin_count",
             minimum=1,
         )
+        object.__setattr__(
+            self,
+            "requested_bins",
+            integer(
+                self.requested_bins,
+                "histogram projection requested_bins",
+                minimum=1,
+            ),
+        )
+        domain_low, domain_high = (float(value) for value in self.domain)
+        if not (
+            math.isfinite(domain_low)
+            and math.isfinite(domain_high)
+            and domain_low < domain_high
+        ):
+            raise ValueError("histogram projection domain must be increasing")
+        object.__setattr__(self, "domain", (domain_low, domain_high))
         edges = readonly_copy(self.edges, dtype=float).reshape(-1)
         if edges.size != bin_count + 1:
             raise ValueError("histogram projection has the wrong edge count")
@@ -850,16 +883,18 @@ class FitProjection:
                     )
                 edge_values = _finite_probe(flat, finite)
         previous = self._histogram_projection
-        mode = str(state["relim_mode"])
+        # The VALUE axis's own mode.  It used to read the count axis's, so
+        # an operator asking for a steady count scale silently also asked
+        # for a steady value domain, and could not ask for either alone.
+        mode = str(state["x_relim_mode"])
         retain_domain = (
             previous is not None
-            and previous.bin_count == count
+            and previous.requested_bins == count
             and mode != "tight"
         )
         if retain_domain:
             assert previous is not None
-            low = float(previous.edges[0])
-            high = float(previous.edges[-1])
+            low, high = previous.domain
             if has_values:
                 if data_low < low or data_high > high:
                     envelope_low = min(low, data_low)
@@ -872,6 +907,9 @@ class FitProjection:
                         low = data_low - padding
                     if data_high > high:
                         high = data_high + padding
+        elif mode == "fixed":
+            low = float(state["x_min"])
+            high = float(state["x_max"])
         else:
             if not has_values:
                 data_low, data_high = 0.0, 1.0
@@ -891,10 +929,14 @@ class FitProjection:
         edges = aligned_histogram_edges(edge_values, count, limits=(low, high))
         selected = HistogramProjection(
             len(edges) - 1,
+            count,
+            (low, high),
             edges,
         )
         if previous is None or not (
             previous.bin_count == selected.bin_count
+            and previous.requested_bins == selected.requested_bins
+            and previous.domain == selected.domain
             and np.array_equal(previous.edges, selected.edges)
         ):
             previous = selected

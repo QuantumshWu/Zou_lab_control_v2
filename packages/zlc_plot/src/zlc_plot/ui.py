@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from .parameters import ParameterSchema, RenderEffect
+from .specs import limit_pair_for
 from .semantics import SemanticDescription
 
 
@@ -68,14 +69,17 @@ def parameter_controls(
         joined = ", ".join(repr(name) for name in unknown)
         raise KeyError(f"choice override refers to unknown parameter(s): {joined}")
     result = []
-    fixed_limits = values.get("relim_mode") == "fixed"
-    limit_names = {"color_min", "color_max", "y_min", "y_max"}
     for name, spec in schema.items():
         if name not in values:
             raise KeyError(f"display state is missing parameter {name!r}")
         choices = tuple(overrides.get(name, spec.choices))
         kind = _control_kind(spec.value_type, choices)
-        limit_field = name in limit_names and "relim_mode" in values
+        # Which mode governs THIS limit is a fact about the parameter
+        # vocabulary, and the vocabulary owns it.  The editor kept its own
+        # copy of the list and so could only ever grey fields on one mode.
+        pair = limit_pair_for(name)
+        limit_field = pair is not None and pair[0] in values
+        fixed_limits = limit_field and values.get(pair[0]) == "fixed"
         result.append(
             ParameterControl(
                 name=name,

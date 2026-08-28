@@ -610,6 +610,42 @@ def _histogram_parameters() -> tuple[ParameterSpec[object], ...]:
             default=False,
             label="Log count axis",
         ),
+        # The VALUE axis is autoscaled too, and until it had a mode it was
+        # the one axis in the product with no answer to "may this keep the
+        # limits it already shows".  It binned between the raw minimum and
+        # maximum every revision, so on a live camera its bin edges moved on
+        # 90 of 94 frames: the bars were re-cut under the operator, and the
+        # moving limits marked the chrome dirty, which took the panel out of
+        # the composed-background path into a full redraw on 60 per cent of
+        # frames.  Normal by default, for the same reason every other steady
+        # view is: a distribution is read across revisions.
+        ParameterSpec(
+            "x_relim_mode",
+            str,
+            _AXIS_LIMIT_EFFECTS,
+            default=RelimMode.NORMAL.value,
+            normalizer=_relim_mode,
+            label="Value limits",
+            choices=tuple(item.value for item in RelimMode),
+        ),
+        ParameterSpec(
+            "x_min",
+            (int, float),
+            _AXIS_LIMIT_EFFECTS,
+            default=None,
+            normalizer=_finite_or_none,
+            allow_none=True,
+            label="Value minimum",
+        ),
+        ParameterSpec(
+            "x_max",
+            (int, float),
+            _AXIS_LIMIT_EFFECTS,
+            default=None,
+            normalizer=_finite_or_none,
+            allow_none=True,
+            label="Value maximum",
+        ),
     )
 
 
@@ -732,9 +768,25 @@ def _image_parameters(style: PlotStyleConfig) -> tuple[ParameterSpec[object], ..
 
 
 _LIMIT_PARAMETER_PAIRS = (
-    ("color_min", "color_max"),
-    ("y_min", "y_max"),
+    ("relim_mode", "color_min", "color_max"),
+    ("relim_mode", "y_min", "y_max"),
+    ("x_relim_mode", "x_min", "x_max"),
 )
+
+#: Every relim mode there is, and the one place that knows it.  The editor
+#: greys an authored limit out unless ITS axis is fixed, and it used to keep
+#: a second copy of this list to do it.
+LIMIT_MODE_NAMES = tuple(dict.fromkeys(mode for mode, _low, _high
+                                       in _LIMIT_PARAMETER_PAIRS))
+
+
+def limit_pair_for(name: str) -> tuple[str, str, str] | None:
+    """The (mode, low, high) triple this authored limit belongs to."""
+
+    for mode, low, high in _LIMIT_PARAMETER_PAIRS:
+        if name in (low, high):
+            return mode, low, high
+    return None
 
 
 def _normalize_limit_transition(
@@ -742,11 +794,16 @@ def _normalize_limit_transition(
     updates: Mapping[str, object],
 ) -> Mapping[str, object]:
     normalized = dict(updates)
-    if "relim_mode" in updates and updates["relim_mode"] != RelimMode.FIXED.value:
-        for low_name, high_name in _LIMIT_PARAMETER_PAIRS:
-            if low_name in current and high_name in current:
-                normalized.setdefault(low_name, None)
-                normalized.setdefault(high_name, None)
+    # Per pair, and per the mode that governs THAT pair: leaving fixed on the
+    # count axis must not throw away an authored value-axis limit.
+    for mode_name, low_name, high_name in _LIMIT_PARAMETER_PAIRS:
+        if mode_name not in updates:
+            continue
+        if updates[mode_name] == RelimMode.FIXED.value:
+            continue
+        if low_name in current and high_name in current:
+            normalized.setdefault(low_name, None)
+            normalized.setdefault(high_name, None)
     return normalized
 
 
@@ -760,7 +817,7 @@ def _validate_authored_conflicts(values: Mapping[str, object]) -> None:
     """
 
     mode = values.get("relim_mode")
-    for low_name, high_name in _LIMIT_PARAMETER_PAIRS:
+    for _mode_name, low_name, high_name in _LIMIT_PARAMETER_PAIRS:
         if low_name not in values or high_name not in values:
             continue
         low = values[low_name]
@@ -783,15 +840,14 @@ def _validate_authored_conflicts(values: Mapping[str, object]) -> None:
 
 def _validate_limit_state(values: Mapping[str, object]) -> None:
     _validate_authored_conflicts(values)
-    mode = values["relim_mode"]
-    for low_name, high_name in _LIMIT_PARAMETER_PAIRS:
+    for mode_name, low_name, high_name in _LIMIT_PARAMETER_PAIRS:
         if low_name not in values or high_name not in values:
             continue
-        if mode == RelimMode.FIXED.value and (
+        if values.get(mode_name) == RelimMode.FIXED.value and (
             values[low_name] is None or values[high_name] is None
         ):
             raise ValueError(
-                f"fixed relim_mode requires {low_name} and {high_name}"
+                f"fixed {mode_name} requires {low_name} and {high_name}"
             )
 
 
@@ -1026,7 +1082,7 @@ def _parameter_schema_for_context(
                 label="Scan regions",
             )
         )
-    has_limits = any(entry.name == "relim_mode" for entry in entries)
+    has_limits = any(entry.name in LIMIT_MODE_NAMES for entry in entries)
     def validate_state(values: Mapping[str, object]) -> None:
         if has_limits:
             _validate_limit_state(values)

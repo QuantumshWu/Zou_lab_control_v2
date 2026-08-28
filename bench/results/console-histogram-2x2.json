@@ -13,298 +13,163 @@
     "megapixels": 1.57
   },
   "live": {
-    "window_s": 5.0,
-    "frames": 48,
-    "frames_per_second": 9.6,
+    "window_s": 12.0,
+    "frames": 112,
+    "frames_per_second": 9.3,
     "beat_ms": 100.0,
     "frame_gap": {
-      "n": 47,
-      "median_ms": 108.54,
-      "p90_ms": 118.19,
-      "p99_ms": 125.51,
-      "max_ms": 126.52,
-      "best_ms": 24.37
+      "n": 111,
+      "median_ms": 109.34,
+      "p90_ms": 118.49,
+      "p99_ms": 124.45,
+      "max_ms": 125.12,
+      "best_ms": 22.48
     },
     "stalls_over_two_beats": 0,
     "worst_gaps_ms": [
-      126.5,
-      124.3,
+      125.1,
+      124.8,
       121.4,
-      119.9,
-      118.3
+      121.2,
+      121.0
     ],
     "seams": [
       {
-        "seam": "MatplotlibRenderer[histogram]._native_draw",
-        "calls": 42,
-        "self_ms_total": 472.7,
-        "self_ms_per_call": 11.26,
-        "cpu_ms_per_call": 8.93,
-        "cpu_share": 0.79,
-        "per_second": 8.4
-      },
-      {
-        "seam": "MatplotlibRenderer[histogram]._dynamic_artists",
-        "calls": 47,
-        "self_ms_total": 94.2,
-        "self_ms_per_call": 2.0,
-        "cpu_ms_per_call": 1.0,
-        "cpu_share": 0.5,
-        "per_second": 9.4
-      },
-      {
         "seam": "MatplotlibRenderer[histogram]._compose_frame",
-        "calls": 47,
-        "self_ms_total": 41.3,
-        "self_ms_per_call": 0.88,
-        "cpu_ms_per_call": 0.66,
-        "cpu_share": 0.76,
-        "per_second": 9.4
+        "calls": 111,
+        "self_ms_total": 216.8,
+        "self_ms_per_call": 1.95,
+        "cpu_ms_per_call": 0.7,
+        "cpu_share": 0.36,
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[histogram].present",
-        "calls": 47,
-        "self_ms_total": 29.6,
+        "calls": 111,
+        "self_ms_total": 69.7,
         "self_ms_per_call": 0.63,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
-        "per_second": 9.4
-      },
-      {
-        "seam": "MatplotlibRenderer[histogram].canvas.copy_from_bbox",
-        "calls": 12,
-        "self_ms_total": 21.2,
-        "self_ms_per_call": 1.76,
-        "cpu_ms_per_call": 1.3,
-        "cpu_share": 0.74,
-        "per_second": 2.4
-      },
-      {
-        "seam": "MatplotlibRenderer[histogram]._update_histogram",
-        "calls": 47,
-        "self_ms_total": 13.6,
-        "self_ms_per_call": 0.29,
-        "cpu_ms_per_call": 0.33,
-        "cpu_share": 1.15,
-        "per_second": 9.4
+        "cpu_ms_per_call": 0.28,
+        "cpu_share": 0.45,
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[histogram].canvas.restore_region",
-        "calls": 17,
-        "self_ms_total": 7.8,
-        "self_ms_per_call": 0.46,
+        "calls": 111,
+        "self_ms_total": 64.4,
+        "self_ms_per_call": 0.58,
+        "cpu_ms_per_call": 0.42,
+        "cpu_share": 0.73,
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[histogram]._update_histogram",
+        "calls": 111,
+        "self_ms_total": 34.2,
+        "self_ms_per_call": 0.31,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 3.4
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[histogram]._dynamic_artists",
+        "calls": 111,
+        "self_ms_total": 4.4,
+        "self_ms_per_call": 0.04,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[histogram]._update_selectors",
-        "calls": 47,
-        "self_ms_total": 1.6,
-        "self_ms_per_call": 0.03,
+        "calls": 111,
+        "self_ms_total": 4.0,
+        "self_ms_per_call": 0.04,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.4
-      },
-      {
-        "seam": "MatplotlibRenderer[histogram]._update_plot",
-        "calls": 47,
-        "self_ms_total": 0.5,
-        "self_ms_per_call": 0.01,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
-        "per_second": 9.4
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[histogram]._blit_exact_rgba_image",
-        "calls": 305,
+        "calls": 2109,
+        "self_ms_total": 2.4,
+        "self_ms_per_call": 0.0,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 175.7
+      },
+      {
+        "seam": "MatplotlibRenderer[histogram]._update_plot",
+        "calls": 111,
+        "self_ms_total": 1.3,
+        "self_ms_per_call": 0.01,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[histogram]._update_height_bars_cage",
+        "calls": 111,
+        "self_ms_total": 0.7,
+        "self_ms_per_call": 0.01,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[histogram]._settle_owned_boxes",
+        "calls": 111,
+        "self_ms_total": 0.5,
+        "self_ms_per_call": 0.0,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[histogram]._update_classifier",
+        "calls": 111,
+        "self_ms_total": 0.5,
+        "self_ms_per_call": 0.0,
+        "cpu_ms_per_call": 0.0,
+        "cpu_share": 0.0,
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer[histogram]._update_fit",
+        "calls": 111,
         "self_ms_total": 0.4,
         "self_ms_per_call": 0.0,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 61.0
-      },
-      {
-        "seam": "MatplotlibRenderer[histogram]._update_height_bars_cage",
-        "calls": 47,
-        "self_ms_total": 0.3,
-        "self_ms_per_call": 0.01,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
-        "per_second": 9.4
-      },
-      {
-        "seam": "MatplotlibRenderer[histogram]._update_classifier",
-        "calls": 47,
-        "self_ms_total": 0.2,
-        "self_ms_per_call": 0.01,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
-        "per_second": 9.4
-      },
-      {
-        "seam": "MatplotlibRenderer[histogram]._settle_owned_boxes",
-        "calls": 47,
-        "self_ms_total": 0.2,
-        "self_ms_per_call": 0.0,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
-        "per_second": 9.4
-      },
-      {
-        "seam": "MatplotlibRenderer[histogram]._update_fit",
-        "calls": 47,
-        "self_ms_total": 0.2,
-        "self_ms_per_call": 0.0,
-        "cpu_ms_per_call": 0.0,
-        "cpu_share": 0.0,
-        "per_second": 9.4
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[histogram]._update_single_fit",
-        "calls": 47,
-        "self_ms_total": 0.1,
+        "calls": 111,
+        "self_ms_total": 0.3,
         "self_ms_per_call": 0.0,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.4
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer[histogram]._update_image_point_overlay",
-        "calls": 47,
+        "calls": 111,
         "self_ms_total": 0.1,
         "self_ms_per_call": 0.0,
         "cpu_ms_per_call": 0.0,
         "cpu_share": 0.0,
-        "per_second": 9.4
+        "per_second": 9.2
       }
     ]
   },
-  "edits": {
-    "kind": "histogram",
-    "edits": [
-      {
-        "section": "display",
-        "values": {
-          "bin_count": 30
-        },
-        "refused": null,
-        "answered": true,
-        "to_next_front_ms": 48.64
-      },
-      {
-        "section": "display",
-        "values": {
-          "cumulative": true
-        },
-        "refused": null,
-        "answered": true,
-        "to_next_front_ms": 47.54
-      },
-      {
-        "section": "display",
-        "values": {
-          "density": true
-        },
-        "refused": null,
-        "answered": true,
-        "to_next_front_ms": 45.76
-      },
-      {
-        "section": "display",
-        "values": {
-          "log_y": true
-        },
-        "refused": null,
-        "answered": true,
-        "to_next_front_ms": 152.08
-      },
-      {
-        "section": "display",
-        "values": {
-          "show_grid": true
-        },
-        "refused": null,
-        "answered": true,
-        "to_next_front_ms": 40.83
-      },
-      {
-        "section": "display",
-        "values": {
-          "threshold_classifier": true
-        },
-        "refused": null,
-        "answered": true,
-        "to_next_front_ms": 45.5
-      },
-      {
-        "section": "display",
-        "values": {
-          "title": "edited while live"
-        },
-        "refused": null,
-        "answered": true,
-        "to_next_front_ms": 45.62
-      },
-      {
-        "section": "display",
-        "values": {
-          "value_label": "edited while live"
-        },
-        "refused": null,
-        "answered": true,
-        "to_next_front_ms": 46.58
-      },
-      {
-        "section": "display",
-        "values": {
-          "window": 9
-        },
-        "refused": null,
-        "answered": true,
-        "to_next_front_ms": 52.14
-      },
-      {
-        "section": "display",
-        "values": {
-          "x_label": "edited while live"
-        },
-        "refused": null,
-        "answered": true,
-        "to_next_front_ms": 43.15
-      },
-      {
-        "section": "display",
-        "values": {
-          "y_label": "edited while live"
-        },
-        "refused": null,
-        "answered": true,
-        "to_next_front_ms": 36.72
-      }
-    ],
-    "skipped": [
-      {
-        "field": "relim_mode",
-        "why": "str is an enum owned by the product"
-      },
-      {
-        "field": "value_display_unit",
-        "why": "unset, so the bench cannot tell the type"
-      },
-      {
-        "field": "y_max",
-        "why": "unset, so the bench cannot tell the type"
-      },
-      {
-        "field": "y_min",
-        "why": "unset, so the bench cannot tell the type"
-      }
-    ],
-    "answered": 11,
-    "of": 11,
-    "worst_ms": 152.08
-  },
   "threads_left_running": [],
-  "problems": []
+  "problems": [],
+  "render_cost": [
+    {
+      "panel": "histogram",
+      "frames": 112,
+      "wall_ms_per_frame": 3.57,
+      "cpu_ms_per_frame": 1.4
+    }
+  ]
 }

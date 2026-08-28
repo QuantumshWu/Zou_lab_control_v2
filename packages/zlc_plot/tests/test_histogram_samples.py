@@ -219,3 +219,125 @@ def test_an_axis_may_be_collapsed_before_the_values_are_binned() -> None:
         assert session.rgba() is not None
     finally:
         session.close()
+
+
+def _noisy_camera(revision: int, seed: int) -> DatasetSnapshot:
+    """Integer counts with a jittering maximum -- a camera frame's shape."""
+
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns({"shot": [0.0]}),
+        data_axes=(
+            Axis.create("y", values=[float(i) for i in range(40)]),
+            Axis.create("x", values=[float(i) for i in range(50)]),
+        ),
+        dtype=np.uint16,
+        generation="histogram-domain",
+    )
+    # Poisson counts and nothing else: the maximum of two thousand samples
+    # wanders by a count or two between revisions, which is the jitter a
+    # camera actually shows and the jitter the domain has to absorb.
+    rng = np.random.default_rng(seed)
+    values = rng.poisson(6.0, size=(1, 1, 40, 50)).astype(np.uint16)
+    return DatasetSnapshot(schema, values, revision=revision)
+
+
+def test_a_steady_value_axis_holds_its_bins_across_revisions() -> None:
+    """The bins an operator is reading must not be re-cut every shot.
+
+    A camera's maximum is the largest of a million noisy samples and moves
+    by a count or two every revision.  Binning between the raw minimum and
+    maximum therefore re-cut every bar under the operator, and moved the x
+    limits with them -- and a moving limit marks the axes chrome dirty,
+    which took the panel out of the composed-background path and into a
+    full figure redraw: measured at 14.63 ms of wall and 11.27 of CPU per
+    frame, against 3.57 and 1.40 once the domain holds.
+
+    Two things had to be true for the retention that was already written to
+    ever run.  It compared the bin count it PRODUCED against the count that
+    was REQUESTED, and integer-aligned bins produce fewer than requested, so
+    on a camera the two never matched.  And it held the produced edges as
+    the next revision's domain, though integer bins round a domain up to a
+    whole number of them -- so each revision widened the span it was handed,
+    and a value axis grew from 30 counts to 1200 in ninety frames.
+    """
+
+    session = PlotSession(_noisy_camera(1, 1), HistogramPlot())
+    try:
+        session.set_size("2x2")
+        session.set_parameters({"bin_count": 60, "x_relim_mode": "normal"})
+        session.rgba()
+
+        # Let the domain absorb the first few maxima, then it must stand.
+        for revision, seed in enumerate((2, 3, 4), start=2):
+            session.update_data(_noisy_camera(revision, seed))
+            session.rgba()
+        held = session._renderer._artists["histogram:projection"][0]
+
+        seen = []
+        for revision, seed in enumerate((5, 6, 7, 8, 9, 10, 11, 12), start=5):
+            session.update_data(_noisy_camera(revision, seed))
+            session.rgba()
+            seen.append(session._renderer._artists["histogram:projection"][0])
+        assert all(np.array_equal(edges, held) for edges in seen), (
+            "the bins were re-cut on %d of %d settled revisions"
+            % (sum(1 for e in seen if not np.array_equal(e, held)), len(seen))
+        )
+        # And no ratchet: a domain that is handed back its own widened edges
+        # grows every revision even when nothing breaches it.
+        spans = [float(edges[-1] - edges[0]) for edges in seen]
+        assert max(spans) == min(spans) == float(held[-1] - held[0])
+
+        # Tight means tight here too: the operator who asks for the data's
+        # own range every revision still gets it.
+        session.set_parameters({"x_relim_mode": "tight"})
+        session.rgba()
+        moved = []
+        for revision, seed in enumerate((13, 14, 15, 16), start=13):
+            session.update_data(_noisy_camera(revision, seed))
+            session.rgba()
+            moved.append(
+                tuple(session._renderer._artists["histogram:projection"][0][[0, -1]])
+            )
+        assert len(set(moved)) > 1, (
+            "tight stopped following the data: %s" % (moved,)
+        )
+    finally:
+        session.close()
+
+
+def test_the_value_axis_mode_is_the_operator_s_own_control() -> None:
+    """It reaches the editor, and it governs only its own limits.
+
+    The value domain used to be retained (or not) by the COUNT axis's mode,
+    so an operator asking for a steady count scale silently also asked for a
+    steady value domain and could not ask for either alone.
+    """
+
+    from zlc_plot.specs import parameter_schema_for_kind
+    from zlc_plot.style import build_plot_style
+    from zlc_plot.ui import parameter_controls
+
+    schema = parameter_schema_for_kind("histogram", style=build_plot_style())
+    assert "x_relim_mode" in schema
+    assert "x_min" in schema and "x_max" in schema
+
+    values = {name: spec.default for name, spec in schema.items()}
+    values["relim_mode"] = "fixed"
+    values["y_min"], values["y_max"] = 0.0, 10.0
+    controls = {control.name: control for control in
+                parameter_controls(schema, values)}
+
+    assert controls["x_relim_mode"].label == "Value limits"
+    assert controls["x_relim_mode"].choices == controls["relim_mode"].choices
+    # The count axis is fixed, so ITS limits are editable and the value
+    # axis's are not.  One mode gating both was the editor's own copy of
+    # the pairing; the vocabulary owns it now.
+    assert controls["y_min"].unavailable_reason == ""
+    assert controls["x_min"].unavailable_reason != ""
+
+    values["x_relim_mode"] = "fixed"
+    values["x_min"], values["x_max"] = 0.0, 5.0
+    controls = {control.name: control for control in
+                parameter_controls(schema, values)}
+    assert controls["x_min"].unavailable_reason == ""
