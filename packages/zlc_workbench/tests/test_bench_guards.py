@@ -338,14 +338,30 @@ def test_the_console_is_driven_at_one_rate_and_it_is_the_product_s() -> None:
     a 100 ms board interval.
     """
 
+    import ast
     import inspect
+    import textwrap
 
     from bench.plot_perf.run_console import ConsoleBench
 
     for owner in (ConsoleBench._pump, ConsoleBench._until):
-        body = inspect.getsource(owner)
-        assert "ProductBeat" in body, owner
-        assert "presenter.beat()" not in body, (
+        # THE PARSED CODE, not the text: the docstring explaining why the
+        # tight-loop beat is gone necessarily contains its name.
+        tree = ast.parse(textwrap.dedent(inspect.getsource(owner)))
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "beat"
+        ]
+        assert not calls, (
             "%s drives the console itself instead of at the board's rate"
             % owner
         )
+        names = {
+            node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+        } | {
+            node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+        }
+        assert "ProductBeat" in names, owner
