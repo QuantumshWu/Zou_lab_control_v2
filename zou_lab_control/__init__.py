@@ -5,6 +5,7 @@ from __future__ import annotations
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 from typing import Mapping
+import os
 import sys
 import tomllib
 
@@ -24,6 +25,36 @@ _LAYERS = (
     "zlc_atom",
     "zlc_workbench",
 )
+
+
+def _quiet_idle_worker_threads() -> None:
+    """Let the parallel pool SLEEP between kernels instead of spinning.
+
+    Every compiled kernel in this product is ``parallel=True``, and numba
+    runs them on OpenMP.  Its worker threads busy-wait after each parallel
+    region rather than sleeping, so once the first kernel has run the pool
+    keeps burning cores for as long as the process lives.  Measured on this
+    machine: arming the camera took the console from 5 per cent of one core
+    to over a thousand -- sixteen native threads at 60-75 per cent each --
+    and stopping the sequencer did not bring it back down, because the spin
+    is not tied to any work.
+
+    ``OMP_WAIT_POLICY=PASSIVE`` is the knob that answers it (``KMP_BLOCKTIME``
+    is Intel's and this is LLVM's runtime, which ignores it).  It costs
+    nothing measurable: the scene raster over 20 camera turns went from a
+    10.94 ms minimum to 10.36, because the work gets a machine that is not
+    already busy spinning.
+
+    Set here because the environment must be in place before the OpenMP
+    runtime initializes, and this bootstrap is what every entry point
+    imports first.  ``setdefault`` so an operator who sets it explicitly
+    keeps their choice.
+    """
+
+    os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+
+
+_quiet_idle_worker_threads()
 
 
 def _activate_checkout() -> None:
