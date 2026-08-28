@@ -158,6 +158,11 @@ class InfoPane(QtWidgets.QWidget):
         titles = [title for title, _rows in normalized]
         if len(set(titles)) != len(titles):
             raise ValueError("info tab titles must be unique")
+        # WHICH TAB THE OPERATOR IS READING is theirs, not the refresh's.
+        # Every tab is destroyed and rebuilt below -- the rows change, the
+        # titles almost never do -- and the rebuilt stack starts at the
+        # first tab, so a refresh threw anyone reading Devices back to Plot.
+        showing = self.info_tabs.tabText(self.info_tabs.currentIndex())
         while self.info_tabs.count():
             widget = self.info_tabs.widget(0)
             self.info_tabs.removeTab(0)
@@ -170,6 +175,10 @@ class InfoPane(QtWidgets.QWidget):
                 self._add_graph_tab(title)
             else:
                 self._add_rows_tab(title, rows)
+        for index in range(self.info_tabs.count()):
+            if self.info_tabs.tabText(index) == showing:
+                self.info_tabs.setCurrentIndex(index)
+                break
         self._apply_pane_width()
 
     def _add_rows_tab(self, title: str, rows: tuple[InfoRow, ...]) -> None:

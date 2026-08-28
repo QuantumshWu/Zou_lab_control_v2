@@ -263,15 +263,19 @@ from zlc_ui.form.qt_form import FluentParameterForm, FORM_WIDGET_HANDLERS
 app = ensure_qt_app(['test'])
 
 # Every kind the panel Setting popup can produce.
-LIVE_KINDS = ('text', 'number', 'int', 'bool', 'choice')
+LIVE_KINDS = ('text', 'number', 'int', 'bool', 'choice', 'note')
 for kind in LIVE_KINDS:
     assert kind in FORM_WIDGET_HANDLERS, kind
 
 spec = FormSpec((
     FormFieldProps('label', 'text', 'Y label'),
     FormFieldProps('ceiling', 'number', 'Value maximum'),
+    # A reason, not a setting: it is in the form because it belongs beside
+    # the controls it is about, and it must behave like nothing an operator
+    # can edit.
+    FormFieldProps('why', 'note', 'Fit'),
 ))
-values = {'label': 'start', 'ceiling': 100.0}
+values = {'label': 'start', 'ceiling': 100.0, 'why': 'a standing reason'}
 form = FluentParameterForm(spec, values)
 window = QtWidgets.QMainWindow()
 window.setCentralWidget(form)
@@ -280,6 +284,18 @@ app.processEvents()
 
 seen = []
 form.changed.connect(seen.append)
+
+# A NOTE IS NOT A CONTROL.  It shows the whole message rather than clipping
+# it to a box's width, it cannot be edited, and writing into it never tells
+# the owner the operator changed a setting -- which is what a message
+# declared as a text field did.
+note = form._widgets['why']
+assert note.toPlainText() == 'a standing reason', note.toPlainText()
+assert note.isReadOnly(), 'a reason must not be typeable'
+assert note.isEnabled(), 'a disabled reason cannot be selected and copied'
+note.setPlainText('tampered')
+app.processEvents()
+assert seen == [], seen
 
 # TEXT applies as it is typed, exactly as the number beside it does.
 label = form._widgets['label']
@@ -299,7 +315,7 @@ ceiling.selectAll()
 QtTest.QTest.keyClicks(ceiling, '0')
 app.processEvents()
 assert ceiling.hasFocus()
-form.reconcile(spec, {'label': 'ab', 'ceiling': 100.0})
+form.reconcile(spec, {'label': 'ab', 'ceiling': 100.0, 'why': 'a standing reason'})
 app.processEvents()
 assert ceiling.text() == '0', (
     'the form wrote the stored value over the operator: %r' % ceiling.text()
@@ -310,10 +326,187 @@ assert form._widgets['label'].text() == 'ab', form._widgets['label'].text()
 # Leave the field, and the projection lands.
 form._widgets['label'].setFocus(QtCore.Qt.MouseFocusReason)
 app.processEvents()
-form.reconcile(spec, {'label': 'ab', 'ceiling': 100.0})
+form.reconcile(spec, {'label': 'ab', 'ceiling': 100.0, 'why': 'a standing reason'})
 app.processEvents()
 assert ceiling.text() == '100.0', ceiling.text()
 window.close()
 print('ok')
+"""
+    )
+
+
+def test_a_form_that_grows_a_row_does_not_scroll_itself() -> None:
+    """Adding a control must not move the controls already on screen.
+
+    Choosing a fit model adds one row, and the whole form jumped: every
+    label the operator was reading slid down and the combo they had just
+    used ended up somewhere else.  Nothing inside the form moved -- the
+    popup placement resized the popup to its UNBOUNDED size hint as a way
+    of measuring it, and for that instant the scroll viewport was tall
+    enough that the vertical range collapsed and Qt clamped the operator's
+    scroll position into it.  Restoring the real size restored the range,
+    not the position, so every edit walked the form a little further.
+    """
+
+    _run_qt(
+        _SURFACE_PROLOGUE
+        + """
+scroll = card._settings_scroll
+bar = scroll.verticalScrollBar()
+
+# Fill the popup past its own height, then look at the bottom -- the only
+# place from which a lost scroll position is visible.
+card.set_panel_projection(state, parameter_surface(14))
+app.processEvents()
+bar.setValue(bar.maximum())
+app.processEvents()
+assert bar.maximum() > 0, 'the form must overflow for this to mean anything'
+
+before_value = bar.value()
+before_max = bar.maximum()
+before_geometry = card._settings_popup.geometry()
+before_rows = {
+    key: widget.mapTo(form, widget.rect().topLeft()).y()
+    for key, widget in form._widgets.items()
+}
+
+# APPEND-ONLY, not re-place-everything.  The layout comparison used to ask
+# whether the placed rows matched the whole wanted list -- which a row that
+# has been built but not yet inserted can never satisfy -- so every append
+# pulled all of them out and put them back.
+inserted = []
+real_insert = form._layout.insertWidget
+form._layout.insertWidget = lambda index, widget, *a, **k: (
+    inserted.append(index), real_insert(index, widget, *a, **k))[1]
+
+card.set_panel_projection(state, parameter_surface(15))
+app.processEvents()
+form._layout.insertWidget = real_insert
+assert len(inserted) == 1, inserted
+
+after_rows = {
+    key: widget.mapTo(form, widget.rect().topLeft()).y()
+    for key, widget in form._widgets.items()
+}
+added = set(after_rows) - set(before_rows)
+assert len(added) == 1, added
+
+# The operator's position, untouched.
+assert bar.value() == before_value, (bar.value(), before_value)
+# ... while the range really did grow, so this is not a no-op test.
+assert bar.maximum() > before_max, (bar.maximum(), before_max)
+
+# Every row that was already there is exactly where it was, and the new
+# one is below all of them.
+for key, y in before_rows.items():
+    assert after_rows[key] == y, (key, y, after_rows[key])
+new_key = next(iter(added))
+assert after_rows[new_key] > max(before_rows.values()), (
+    new_key, after_rows[new_key], max(before_rows.values()))
+"""
+        + _SURFACE_EPILOGUE
+    )
+
+
+def test_a_short_form_keeps_its_pitch_when_it_grows() -> None:
+    """A row's position depends on the rows above it and nothing else.
+
+    A form shorter than its host had no trailing slack, so the surplus
+    height was shared out along the column and the PITCH depended on the row
+    COUNT.  Adding one control moved every control already on screen upward,
+    the lowest by the most -- with no scrolling involved at all, so this is a
+    second, independent way the same complaint appears.
+    """
+
+    _run_qt(
+        _SURFACE_PROLOGUE
+        + """
+# Deliberately far short of the viewport: this is the regime where surplus
+# height exists to be mis-shared.
+card.set_panel_projection(state, parameter_surface(2))
+app.processEvents()
+scroll = card._settings_scroll
+assert scroll.verticalScrollBar().maximum() == 0, 'must not overflow yet'
+
+before = {
+    key: widget.mapTo(form, widget.rect().topLeft()).y()
+    for key, widget in form._widgets.items()
+}
+assert len(before) >= 3, before
+
+card.set_panel_projection(state, parameter_surface(3))
+app.processEvents()
+after = {
+    key: widget.mapTo(form, widget.rect().topLeft()).y()
+    for key, widget in form._widgets.items()
+}
+assert len(after) == len(before) + 1, (len(before), len(after))
+for key, y in before.items():
+    assert after[key] == y, (key, y, after[key])
+"""
+        + _SURFACE_EPILOGUE
+    )
+
+
+def test_the_scrollbar_appearing_does_not_narrow_every_control() -> None:
+    """Width-bounded content reflows to the viewport, so the viewport is fixed.
+
+    The bar was AsNeeded with no reserved gutter, so the very row that
+    pushed the content past the viewport also took the bar's width off every
+    control in the form -- one more layout change caused by nothing but a
+    control being added.
+
+    Tested on the scroll area itself, at a FIXED outer size: mounted in the
+    Setting popup the popup would legitimately re-measure its own width at
+    the same moment, and the two effects are not separable there.
+    """
+
+    _run_qt(
+        """
+import zou_lab_control
+from PyQt5 import QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent import FluentScrollArea, FluentLabel
+app = ensure_qt_app(['scroll-gutter'])
+
+area = FluentScrollArea()
+area.resize(300, 200)
+body = QtWidgets.QWidget()
+column = QtWidgets.QVBoxLayout(body)
+column.setContentsMargins(0, 0, 0, 0)
+rows = []
+for index in range(3):
+    label = FluentLabel(f'row {index}', body)
+    label.setFixedHeight(20)
+    column.addWidget(label)
+    rows.append(label)
+area.set_width_bounded_widget(body)
+area.show()
+app.processEvents()
+
+assert area.verticalScrollBar().maximum() == 0, 'must not overflow yet'
+narrow_viewport = area.viewport().width()
+narrow_body = body.width()
+
+# Grow the content until the bar is genuinely needed.  The outer widget is
+# never resized, so any viewport change is the bar's doing and nothing else.
+for index in range(3, 40):
+    label = FluentLabel(f'row {index}', body)
+    label.setFixedHeight(20)
+    label.show()
+    column.addWidget(label)
+column.activate()
+body.updateGeometry()
+app.processEvents()
+app.processEvents()
+assert area.verticalScrollBar().maximum() > 0, 'the bar must be needed now'
+
+assert area.viewport().width() == narrow_viewport, (
+    narrow_viewport, area.viewport().width())
+assert body.width() == narrow_body, (narrow_body, body.width())
+
+area.close()
+area.deleteLater()
+app.processEvents()
 """
     )

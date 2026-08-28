@@ -690,7 +690,21 @@ def show_fluent_popup_for_anchor(
     if origin is not None and not isinstance(origin, QtCore.QPoint):
         raise TypeError("origin must be QPoint or None")
 
-    popup.adjustSize()
+    # MEASURE WITHOUT MOVING ANYTHING.  This used to call popup.adjustSize(),
+    # which is not a measurement at all: it RESIZES the popup to its unbounded
+    # size hint before the cap below is applied.  For the one instant that
+    # oversized popup existed, the scroll viewport grew, its vertical range
+    # collapsed to fit, and Qt clamped the operator's scroll VALUE into the
+    # smaller range.  Restoring the real size restored the range but not the
+    # value, so a form that merely grew one row -- picking a fit model adds
+    # one -- scrolled itself, and every row the operator was reading moved.
+    #
+    # Nothing below needs a resized popup: the chrome walk reads only layout
+    # margins, spacing, frame widths and size hints, and the content's own
+    # hint is layout-derived.  Polish is what adjustSize was really
+    # contributing (style metrics for the reserved scrollbar), and polishing
+    # has no geometry side effect.
+    popup.ensurePolished()
     hint = content.sizeHint()
     anchor_top_left = anchor.mapToGlobal(QtCore.QPoint(0, 0))
     anchor_bottom_right = anchor.mapToGlobal(
@@ -3776,6 +3790,16 @@ class FluentCheckBox(QtWidgets.QCheckBox):
 class FluentScrollArea(QtWidgets.QScrollArea):
     def __init__(self, parent=None):
         super().__init__(parent)
+        #: Width-bounded content reflows to the viewport, so the viewport's
+        #: width must not depend on whether the vertical bar happens to be
+        #: showing.  It did: the row that first pushed the content past the
+        #: viewport made the bar appear and narrowed EVERY control by the
+        #: bar's width, in the same instant the operator added that row.
+        self._bounded = False
+        self._reserving = False
+        self.verticalScrollBar().rangeChanged.connect(
+            lambda *_: self._reserve_scrollbar_gutter()
+        )
         self.setWidgetResizable(True)
         self.setMinimumWidth(0)
         self.setFrameShape(QtWidgets.QFrame.NoFrame)
@@ -3808,7 +3832,33 @@ class FluentScrollArea(QtWidgets.QScrollArea):
             QtWidgets.QSizePolicy.Ignored,
             QtWidgets.QSizePolicy.Preferred,
         )
+        self._bounded = True
         self.setWidget(widget)
+        self._reserve_scrollbar_gutter()
+
+    def _reserve_scrollbar_gutter(self) -> None:
+        """Hold the vertical bar's width whether or not the bar is there.
+
+        Asked as "is the range non-empty", not "is the bar visible": the
+        widget's visibility is not settled yet at the moment its range
+        changes, and this must be a function of the content alone.
+        """
+
+        if not self._bounded or self._reserving:
+            return
+        self._reserving = True
+        try:
+            bar = self.verticalScrollBar()
+            needed = bar.maximum() > bar.minimum()
+            reserved = 0 if needed else bar.sizeHint().width()
+            if self.viewportMargins().right() != reserved:
+                self.setViewportMargins(0, 0, reserved, 0)
+        finally:
+            self._reserving = False
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._reserve_scrollbar_gutter()
 
 
 class LinkedScrollPanes(QtWidgets.QWidget):

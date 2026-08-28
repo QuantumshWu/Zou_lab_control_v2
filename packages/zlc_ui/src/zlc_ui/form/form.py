@@ -17,6 +17,9 @@ from typing import Literal, TypeAlias
 
 
 FormFieldKind: TypeAlias = Literal[
+    #: Not a control.  A standing message about the section it sits in --
+    #: shown, never edited, and carrying no value the owner reads back.
+    "note",
     "text",
     "int",
     "float",
@@ -29,6 +32,7 @@ FormFieldKind: TypeAlias = Literal[
 ]
 _FORM_FIELD_KINDS = frozenset(
     {
+        "note",
         "text",
         "int",
         "float",

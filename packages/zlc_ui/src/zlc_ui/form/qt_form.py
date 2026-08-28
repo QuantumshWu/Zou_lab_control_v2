@@ -32,6 +32,7 @@ from ..fluent import (
     FluentLabel,
     FluentLineEdit,
     FluentPathEdit,
+    FluentReadoutMultiline,
     FluentSectionLabel,
     FluentSettingRow,
     FluentSpinBox,
@@ -754,8 +755,49 @@ class _KeyedChoiceHandler(FormWidgetHandler):
         self._fill(field, widget, current, context)
 
 
+class _NoteHandler(_StaticHandler):
+    """A standing message, shown in full and never editable.
+
+    Declared like a field because it belongs WITH the controls it is about
+    -- a reason the Fit section cannot be applied is useless on the far side
+    of the popup -- but it is not one: it never emits ``changed``, so the
+    owner is never told the operator edited something they cannot edit, and
+    its text wraps instead of being clipped by a control's width.
+    """
+
+    def normalize(self, field: FormFieldProps, value: object) -> str:
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            raise _value_error(field, "a note is text")
+        return value
+
+    def build(self, field, value, on_change, context=None):
+        del on_change, context
+        widget = FluentReadoutMultiline(
+            self.normalize(field, value),
+            plain=True,
+            max_height=scaled_px(160, minimum=90),
+        )
+        widget.setToolTip(field.description)
+        return widget
+
+    def read(self, field, widget):
+        return self.normalize(field, widget.toPlainText())
+
+    def write(self, field, widget, value):
+        text = self.normalize(field, value)
+        if widget.toPlainText() != text:
+            widget.setPlainText(text)
+
+    def is_empty(self, field, widget):
+        del field
+        return not widget.toPlainText()
+
+
 FORM_WIDGET_HANDLERS: Mapping[str, FormWidgetHandler] = MappingProxyType(
     {
+        "note": _NoteHandler(),
         "text": _TextHandler(),
         "int": _IntHandler(),
         "float": _FloatHandler(),
@@ -773,6 +815,10 @@ def _widget_family(field: FormFieldProps) -> str:
     """Concrete control family required by one declaration."""
 
     prefix = "auto:" if field.automatic else ""
+    if field.kind == "note":
+        # Its own family: a note replacing a text field must REBUILD, not be
+        # written into a line edit that would clip it.
+        return "note"
     if field.kind == "int" and _IntHandler._spin_range(field) is not None:
         return prefix + "int-spin"
     if field.kind == "float" and _FloatHandler._spin_range(field) is not None:
@@ -842,6 +888,12 @@ def _reconfigure_widget(
 ) -> None:
     """Apply changed presentation constraints to one compatible control."""
 
+    if field.kind == "note":
+        # A note is never disabled and never carries an unavailable reason:
+        # it IS the reason.  Enabling it is what keeps it selectable, so the
+        # operator can copy a message out of it.
+        widget.setToolTip(field.description)
+        return
     widget.setToolTip(field.unavailable_reason or field.description)
     widget.setEnabled(not field.unavailable)
     if isinstance(widget, FluentLineEdit):
@@ -928,6 +980,13 @@ class FluentParameterForm(QtWidgets.QWidget):
             if automatic is not None:
                 self._auto_switches[field.key] = automatic
             self._layout.addWidget(row)
+        # THE SLACK GOES BELOW THE ROWS, not between them.  Without this a
+        # form shorter than its host shares the surplus height across its
+        # rows, so the PITCH depends on the row COUNT: adding one control
+        # moved every control already on screen upward, the lowest by the
+        # most.  A row's position must depend on the rows above it and
+        # nothing else.
+        self._layout.addStretch(1)
 
         # A field that depends on another follows it while the form is being
         # edited, so the operator SEES that a folder belongs to "saved frames"
@@ -1350,11 +1409,20 @@ class FluentParameterForm(QtWidgets.QWidget):
             # one row at the end pulled every surviving row out of the
             # layout and put it back -- which is most of what the
             # operator sees as the form collapsing and rebuilding.
+            #
+            # Compare LIKE WITH LIKE.  A row built above is already in
+            # ``self._rows`` but not yet in the layout, so comparing the
+            # layout against the whole wanted list said "order changed"
+            # for every append -- the very case the paragraph above says
+            # is handled.  The question is whether the rows that ARE
+            # placed are in the right relative order; the ones that are
+            # not placed get inserted below regardless.
             placed = [
                 key for key in self._layout_order() if key in self._rows
             ]
+            in_layout = set(placed)
             wanted = [field.key for field in spec.fields if field.key in self._rows]
-            order_changed = placed != wanted
+            order_changed = placed != [key for key in wanted if key in in_layout]
             for index, field in enumerate(spec.fields):
                 if field.key not in self._rows:
                     continue
@@ -1373,7 +1441,9 @@ class FluentParameterForm(QtWidgets.QWidget):
                         or old_field.row_label != field.row_label
                     ):
                         row.set_label(label, width=label_width)
-                if order_changed:
+                if order_changed or field.key not in in_layout:
+                    # removeWidget on a row that is not in the layout is a
+                    # no-op, so a fresh row simply lands at its index.
                     self._layout.removeWidget(row)
                     self._layout.insertWidget(index, row)
                     if self.isVisible() and not row.isVisible():

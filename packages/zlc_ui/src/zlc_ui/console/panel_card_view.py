@@ -917,10 +917,15 @@ class PanelCardView(FluentGroupBox):
                 self._parameter_surface.get(f"{section}_unavailable") or ""
             )
             if unavailable:
+                # A REASON, not a setting.  Declared as "text" it became a
+                # disabled line edit holding a sentence wider than itself,
+                # labelled with the bare section name -- so the Fit section
+                # showed a greyed "Fit" box under its "Fit model" combo and
+                # read as a second, broken input.
                 fields.append(
                     FormFieldProps(
                         f"{section}_unavailable",
-                        "text",
+                        "note",
                         section_labels[section],
                         default=unavailable,
                     )
@@ -991,10 +996,6 @@ class PanelCardView(FluentGroupBox):
                 key = f"semantic__{field['key']}"
                 if key in form.spec.keys:
                     form.widget_for(key).setEnabled(False)
-        for section in ("semantic", "display", "fit"):
-            key = f"{section}_unavailable"
-            if key in form.spec.keys:
-                form.widget_for(key).setEnabled(False)
 
     def _sync_settings_body_size(self) -> None:
         body = self._settings_body

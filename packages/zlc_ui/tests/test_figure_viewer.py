@@ -205,3 +205,41 @@ pane.set_tabs((('Device', ((long_label, '0.02'),)),))
 assert pane.width() == before, 'loaded labels changed the fixed Viewer split'
 """
     )
+
+
+def test_an_info_refresh_keeps_the_tab_the_operator_is_reading() -> None:
+    """A refresh replaces the CONTENT of the tabs, not which one is open.
+
+    Every tab is destroyed and rebuilt on each ``set_tabs`` -- the rows
+    change, the five titles never do -- and the rebuilt stack starts at the
+    first tab, so anyone reading Devices was thrown back to Plot by a
+    refresh they did not ask for.
+    """
+
+    _run_qt(
+        """
+import zou_lab_control
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.fluent.info_pane import InfoPane
+app = ensure_qt_app(['info-tab'])
+
+TITLES = ('Plot', 'Logic', 'Devices', 'Flow', 'Raw')
+pane = InfoPane(label_names=TITLES)
+pane.set_tabs(tuple((title, (('a', '1'),)) for title in TITLES))
+app.processEvents()
+pane.info_tabs.setCurrentIndex(2)
+app.processEvents()
+assert pane.info_tabs.tabText(pane.info_tabs.currentIndex()) == 'Devices'
+
+pane.set_tabs(tuple((title, (('a', '9'),)) for title in TITLES))
+app.processEvents()
+assert pane.info_tabs.tabText(pane.info_tabs.currentIndex()) == 'Devices', (
+    pane.info_tabs.tabText(pane.info_tabs.currentIndex()))
+
+# A tab that no longer exists cannot be kept; falling back to the first is
+# the only honest answer, and it must not raise.
+pane.set_tabs((('Plot', (('a', '9'),)), ('Logic', (('a', '9'),))))
+app.processEvents()
+assert pane.info_tabs.tabText(pane.info_tabs.currentIndex()) == 'Plot'
+"""
+    )
