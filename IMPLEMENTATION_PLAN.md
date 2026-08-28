@@ -267,320 +267,71 @@
 - typed Figure仍保存全部cells；页面只是显示状态。导出提供当前页、全部分页PNG或多页PDF，
   不生成一个包含数百微小Axes的单张巨图。
 
-## 7. 当前Goal进度（2026-08-27，branch `height3d`）
+## 7. 当前Goal进度（2026-08-27）
 
-用户七项清单，全部完成。**已完成并提交的不得重做**；每项的证据是当前tree重新取得的实测。
+> 本节只记录**当前状态、裁决、和仍然开着的事**。
+> 每一次尝试的经过、被实测否决的方案、以及我自己的测量失误，写在**做那件事的
+> 那个 commit 的 message 里**——那才是不会过期的记录。计划文档不做 changelog；
+> 曾经把它当 changelog 用，导致 586 行里 317 行是一次 Goal 的流水账，已清除。
 
-1. **`90ee153`** — `display__title` 切回 Auto 时 `ValueError` 穿出 Qt slot、进程 abort
-   （exit -1073740791）。根因：text handler 用 `field.default`（当前值）当作"允不允许空"
-   的规则，而 `adopt_projection` 正确地把 default 排除在 metadata 比较之外，于是新的
-   `None` 被上一份声明审判。改为读 `field.required`，与 int/number/real 的
-   `blank_allowed` 同一个所有者。红/绿：`test_settings_layout.py`（变异回旧规则即红）。
-2. **性能，`0dbf943` + `e6f3a40` + `3a891bc`**。**上一轮报的 93 ms/move 是夹具伪影**：
-   `chain/realloop.py` 用 GUI 线程上的定时器调阻塞的 `session.fire()`。产品是
-   free-running `sequencer.fire(cycles=None)`。按产品方式重测后交付只占 0.2 ms，
-   瓶颈全在渲染。见下表。
-3. **selector 手势已不再卡**：真实链路 hand→picture 中位 image 7.8 / curve 9.1 /
-   histogram 10.7 / rolling 8.8 / 3D 57.6 ms。facet_grid 的 68 ms 是量法产物——
-   overview 上的左拖按设计不成手势，测到的是下一帧 live 到达。
-4. **`14f140b`** — 柱数=数据格数，LOD 全删。
-5. **`14f140b` + `a15dd23`** — home azimuth −55→+55（正 azimuth=顺时针；实测 home
-   四角 far=a near=c left=d right=b）；墙=ab/ad、轴=cd/bc、z 轴在 d；轴线/刻度/标签
-   与场景一起遮挡。
-6. **`f809e4d`（rolling 相对 shot 号）+ `a359bd8`（每种 kind 都能从区域派生）**。
-7. **组合矩阵已跑**（`chain/matrix.py`、`chain/combos.py`）。
+### 七项清单：全部完成，不得重做
 
-### 真实链路实测（4x4 单面板，free-running 生产者）
-
-| kind | live frame ms | 手势帧 ms | hand→picture ms 中位/p90 |
-|---|---|---|---|
-| image heatmap | 44.9 | 11.9 | 7.8 / 14.5 |
-| image 3D bars | 94.5 | 57.3 | 53.3 / 83.5（ROI 42.1–42.6） |
-| curve | 14.3 | 10.2 | 9.1 / 14.3 |
-| histogram | 40.1 | 10.4 | 10.7 / 16.3 |
-| rolling | 15.8 | 11.8 | 8.8 / 13.7 |
-| facet grid | 21.1 | 19.3 | 68.3 / 89.7（见上，非延迟） |
-
-四面板并存（2x2）：hand→picture image 9.7 / 3D 41.2 / curve 10.1 / rolling 9.3。
-ROI 链（camera→roi_frame→3D）：相机上的 ROI 手势 9.7 ms，ROI 3D 面板 23.0 ms。
-带 fit 的 rolling：live 帧 10.7 ms，手势 8.7 ms。全程无 warning/error。
-
-### 合并后在 master 上的独立复验（不是开发树的数字）
-
-| 项 | 在 master 上重新取得的证据 |
-|---|---|
-| 4 | 宽 ROI：数据 1150×1150 / 场景 1150×1150；缩小后：数据 790×1150 / 场景 1150×790。**柱数=格数，且随 ROI 变化**（`chain/verify4.py`） |
-| 5 | home 相机四角实测 `far=a near=c left=d right=b`，folded 11×7 与源同向（`chain/h3daxes.py`） |
-| 6a | rolling x = `[-4,-3,-2,-1,0]`，label "Shots from latest"，xlim (-4,0)，**再来一发后完全不变** |
-| 6b | image 切轴 770×770 全有效／curve 切轴 1200×763／histogram 值带 582814 of 2304000 有效／rolling 窗口未及最新一发时 0 有效 |
-| 7 | 全 kind 矩阵与组合场景见下；四面板并存 hand→picture 8.6–39.3 ms，ROI 链 9.8 / 39.7 ms，带 fit 的 rolling 8.9 ms，全程无 warning/error |
-
-第 3 项点名的三个症状，逐个直接测（`chain/verify3.py`，master，free-running 生产者）：
-
-| kind | 每次 move 有没有画面 | 按下后一帧不出的次数 | 同一个手势提交同一个区域？ |
-|---|---|---|---|
-| image | 36/36 | 0 | **6 次全同** |
-| curve | 36/36 | 0 | **6 次全同** |
-| histogram | 36/36 | 0 | 6 次里 3 种——它的 x **就是测量值**，活数据的值域每一发都在动，这是轴在动不是区域在跳 |
-| rolling | 36/36 | 0 | **6 次全同** |
-
-**探针自身的两次错，记在这里免得再犯**：(1) 用 `panel_state_changed` 发
-`{"selector": {}}` 清区域——`selector` 根本不在 `update_panel_state` 的允许字段里，
-清除被拒绝而我没看返回值；(2) 于是每隔一次拖动其实是**落在已有区域边柄上的 resize**，
-交替出两个矩形，被我一度读成"跳变"。真正的清除路径是
-`host.remove_selector(SelectorKind.AREA / X_RANGE)`。
-
-master 全 kind 矩阵（4x4 单面板，free-running 生产者）：
-image 5.8 / 3D 53.3 / curve 9.7 / histogram 5.9 / rolling 9.9 / facet 68.0 ms（facet 见上，非延迟）。
-
-### 七项在**当前 master**（`2bcdc8f`）上的整体复验
-
-本轮动过 3D 光栅（`e99161a` / `50b26b7` / `c166f42`），所以七项全部重跑，不吃旧证据。
-
-| 项 | 在当前 master 上重新取得的证据 |
-|---|---|
-| 1 | `qt_form.py::_TextHandler.normalize` 读的是 `field.required`（不是 `field.default`），修复在 `90ee153` |
-| 2 | 静源 hand→picture **29.7 / 30.7 / 31.2 ms**（三次复跑），与 heatmap 整幅帧 30.3 ms 持平；你报的是 93 ms |
-| 3 | image / curve / rolling **36/36 有画面、0 次静默、6 次拖动提交同一区域**；histogram 变化是它的 x 就是测量值、活数据值域在动 |
-| 4 | 宽 ROI 数据 1150×1150 / 场景 1150×1150；缩小后 790×1150 / 1150×790——**柱数=格数且随 ROI 变** |
-| 5 | home 相机（origin=upper, azimuth=+55）四角实测 `far=a near=c left=d right=b`；origin=lower 时画面本身翻转，故 `far=d` 是同一关系 |
-| 6 | rolling 的区域是 `('shot', -69.4, -29.9)`——**负数=相对最新一发**；四种 kind 都从区域派生：image 切 770×770 全有效／curve 切 1200×763／histogram **值带** 1153368/2304000 有效／rolling **shot 窗口**（窗口未及那段时 0 有效） |
-| 7 | 全 kind 矩阵、四面板并存、ROI 链、带 fit 的 rolling 全部重跑，见下 |
-
-组合场景（`chain/combos.py`，当前 master）：
-
-| 场景 | hand→picture 中位 | 本轮之前 |
+| 项 | 结论 | 定型提交 |
 |---|---|---|
-| 四面板并存 2x2：image / **3D** / curve / rolling | 6.7 / **24.6** / 6.5 / 7.5 ms | 8.6–**39.3** |
-| ROI 链：相机 ROI 手势 / ROI 3D 面板手势 | 6.9 / **32.1** ms | 9.8 / **39.7** |
-| 带 fit 的 rolling | 8.6 ms | 8.9 |
+| 1 | `display__title` 切回 Auto 时 `ValueError` 穿出 Qt slot、进程 abort。根因＝**一个字段两件事**：`field.default`（当前值）被当成"允不允许空"的规则。改读 `field.required`，与标量的 `blank_allowed` 同一个所有者 | `90ee153` |
+| 2 | 3D 拖动延迟。用户报的 93 ms/move 是夹具伪影（GUI 线程上跑阻塞生产者）；真实数字见下表 | `c166f42` 等 |
+| 3 | selector 不响应/卡顿/跳变：image/curve/rolling **36/36 有画面、0 次静默、6 次拖动提交同一区域**。histogram 的区域会变，是因为它的 x 就是测量值、活数据值域在动 | — |
+| 4 | 3D 柱数＝数据格数，LOD 全删；ROI 缩小时柱数跟着变（1150×1150 → 1150×790） | `14f140b` |
+| 5 | home 相机四角 `far=a near=c left=d right=b`；墙＝ab/ad、轴＝cd/bc、z 轴在 d；轴与场景一起遮挡。`origin=lower` 时画面本身翻转，`far=d` 是同一关系 | `14f140b` `a15dd23` |
+| 6 | rolling 的 x 是**相对最新一发**（区域实测为负 shot 号）；四种 kind 都能从区域派生：image/curve **切片**、histogram **值带置无效**、rolling **shot 窗口** | `f809e4d` `a359bd8` |
+| 7 | 全 kind 矩阵、组合场景、逐环节 profiling，见下 | — |
 
-唯一的操作者报告是 `panel-8: fit requires more finite observations than free parameters`，
-**只出现一次**（探针逐条收集不去重）：在 live rolling 上刚挂上 fit、窗口里的点还少于
-自由参数的那一刻。随后 fit 正常求解并跑了 67 帧。这是正确的反馈，不是噪声。
+### 当前实测（master，4x4 单面板，free-running 生产者，`chain/matrix.py`）
 
-### 仍然开着的（已知，未修）
+三列是三件不同的事：**live 帧**＝数据来了整幅重画；**手势帧**＝手势期间的帧；
+**hand→picture**＝按下到画面出现。
 
-- **3D 面板仍是最慢的 kind**：ROI 手势 **42–50 ms**、整幅相机 **53.3 ms**，
-  live 帧 **94.5 ms**（本轮起点 181）。**关键实测：把生产者完全停掉，orbit 仍是
-  50.1 ms/move** —— 所以手等的不是数据帧，就是它自己那一帧。
+| kind | live 帧 中位/p90 | 手势帧 中位/p90 | hand→picture 中位/p90 |
+|---|---|---|---|
+| image heatmap | 36.8 / 41.7 | 11.0 / 39.4 | **6.5 / 12.5** |
+| image 3D bars | 85.8 / 94.6 | 38.9 / 87.5 | **42.9 / 138.2** |
+| curve | 13.3 / 15.4 | 8.9 / 18.7 | **9.1 / 12.3** |
+| histogram | 36.2 / 43.9 | 12.1 / 45.3 | **10.6 / 16.9** |
+| rolling | 12.6 / 16.2 | 10.2 / 20.3 | **9.9 / 14.0** |
+| facet grid | 17.5 / 19.3 | 15.0 / 22.9 | **72.9 / 85.7** |
 
-  一帧的账（真拖动、无生产者、ROI 647×849、**真屏 DPR 3、3D 坐标区 1630×1630 设备像素**）：
+组合场景（`chain/combos.py`）：四面板并存 2x2 手势 image 6.7 / 3D 24.6 / curve 6.5 /
+rolling 7.5 ms；ROI 链 相机 6.9、ROI 3D 面板 32.1 ms；带 fit 的 rolling 8.6 ms。
 
-  | 环节 | self ms/帧 |
-  |---|---|
-  | `render_height_bars`（场景光栅） | 20.7 |
-  | `_compose_frame`（matplotlib 合成） | 9.7 |
-  | `_update_height_bars_artist` | 3.9 |
-  | `_stroke_rims`（0.53 px 的缝） | 3.5 |
-  | `_native_draw`（每次手势抓一次背景，摊到每帧） | 2.6 |
-  | chrome 几何 + 遮挡采样 + 其余 | ~1.5 |
-  | **合计** | **≈42** |
+**同一杆秤的对照**：heatmap 的选框手势走 overlay（只重画矩形）4.4–7.3 ms；
+heatmap 的**中键 pan**（同样整幅重画）**30.3 ms**；静源 3D orbit **29.7 / 30.7 / 31.2 ms**。
+3D 与 heatmap 的整幅帧持平——那是这套系统重画一幅画的地板。
 
-  逐项都查过了：compose 分支健康（81 次里 58 次走可复用背景，逃生舱不触发，
-  `restore_region` 只 1.75 ms）；`_update_plot` 那 10 ms 是子项没被 tap，展开后
-  `_update_image_chrome` 只有 0.08 ms；派生和颜色都进了 numba 的同一次 walk；
-  `render_height_bars` 收 256 行色表；采样密度和缝都按柱宽收。**没有剩下的浪费**。
+### 已做出的裁决（不再重开）
 
-  **成本的来源，实测拆开（这条推翻了我先前的说法）**：在同一个 1630×1630 盒子里，
-  **4×4 网格（16 根柱）就要 12.7 ms**，647×849（55 万根）是 16.9 ms，
-  1200×1920（230 万根）是 23.4 ms。**所以成本几乎全在输出像素，不在柱数**——
-  「柱数=数据格数」那条裁决只占约 4 ms，我先前把整笔账都算在它头上是错的。
+- **不改抗锯齿**。解析覆盖正是 3D 边缘能和 heatmap 在同一 DPR 下一样干净的原因。
+- **`_stroke_rims` 的缝按设备像素收，不改成逻辑像素**。改了能省 3.7 ms，但稠密场景
+  会整体变亮变平——那是改画面。
+- **不给 `_reduce_blocks` 配浮点内核**。它是浮点输入下正确的退路；新内核＋新逐位契约
+  测试换平均每帧约 1 ms，不成比例。
+- **3D 场景的帧缓冲与 face-id 平面两块轮换**。多占一份缓冲，换掉每帧向 OS 买 21 MB
+  新页面的 4.6 ms。安全前提是两块每帧都被完整写满。
 
-  那 12.7 ms 的固定成本是「在 266 万像素上光栅化一个场景」：写 21 MB 的
-  `out`+`id_plane` 只占 2.0 ms（按列写、按行存的模式已实测比分块写**更快**：
-  wall 2.02 vs 2.87 ms，因为机器有空核），其余约 10 ms 是逐像素的着色循环——
-  **48 ns/像素的 CPU，对 ~15 个浮点操作而言差了约 10 倍**。
+### 仍然开着的
 
-  **那 10 ms 逐像素成本在哪，已用变体逐段量过**：
-
-  - **写缓冲 2.0 ms**。而且现在的写法已经是墙钟上更优的：拿分块写做过对照，
-    分块省一半 CPU 但墙钟更慢（35.9→18.8 ms CPU，2.02→2.87 ms wall，机器有空核）。
-  - **每列的清零 + 合成两趟不是成本**。我真的改了一版把这两趟按天空收紧
-    （`first_row` 之上累加器恒为零，合成退化成常量背景），45 个测试全绿、
-    与 numpy 规范逐位相同——但**只换来 0.1 ms**（16.4→16.3）。买不到东西就不留
-    复杂度，已撤回。
-  - **跳过未被碰过的行也不是**。差分平面只在记录端点非零（每条记录至多 6 行），
-    所以我给每行加了一个字节的 `touched`，把走查里 8 次整幅高度的读和整条累加
-    依赖链都跳掉。45 个测试全绿、与规范逐位相同——**稀疏场景只快 3%
-    （16.3→15.8），稠密场景反而慢 4%（21.8→22.6，分支本身的代价）**。已撤回。
-  - **剩下的就是累加走查的算术本身**：每像素 3 个乘加 + 钳位 + 4 次写，
-    那就是解析覆盖抗锯齿。再快必须改这套算法，也就是**改画面是什么**。
-
-  - **累加器那层中间量也不是**。taps==1 时走查是唯一写者，`0+v == v`、`x*1.0 == x`，
-    所以可以直接写、省掉清零趟和每像素 4 次读回。45 个测试全绿、逐位相同——
-    **16.3→16.1 ms，噪声内**。已撤回。
-
-  四次动手尝试（分块写、按天空收紧、跳过未触碰行、去掉累加器中间层）**全部实测
-  被否决，代码都已撤回**。这四条连同数字留在这里，是为了下次不要再从同样的
-  怀疑开始：走查是**算术受限**的，不是内存、不是分支、不是多余的趟数。
-
-  **为什么「3D 42 ms vs 其它 6–10 ms」是不同的问题（实测，不是推理）**：
-  heatmap 的手之所以 5.6 ms 得到回应，是因为选框手势底下的图**没有变**，
-  所以走 `_paint_gesture_overlay`——恢复一张抓好的底图、只重画选框，**4.4 ms**。
-  它真正重画一帧是 **29–40 ms**（`_update_image_artist` 17 + chrome + compose 14），
-  和 3D 的手势帧 57 ms 同一量级，而 3D 那一帧还多做 55 万个盒子的解析覆盖投影。
-  3D 转动时底图必然改变，没有这条快路可走。
-
-  **顺带纠正一个测量前提**：`camera_measurement` 在 `repeat: 0` 下会让虚拟相机
-  持续出帧——**实测 5 秒内源发布 117 个不同 revision（23/s），即使一发脉冲都没再打**。
-  所以本轮几个标了「无生产者」的探针其实都有生产者；面板每秒 18–19 次整帧是在
-  渲染真实新数据，不是空转。我一度以为「每 move 白跑 35 ms」是缺陷，查证后不存在，
-  没有改任何代码。**下次别再把 `ZLC_LIVE=0` 当成没有数据在流。**
-
-  **裁决（我做的，不是待定项）**：不改抗锯齿。解析覆盖正是 3D 场景的边缘能和
-  heatmap 在同一 DPR 下一样干净的原因；换成采样式 AA 会让 3D 面板明显比其它面板
-  更噪，而现行裁决是「3D 是 heatmap 的另一种表示」且「不许有静默的质量退回」。
-  为 20 ms 把画面做差，不划算。
-
-  **compose 那 9.7 ms 是被平均掉的**：81 次合成里 20 次是每次手势开头抓背景那一次
-  （native draw + copy_from_bbox，约 10–12 ms），稳态的 confined 合成便宜得多——
-  场景图走精确 blit（实测 `AxesImage -> True`），chrome 只有 39/49 个顶点的两条线
-  和 12 个 text（0.13 ms 一个）。颜色条与分布轨在手势期间**确实被排除**
-  （实测两条轨的 bbox 与场景盒不相交）。
-
-  **面板尺寸的实测对照**（同一台机器、同一条链）：3D 手势 hand→picture
-  4x4 **53.3 ms** / 2x2 **35.6 ms**；场景光栅 20.7 / 11.7 ms。其它 kind 在 2x2 下是
-  6.5–7.4 ms。
-
-  **结论**：CPU 侧、在不改画面语义的前提下，已经没有剩余。3D 与其它 kind 的
-  6–10 ms 之间是结构差：heatmap 的手势只是移动一个矩形、图本身不重画，3D 每动一次
-  都要把整个场景重新投影一遍；拿 heatmap 真正重画时的 live 帧（37.8 ms）对照，
-  3D 的手势帧是同一量级。
-#### 追加一轮（`e99161a`）：第一次把 3D 和 heatmap 放在同一杆秤上称
-
-**先说本轮抓到的自己的错**：`chain/orbitcost.py` / `orbitframe.py` 用
-`host._pointer_event("move", ..., button=None)` 直接驱动 orbit——**这条路上的
-move 会被静默丢掉**：press 建出的确实是 `_OrbitGesture`、`height_bars_dragging`
-也确实为 True，但 12 次 move 之后相机仍是 `(55.0, 30.0)`，一度都没转。
-只有真 Qt 事件（`matrix.py` 那条路：`QMouseEvent` + `MiddleButton`）才真的转。
-所以先前所有"orbit 每帧 xx ms"的拆账，量到的其实是**生产者推的数据帧**，
-不是手推的相机帧。我差点据此报一个"静止数据下 orbit 完全不出帧"的幽灵缺陷。
-**教训：驱动手势只认真事件路径；探针里相机/区域的『之前 → 之后』必须打印出来。**
-
-改用真 Qt 路径、并把源真正静下来（`repeat: 1`，实测 1.5 s 内 0 个新 revision）
-之后，一次相机移动的账（4x4、DPR 3、768×768 格、1630×1630 设备像素）：
-
-| 环节 | self ms/move |
-|---|---|
-| `render_height_bars`（场景光栅） | 18.4 |
-| `_compose_frame`（含场景图精确 blit ~2.2） | 4.1 |
-| `_stroke_rims`（0.5 px 的缝） | 3.7 |
-| `canvas.restore_region` | 1.7 |
-| `present` | 1.2 |
-| `_update_height_bars_artist` | 1.0 |
-| chrome 几何 + 遮挡 + 其余 | ~2.2 |
-| 每次手势抓一次背景，摊到每 move | ~1.7 |
-| **合计** | **≈38** |
-
-**confined 手势是生效的**：整段 16 次 move 里 `canvas.draw` 只有 **2 次**
-（按下抓一次背景），`_dynamic_artists` 0.18 ms、`_selector_artist_ids` 0.00 ms。
-
-**本轮唯一的真缺陷，已修**：`_height_bars_floor_value` 用
-`heights[np.isfinite(heights)].min()` 现算——这是**数据的事实**，却坐在
-**每帧的路径**上，768×768 每 move 白花 1.9 ms 重新回答数据早已定死的数字。
-移进它本来就该在的那个缓存（同一个 `input_key`，与 heights/色表/上下限/zero_rgb
-并列），只把「与色限取 clip」留在每帧——那是两个数的算术。
-实测 `_update_height_bars_artist` 自时间 **3.49 → 1.02 ms/move**。
-
-**决定性的对照实验（先前一直缺的那一杆秤）**：把同一个面板、同一份数据、
-同一个尺寸、同一个 DPR 切成 heatmap，用**同样不能走 overlay 的中键 pan** 测——
-
-| 手势 | hand→picture 中位 |
-|---|---|
-| heatmap **pan**（整幅重画） | **30.3 ms** |
-| 3D **orbit**（整幅重画） | **38.0 ms** |
-| heatmap **选框拖动**（只重画矩形，走 overlay） | 4.4–7.3 ms |
-
-**所以"3D 53 ms vs image 5.8 ms"从来不是同一个问题**：那是拿
-**overlay**（恢复底图+重画一个矩形）去比**整幅帧**。放在同一杆秤上，
-3D 是 heatmap 的 **1.25 倍**，多出来的 8 ms 正是「把 55 万个盒子重新投影一遍」
-比「把一张 RGBA 重采样一遍」贵的那部分。3D 不是异类，它就是这套系统里
-一帧的价钱。
-
-**修完之后的矩阵（master，4x4，free-running 生产者，`chain/matrix.py`）**：
-image 7.3 / **3D 45.7（原 53.3，p90 83.5→71.3）** / curve 9.2 / histogram 10.3 /
-rolling 10.4 ms，全程无 warning/error。静源下 3D 为 38.0 ms，活源下 46.6 ms，
-16/16 次 move 都有画面——**差的那 8.6 ms 是生产者在抢同一台机器，仲裁是好的**。
-
-**第五、六次内核尝试（`50b26b7`）**：走查里三个「平面」记录构造器
-（柱顶、地板、背板）用 `d = c_val - c_val; slp = d / height` 去得到零——
-每条记录三次真除法（编译器折不掉：它不知道 `height` 有限且非零），
-外加三个只为喂它而存在的局部量。改成直接写 `0.0` 与 `c_val`：
-**在生产尺寸（768×768 / 1630px 盒）直接对照 numpy 规范逐位相同**，
-也与改前产出的帧逐位相同。**但不是提速**：24 次相机转、两侧各两轮，
-改前 min 17.4–18.3 ms、改后 17.7–18.0 ms，在噪声内。**保留它是因为少了 17 行、
-代码说的就是它的意思，不是因为它买到了时间。**
-
-同一次尝试的另一半——把每条记录的 ×255 提前算一遍、四个 scatter pass 直接读——
-**是提速主张，被实测否决**（min 17.8–19.0 ms，反而略慢）：存回再读比重算一次乘法贵，
-和先前「去掉累加器中间层」是同一课。已撤回，数字留在这里免得下次重试。
-
-#### 第七次尝试成了（`c166f42`）：**三分之一的场景走查根本不是走查，是操作系统**
-
-前六次全部假设走查是**算术受限**的——错了。每一帧都**重新申请**它的输出：
-一张 1630×1630 的 RGBA 帧加一张 1630×1630 的 face-id 平面，**21 MB**；
-第一次触碰这些页面就是操作系统去映射并清零它们。隔离测量：
-
-| | ms |
-|---|---|
-| 申请 + 写满 | 5.27 |
-| 复用同一块 + 写满 | 0.67 |
-| `np.empty` 调用本身 | 0.03 |
-
-**代价从来不是分配器，是页面。** 两块缓冲每帧都被**完整写满**
-（combine 循环走遍帧的每一行，中间 tap 写遍 id 平面的每一行、含背景行），
-所以不可能有陈旧像素进入画面。**两块轮换**：刚画完那帧还挂在 artist 上、
-它的 id 平面还在回答点选，直到下一帧替换它们——一帧的宽限期正好是它们的寿命。
-盒子改尺寸时整对重建，所以一个面板只持有两块、不留历史。
-
-| | 之前 | 之后 |
-|---|---|---|
-| 场景光栅（24 次转，768×768/1630 盒） | min 17.4–18.3、median 19.3–20.4 ms | **min 10.9–11.0、median 12.9–13.0 ms** |
-| 真实链路 hand→picture（静源，三次复跑） | 38.0 ms | **29.7 / 30.7 / 31.2 ms** |
-
-生产尺寸下与 numpy 规范**逐位相同**（直接对照，不只靠套件的小网格）；
-`test_height_bars` + `test_exact_blit_parity` 92 绿。
-
-**这把 3D 转动放到了和 heatmap 自己整幅帧（30.3 ms）同一水平**——
-也就是这套系统「重画一幅画」的地板。第 2 项到此为止：你报的 93 ms，现在是 ~30 ms。
-
-修完的全 kind 矩阵（4x4，free-running 生产者）：image live 帧 44.0→**36.8**、
-3D live 帧 93.0→**85.8**、手势帧 46.8→**38.9**、curve 14.7→**13.3**、
-histogram 40.1→**36.2**、rolling 14.8→**12.6**、facet 22.3→**17.5** ms，无 warning/error。
-（其它 kind 的改善里有环境涨落成分，3D 那条有隔离基准佐证。）
-
-#### 一帧 live heatmap 的账（`chain/imgprof.py`，嵌套自时间，图 2478×1827、DPR 3）
-
-| 环节 | self ms/帧 |
-|---|---|
-| `_compose_frame` | 9.06 |
-| `_update_image_artist` | 4.97 |
-| `_view_filling_rgba_front` | 2.81 |
-| `raster.prepare_image_front` | 2.58 |
-| `raster._reduce_blocks`（半数帧走到） | 4.20 ×0.5 |
-| `_update_image_chrome` | 2.05 |
-| `_image_rgba_front` | 1.77 |
-| `restore_region` / `present` / 其余 | ~2.1 |
-
-**没有再动**：`_reduce_blocks` 是 float 输入下**正确**的退路——
-`block_sum_unsigned` 只在能证明整数和精确时才接手。给它配一个浮点内核意味着
-新内核 + 新逐位契约测试，换来平均每帧约 1 ms（约 4%），不成比例；
-其余各项都是「在 450 万像素的图上重画一幅画」的地板，不是缺陷。
-
-**没有再动的一项，理由写在这里**：`_stroke_rims` 3.7 ms。缝宽按**设备**像素收
-（`bar_px - 1`），而采样密度按**逻辑**像素收（`3 / dpr`）——同一个「眼睛能分辨多细」
-的问题有两个答案。若把缝也按逻辑像素收，DPR 3 下 1.5 设备像素（=0.5 逻辑像素）
-的柱就不该有缝，能省掉这 3.7 ms。**但那是改画面**：稠密场景会整体变亮变平。
-现行裁决是「3D 是 heatmap 的另一种表示」且「不许有静默的质量退回」，故不改。
-
-- **z 刻度标签被切**（"0.8" 印成 ".8"）：场景 fit 只留 4% 几何 margin，那不是文字
-  需要的房间。先于本轮存在。
+- **facet grid 的手势走错车道**：ADAPTIVE 帧只有 0.5 ms（什么都没做），手实际在等
+  下一个 PRESENTATION 帧，hand→picture 72.9 ms。全表最大的单点异常。
+- **3D 的 p90 138 ms**：手势期间 87 ms 的 live 帧插队。中位被仲裁保住了，尾巴没有。
+- **ROI 链上两个 p90 异常**：126 / 130 ms。
+- **histogram 的 live 帧 36.2 ms**：每帧重新分箱 230 万个值。
+- **`_reduce_blocks` 4.2 ms 出现在半数 image 帧上**（裁决见上，记录在此备查）。
+- **z 刻度标签被切**（"0.8" 印成 ".8"）：场景 fit 只留 4% 几何 margin。先于本轮存在。
 - **`test_guard_c_save_semantics` 红**：保存面板图时 matplotlib mathtext
   `ParseException`。**在 master 上同样红**，与本轮无关。
 
-工具（本轮新增，在 C:\Users\eadri\AppData\Local\Temp\claude\chain\）：
-`matrix.py`（全 kind × 手势）、`combos.py`（多面板/ROI 链/fit）、`movecost2.py`
-（真事件循环逐阶段 move 成本）、`dragprof.py`（嵌套自时间）、`h3dlevers.py`
-（渲染代价矩阵）、`derivecost.py`（派生逐语句）、`h3daxes.py`（四角落位）、
-`h3dshot.py`（场景抓图）、`roikinds.py`（每种 kind 的 ROI 派生）。
+### 探针（`C:\Users\eadri\AppData\Local\Temp\claude\chain\`）
+
+`matrix.py` 全 kind × 手势｜`combos.py` 多面板/ROI 链/fit｜`verify3.py` selector 三症状｜
+`roikinds.py` 每种 kind 的区域派生｜`imgprof.py` live image 帧自时间｜
+`orbitqt.py` 3D orbit 自时间｜`kernelcheck.py` 场景光栅与 numpy 规范的逐位对照。
+`tap.py` 是它们共用的嵌套自时间探针（cProfile 会骗人）。
