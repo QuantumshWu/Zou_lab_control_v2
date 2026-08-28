@@ -30,6 +30,7 @@ __all__ = [
     "PanelState",
     "allows_image_overlay",
     "control_document",
+    "fit_expression_refusal",
     "fit_output_fields",
     "fit_edit_targets",
     "panel_data_shape",
@@ -276,15 +277,33 @@ def panel_surface_from_description(
         "fit": fit,
         "semantic_unavailable": "",
         "display_unavailable": "",
-        "fit_unavailable": (
-            ""
-            if not description.fit_expression_error
-            else "Parameter expression ignored; automatic fit is active: "
-            + str(description.fit_expression_error)
-        ),
+        # "nothing here yet, and why" -- a host that has described its
+        # fit models has nothing of the sort to say.
+        "fit_unavailable": "",
+        # ... and the refusal is its OWN thing, with its own name.
+        "fit_refused": fit_expression_refusal(description),
         "fit_outputs": fit_outputs,
         "semantic_provisional": False,
     }
+
+
+def fit_expression_refusal(description: object) -> str:
+    """What the operator TYPED that the model would not take, or "".
+
+    Distinct from a section having nothing to offer yet -- "choose a
+    compatible signal", "fit models resolve when the plot surface mounts" --
+    which are states of the panel and not refusals of anything anybody
+    wrote.  Both used to be spelled into the same ``*_unavailable`` string,
+    so a reader could not tell them apart without matching the words; the
+    refusal is asked for by name here instead.
+    """
+
+    error = getattr(description, "fit_expression_error", None)
+    if not error:
+        return ""
+    return (
+        "Parameter expression ignored; automatic fit is active: " + str(error)
+    )
 
 
 def fit_output_fields(

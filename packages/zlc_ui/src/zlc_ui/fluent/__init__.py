@@ -19,7 +19,7 @@ for _name in (
     "fluent_scrollbar_thickness", "fluent_scrollbar_stylesheet", "status_dot_stylesheet",
     "stroke_card_border", "signals_blocked", "format_compact_number",
     "align_to_resolution", "FluentStatusDot", "FluentLabel", "muted_note_label",
-    "FluentFrame", "FluentPopup", "show_fluent_popup_for_anchor",
+    "FluentCompanionFrame", "FluentFrame", "FluentPopup", "show_fluent_popup_for_anchor",
     "FluentSettingsPopupAnchor", "FluentGroupBox", "FluentButton", "FluentLineEdit",
     "FluentReadoutEdit", "FluentReadoutMultiline", "FluentPathEdit",
     "FluentSectionLabel", "setting_label_width", "FluentSettingRow", "fluent_message",

@@ -527,9 +527,15 @@ class FluentPopup(QtWidgets.QFrame):
     corners are truly rounded with nothing outside them, and because the border is
     painted (not a stylesheet rule) it can never cascade onto child widgets."""
 
+    #: What the desktop is told this surface IS.  A menu by default; a
+    #: subclass that is a frame the operator keeps says so instead, and says
+    #: it HERE -- setting window flags after construction re-creates the
+    #: native window underneath a widget that has already been polished.
+    WINDOW_TYPE = QtCore.Qt.Popup
+
     def __init__(self, parent=None, *, radius: float | None = None,
                  border: str = DIVIDER, fill: str = "white"):
-        super().__init__(parent, QtCore.Qt.Popup | QtCore.Qt.FramelessWindowHint
+        super().__init__(parent, self.WINDOW_TYPE | QtCore.Qt.FramelessWindowHint
                          | QtCore.Qt.NoDropShadowWindowHint)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self._radius = None if radius is None else float(radius)
@@ -560,6 +566,11 @@ class FluentPopup(QtWidgets.QFrame):
                 owner_retired = bool(
                     watched.windowState() & QtCore.Qt.WindowMinimized
                 )
+            # A MENU follows its owner by going away: it is anchored to a
+            # widget in that window, and the moment the window moves,
+            # resizes or loses the desktop the anchor means nothing.  A
+            # frame the operator carried somewhere follows by MOVING --
+            # see FluentCompanionFrame, which overrides this.
             if owner_retired and self.isVisible():
                 self.hide()
         return super().eventFilter(watched, event)
@@ -580,6 +591,86 @@ class FluentPopup(QtWidgets.QFrame):
         rect = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         radius = float(_radius() if self._radius is None else self._radius)
         painter.drawRoundedRect(rect, radius, radius)
+
+
+class FluentCompanionFrame(FluentPopup):
+    """An auxiliary frame that BELONGS to the window it was opened from.
+
+    Same painted card as :class:`FluentPopup`, a different relationship with
+    the desktop.  A popup is a menu: transient, dismissed by the next click,
+    and gone.  A companion frame is something the operator opens, carries
+    where they want it and works with -- so it must behave like a window
+    owned by its console: stacked directly above it and nowhere else, moved
+    with it, minimised with it, closed with it.  Nothing on the desktop can
+    get between them.
+
+    ``Qt.Tool`` plus a real parent is what tells the desktop that.  The
+    previous type, ``Qt.Popup``, told it the opposite: auto-dismiss covers
+    only presses inside this application, so clicking another program left
+    the frame up while that program sank the console behind it.
+
+    Following the owner is done by FOLLOWING, not by hiding.  The base class
+    hides on the owner's Move and Resize, which is right for something
+    anchored to a button in that window and wrong for a frame the operator
+    put somewhere: it made moving the console make the frame disappear.
+    Here the frame travels the same delta and keeps its place relative to
+    the window it belongs to.
+    """
+
+    WINDOW_TYPE = QtCore.Qt.Tool
+
+    def __init__(self, parent, **kwargs):
+        if not isinstance(parent, QtWidgets.QWidget):
+            raise TypeError("a companion frame must belong to a widget")
+        super().__init__(parent, **kwargs)
+        self._owner_at = (
+            None
+            if self._owner_window is None
+            else self._owner_window.frameGeometry().topLeft()
+        )
+
+    def eventFilter(self, watched, event):  # noqa: N802 - Qt naming
+        if watched is self._owner_window:
+            kind = event.type()
+            if kind == QtCore.QEvent.Move:
+                # TRAVEL WITH IT.  The base class hides here, which is what
+                # made dragging the console take the frame off the screen.
+                previous, self._owner_at = (
+                    self._owner_at,
+                    watched.frameGeometry().topLeft(),
+                )
+                if previous is not None and self.isVisible():
+                    self.move(self.frameGeometry().topLeft()
+                              + (self._owner_at - previous))
+                return False
+            if kind == QtCore.QEvent.Resize:
+                # A window resize is not a reason to take a frame away.
+                return False
+            if kind == QtCore.QEvent.WindowDeactivate:
+                # The console going behind another program takes this frame
+                # with it -- that is what OWNING it means, and it is why the
+                # frame must not close itself here.
+                return False
+            if kind == QtCore.QEvent.WindowStateChange:
+                # Minimise/restore are the desktop's to perform on an owned
+                # window; asked here only so a platform that does not do it
+                # still keeps the two together.
+                minimised = bool(watched.windowState() & QtCore.Qt.WindowMinimized)
+                if minimised and self.isVisible():
+                    self._minimised_with_owner = True
+                    self.hide()
+                elif not minimised and getattr(
+                    self, "_minimised_with_owner", False
+                ):
+                    self._minimised_with_owner = False
+                    self.show()
+                return False
+        return super().eventFilter(watched, event)
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        if self._owner_window is not None:
+            self._owner_at = self._owner_window.frameGeometry().topLeft()
+        super().showEvent(event)
 
 
 def _popup_content_chrome(
@@ -642,7 +733,6 @@ def show_fluent_popup_for_anchor(
     minimum_height: int = 300,
     maximum_height: int | None = None,
     content_width: int | None = None,
-    origin: QtCore.QPoint | None = None,
 ) -> None:
     """Size and place one Fluent popup beside its anchor on the active screen.
 
@@ -656,11 +746,13 @@ def show_fluent_popup_for_anchor(
     content stay a width CONSUMER -- no manual minimum pinned onto the widget
     that would clip when the screen clamps the popup narrower.
 
-    ``origin`` is a global top-left the OPERATOR chose by dragging the
-    popup there.  Placement then keeps it (clamped to the screen) and only
-    the size is recomputed: a popup whose form grew a row -- picking a fit
-    model adds one -- was otherwise re-anchored beside its button, which
-    reads as the panel throwing the operator's window back.
+    This runs ONCE, when a popup opens.  It used to run again whenever the
+    mounted content's required size changed, and an ``origin`` argument
+    existed to keep a dragged popup from being thrown back beside its
+    button by that second run.  Re-placing an open frame is what was wrong:
+    it resized the operator's window under them and moved everything in it.
+    The caller now measures content without re-placing, so there is one
+    placement per open and nothing to preserve across it.
     """
 
     if not isinstance(popup, FluentPopup):
@@ -687,8 +779,6 @@ def show_fluent_popup_for_anchor(
         or content_width <= 0
     ):
         raise ValueError("content_width must be a positive integer or None")
-    if origin is not None and not isinstance(origin, QtCore.QPoint):
-        raise TypeError("origin must be QPoint or None")
 
     # MEASURE WITHOUT MOVING ANYTHING.  This used to call popup.adjustSize(),
     # which is not a measurement at all: it RESIZES the popup to its unbounded
@@ -761,8 +851,6 @@ def show_fluent_popup_for_anchor(
         top = anchor_bottom_right.y() + 1 + gap
     popup.resize(desired_width, desired_height)
     left = anchor_bottom_right.x() - popup.width() + 1
-    if origin is not None:
-        left, top = origin.x(), origin.y()
     if available is not None:
         left = max(
             available.left(),

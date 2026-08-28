@@ -155,7 +155,7 @@ print(zou_lab_control.__file__)
 from zlc_ui.console import panel_card_view as tested_module
 print(tested_module.__file__)
 from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
-from zlc_ui.fluent import GREY, RED, FluentPopup
+from zlc_ui.fluent import GREY, RED, FluentCompanionFrame, FluentPopup
 from zlc_ui.qt import ensure_qt_app
 PanelCardView = tested_module.PanelCardView
 app = ensure_qt_app(['test'])
@@ -201,11 +201,22 @@ app.installEventFilter(show_spy)
 QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
 app.processEvents()
 popup = card._settings_popup
-assert isinstance(popup, FluentPopup)
+# A FRAME, not a menu: the operator carries it around and works with it
+# open, so it is a window that BELONGS to the console rather than a
+# menu-class surface the desktop keeps above everything.
+assert isinstance(popup, FluentCompanionFrame)
 assert popup.parentWidget() is card
 assert popup.isWindow()
-assert popup.windowFlags() & QtCore.Qt.Popup
-assert shown_top_levels == ['FluentPopup']
+# The masked TYPE, not a bit test: Qt.Tool is defined as Qt.Popup |
+# Qt.Dialog, so `flags & Qt.Popup` is true for a tool window as well and
+# cannot tell a frame from a menu.
+assert (
+    popup.windowFlags() & QtCore.Qt.WindowType_Mask
+) == QtCore.Qt.Tool, popup.windowFlags()
+assert (
+    QtWidgets.QWidget(card).windowFlags() & QtCore.Qt.WindowType_Mask
+) != QtCore.Qt.Tool
+assert shown_top_levels == ['FluentCompanionFrame']
 assert {
     widget for widget in app.topLevelWidgets() if widget.isVisible()
 } == top_levels | {popup}
@@ -280,7 +291,18 @@ app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete); app.processEvents()
     )
 
 
-def test_fluent_popup_retires_with_its_owner_window() -> None:
+def test_the_setting_frame_belongs_to_the_console_window() -> None:
+    """It goes WITH its owner -- it does not go away when the owner does.
+
+    The first answer to "the desktop put a browser between the console and
+    its Setting frame" was to hide the frame the moment the console lost the
+    desktop, moved or resized.  That answered the symptom by removing the
+    frame: minimising the console destroyed the view of it, and dragging the
+    console made it disappear.  A frame the operator carries around and
+    works with is a WINDOW BELONGING TO the console, and the desktop already
+    knows how to stack, minimise and restore those.
+    """
+
     _run_qt(
         """
 import zou_lab_control
@@ -292,6 +314,7 @@ from zlc_ui import open_task_console
 from zlc_ui.console import PanelCardView
 from zlc_ui.qt import ensure_qt_app
 FluentPopup = tested_module.FluentPopup
+FluentCompanionFrame = tested_module.FluentCompanionFrame
 app = ensure_qt_app(['test'])
 top_levels = set(app.topLevelWidgets())
 console = open_task_console(window_ratio=0.4)
@@ -323,37 +346,52 @@ assert popup.isVisible()
 assert {
     widget for widget in app.topLevelWidgets() if widget.isVisible()
 } == top_levels | {owner, popup}
+# THE CONSOLE LOSING THE DESKTOP TAKES THE FRAME WITH IT, it does not
+# take the frame AWAY.  This used to hide the frame -- the first answer to
+# "a browser sat between the console and its Setting frame" -- and that is
+# why minimising destroyed the view of it and moving the console made it
+# vanish.  Ownership is what keeps them stacked; the frame stays open.
 QtWidgets.QApplication.sendEvent(
     owner, QtCore.QEvent(QtCore.QEvent.WindowDeactivate)
 )
 app.processEvents()
-assert not popup.isVisible(), 'an inactive owner left its popup above another window'
+assert popup.isVisible(), 'the frame left its owner rather than going behind with it'
 
-# Owner activation/restoration must never resurrect an explicitly retired popup.
-QtWidgets.QApplication.sendEvent(
-    owner, QtCore.QEvent(QtCore.QEvent.WindowActivate)
+# The console MOVING takes the frame with it, at the same offset.
+before = popup.frameGeometry().topLeft()
+was = owner.frameGeometry().topLeft()
+owner.move(was.x() + 37, was.y() + 23)
+app.processEvents()
+assert popup.frameGeometry().topLeft() - before == QtCore.QPoint(37, 23), (
+    before, popup.frameGeometry().topLeft()
 )
+
+# Minimise takes it down and RESTORE BRINGS IT BACK.  It used to stay gone.
+owner.setWindowState(owner.windowState() | QtCore.Qt.WindowMinimized)
+app.processEvents()
+assert not popup.isVisible(), 'a minimized owner left its frame visible'
 owner.showNormal()
 app.processEvents()
+assert popup.isVisible(), 'restoring the console left its own frame behind'
+
+# But a frame the operator CLOSED stays closed: the owner coming back is
+# not a reason to reopen something they put away.
+card.retire_settings_popup()
+app.processEvents()
 assert not popup.isVisible()
+owner.setWindowState(owner.windowState() | QtCore.Qt.WindowMinimized)
+app.processEvents()
+owner.showNormal()
+app.processEvents()
+assert not popup.isVisible(), 'a retired frame was resurrected by its owner'
 
 QtTest.QTest.qWait(300)
 QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
 app.processEvents()
 assert popup.isVisible()
-owner.setWindowState(owner.windowState() | QtCore.Qt.WindowMinimized)
-app.processEvents()
-assert not popup.isVisible(), 'a minimized owner left its popup visible'
-
-owner.showNormal()
-app.processEvents()
-assert not popup.isVisible()
-QtTest.QTest.qWait(300)
-QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
-app.processEvents()
 owner.hide()
 app.processEvents()
-assert not popup.isVisible(), 'a hidden owner left its popup visible'
+assert not popup.isVisible(), 'a hidden owner left its frame visible'
 
 owner.show()
 app.processEvents()
@@ -362,7 +400,7 @@ QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
 app.processEvents()
 owner.close()
 app.processEvents()
-assert not popup.isVisible(), 'a closed owner left its popup visible'
+assert not popup.isVisible(), 'a closed owner left its frame visible'
 assert not any(
     widget.isVisible() and isinstance(widget, FluentPopup)
     for widget in app.topLevelWidgets()
@@ -433,6 +471,12 @@ def test_a_dragged_setting_popup_stays_where_the_operator_put_it() -> None:
     the anchor re-asserted itself on every content resize.  Picking a fit
     model adds the parameter row, so the popup jumped back to the card
     the moment the operator used it.
+
+    That was first answered by remembering the dragged origin and feeding it
+    back into the re-placement, which left the re-placement itself in
+    charge: it kept the position and changed the SIZE instead, under a cap
+    that differed once a drag had happened.  Now placement runs once, when
+    the frame opens; nothing re-places a frame that is already on screen.
     """
 
     _run_qt(
@@ -507,9 +551,15 @@ try:
         popup.frameGeometry().topLeft(), moved
     )
     # Closing ends the operator's placement; the next open anchors again.
+    # There is no remembered origin to check -- placement runs once, when
+    # the frame opens, so a closed frame carries nothing forward.
     card.retire_settings_popup()
     app.processEvents()
-    assert card._settings_origin is None
+    assert not popup.isVisible()
+    assert not hasattr(card, '_settings_origin'), (
+        'a remembered origin only ever existed to survive a re-placement '
+        'that no longer happens'
+    )
 finally:
     console.close()
     app.processEvents()
@@ -2276,5 +2326,58 @@ assert card._caption() == 'panel-2 MOT shot', card._caption()
 assert card.title_edit.text() == 'MOT shot'
 card.deleteLater()
 print('ok')
+"""
+    )
+
+
+def test_a_reason_is_never_a_control_in_the_setting_form() -> None:
+    """Why a section could not be applied is a MESSAGE, not a setting.
+
+    All three reasons were declared as form fields of kind "text", so each
+    became a line edit labelled with the bare section name -- the Fit
+    section showed a greyed "Fit" box under its "Fit model" combo and read
+    as a second, broken input.  The console already has one place for what
+    it could not do; the form declares controls and nothing else.
+    """
+
+    _run_qt(
+        """
+import zou_lab_control
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.console.panel_card_view import PanelCardView
+app = ensure_qt_app(['reason'])
+
+card = PanelCardView('panel-1', 'Panel')
+card.set_size_choices(('2x2',), '2x2')
+card.set_interval_choices((100,), 100)
+state = {
+    'signal': '', 'kind': 'image', 'size': '2x2', 'interval_ms': 100,
+    'title': 'Panel', 'semantic': {}, 'display': {}, 'fit': {},
+    'overlay_signal': '',
+}
+loud = {
+    'semantic': (), 'display': (), 'fit': (),
+    'semantic_unavailable': 'the semantic reason',
+    'display_unavailable': 'the display reason',
+    'fit_unavailable': 'the fit reason',
+}
+card.set_panel_projection(state, loud)
+card.show()
+app.processEvents()
+card._open_settings()
+app.processEvents()
+
+form = card._settings_form
+declared = set(form.spec.keys)
+for section in ('semantic', 'display', 'fit'):
+    assert f'{section}_unavailable' not in declared, declared
+assert not any('unavailable' in key for key in declared), declared
+
+# The surface still carries them -- they are real, the console says them.
+assert card._parameter_surface['fit_unavailable'] == 'the fit reason'
+
+card.retire_settings_popup()
+card.close()
+app.processEvents()
 """
     )

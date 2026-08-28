@@ -263,19 +263,15 @@ from zlc_ui.form.qt_form import FluentParameterForm, FORM_WIDGET_HANDLERS
 app = ensure_qt_app(['test'])
 
 # Every kind the panel Setting popup can produce.
-LIVE_KINDS = ('text', 'number', 'int', 'bool', 'choice', 'note')
+LIVE_KINDS = ('text', 'number', 'int', 'bool', 'choice')
 for kind in LIVE_KINDS:
     assert kind in FORM_WIDGET_HANDLERS, kind
 
 spec = FormSpec((
     FormFieldProps('label', 'text', 'Y label'),
     FormFieldProps('ceiling', 'number', 'Value maximum'),
-    # A reason, not a setting: it is in the form because it belongs beside
-    # the controls it is about, and it must behave like nothing an operator
-    # can edit.
-    FormFieldProps('why', 'note', 'Fit'),
 ))
-values = {'label': 'start', 'ceiling': 100.0, 'why': 'a standing reason'}
+values = {'label': 'start', 'ceiling': 100.0}
 form = FluentParameterForm(spec, values)
 window = QtWidgets.QMainWindow()
 window.setCentralWidget(form)
@@ -284,18 +280,6 @@ app.processEvents()
 
 seen = []
 form.changed.connect(seen.append)
-
-# A NOTE IS NOT A CONTROL.  It shows the whole message rather than clipping
-# it to a box's width, it cannot be edited, and writing into it never tells
-# the owner the operator changed a setting -- which is what a message
-# declared as a text field did.
-note = form._widgets['why']
-assert note.toPlainText() == 'a standing reason', note.toPlainText()
-assert note.isReadOnly(), 'a reason must not be typeable'
-assert note.isEnabled(), 'a disabled reason cannot be selected and copied'
-note.setPlainText('tampered')
-app.processEvents()
-assert seen == [], seen
 
 # TEXT applies as it is typed, exactly as the number beside it does.
 label = form._widgets['label']
@@ -315,7 +299,7 @@ ceiling.selectAll()
 QtTest.QTest.keyClicks(ceiling, '0')
 app.processEvents()
 assert ceiling.hasFocus()
-form.reconcile(spec, {'label': 'ab', 'ceiling': 100.0, 'why': 'a standing reason'})
+form.reconcile(spec, {'label': 'ab', 'ceiling': 100.0})
 app.processEvents()
 assert ceiling.text() == '0', (
     'the form wrote the stored value over the operator: %r' % ceiling.text()
@@ -326,7 +310,7 @@ assert form._widgets['label'].text() == 'ab', form._widgets['label'].text()
 # Leave the field, and the projection lands.
 form._widgets['label'].setFocus(QtCore.Qt.MouseFocusReason)
 app.processEvents()
-form.reconcile(spec, {'label': 'ab', 'ceiling': 100.0, 'why': 'a standing reason'})
+form.reconcile(spec, {'label': 'ab', 'ceiling': 100.0})
 app.processEvents()
 assert ceiling.text() == '100.0', ceiling.text()
 window.close()
@@ -509,4 +493,87 @@ area.close()
 area.deleteLater()
 app.processEvents()
 """
+    )
+
+
+def test_a_frame_carried_away_from_its_button_still_does_not_move() -> None:
+    """The previous guard only ever tested the frame where it opens.
+
+    Anchored, the frame is already pinned to its card-relative height cap and
+    cannot grow, so nothing moved and the fix looked complete.  Carried
+    somewhere else it was placed under a DIFFERENT height rule -- no cap at
+    all -- and the first content change after the drag grew it by 131 px and
+    moved every row 100 px.  A gesture that chooses a POSITION was deciding
+    the SIZE.
+
+    Placement now happens once, when the frame opens.  What is on screen
+    stays where the operator put it, and a new control goes below.
+    """
+
+    _run_qt(
+        _SURFACE_PROLOGUE
+        + """
+from PyQt5 import QtGui
+card.set_panel_projection(state, parameter_surface(14))
+app.processEvents()
+popup = card._settings_popup
+scroll = card._settings_scroll
+bar = scroll.verticalScrollBar()
+assert bar.maximum() > 0, 'the form must overflow for this to mean anything'
+anchored = popup.geometry()
+
+# Carry it off, exactly as the drag handle does.
+handle = card._settings_drag_handle
+start = popup.frameGeometry().topLeft() + QtCore.QPoint(20, 8)
+for kind, offset in (
+    (QtCore.QEvent.MouseButtonPress, QtCore.QPoint(0, 0)),
+    (QtCore.QEvent.MouseMove, QtCore.QPoint(90, -60)),
+    (QtCore.QEvent.MouseButtonRelease, QtCore.QPoint(90, -60)),
+):
+    where = start + offset
+    card.eventFilter(handle, QtGui.QMouseEvent(
+        kind, handle.mapFromGlobal(where), where,
+        QtCore.Qt.LeftButton, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier))
+app.processEvents()
+carried = popup.geometry()
+# The gesture must actually have carried it, or everything below is a
+# test of the anchored case wearing a different name.
+assert carried.topLeft() != anchored.topLeft(), (anchored, carried)
+
+for position in (bar.maximum(), bar.maximum() // 2, 0):
+    bar.setValue(position)
+    app.processEvents()
+    before_geometry = popup.geometry()
+    before = {
+        key: (widget.mapToGlobal(widget.rect().topLeft()).x(),
+              widget.mapToGlobal(widget.rect().topLeft()).y())
+        for key, widget in form._widgets.items()
+    }
+    before_max = bar.maximum()
+
+    card.set_panel_projection(state, parameter_surface(15))
+    app.processEvents()
+
+    after = {
+        key: (widget.mapToGlobal(widget.rect().topLeft()).x(),
+              widget.mapToGlobal(widget.rect().topLeft()).y())
+        for key, widget in form._widgets.items()
+    }
+    # The frame the operator carried there is untouched -- size AND place.
+    assert popup.geometry() == before_geometry, (
+        position, before_geometry, popup.geometry())
+    assert popup.geometry() == carried, (position, carried, popup.geometry())
+    # Nothing that was on screen moved ON SCREEN.
+    for key, point in before.items():
+        assert after[key] == point, (position, key, point, after[key])
+    # ... and the new control really did arrive, below everything.
+    added = set(after) - set(before)
+    assert len(added) == 1, added
+    assert after[next(iter(added))][1] > max(y for _x, y in before.values())
+    assert bar.maximum() > before_max, (before_max, bar.maximum())
+
+    card.set_panel_projection(state, parameter_surface(14))
+    app.processEvents()
+"""
+        + _SURFACE_EPILOGUE
     )

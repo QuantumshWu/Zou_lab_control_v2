@@ -32,7 +32,6 @@ from ..fluent import (
     FluentLabel,
     FluentLineEdit,
     FluentPathEdit,
-    FluentReadoutMultiline,
     FluentSectionLabel,
     FluentSettingRow,
     FluentSpinBox,
@@ -755,49 +754,8 @@ class _KeyedChoiceHandler(FormWidgetHandler):
         self._fill(field, widget, current, context)
 
 
-class _NoteHandler(_StaticHandler):
-    """A standing message, shown in full and never editable.
-
-    Declared like a field because it belongs WITH the controls it is about
-    -- a reason the Fit section cannot be applied is useless on the far side
-    of the popup -- but it is not one: it never emits ``changed``, so the
-    owner is never told the operator edited something they cannot edit, and
-    its text wraps instead of being clipped by a control's width.
-    """
-
-    def normalize(self, field: FormFieldProps, value: object) -> str:
-        if value is None:
-            return ""
-        if not isinstance(value, str):
-            raise _value_error(field, "a note is text")
-        return value
-
-    def build(self, field, value, on_change, context=None):
-        del on_change, context
-        widget = FluentReadoutMultiline(
-            self.normalize(field, value),
-            plain=True,
-            max_height=scaled_px(160, minimum=90),
-        )
-        widget.setToolTip(field.description)
-        return widget
-
-    def read(self, field, widget):
-        return self.normalize(field, widget.toPlainText())
-
-    def write(self, field, widget, value):
-        text = self.normalize(field, value)
-        if widget.toPlainText() != text:
-            widget.setPlainText(text)
-
-    def is_empty(self, field, widget):
-        del field
-        return not widget.toPlainText()
-
-
 FORM_WIDGET_HANDLERS: Mapping[str, FormWidgetHandler] = MappingProxyType(
     {
-        "note": _NoteHandler(),
         "text": _TextHandler(),
         "int": _IntHandler(),
         "float": _FloatHandler(),
@@ -815,10 +773,6 @@ def _widget_family(field: FormFieldProps) -> str:
     """Concrete control family required by one declaration."""
 
     prefix = "auto:" if field.automatic else ""
-    if field.kind == "note":
-        # Its own family: a note replacing a text field must REBUILD, not be
-        # written into a line edit that would clip it.
-        return "note"
     if field.kind == "int" and _IntHandler._spin_range(field) is not None:
         return prefix + "int-spin"
     if field.kind == "float" and _FloatHandler._spin_range(field) is not None:
@@ -888,12 +842,6 @@ def _reconfigure_widget(
 ) -> None:
     """Apply changed presentation constraints to one compatible control."""
 
-    if field.kind == "note":
-        # A note is never disabled and never carries an unavailable reason:
-        # it IS the reason.  Enabling it is what keeps it selectable, so the
-        # operator can copy a message out of it.
-        widget.setToolTip(field.description)
-        return
     widget.setToolTip(field.unavailable_reason or field.description)
     widget.setEnabled(not field.unavailable)
     if isinstance(widget, FluentLineEdit):

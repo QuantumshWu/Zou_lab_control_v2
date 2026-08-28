@@ -384,8 +384,11 @@ assert {
     'semantic__fate:field.x',
     'semantic__fate:field.y',
     'semantic__fate:field.z',
-    'fit_unavailable',
 } <= form_keys
+# A reason why a section has nothing to offer is a MESSAGE, and the form
+# declares controls.  It used to be declared here as a field, which is how
+# the Fit section grew a greyed box labelled "Fit" under its Fit model combo.
+assert not any('unavailable' in key for key in form_keys), form_keys
 card._open_settings()
 app.processEvents()
 assert 'kind' not in card._settings_form.spec.keys

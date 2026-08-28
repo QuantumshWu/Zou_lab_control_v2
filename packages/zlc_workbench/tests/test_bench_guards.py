@@ -229,3 +229,31 @@ def test_the_seam_list_is_derived_from_the_renderer_not_typed_out() -> None:
     with pytest.raises(HarnessSeamError) as refused:
         renderer_seams(Drifted)
     assert "_compose_frame" in str(refused.value)
+
+
+def test_the_bench_shows_the_product_s_own_window() -> None:
+    """A measurement taken at a size the product never opens at is a guess.
+
+    ``ConsoleBench.start`` pinned 1600x1000 unconditionally, for run-to-run
+    comparability.  The card's size decides the Setting frame's height cap,
+    so every acceptance measurement of that frame was taken in a regime the
+    operator never reaches -- which is how a whole class of frame behaviour
+    went unseen.  Pinning is now something a benchmark asks for.
+    """
+
+    import inspect
+
+    from bench.plot_perf.run_console import ConsoleBench, main
+
+    signature = inspect.signature(ConsoleBench.start)
+    assert "window_size" in signature.parameters, sorted(signature.parameters)
+    assert signature.parameters["window_size"].default is None
+
+    body = inspect.getsource(ConsoleBench.start)
+    assert "if window_size is not None:" in body
+    assert "window.resize(1600, 1000)" not in body, (
+        "a fixed size must not be the default"
+    )
+    # ... and the performance entry point, which does need two runs to be
+    # comparable, asks for one.
+    assert "window_size=(1600, 1000)" in inspect.getsource(main)

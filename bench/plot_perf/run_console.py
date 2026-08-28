@@ -170,6 +170,7 @@ class ConsoleBench:
         camera: str = "mot_camera",
         exposure: float = 0.01,
         clear_preview_panels: bool = True,
+        window_size: tuple[int, int] | None = None,
     ):
         from pulse_fixtures import PULSE_NAME, write_ordinary_pulse
         from zlc_workbench.apps.task_console import build_console
@@ -219,11 +220,18 @@ class ConsoleBench:
         )
         window = self.view._window if self.view._window is not None else self.view._view
         # A REAL window -- the console's own, with its real device pixel
-        # ratio, which is the whole point of this layer.  Sized rather than
-        # maximised so the card geometry is the same on every run: maximised
-        # depends on the screen it lands on, and two runs then measure two
-        # different pictures.
-        window.resize(1600, 1000)
+        # ratio, which is the whole point of this layer.
+        #
+        # AND THE PRODUCT'S OWN SIZE BY DEFAULT.  This used to pin 1600x1000
+        # unconditionally, "so the card geometry is the same on every run".
+        # It also meant every acceptance measurement was taken at a size the
+        # operator never sees -- and card size decides the Setting frame's
+        # height cap, so a whole class of frame behaviour was measured in a
+        # regime that does not occur.  A benchmark that needs two runs to be
+        # comparable asks for a size explicitly; looking at the product does
+        # not.
+        if window_size is not None:
+            window.resize(int(window_size[0]), int(window_size[1]))
         window.show()
         self._pump(1.2)
         self.view._view.tabs.setCurrentIndex(0)
@@ -1023,7 +1031,11 @@ def main() -> None:
     bench = ConsoleBench(allow_low_density=args.allow_low_density)
     layout = [item.strip() for item in args.panels.split(",") if item.strip()]
     with bench:
-        bench.start()
+        # A PERFORMANCE run pins the window: two runs are only comparable if
+        # the card geometry is identical, and the product's own size follows
+        # whatever screen it lands on.  Anything looking at behaviour uses
+        # the default, which is the product's.
+        bench.start(window_size=(1600, 1000))
         if layout:
             panels = bench.add_panels(layout, size=args.size)
             payload = {

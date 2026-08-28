@@ -23,7 +23,7 @@ from zlc_ui.fluent import (
     FluentGroupBox,
     FluentLabel,
     FluentLineEdit,
-    FluentPopup,
+    FluentCompanionFrame,
     FluentScrollArea,
     FluentSettingsPopupAnchor,
     FluentStatusDot,
@@ -117,7 +117,7 @@ class PanelCardView(FluentGroupBox):
         self.panel_id = str(panel_id)
         self._base_title = str(title)
         self._surface: QtWidgets.QWidget | None = None
-        self._settings_popup: FluentPopup | None = None
+        self._settings_popup: FluentCompanionFrame | None = None
         self._settings_anchor: FluentSettingsPopupAnchor | None = None
         self._settings_drag_handle: FluentLabel | None = None
         self._settings_scroll: FluentScrollArea | None = None
@@ -158,7 +158,6 @@ class PanelCardView(FluentGroupBox):
         #: button, and the drag -- and the anchor used to re-assert itself
         #: on every content resize, so picking a fit model (which adds the
         #: parameter row) threw the popup back beside the button.
-        self._settings_origin: QtCore.QPoint | None = None
 
         #: Whether what this card shows will deliver again.  A live panel
         #: redraws on a beat and can be taken off the board; a saved figure
@@ -464,13 +463,14 @@ class PanelCardView(FluentGroupBox):
         incoming = self._validated_panel_state(state)
         projected = dict(surface) if isinstance(surface, Mapping) else {}
         state_changed = incoming != self._state_projection
+        # What the FORM is built from.  The three *_unavailable reasons used
+        # to be here because the form declared them as fields; they are
+        # messages, the console says them, and a message changing is not a
+        # reason to rebuild a form.
         form_keys = (
             "semantic",
             "display",
             "fit",
-            "semantic_unavailable",
-            "display_unavailable",
-            "fit_unavailable",
             "science_locked",
             "paints_images",
         )
@@ -671,8 +671,11 @@ class PanelCardView(FluentGroupBox):
                 event.type() == QtCore.QEvent.MouseMove
                 and self._settings_drag_offset is not None
             ):
+                # Moving the window IS the gesture.  Nothing else needs
+                # to remember where it went: no placement runs again while
+                # the frame is open, so there is nothing left to re-anchor
+                # it beside the button.
                 popup.move(event.globalPos() - self._settings_drag_offset)
-                self._settings_origin = popup.frameGeometry().topLeft()
                 return True
             if (
                 event.type() == QtCore.QEvent.MouseButtonRelease
@@ -684,7 +687,6 @@ class PanelCardView(FluentGroupBox):
                 # Closing ends the operator's placement: the next open is
                 # a fresh gesture and belongs beside its button again.
                 self._settings_drag_offset = None
-                self._settings_origin = None
         if (
             watched is self._settings_body
             and event.type() == QtCore.QEvent.LayoutRequest
@@ -811,7 +813,6 @@ class PanelCardView(FluentGroupBox):
 
         if self._settings_popup is not None:
             self._settings_popup.hide()
-            self._settings_origin = None
 
     def _commit_title(self) -> None:
         value = self.title_edit.text().strip()
@@ -883,11 +884,6 @@ class PanelCardView(FluentGroupBox):
                     state["interval_ms"],
                 )
             )
-        section_labels = {
-            "semantic": "Semantic",
-            "display": "Display",
-            "fit": "Fit",
-        }
         for section in ("semantic", "display", "fit"):
             declared_fields = tuple(
                 parameter_fields(self._parameter_surface, section)
@@ -913,23 +909,14 @@ class PanelCardView(FluentGroupBox):
                         automatic=field.automatic,
                     )
                 )
-            unavailable = str(
-                self._parameter_surface.get(f"{section}_unavailable") or ""
-            )
-            if unavailable:
-                # A REASON, not a setting.  Declared as "text" it became a
-                # disabled line edit holding a sentence wider than itself,
-                # labelled with the bare section name -- so the Fit section
-                # showed a greyed "Fit" box under its "Fit model" combo and
-                # read as a second, broken input.
-                fields.append(
-                    FormFieldProps(
-                        f"{section}_unavailable",
-                        "note",
-                        section_labels[section],
-                        default=unavailable,
-                    )
-                )
+            # A REASON IS NOT A SETTING, so the form does not declare one.
+            # Each section's "why this could not be applied" used to be
+            # appended here as a field: kind "text", so it became a line
+            # edit labelled with the bare section name, sitting under the
+            # controls it was about and reading as another input.  The
+            # console already has one place for what it could not do -- the
+            # header line, and the standing mark on the card -- and that is
+            # where these go.
         return FormSpec(tuple(fields))
 
     def _form_values(self) -> dict[str, object]:
@@ -952,7 +939,6 @@ class PanelCardView(FluentGroupBox):
             )
         if self._live and self._interval_choices:
             values["interval_ms"] = int(self._state_projection["interval_ms"])
-        form_keys = self._form_spec().keys
         for section in ("semantic", "display", "fit"):
             declared_fields = tuple(
                 parameter_fields(self._parameter_surface, section)
@@ -962,11 +948,6 @@ class PanelCardView(FluentGroupBox):
             )
             for key, value in declared_values.items():
                 values[f"{section}__{key}"] = value
-            unavailable_key = f"{section}_unavailable"
-            if unavailable_key in form_keys:
-                values[unavailable_key] = str(
-                    self._parameter_surface.get(unavailable_key) or ""
-                )
         return values
 
     def _rebuild_settings_form(self, *, force: bool = False) -> None:
@@ -998,8 +979,24 @@ class PanelCardView(FluentGroupBox):
                     form.widget_for(key).setEnabled(False)
 
     def _sync_settings_body_size(self) -> None:
+        """Measure the content.  Do NOT move the frame it is sitting in.
+
+        This used to re-run the whole placement -- size AND position, derived
+        afresh from the content -- whenever the form's required width or
+        height changed.  So adding one control resized the operator's frame
+        underneath them, and everything in it moved.
+
+        An open frame's geometry belongs to the operator: they opened it
+        there, they may have carried it somewhere else, and a control
+        appearing is not a reason to take that away.  The measurements below
+        still matter -- the body's minimum height is what lets the scroll
+        area reach the last row, and the width is what the NEXT open is
+        sized from -- but they end here.  Content goes into the scroll.
+        """
+
         body = self._settings_body
-        if body is None or body.layout() is None:
+        scroll = self._settings_scroll
+        if body is None or body.layout() is None or scroll is None:
             return
         margins = body.layout().contentsMargins()
         required_width = (
@@ -1007,17 +1004,44 @@ class PanelCardView(FluentGroupBox):
             + margins.left()
             + margins.right()
         )
+        self._settings_content_width = required_width
         required_height = body.layout().sizeHint().height()
-        geometry_changed = False
-        if self._settings_content_width != required_width:
-            self._settings_content_width = required_width
-            geometry_changed = True
         if body.minimumHeight() != required_height:
             body.setMinimumHeight(required_height)
-            geometry_changed = True
+        # Finish the job here rather than a layout turn later.  The
+        # re-placement that used to follow was synchronous, so removing it
+        # left the scroll content one turn stale -- one frame of the old
+        # height on screen.  This is what widgetResizable would do next
+        # turn, done now, and it touches the content only.
+        body.resize(
+            body.width(),
+            max(required_height, scroll.viewport().height()),
+        )
         popup = self._settings_popup
-        if geometry_changed and popup is not None and popup.isVisible():
-            self._show_settings_popup()
+        if popup is None or not popup.isVisible():
+            return
+        # THE ONE EDGE THAT MAY MOVE.  The frame never moves and never
+        # changes height while it is open, but the scroll area is
+        # width-bounded with its horizontal bar off, so content that needs
+        # more width than the viewport has is simply cut off.  Widen the
+        # RIGHT edge by the shortfall: every row is laid out from the left,
+        # so nothing already on screen moves.
+        shortfall = required_width - scroll.viewport().width()
+        if shortfall <= 0:
+            return
+        screen = QtWidgets.QApplication.screenAt(popup.geometry().center())
+        if screen is None:
+            screen = QtWidgets.QApplication.primaryScreen()
+        limit = (
+            popup.width() + shortfall
+            if screen is None
+            else min(
+                popup.width() + shortfall,
+                max(1, screen.availableGeometry().right() - popup.x() + 1),
+            )
+        )
+        if limit > popup.width():
+            popup.resize(limit, popup.height())
 
     def _settings_available_height(self) -> int:
         """Vertical room the popup may take: from below Setting to the card foot."""
@@ -1047,21 +1071,24 @@ class PanelCardView(FluentGroupBox):
             self._settings_body,
             minimum_width=1,
             minimum_height=320,
-            # The card-relative cap describes a popup hanging under the
-            # Setting button; once the operator carried it elsewhere only
-            # the screen bounds it, which the placement already applies.
-            maximum_height=(
-                None
-                if self._settings_origin is not None
-                else self._settings_available_height()
-            ),
+            # ONE height rule.  There used to be a second one -- no cap at
+            # all once the operator had dragged the frame -- which only ever
+            # ran on the while-visible re-placement, and made the frame grow
+            # by 131 px the first time anything changed after a drag.
+            # Placement now happens once, when the frame opens, and it opens
+            # beside its button.
+            maximum_height=self._settings_available_height(),
             content_width=self._settings_content_width,
-            origin=self._settings_origin,
         )
 
     def _open_settings(self) -> None:
         if self._settings_popup is None:
-            popup = FluentPopup(self)
+            # A FRAME, not a menu.  It has a drag handle, the operator
+            # carries it where they want it and works with it open, so it
+            # belongs to the console the way every other auxiliary window
+            # does: stacked directly above it and nowhere else, travelling,
+            # minimising and closing with it.
+            popup = FluentCompanionFrame(self)
             layout = QtWidgets.QVBoxLayout(popup)
             pad = max(1, scaled_px(10))
             layout.setContentsMargins(pad, pad, 0, pad)
@@ -1159,12 +1186,6 @@ class PanelCardView(FluentGroupBox):
         if self._settings_form is None:
             return
         name = str(key)
-        if name in {
-            "semantic_unavailable",
-            "display_unavailable",
-            "fit_unavailable",
-        }:
-            return
         try:
             value = self._settings_form.read_value(name)
             section, separator, parameter_key = name.partition("__")

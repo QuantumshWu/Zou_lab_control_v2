@@ -1232,7 +1232,7 @@ def test_arming_a_fit_from_setting_reaches_the_panels_pixels(
         presenter,
         lambda: set(binding.state.fit) == {"model"}
         and "automatic fit is active"
-        in binding.parameter_surface["fit_unavailable"],
+        in binding.parameter_surface["fit_refused"],
     )
     expression = next(
         field
@@ -5760,3 +5760,79 @@ def test_the_console_answers_the_manual_axis_question_the_engine_asks(
         assert "stopped the manual scan" in host.cancelled
     finally:
         presenter.close()
+
+
+def test_a_refused_parameter_expression_is_said_where_messages_are_said(
+    presenter, session
+) -> None:
+    """A reason reaches the header and the card, not a widget in the form.
+
+    It used to be pushed into the Setting form as a field, so the operator
+    got a control-shaped thing that was not a control, holding a sentence
+    wider than the box it was in.  The console has one place for what it
+    could not do.
+    """
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(
+        node.signal_key("frames"), snapshot, kind="image"
+    )
+    _settle_panel_hosts(
+        presenter, lambda: bool(binding.parameter_surface.get("fit"))
+    )
+    fit_model = next(
+        value for _label, value in binding.parameter_surface["fit"][0]["choices"]
+    )
+    assert presenter.update_panel_state(
+        binding.panel_id, {"fit": {"model": fit_model}}
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: any(
+            field["key"] == "expression"
+            for field in binding.parameter_surface["fit"]
+        ),
+    )
+
+    said: list[tuple[str, str]] = []
+    original = presenter._report
+
+    def report(message, severity="task", **kwargs):
+        said.append((severity, str(message)))
+        return original(message, severity=severity, **kwargs)
+
+    presenter._report = report
+
+    marks: list[tuple[str, str, bool]] = []
+    original_status = presenter.view.set_panel_status
+
+    def status(panel_id, text, error=False):
+        marks.append((str(panel_id), str(text), bool(error)))
+        return original_status(panel_id, text, error=error)
+
+    presenter.view.set_panel_status = status
+
+    assert presenter.update_panel_state(
+        binding.panel_id,
+        {"fit": {"model": fit_model, "expression": "not_a_parameter=1"}},
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: bool(binding.parameter_surface.get("fit_refused")),
+    )
+    reason = str(binding.parameter_surface["fit_refused"])
+    assert "not a parameter" in reason, reason
+
+    # THE HEADER, once, naming the panel it belongs to; and THE CARD, for as
+    # long as it stays true.
+    _settle_panel_hosts(
+        presenter,
+        lambda: any(
+            binding.panel_id in text and "not a parameter" in text
+            for _severity, text in said
+        )
+        and any(
+            identifier == binding.panel_id and error and "not a parameter" in text
+            for identifier, text, error in marks
+        ),
+    )

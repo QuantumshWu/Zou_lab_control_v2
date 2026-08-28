@@ -131,6 +131,23 @@ def _run_inline(work, deliver, failed) -> None:
         failed(error)
 
 
+def _refused_expression(binding: "PanelBinding") -> str:
+    """What the operator typed into the Parameters box and the model refused.
+
+    Its own key, because ``fit_unavailable`` means "nothing here yet, and
+    why" -- "choose a compatible signal", "fit models resolve when the plot
+    surface mounts".  Those are states of a young panel, not refusals of
+    anything anybody wrote, and a panel must not wear "settings not applied"
+    for being young.
+
+    Read from the surface the binding already holds.  Asking the port for
+    its accepted description instead would take that port's state lock, once
+    per panel, on every beat -- a lock this loop has no reason to want.
+    """
+
+    return str(binding.parameter_surface.get("fit_refused") or "")
+
+
 def _error_text(error: BaseException) -> str:
     """The message an exception carries, or its class name when it has none.
 
@@ -2715,6 +2732,9 @@ class ConsolePresenter:
             "semantic_unavailable": str(semantic_unavailable),
             "display_unavailable": str(display_unavailable),
             "fit_unavailable": str(fit_unavailable),
+            # A surface projected before a host describes anything has
+            # nothing the operator typed to refuse.
+            "fit_refused": "",
             "fit_outputs": tuple((str(name), str(label)) for name, label in fit_outputs),
             # Schema-projected, not yet host-described: the fate rows are
             # real (they come from schema+spec alone) but choices are not
@@ -5381,7 +5401,15 @@ class ConsolePresenter:
                 or getattr(binding.bridge, "last_error", None)
                 or getattr(binding.port, "last_error", None)
             )
-            standing = binding.vacancy or binding.unapplied_display
+            # Each source says itself where it is discovered -- a vacant
+            # role and a refused write both at the write that produced them.
+            # A refused parameter expression has no such moment: it arrives
+            # with a description, so this is where it is found and therefore
+            # where it is said.  It used to be pushed into the Setting form
+            # as a field instead, which put a control-shaped thing that is
+            # not a control under the controls it was about.
+            refused = _refused_expression(binding)
+            standing = binding.vacancy or binding.unapplied_display or refused
             if error is None and standing:
                 # An authored table that cannot draw is a CONDITION of this
                 # panel, not a failure of it: the picture on screen is the
@@ -5392,6 +5420,10 @@ class ConsolePresenter:
                 condition = f"settings not applied -- {standing}"
                 if binding.reported_condition != condition:
                     binding.reported_condition = condition
+                    if standing is refused and refused:
+                        self._report(
+                            f"{panel_id}: {refused}", severity="warning"
+                        )
                     if panel_id in self.view.panel_ids():
                         self.view.set_panel_status(
                             panel_id, condition, error=True
