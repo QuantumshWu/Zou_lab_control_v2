@@ -295,6 +295,41 @@ def prepare_image_front(
     )
 
 
+def _source_reduces_in_one_compiled_pass(
+    dtype: Any,
+    row_block: float,
+    column_block: float,
+) -> bool:
+    """Would the display reduction take the compiled path from the SOURCE?
+
+    The pyramid exists to hand the reduction a smaller plane.  But a level is
+    a float32 MEAN, and the compiled block-sum only accepts unsigned integers
+    whose block sums are provably exact -- so building a level routes the
+    reduction away from the very kernel it would otherwise have hit.
+    Measured on a 1200x1920 uint8 camera frame at a 2x2 panel: the level
+    costs 2.9 ms to build and its float32 plane then costs 7.6 ms to reduce,
+    where the source reduces directly in 2.9.
+
+    Skipping the level is also the truer answer.  A mean of means is not the
+    mean unless the blocks divide evenly, and unevenly is the ordinary case:
+    the level only requires the SOURCE to halve evenly, never the display
+    blocks to.
+    """
+
+    if not kernels.engaged():
+        return False
+    if dtype.kind not in "u" or dtype.itemsize > 4:
+        return False
+    # One more sample per side than the ratio, which is the widest block a
+    # ragged partition can produce.
+    rows_per = int(math.ceil(row_block)) + 1
+    columns_per = int(math.ceil(column_block)) + 1
+    return (
+        rows_per * columns_per * int(np.iinfo(dtype).max)
+        < kernels.FLOAT32_EXACT_INTEGER
+    )
+
+
 class ImageFrontStore:
     """Prepared-front LRU plus a per-revision mip pyramid for one image.
 
@@ -350,6 +385,7 @@ class ImageFrontStore:
                 x_limits=x_limits,
                 y_limits=y_limits,
                 display_pixel_shape=display_pixel_shape,
+                dtype=source.dtype,
             )
             if level > 1:
                 level_values = self._level(source, level, revision_token)
@@ -376,6 +412,7 @@ class ImageFrontStore:
         x_limits: tuple[float, float],
         y_limits: tuple[float, float],
         display_pixel_shape: tuple[int, int],
+        dtype: Any = None,
     ) -> int:
         rows, columns = shape
         left, right, bottom, top = (float(value) for value in extent)
@@ -389,6 +426,10 @@ class ImageFrontStore:
         row_block = (row_stop - row_start) / max(1, int(display_height))
         column_block = (column_stop - column_start) / max(1, int(display_width))
         block = min(row_block, column_block)
+        if dtype is not None and _source_reduces_in_one_compiled_pass(
+            dtype, row_block, column_block
+        ):
+            return 1
         level = 1
         # Halve while at least one source sample per display pixel remains
         # and the source divides evenly.  A residual oversample below the
