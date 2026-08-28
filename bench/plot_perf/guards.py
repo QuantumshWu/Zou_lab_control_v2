@@ -128,6 +128,24 @@ class ProductBeat:
             time.sleep(0.001)
         return time.perf_counter() - started
 
+    def run_until(self, predicate, timeout: float, tick=None) -> bool:
+        """Drive the console until a predicate holds, or time runs out.
+
+        Same pacing as :meth:`run`, because there is only one rate at which
+        this console is driven and a bench that has two of them is a bench
+        that measures whichever one it happened to be in.
+        """
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self._app.processEvents(self._QtCore.QEventLoop.AllEvents, 20)
+            if tick is not None:
+                tick()
+            if predicate():
+                return True
+            time.sleep(0.001)
+        return False
+
 
 # --------------------------------------------------------------- producer
 def free_running(session) -> None:

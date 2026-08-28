@@ -111,6 +111,28 @@ def renderer_seams(renderer_type=None) -> tuple[str, ...]:
     return _COMPOSE_SEAMS + updates
 
 
+def every_gap_ms(stamps, origin: float) -> dict:
+    """EVERY interval between presented frames, in order, since the panel opened.
+
+    Not a summary and not a bucket average.  The producer runs at 10 Hz, so
+    the colour-limit bar -- which is redrawn on every frame -- should move
+    every 100 ms for as long as the console is open.  What an operator
+    reports is that it starts out doing exactly that and then slows down,
+    and neither a single median over the whole run nor a five-second bucket
+    average can show that: both are means over the very interval where the
+    change happens.  A trend is only visible if nothing is averaged.
+    """
+
+    if not stamps:
+        return {"first_frame_ms": None, "gaps_ms": []}
+    return {
+        "first_frame_ms": round(1e3 * (stamps[0] - origin), 1),
+        "gaps_ms": [
+            round(1e3 * (b - a), 1) for a, b in zip(stamps, stamps[1:])
+        ],
+    }
+
+
 class HarnessSeamError(RuntimeError):
     """The bench's idea of the renderer no longer matches the renderer."""
 
@@ -261,20 +283,30 @@ class ConsoleBench:
         return tuple(closed)
 
     def _pump(self, seconds: float) -> None:
-        deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
-            self.presenter.beat()
-            self.app.processEvents()
-            time.sleep(0.002)
+        """Let the console run, AT THE RATE THE PRODUCT RUNS IT.
+
+        These two used to call ``presenter.beat()`` in a tight loop, once
+        every two milliseconds -- three to five hundred hertz against the
+        board's own hundred-millisecond timer.  ProductBeat exists because
+        of exactly that mistake and its docstring says so; it was fixed
+        where frames were counted and left standing everywhere else, which
+        is most of a run.
+
+        What it produced was a console that, before acquisition started,
+        published at the full source rate: measured, 23.3 revisions a
+        second reaching the screen 23.3 times a second, against 9.2 once
+        the beat took over.  An operator watching the real product never
+        sees that burst, because the real product never beats that fast.
+        The bench was showing its own hand and calling it startup.
+        """
+
+        with guards.ProductBeat(self.app, self.presenter) as beat:
+            beat.run(seconds)
 
     def _until(self, predicate, what: str, timeout: float = 60.0) -> None:
-        end = time.monotonic() + timeout
-        while time.monotonic() < end:
-            self.presenter.beat()
-            self.app.processEvents()
-            if predicate():
+        with guards.ProductBeat(self.app, self.presenter) as beat:
+            if beat.run_until(predicate, timeout):
                 return
-            time.sleep(0.004)
         raise guards.HarnessError(f"timed out waiting for {what}")
 
     # --------------------------------------------------------------- panels
@@ -373,6 +405,7 @@ class ConsoleBench:
         self._pump(1.0)
         probe.reset()
         presented.reset()
+        origin = time.perf_counter()
         with guards.ProductBeat(self.app, self.presenter) as beat:
             elapsed = beat.run(seconds, tick=presented.poll)
         gaps = [
@@ -389,6 +422,8 @@ class ConsoleBench:
             "frames_per_second": round(presented.count / elapsed, 1),
             "beat_ms": round(beat_s * 1e3, 1),
             "frame_gap": stats(gaps),
+            # EVERY interval, in order.  See every_gap_ms().
+            "timeline": every_gap_ms(presented.stamps, origin),
             "stalls_over_two_beats": len(stalls),
             "worst_gaps_ms": [
                 round(gap * 1e3, 1) for gap in sorted(gaps, reverse=True)[:5]
@@ -430,6 +465,7 @@ class ConsoleBench:
             for counter in counters:
                 counter.poll()
 
+        origin = time.perf_counter()
         with guards.ProductBeat(self.app, self.presenter) as beat:
             elapsed = beat.run(seconds, tick=tick)
 
@@ -455,6 +491,8 @@ class ConsoleBench:
                     "stalls_over_two_beats": sum(
                         1 for gap in gaps if gap > 2 * beat_s
                     ),
+                    # EVERY interval, in order.  See every_gap_ms().
+                    "timeline": every_gap_ms(counter.stamps, origin),
                 }
             )
         return {
@@ -781,12 +819,69 @@ class ConsoleBench:
         }
 
     #: How long a hand takes between putting the button down and starting
-    #: to move it.  Not a constant: the point of the measurement is to land
-    #: the press at every phase of the producer's cycle, because that phase
-    #: is what decides whether the press waits out a frame that is already
-    #: running.  These are milliseconds, walked in order so two runs see
-    #: the same hand.
+    #: to move it.  Not a constant: the point is to land the press at every
+    #: phase of the producer's cycle, because that phase decides whether it
+    #: waits out a frame that is already running.  Milliseconds, walked in
+    #: order so two runs see the same hand.
     _REACTION_MS = (17, 143, 61, 210, 34, 96, 178, 8, 122, 249, 45, 79)
+
+    #: A hand goes up, down, left and right.  One direction for eight steps
+    #: is one sign of one rounding, and it walks the view off the data --
+    #: after which the frame is letterboxed and the compose is doing
+    #: different work from the one being asked about.  Widget-normalized,
+    #: small enough that the cursor stays well inside the axes.
+    _WALK = (
+        (0.00, -0.06), (0.05, 0.00), (0.00, 0.07), (-0.06, 0.00),
+        (0.04, 0.05), (-0.05, -0.04), (0.06, -0.03), (-0.03, 0.06),
+        (-0.04, -0.05), (0.06, 0.02), (0.00, -0.07), (-0.05, 0.03),
+        (0.03, 0.06), (-0.06, -0.02), (0.05, -0.04), (-0.02, 0.01),
+    )
+
+    def _hand_timeline(self, widget, on_submit, on_answer):
+        """Stamp every pointer submission and every answer, and pair NOTHING.
+
+        The hand's round trip is the only quantity that can be attributed
+        to the hand at all: neither "a front was presented" nor any field
+        of the front's identity separates the gesture's frame from the
+        camera's -- a pan advances only ``sequence``, and so does every
+        producer frame (measured: 64 moves, display revision delta 0 on
+        every one, while the view limits moved on every one).
+
+        But the round trip cannot be recovered for a move.  The host
+        coalesces pointer work, so a hand moving faster than the console
+        answers has moves that are correctly never answered, and any
+        first-in-first-out pairing slips by one on each of them and
+        inflates everything after.  So this reports the two streams and
+        lets the caller take only what needs no pairing.
+        """
+
+        submit = widget._submit_pointer
+
+        def wrapped_submit(action, *args, **kwargs):
+            on_submit(action, time.perf_counter())
+            return submit(action, *args, **kwargs)
+
+        def observe(result):
+            on_answer(result[1], time.perf_counter())
+
+        widget._submit_pointer = wrapped_submit
+        # A SECOND RECEIVER on the signal, not a replacement for the slot.
+        # Rebinding ``widget._finish_pointer`` measured nothing at all --
+        # 120 events submitted, none answered -- because the connection
+        # made at construction holds the ORIGINAL bound method, and an
+        # instance attribute set afterwards is not what Qt calls.  Slots
+        # run in connection order, so this one runs after the widget has
+        # installed the answer, which is when the operator would see it.
+        widget._gesture_ready.connect(observe)
+
+        def restore():
+            widget._submit_pointer = submit
+            try:
+                widget._gesture_ready.disconnect(observe)
+            except TypeError:
+                pass
+
+        return restore
 
     def gesture(
         self,
@@ -794,7 +889,7 @@ class ConsoleBench:
         *,
         kind: str,
         motion: str = "auto",
-        moves: int = 8,
+        moves: int = 60,
         trials: int = 12,
     ) -> dict:
         """Press-move-release with REAL Qt events, and prove it landed.
@@ -802,16 +897,21 @@ class ConsoleBench:
         Three quantities, not one.  A drag whose button is already down is
         smooth; what an operator complains about is the beginning, so the
         press and the first move are reported SEPARATELY from the steady
-        state they are supposed to resemble.  Pooling them, as this did,
-        buries the six first-moves of a run under forty-two later ones
-        where no median and barely a p90 can find them.
+        state they are supposed to resemble.  Pooling them buries the
+        twelve first moves under eighty-four later ones, where no median
+        and barely a p90 can find them.
         """
 
         from PyQt5 import QtCore, QtGui
+        from zlc_plot import NumericRange
 
         widget = self.surface(panel)
         pointer = Pointer(widget, self.app, QtCore, QtGui)
-        presented = Presented(widget)
+        # THROUGH THE QUEUE.  A synchronous sendEvent runs the widget's
+        # handler on the calling thread, so the press skips every wait an
+        # operator's press cannot skip.  The clock therefore starts when
+        # the event is POSTED, not when the handler gets round to it.
+        pointer.post = True
         if motion == "auto":
             motion = "orbit" if kind == "height_bars" else "pan"
         if motion not in {"orbit", "pan", "area"}:
@@ -833,104 +933,164 @@ class ConsoleBench:
                     round(camera.elevation_deg, 3),
                 )
             if motion == "pan":
-                limits = panel.host.describe_display().result().value.limits
+                value = panel.host.describe_display().result().value.limits
                 return (
-                    round(float(limits.x.low), 6),
-                    round(float(limits.x.high), 6),
-                    round(float(limits.y.low), 6),
-                    round(float(limits.y.high), 6),
+                    float(value.x.low), float(value.x.high),
+                    float(value.y.low), float(value.y.high),
                 )
             return guards.committed_region(panel)
 
-        def hand_stamp():
-            """What a front says about the HAND, not about the data.
-
-            A live console presents frames the whole time a gesture runs,
-            so "one more front appeared" is satisfied by the producer's
-            next frame and measures the producer's phase.  Taken that way
-            the first move of a pan came out at 0.63 ms against 33.66 for
-            the later ones -- the picture had not moved at all, and a
-            harness reporting that a gesture is fastest before it starts
-            is reporting its own artefact.
-
-            The view and the selectors have their own revisions on the
-            front's identity, and a data frame does not touch them.  So
-            this is the exact question: did the picture follow the hand.
-            """
-
-            front = getattr(widget, "presented_front", None)
-            if front is None:
-                return None
-            identity = front.identity
-            return (
-                identity.display_revision,
-                identity.image_overlay_revision,
-            )
-
-        def paint_after(send) -> float | None:
-            """Send one pointer event; return the seconds until it shows."""
-
-            baseline = hand_stamp()
-            sent = time.perf_counter()
-            send()
-            deadline = sent + 1.0
-            while time.perf_counter() < deadline:
-                self.app.processEvents()
-                presented.poll()
-                if hand_stamp() != baseline:
-                    return time.perf_counter() - sent
-                time.sleep(0.0003)
-            return None
-
+        home = None
         if motion == "pan":
             # A HOME VIEW HAS NOWHERE TO PAN.  Fully zoomed out the frame
             # already shows everything, so the drag is clamped to a no-op
-            # and the run ends with 'the gesture left the view limits
-            # unchanged' -- which is the harness telling the truth about a
-            # gesture that really did nothing.  Zoom in first, the way an
-            # operator has already done before they start dragging.
-            for _notch in range(8):
-                pointer.wheel(0.35, 0.40, -1)
-                pump(self.app, 0.05)
+            # and the run ends with "the gesture left the view limits
+            # unchanged" -- the harness correctly reporting that it
+            # measured nothing.
+            #
+            # PAST full, not merely to it: the operator zooms in and then
+            # drags, and the whole drag stays full of data.  The criterion
+            # is stated and checked rather than a notch count, because the
+            # home view of an image IS the data extent.
+            home = owned()
+            span = (home[1] - home[0], home[3] - home[2])
+            notches = 0
+            while notches < 60:
+                now = owned()
+                if (now[1] - now[0]) <= span[0] / 12.0 and (
+                    now[3] - now[2]
+                ) <= span[1] / 12.0:
+                    break
+                pointer.wheel(0.5, 0.5, -1)
+                pump(self.app, 0.08)
+                notches += 1
             self._pump(0.5)
+        zoomed = None if home is None else owned()
+
+        def still_full_of_data() -> bool:
+            """Is the frame still covered by the data it is showing?"""
+
+            if home is None:
+                return True
+            now = owned()
+            return (
+                now[0] >= home[0] - 1e-9
+                and now[1] <= home[1] + 1e-9
+                and now[2] >= home[2] - 1e-9
+                and now[3] <= home[3] + 1e-9
+            )
+
+        presses: list[float] = []
+        first_moves: list[float] = []
+        steady_gaps: list[float] = []
+        submitted_moves = [0]
+        answered_moves = [0]
+        trial_state = {
+            "press_at": None,
+            "first_move_at": None,
+            "last_answer": None,
+            "reaction_ms": 0.0,
+        }
+        # (reaction, first move) per trial.  THE decisive pair: the press
+        # does a full compose the operator sees nothing for, and whether
+        # that lands on the critical path depends entirely on whether the
+        # hand starts moving before it finishes.  A hand that waits out
+        # its own reaction time gets it for free; one that moves at once
+        # queues behind it.
+        by_reaction: list[tuple[float, float]] = []
+
+        def on_submit(action, when):
+            # The submission stamp is NOT the start.  It is taken inside
+            # the widget's handler, which is after the queue wait -- the
+            # very interval an operator experiences as the press not
+            # landing.  The starts are stamped at post time below.
+            if action == "move":
+                submitted_moves[0] += 1
+
+        def on_answer(action, when):
+            if action == "press":
+                started = trial_state["press_at"]
+                if started is not None:
+                    presses.append(when - started)
+                    trial_state["press_at"] = None
+                return
+            if action != "move":
+                return
+            answered_moves[0] += 1
+            started = trial_state["first_move_at"]
+            if started is not None and trial_state["last_answer"] is None:
+                # THE FIRST ANSWER AFTER THE FIRST MOVE.  Exact without
+                # pairing: only one move task can be pending, so this is
+                # that move's answer whatever was coalesced behind it.
+                first_moves.append(when - started)
+                by_reaction.append(
+                    (
+                        round(trial_state["reaction_ms"], 1),
+                        round((when - started) * 1e3, 1),
+                    )
+                )
+            elif trial_state["last_answer"] is not None:
+                # What a hand already moving actually experiences: how long
+                # between one update of the picture and the next.
+                steady_gaps.append(when - trial_state["last_answer"])
+            trial_state["last_answer"] = when
 
         before = owned()
-        first_moves: list[float] = []
-        later_moves: list[float] = []
-        missed_catches = 0
-        # THE CONSOLE KEEPS RUNNING WHILE THE HAND DOES.  Without this the
-        # beat never ticks for the length of the gesture, so no live frame
-        # is ever started and the press competes with nothing -- which is
-        # the whole mechanism under investigation.  Everything below pumps
-        # through processEvents, which is what fires this timer.
-        with guards.ProductBeat(self.app, self.presenter):
-            for trial in range(trials):
-                # NOT pumped to quiescence first.  A press that only ever
-                # arrives on an idle machine is a press that never waits for
-                # anything, which is exactly the fiction this was measuring.
-                reaction = self._REACTION_MS[trial % len(self._REACTION_MS)] / 1e3
-                pointer.press(0.35, 0.40, button=button)
-                pump(self.app, reaction)
-                answered = paint_after(
-                    lambda: pointer.move(0.35 + 0.05, 0.40 + 0.03)
-                )
-                if answered is None:
-                    # The hand went down, moved, and the picture did not
-                    # follow.  This is the "it does not catch" report, and it
-                    # has to be COUNTED, not dropped for having no latency.
-                    missed_catches += 1
-                else:
-                    first_moves.append(answered)
-                for step in range(2, moves + 1):
-                    answered = paint_after(
-                        lambda step=step: pointer.move(
-                            0.35 + 0.05 * step, 0.40 + 0.03 * step
-                        )
+        left_the_data = 0
+        restore = self._hand_timeline(widget, on_submit, on_answer)
+        try:
+            # THE CONSOLE KEEPS RUNNING WHILE THE HAND DOES.  Without this
+            # the beat never ticks for the length of the gesture, so no live
+            # frame is ever started and the press competes with nothing --
+            # which is the whole mechanism under investigation.
+            with guards.ProductBeat(self.app, self.presenter):
+                for trial in range(trials):
+                    if zoomed is not None:
+                        # BACK TO WHERE THE ZOOM PUT IT.  A pan commits, so
+                        # without this each trial starts further from the
+                        # centre than the last and the later ones walk the
+                        # view past the data edge -- measured, five of
+                        # twelve did, and a letterboxed frame is different
+                        # work from the one being asked about.
+                        panel.host.set_viewport(
+                            NumericRange(zoomed[0], zoomed[1]),
+                            NumericRange(zoomed[2], zoomed[3]),
+                        ).result()
+                        self._pump(0.25)
+                    trial_state["first_move_at"] = None
+                    trial_state["last_answer"] = None
+                    trial_state["reaction_ms"] = float(
+                        self._REACTION_MS[trial % len(self._REACTION_MS)]
                     )
-                    if answered is not None:
-                        later_moves.append(answered)
-                pointer.release(0.35 + 0.05 * moves, 0.40 + 0.03 * moves, button=button)
-                pump(self.app, 0.15)
+                    # NOT pumped to quiescence first.  A press that only
+                    # ever arrives on an idle machine is a press that never
+                    # waits for anything.
+                    at = [0.5, 0.5]
+                    trial_state["press_at"] = time.perf_counter()
+                    pointer.press(at[0], at[1], button=button)
+                    pump(
+                        self.app,
+                        self._REACTION_MS[trial % len(self._REACTION_MS)] / 1e3,
+                    )
+                    for step in range(moves):
+                        dx, dy = self._WALK[step % len(self._WALK)]
+                        at[0] += dx
+                        at[1] += dy
+                        if trial_state["first_move_at"] is None:
+                            trial_state["first_move_at"] = time.perf_counter()
+                        pointer.move(at[0], at[1])
+                        # A hand moves at 60-125 Hz.
+                        pump(self.app, 0.012)
+                    pointer.release(at[0], at[1], button=button)
+                    pump(self.app, 0.15)
+                    # ONCE PER TRIAL, not once per move.  `owned()` is a
+                    # blocking CONTROL round trip to the worker; calling it
+                    # between moves serializes the very queue being timed,
+                    # so the probe would have been the load.
+                    if not still_full_of_data():
+                        left_the_data += 1
+        finally:
+            restore()
         guards.require_effect(
             before,
             owned(),
@@ -941,22 +1101,32 @@ class ConsoleBench:
             }[motion],
         )
         first = stats(first_moves)
-        later = stats(later_moves)
+        later = stats(steady_gaps)
         return {
             "gesture": motion,
             "trials": trials,
             "panels_in_console": len(self.presenter.panels),
-            "missed_catches": missed_catches,
-            # The number the operator feels at the start of a drag.
-            "first_move_to_picture": first,
-            # What it is supposed to cost once the hand is already down.
-            "later_move_to_picture": later,
+            # What the hand waits for before the gesture has caught.
+            "press": stats(presses),
+            "first_move": first,
+            # What a hand already moving experiences: the interval between
+            # one update of the picture and the next.
+            "steady_gap": later,
             "start_penalty": (
                 None
-                if not first_moves or not later_moves
+                if not first_moves or not steady_gaps
                 else round(first["median_ms"] / later["median_ms"], 2)
             ),
-            "answered": len(first_moves) + len(later_moves),
+            # Moves the host coalesced away.  Correct behaviour, not a
+            # fault: the newest supersedes them.  Reported because the
+            # ratio says how much faster the hand moved than the console
+            # could answer.
+            "first_move_by_reaction_ms": sorted(by_reaction),
+            "moves_submitted": submitted_moves[0],
+            "moves_answered": answered_moves[0],
+            # Non-zero means a walk wandered off the data and part of
+            # this distribution is about a letterboxed frame.
+            "trials_that_left_the_data": left_the_data,
         }
 
     # ------------------------------------------------------------- teardown

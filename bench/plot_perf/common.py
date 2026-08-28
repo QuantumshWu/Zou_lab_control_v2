@@ -271,6 +271,16 @@ class Pointer:
             nx * self._widget.width(), ny * self._widget.height()
         )
 
+    #: Deliver through the event QUEUE, the way the window system does.
+    #:
+    #: ``sendEvent`` calls the widget's handler synchronously on the calling
+    #: thread, so a synthesized press can never wait for anything -- not for
+    #: a paint already running, not for a queued front install, not for the
+    #: beat.  An operator's press cannot skip that queue, and the wait is
+    #: part of what they feel.  Off by default so existing measurements keep
+    #: their meaning; the gesture measurement turns it on.
+    post = False
+
     def _send(self, kind, nx, ny, button):
         QtCore, QtGui = self._QtCore, self._QtGui
         event = QtGui.QMouseEvent(
@@ -280,6 +290,10 @@ class Pointer:
             self._buttons,
             QtCore.Qt.NoModifier,
         )
+        if self.post:
+            # postEvent takes ownership; the C++ side outlives this frame.
+            self._app.postEvent(self._widget, event)
+            return
         self._app.sendEvent(self._widget, event)
 
     def press(self, nx, ny, button=None):

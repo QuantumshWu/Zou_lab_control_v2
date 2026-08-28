@@ -294,18 +294,58 @@ def test_the_gesture_measurement_asks_whether_the_picture_followed_the_hand() ->
     from bench.plot_perf.run_console import ConsoleBench
 
     body = inspect.getsource(ConsoleBench.gesture)
-    assert "display_revision" in body and "image_overlay_revision" in body, (
-        "the gesture must wait on the hand's own revisions"
-    )
+    probe = inspect.getsource(ConsoleBench._hand_timeline)
     assert "presented.count > baseline" not in body, (
         "counting fronts measures the producer, not the hand"
     )
-    # Three quantities, because the start is the complaint and pooling it
-    # with the steady state is what hid it.
-    for key in ("first_move_to_picture", "later_move_to_picture",
-                "missed_catches"):
-        assert key in body, key
+    assert "display_revision" not in body, (
+        "measured: a pan never advances it, so it reports every trial missed"
+    )
+    # The hand's own stream: submitted here, answered there.
+    assert "_submit_pointer" in probe and "_gesture_ready" in probe
+    # And NOT paired, because the host coalesces moves and any
+    # first-in-first-out pairing slips by one on each coalesced move.
+    assert "queue.pop(0)" not in probe, "coalesced moves make pairing a lie"
+    # The start is the complaint, so it is reported apart from the steady
+    # state; each trial starts from the same viewport, or the later ones
+    # walk the view off the data.
+    for key in ("press", "first_move", "steady_gap",
+                "moves_submitted", "moves_answered"):
+        assert '"%s"' % key in body, key
+    assert "set_viewport" in body, "a pan commits; trials must start level"
     # And it runs against a console that is actually running.
     assert "ProductBeat" in body, (
         "a gesture measured on a frozen console competes with nothing"
     )
+    # In the operator's scenario: zoomed past full, and all four directions.
+    assert "_WALK" in body and "still_full_of_data" in body
+
+
+def test_the_console_is_driven_at_one_rate_and_it_is_the_product_s() -> None:
+    """The harness must never beat the console faster than the board does.
+
+    ``ProductBeat`` exists because a bench that calls ``presenter.beat()``
+    in a tight loop drives it about fifty times too fast and becomes the
+    load it is measuring.  That was fixed where frames are counted and left
+    standing in ``_pump`` and ``_until``, which is most of a run -- so
+    before acquisition started the bench published at the full source rate:
+    measured, 23.3 revisions a second reaching the screen 23.3 times a
+    second, against 9.2 once the real beat took over.  An operator watching
+    the product never sees that burst, because the product never beats that
+    fast.  The bench was showing its own hand and calling it startup.
+
+    With one owner for the rate, both phases measure 109 and 110 ms against
+    a 100 ms board interval.
+    """
+
+    import inspect
+
+    from bench.plot_perf.run_console import ConsoleBench
+
+    for owner in (ConsoleBench._pump, ConsoleBench._until):
+        body = inspect.getsource(owner)
+        assert "ProductBeat" in body, owner
+        assert "presenter.beat()" not in body, (
+            "%s drives the console itself instead of at the board's rate"
+            % owner
+        )
