@@ -1180,6 +1180,25 @@ class _LatestOnlyProcessorLane:
         self._executor.shutdown(wait=False, cancel_futures=True)
 
 
+class GenerationSchemaAdvanced(ValueError):
+    """An output changed shape, so it needs a new generation -- not a fault.
+
+    A schema is frozen per generation on purpose: a consumer that reads one
+    publication must be able to read the next without re-learning the
+    shape.  But shape can change for reasons that are nobody's mistake.  A
+    panel pooling a window of shots hands its own derivation a source that
+    GROWS one shot per publication while the window fills, so the derived
+    point table gains a row every time.
+
+    The answer is the same one a re-drawn region gets: a different
+    derivation publishes into a different generation.  Only the owner of
+    the derivation can start one, which is why this is a NAMED condition
+    rather than a bare ValueError -- unnamed, it reached that owner as an
+    ordinary failure and took the whole derivation down, so an operator
+    who set a window watched the region they had drawn stop publishing.
+    """
+
+
 class SignalDataPlane:
     """One owner for signal generations, publications, and visible frontiers."""
 
@@ -2945,7 +2964,7 @@ class SignalDataPlane:
         )
         for name, schema in schemas.items():
             if name in prior and prior[name] != schema:
-                raise ValueError(
+                raise GenerationSchemaAdvanced(
                     "signal publication schema changed inside one generation"
                 )
             prior[name] = schema

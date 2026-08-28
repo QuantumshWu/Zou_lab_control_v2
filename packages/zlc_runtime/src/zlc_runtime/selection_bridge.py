@@ -56,6 +56,7 @@ from .dataset_output import (
     DatasetOutputDeclaration,
     LiveDatasetOutput,
 )
+from .plane import GenerationSchemaAdvanced
 from .plane import SignalDataPlane, SignalPublication, SignalValue
 
 __all__ = [
@@ -1302,14 +1303,26 @@ class SelectionBridge:
         state: SelectionState,
         *,
         source_publication: SignalPublication,
+        rearm: bool = False,
     ) -> None:
+        """Claim this region's outputs in a fresh generation.
+
+        ``rearm`` re-runs it for the region already committed, which is how
+        a derivation whose SHAPE changed under it gets a new generation
+        without the operator touching anything.
+        """
+
         if not isinstance(source_publication, SignalPublication):
             raise TypeError("source_publication must be SignalPublication")
         with self._lock:
             if self._closed or not self._started:
                 return
             previous = self._selection
-            if previous is not None and state.revision <= previous.revision:
+            if (
+                not rearm
+                and previous is not None
+                and state.revision <= previous.revision
+            ):
                 raise ValueError("selection revisions must increase")
             output_names = self._selection_output_names(state)
             self._selection_epoch += 1
@@ -1638,6 +1651,36 @@ class SelectionBridge:
             # accepted frame.  That is normal latest-only timing, not a failed
             # signal generation: retain the last accepted Fit publication
             # until the plot emits the next batch for this same panel.
+            return
+        if (
+            isinstance(error, GenerationSchemaAdvanced)
+            and processor._role == "selection"
+        ):
+            # Not a failure: what this region derives changed shape, which
+            # a new generation is exactly the answer to.  A panel pooling a
+            # window hands its own ROI a source that grows one shot per
+            # publication while the window fills, so this fires once per
+            # shot until it is full and then stops.  Releasing instead --
+            # which is what an unnamed ValueError got -- retired the
+            # region's outputs for good, and the operator saw the ROI they
+            # had drawn stop publishing the moment they set a window.
+            #
+            # Not recorded either: the operator has nothing to do about a
+            # window filling, and a panel that reports an error on every
+            # shot of it looks broken while it is working.
+            self._release_processor(processor)
+            with self._lock:
+                state = self._selection
+            publication = self._current_source_publication()
+            if state is not None and publication is not None:
+                try:
+                    self._commit_selection(
+                        state,
+                        source_publication=publication,
+                        rearm=True,
+                    )
+                except Exception as retry:
+                    self._record_error(retry)
             return
         # An EmptySelection reaches here too, and RELEASING is right for it:
         # a region that names no data names none on every publication -- it

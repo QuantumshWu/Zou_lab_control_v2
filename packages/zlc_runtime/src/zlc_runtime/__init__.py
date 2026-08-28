@@ -7,6 +7,7 @@ from .dataset_output import (
 )
 from .plane import (
     IndexedHistoryLease,
+    GenerationSchemaAdvanced,
     SignalDataPlane,
     SignalDescription,
     SignalPublication,
@@ -40,6 +41,7 @@ __all__ = (
     "MonitorCoverage",
     "SurfaceBatchArbiter",
     "SurfaceUpdate",
+    "GenerationSchemaAdvanced",
     "SignalDataPlane",
     "SignalValue",
     "SignalPublication",
