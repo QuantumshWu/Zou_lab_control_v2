@@ -1283,6 +1283,20 @@ class SelectionBridge:
                     return
                 raise
 
+    def _retire_selection_outputs(self) -> None:
+        """Take down what the PREVIOUS region derived.
+
+        A newly committed region that names no data replaces one that may
+        have named plenty.  Left published, the old signal stands as the
+        answer to the new box -- the same stale-slot mistake a withdrawn
+        fit once made -- so the route is taken down and its output names
+        freed.
+        """
+
+        processor = self._take_processor("selection")
+        if processor is not None:
+            self._withdraw_processor(processor)
+
     def _commit_selection(
         self,
         state: SelectionState,
@@ -1313,6 +1327,7 @@ class SelectionBridge:
                         "on it derives nothing"
                     )
                 )
+                self._retire_selection_outputs()
                 return
             source = publication.value(self._source_signal)
             if source is None:
@@ -1332,6 +1347,7 @@ class SelectionBridge:
                 # silently kept the region it already had, so the operator
                 # saw a mark move and nothing follow it.
                 self._record_error(error)
+                self._retire_selection_outputs()
                 return
         # From here the plane's output NAMES are claimed, and only afterwards
         # can this commit learn whether its claim is still wanted -- the same
@@ -1623,6 +1639,12 @@ class SelectionBridge:
             # signal generation: retain the last accepted Fit publication
             # until the plot emits the next batch for this same panel.
             return
+        # An EmptySelection reaches here too, and RELEASING is right for it:
+        # a region that names no data names none on every publication -- it
+        # is a fact about where the box was drawn, not about this shot -- so
+        # what the PREVIOUS region derived has to be retired rather than left
+        # standing as though it were still the answer.  The reason is
+        # recorded either way, which is what the operator reads.
         self._record_error(error)
         self._release_processor(processor)
 
@@ -2039,8 +2061,23 @@ class SelectionBridge:
             # A rolling region is drawn in shots-from-latest, and the
             # publication being derived IS the latest one -- it sits at
             # zero.  A window that does not reach zero names shots that
-            # have already gone by, so this one is not in it.
-            valid_values = np.zeros_like(valid_values)
+            # have already gone by, and this publication is not one of
+            # them.
+            #
+            # Zeroing the validity and publishing anyway said something
+            # FALSE: that the shots the operator boxed hold no data.  They
+            # hold exactly the data the box was drawn around; this
+            # publication simply is not among them.  Because a rolling
+            # window slides, no arriving publication ever is -- so every
+            # frame came out empty and the region looked broken rather
+            # than out of reach.  "No data HERE" is what EmptySelection
+            # says, and both routes already turn it into a reason the
+            # operator can read.
+            raise EmptySelection(
+                "this region names shots that have already gone by; only a "
+                "window reaching the newest shot can be cut from the live "
+                "stream"
+            )
         derived_schema = restricted_schema(
             source_schema,
             repeat_indices,

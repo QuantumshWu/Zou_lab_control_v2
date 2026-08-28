@@ -18,6 +18,7 @@ from zlc_data import (
     AxisId,
     AxisSpec,
     BlockId,
+    EmptySelection,
     CellValidity,
     DataBlock,
     DatasetRevision,
@@ -890,10 +891,19 @@ def test_a_value_band_and_a_shot_window_restrict_without_cutting_an_axis() -> No
     A histogram's x is the measured VALUE and a rolling trace's x is the
     shot ordinal; neither is a Dataset axis, so neither can be a Selection
     term.  They restrict what COUNTS instead: the cells outside a value
-    band stop being valid, and a shot window that does not reach the newest
-    shot -- the one being derived, which sits at zero -- answers nothing.
-    Refusing to derive from them at all is what left a region drawn on a
-    histogram or a rolling panel with nowhere to go.
+    band stop being valid.  Refusing to derive from them at all is what
+    left a region drawn on a histogram or a rolling panel with nowhere to
+    go.
+
+    A shot window is the one that cannot be answered from the shot in
+    hand.  The publication being derived IS the newest one, so it sits at
+    zero; a window that stops short of zero names shots that have already
+    gone by.  Publishing a frame with nothing valid claimed those shots
+    hold no data, which is false -- they hold exactly what the box was
+    drawn around -- and because a rolling window slides, EVERY arriving
+    publication came out empty.  The region derives nothing, and what the
+    previous region derived is taken down rather than left standing as
+    though it answered the new box.
     """
 
     schema = _image_schema()
@@ -932,11 +942,13 @@ def test_a_value_band_and_a_shot_window_restrict_without_cutting_an_axis() -> No
                 revision=2,
             ),
         )
-        frame = plane.freeze().value("@logic/band/roi_frame")
-        assert frame is not None
-        assert not _expanded_validity(frame.snapshot).any(), (
-            "a window that stops short of the newest shot does not name this one"
+        assert plane.freeze().value("@logic/band/roi_frame") is None, (
+            "a window that stops short of the newest shot derives nothing, "
+            "and nothing is what it must publish -- neither a frame of "
+            "invalid cells nor the frame the previous region derived"
         )
+        assert isinstance(bridge.last_error, EmptySelection)
+        assert "already gone by" in str(bridge.last_error)
 
         events.emit_selection(
             SelectionChange.COMMITTED,
