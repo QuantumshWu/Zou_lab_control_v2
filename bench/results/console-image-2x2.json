@@ -12,164 +12,133 @@
     "megapixels": 1.57
   },
   "live": {
-    "window_s": 20.0,
-    "frames": 184,
-    "frames_per_second": 9.2,
+    "window_s": 5.0,
+    "frames": 47,
+    "frames_per_second": 9.4,
     "beat_ms": 100.0,
     "frame_gap": {
-      "n": 183,
-      "median_ms": 110.5,
-      "p90_ms": 119.26,
-      "p99_ms": 124.99,
-      "max_ms": 190.64,
-      "best_ms": 28.57
+      "n": 46,
+      "median_ms": 110.06,
+      "p90_ms": 119.32,
+      "p99_ms": 126.22,
+      "max_ms": 129.23,
+      "best_ms": 26.85
     },
     "stalls_over_two_beats": 0,
     "worst_gaps_ms": [
-      190.6,
-      130.5,
-      123.8,
-      122.6,
-      121.6
+      129.2,
+      122.5,
+      120.7,
+      120.5,
+      120.0
     ],
     "seams": [
       {
         "seam": "MatplotlibRenderer._compose_frame",
-        "calls": 183,
-        "self_ms_total": 1758.9,
-        "self_ms_per_call": 9.61,
-        "per_second": 9.1
+        "calls": 46,
+        "self_ms_total": 408.4,
+        "self_ms_per_call": 8.88,
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer._update_image_chrome",
-        "calls": 183,
-        "self_ms_total": 1336.6,
-        "self_ms_per_call": 7.3,
-        "per_second": 9.1
+        "calls": 46,
+        "self_ms_total": 292.0,
+        "self_ms_per_call": 6.35,
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer._view_filling_rgba_front",
-        "calls": 182,
-        "self_ms_total": 333.6,
-        "self_ms_per_call": 1.83,
-        "per_second": 9.1
+        "calls": 46,
+        "self_ms_total": 107.1,
+        "self_ms_per_call": 2.33,
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer._update_image_artist",
-        "calls": 182,
-        "self_ms_total": 288.4,
-        "self_ms_per_call": 1.58,
-        "per_second": 9.1
+        "calls": 46,
+        "self_ms_total": 74.7,
+        "self_ms_per_call": 1.62,
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer._cached_image_range",
-        "calls": 183,
-        "self_ms_total": 200.8,
-        "self_ms_per_call": 1.1,
-        "per_second": 9.1
+        "calls": 46,
+        "self_ms_total": 53.8,
+        "self_ms_per_call": 1.17,
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer._image_rgba_front",
-        "calls": 183,
-        "self_ms_total": 137.3,
-        "self_ms_per_call": 0.75,
-        "per_second": 9.1
-      },
-      {
-        "seam": "MatplotlibRenderer._mutate_image_artists",
-        "calls": 183,
-        "self_ms_total": 100.3,
-        "self_ms_per_call": 0.55,
-        "per_second": 9.1
+        "calls": 46,
+        "self_ms_total": 36.9,
+        "self_ms_per_call": 0.8,
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer.present",
-        "calls": 183,
-        "self_ms_total": 98.3,
-        "self_ms_per_call": 0.54,
-        "per_second": 9.1
+        "calls": 46,
+        "self_ms_total": 25.5,
+        "self_ms_per_call": 0.55,
+        "per_second": 9.2
+      },
+      {
+        "seam": "MatplotlibRenderer._mutate_image_artists",
+        "calls": 46,
+        "self_ms_total": 22.7,
+        "self_ms_per_call": 0.49,
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer._blit_exact_rgba_image",
-        "calls": 4941,
-        "self_ms_total": 56.4,
+        "calls": 1242,
+        "self_ms_total": 14.3,
         "self_ms_per_call": 0.01,
-        "per_second": 247.0
+        "per_second": 248.3
       },
       {
         "seam": "MatplotlibRenderer._update_selectors",
-        "calls": 183,
-        "self_ms_total": 40.0,
-        "self_ms_per_call": 0.22,
-        "per_second": 9.1
+        "calls": 46,
+        "self_ms_total": 9.0,
+        "self_ms_per_call": 0.19,
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer._update_horizontal_histogram",
-        "calls": 182,
-        "self_ms_total": 35.8,
-        "self_ms_per_call": 0.2,
-        "per_second": 9.1
+        "calls": 46,
+        "self_ms_total": 8.2,
+        "self_ms_per_call": 0.18,
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer._dynamic_artists",
-        "calls": 183,
-        "self_ms_total": 13.6,
+        "calls": 46,
+        "self_ms_total": 3.2,
         "self_ms_per_call": 0.07,
-        "per_second": 9.1
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer._settle_owned_boxes",
-        "calls": 183,
-        "self_ms_total": 1.7,
+        "calls": 46,
+        "self_ms_total": 0.4,
         "self_ms_per_call": 0.01,
-        "per_second": 9.1
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer._resolve_image_limits",
-        "calls": 183,
-        "self_ms_total": 1.6,
+        "calls": 46,
+        "self_ms_total": 0.4,
         "self_ms_per_call": 0.01,
-        "per_second": 9.1
+        "per_second": 9.2
       },
       {
         "seam": "MatplotlibRenderer._update_fit",
-        "calls": 183,
-        "self_ms_total": 0.7,
+        "calls": 46,
+        "self_ms_total": 0.1,
         "self_ms_per_call": 0.0,
-        "per_second": 9.1
+        "per_second": 9.2
       }
     ]
   },
-  "stalls": {
-    "window_s": 20.0,
-    "beat_ms": 100.0,
-    "frames": 184,
-    "source_revisions": 484,
-    "beat_ticks": 182,
-    "beat_tick_gap": {
-      "n": 181,
-      "median_ms": 109.65,
-      "p90_ms": 117.49,
-      "p99_ms": 121.3,
-      "max_ms": 123.12,
-      "best_ms": 93.98
-    },
-    "frame_gap": {
-      "n": 183,
-      "median_ms": 109.55,
-      "p90_ms": 118.7,
-      "p99_ms": 131.9,
-      "max_ms": 186.64,
-      "best_ms": 35.78
-    },
-    "slips": [
-      {
-        "gap_ms": 186.6,
-        "beats_in_gap": 2,
-        "new_revisions_in_gap": 4,
-        "longest_tick_gap_ms": 115.0,
-        "blame": "render: beats fired with data and no front followed"
-      }
-    ]
-  }
+  "threads_left_running": []
 }

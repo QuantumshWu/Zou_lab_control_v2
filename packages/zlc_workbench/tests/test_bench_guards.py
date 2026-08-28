@@ -113,3 +113,37 @@ def test_the_bench_benchmarks_one_size_and_says_which() -> None:
     from bench.plot_perf.common import SIZE_PRESET
 
     assert SIZE_PRESET == "2x2"
+
+
+def test_a_console_bench_cannot_be_left_open() -> None:
+    """The console layer opens a real window and non-daemon threads.
+
+    A bench that only quiets the pulse leaves the panels' raster workers,
+    the logic node, the save worker build_console attaches, the window and
+    the session's device claims all standing -- so the process never exits
+    and the console stays on screen until it is killed from the task list.
+    That happened, repeatedly, which is why close() now runs the product's
+    own shutdown and why the runner holds the bench in a ``with``.
+    """
+
+    from bench.plot_perf.run_console import ConsoleBench
+
+    assert hasattr(ConsoleBench, "__enter__")
+    assert hasattr(ConsoleBench, "__exit__")
+
+    # Closing something that never started must not raise: a failure during
+    # start() has to leave the ``with`` able to clean up after it.
+    never_started = ConsoleBench.__new__(ConsoleBench)
+    never_started.close()
+
+    # And the survivor check counts what would actually hold the process
+    # open -- not the main thread, and not daemons.
+    import threading
+
+    survivors = ConsoleBench.surviving_threads(never_started)
+    assert threading.main_thread().name not in survivors
+    assert all(
+        not thread.daemon
+        for thread in threading.enumerate()
+        if thread.name in survivors
+    )

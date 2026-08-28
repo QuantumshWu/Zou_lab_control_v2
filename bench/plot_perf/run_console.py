@@ -377,11 +377,94 @@ class ConsoleBench:
             "hand_to_picture": stats(latencies),
         }
 
+    # ------------------------------------------------------------- teardown
+    def __enter__(self) -> "ConsoleBench":
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
+
     def close(self) -> None:
+        """Shut the console down the way the product does, and finish.
+
+        A bench that only stops the pulse leaves everything else standing:
+        the panels' raster workers, the logic node's thread, the save
+        worker ``build_console`` attaches, the window, and the session's
+        device claims.  None of those are daemon threads, so the process
+        does not exit and the console stays on screen -- which is exactly
+        what happened until this method existed, and it had to be killed
+        from the task list.
+
+        The sequence is the product's own, the same one the console guard
+        test uses: quiet the hardware, release the claims, drive the
+        presenter's asynchronous close to completion, close the view, then
+        close the session.  ``presenter.close`` deliberately never blocks
+        on the Qt owner, so it is PUMPED to completion rather than awaited.
+        """
+
+        presenter = getattr(self, "presenter", None)
+        if presenter is None:
+            return
+        session = getattr(self, "session", None)
+
+        # 1. Quiet the hardware and release its claims, or session.close()
+        #    refuses on device_use.assert_idle().
+        if session is not None:
+            try:
+                session.sequencer.safe()
+            except Exception:
+                pass
+        node = getattr(self, "node", None)
+        if node is not None:
+            try:
+                presenter.stop_logic(node)
+            except Exception:
+                pass
+
+        # 2. The presenter's close is a guard, not a call: first ask begins
+        #    the shutdown, and it reports ready only once it has finished.
         try:
-            self.session.sequencer.safe()
+            presenter.close()
+            deadline = time.monotonic() + 15.0
+            while time.monotonic() < deadline:
+                presenter.beat()
+                self.app.processEvents()
+                if presenter.close():
+                    break
+                time.sleep(0.005)
         except Exception:
             pass
+
+        # 3. The window, past its own close guard -- the console asks the
+        #    operator before closing, and a bench is not an operator.
+        view = getattr(self, "view", None)
+        if view is not None:
+            try:
+                view.set_close_guard(lambda: True)
+                view.close()
+                self.app.processEvents()
+            except Exception:
+                pass
+
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+        self.presenter = None
+
+    def surviving_threads(self) -> tuple[str, ...]:
+        """Non-daemon threads still alive: what would keep the process up."""
+
+        import threading
+
+        return tuple(
+            sorted(
+                thread.name
+                for thread in threading.enumerate()
+                if thread is not threading.main_thread() and not thread.daemon
+            )
+        )
 
 
 def main() -> None:
@@ -397,22 +480,24 @@ def main() -> None:
     parser.add_argument("--top", type=int, default=18)
     args = parser.parse_args()
 
-    bench = ConsoleBench(allow_low_density=args.allow_low_density).start()
-    panel = bench.add_panel(args.kind, size=args.size)
-    guards.require_panels(bench.presenter, len(bench.presenter.panels))
-    payload = {
-        "kind": args.kind,
-        "size": args.size,
-        "panels_in_console": len(bench.presenter.panels),
-        "density": bench.density(panel),
-    }
-    bench.instrument(panel)
-    payload["live"] = bench.live(panel, args.seconds)
-    if args.stalls:
-        payload["stalls"] = bench.attribute_stalls(panel, args.seconds)
-    if args.gesture:
-        payload["gesture"] = bench.gesture(panel, kind=args.kind)
-    bench.close()
+    bench = ConsoleBench(allow_low_density=args.allow_low_density)
+    with bench:
+        bench.start()
+        panel = bench.add_panel(args.kind, size=args.size)
+        guards.require_panels(bench.presenter, len(bench.presenter.panels))
+        payload = {
+            "kind": args.kind,
+            "size": args.size,
+            "panels_in_console": len(bench.presenter.panels),
+            "density": bench.density(panel),
+        }
+        bench.instrument(panel)
+        payload["live"] = bench.live(panel, args.seconds)
+        if args.stalls:
+            payload["stalls"] = bench.attribute_stalls(panel, args.seconds)
+        if args.gesture:
+            payload["gesture"] = bench.gesture(panel, kind=args.kind)
+    payload["threads_left_running"] = list(bench.surviving_threads())
 
     print("kind=%s size=%s  %s px  DPR %s  %s panels in the console" % (
         args.kind,
@@ -452,6 +537,10 @@ def main() -> None:
         print("gesture: %s" % (payload["gesture"],))
     print()
     print(probe.report(live["window_s"], top=args.top))
+    left = payload["threads_left_running"]
+    print()
+    print("non-daemon threads still alive after close: %s"
+          % (", ".join(left) if left else "none"))
     path = write_result(payload, f"console-{args.kind}-{args.size}")
     print(f"\nwrote {path}")
 
