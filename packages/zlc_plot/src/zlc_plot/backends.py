@@ -22,6 +22,7 @@ from ._selector_scene import (
     SceneKind,
 )
 from .assets import HELVETICA_LIGHT_FAMILY, helvetica_light_path
+from ._gesture_log import LOG as _GESTURE_LOG
 from .raster import (
     RasterFront,
     RasterPlotHost,
@@ -1272,6 +1273,11 @@ def _qt5_plot_widget_class() -> type[Any]:
             self._pointer_button = button
             if button in (1, 2):
                 self.grabMouse()
+            if _GESTURE_LOG.on:
+                # WHERE THE WINDOW SYSTEM HANDED IT OVER.  Everything the
+                # session records happens after this; a press that felt
+                # late may have been late before the product ever saw it.
+                _GESTURE_LOG.widget(self, "press", event)
             self._submit_pointer("press", event, button=button)
             event.accept()
 

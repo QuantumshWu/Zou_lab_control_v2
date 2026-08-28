@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from time import monotonic as _monotonic
 from time import monotonic
+
+from ._gesture_log import LOG as _GESTURE_LOG
 from typing import TYPE_CHECKING, Any
 import math
 
@@ -129,6 +132,13 @@ class GestureSessionMixin:
         button = getattr(event, "button", None)
         if button not in (1, 2, 3):
             return
+        if _GESTURE_LOG.on:
+            _GESTURE_LOG.press(
+                self,
+                button=int(button),
+                had_transform=interaction_transform is not None,
+                double=bool(getattr(event, "dblclick", False)),
+            )
         button = int(button)
         assert self._renderer is not None
         if interaction_transform is None:
@@ -696,16 +706,35 @@ class GestureSessionMixin:
     def _on_motion(self, event: Any) -> None:
         gesture = self._gesture
         if gesture is None:
+            if _GESTURE_LOG.on:
+                _GESTURE_LOG.move(self, kind="none", reason="no gesture")
             return
         if isinstance(gesture, _PanGesture):
-            if gesture.lane_due(
+            due = gesture.lane_due(
                 "pan",
                 self._defaults.interaction.pointer_update_interval_ms,
-            ):
+            )
+            before = None
+            if _GESTURE_LOG.on:
+                before = self._logged_owned_value()
+            started = _monotonic()
+            if due:
                 try:
                     self._update_pan(event, gesture)
                 finally:
                     gesture.lane_finished("pan")
+            if _GESTURE_LOG.on:
+                _GESTURE_LOG.move(
+                    self,
+                    kind="pan",
+                    admitted=bool(due),
+                    ms=round(1e3 * (_monotonic() - started), 1),
+                    moved=(
+                        False
+                        if not due
+                        else self._logged_owned_value() != before
+                    ),
+                )
             return
         if isinstance(gesture, _OrbitGesture):
             if not gesture.lane_due(
@@ -1039,6 +1068,8 @@ class GestureSessionMixin:
     def _clear_gesture(self, gesture: _PointerGesture) -> None:
         if self._gesture is not gesture:
             return
+        if _GESTURE_LOG.on:
+            _GESTURE_LOG.release(self, gesture=type(gesture).__name__)
         self._gesture = None
         if self._renderer is None:
             return
@@ -1049,6 +1080,36 @@ class GestureSessionMixin:
             self._renderer.set_view_dragging(None)
             return
         self._renderer.end_selector_gesture()
+
+    def _logged_owned_value(self) -> Any:
+        """What the gesture under way owns, cheaply, for the recorder.
+
+        The view limits for a pan, the camera for an orbit.  Read off the
+        renderer rather than asked of the host: this runs inside the
+        pointer task itself, and a round trip from here would serialise
+        the very queue the recording is about.
+        """
+
+        renderer = self._renderer
+        if renderer is None:
+            return None
+        gesture = self._gesture
+        if isinstance(gesture, _OrbitGesture):
+            camera = getattr(renderer, "height_bars_camera", None)
+            return None if camera is None else (
+                round(camera.azimuth_deg, 4),
+                round(camera.elevation_deg, 4),
+            )
+        axes = getattr(gesture, "axes", None)
+        if axes is None:
+            return None
+        try:
+            return (
+                tuple(round(float(v), 6) for v in axes.get_xlim()),
+                tuple(round(float(v), 6) for v in axes.get_ylim()),
+            )
+        except Exception:
+            return None
 
     def _cancel_gesture(self) -> SelectorState | None:
         gesture = self._gesture
