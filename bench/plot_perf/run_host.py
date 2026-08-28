@@ -14,12 +14,20 @@ Run:  python -m bench.plot_perf.run_host [--only substring] [--label name]
 """
 from __future__ import annotations
 
+import os
+
+# This layer times the plot alone, where a small offscreen surface
+# IS the point.  The console layer refuses it -- see
+# common.bootstrap and guards.require_real_density.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 import argparse
 import math
 import time
 import traceback
 
 from .common import (
+    SIZE_PRESET,
     Pointer,
     Presented,
     axis_by_role,
@@ -33,7 +41,6 @@ from .common import (
 from .cases import Case, catalog
 
 FRONT_TIMEOUT = 6.0
-SIZE_PRESET = "4x4"
 PRODUCER_HZ = 25.0
 
 

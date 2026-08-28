@@ -22,7 +22,15 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
 def bootstrap() -> None:
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    """Put this worktree's packages first.  It does NOT choose a platform.
+
+    Defaulting to offscreen here used to be invisible: every runner that
+    imported this module inherited a device pixel ratio of 1 and a surface
+    one ninth the area of the real display, and pixel-bound numbers came
+    back that cheap.  Each runner now says what surface it means -- the two
+    plot-layer ones ask for offscreen, the console one refuses it.
+    """
+
     for pkg in ("zlc_plot", "zlc_data"):
         path = str(ROOT / "packages" / pkg / "src")
         if path not in sys.path:
@@ -180,6 +188,13 @@ def camera_feed(
 
 
 # ------------------------------------------------------------ Qt plumbing
+#: The size every layer benchmarks at.  2x2 is the size panels are
+#: actually worked in; 4x4 is a stress case and reports a cost no
+#: operator pays all day.  One constant so the three layers cannot
+#: drift into comparing different pictures.
+SIZE_PRESET = "2x2"
+
+
 def qt_env():
     """Import Qt lazily so session-layer runs never touch it."""
 

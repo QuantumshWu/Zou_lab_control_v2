@@ -20,6 +20,7 @@ import matplotlib
 
 matplotlib.use("Agg", force=True)
 
+from .common import SIZE_PRESET
 from .cases import catalog  # noqa: E402
 
 
@@ -66,7 +67,7 @@ def attribute(case, updates: int) -> dict:
     feed = case.feed()
     session = PlotSession(feed.next(), case.spec())
     try:
-        session.set_size("4x4")
+        session.set_size(SIZE_PRESET)
         session.rgba()
         for _ in range(2):                      # warm the caches
             session.update_data(feed.next())

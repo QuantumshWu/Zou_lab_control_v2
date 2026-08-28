@@ -7,6 +7,13 @@ Run:  python -m bench.plot_perf.run_session [--only substring] [--label name]
 """
 from __future__ import annotations
 
+import os
+
+# This layer times the plot alone, where a small offscreen surface
+# IS the point.  The console layer refuses it -- see
+# common.bootstrap and guards.require_real_density.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 import argparse
 import time
 import traceback
@@ -15,6 +22,7 @@ import matplotlib
 
 matplotlib.use("Agg", force=True)
 
+from .common import SIZE_PRESET
 from .cases import catalog  # noqa: E402
 from .common import stats, write_result  # noqa: E402
 
@@ -26,7 +34,7 @@ def run_case(case) -> dict:
     report: dict = {"case": case.name, "points": feed.size}
     t0 = time.perf_counter()
     session = PlotSession(feed.next(), case.spec())
-    session.set_size("4x4")
+    session.set_size(SIZE_PRESET)
     if case.parameters:
         session.set_parameters(dict(case.parameters))
     session.rgba()
