@@ -1219,6 +1219,18 @@ def _qt5_plot_widget_class() -> type[Any]:
                 return
             if candidate is None or role is None:
                 if action in {"release", "cancel", "key"} or not active_pan:
+                    if _GESTURE_LOG.on and self._pointer_button is not None:
+                        # THE LATCH IS BEING DROPPED WHILE A BUTTON IS
+                        # DOWN.  Every move after this is submitted with
+                        # no button and is routed as a hover, so it never
+                        # reaches the gesture -- which is what a drag
+                        # that does not catch looks like from the log.
+                        _GESTURE_LOG.widget(
+                            self,
+                            "latch cleared by %s (active_pan=%s, button=%s)"
+                            % (action, active_pan, self._pointer_button),
+                            None,
+                        )
                     self._clear_interaction()
                 elif action == "move":
                     # A pan front is already complete when it reaches this
