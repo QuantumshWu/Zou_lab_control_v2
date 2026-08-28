@@ -187,7 +187,7 @@ def _scalar_close(left: float, right: float) -> bool:
     return abs(left - right) <= 1e-15 + 1e-12 * abs(right)
 
 
-def _relim_retains(mode: str) -> bool:
+def _relim_retains(mode: str, *, rules_geometry: bool = False) -> bool:
     """Whether an autoscaled axis may keep the limits it already shows.
 
     THE answer to that question, for every autoscaled axis there is.  TIGHT
@@ -203,9 +203,20 @@ def _relim_retains(mode: str) -> bool:
     re-fitted on tight, the colour scale sat behind a 35% deadband, and an
     operator who chose tight watched an image's scale ignore a peak that had
     moved by a fifth.
+
+    RULES_GEOMETRY is the one fact that changes the answer, and it is not
+    a second opinion about tight: it says these limits are not colouring
+    the picture, they are building it.  A height field's bar heights ARE
+    this scale, so re-fitting every revision changes the length of the
+    ruler between one frame and the next -- the z ticks slide up and down
+    the frame, and the "step the operator can see" cannot be seen, because
+    the scale it would be measured against moved with it.  Measured on a
+    live camera ROI: ten different z scales in a hundred and nineteen
+    frames, the z ticks walking four per cent of the box between them;
+    with the limits retained, one scale for the whole run.
     """
 
-    return mode != "tight"
+    return mode != "tight" or rules_geometry
 
 
 def _autoscaled_limits(
@@ -3437,8 +3448,18 @@ class MatplotlibRenderer:
         data_range: tuple[float, float] | None,
         state: DisplayState,
     ) -> tuple[float, float]:
+        # A height field takes its bar heights from these very numbers,
+        # so for that presentation the colour scale IS the z axis.  One
+        # value still serves both -- the scene's contract is that the
+        # same value gets the same height and the same colour -- but the
+        # answer is settled for a picture that is STOOD on it.
         return self._resolve_data_limits(
-            key, data_range, state, "color", allow_partial=True
+            key,
+            data_range,
+            state,
+            "color",
+            allow_partial=True,
+            rules_geometry=self._height_bars_active(key, state),
         )
 
     def _resolve_data_limits(
@@ -3450,10 +3471,16 @@ class MatplotlibRenderer:
         *,
         allow_partial: bool = False,
         cache_selected: bool = False,
+        rules_geometry: bool = False,
     ) -> tuple[float, float]:
         limits_key = f"{key}:automatic_{quantity}_limits"
         mode_key = f"{key}:relim_mode"
         mode = str(state["relim_mode"])
+        # Whether the limits build the picture is part of the question
+        # they answer: a panel that switches presentation asked a
+        # different question, so it re-fits rather than holding a range
+        # that was retained under a rule no longer in force.
+        asked = (mode, bool(rules_geometry))
         current = self._artists.get(limits_key)
         if mode == "fixed":
             automatic = None
@@ -3469,7 +3496,10 @@ class MatplotlibRenderer:
                 zero_based=mode == "normal",
                 # Changing the mode is a new question, so the answer is
                 # re-fitted rather than held over from the old one.
-                retain=_relim_retains(mode) and self._artists.get(mode_key) == mode,
+                retain=(
+                    _relim_retains(mode, rules_geometry=rules_geometry)
+                    and self._artists.get(mode_key) == asked
+                ),
             )
         selected = _select_display_limits(
             mode, automatic, state, quantity, allow_partial=allow_partial
@@ -3477,7 +3507,7 @@ class MatplotlibRenderer:
         cached = selected if cache_selected else automatic
         if cached is not None:
             self._artists[limits_key] = cached
-        self._artists[mode_key] = mode
+        self._artists[mode_key] = asked
         return selected
 
     def _resolve_distribution_limits(

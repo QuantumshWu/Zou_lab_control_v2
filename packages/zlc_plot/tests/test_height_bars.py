@@ -1462,3 +1462,60 @@ def test_scene_labels_are_cut_off_at_the_room_the_scene_owns() -> None:
             )
     finally:
         session.close()
+
+
+def test_a_height_field_keeps_its_scale_when_the_heat_map_would_not() -> None:
+    """The z scale is geometry, so tight must not re-rule it every shot.
+
+    A heat map under ``tight`` takes the data's range every revision, and a
+    colour scale that breathes by a few per cent is invisible.  The height
+    presentation stands the picture on those same numbers: re-fitting on a
+    noisy maximum changes the length of the ruler between one frame and the
+    next, and the z ticks walk up and down the frame.  Measured on a live
+    camera ROI before this held: ten different z scales in a hundred and
+    nineteen frames.
+
+    The two presentations must still agree about what a value MEANS, so this
+    checks the retention, not a second set of numbers: the same resolver, the
+    same limits, held.
+    """
+
+    from zlc_plot.rendering import _relim_retains
+
+    session = _session()
+    try:
+        session.set_parameters({"presentation": "height_bars",
+                                "relim_mode": "tight"})
+        session.rgba()
+        renderer = session._renderer
+        held = renderer._artists["image:automatic_color_limits"]
+
+        # A shot whose extremes moved, the way shot noise moves them.
+        seen = []
+        for revision, seed in enumerate((11, 23, 37, 51), start=2):
+            session.update_data(_scan_snapshot(10, revision=revision, seed=seed))
+            session.rgba()
+            seen.append(renderer._artists["image:automatic_color_limits"])
+        assert all(limits == held for limits in seen), (
+            "the height field re-ruled itself on %d of %d revisions: %s"
+            % (sum(1 for limits in seen if limits != held), len(seen), seen)
+        )
+
+        # And a heat map on the same data still takes tight at its word.
+        session.set_parameters({"presentation": "heatmap"})
+        session.rgba()
+        moved = []
+        for revision, seed in enumerate((11, 23, 37, 51), start=6):
+            session.update_data(_scan_snapshot(10, revision=revision, seed=seed))
+            session.rgba()
+            moved.append(renderer._artists["image:automatic_color_limits"])
+        assert len(set(moved)) > 1, (
+            "tight stopped following the data for a heat map too: %s" % (moved,)
+        )
+
+        # The rule the behaviour above rests on, named once.
+        assert _relim_retains("tight") is False
+        assert _relim_retains("tight", rules_geometry=True) is True
+        assert _relim_retains("normal") is True
+    finally:
+        session.close()
