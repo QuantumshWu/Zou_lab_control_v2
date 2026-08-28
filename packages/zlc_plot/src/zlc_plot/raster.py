@@ -2267,8 +2267,23 @@ class RasterPlotHost:
             if replaced is None:
                 self._pending.append(task)
             else:
+                # COALESCING MAY NOT MOVE WORK EARLIER.  Dropping the new
+                # task into the superseded one's slot puts it wherever
+                # that one happened to sit -- and a hover move queued
+                # before a press sits BEFORE it, so the first move of a
+                # drag overtook the press that was supposed to create the
+                # gesture.  It then ran with no gesture, answered with no
+                # active pan, and its answer cleared the button latch;
+                # every move after that was submitted with no button and
+                # routed as a hover, so the drag never reached the
+                # gesture at all.  Recorded on the operator's console,
+                # seven drags in fifty-six.
+                #
+                # Superseding is about not composing every intermediate
+                # move, which taking the tail position does just as well.
                 superseded = self._pending[replaced].completion
-                self._pending[replaced] = task
+                del self._pending[replaced]
+                self._pending.append(task)
             self._condition.notify()
         # Future.cancel() invokes done callbacks synchronously.  Never run
         # application callbacks while holding the non-reentrant queue lock.
@@ -2293,8 +2308,12 @@ class RasterPlotHost:
         was queued before it.
 
         Pointer tasks keep their order AMONG THEMSELVES (press, move, release
-        is a sequence), and only one can be pending at a time because they
-        coalesce, so a data frame waits for at most one of them.
+        is a sequence), and only one MOVE can be pending at a time because
+        they coalesce, so a data frame waits for at most a few of them.
+        That order is the queue's, and it holds only because superseding a
+        pointer task appends the replacement instead of dropping it into
+        the superseded one's slot -- which used to let a drag's first move
+        overtake its own press.  See _submit.
         """
 
         if self._front is None:

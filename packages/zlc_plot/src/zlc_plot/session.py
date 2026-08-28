@@ -46,7 +46,6 @@ from ._gesture_engine import (
     range_endpoint_hit,
 )
 from ._session_fit import FitSessionMixin, _WarmSeed
-from ._gesture_log import LOG as _GESTURE_LOG
 from ._session_gesture import GestureSessionMixin
 from ._session_live import LiveSessionMixin
 from ._session_state import (
@@ -4792,22 +4791,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     event,
                     interaction_transform=interaction_transform,
                 )
-                if _GESTURE_LOG.on:
-                    # THE ONE PLACE that sees every way a press can end.
-                    # _on_button_press returns early from a dozen points
-                    # -- no transform, the pointer not on the active
-                    # axes, no origin -- and a press that ends at one of
-                    # them is exactly what "it did not catch" looks like.
-                    built = self._gesture
-                    _GESTURE_LOG.press_resolved(
-                        self,
-                        built=None if built is None else type(built).__name__,
-                        on_active_axes=bool(
-                            event_axes is not None
-                            and event_axes is self._renderer.primary_axes
-                        ),
-                        had_axes=event_axes is not None,
-                    )
             elif selected_action == "move" and button is None:
                 series("move", event_axes)
             elif selected_action == "release":
