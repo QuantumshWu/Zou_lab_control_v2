@@ -2837,8 +2837,28 @@ class ConsolePresenter:
                 dict(state.display),
                 facet_cell_kind=actual_cell_kind,
             )
-        except (TypeError, ValueError, KeyError):
-            controls = ()
+            display_unavailable = ""
+        except (TypeError, ValueError, KeyError) as error:
+            # WHICH controls a panel has is a fact about its KIND; what
+            # they hold is the authored bag.  Answering "one of these
+            # values is unacceptable" by returning no controls at all
+            # said the second thing with the first thing's words, and
+            # the consequences ran a long way: an empty control set is
+            # a different FIELD SET, which sends the Setting form down
+            # its replacement path, which destroys the widget the
+            # operator's cursor is in and re-measures the popup around
+            # them.  Deleting a colour maximum collapsed a form of
+            # twenty-nine rows to eleven that way.
+            #
+            # So: keep the vocabulary, from the kind alone, and say what
+            # could not be applied -- exactly as the sibling that
+            # describes an unbound panel already does.
+            display_unavailable = _error_text(error)
+            controls = parameter_controls_for_kind(
+                state.kind,
+                None,
+                facet_cell_kind=actual_cell_kind,
+            )
         # The authored table is put back on these rows by
         # _publish_panel_state, which every path handing a surface to a view
         # goes through -- keyed on the row's own "key".  A second overlay
@@ -2848,6 +2868,7 @@ class ConsolePresenter:
         return self._parameter_surface(
             controls,
             state,
+            display_unavailable=display_unavailable,
             semantic=tuple(entries),
             semantic_unavailable=semantic_reason,
             fit_unavailable=str(reason),

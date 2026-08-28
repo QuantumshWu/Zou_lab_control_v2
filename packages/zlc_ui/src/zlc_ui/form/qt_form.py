@@ -1161,6 +1161,19 @@ class FluentParameterForm(QtWidgets.QWidget):
     def write_all(self, values: Mapping[str, object]) -> None:
         self.populate(values)
 
+    def _layout_order(self) -> list[str]:
+        """The keys in the order the layout is holding them right now."""
+
+        rows = {id(row): key for key, row in self._rows.items()}
+        order: list[str] = []
+        for index in range(self._layout.count()):
+            item = self._layout.itemAt(index)
+            widget = None if item is None else item.widget()
+            key = None if widget is None else rows.get(id(widget))
+            if key is not None:
+                order.append(key)
+        return order
+
     def reconcile(
         self,
         spec: FormSpec,
@@ -1201,6 +1214,23 @@ class FluentParameterForm(QtWidgets.QWidget):
         new_dependents = self._dependency_map(spec)
 
         old_fields = self._fields
+        # WHICH row the operator is inside, asked once, before anything
+        # is decided.  The retained loop already refused to write over
+        # them; every other path here could still take the widget away
+        # underneath their cursor -- rebuild it because its family
+        # changed, delete its row because the key left the spec, or
+        # re-insert it because some other row was added.  A row that
+        # disappears mid-word is the same defect as a value that
+        # changes mid-word, and it is the one the operator sees as the
+        # whole form collapsing.
+        editing_key = next(
+            (
+                key
+                for key, widget in self._widgets.items()
+                if _being_edited(widget)
+            ),
+            None,
+        )
         replacements: dict[
             str,
             tuple[QtWidgets.QWidget, QtWidgets.QWidget, FluentSwitch | None],
@@ -1215,6 +1245,11 @@ class FluentParameterForm(QtWidgets.QWidget):
                 old_field is not None
                 and _widget_family(old_field) == _widget_family(field)
             ):
+                continue
+            if field.key == editing_key:
+                # Its family changed while they are typing in it.  The
+                # new widget lands the moment they leave; a projection
+                # is never worth the words they are still writing.
                 continue
             handler = new_handlers[field.key]
             widget = handler.build(
@@ -1284,6 +1319,8 @@ class FluentParameterForm(QtWidgets.QWidget):
             for key, row in tuple(self._rows.items()):
                 if key in desired_keys and key not in replaced_keys:
                     continue
+                if key == editing_key:
+                    continue
                 self._layout.removeWidget(row)
                 # Reconcile may run while an Edit page is visible.  An
                 # unparented QWidget becomes a transient native window; hide
@@ -1308,8 +1345,19 @@ class FluentParameterForm(QtWidgets.QWidget):
                     automatic.setEnabled(not field.unavailable)
                     widget.setEnabled(not selected and not field.unavailable)
 
-            order_changed = self._spec.keys != spec.keys or bool(replacements)
+            # Only the rows whose POSITION changed.  This used to be
+            # "any key was replaced or the key list differs", so adding
+            # one row at the end pulled every surviving row out of the
+            # layout and put it back -- which is most of what the
+            # operator sees as the form collapsing and rebuilding.
+            placed = [
+                key for key in self._layout_order() if key in self._rows
+            ]
+            wanted = [field.key for field in spec.fields if field.key in self._rows]
+            order_changed = placed != wanted
             for index, field in enumerate(spec.fields):
+                if field.key not in self._rows:
+                    continue
                 row = self._rows[field.key]
                 if isinstance(row, FluentSettingRow):
                     automatic = self._auto_switches.get(field.key)

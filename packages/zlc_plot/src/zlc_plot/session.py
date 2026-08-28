@@ -1151,7 +1151,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         )
         display_store = DisplayStateStore(
             schema,
-            initial_state.parameters,
+            self._filled_store_values(schema, initial_state.parameters),
             initial_revision=old_state.revision + 1,
         )
         projection = FitProjection(
@@ -2046,6 +2046,50 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             "current value from; say where it materialises from here"
         )
 
+    def _filled_store_values(
+        self,
+        schema: object,
+        values: Mapping[str, object],
+    ) -> dict[str, object]:
+        """Fill any fixed pair a caller is handing over half-authored.
+
+        A DisplayStateStore refuses to hold a fixed pair with a missing
+        end -- its own full-state validator says so -- and a store that
+        will not build is a host that will not configure, which takes
+        the panel's entire display vocabulary with it.  The constructor
+        and the parameter path already keep the promise the write gate
+        makes; this is the third and last way a store gets built, so
+        every one of them now keeps it.
+
+        Before the renderer exists there is no picture to take the
+        missing end FROM; that case is the constructor's deferral, and
+        it is the only one that may pass a gap through.
+        """
+
+        filled = dict(values)
+        if self._renderer is None:
+            return filled
+        for mode_name, low_name, high_name in limit_pairs():
+            if (
+                mode_name not in schema
+                or low_name not in schema
+                or high_name not in schema
+            ):
+                continue
+            if filled.get(mode_name) != RelimMode.FIXED.value:
+                continue
+            if (
+                filled.get(low_name) is not None
+                and filled.get(high_name) is not None
+            ):
+                continue
+            low, high = self._current_limits_for(low_name)
+            if filled.get(low_name) is None:
+                filled[low_name] = low
+            if filled.get(high_name) is None:
+                filled[high_name] = high
+        return filled
+
     def _materialize_fixed_limits(
         self,
         prepared: dict[str, object],
@@ -2519,7 +2563,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         )
         display_store = DisplayStateStore(
             schema,
-            initial_state.parameters,
+            self._filled_store_values(schema, initial_state.parameters),
             initial_revision=old_state.revision + 1,
         )
         focused = 0 if isinstance(spec, FacetGridPlot) else None

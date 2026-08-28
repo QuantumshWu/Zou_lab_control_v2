@@ -134,6 +134,42 @@ def test_one_cleared_end_of_a_fixed_pair_materializes_like_two() -> None:
         session.close()
 
 
+def test_replacing_the_spec_keeps_the_promise_too() -> None:
+    """Every DisplayStateStore in a session, not just the two on the edit path.
+
+    A store refuses to hold a fixed pair with a missing end, and a store
+    that will not build is a host that will not configure -- which takes
+    the panel's whole display vocabulary with it.  There are exactly three
+    ways a store gets built; the spec-replacement one never learned the
+    rule, so a half-authored pair reaching it by any route (a saved board,
+    a restored layout) would have wedged the panel where no keystroke can.
+    """
+
+    session = PlotSession(
+        image_snapshot(),
+        ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
+        parameters={"relim_mode": "fixed", "color_min": None, "color_max": None},
+    )
+    try:
+        session.rgba()
+        # Half-author it directly in the store, the shape a stored board can
+        # carry, then ask for the replacement every kind change performs.
+        held = dict(session.display_state.values)
+        held["color_max"] = None
+        prepared = session._prepare_replacement(
+            session._spec,
+            held,
+            session._size or session.surface_plan.preset,
+        )
+        store = prepared[2]
+        assert store.state.values["color_max"] is not None, (
+            "the replacement store took a gap the picture could have filled"
+        )
+        assert store.state.values["relim_mode"] == "fixed"
+    finally:
+        session.close()
+
+
 def test_a_fixed_pair_takes_its_own_axis_limits_and_says_so() -> None:
     """Every pair names where it materialises from; none inherits.
 
