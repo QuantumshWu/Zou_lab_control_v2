@@ -101,7 +101,13 @@ class ConsoleBench:
         self._tmp = pathlib.Path(tempfile.mkdtemp(prefix="console-bench-"))
 
     # ------------------------------------------------------------ lifecycle
-    def start(self, *, camera: str = "mot_camera", exposure: float = 0.01):
+    def start(
+        self,
+        *,
+        camera: str = "mot_camera",
+        exposure: float = 0.01,
+        clear_preview_panels: bool = True,
+    ):
         from pulse_fixtures import PULSE_NAME, write_ordinary_pulse
         from zlc_workbench.apps.task_console import build_console
         from zlc_workbench.logic import stable_signal_key
@@ -148,7 +154,31 @@ class ConsoleBench:
         self.view._view.tabs.setCurrentIndex(0)
         self.presenter.set_deriving(True)
         self.report["signal"] = self.signal
+        if clear_preview_panels:
+            self.report["preview_panels_closed"] = self._clear_panels()
         return self
+
+    def _clear_panels(self) -> tuple[str, ...]:
+        """Start from zero panels, so the scenario is DECLARED not inherited.
+
+        A logic node declares preview panels and the console opens them --
+        correct for an operator, and an uncontrolled second live panel for a
+        benchmark.  Leaving it there made every "one panel" measurement a
+        two-panel measurement: the seam table came back at 29-59 per cent
+        cpu because the thread was competing with a panel nobody asked for.
+        Detecting it was not enough; require_panels only made it visible.
+        """
+
+        closed = []
+        for panel_id in tuple(self.presenter.panels):
+            try:
+                self.presenter.remove_panel(panel_id)
+                closed.append(panel_id)
+            except Exception:
+                continue
+        if closed:
+            self._pump(1.5)
+        return tuple(closed)
 
     def _pump(self, seconds: float) -> None:
         deadline = time.monotonic() + seconds
@@ -507,7 +537,9 @@ def main() -> None:
     with bench:
         bench.start()
         panel = bench.add_panel(args.kind, size=args.size)
-        guards.require_panels(bench.presenter, len(bench.presenter.panels))
+        # The scenario declares ONE panel; anything else is contention the
+        # numbers would silently carry.
+        guards.require_panels(bench.presenter, 1)
         payload = {
             "kind": args.kind,
             "size": args.size,

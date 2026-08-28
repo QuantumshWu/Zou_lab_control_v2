@@ -15,6 +15,13 @@ functions, where there is only one.
 
 Numba dispatchers carry ``__wrapped__`` and cannot be wrapped this way --
 :func:`watch_module` says so out loud instead of silently timing nothing.
+
+Wall AND cpu, always both.  A console runs a producer, several panels and a
+parallel pool on one machine, so a seam's thread is descheduled inside it
+constantly: a function whose own work is 0.4 ms was reported at 4.8 ms of
+wall time, and read as "this is slow" when it was "this waited".  The two
+columns are the difference between an optimisation target and a scheduling
+fact -- ``time.thread_time`` is per-thread CPU, so waiting does not count.
 """
 from __future__ import annotations
 
@@ -23,16 +30,17 @@ import time
 from collections import defaultdict
 
 
-_TOTALS: dict[str, list] = defaultdict(lambda: [0, 0.0])
+_TOTALS: dict[str, list] = defaultdict(lambda: [0, 0.0, 0.0])
 _local = threading.local()
 _lock = threading.Lock()
 
 
 class _Frame:
-    __slots__ = ("children",)
+    __slots__ = ("children", "cpu_children")
 
     def __init__(self) -> None:
         self.children = 0.0
+        self.cpu_children = 0.0
 
 
 def _timed(name, function):
@@ -43,17 +51,21 @@ def _timed(name, function):
         frame = _Frame()
         stack.append(frame)
         started = time.perf_counter()
+        cpu_started = time.thread_time()
         try:
             return function(*args, **kwargs)
         finally:
             gross = time.perf_counter() - started
+            cpu_gross = time.thread_time() - cpu_started
             stack.pop()
             if stack:
                 stack[-1].children += gross
+                stack[-1].cpu_children += cpu_gross
             with _lock:
                 row = _TOTALS[name]
                 row[0] += 1
                 row[1] += gross - frame.children
+                row[2] += cpu_gross - frame.cpu_children
 
     return wrapper
 
@@ -122,7 +134,10 @@ def rows(seconds: float) -> list[dict]:
 
     with _lock:
         items = sorted(
-            ((name, count, total) for name, (count, total) in _TOTALS.items()),
+            (
+                (name, count, total, cpu)
+                for name, (count, total, cpu) in _TOTALS.items()
+            ),
             key=lambda row: -row[2],
         )
     return [
@@ -131,28 +146,39 @@ def rows(seconds: float) -> list[dict]:
             "calls": count,
             "self_ms_total": round(total * 1e3, 1),
             "self_ms_per_call": round(total / count * 1e3, 2) if count else 0.0,
+            "cpu_ms_per_call": round(cpu / count * 1e3, 2) if count else 0.0,
+            # What fraction of the wall time this thread was actually running.
+            # Well under 1 means the seam WAITED; optimising it would not help.
+            "cpu_share": round(cpu / total, 2) if total > 0 else 0.0,
             "per_second": round(count / seconds, 1) if seconds > 0 else 0.0,
         }
-        for name, count, total in items
+        for name, count, total, cpu in items
     ]
 
 
 def report(seconds: float, top: int = 20) -> str:
-    """The same rows, as a table to read."""
+    """The same rows, as a table to read.
+
+    ``cpu%`` is what separates a slow seam from a waiting one: at 100 per
+    cent the thread ran the whole time and the number is work; well below
+    it the thread was descheduled, and optimising the seam buys nothing.
+    """
 
     lines = [
-        "%-46s %6s %9s %9s %8s"
-        % ("seam", "calls", "self ms", "ms/call", "per s")
+        "%-46s %6s %9s %10s %9s %5s %7s"
+        % ("seam", "calls", "wall ms", "wall/call", "cpu/call", "cpu%", "per s")
     ]
     for row in rows(seconds)[:top]:
         lines.append(
-            "%-46s %6d %9.1f %9.2f %8.1f"
+            "%-46s %6d %9.1f %10.2f %9.2f %4.0f%% %7.1f"
             % (
                 row["seam"],
                 row["calls"],
                 row["self_ms_total"],
                 row["self_ms_per_call"],
+                row["cpu_ms_per_call"],
+                row["cpu_share"] * 100.0,
                 row["per_second"],
             )
         )
-    return "\n".join(lines)
+    return chr(10).join(lines)
