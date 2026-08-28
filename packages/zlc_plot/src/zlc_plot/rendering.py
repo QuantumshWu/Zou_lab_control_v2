@@ -4079,29 +4079,15 @@ class MatplotlibRenderer:
         be reused, and after two consecutive misses the compose gives up
         and draws.  Measured, that draw was 63 per cent of an 83 ms move.
 
-        THE DRAW DOES NOT HAPPEN HERE.  It did, for a while: the press
-        called capture_gesture_background so the first move would find a
-        background waiting.  Measured on the operator's own panel, with
-        the hand moving across the press the way a hand does, that cost
-        the press 26.3 ms of host time against 6.0 for a move -- and the
-        first move was no faster for it (9.8 ms with the capture, 7.4
-        without).  It was duplicated work: the press composed a frame
-        nobody sees, and the first move composed again.  Press to the
-        picture first following went 43.5 ms; without the capture the
-        press itself is 2.9.
-
-        The selector path already knew this.  Its own comment records the
-        same experiment with the same answer -- adding an explicit capture
-        at the press took the first move from 26 ms to 47 -- because the
-        press and the move that follows it run back to back on one worker,
-        so work added at the press is work the first move waits for.  This
-        is that lesson, applied to the gesture it was not applied to.
-
-        The earlier numbers that argued for the capture (first move 41-50
-        against 21-24) were taken on a bench that beat the console at
-        three to five hundred hertz and delivered its clicks by calling
-        the widget's handler directly.  They do not survive the harness
-        being fixed.
+        THE DRAW HAPPENS HERE, at the press.  The paragraph above promised
+        it and the code only invalidated: the background, its signature and
+        the composed generation were cleared, and rebuilding them fell to
+        whoever composed next -- the first move.  So the first move of a
+        press-then-drag paid a full hidden-dynamics draw and a whole-figure
+        background capture that the tenth move does not, which is exactly
+        the stutter an operator sees when they press and drag but never
+        when the button was already down.  Composing under the confinement
+        makes the first move cost what a move costs.
         """
 
         self._composed_generation = -1
@@ -4109,6 +4095,31 @@ class MatplotlibRenderer:
         self._background_region = None
         self._background_signature = None
         self._chrome_churn = 0
+        if axes is not None:
+            self.capture_gesture_background()
+
+    def capture_gesture_background(self) -> None:
+        """Compose once NOW, so the first move costs what the tenth costs.
+
+        Every gesture partitions the figure: what the hand moves is dynamic
+        for the length of it, everything else is chrome that will be the
+        same pixels at the end as at the start.  That partition is only
+        worth anything once the chrome has actually been captured, and the
+        capture happens in a compose.  A gesture that installed its
+        partition and stopped left the capture -- a full hidden-dynamics
+        draw and a whole-figure background grab -- to whoever composed next,
+        which is the operator's first move.
+
+        Measured on a live image pan: first move 41-50 ms against 21-24 ms
+        for later ones, 2.0x.  With the capture here, 25-33 against 18-20.
+
+        In the style, like every other compose: a frame drawn outside it is
+        drawn under Matplotlib's defaults, which is a different picture from
+        every other frame.
+        """
+
+        with style_context(self.style):
+            self._compose_frame(chrome_stable=True)
 
     @property
     def height_bars_camera(self) -> "HeightBarCamera | None":
