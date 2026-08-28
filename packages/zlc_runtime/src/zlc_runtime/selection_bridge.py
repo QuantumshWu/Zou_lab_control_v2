@@ -423,6 +423,46 @@ SELECTION_PLOT_KINDS = frozenset({"image", "curve", "histogram", "rolling"})
 
 
 @dataclass(frozen=True, slots=True)
+class DrawnRegion:
+    """The shape the hand put on the picture.
+
+    Not always the shape the derivation reads.  A histogram's drag draws a
+    rectangle whose y is a bin COUNT: it restricts nothing upstream, so the
+    derivation reads an x range.  Saying that by REWRITING
+    ``selector_kind`` made one word answer two questions -- which geometry
+    to derive, and what a surface should show and remove -- and the two
+    surfaces of one panel then disagreed: the card kept the box the hand
+    drew while the Setting editor was handed a full-height band, and
+    removing "the region" asked a surface to drop a kind it never had.
+
+    ``lower``/``upper`` carry only the bound ``ranges`` cannot: the one
+    that names nothing upstream.  When the drawn shape and the derived
+    geometry agree, there is nothing extra to carry and this is ``None``.
+    """
+
+    kind: str
+    lower: float | None = None
+    upper: float | None = None
+
+    def __post_init__(self) -> None:
+        kind = canonical_text(self.kind, "drawn region kind")
+        if kind not in {"area", "x_range"}:
+            raise ValueError("drawn region kind must be area or x_range")
+        if (self.lower is None) != (self.upper is None):
+            raise ValueError("drawn region bounds must be given together")
+        if self.lower is not None:
+            lower = _finite(self.lower, "drawn region lower")
+            upper = _finite(self.upper, "drawn region upper")
+            # Ordered the way SelectionRange orders its own: a drag that
+            # ends above where it began is the same rectangle.
+            if lower > upper:
+                lower, upper = upper, lower
+            object.__setattr__(self, "lower", lower)
+            object.__setattr__(self, "upper", upper)
+        object.__setattr__(self, "kind", kind)
+
+
+@dataclass(frozen=True, slots=True)
 class SelectionState:
     """Pure numeric selector state supplied by a plot adapter.
 
@@ -439,6 +479,9 @@ class SelectionState:
     facets: tuple[FacetCondition, ...] = ()
     repeat_index: int | None = None
     revision: int = 0
+    #: What the hand drew, when that differs from what is derived.  The
+    #: runtime never reads it; the panel's two surfaces do.
+    drawn: "DrawnRegion | None" = None
 
     def __post_init__(self) -> None:
         plot_kind = canonical_text(self.plot_kind, "selection plot_kind")
@@ -476,6 +519,8 @@ class SelectionState:
         object.__setattr__(self, "ranges", ranges)
         object.__setattr__(self, "facets", facets)
         object.__setattr__(self, "repeat_index", repeat_index)
+        if self.drawn is not None and not isinstance(self.drawn, DrawnRegion):
+            raise TypeError("selection drawn must be a DrawnRegion or None")
         object.__setattr__(
             self,
             "revision",

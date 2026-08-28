@@ -23,6 +23,7 @@ from .selection_bridge import (
     SelectionBridge,
     SelectionChange,
     SelectionRange,
+    DrawnRegion,
     SelectionState,
     selection_output_catalog,
 )
@@ -50,6 +51,7 @@ __all__ = (
     "SelectionBridge",
     "SelectionChange",
     "SelectionRange",
+    "DrawnRegion",
     "SelectionState",
     "FitEventValue",
     "selection_output_catalog",

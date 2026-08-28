@@ -45,6 +45,7 @@ from zlc_plot import (
 from zlc_plot.selectors import RectangleRange, SelectorState as PlotSelectorState
 
 from zlc_runtime import (
+    DrawnRegion,
     FitEventValue,
     SelectionBridge,
     SelectionChange,
@@ -253,6 +254,21 @@ def panel_selection_document(selection: SelectionState | None) -> dict[str, Any]
     return {
         "plot_kind": str(selection.plot_kind),
         "selector_kind": str(selection.selector_kind),
+        "drawn": (
+            None
+            if selection.drawn is None
+            else {
+                "kind": str(selection.drawn.kind),
+                "lower": (
+                    None if selection.drawn.lower is None
+                    else float(selection.drawn.lower)
+                ),
+                "upper": (
+                    None if selection.drawn.upper is None
+                    else float(selection.drawn.upper)
+                ),
+            }
+        ),
         "ranges": [
             {
                 "axis": str(item.axis),
@@ -286,7 +302,9 @@ def panel_selection_from_document(document: Mapping[str, Any]) -> SelectionState
 
     if not document:
         return None
-    expected = {"plot_kind", "selector_kind", "ranges", "facets", "repeat_index"}
+    expected = {
+        "plot_kind", "selector_kind", "drawn", "ranges", "facets", "repeat_index",
+    }
     if set(document) != expected:
         raise ValueError("panel selector fields do not match the current grammar")
     raw_ranges = document["ranges"]
@@ -311,9 +329,24 @@ def panel_selection_from_document(document: Mapping[str, Any]) -> SelectionState
             "domain",
         }:
             raise ValueError("panel selector facet fields do not match the current grammar")
+    raw_drawn = document["drawn"]
+    if raw_drawn is not None and (
+        not isinstance(raw_drawn, Mapping)
+        or set(raw_drawn) != {"kind", "lower", "upper"}
+    ):
+        raise ValueError("panel selector drawn fields do not match the current grammar")
     return SelectionState(
         plot_kind=str(document["plot_kind"]),
         selector_kind=str(document["selector_kind"]),
+        drawn=(
+            None
+            if raw_drawn is None
+            else DrawnRegion(
+                str(raw_drawn["kind"]),
+                None if raw_drawn["lower"] is None else float(raw_drawn["lower"]),
+                None if raw_drawn["upper"] is None else float(raw_drawn["upper"]),
+            )
+        ),
         ranges=tuple(
             SelectionRange(
                 axis=str(item["axis"]),
@@ -336,6 +369,39 @@ def panel_selection_from_document(document: Mapping[str, Any]) -> SelectionState
     )
 
 
+def _surface_geometry(
+    selection: SelectionState,
+) -> tuple[str, tuple[float, float], tuple[float, float] | None]:
+    """What a plot surface shows for this region: kind, x bounds, y bounds.
+
+    ONE owner, because three callers need the same answer -- mounting a
+    surface, mirroring onto the panel's OTHER surface, and taking the
+    region away.  While each read ``selector_kind`` directly, a histogram's
+    box came back as a full-height band on the Setting editor while the
+    card still showed the rectangle, and the removal asked the card for a
+    kind it did not have.
+    """
+
+    ranges = tuple(selection.ranges)
+    x_bounds = (float(ranges[0].lower), float(ranges[0].upper))
+    drawn = selection.drawn
+    if drawn is not None and drawn.kind == "area":
+        if drawn.lower is None or drawn.upper is None:
+            raise ValueError("a drawn area needs the bound its ranges do not carry")
+        return "area", x_bounds, (float(drawn.lower), float(drawn.upper))
+    if selection.selector_kind == "area":
+        if len(ranges) != 2:
+            raise ValueError("an area panel selection requires x and y ranges")
+        return "area", x_bounds, (float(ranges[1].lower), float(ranges[1].upper))
+    if selection.selector_kind == "x_range":
+        if len(ranges) != 1:
+            raise ValueError("an x-range panel selection requires one range")
+        return "x_range", x_bounds, None
+    raise ValueError(
+        f"unsupported panel selector kind {selection.selector_kind!r}"
+    )
+
+
 def panel_plot_selectors(
     selection: SelectionState | None,
     *,
@@ -345,30 +411,23 @@ def panel_plot_selectors(
 
     states: list[PlotSelectorState] = []
     if selection is not None:
-        ranges = tuple(selection.ranges)
-        if selection.selector_kind == "area":
-            if len(ranges) != 2:
-                raise ValueError("an area panel selection requires x and y ranges")
+        kind, x_bounds, y_bounds = _surface_geometry(selection)
+        if kind == "area":
+            assert y_bounds is not None
             states.append(PlotSelectorState(
                 SelectorKind.AREA,
                 RectangleRange(
-                    NumericRange(ranges[0].lower, ranges[0].upper),
-                    NumericRange(ranges[1].lower, ranges[1].upper),
+                    NumericRange(*x_bounds),
+                    NumericRange(*y_bounds),
                 ),
                 facet_index=facet_index,
             ))
-        elif selection.selector_kind == "x_range":
-            if len(ranges) != 1:
-                raise ValueError("an x-range panel selection requires one range")
+        else:
             states.append(PlotSelectorState(
                 SelectorKind.X_RANGE,
-                NumericRange(ranges[0].lower, ranges[0].upper),
+                NumericRange(*x_bounds),
                 facet_index=facet_index,
             ))
-        else:
-            raise ValueError(
-                f"unsupported panel selector kind {selection.selector_kind!r}"
-            )
     return tuple(states)
 
 
@@ -498,19 +557,18 @@ def panel_selection_binds_a_revision(selection: SelectionState) -> bool:
 def _apply_panel_selection(host: Any, selection: SelectionState) -> object:
     """Project one panel-owned canonical selection onto a plot surface."""
 
-    ranges = selection.ranges
-    if selection.selector_kind == "area":
-        x, y = ranges
+    kind, x_bounds, y_bounds = _surface_geometry(selection)
+    if kind == "area":
+        assert y_bounds is not None
         return host.set_area_selector(
-            NumericRange(x.lower, x.upper),
-            NumericRange(y.lower, y.upper),
+            NumericRange(*x_bounds),
+            NumericRange(*y_bounds),
             display=False,
             emit_change=False,
         )
-    value = ranges[0]
     return host.set_x_selector(
-        value.lower,
-        value.upper,
+        x_bounds[0],
+        x_bounds[1],
         display=False,
         emit_change=False,
     )
@@ -519,8 +577,9 @@ def _apply_panel_selection(host: Any, selection: SelectionState) -> object:
 def _remove_panel_selection(host: Any, selection: SelectionState) -> object:
     """Remove the same selector kind from the panel's other plot surface."""
 
+    kind, _x_bounds, _y_bounds = _surface_geometry(selection)
     return host.remove_selector(
-        SelectorKind(selection.selector_kind),
+        SelectorKind(kind),
         emit_change=False,
     )
 
@@ -840,6 +899,7 @@ class PlotSelectionSource:
                 repeat_index=repeat_index,
                 revision=int(selector.revision),
             )
+        drawn: DrawnRegion | None = None
         if selector_kind == "area":
             # A drag always draws a box; what the box MEANS is the surface's
             # business.  Its x bound always says something -- the interval on
@@ -868,6 +928,19 @@ class PlotSelectionSource:
                     )
                 )
             else:
+                # The DERIVATION reads an x range -- that is what
+                # ``selector_kind`` answers.  What the hand DREW is still a
+                # box, and that is what both of this panel's surfaces must
+                # show and must be asked to remove.  Rewriting the one word
+                # to mean the other is what put a full-height band in the
+                # Setting editor while the card kept the rectangle, and made
+                # "clear the region" ask a surface to drop a kind it never
+                # had.
+                drawn = DrawnRegion(
+                    "area",
+                    float(selector.value.y.low),
+                    float(selector.value.y.high),
+                )
                 selector_kind = "x_range"
             ranges = tuple(ranges)
         else:
@@ -887,6 +960,7 @@ class PlotSelectionSource:
             facets=facets,
             repeat_index=repeat_index,
             revision=int(selector.revision),
+            drawn=drawn,
         )
 
 

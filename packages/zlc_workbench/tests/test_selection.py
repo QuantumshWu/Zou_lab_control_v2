@@ -307,6 +307,55 @@ def test_a_histogram_value_range_remains_a_panel_local_selector(frames) -> None:
         host.close()
 
 
+def test_a_box_on_a_histogram_stays_a_box_on_every_surface(frames) -> None:
+    """What the derivation reads and what a surface shows are two questions.
+
+    A histogram's y is a bin COUNT, so the region derives an x range -- but
+    the hand drew a rectangle, and the panel's card and its Setting editor
+    must both show that rectangle and both be asked to remove it.  While one
+    word answered both questions, the editor was handed a full-height band
+    while the card kept the box, and "clear the region" asked a surface to
+    drop a selector kind it never had.
+    """
+
+    plot = pytest.importorskip("zlc_plot")
+    from zlc_plot.selectors import SelectorKind
+
+    _signal, snapshot = frames
+    host = plot.RasterPlotHost.from_plot(snapshot, plot.HistogramPlot())
+    source = PlotSelectionSource(host)
+    seen: list = []
+    source.subscribe_observation(seen.append)
+    try:
+        _draw_area(host)
+        assert seen
+        state = seen[-1].state
+
+        # What the derivation reads: one bound, on the measured value.
+        assert state.selector_kind == "x_range"
+        assert len(state.ranges) == 1
+        assert state.ranges[0].domain == "value"
+
+        # What the picture shows: the box, on every surface.
+        assert state.drawn is not None
+        assert state.drawn.kind == "area"
+        assert state.drawn.lower is not None and state.drawn.upper is not None
+        painted = panel_plot_selectors(state, facet_index=None)
+        assert [item.kind for item in painted] == [SelectorKind.AREA]
+
+        # And it survives the document a layout writes down.
+        restored = panel_selection_from_document(panel_selection_document(state))
+        assert restored is not None
+        assert restored.drawn == state.drawn
+        assert [
+            item.kind
+            for item in panel_plot_selectors(restored, facet_index=None)
+        ] == [SelectorKind.AREA]
+    finally:
+        source.close()
+        host.close()
+
+
 def test_a_point_selector_is_a_readout_not_an_error(image_panel) -> None:
     """A crosshair or threshold marks a point: it derives nothing AND is no
     failure.
