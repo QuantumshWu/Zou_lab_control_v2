@@ -1100,6 +1100,7 @@ def _qt5_plot_widget_class() -> type[Any]:
             double: bool = False,
             step: float = 0.0,
             key: str | None = None,
+            held: bool = False,
         ) -> None:
             if not self._host_can_serve():
                 return
@@ -1148,6 +1149,7 @@ def _qt5_plot_widget_class() -> type[Any]:
                 interaction=(
                     None if source_front is None else source_front.interaction
                 ),
+                held=held,
             )
 
             def completed(value: Future[object]) -> None:
@@ -1301,6 +1303,13 @@ def _qt5_plot_widget_class() -> type[Any]:
                 "move",
                 event,
                 button=button,
+                # The window system's own button mask, not our
+                # ``_pointer_button``: that field is cleared as soon as a
+                # press resolves no candidate and no role, which is what an
+                # area rubber-band press does, while the gesture it started
+                # goes right on running on the host.  Only the mask can say
+                # whether a hand is actually pressing.
+                held=self._buttons_are_held(event),
             )
             event.accept()
 
@@ -1348,6 +1357,18 @@ def _qt5_plot_widget_class() -> type[Any]:
                 event.accept()
                 return
             super().keyPressEvent(event)
+
+        @staticmethod
+        def _buttons_are_held(event: object) -> bool:
+            """Is any mouse button physically down, per the window system?"""
+
+            buttons = getattr(event, "buttons", None)
+            if not callable(buttons):
+                return False
+            try:
+                return int(buttons()) != 0
+            except (TypeError, ValueError):
+                return False
 
         def _clear_interaction(self) -> None:
             try:

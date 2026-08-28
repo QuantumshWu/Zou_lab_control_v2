@@ -422,6 +422,46 @@ _HANDS = _HandArbiter()
 _HAND_YIELD_POLL_SECONDS = 0.008
 
 
+def _is_a_hand(action: str, held: bool) -> bool:
+    """Whether this pointer event is a hand the cameras must stand aside for.
+
+    The arbiter's bargain is that the hand's own pixels replace the camera's:
+    a drag repaints the thing being dragged on every move, so trading the
+    camera's frames for the gesture's is a trade the operator wanted.  A bare
+    HOVER makes no pixels at all -- it resolves a candidate and returns
+    without publishing -- so the same bargain gives up the camera and buys
+    nothing.
+
+    Measured on a live console at real density, one image panel, four panels
+    in the process:
+
+        still, selectors on           9.22 fps
+        DRAGGING at 100 Hz           85.12 fps   (the gesture's own frames)
+        bare HOVER at 100 Hz          0.11 fps   -- and every other panel too
+
+    The mechanism is arithmetic: every raw move arms a hold of at least
+    _MINIMUM_HOLD_SECONDS, and a pointer at 60-125 Hz renews it three to five
+    times faster than it can expire, so ``busy()`` never goes false and every
+    publishing task in the process stands aside for as long as the pointer is
+    moving.  Measured thresholds: 29 moves a second still froze it (34 ms
+    apart, under the 40 ms floor); 9 a second did not (107 ms apart).
+
+    So the hand is every pointer event EXCEPT a move with no button PHYSICALLY
+    down, and the leave that follows it.  A scroll carries no button and is
+    still a hand: the wheel repaints, and the operator is waiting for it.
+
+    HELD is the button mask the window system delivered, not the widget's own
+    ``_pointer_button``.  That field is cleared the moment a press resolves no
+    candidate and no role (backends.py, _finish_pointer), which is exactly
+    what an area rubber-band press does -- so every move of the commonest
+    selector gesture would have arrived looking like a hover.  Caught by
+    test_a_drag_stays_a_hand_from_press_to_release, which read
+    press(1), move(None) x5, release(1) off a real widget.
+    """
+
+    return not (action in {"move", "leave"} and not held)
+
+
 @dataclass(slots=True)
 class _WorkerTask:
     callback: Callable[[], Any]
@@ -2013,8 +2053,13 @@ class RasterPlotHost:
         identity: RasterIdentity | None = None,
         axes: AxisTransform | None = None,
         interaction: RasterInteractionMap | None = None,
+        held: bool = False,
     ) -> Future[RasterOperation[object]]:
-        """Route Qt raster input through PlotSession's interaction engine."""
+        """Route Qt raster input through PlotSession's interaction engine.
+
+        ``held`` says a mouse button is physically down, which is what
+        separates a drag from a hover for :func:`_is_a_hand`.
+        """
 
         selected_action = text(action, "pointer action").lower()
         if selected_action not in {
@@ -2095,7 +2140,7 @@ class RasterPlotHost:
             apply,
             _mode=_DispatchMode.ADAPTIVE,
             coalesce_key=_pointer_coalesce((selected_action,), {}),
-            _hand=True,
+            _hand=_is_a_hand(selected_action, bool(held)),
         )
 
     def set_viewport(

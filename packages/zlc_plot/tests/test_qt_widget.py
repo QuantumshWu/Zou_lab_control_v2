@@ -409,3 +409,143 @@ def test_the_widget_asks_the_screen_before_it_subscribes() -> None:
     finally:
         observer.current_ratio = original
         host.close(timeout=30)
+
+
+def test_a_bare_hover_is_not_a_hand_but_every_part_of_a_drag_is() -> None:
+    """The arbiter's bargain is the hand's pixels for the camera's.
+
+    A drag repaints the thing being dragged on every move, so trading the
+    camera's frames for the gesture's is the trade the operator asked for.  A
+    bare hover publishes nothing on an image surface, so the same trade gives
+    up the camera and buys nothing -- and because every raw move arms a hold
+    of at least 40 ms while a pointer reports at 60-125 Hz, the hold is
+    renewed three to five times faster than it can expire.  Measured on a live
+    console with four panels: still 9.22 fps, hovering 0.11 fps on EVERY panel
+    (the arbiter is process-wide), dragging 85 fps.  With the hover excluded,
+    hovering measures 9.11 and dragging still measures 90.
+
+    A scroll carries no button and is still a hand: the wheel repaints and the
+    operator is waiting for it.
+    """
+
+    from zlc_plot.raster import _is_a_hand
+
+    # The whole vocabulary _pointer_event accepts, so a new action cannot be
+    # added without deciding this question for it.
+    assert _is_a_hand("move", False) is False
+    assert _is_a_hand("leave", False) is False
+
+    assert _is_a_hand("move", True) is True
+    assert _is_a_hand("press", False) is True
+    assert _is_a_hand("release", False) is True
+    assert _is_a_hand("scroll", False) is True
+    assert _is_a_hand("key", False) is True
+    assert _is_a_hand("cancel", False) is True
+
+
+@pytest.mark.gui
+def test_a_drag_stays_a_hand_from_press_to_release() -> None:
+    """Every move of a drag must reach the host carrying its button.
+
+    The hand is decided from the button the widget reports, so anything that
+    cleared ``_pointer_button`` in the middle of a gesture would silently
+    demote the rest of the drag to hovers and hand the machine back to the
+    cameras half way through.  This walks a real press-move-release over a
+    real widget and asserts the classification for every event the host saw.
+    """
+
+    try:
+        app = ensure_qt5_application([])
+        from PyQt5.QtCore import QPointF, Qt
+        from PyQt5.QtGui import QMouseEvent
+    except Exception as error:  # pragma: no cover - environment-dependent
+        pytest.skip(f"Qt5 offscreen unavailable: {error}")
+
+    from zlc_plot.raster import _is_a_hand
+
+    # Explicit events, not QTest: QTest.mouseMove goes through the platform's
+    # cursor, and offscreen it stops delivering once other windows have come
+    # and gone -- this test passed alone and saw no moves at all in a full
+    # file run.  A QMouseEvent sent to the widget is the same event the
+    # platform would deliver and depends on nothing outside it.
+    def send(kind, position, button, buttons):
+        app.sendEvent(
+            widget,
+            QMouseEvent(kind, QPointF(*position), button, buttons, Qt.NoModifier),
+        )
+        app.processEvents()
+
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns({"x": np.linspace(0.0, 1.0, 20)}),
+        dtype=np.float64,
+        generation="hand-classification",
+    )
+    snapshot = DatasetSnapshot(schema, np.linspace(0.0, 1.0, 20).reshape(1, -1), 0)
+    host = RasterPlotHost.from_plot(snapshot, CurvePlot(AxisRef.point("x")))
+    widget = None
+    seen: list[tuple[str, object]] = []
+    original = type(host)._pointer_event
+
+    def watched(self, action, x, y, *, button=None, held=False, **kwargs):
+        seen.append((str(action), button, bool(held)))
+        return original(self, action, x, y, button=button, held=held, **kwargs)
+
+    type(host)._pointer_event = watched
+    try:
+        widget = Qt5PlotWidget(host)
+        widget.show()
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and widget.presented_front is None:
+            app.processEvents()
+            time.sleep(0.005)
+        assert widget.presented_front is not None
+
+        width, height = widget.width(), widget.height()
+        start = (max(2, width // 3), max(2, height // 3))
+
+        # HOVER: moves with no button held.
+        seen.clear()
+        for step in range(4):
+            send(
+                QMouseEvent.MouseMove,
+                (start[0] + 3 * step, start[1] + 2 * step),
+                Qt.NoButton,
+                Qt.NoButton,
+            )
+        hovers = [row for row in seen if row[0] == "move"]
+        assert hovers, "the hover did not reach the host at all"
+        assert all(not held for _action, _button, held in hovers)
+        assert not any(_is_a_hand(action, held) for action, _button, held in hovers)
+
+        # DRAG: press, several moves, release.
+        seen.clear()
+        send(QMouseEvent.MouseButtonPress, start, Qt.LeftButton, Qt.LeftButton)
+        for step in range(1, 6):
+            send(
+                QMouseEvent.MouseMove,
+                (start[0] + 12 * step, start[1] + 9 * step),
+                Qt.NoButton,
+                Qt.LeftButton,
+            )
+        end = (start[0] + 72, start[1] + 54)
+        send(QMouseEvent.MouseButtonRelease, end, Qt.LeftButton, Qt.NoButton)
+
+        actions = [action for action, _button, _held in seen]
+        assert "press" in actions and "release" in actions
+        dragged = [row for row in seen if row[0] == "move"]
+        assert dragged, "the drag sent no moves"
+        # The widget's own _pointer_button is cleared the moment the press
+        # resolves nothing to grab -- which an area rubber-band press does --
+        # so it cannot be what the hand is read from.
+        assert all(held for _action, _button, held in dragged), (
+            "a drag move reached the host with no button held: %s" % (seen,)
+        )
+        assert all(_is_a_hand(action, held) for action, _button, held in seen), (
+            "part of a drag was not classified as a hand: %s" % (seen,)
+        )
+    finally:
+        type(host)._pointer_event = original
+        if widget is not None:
+            widget.close_adapter()
+        host.close(timeout=10)
