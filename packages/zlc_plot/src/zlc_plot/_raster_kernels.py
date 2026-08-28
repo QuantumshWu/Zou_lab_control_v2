@@ -17,22 +17,24 @@ general-purpose routine paying for a generality the caller does not need
 cells whose blocks are one or two samples wide).  The kernels touch each
 output once, in parallel, with the bookkeeping in registers.
 
-Compilation caches on disk under ``NUMBA_CACHE_DIR`` exactly as the
-scanline engine does; ``ZLC_PLOT_KERNELS=numpy`` forces every dispatch back
-to its reference, which is how the contract test compares them.
+Compilation caches on disk exactly as the scanline engine does, in the
+directory :mod:`zlc_plot._kernel_cache` owns; ``ZLC_PLOT_KERNELS=numpy``
+forces every dispatch back to its reference, which is how the contract test
+compares them.
 """
 
 from __future__ import annotations
 
 import os
-import pathlib
 from typing import Any
 
 import numpy as np
 
-if "NUMBA_CACHE_DIR" not in os.environ:
-    _repo_root = pathlib.Path(__file__).resolve().parents[4]
-    os.environ["NUMBA_CACHE_DIR"] = str(_repo_root / ".numba_cache")
+from . import _kernel_cache
+
+# BEFORE numba is imported: it reads NUMBA_CACHE_DIR when the dispatcher is
+# built, so a later assignment is ignored in silence.
+_kernel_cache.install()
 
 try:  # pragma: no cover - absence is exercised by the dispatch fallback
     from numba import njit, prange

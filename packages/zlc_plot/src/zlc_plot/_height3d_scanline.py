@@ -15,10 +15,10 @@ hundreds of megabytes per frame; the scanline walk touches each output
 pixel once, with the per-column bookkeeping in registers and small
 per-chunk scratch.
 
-Compilation caches on disk under ``ZLC_NUMBA_CACHE`` (default: the
-repository's ``.numba_cache``, see ``bin/warm_numba_cache.bat``): the
-first call on a fresh machine compiles once; afterwards every process
-loads machine code in milliseconds.
+Compilation caches on disk in the directory :mod:`zlc_plot._kernel_cache`
+owns -- the user's local cache area, not the checkout -- see
+``bin/warm_numba_cache.bat``.  The first call on a fresh machine compiles
+once; afterwards every process loads machine code in milliseconds.
 """
 
 from __future__ import annotations
@@ -28,9 +28,11 @@ import pathlib
 
 import numpy as np
 
-if "NUMBA_CACHE_DIR" not in os.environ:
-    _repo_root = pathlib.Path(__file__).resolve().parents[4]
-    os.environ["NUMBA_CACHE_DIR"] = str(_repo_root / ".numba_cache")
+from . import _kernel_cache
+
+# BEFORE numba is imported: it reads NUMBA_CACHE_DIR when the dispatcher is
+# built, so a later assignment is ignored in silence.
+_kernel_cache.install()
 
 try:  # pragma: no cover - absence is exercised by the engine fallback
     from numba import njit, prange
@@ -296,7 +298,11 @@ def warm(force: bool = False) -> str:
 
     import numba
 
-    cache_dir = pathlib.Path(os.environ["NUMBA_CACHE_DIR"])
+    # install() leaves the variable unset when the cache root cannot be
+    # written; ask the owner rather than the environment it may not have set.
+    cache_dir = pathlib.Path(
+        os.environ.get("NUMBA_CACHE_DIR") or _kernel_cache.kernel_cache_dir()
+    )
     cache_dir.mkdir(parents=True, exist_ok=True)
     source = pathlib.Path(__file__).read_bytes()
     fingerprint = "|".join((

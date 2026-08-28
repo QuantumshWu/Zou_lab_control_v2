@@ -322,3 +322,61 @@ def test_the_masked_block_mean_counts_what_it_summed() -> None:
     np.testing.assert_array_equal(
         np.ma.getmaskarray(compiled), np.ma.getmaskarray(reference)
     )
+
+
+def test_the_kernel_cache_lives_outside_the_checkout() -> None:
+    """Compiled machine code is a per-machine artefact, not a source file.
+
+    It used to be written to ``.numba_cache`` in the repository root.  That is
+    wrong twice over: the bytes are compiled for THIS cpu and toolchain, so
+    they must never travel with the tree, and a checkout is often inside a
+    synced folder -- this one is -- where a directory rewritten on every
+    compile is uploaded forever for nothing.
+
+    Two modules and one batch file each carried their own copy of the path,
+    which is why this asserts there is one owner and that everyone asks it.
+    """
+
+    import os
+    import pathlib
+
+    from zlc_plot import _kernel_cache
+
+    chosen = pathlib.Path(_kernel_cache.kernel_cache_dir()).resolve()
+    checkout = pathlib.Path(_kernel_cache.__file__).resolve().parents[4]
+    assert checkout.name  # the repository root, four levels up from the module
+    assert checkout not in chosen.parents and chosen != checkout, (
+        "the kernel cache is inside the checkout: %s" % chosen
+    )
+    assert _kernel_cache.CACHE_NAMESPACE in chosen.parts
+
+    # And the environment override still wins, which is what a sandbox or a
+    # read-only home needs.
+    previous = os.environ.get("NUMBA_CACHE_DIR")
+    try:
+        os.environ["NUMBA_CACHE_DIR"] = "somewhere/else"
+        assert _kernel_cache.install() == "somewhere/else"
+    finally:
+        if previous is None:
+            os.environ.pop("NUMBA_CACHE_DIR", None)
+        else:
+            os.environ["NUMBA_CACHE_DIR"] = previous
+
+
+def test_no_module_keeps_its_own_copy_of_the_cache_path() -> None:
+    """The path has one owner; a second copy is how a move half-lands."""
+
+    import pathlib
+
+    package = pathlib.Path(__file__).resolve().parents[1] / "src" / "zlc_plot"
+    offenders = [
+        path.name
+        for path in package.glob("*.py")
+        if path.name != "_kernel_cache.py"
+        and "NUMBA_CACHE_DIR" in path.read_text(encoding="utf-8")
+        and "os.environ[\"NUMBA_CACHE_DIR\"] =" in path.read_text(encoding="utf-8")
+    ]
+    assert not offenders, (
+        "these modules set NUMBA_CACHE_DIR themselves instead of asking "
+        "_kernel_cache: %s" % offenders
+    )

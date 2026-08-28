@@ -25,5 +25,13 @@ packages/zlc_pulse/fpga/.Xil/
 # another.
 /workspace/
 
-# Numba disk cache: regenerable machine code (bin/warm_numba_cache.bat)
+# Numba disk cache.  It no longer lives here -- zlc_plot/_kernel_cache.py
+# puts it in the user's local cache area, because a checkout is often inside
+# a synced folder and machine code rewritten on every compile would upload
+# forever.  The rule stays so an old checkout's leftovers are not offered.
 /.numba_cache/
+
+# Bench results are what a run PRODUCED, not what anyone authored: they
+# change on every run and nothing reads them back (bench/plot_perf/common.py
+# only writes).  Committing them made every measurement a diff.
+/bench/results/
