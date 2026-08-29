@@ -37,7 +37,6 @@ opaque string; the view does not interpret it.
 order_committed = pyqtSignal(tuple)  # tuple[str, ...], panel_id order
 
 set_cards(cards: tuple[PanelCardView, ...]) -> None
-grab_board() -> QPixmap
 ```
 
 Construct the board with an injected `BoardMetrics(gap, card_size)` policy.
@@ -46,8 +45,7 @@ packs the cards, repacks them when its width changes, moves the dragged card
 freely without a placeholder/ghost, and commits the new `panel_id` order on
 release.  The presenter
 persists that order and each card's size; it never sends pixel rectangles
-back to the view.  `order_committed` is the only board-level reorder payload,
-and `grab_board()` captures the current board for a host-owned image action.
+back to the view.  `order_committed` is the only board-level reorder payload.
 
 ## `LogicRowView`
 

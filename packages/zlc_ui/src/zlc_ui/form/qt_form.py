@@ -1225,11 +1225,14 @@ class FluentParameterForm(QtWidgets.QWidget):
         # is decided.  The retained loop already refused to write over
         # them; every other path here could still take the widget away
         # underneath their cursor -- rebuild it because its family
-        # changed, delete its row because the key left the spec, or
-        # re-insert it because some other row was added.  A row that
-        # disappears mid-word is the same defect as a value that
+        # changed, or re-insert it because some other row was added.  A
+        # row that disappears mid-word is the same defect as a value that
         # changes mid-word, and it is the one the operator sees as the
         # whole form collapsing.
+        #
+        # A key that has LEFT the spec is not that case.  Its row is kept
+        # from being rebuilt, never from being removed: nothing owns the
+        # field any more, so a row that stayed behind would edit nothing.
         editing_key = next(
             (
                 key
@@ -1326,8 +1329,15 @@ class FluentParameterForm(QtWidgets.QWidget):
             for key, row in tuple(self._rows.items()):
                 if key in desired_keys and key not in replaced_keys:
                     continue
-                if key == editing_key:
-                    continue
+                # No exemption for the focused row here.  A focused key
+                # that is still in the spec never reaches this loop --
+                # the replacement loop skips it, so the clause above
+                # keeps it.  Exempting it a second time could therefore
+                # only retain a row whose key had LEFT the spec, while
+                # _fields and _handlers below are rebuilt from the new
+                # spec alone: the next keystroke fired the build-time
+                # changed(key), read_value raised KeyError out of a Qt
+                # slot, and PyQt aborted the process with no traceback.
                 self._layout.removeWidget(row)
                 # Reconcile may run while an Edit page is visible.  An
                 # unparented QWidget becomes a transient native window; hide

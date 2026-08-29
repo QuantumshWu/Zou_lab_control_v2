@@ -151,6 +151,7 @@ class PanelCardView(FluentGroupBox):
         self._size_choices: tuple[str, ...] = ()
         self._cell_kind_choices: tuple[str, ...] = ()
         self._default_size = ""
+        self._press_at: QtCore.QPoint | None = None
         self._drag_offset: QtCore.QPoint | None = None
         self._settings_drag_offset: QtCore.QPoint | None = None
         #: Where the OPERATOR dragged this popup, for as long as it stays
@@ -162,7 +163,6 @@ class PanelCardView(FluentGroupBox):
         #: Whether what this card shows will deliver again.  A live panel
         #: redraws on a beat and can be taken off the board; a saved figure
         #: does neither, and must not offer controls for both.
-        self._live = True
         self._editing_enabled = True
         self.settings_button = FluentButton("Setting", color=GREY)
         button_height = scaled_px(26, minimum=22)
@@ -336,22 +336,6 @@ class PanelCardView(FluentGroupBox):
         self.setFixedSize(total_width, total_height)
         self.geometry_changed.emit()
 
-    def set_live(self, live: bool) -> None:
-        """Whether what this card shows will ever deliver again.
-
-        A saved figure will not.  Its redraw interval means nothing, and there
-        is no board to remove it from -- offering both anyway is two controls
-        that cannot do what they say, which is the failure this project keeps
-        being audited for.
-        """
-
-        self._live = bool(live)
-        self.close_button.setVisible(self._live)
-        if not self._live:
-            self._disarm_header_remove()
-        remove = getattr(self, "remove_button", None)
-        if remove is not None:
-            remove.setVisible(self._live)
 
     def set_interval_choices(self, intervals: object, default_interval: int) -> None:
         """Receive the scheduler's one finite refresh policy."""
@@ -877,7 +861,7 @@ class PanelCardView(FluentGroupBox):
                 choices=tuple(FormChoice(value, value) for value in self._size_choices),
             )
         )
-        if self._live and self._interval_choices:
+        if self._interval_choices:
             fields.append(
                 interval_form_field(
                     self._interval_choices,
@@ -937,7 +921,7 @@ class PanelCardView(FluentGroupBox):
             values["cell_kind"] = str(
                 self._state_projection.get("cell_kind") or ""
             )
-        if self._live and self._interval_choices:
+        if self._interval_choices:
             values["interval_ms"] = int(self._state_projection["interval_ms"])
         for section in ("semantic", "display", "fit"):
             declared_fields = tuple(
@@ -1123,7 +1107,6 @@ class PanelCardView(FluentGroupBox):
             self.edit_button.clicked.connect(self._request_edit)
             self.remove_button = FluentButton("Remove", body, color=ORANGE)
             self.remove_button.clicked.connect(self._request_remove)
-            self.remove_button.setVisible(self._live)
             buttons.addWidget(self.edit_button)
             buttons.addStretch(1)
             buttons.addWidget(self.remove_button)
@@ -1161,8 +1144,6 @@ class PanelCardView(FluentGroupBox):
         self.remove_requested.emit()
 
     def _header_remove_clicked(self) -> None:
-        if not self._live:
-            return
         if self._remove_armed:
             self._remove_timer.stop()
             self._disarm_header_remove()
@@ -1223,14 +1204,32 @@ class PanelCardView(FluentGroupBox):
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt API
         if event.button() == QtCore.Qt.LeftButton:
-            self._drag_offset = event.pos()
-            self.setCursor(QtCore.Qt.ClosedHandCursor)
+            self._press_at = event.pos()
+            self._drag_offset = None
             self.raise_()
             self.grabMouse()
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt API
-        if self._drag_offset is not None and event.buttons() & QtCore.Qt.LeftButton:
+        if self._press_at is not None and event.buttons() & QtCore.Qt.LeftButton:
+            if self._drag_offset is None:
+                # A PRESS IS NOT A DRAG.  A zero-motion click emitted a
+                # drop, and a drop records this card as the board's
+                # anchor -- kept until the card leaves the board, so every
+                # later repack placed it at the absolute (col, row) it
+                # happened to hold and stacked the others around it.  One
+                # click to look at a card, and widening the window
+                # rearranged everything except that card.  Where the line
+                # between a click and a drag is, is the window system's to
+                # say, which is what the pulse schedule already asks.
+                travelled = (event.pos() - self._press_at).manhattanLength()
+                if travelled < QtWidgets.QApplication.startDragDistance():
+                    super().mouseMoveEvent(event)
+                    return
+                self._drag_offset = self._press_at
+                # The closed hand marks the grab, so it appears when the
+                # card actually starts following the pointer.
+                self.setCursor(QtCore.Qt.ClosedHandCursor)
             self.move(self.mapToParent(event.pos() - self._drag_offset))
             point = (int(event.pos().x()), int(event.pos().y()))
             self.drag_started.emit(point)
@@ -1238,11 +1237,16 @@ class PanelCardView(FluentGroupBox):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt API
-        if event.button() == QtCore.Qt.LeftButton and self._drag_offset is not None:
+        if event.button() == QtCore.Qt.LeftButton and self._press_at is not None:
+            dragged = self._drag_offset is not None
+            self._press_at = None
             self._drag_offset = None
             self.setCursor(QtCore.Qt.OpenHandCursor)
             self.releaseMouse()
-            self.dropped.emit((int(event.pos().x()), int(event.pos().y())))
+            # A press that reaches release without ever crossing the
+            # threshold IS a click, and a click drops nothing.
+            if dragged:
+                self.dropped.emit((int(event.pos().x()), int(event.pos().y())))
         super().mouseReleaseEvent(event)
 
 

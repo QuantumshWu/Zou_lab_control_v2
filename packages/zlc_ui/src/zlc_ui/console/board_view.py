@@ -79,9 +79,6 @@ class ConsoleBoardView(QtWidgets.QWidget):
         self._order = tuple(card.panel_id for card in incoming)
         self._pack_current()
 
-    def grab_board(self) -> QtGui.QPixmap:
-        return self.grab()
-
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
         super().resizeEvent(event)
         if self._active_card is None:
@@ -106,8 +103,17 @@ class ConsoleBoardView(QtWidgets.QWidget):
             return GeomProxy(size.width(), size.height(), int(card.x()), int(card.y()))
         return GeomProxy(size.width(), size.height())
 
-    def _board_width(self, order: tuple[str, ...]) -> int:
-        proxies = [self._proxy(self._cards[panel_id]) for panel_id in order]
+    def _board_width(self, proxies) -> int:
+        """How wide the board must be to hold these cards.
+
+        Takes the PROXIES, not the order: every caller has already built
+        one per card, and rebuilding them here made a resize drag allocate
+        2N proxies and make 2N card.size() round trips per frame instead
+        of N.  min_board_width reads only .width, so the caller's copies --
+        placed or not, pinned or not -- answer the same question.
+        """
+
+        proxies = tuple(proxies)
         if not proxies:
             return 0
         return max(self.width(), min_board_width(proxies, self._metrics))
@@ -129,7 +135,7 @@ class ConsoleBoardView(QtWidgets.QWidget):
         pack(
             tuple(proxies[panel_id] for panel_id in order),
             self._metrics,
-            self._board_width(order),
+            self._board_width(proxies.values()),
             pinned=pinned,
         )
         by_id: dict[str, GeomProxy] = {}
@@ -189,17 +195,22 @@ class ConsoleBoardView(QtWidgets.QWidget):
         return None
 
     def _card_dropped(self, card: PanelCardView, local_point: tuple[int, int]) -> None:
+        # A drop now always follows a drag that crossed the window
+        # system's threshold, so this no longer covers for a click
+        # arriving as a drop -- it covers a drag whose first move landed
+        # before this view saw it.
         if card is not self._active_card:
             self._active_card = card
         others = tuple(panel_id for panel_id in self._order if panel_id != card.panel_id)
         other_proxies = [
             self._proxy(self._cards[panel_id], placed=True) for panel_id in others
         ]
+        dropped = self._proxy(card, placed=True)
         anchor = nearest_anchor(
-            self._proxy(card, placed=True),
+            dropped,
             other_proxies,
             self._metrics,
-            self._board_width(self._order),
+            self._board_width((dropped, *other_proxies)),
         )
         self._anchor_id = card.panel_id
         self._anchor = anchor

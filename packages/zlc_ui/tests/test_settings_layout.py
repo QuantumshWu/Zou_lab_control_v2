@@ -577,3 +577,64 @@ for position in (bar.maximum(), bar.maximum() // 2, 0):
 """
         + _SURFACE_EPILOGUE
     )
+
+
+def test_a_row_whose_key_left_the_spec_goes_even_under_the_cursor() -> None:
+    """The form never holds a widget it cannot answer for.
+
+    Keeping the focused row from being REBUILT is the rule; keeping it
+    from being REMOVED is a different thing, and the exemption was written
+    once and applied to both.  A focused key still in the spec never
+    reaches the deletion loop, so the second exemption could only ever
+    retain a row whose key had LEFT the spec -- while _fields and
+    _handlers are rebuilt from the new spec alone.  The retained row was
+    still laid out, still visible, still wired to the build-time
+    changed(key); the next keystroke sent read_value into a KeyError, out
+    of a Qt slot, and PyQt aborted the process without a traceback.
+
+    Reachable by ordinary use: flipping paints_images drops
+    'overlay_signal', flipping live drops 'interval_ms'.
+    """
+
+    _run_qt(
+        """
+import zou_lab_control
+from PyQt5 import QtCore, QtTest, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.form.form import FormFieldProps, FormSpec
+from zlc_ui.form.qt_form import FluentParameterForm
+
+app = ensure_qt_app(['test'])
+
+spec = FormSpec((
+    FormFieldProps('label', 'text', 'Y label'),
+    FormFieldProps('overlay', 'text', 'Overlay signal'),
+))
+form = FluentParameterForm(spec, {'label': 'start', 'overlay': 'trap'})
+window = QtWidgets.QMainWindow()
+window.setCentralWidget(form)
+window.show()
+app.processEvents()
+
+# Their cursor is in the row the owner is about to drop.
+overlay = form._widgets['overlay']
+overlay.setFocus(QtCore.Qt.MouseFocusReason)
+overlay.selectAll()
+QtTest.QTest.keyClicks(overlay, 'pr')
+app.processEvents()
+assert overlay.hasFocus()
+
+smaller = FormSpec((FormFieldProps('label', 'text', 'Y label'),))
+form.reconcile(smaller, {'label': 'start'})
+app.processEvents()
+
+assert set(form._widgets) == {'label'}, sorted(form._widgets)
+assert set(form._rows) == {'label'}, sorted(form._rows)
+# The invariant that makes the abort impossible: every widget still held
+# is one the form can read.
+for key in form._widgets:
+    form.read_value(key)
+window.close()
+print('ok')
+"""
+    )

@@ -155,7 +155,6 @@ class PeriodCard(FluentGroupBox):
             choices = period.unit_choices or (period.unit,)
             self.unit_combo.addItems([str(value) for value in choices])
             self.unit_combo.setCurrentText(period.unit)
-        self.unit_combo.setEnabled(not period.unit_locked)
         _apply_field(self.duration_edit, period.duration)
         self.name_edit.setText(period.name)
         self._last_name = period.name

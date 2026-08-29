@@ -66,7 +66,6 @@ class PeriodVM:
     duration: FieldVM
     unit: str
     unit_choices: tuple[str, ...] = ()
-    unit_locked: bool = False
     digital: tuple[tuple[str, bool], ...] = ()
     analog: tuple[tuple[str, str, FieldVM], ...] = ()
 

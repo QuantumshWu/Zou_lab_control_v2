@@ -21,7 +21,13 @@ class StatusStrip(FluentStatusStrip):
     """
 
 
-    _PRIORITY = {name: rank for rank, name in enumerate(STATUS_SEVERITIES)}
+    #: The severities this strip accepts.  It used to be a rank map,
+    #: left over from a worst-severity-wins rule this class removed on
+    #: purpose -- a status line is a fact about the last thing that
+    #: happened.  The ranks were never compared, only tested for
+    #: membership, and a reader who found them went looking for the
+    #: ordering that gave them meaning.
+    _ACCEPTED = frozenset(STATUS_SEVERITIES)
     _FLUENT_SEVERITY = {"idle": "info", "warning": "warning", "task": "task", "error": "error"}
 
     def __init__(self, parent=None, *, action_text: str = "") -> None:
@@ -41,7 +47,7 @@ class StatusStrip(FluentStatusStrip):
 
     def show_status(self, text: str, severity: str) -> None:
         severity = str(severity)
-        if severity not in self._PRIORITY:
+        if severity not in self._ACCEPTED:
             raise ValueError(
                 "severity must be one of " + ", ".join(STATUS_SEVERITIES)
             )

@@ -585,7 +585,7 @@ board = ConsoleBoardView(metrics=BoardMetrics(12))
 board.set_cards((card,))
 board.resize(hint.width() + 40, hint.height() + 40); board.show(); app.processEvents()
 assert card.geometry().getRect() == (12, 12, hint.width(), hint.height())
-assert not board.grab_board().isNull()
+assert not board.grab().isNull()
 """
     )
 
@@ -2379,5 +2379,59 @@ assert card._parameter_surface['fit_unavailable'] == 'the fit reason'
 card.retire_settings_popup()
 card.close()
 app.processEvents()
+"""
+    )
+
+
+def test_a_click_on_a_card_is_not_a_drop() -> None:
+    """A drop pins the card as the board's anchor, so a click must not be one.
+
+    The card emitted `dropped` on any left release that followed a left
+    press, zero motion included.  ConsoleBoardView then recorded that card
+    as the anchor -- kept until the card leaves the board -- so every later
+    repack placed it at the absolute (col, row) it happened to hold and
+    stacked the others around it.  One click to look at a card, and
+    widening the window rearranged everything except that card.
+    """
+
+    _run_qt(
+        """
+import zou_lab_control
+from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.console import PanelCardView
+
+app = ensure_qt_app(['card-click-is-not-a-drop'])
+card = PanelCardView('panel-1')
+card.show()
+app.processEvents()
+
+drops = []
+card.dropped.connect(drops.append)
+
+at = QtCore.QPoint(40, 12)
+QtTest.QTest.mousePress(card, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, at)
+QtTest.QTest.mouseRelease(card, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, at)
+app.processEvents()
+assert drops == [], 'a zero-motion click dropped the card: %r' % (drops,)
+
+# Past the window system's own threshold, it IS a drag.
+far = QtCore.QPoint(
+    at.x() + QtWidgets.QApplication.startDragDistance() * 3 + 8, at.y() + 6
+)
+QtTest.QTest.mousePress(card, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, at)
+# QTest.mouseMove does not carry the held button, and the threshold is
+# only crossed by a move that says the button is down.
+app.sendEvent(card, QtGui.QMouseEvent(
+    QtCore.QEvent.MouseMove,
+    QtCore.QPointF(far),
+    QtCore.Qt.NoButton,
+    QtCore.Qt.LeftButton,
+    QtCore.Qt.NoModifier,
+))
+QtTest.QTest.mouseRelease(card, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, far)
+app.processEvents()
+assert len(drops) == 1, 'a real drag did not drop the card: %r' % (drops,)
+print('ok')
 """
     )
