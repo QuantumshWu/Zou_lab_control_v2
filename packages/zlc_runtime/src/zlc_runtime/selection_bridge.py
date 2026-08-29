@@ -104,8 +104,8 @@ class _Sample:
     A camera frame is small unsigned integers, so it has at most sixty-five
     thousand distinct values and one ``bincount`` pass answers all five at
     once.  The array path stays for everything else AND is the
-    specification: ``test_roi_statistics_agree`` asserts the two give
-    identical numbers.
+    specification: ``test_the_histogram_summary_gives_the_array_path_s_numbers_exactly``
+    asserts the two give identical numbers.
     """
 
     __slots__ = ("_values", "_counts", "_size")
@@ -354,7 +354,8 @@ def _roi_statistics(
     # 16.2 against 36.8 on a whole frame -- because sixty-five thousand
     # levels answer all five questions in one pass where the stacked form
     # partitions four million pixels twice.  Both give the same numbers,
-    # bit for bit; ``test_roi_statistics_agree`` is where that is asserted.
+    # bit for bit; ``test_the_stacked_reduction_gives_the_per_cell_numbers``
+    # is where that is asserted.
     rows = [_ROW_REDUCERS.get(reducer) for reducer in reducers.values()]
     if (
         everything_counts

@@ -2752,3 +2752,49 @@ def test_a_box_that_names_no_sample_is_a_condition_that_clears() -> None:
         assert plane.freeze().value("@logic/image/roi_mean") is not None
     finally:
         _close(bridge, plane, source)
+
+
+def test_the_stacked_reduction_gives_the_per_cell_numbers() -> None:
+    """Whichever machine the cell count picks, the numbers are the same.
+
+    A scan cut is thousands of short rows and a camera window is one long
+    one, and they want opposite machines: reducing the stack along its
+    trailing axis walks every row in one numpy call, while a lone wide row
+    is answered fastest by counting its sixty-five thousand levels.  The
+    choice is a speed choice only, so it is asserted bit for bit -- and on
+    both dtypes, because the counted path exists for the unsigned one and
+    a silent disagreement there would look exactly like a dtype bug.
+    """
+
+    import numpy as np
+
+    from zlc_runtime.selection_bridge import (
+        _AREA_SELECTION_OUTPUTS,
+        _Sample,
+        _roi_statistics,
+    )
+
+    catalog = {
+        name: reducer
+        for name, _label, reducer in _AREA_SELECTION_OUTPUTS
+        if reducer is not None
+    }
+    rng = np.random.default_rng(11)
+    cases = (
+        ("many short float rows", rng.normal(500.0, 30.0, (7, 9, 3, 34))),
+        ("many short uint16 rows", rng.integers(0, 4000, (7, 9, 3, 34), dtype=np.uint16)),
+        ("rows shorter than the tail", rng.normal(0.0, 1.0, (5, 4, 1, 6))),
+        ("one wide row", rng.integers(0, 4000, (1, 1, 64, 64), dtype=np.uint16)),
+    )
+    for label, values in cases:
+        finite = np.ones(values.shape, dtype=bool)
+        answered = _roi_statistics(values, finite, catalog)
+        for name, reducer in catalog.items():
+            expected = np.zeros(values.shape[:2], dtype=np.float64)
+            for index in np.ndindex(values.shape[:2]):
+                region = np.ascontiguousarray(values[index].reshape(-1))
+                expected[index] = reducer(_Sample(region))
+            assert np.array_equal(np.asarray(answered[name][0]), expected), (
+                f"{label}: {name} disagrees between the stacked and per-cell paths"
+            )
+            assert bool(np.all(answered[name][1]))
