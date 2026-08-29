@@ -624,7 +624,7 @@ class BoardScheduler:
         # cohort finish during Pause without advancing the frozen board.
         self._admission_owed: set[str] = set()
         self._closed = False
-        self._last_front = SignalFront({}, {})
+        self._last_front = SignalFront({})
 
     @staticmethod
     def _presented_front_refs(port: SurfacePort) -> tuple[EventRef, ...]:
@@ -691,12 +691,14 @@ class BoardScheduler:
             for name in SurfaceBatchArbiter._front_signals(port)
         }
 
-    def _follower_outputs(self, displayed: set[str]) -> set[str]:
-        return {
-            output
+    def _follower_edges(self, displayed: set[str]) -> tuple[tuple[str, str], ...]:
+        """The follower edges whose BOTH ends are on the board."""
+
+        return tuple(
+            (source, output)
             for source, output in self._plane.follower_edges()
             if source in displayed and output in displayed
-        }
+        )
 
     def _shot_roots(
         self,
@@ -714,6 +716,41 @@ class BoardScheduler:
             return self._plane.publication_roots(publication)
         except RuntimeError:
             return None
+
+    @staticmethod
+    def _lineage_window(
+        candidates,
+        *,
+        edges,
+        member_panels,
+        source_signals,
+        signals_of,
+    ) -> frozenset[str]:
+        """Which of these panels THIS cohort must stay open for.
+
+        A cohort holds extra display boundaries so a follower's frame can
+        join the frame it follows.  WHICH followers those are is a question
+        about this cohort's own lineage: joining a cohort requires equal
+        shot roots, so a panel of unrelated ancestry can never join it, and
+        naming it here only holds a finished frame back.
+
+        ``on_tick`` handed every cohort one board-global set, so a single
+        rolling fit panel -- due on every tick, and a follower of the image
+        it fits -- made every unrelated panel on the board wait two extra
+        boundaries for a frame it had already drawn: 200 ms at a 100 ms
+        base interval, every tick, for as long as that panel was open.
+        ``stage_owed`` beside it already asked the narrower question.
+        """
+
+        return frozenset(
+            panel
+            for panel in candidates
+            if panel in member_panels
+            or any(
+                source in source_signals and output in signals_of(panel)
+                for source, output in edges
+            )
+        )
 
     def on_tick(self) -> SignalFront:
         if self._closed:
@@ -741,7 +778,11 @@ class BoardScheduler:
         # for exactly those follower panels: the window closes the moment
         # every one has joined, or after the fallback boundaries when one
         # never stages.  Without a displayed follower nothing ever waits.
-        follower_outputs = self._follower_outputs(displayed)
+        # The EDGES, not only their outputs: which panels a cohort must
+        # stay open for is a lineage question, and the answer needs to know
+        # which source each follower follows.
+        edges = self._follower_edges(displayed)
+        follower_outputs = {output for _source, output in edges}
         due = {
             SurfaceBatchArbiter._panel_id(port): self._clock.group_due(
                 elapsed, (getattr(port, "display_interval_ms"),)
@@ -777,6 +818,13 @@ class BoardScheduler:
                 roots = self._port_shot_roots(port, front)
                 if roots is not None and roots in held_roots:
                     held_panels.add(SurfaceBatchArbiter._panel_id(port))
+        signals_by_panel = {
+            SurfaceBatchArbiter._panel_id(port): frozenset(
+                SurfaceBatchArbiter._front_signals(port)
+            )
+            for port in ports
+        }
+        signals_of = signals_by_panel.__getitem__
         window_panels = frozenset(
             SurfaceBatchArbiter._panel_id(port)
             for port in ports
@@ -863,7 +911,17 @@ class BoardScheduler:
                 front,
                 shot_roots=roots,
                 window_panels=(
-                    window_panels if publication is not None else frozenset()
+                    self._lineage_window(
+                        window_panels,
+                        edges=edges,
+                        member_panels=frozenset((panel_id,)),
+                        source_signals=frozenset(
+                            SurfaceBatchArbiter._front_signals(port)
+                        ),
+                        signals_of=signals_of,
+                    )
+                    if publication is not None
+                    else frozenset()
                 ),
             ):
                 self._owed.discard(panel_id)
@@ -957,6 +1015,12 @@ class BoardScheduler:
 
         edges = self._plane.follower_edges()
         follower_outputs = {output for _source, output in edges}
+        signals_by_panel = {
+            SurfaceBatchArbiter._panel_id(port): frozenset(
+                SurfaceBatchArbiter._front_signals(port)
+            )
+            for port in ports
+        }
         for roots, members in ready.items():
             member_panels = {
                 SurfaceBatchArbiter._panel_id(member) for member in members
@@ -966,25 +1030,20 @@ class BoardScheduler:
                 for member in members
                 for name in SurfaceBatchArbiter._front_signals(member)
             }
-            window_panels = frozenset(
-                SurfaceBatchArbiter._panel_id(candidate)
-                for candidate in ports
-                if SurfaceBatchArbiter._panel_id(candidate) in self._owed
-                and (
-                    any(
+            window_panels = self._lineage_window(
+                (
+                    SurfaceBatchArbiter._panel_id(candidate)
+                    for candidate in ports
+                    if SurfaceBatchArbiter._panel_id(candidate) in self._owed
+                    and any(
                         name in follower_outputs
                         for name in SurfaceBatchArbiter._front_signals(candidate)
                     )
-                    and (
-                        SurfaceBatchArbiter._panel_id(candidate) in member_panels
-                        or any(
-                            source in source_signals
-                            and output
-                            in SurfaceBatchArbiter._front_signals(candidate)
-                            for source, output in edges
-                        )
-                    )
-                )
+                ),
+                edges=edges,
+                member_panels=member_panels,
+                source_signals=source_signals,
+                signals_of=signals_by_panel.__getitem__,
             )
             if self._arbiter.enqueue_group(
                 tuple(members),

@@ -264,7 +264,6 @@ class SignalDescription:
     source_name: str | None
     revision: int
     shape: tuple[int, ...] | None
-    failure: str | None = None
 
     @property
     def derived(self) -> bool:
@@ -417,7 +416,6 @@ class SignalFront:
     """Immutable front: coherent derived components, independent producers."""
 
     signals: Mapping[str, SignalValue]
-    failures: Mapping[str, str]     # producer instance_id -> freeze failure
     publication_by_signal: Mapping[str, SignalPublication] = field(
         default_factory=dict,
         repr=False,
@@ -425,14 +423,10 @@ class SignalFront:
 
     def __post_init__(self) -> None:
         signals = dict(self.signals)
-        failures = dict(self.failures)
         publications = dict(self.publication_by_signal)
         if __debug__:
             assert all(isinstance(value, SignalValue) for value in signals.values()), (
                 "SignalFront signals must contain SignalValue values"
-            )
-            assert all(isinstance(value, str) for value in failures.values()), (
-                "SignalFront failures must contain strings"
             )
             assert set(publications) == set(signals), (
                 "SignalFront publications must cover every signal"
@@ -445,7 +439,6 @@ class SignalFront:
                     "SignalFront value is not owned by its exact publication"
                 )
         object.__setattr__(self, "signals", MappingProxyType(signals))
-        object.__setattr__(self, "failures", MappingProxyType(failures))
         object.__setattr__(
             self,
             "publication_by_signal",
@@ -804,13 +797,16 @@ def _update_indexed_history(
     value: SignalValue,
     sequence: int,
     demand: int,
-    event_record: Mapping[str, object] | None = None,
 ) -> tuple[_IndexedHistory, bool]:
     primary_index = value.primary_index
     if primary_index is None:
         raise RuntimeError("indexed signal lost its source primary index")
     event = value.snapshot
-    selected_record = value.event_record if event_record is None else event_record
+    # The record a retained cell keeps is the record of the VALUE it keeps.
+    # This used to be overridable, and the one caller that passed it passed
+    # the shared event record -- provably the same object -- behind a guard
+    # that read like a first-event special case there is no such thing as.
+    selected_record = value.event_record
     if history is None:
         return (
             (
@@ -917,7 +913,6 @@ class _GenerationState:
     published_names: tuple[str, ...] | None = None
     published_schemas: Mapping[str, DatasetSchema] | None = None
     next_sequence: int = 1
-    failure: str | None = None
     terminal: bool = False
     retired: bool = False
     publication_stream: AcquisitionStream[SignalPublication] | None = None
@@ -1260,7 +1255,7 @@ class SignalDataPlane:
         self._front_signals: frozenset[str] = frozenset()
         self._membership_changed = False
         self._closed = False
-        self._front = SignalFront({}, {})
+        self._front = SignalFront({})
         self._publication_callbacks: set[Callable[[], object]] = set()
 
     def subscribe_publications(
@@ -1305,13 +1300,6 @@ class SignalDataPlane:
             return bool(
                 declaration is not None and declaration.index_by_source
             )
-
-    def indexed_history_active(self, signal_name: str) -> bool:
-        """Whether any consumer currently owns this signal's indexed view."""
-
-        name = canonical_text(signal_name, "signal name")
-        with self._lock:
-            return bool(self._indexed_history_demands.get(name))
 
     def acquire_indexed_history(
         self,
@@ -1521,7 +1509,6 @@ class SignalDataPlane:
         self._states.pop(state.owner_id)
         state.retired = True
         state.publication = None
-        state.failure = None
 
     def _processor_cleanup_completed(self, node: object) -> None:
         """Release a retired route only after its lane entry is truly gone."""
@@ -1652,39 +1639,6 @@ class SignalDataPlane:
             ),
         )
 
-    def reserve(self, node: object) -> StreamGenerationId:
-        """Reserve one producer generation before its worker can publish.
-
-        The composition owner performs this before submitting a run.  Every
-        event then enters through ``commit_live``; publication can therefore
-        never recreate a generation after retirement.
-        """
-
-        owner_id = _node_instance_id(node)
-        output_names, bare_names = self._node_route_names(node)
-        with self._lock:
-            self._wait_for_start_locked(owner_id)
-            existing = self._states.get(owner_id)
-            if existing is not None:
-                if (
-                    not existing.retired
-                    and not existing.terminal
-                    and existing.kind == "producer"
-                    and existing.node is node
-                    and existing.output_names == output_names
-                    and dict(existing.bare_names) == dict(bare_names)
-                ):
-                    return existing.generation
-                raise RuntimeError("producer generation is already active")
-            state = self._install_state_locked(
-                owner_id=owner_id,
-                kind="producer",
-                output_names=output_names,
-                bare_names=bare_names,
-                node=node,
-            )
-            return state.generation
-
     def begin_generation(self, node: object) -> StreamGenerationId:
         """Start a producer generation, superseding a FINISHED predecessor.
 
@@ -1693,10 +1647,11 @@ class SignalDataPlane:
         generation is replaced.  It ends when the next run begins -- and that
         is this method.
 
-        Use this to START a run.  ``reserve`` is the lower-level operation that
-        refuses to touch an existing generation at all; a caller that reserves
-        directly can never run the same node twice, because the first run leaves
-        a terminal generation behind and the second reservation is rejected.
+        Use this to START a run.  It is the only way in: a lower-level
+        ``reserve`` used to sit beside it, refusing to touch an existing
+        generation at all, so a caller that took it could never run the same
+        node twice -- the first run left a terminal generation behind and the
+        second reservation was rejected.  Nothing in production took it.
 
         A generation that is still LIVE is not superseded: two concurrent runs of
         one producer is a real error and still raises.
@@ -2105,7 +2060,6 @@ class SignalDataPlane:
                 state,
                 values,
                 parents=parents,
-                notify=False,
             )
             replay_parents = (
                 ()
@@ -2132,7 +2086,6 @@ class SignalDataPlane:
                     publication.signals[qualified],
                     sequence,
                     history_demand,
-                    None if history is None else event_record,
                 )[0]
             if source_publication is not None:
                 state.last_parent_sequence = source_publication.event_ref.sequence
@@ -2493,7 +2446,6 @@ class SignalDataPlane:
                                     else value.shape
                                 )
                             ),
-                            failure=state.failure,
                         )
                     )
         return tuple(sorted(descriptions, key=lambda item: item.name))
@@ -2513,7 +2465,11 @@ class SignalDataPlane:
             state = self._state_for_signal_locked(name)
             return state is not None and not state.retired and not state.terminal
 
-    def retains(self, signal_name: str) -> bool:
+    def retains(
+        self,
+        signal_name: str,
+        publication: SignalPublication | None = None,
+    ) -> bool:
         """Whether this signal's data is still HERE to be derived from.
 
         ``is_generation_live`` answers two of the three states a signal can
@@ -2524,12 +2480,27 @@ class SignalDataPlane:
         ``LookupError``: a box drawn on a panel whose run has been retired
         took the console down that way.  The third state is a fact this
         plane owns, so it answers it here instead of by exception.
+
+        Given a PUBLICATION, it answers about that publication and not just
+        about the name.  A Stop and a Start mint a new generation under the
+        same name, so the name alone still said "held" while the moment a
+        selection was drawn against belonged to the retired one -- and
+        ``current_dataset`` then raised ValueError, out of the bridge and
+        into the Qt slot of the switch the operator had just flicked.  Same
+        third state, one level down.
         """
 
         name = canonical_text(signal_name, "signal name")
         with self._lock:
             state = self._state_for_signal_locked(name)
-            return state is not None and not state.retired
+            if state is None or state.retired:
+                return False
+            if publication is None:
+                return True
+            return (
+                publication.event_ref.stream_id.value == state.owner_id
+                and publication.event_ref.generation == state.generation
+            )
 
     def latest_publication(self, signal_name: str) -> SignalPublication | None:
         name = canonical_text(signal_name, "signal name")
@@ -3024,8 +2995,6 @@ class SignalDataPlane:
         values: Mapping[str, SignalValue],
         *,
         parents: tuple[SignalPublication, ...] = (),
-        terminal: bool = False,
-        notify: bool = True,
     ) -> SignalPublication:
         if state.retired or self._states.get(state.owner_id) is not state:
             raise RuntimeError("signal generation is no longer active")
@@ -3044,10 +3013,16 @@ class SignalDataPlane:
         )
         run_record = _shared_run_record(frozen)
         event_record = _shared_event_record(frozen)
+        # ALWAYS non-terminal, and the emit is always the caller's.  Both
+        # were parameters; the one call site passed notify=False and never
+        # passed terminal, so a second "publish and finish" path sat beside
+        # the live one looking like an owner.  The caller emits after it has
+        # updated commit_chunks, indexed_history and occupied_cells, which
+        # is the order a subscriber must see.
         self._validate_generation_values_locked(
             state,
             frozen,
-            terminal=terminal,
+            terminal=False,
         )
         publication = SignalPublication(
             event_ref=EventRef(
@@ -3064,16 +3039,7 @@ class SignalDataPlane:
         self._publication_parents[publication] = parents
         state.next_sequence += 1
         state.publication = publication
-        state.failure = None
-        state.terminal = terminal
-        producer = state.publication_stream
-        if notify and producer is not None:
-            producer.emit(
-                publication,
-                sequence=publication.event_ref.sequence,
-            )
-            if terminal:
-                producer.finish()
+        state.terminal = False
         self._membership_changed = True
         return publication
 
@@ -3234,7 +3200,7 @@ class SignalDataPlane:
             self._states.clear()
             self._indexed_history_demands.clear()
             self._front_signals = frozenset()
-            self._front = SignalFront({}, {})
+            self._front = SignalFront({})
             self._publication_parents.clear()
             self._publication_callbacks.clear()
         self._lane.close()

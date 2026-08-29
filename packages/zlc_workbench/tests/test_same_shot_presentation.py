@@ -79,7 +79,7 @@ class _Bench:
             dataset_output_declarations=(self.outputs["frame"].declaration,),
             signal_key=lambda name: f"camera/{name}",
         )
-        self.plane.reserve(self.node)
+        self.plane.begin_generation(self.node)
         # Deliberately NO set_front_signals here: declaring the coherent set
         # is the scheduler's job on tick.  A bench that declares by hand hides
         # a board that never does -- which is exactly how the same-shot suite

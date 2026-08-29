@@ -3833,7 +3833,7 @@ def test_partial_grid_points_mount_and_reproject_one_canonical_snapshot(
         ),
         cell,
     )
-    session.signal_plane.reserve(node)
+    session.signal_plane.begin_generation(node)
 
     def commit_point(index: int, measured: float) -> None:
         point = PointColumn(
@@ -5003,7 +5003,7 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
         dataset_output_declarations=(declaration,),
         signal_key=lambda name: f"scan-survival/{name}",
     )
-    session.signal_plane.reserve(node)
+    session.signal_plane.begin_generation(node)
     session.signal_plane.commit_live(
         node,
         {
@@ -5097,7 +5097,7 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
         dataset_output_declarations=(declaration,),
         signal_key=lambda name: f"scan-map/{name}",
     )
-    session.signal_plane.reserve(map_node)
+    session.signal_plane.begin_generation(map_node)
     session.signal_plane.commit_live(
         map_node,
         {

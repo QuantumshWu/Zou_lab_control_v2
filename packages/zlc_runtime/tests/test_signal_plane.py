@@ -222,7 +222,7 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
             }
         }
     try:
-        plane.reserve(source)
+        plane.begin_generation(source)
         plane.commit_live(source, {"frame": _latest(source_declaration, 1.0)})
         first = plane.latest_publication("indexed-source/frame")
         assert first is not None
@@ -424,7 +424,7 @@ def test_indexed_history_retains_only_the_requested_window() -> None:
     plane = SignalDataPlane()
     history = None
     try:
-        plane.reserve(source)
+        plane.begin_generation(source)
         plane.commit_live(source, {"frame": _latest(source_declaration, 1.0)})
         publication = plane.latest_publication("bounded-source/frame")
         assert publication is not None
@@ -532,7 +532,7 @@ def test_commit_mints_runtime_identity_and_freezes_run_record() -> None:
     record = MappingProxyType(mutable)
     plane = SignalDataPlane()
     try:
-        generation = plane.reserve(node)
+        generation = plane.begin_generation(node)
         value = plane.commit_live(
             node,
             {
@@ -577,7 +577,7 @@ def test_finite_prefix_merges_event_epochs_without_changing_run_identity() -> No
         }
 
     try:
-        plane.reserve(node)
+        plane.begin_generation(node)
         first = plane.commit_live(
             node,
             {
@@ -631,7 +631,7 @@ def test_partial_current_has_invalid_future_and_overlap_is_rejected() -> None:
     node = _node("partial", declaration)
     plane = SignalDataPlane()
     try:
-        plane.reserve(node)
+        plane.begin_generation(node)
         plane.commit_live(
             node,
             {
@@ -675,7 +675,7 @@ def test_finite_signal_reports_full_repeat_geometry_from_first_event_through_sto
     node = _node("repeat-display", declaration)
     plane = SignalDataPlane()
     try:
-        plane.reserve(node)
+        plane.begin_generation(node)
         event_value = plane.commit_live(
             node,
             {
@@ -713,7 +713,7 @@ def test_finite_signal_reports_full_point_grid_geometry_while_cells_arrive() -> 
     node = _node("grid-display", declaration)
     plane = SignalDataPlane()
     try:
-        plane.reserve(node)
+        plane.begin_generation(node)
         plane.commit_live(
             node,
             {
@@ -810,7 +810,7 @@ def test_one_canonical_prefix_is_reused_across_later_event_commits(monkeypatch) 
     monkeypatch.setattr(plane_module, "owned_snapshot_from_arrays", counted)
     plane = SignalDataPlane()
     try:
-        plane.reserve(node)
+        plane.begin_generation(node)
         plane.commit_live(
             node,
             {
@@ -870,7 +870,7 @@ def test_canonical_prefix_is_bound_to_its_publication_when_next_event_wins_race(
     node = _node("publication-prefix", declaration)
     plane = SignalDataPlane()
     try:
-        plane.reserve(node)
+        plane.begin_generation(node)
         plane.commit_live(
             node,
             {
@@ -930,7 +930,7 @@ def test_repeat_100_publication_cost_and_retained_arrays_stay_linear(monkeypatch
     monkeypatch.setattr(plane_module, "owned_snapshot_from_arrays", counted)
     plane = SignalDataPlane()
     try:
-        plane.reserve(node)
+        plane.begin_generation(node)
         published_value_bytes = 0
         for index in range(100):
             value = plane.commit_live(
@@ -1000,7 +1000,7 @@ def test_full_materialization_does_not_hold_plane_lock(monkeypatch, operation: s
 
     plane = SignalDataPlane()
     try:
-        plane.reserve(node)
+        plane.begin_generation(node)
         plane.commit_live(
             node,
             {
@@ -1053,7 +1053,7 @@ def test_mixed_exact_and_latest_siblings_share_one_event_without_retention() -> 
     first_ref = None
     first = None
     try:
-        plane.reserve(node)
+        plane.begin_generation(node)
         for index in range(2):
             values = plane.commit_live(
                 node,
@@ -1105,7 +1105,7 @@ def test_late_exact_replay_keeps_slim_causal_roots_and_drops_monitor_sibling() -
     first_tap = None
     downstream_tap = None
     try:
-        plane.reserve(source)
+        plane.begin_generation(source)
         plane.commit_live(
             source,
             {
@@ -1264,7 +1264,7 @@ def test_latest_processors_run_parallel_per_node_serial_and_coalesce() -> None:
     second = Processor("latest-second")
     plane = SignalDataPlane()
     try:
-        plane.reserve(source)
+        plane.begin_generation(source)
         plane.commit_live(
             source,
             {"frame": _latest(source_declaration, 1.0)},
@@ -1343,7 +1343,7 @@ def test_freeze_preserves_publication_committed_while_processor_route_runs(
 
     monkeypatch.setattr(plane._lane, "route", gated_route)
     try:
-        plane.reserve(source)
+        plane.begin_generation(source)
         plane.commit_live(source, {"frame": _latest(declaration, 1.0)})
 
         def freeze_first_publication() -> None:
@@ -1377,7 +1377,7 @@ def test_direct_latest_commit_retires_without_cleanup_callbacks() -> None:
     node = _node("preview", declaration)
     plane = SignalDataPlane()
     try:
-        plane.reserve(node)
+        plane.begin_generation(node)
         plane.commit_live(node, {"preview": _latest(declaration, 1.0)})
         assert plane.retire(node) == frozenset({"preview/preview"})
         assert plane.latest_publication("preview/preview") is None

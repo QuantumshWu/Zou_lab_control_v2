@@ -179,7 +179,6 @@ def _regenerated(
     )
     return regenerated_value, regenerated_publication, SignalFront(
         {signal: regenerated_value},
-        {},
         {signal: regenerated_publication},
     )
 
@@ -413,7 +412,7 @@ def test_publication_for_identity_requires_generation_and_bare_revision(
             sequence=publication.event_ref.sequence + 123,
         ),
     )
-    front = SignalFront({signal: value}, {}, {signal: publication})
+    front = SignalFront({signal: value}, {signal: publication})
     revision_object = value.snapshot.block.revision
     revision_number = value.snapshot.ref.revision.value
     generation = value.snapshot.ref.stream_generation
@@ -665,7 +664,6 @@ def test_companion_only_change_updates_overlay_and_composite_currency(
         return (
             SignalFront(
                 {signal: value, companion: companion_value},
-                {},
                 {
                     signal: publication,
                     companion: companion_publication,
@@ -877,7 +875,6 @@ def test_frames_outpacing_the_render_worker_are_skipped_without_an_error(
             )
             return SignalFront(
                 {signal: stepped_value},
-                {},
                 {signal: stepped},
             )
 

@@ -81,9 +81,9 @@ class FakePlane(RuntimeSignalDataPlane):
         super().__init__()
         self.calls: list[tuple[str, tuple[Any, ...], Mapping[str, Any]]] = []
 
-    def reserve(self, producer: object):
-        self.calls.append(("reserve", (producer,), {}))
-        return super().reserve(producer)
+    def begin_generation(self, producer: object):
+        self.calls.append(("begin_generation", (producer,), {}))
+        return super().begin_generation(producer)
 
     def retire(self, producer: object):
         self.calls.append(("retire", (producer,), {}))

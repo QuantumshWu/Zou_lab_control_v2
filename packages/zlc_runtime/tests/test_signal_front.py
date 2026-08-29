@@ -225,7 +225,7 @@ def test_plane_front_keeps_weak_parent_payload_alive() -> None:
     roi_tap = None
     fit_tap = None
     try:
-        plane.reserve(node)
+        plane.begin_generation(node)
         plane.set_front_signals({"camera/frame", "roi/value", "fit/value"})
         plane.commit_live(node, state)
         first_front = plane.freeze()

@@ -150,22 +150,25 @@ def test_transient_monitor_still_retires_at_terminal() -> None:
         plane.close()
 
 
-def test_reserve_alone_can_never_run_the_same_node_twice() -> None:
-    """The behaviour that made a second shot impossible, pinned deliberately.
+def test_a_live_generation_is_never_superseded_underneath_a_running_shot() -> None:
+    """Two concurrent runs of one producer is a real error, not a restart.
 
-    ``reserve`` is the low-level operation and it is RIGHT to refuse -- it must
-    not silently discard a generation.  The defect was that it was the only
-    operation available, so a caller had no way to say "the previous run is
-    over" and every domain node could fire exactly once per process.
+    ``begin_generation`` replaces a FINISHED predecessor; a generation that
+    has published and not ended is still running, and silently discarding
+    it would drop the shot in flight.
     """
 
     plane = SignalDataPlane()
     node = _Producer()
     try:
-        plane.reserve(node)
-        _publish(plane, node, 1)
+        plane.begin_generation(node)
+        # Committed but NOT sealed: the shot is in flight.
+        plane.commit_live(
+            node,
+            {"frames": _commit(node, revision=1, total=1, origin=0)},
+        )
         with pytest.raises(RuntimeError, match="already active"):
-            plane.reserve(node)
+            plane.begin_generation(node)
     finally:
         plane.close()
 
@@ -383,15 +386,6 @@ def test_concurrent_generation_starters_share_one_installed_successor() -> None:
     finally:
         release_cancel.set()
         release_work.set()
-        plane.close()
-
-
-def test_reserve_stays_idempotent_before_anything_is_published() -> None:
-    plane = SignalDataPlane()
-    node = _Producer()
-    try:
-        assert plane.reserve(node) == plane.reserve(node)
-    finally:
         plane.close()
 
 

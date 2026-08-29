@@ -630,7 +630,7 @@ def _plane_for(snapshot: OwnedSnapshot, front_signals: set[str]):
         MonitorCoverage(total, total),
     )
     plane = SignalDataPlane()
-    plane.reserve(source_node)
+    plane.begin_generation(source_node)
     plane.commit_live(source_node, {"frame": output})
     plane.freeze()
     plane.set_front_signals({"camera/frame", *front_signals})

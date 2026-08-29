@@ -109,7 +109,7 @@ def test_repeat_zero_monitor_replaces_latest_only_with_a_complete_camera_cycle()
         assert measurement.request.roi_xywh == (2, 3, 20, 16)
         assert measurement.actual_working_point is not None
         assert measurement.actual_working_point.roi_origin_yx == (3, 2)
-        assert any(call[0] == "reserve" for call in plane.calls)
+        assert any(call[0] == "begin_generation" for call in plane.calls)
         front = plane.freeze()
         assert signal_key in front.signals
         terminal = monitor.close()

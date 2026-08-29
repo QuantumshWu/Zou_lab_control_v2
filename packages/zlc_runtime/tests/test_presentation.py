@@ -54,7 +54,6 @@ def _front(name: str = "camera/frame", sequence: int = 1) -> SignalFront:
     )
     return SignalFront(
         {name: value},
-        {},
         {name: publication},
     )
 
@@ -182,7 +181,7 @@ def test_companion_only_currency_change_schedules_the_panel_again() -> None:
             "camera/frame": primary.publication("camera/frame"),
             "occupancy/occupied": companion.publication("occupancy/occupied"),
         }
-        return SignalFront(signals, {}, publications)
+        return SignalFront(signals, publications)
 
     plane = _Plane(combined(first_companion))
     channels = _Sink()
@@ -288,7 +287,6 @@ def test_same_shot_siblings_commit_together_in_one_cohort() -> None:
     siblings = frozenset(("occupancy/rate", "occupancy/counts"))
     front = SignalFront(
         dict(publication.signals),
-        {},
         {name: publication for name in siblings},
     )
     ports = (
@@ -628,7 +626,6 @@ def test_a_displayed_follower_joins_its_shot_within_the_open_window() -> None:
             "camera/frame": camera_front.value("camera/frame"),
             "@logic/panel/center": fit_front.value("@logic/panel/center"),
         },
-        {},
         {
             "camera/frame": camera_publication,
             "@logic/panel/center": fit_publication,
@@ -682,7 +679,6 @@ def test_completion_wake_does_not_bypass_a_not_due_follower() -> None:
             "camera/frame": camera_front.value("camera/frame"),
             "@logic/panel/center": fit_front.value("@logic/panel/center"),
         },
-        {},
         {
             "camera/frame": camera_publication,
             "@logic/panel/center": fit_publication,
@@ -732,7 +728,6 @@ def test_due_coherent_component_stages_on_its_completion_wake() -> None:
                 "camera/frame": camera.value("camera/frame"),
                 "roi/frame": roi.value("roi/frame"),
             },
-            {},
             {
                 "camera/frame": camera.publication("camera/frame"),
                 "roi/frame": roi.publication("roi/frame"),
@@ -827,7 +822,7 @@ def test_board_scheduler_owes_a_failed_slow_beat_to_the_next_base_tick() -> None
     assert len(port.accepted) == 1
 
 def test_board_scheduler_owes_missing_value_until_the_next_base_tick() -> None:
-    empty = SignalFront({}, {})
+    empty = SignalFront({})
     complete = _front()
     plane = _Plane(empty)
     channels = _Sink()

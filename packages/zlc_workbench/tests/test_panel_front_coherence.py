@@ -76,7 +76,7 @@ def test_a_panels_annotation_reaches_the_planes_coherent_front_set() -> None:
             self.declared = frozenset(names)
 
         def freeze(self):
-            return SignalFront({}, {}, {})
+            return SignalFront({})
 
         def direct_parent_publications(self, _publication):
             return ()

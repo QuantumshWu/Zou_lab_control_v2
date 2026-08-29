@@ -1216,7 +1216,7 @@ class SelectionBridge:
                 self._withdraw_processor(stale)
         if not output_names:
             return
-        if not self._source_retained():
+        if not self._source_retained(publication):
             self._record_error(
                 RuntimeError(
                     "this run is no longer held, so its fit derives nothing"
@@ -1366,16 +1366,20 @@ class SelectionBridge:
         publication = source_publication
         outputs = None
         if output_names:
-            if not self._source_retained():
+            if not self._source_retained(publication):
                 # A real answer, not a failure: the picture is still on the
                 # panel, the run behind it is not.  Nothing can be cut from
-                # data the plane has let go.
+                # data the plane has let go.  Asked about the PUBLICATION,
+                # so a Stop and a Start -- which mint a new generation under
+                # the same name -- reach this answer instead of raising out
+                # of the materialization below.
                 self._record_error(
                     RuntimeError(
                         "this run is no longer held, so a selection drawn "
                         "on it derives nothing"
                     )
                 )
+                self._forget_selection()
                 self._retire_selection_outputs()
                 return
             source = publication.value(self._source_signal)
@@ -1402,6 +1406,7 @@ class SelectionBridge:
                 # one pixel too small ended the panel's Setting form for the
                 # rest of the session, widening it again included.
                 self._record_condition(str(error))
+                self._forget_selection()
                 self._retire_selection_outputs()
                 return
         self._selection_succeeded()
@@ -1612,8 +1617,11 @@ class SelectionBridge:
         )
         return _TriggeredOutputs(outputs, trigger)
 
-    def _source_retained(self) -> bool:
-        """Is the run this bridge derives from still HERE?
+    def _source_retained(
+        self,
+        publication: SignalPublication | None = None,
+    ) -> bool:
+        """Is the run this DERIVATION was drawn on still HERE?
 
         A panel keeps its last picture after its run is retired, and its
         selectors keep working: a box drawn there asks for a dataset the
@@ -1623,7 +1631,22 @@ class SelectionBridge:
         The plane knows; ask it before materializing anything.
         """
 
-        return bool(self._plane.retains(self._source_signal))
+        return bool(self._plane.retains(self._source_signal, publication))
+
+    def _forget_selection(self) -> None:
+        """Stop remembering a region this commit could not derive from.
+
+        The memory exists so ``configure_outputs`` can re-run the last
+        commit when an output switch changes, and it was written only on
+        the success path -- so after a box that derived nothing, it still
+        named the box BEFORE it.  Flicking a switch then republished
+        roi_mean for a region the operator no longer had, while the only
+        mark on the picture was the new one.
+        """
+
+        with self._lock:
+            self._selection = None
+            self._selection_publication = None
 
     def _source_snapshot(
         self,

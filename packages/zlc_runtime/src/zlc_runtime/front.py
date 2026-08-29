@@ -94,8 +94,8 @@ def build_front(
 ) -> SignalFront:
     """Build one coherent front from an immutable state view.
 
-    ``states_view`` is read once; its members must expose the eight state
-    fields used by the algorithm (retired, failure, publication, terminal,
+    ``states_view`` is read once; its members must expose the seven state
+    fields used by the algorithm (retired, publication, terminal,
     output_names, kind, source_name, and coherent).  ``resolve_parents`` is
     the plane's read-only parent lookup.  No object in the input view is
     mutated.
@@ -104,7 +104,6 @@ def build_front(
     states = _values(states_view)
     requested_names = frozenset(front_signals)
     latest: dict[str, SignalPublication] = {}
-    failures: dict[str, str] = {}
     active_names: set[str] = set()
     adjacency: dict[str, set[str]] = {}
     source_by_output: dict[str, str] = {}
@@ -112,10 +111,6 @@ def build_front(
     for state in states:
         if getattr(state, "retired"):
             continue
-        owner_id = getattr(state, "owner_id")
-        failure = getattr(state, "failure")
-        if failure is not None:
-            failures[owner_id] = failure
         publication = getattr(state, "publication")
         if getattr(state, "terminal") and publication is not None:
             state_active_names = set(publication.signals)
@@ -239,7 +234,7 @@ def build_front(
         signals[name] = value
         publications[name] = publication
 
-    return SignalFront(signals, failures, publications)
+    return SignalFront(signals, publications)
 
 
 __all__ = ["build_front"]

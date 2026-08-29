@@ -140,7 +140,7 @@ def _source_setup(
     }
     source = _Source(declaration)
     plane = SignalDataPlane()
-    plane.reserve(source)
+    plane.begin_generation(source)
     plane.commit_live(source, state)
     initial = plane.freeze()
     return plane, source, None, state, initial
@@ -205,7 +205,7 @@ def _finite_source_setup(
     }
     source = _Source(declaration)
     plane = SignalDataPlane()
-    plane.reserve(source)
+    plane.begin_generation(source)
     plane.commit_live(source, state)
     return plane, source, state, plane.freeze()
 

@@ -127,7 +127,6 @@ def _shot(sequence: int, companion_sequence: int):
             SIGNAL: picture.value(SIGNAL),
             COMPANION: annotation.value(COMPANION),
         },
-        {},
         {SIGNAL: picture, COMPANION: annotation},
     )
     return picture.value(SIGNAL), picture, front
