@@ -315,3 +315,18 @@ def test_a_scan_point_must_have_one_value_per_slot() -> None:
     )
     with pytest.raises(ValueError, match="one value per slot"):
         resolve_scan_point(sequence, (1.0, 2.0))
+
+
+def test_a_template_for_nothing_is_refused_rather_than_invented() -> None:
+    """With no bound field there is no column, so there is no starter program.
+
+    A stand-in column made the file state two falsehoods -- a slot named s0
+    that does not exist, and, because a stand-in carries no limits, a legal
+    range of "0 .. 0" under a comment saying that is what the board accepts.
+    The table it built was then refused, so the operator read the truth one
+    click later than the file had already implied it.
+    """
+
+    for kind in ("column_stack", "grid"):
+        with pytest.raises(ValueError, match="at least one bound field"):
+            scan_table_template(kind, ())

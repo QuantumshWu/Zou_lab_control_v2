@@ -13,7 +13,7 @@ from collections.abc import Mapping
 
 from .compile import CompiledProgram, evaluate_affine_tick, slot_operand_width
 from .model import PORT_DAC, PulseSequence, PulseTarget
-from .schedule import trigger_windows
+from .schedule import trigger_edge_ticks
 from .transport.base import DEFAULT_OBSERVER_INTERVAL, RegisterTransport
 from .wire import (
     CMD_FIRE,
@@ -811,23 +811,30 @@ class PulseStreamer:
             physical: logical
             for logical, physical in program.logical_digital_outputs
         }
-        for bit, delay in ttl:
+        for bit, _delay in ttl:
             if bit >= len(program.channels):
                 raise ValueError(f"channel delay index {bit} is outside the program")
-            physical = program.channels[bit]
-            logical = physical_to_logical.get(physical, physical)
-            windows = trigger_windows(
-                checked_program,
-                logical,
-                table,
-                cycles=checked_cycles,
-            )
-            events = sorted(tick for window in windows for tick in window)
+        # ONE WALK of the run, not one per delayed channel.  A single
+        # negative delay makes every driven lane a delayed channel, and this
+        # runs inside fire() before the board is strobed -- so the walk that
+        # is identical for all of them ran nine times while the operator
+        # waited on Run.
+        asked = tuple(
+            physical_to_logical.get(program.channels[bit], program.channels[bit])
+            for bit, _delay in ttl
+        )
+        edges = trigger_edge_ticks(
+            checked_program,
+            asked,
+            table,
+            cycles=checked_cycles,
+        )
+        for (bit, delay), logical in zip(ttl, asked):
             self._check_delay_window(
-                events,
+                edges[logical],
                 delay,
                 self.geom.evt_fifo_depth,
-                f"channel {physical!r}",
+                f"channel {program.channels[bit]!r}",
             )
 
         if bus_delays:

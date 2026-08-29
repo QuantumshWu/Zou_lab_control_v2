@@ -547,7 +547,17 @@ def scan_table_template(kind: str, columns: Sequence[ScanColumnSpec]) -> str:
     contract with whoever runs the program.
     """
 
-    cols = list(columns) or [ScanColumnSpec("s0", 1.0, 10_000.0, False, "ns")]
+    cols = list(columns)
+    if not cols:
+        # NOT A SLOT NAMED s0.  With nothing bound there is no column, and a
+        # stand-in column made the starter program state two things that are
+        # not true: that a slot called s0 exists, and -- because a stand-in
+        # carries no limits, only the 0.0 defaults -- that the board accepts
+        # "0 .. 0" for it.  The table it builds is then refused, and the
+        # operator learns on the next click what the file already implied.
+        raise ValueError(
+            "a scan template needs at least one bound field; bind one first"
+        )
     count = len(cols)
 
     def _sweep(spec: ScanColumnSpec, size: object) -> str:

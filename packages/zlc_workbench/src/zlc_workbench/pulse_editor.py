@@ -2771,7 +2771,9 @@ class PulseEditorPresenter:
     def write_scan_template(self, kind: str) -> None:
         """Replace the authored source with a starter program for these slots."""
 
-        if self.sequence is None:
+        # The same question the run path asks, asked here too: a starter
+        # program for zero bound slots can only be written by inventing one.
+        if not self._has_scan_slots():
             return
         self._edit_state(
             scan_source=self._template(str(kind)),

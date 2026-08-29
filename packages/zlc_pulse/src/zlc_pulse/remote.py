@@ -619,12 +619,22 @@ def _recv_frame(connection: socket.socket) -> Any | None:
     def reject_constant(value):
         raise ValueError(f"non-finite JSON constant {value!r} in remote JSON")
 
-    return decode_tree(
-        json.loads(
-            payload.decode("utf-8"),
-            object_pairs_hook=object_from_pairs,
-            parse_constant=reject_constant,
-        )
+    # THE TREE, NOT THE OBJECTS IT DESCRIBES.  Decoding domain values
+    # here made a payload the server could not interpret indistinguishable
+    # from a broken socket: decode_tree raises ValueError, only OSError is
+    # caught around the read loop, so the error escaped the handler
+    # entirely.  socketserver then tore the connection down, the finally
+    # clause reported "client disconnect", and a running board was
+    # AUTO-SAFEd -- while the operator was told another editor had taken
+    # it.  Version skew between a rig-machine server and a newer editor is
+    # all it takes.
+    #
+    # Reading a frame and understanding what is in it are two jobs.  This
+    # one ends at the JSON.
+    return json.loads(
+        payload.decode("utf-8"),
+        object_pairs_hook=object_from_pairs,
+        parse_constant=reject_constant,
     )
 
 
@@ -689,6 +699,11 @@ class _RemoteHandler(socketserver.BaseRequestHandler):
                         raise ValueError(f"unknown remote method: {method}")
                     if not isinstance(params, Mapping):
                         raise ValueError("request params must be an object")
+                    # Interpreted HERE, inside the try that turns a bad
+                    # request into an error response, so a payload this
+                    # server cannot read costs the client its answer and
+                    # nothing else.
+                    params = decode_tree(params)
                     if not claimed:
                         server.claim_client(client, self.request)
                         claimed = True
@@ -1341,7 +1356,11 @@ class RemotePulseStreamer:
             if set(response) != expected:
                 raise ConnectionError("remote response fields differ from the protocol")
             if ok:
-                return response["result"]
+                # The frame reader stops at the JSON, so the domain values
+                # a result carries are interpreted here -- on the side
+                # that asked for them, and inside the guard that turns a
+                # malformed answer into a connection error.
+                return decode_tree(response["result"])
             error = response["error"]
             if (
                 not isinstance(error, Mapping)

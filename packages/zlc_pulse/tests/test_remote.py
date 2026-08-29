@@ -908,3 +908,77 @@ def test_a_client_that_leaves_takes_its_poll_memory_with_it() -> None:
     assert any(key[0] == "10.0.0.1:1" for key in _LAST_POLL)
     _forget_polls("10.0.0.1:1")
     assert not any(key[0] == "10.0.0.1:1" for key in _LAST_POLL)
+
+
+def test_a_payload_the_server_cannot_read_costs_the_client_its_answer_only() -> None:
+    """A request it cannot interpret must not end the session or safe the board.
+
+    The frame reader used to decode the domain values as it read, and
+    decode_tree raises ValueError while only OSError was caught around the
+    read loop -- so an un-decodable payload escaped the handler entirely.
+    socketserver tore the connection down, the finally clause reported it
+    as "client disconnect", and a RUNNING BOARD was AUTO-SAFEd, while the
+    operator was told another editor had taken it.  Version skew between a
+    rig-machine server and a newer editor is all it takes.
+
+    Reading a frame and understanding what is in it are two jobs.
+    """
+
+    import json
+    import struct
+
+    geom = replace(StreamerParams(), max_edges=8, bank_size=2)
+    streamer = PulseStreamer(
+        MemoryRegisterTransport(geom=geom), geom, 50e6, target=_BOARD_TARGET
+    )
+    streamer.open()
+    safed: list[str] = []
+    original_safe = streamer.safe
+
+    def watched_safe(*args, **kwargs):
+        safed.append("safe")
+        return original_safe(*args, **kwargs)
+
+    streamer.safe = watched_safe  # type: ignore[method-assign]
+
+    with _server(streamer) as server:
+        connection = socket.create_connection(
+            ("127.0.0.1", server.server_address[1]), timeout=5.0
+        )
+        try:
+            def send(message):
+                payload = json.dumps(message).encode("utf-8")
+                connection.sendall(struct.pack("!I", len(payload)) + payload)
+
+            def receive():
+                header = connection.recv(4)
+                (size,) = struct.unpack("!I", header)
+                body = b""
+                while len(body) < size:
+                    body += connection.recv(size - len(body))
+                return json.loads(body.decode("utf-8"))
+
+            send({"id": 1, "method": "open", "params": {}})
+            assert receive()["ok"] is True
+            safed.clear()
+
+            # A payload naming a type this server cannot read.
+            send({
+                "id": 2,
+                "method": "load",
+                "params": {"program": {"__type__": "CompiledProgram", "bogus": 1}},
+            })
+            answer = receive()
+            assert answer["id"] == 2
+            assert answer["ok"] is False
+
+            # The session is still alive and still owns the board.
+            send({"id": 3, "method": "describe", "params": {}})
+            assert receive()["ok"] is True
+
+            # Checked while the session is still open: safing on the way
+            # out is what a real disconnect is supposed to do, and would
+            # hide the very thing this test is about.
+            assert not safed, "an unreadable request must not safe a running board"
+        finally:
+            connection.close()

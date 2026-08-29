@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from numbers import Integral
 
 import numpy as np
@@ -24,11 +25,7 @@ def trigger_times(
     """
 
     return np.asarray(
-        [
-            tick
-            for tick, high in _channel_transitions(prog, channel, table, cycles)
-            if high
-        ],
+        _channel_edges(prog, (channel,), table, cycles)[0][0::2],
         dtype=np.uint64,
     )
 
@@ -48,19 +45,57 @@ def trigger_windows(
     rule, drifting from the one the board plays.
     """
 
-    windows: list[tuple[int, int]] = []
-    rise: int | None = None
-    for tick, high in _channel_transitions(prog, channel, table, cycles):
-        if high and rise is None:
-            rise = tick
-        elif not high and rise is not None:
-            windows.append((rise, tick))
-            rise = None
-    if rise is not None:
+    return trigger_windows_by_channel(prog, (channel,), table, cycles=cycles)[channel]
+
+
+def trigger_windows_by_channel(
+    prog: CompiledProgram,
+    channels: Sequence[str],
+    table: np.ndarray | None = None,
+    *,
+    cycles: int = 1,
+) -> dict[str, tuple[tuple[int, int], ...]]:
+    """Return the exposure windows of several lanes from ONE walk of the run.
+
+    A run is one timeline; which lanes an asker cares about does not change
+    it, and the point table it is played over is shared by all of them.  The
+    virtual world needs cooling, probe, trap and the camera for every shot.
+    """
+
+    names = tuple(channels)
+    streams = _channel_edges(prog, names, table, cycles)
+    return {name: _windows_of(edges) for name, edges in zip(names, streams)}
+
+
+def trigger_edge_ticks(
+    prog: CompiledProgram,
+    channels: Sequence[str],
+    table: np.ndarray | None = None,
+    *,
+    cycles: int = 1,
+) -> dict[str, tuple[int, ...]]:
+    """Return the tick of every edge each named lane plays.
+
+    An edge is what a delay FIFO holds an entry for -- rise and fall alike --
+    so a capacity check asks this.  It used to ask for exposure windows and
+    then take them apart again: pairing every edge with its neighbour, then
+    flattening the pairs and sorting them back into the order they were
+    already in, to recover exactly the stream below.  Asking the exposure
+    question also meant refusing a program for an exposure-shaped reason (a
+    lane still high at the end) from inside a FIFO-capacity check.
+    """
+
+    names = tuple(channels)
+    return dict(zip(names, _channel_edges(prog, names, table, cycles)))
+
+
+def _windows_of(edges: tuple[int, ...]) -> tuple[tuple[int, int], ...]:
+    if len(edges) % 2:
         raise ValueError("program leaves a trigger channel high after a finite run")
+    windows = tuple(zip(edges[0::2], edges[1::2]))
     if any(end <= start for start, end in windows):
         raise ValueError("program contains a non-positive trigger window")
-    return tuple(windows)
+    return windows
 
 
 def run_duration_seconds(
@@ -79,67 +114,105 @@ def run_duration_seconds(
     ) / float(prog.clock_hz)
 
 
-def _channel_transitions(
+def _channel_edges(
     prog: CompiledProgram,
-    channel: str,
+    channels: Sequence[str],
     table: np.ndarray | None,
     cycles: int,
-) -> tuple[tuple[int, bool], ...]:
-    """Project the exact finite edge stream played by one digital channel."""
+) -> tuple[tuple[int, ...], ...]:
+    """Project the tick of every edge each named lane plays, in playback order.
+
+    LEVELS ARE NOT STORED.  An edge is a change, so a lane's levels
+    alternate: the first edge raises it, the second lowers it, and the
+    position in the stream already says which.  Carrying a bool beside every
+    tick allocated a tuple per edge -- 3.9 million of them for one 200-point
+    fire -- to repeat what counting says.
+
+    THE SHAPE OF A POINT IS SHARED BY EVERY LANE.  ``_point_timing`` has no
+    channel argument, and the table is cycled, so a scan of N rows has N
+    shapes however many cycles it plays.  Derived per lane, a program with
+    nine delayed lanes derived the same table nine times -- and nine is
+    authorable by accident, because a delay is written per port and a
+    NEGATIVE one is expressed by lifting every OTHER driven lane, so one
+    ``-100 ns`` turns every driven lane into a delayed channel.  This runs
+    inside fire(), before the board is strobed, with the operator waiting.
+    """
 
     if not isinstance(prog, CompiledProgram):
         raise TypeError("prog must be CompiledProgram")
-    physical = dict(prog.logical_digital_outputs).get(channel, channel)
-    if physical not in prog.channels:
-        raise ValueError(f"unknown channel {channel!r}")
-    bit = prog.channels.index(physical)
-    if prog.clk_enable & (1 << bit):
-        raise ValueError("clock lanes do not have digital trigger results")
+    physical_of = dict(prog.logical_digital_outputs)
+    bits: list[int] = []
+    for channel in channels:
+        physical = physical_of.get(channel, channel)
+        if physical not in prog.channels:
+            raise ValueError(f"unknown channel {channel!r}")
+        bit = prog.channels.index(physical)
+        if prog.clk_enable & (1 << bit):
+            raise ValueError("clock lanes do not have digital trigger results")
+        bits.append(bit)
 
     points = _scan_points(prog, table, cycles)
+    loop_count = prog.loop_count
+    loop_start_index = prog.loop_start_index
+    shapes: dict[tuple[int, ...], tuple] = {}
 
-    transitions: list[tuple[int, bool]] = []
-    previous = False
-    run_offset = 0
-    delay = int(prog.channel_delays[bit])
-    for point_index, point in enumerate(points):
-        effective, loop_start, loop_end, final, span, total = _point_timing(
-            prog, point, point_index
-        )
+    streams: list[tuple[int, ...]] = []
+    for bit in bits:
+        delay = int(prog.channel_delays[bit])
+        # One lookup per stop instead of a shift and a mask: the mask table
+        # has 41 rows and the walk visits them hundreds of thousands of times.
+        levels = tuple(bool((mask >> bit) & 1) for mask in prog.masks)
+        terminal = levels[-1]
+        ticks: list[int] = []
+        previous = False
+        run_offset = 0
+        for point_index, point in enumerate(points):
+            shape = shapes.get(point)
+            if shape is None:
+                effective, _loop_start, loop_end, final, span, total = _point_timing(
+                    prog, point, point_index
+                )
+                prefix = tuple(range(loop_start_index))
+                body = tuple(
+                    index
+                    for index in range(loop_start_index, len(effective))
+                    if effective[index] < loop_end
+                )
+                extra = tuple(
+                    index
+                    for index in range(loop_start_index, len(effective))
+                    if loop_end <= effective[index] < final
+                )
+                shape = (effective, prefix, body, extra, final, span, total)
+                shapes[point] = shape
+            effective, prefix, body, extra, final, span, total = shape
 
-        def consume(indices: tuple[int, ...], offset: int) -> None:
-            nonlocal previous
-            for index in indices:
-                current = bool((prog.masks[index] >> bit) & 1)
-                if current != previous:
-                    transitions.append((offset + effective[index] + delay, current))
-                    previous = current
+            for index in prefix:
+                level = levels[index]
+                if level != previous:
+                    previous = level
+                    ticks.append(run_offset + effective[index] + delay)
+            for iteration in range(loop_count):
+                offset = run_offset + iteration * span
+                for index in body:
+                    level = levels[index]
+                    if level != previous:
+                        previous = level
+                        ticks.append(offset + effective[index] + delay)
+            offset = run_offset + (loop_count - 1) * span
+            for index in extra:
+                level = levels[index]
+                if level != previous:
+                    previous = level
+                    ticks.append(offset + effective[index] + delay)
 
-        prefix = tuple(range(prog.loop_start_index))
-        body = tuple(
-            index
-            for index in range(prog.loop_start_index, len(effective))
-            if effective[index] < loop_end
-        )
-        tail = tuple(
-            index
-            for index in range(prog.loop_start_index, len(effective))
-            if loop_end <= effective[index] < final
-        )
-        consume(prefix, run_offset)
-        for iteration in range(prog.loop_count):
-            consume(body, run_offset + iteration * span)
-        consume(tail, run_offset + (prog.loop_count - 1) * span)
+            if terminal != previous:
+                previous = terminal
+                ticks.append(offset + final + delay)
+            run_offset += total
+        streams.append(tuple(ticks))
 
-        terminal = bool((prog.masks[-1] >> bit) & 1)
-        if terminal != previous:
-            transitions.append(
-                (run_offset + final + (prog.loop_count - 1) * span + delay, terminal)
-            )
-            previous = terminal
-        run_offset += total
-
-    return tuple(transitions)
+    return tuple(streams)
 
 
 def _scan_points(
@@ -201,4 +274,10 @@ def _point_timing(
     return effective, loop_start, loop_end, final, span, total
 
 
-__all__ = ["run_duration_seconds", "trigger_times", "trigger_windows"]
+__all__ = [
+    "run_duration_seconds",
+    "trigger_times",
+    "trigger_windows",
+    "trigger_windows_by_channel",
+    "trigger_edge_ticks",
+]

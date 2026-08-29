@@ -13,7 +13,10 @@ from typing import Any, Callable
 import numpy as np
 
 from zlc_pulse.compile import CompiledProgram, evaluate_affine_tick
-from zlc_pulse.schedule import run_duration_seconds, trigger_windows
+from zlc_pulse.schedule import (
+    run_duration_seconds,
+    trigger_windows_by_channel,
+)
 
 
 DEFAULT_SIMULATION_GRID_SHAPE_YX = (5, 7)
@@ -912,10 +915,15 @@ class SimulationWorld:
             raise TypeError("program must be CompiledProgram")
         row = None if table is None else np.asarray(table, dtype=np.int64).reshape(1, -1)
         clock = float(program.clock_hz)
-        cooling = trigger_windows(program, "cooling", row)
-        probe = trigger_windows(program, "probe", row)
-        trap = trigger_windows(program, "trap", row)
-        camera_windows = trigger_windows(program, str(camera_channel), row)
+        # One shot is one timeline: the four lanes it needs come out of a
+        # single walk of the point rather than four replays of it.
+        lanes = trigger_windows_by_channel(
+            program, ("cooling", "probe", "trap", str(camera_channel)), row
+        )
+        cooling = lanes["cooling"]
+        probe = lanes["probe"]
+        trap = lanes["trap"]
+        camera_windows = lanes[str(camera_channel)]
         base_duration_ticks = int(
             round(run_duration_seconds(program, row) * clock)
         )
