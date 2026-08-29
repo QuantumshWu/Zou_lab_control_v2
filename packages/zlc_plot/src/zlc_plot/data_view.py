@@ -3006,23 +3006,16 @@ class DataView:
             if window > 1
             else np.broadcast_to(self._samples.valid_mask, shape)
         )
-        flat_values = np.asarray(self._samples.value.canonical).reshape(-1)
-        usable = np.asarray(validity, dtype=bool).reshape(-1)
-
         dimensions, coordinates = self._reduction_plan(tuple(cell.reduced))
-        buckets = self._reduction_buckets(dimensions, coordinates)
-        codes = np.ascontiguousarray(buckets.codes).reshape(-1)
-        reduced, counts = _aggregate_by_codes(
-            flat_values, usable, codes, buckets.count, cell.reduction
-        )
-        present = np.asarray(counts) > 0
 
         # ASK THE FACET AXIS, NOT EVERY SAMPLE.  The facet axis survives the
         # reduction -- validate_facet refuses a grid that reduces the axis it
-        # facets by -- so a bucket lies in exactly one cell, and which one is
-        # already written in the bucket number.  Reading it per sample instead
-        # meant grouping two million positions to learn four answers: 0.40 s
-        # of a 0.58 s build, nearly all of it one argsort and one unique.
+        # facets by -- so every reduced value lies in exactly one cell, and
+        # which one is fixed by its index along that axis.  Reading it per
+        # sample instead grouped two million positions to learn four answers:
+        # 0.40 s of a 0.58 s build, nearly all of it one argsort and one
+        # unique.  One representative element per index along the axis puts
+        # the same domain machinery on an array the size of the AXIS.
         facet_axis = int(self._resolve(spec.facet).dimension)
         strides_flat = [1] * len(shape)
         for axis in range(len(shape) - 2, -1, -1):
@@ -3033,19 +3026,59 @@ class DataView:
         )
         domain = self._domain(spec.facet, representatives)
         axis_codes = np.asarray(domain.codes, dtype=np.int64)
-        if facet_axis == 1 and buckets.point_groups is not None:
-            # The kept point axis stands for GROUPS of rows, and every row in
-            # a group shares the facet coordinate -- it is not the one being
-            # reduced -- so any row of the group names the group's cell.
-            grouped = np.full(int(buckets.extents[buckets.axes.index(1)]), -1, dtype=np.int64)
-            grouped[buckets.point_groups] = axis_codes
-            axis_codes = grouped
-        bucket_facet = axis_codes[buckets.axis_index(facet_axis)]
+        cell_count = len(domain.values)
 
-        pools = tuple(
-            np.asarray(reduced[present & (bucket_facet == index)], dtype=float)
-            for index in range(len(domain.values))
-        )
+        if not coordinates:
+            # WHOLE AXES ARE A UFUNC.  Naming only tensor axes -- reduce over
+            # repeat, the ordinary case -- is exactly what _collapse_axes
+            # already does with np.sum/np.min over an axis, and the answer
+            # keeps the array's own shape minus those axes.  So the facet
+            # index is an INDEX, read straight off the surviving axis, and
+            # none of the per-sample machinery below is needed.  Measured on
+            # 2M samples: the sum itself is 0.7 ms where scattering the same
+            # reduction into buckets costs 20.7 ms plus 7.4 ms to build the
+            # codes.
+            reduced, present = self._collapse_axes(
+                self._samples.value.canonical,
+                validity,
+                tuple(cell.reduced),
+                cell.reduction,
+            )
+            kept = [axis for axis in range(len(shape)) if axis not in dimensions]
+            spread = [1] * len(kept)
+            spread[kept.index(facet_axis)] = -1
+            cells = axis_codes.reshape(spread)
+            pools = tuple(
+                np.asarray(reduced[present & (cells == index)], dtype=float)
+                for index in range(cell_count)
+            )
+        else:
+            # A point coordinate regroups the point ROWS, so the surviving
+            # point axis is no longer the array's: the identity has to be
+            # built per sample.
+            flat_values = np.asarray(self._samples.value.canonical).reshape(-1)
+            usable = np.asarray(validity, dtype=bool).reshape(-1)
+            buckets = self._reduction_buckets(dimensions, coordinates)
+            codes = np.ascontiguousarray(buckets.codes).reshape(-1)
+            reduced, counts = _aggregate_by_codes(
+                flat_values, usable, codes, buckets.count, cell.reduction
+            )
+            present = np.asarray(counts) > 0
+            if facet_axis == 1 and buckets.point_groups is not None:
+                # The kept point axis stands for GROUPS of rows, and every row
+                # in a group shares the facet coordinate -- it is not the one
+                # being reduced -- so any row of the group names its cell.
+                grouped = np.full(
+                    int(buckets.extents[buckets.axes.index(1)]), -1, dtype=np.int64
+                )
+                grouped[buckets.point_groups] = axis_codes
+                axis_codes = grouped
+            bucket_facet = axis_codes[buckets.axis_index(facet_axis)]
+            pools = tuple(
+                np.asarray(reduced[present & (bucket_facet == index)], dtype=float)
+                for index in range(cell_count)
+            )
+
         joined = np.concatenate(pools) if pools else np.empty(0, dtype=float)
         return _FacetHistogramPlan(pools, tuple(domain.values), joined)
 

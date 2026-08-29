@@ -208,3 +208,99 @@ def test_the_grid_and_the_single_panel_reduce_the_same_way() -> None:
         _grid(reduced=refs, reduction=Reduction.MEAN)
     )
     np.testing.assert_allclose(np.sort(grid_pool), single)
+
+
+def _two_column_view(values: np.ndarray) -> DataView:
+    """A frame x detuning scan: facet by one coordinate, reduce the other."""
+
+    rows = values.shape[1]
+    schema = DatasetSchema(
+        AxisSpec(AxisId("t.repeat"), "repeat", REPEAT, values.shape[0], tuple(range(values.shape[0]))),
+        PointTable(
+            rows,
+            (
+                PointColumn(
+                    AxisId("p.frame"), "frame", SCAN_POINT, PointColumn.NUMERIC,
+                    tuple(float(row % 2) for row in range(rows)),
+                ),
+                PointColumn(
+                    AxisId("p.detuning"), "detuning", SCAN_POINT, PointColumn.NUMERIC,
+                    tuple(float(row // 2) for row in range(rows)),
+                ),
+            ),
+        ),
+        None,
+        ValueSchema(
+            (AxisSpec(AxisId("v.site"), "site", SITE, values.shape[2], tuple(range(values.shape[2]))),),
+            ValidityContract.value(),
+            np.dtype("float64"),
+            "count",
+        ),
+    )
+    block = DataBlock(
+        BlockId("d"),
+        DatasetRevision(1),
+        values,
+        CellValidity(np.ones(values.shape[:2], dtype=bool)),
+        schema,
+        None,
+    )
+    return DataView(OwnedSnapshot(block.ref(StreamGenerationId("g")), block))
+
+
+def test_a_reduced_point_coordinate_groups_the_rows_inside_each_cell() -> None:
+    """The path a whole tensor axis does not take.
+
+    Reducing "detuning" while facetting by "frame" cannot be a ufunc over an
+    array axis: both coordinates live on the one point axis, so the surviving
+    point axis is a REGROUPING of its rows and the identity has to be built
+    per sample.  Whole-axis reductions take the cheaper route; this checks
+    the other one still answers, against a hand computation.
+    """
+
+    repeats, rows, sites = 3, 6, 2  # frames {0,1} x detunings {0,1,2}
+    values = np.arange(repeats * rows * sites, dtype=float).reshape(repeats, rows, sites)
+    view = _two_column_view(values)
+    grid = FacetGridPlot(
+        facet=AxisRef.point("p.frame"),
+        cell=HistogramPlot(
+            reduced=(AxisRef.point("p.detuning"),), reduction=Reduction.MEAN
+        ),
+    )
+    plan = view._facet_histogram_plan(grid, 1)
+    assert len(plan.pools) == 2
+    for frame in (0, 1):
+        # Rows of this frame, averaged over the three detunings, per repeat
+        # and per site -- so repeats x sites values survive in the cell.
+        mine = values[:, frame::2, :].mean(axis=1)
+        np.testing.assert_allclose(np.sort(plan.pools[frame]), np.sort(mine.reshape(-1)))
+
+
+def test_both_reduction_routes_agree_on_a_reduction_they_share() -> None:
+    """Reducing the repeat axis is expressible either way; they must match."""
+
+    from zlc_plot.data_view import _aggregate_by_codes
+
+    repeats, rows, sites = 4, 6, 2
+    values = np.arange(repeats * rows * sites, dtype=float).reshape(repeats, rows, sites)
+    view = _two_column_view(values)
+    refs = (AxisRef.repeat(),)
+
+    # The route the plan takes: a ufunc over the array axis.
+    valid = np.ones(values.shape, dtype=bool)
+    quick, present = view._collapse_axes(values, valid, refs, Reduction.MEAN)
+
+    # The route a point-coordinate reduction is forced to take, on the same
+    # reduction: one bucket identity per sample, scattered.
+    dimensions, coordinates = view._reduction_plan(refs)
+    buckets = view._reduction_buckets(dimensions, coordinates)
+    scattered, counts = _aggregate_by_codes(
+        values.reshape(-1),
+        np.ones(values.size, dtype=bool),
+        np.ascontiguousarray(buckets.codes).reshape(-1),
+        buckets.count,
+        Reduction.MEAN,
+    )
+    np.testing.assert_allclose(
+        quick[present], scattered.reshape(buckets.shape)[counts.reshape(buckets.shape) > 0]
+    )
