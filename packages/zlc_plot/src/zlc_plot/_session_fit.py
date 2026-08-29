@@ -1830,7 +1830,6 @@ class FitSessionMixin:
             try:
                 self._render_current(
                     RenderEffect.OVERLAY,
-                    schedule_fit=False,
                 )
             except Exception:
                 with self._lock:
@@ -1839,7 +1838,6 @@ class FitSessionMixin:
                 try:
                     self._render_current(
                         RenderEffect.OVERLAY,
-                        schedule_fit=False,
                     )
                 except Exception:
                     self.redraw_surface()
@@ -1926,7 +1924,6 @@ class FitSessionMixin:
                 self._accepted_fit = presentation.previous
             self._render_current(
                 RenderEffect.OVERLAY,
-                schedule_fit=False,
             )
 
     def subscribe_fit(self, callback: FitCallback) -> Callable[[], None]:
@@ -1980,7 +1977,6 @@ class FitSessionMixin:
             try:
                 self._render_current(
                     RenderEffect.OVERLAY,
-                    schedule_fit=False,
                 )
             except Exception:
                 with self._lock:
@@ -1995,7 +1991,6 @@ class FitSessionMixin:
                 try:
                     self._render_current(
                         RenderEffect.OVERLAY,
-                        schedule_fit=False,
                     )
                 except Exception:
                     self.redraw_surface()

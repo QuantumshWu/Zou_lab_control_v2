@@ -74,7 +74,6 @@ _COMPOSE_SEAMS = (
     "_native_draw",
     "_image_rgba_front",
     "_view_filling_rgba_front",
-    "_box_sized_rgba_front",
     "_mutate_image_artists",
     "_cached_image_range",
     "_blit_exact_rgba_image",

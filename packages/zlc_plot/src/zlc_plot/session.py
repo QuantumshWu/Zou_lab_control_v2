@@ -1428,8 +1428,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
     def _render_current(
         self,
         effects: RenderEffect,
-        *,
-        schedule_fit: bool = False,
     ) -> None:
         with self._render_lock:
             assert self._renderer is not None
@@ -1547,12 +1545,10 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             if plan is not None:
                 self._apply_layout_plan(
                     plan,
-                    schedule_fit=False,
                 )
             else:
                 self._render_current(
                     RenderEffect.BASE_GEOMETRY,
-                    schedule_fit=False,
                 )
         except Exception:
             with self._lock:
@@ -1575,12 +1571,10 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 if plan is not None:
                     self._apply_layout_plan(
                         old_plan,
-                        schedule_fit=False,
                     )
                 else:
                     self._render_current(
                         RenderEffect.BASE_GEOMETRY,
-                        schedule_fit=False,
                     )
             except Exception:
                 self.redraw_surface()
@@ -1628,12 +1622,10 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             if current_plan != presentation.previous_plan:
                 self._apply_layout_plan(
                     presentation.previous_plan,
-                    schedule_fit=False,
                 )
             else:
                 self._render_current(
                     RenderEffect.BASE_GEOMETRY,
-                    schedule_fit=False,
                 )
 
     def _emit_projection_focus_change(
@@ -1648,8 +1640,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
     def _apply_layout_plan(
         self,
         plan: SurfacePlan,
-        *,
-        schedule_fit: bool = False,
     ) -> None:
         with self._render_lock:
             self._cancel_gesture()
@@ -1833,7 +1823,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 self._configuration_display_events = None
                 self._configuration_fit_events = None
                 if effects != RenderEffect.NONE:
-                    self._render_current(effects, schedule_fit=False)
+                    self._render_current(effects)
                 fit_commit_actions = tuple(
                     self._configuration_fit_commit_actions or ()
                 )
@@ -2491,12 +2481,10 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     layout_attempted = True
                     self._apply_layout_plan(
                         plan,
-                        schedule_fit=False,
                     )
                 else:
                     self._render_current(
                         effects,
-                        schedule_fit=False,
                     )
             except Exception:
                 with self._lock:
@@ -2519,12 +2507,10 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     if layout_attempted or self.surface_plan != old_plan:
                         self._apply_layout_plan(
                             old_plan,
-                            schedule_fit=False,
                         )
                     else:
                         self._render_current(
                             RenderEffect.LAYOUT,
-                            schedule_fit=False,
                         )
                 except Exception:
                     self.redraw_surface()
@@ -2808,7 +2794,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             try:
                 self._apply_layout_plan(
                     plan,
-                    schedule_fit=False,
                 )
             except Exception:
                 with self._lock:
@@ -2817,7 +2802,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 try:
                     self._apply_layout_plan(
                         previous_plan,
-                        schedule_fit=False,
                     )
                 except Exception:
                     self.redraw_surface()
@@ -2958,12 +2942,10 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 if preserve_native_canvas:
                     self._render_current(
                         RenderEffect.LAYOUT,
-                        schedule_fit=False,
                     )
                 else:
                     self._apply_layout_plan(
                         plan,
-                        schedule_fit=False,
                     )
             except Exception:
                 with self._lock:
@@ -2978,12 +2960,10 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     if preserve_native_canvas:
                         self._render_current(
                             RenderEffect.LAYOUT,
-                            schedule_fit=False,
                         )
                     else:
                         self._apply_layout_plan(
                             previous_plan,
-                            schedule_fit=False,
                         )
                 except Exception:
                     self.redraw_surface()
@@ -3727,7 +3707,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             try:
                 self._render_current(
                     RenderEffect.OVERLAY,
-                    schedule_fit=False,
                 )
             except Exception:
                 with self._lock:
@@ -3737,7 +3716,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 try:
                     self._render_current(
                         RenderEffect.OVERLAY,
-                        schedule_fit=False,
                     )
                 except Exception:
                     self.redraw_surface()
@@ -3977,7 +3955,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 if self._renderer is not None:
                     self._render_current(
                         RenderEffect.OVERLAY,
-                        schedule_fit=False,
                     )
             except Exception:
                 with self._lock:
@@ -3995,7 +3972,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     if self._renderer is not None:
                         self._render_current(
                             RenderEffect.OVERLAY,
-                            schedule_fit=False,
                         )
                 except Exception:
                     self.redraw_surface()
@@ -4438,7 +4414,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 | RenderEffect.OVERLAY
             )
             try:
-                self._render_current(effects, schedule_fit=False)
+                self._render_current(effects)
             except Exception:
                 with self._lock:
                     (
@@ -4446,7 +4422,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                         self._fit_context_generation,
                     ) = previous
                 try:
-                    self._render_current(effects, schedule_fit=False)
+                    self._render_current(effects)
                 except Exception:
                     self.redraw_surface()
                 raise

@@ -736,9 +736,12 @@ class GestureSessionMixin:
                 # a hand that had not let go yet watched the scene snap
                 # home to the view it started from.  The camera has one
                 # owner -- the display parameters -- and the drag writes
-                # it like the scroll wheel already writes the zoom.  Only
-                # the RESOLUTION is transient, and that is the renderer's
-                # drag budget, not a second copy of the view.
+                # it like the scroll wheel already writes the zoom.  What
+                # IS transient is the compose partition: for the length of
+                # the gesture the scene is the dynamic artist and the
+                # chrome beside it is background.  Nothing about the drag
+                # lowers the resolution -- the scene is rendered at the box
+                # size on every frame.
                 with self._renderer.raster_transaction():
                     self.set_parameters({
                         "camera_azimuth": camera.azimuth_deg,
@@ -781,7 +784,7 @@ class GestureSessionMixin:
                             candidate.value.high,
                         )
                         self._render_current(
-                            RenderEffect.OVERLAY, schedule_fit=False
+                            RenderEffect.OVERLAY
                         )
                     finally:
                         gesture.lane_finished("raster")
@@ -818,13 +821,17 @@ class GestureSessionMixin:
             self._clear_gesture(gesture)
             assert self._renderer is not None
             # Letting go changes no view: every frame of the drag was
-            # already committed.  What lifts is the resolution budget, so
-            # the scene the hand left is repainted in full.
+            # already committed, and there is no resolution budget to hand
+            # back -- the scene is rendered at the box size throughout.  So
+            # the pixels of the scene are already the pixels of the answer;
+            # what changed is the PARTITION, and dropping the confinement
+            # invalidates the background.  Composing it back is the whole
+            # job.  Asking for BASE_GEOMETRY instead re-ran the scanline
+            # materialize -- 20-40 ms on a 1200x1920 grid -- to arrive at a
+            # bit-identical picture, on every single mouse-up.
             self._renderer.set_height_bars_dragging(False)
             with self._renderer.raster_transaction():
-                self._render_current(
-                    RenderEffect.BASE_GEOMETRY, schedule_fit=False
-                )
+                self._renderer.capture_gesture_background()
             return
         if getattr(event, "button", None) == 2:
             if not isinstance(gesture, _PanGesture):
@@ -867,7 +874,7 @@ class GestureSessionMixin:
             else:
                 with self._renderer.raster_transaction():
                     self._render_current(
-                        RenderEffect.BASE_GEOMETRY, schedule_fit=False
+                        RenderEffect.BASE_GEOMETRY
                     )
             return
         if isinstance(gesture, _ColorGesture):
@@ -901,12 +908,10 @@ class GestureSessionMixin:
             else:
                 self._render_current(
                     RenderEffect.BASE_GEOMETRY,
-                    schedule_fit=False,
                 )
         except Exception:
             self._render_current(
                 RenderEffect.BASE_GEOMETRY,
-                schedule_fit=False,
             )
             raise
 
@@ -952,7 +957,7 @@ class GestureSessionMixin:
         if committed is not None:
             self.remove_selector(committed.kind)
             return
-        self._render_current(RenderEffect.OVERLAY, schedule_fit=False)
+        self._render_current(RenderEffect.OVERLAY)
 
     def _on_key_press(self, event: Any) -> None:
         if str(getattr(event, "key", "")).lower() != "escape":
@@ -1032,7 +1037,6 @@ class GestureSessionMixin:
         if render:
             self._render_current(
                 RenderEffect.AXIS_TRANSFORM | RenderEffect.OVERLAY,
-                schedule_fit=False,
             )
         return True
 
@@ -1061,8 +1065,8 @@ class GestureSessionMixin:
             elif isinstance(gesture, _OrbitGesture):
                 assert self._renderer is not None
                 # Losing the pointer ends the DRAG, never the view: the
-                # camera it turned is committed, so cancelling only hands
-                # the resolution budget back.
+                # camera it turned is committed, so cancelling only drops
+                # the compose partition.
                 self._renderer.set_height_bars_dragging(False)
         finally:
             self._clear_gesture(gesture)
@@ -1074,13 +1078,11 @@ class GestureSessionMixin:
         ):
             self._render_current(
                 RenderEffect.AXIS_TRANSFORM | RenderEffect.OVERLAY,
-                schedule_fit=False,
             )
         restore_committed = isinstance(gesture, _ColorGesture) or cancelled is not None
         if restore_committed and self._renderer is not None and not self._closed:
             color_gesture = isinstance(gesture, _ColorGesture)
             self._render_current(
                 RenderEffect.BASE_GEOMETRY if color_gesture else RenderEffect.OVERLAY,
-                schedule_fit=False,
             )
         return cancelled

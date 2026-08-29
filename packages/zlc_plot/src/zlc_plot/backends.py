@@ -545,7 +545,6 @@ def _qt5_plot_widget_class() -> type[Any]:
             self._interaction_window = None
             self._gesture_front: RasterFront | None = None
             self._gesture_axes: AxisTransform | None = None
-            self._gesture_kind: SceneKind | None = None
             self._candidate: SelectorState | ColorLimitCandidate | None = None
             self._pointer_button: int | None = None
             #: Every pointer submission in order, and the one that latched
@@ -1241,7 +1240,6 @@ def _qt5_plot_widget_class() -> type[Any]:
                 return
             if candidate is not None:
                 self._candidate = candidate
-                self._gesture_kind = candidate.kind
             if state.publish_front and operation_front is not None:
                 self._install_front(operation_front)
             if (
@@ -1285,7 +1283,6 @@ def _qt5_plot_widget_class() -> type[Any]:
                 return
             self._gesture_front = front
             self._gesture_axes = axes
-            self._gesture_kind = candidate.kind
             if action == "move":
                 # Candidate scenes are immutable and already resolved by the
                 # shared PlotSession interaction engine.  Paint them in the
@@ -1430,7 +1427,6 @@ def _qt5_plot_widget_class() -> type[Any]:
                 pass
             self._gesture_front = None
             self._gesture_axes = None
-            self._gesture_kind = None
             self._candidate = None
             self._pointer_button = None
             self.update()

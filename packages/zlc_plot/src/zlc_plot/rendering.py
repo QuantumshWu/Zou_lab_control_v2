@@ -1262,7 +1262,7 @@ class MatplotlibRenderer:
         self._quantized_bounds: dict[int, tuple[float, ...]] = {}
         #: One settled opacity answer per composed front, kept beside
         #: the array so its identity cannot be recycled underneath.
-        self._front_opacity: dict[int, tuple[Any, bool]] = {}
+        self._front_opacity: dict[int, tuple[weakref.ref, bool]] = {}
         self._boundary_chrome_cache: dict[
             int, tuple[tuple[Any, Any, float], ...]
         ] = {}
@@ -1547,6 +1547,19 @@ class MatplotlibRenderer:
         self._fit_family = None
         self._fit_model_id = None
         self._image_ranges.clear()
+        # THE BOXES TOO.  These five are keyed by id(axes), and relayout is
+        # exactly where the old Axes are dropped -- so a later generation
+        # could be allocated at a freed address, read installed=True out of
+        # a stale _owned_axes, and skip installing its own apply_aspect
+        # override.  apply_aspect then re-derived a box like 92.99999999999989
+        # px, the exact-fill blit refused it, and every cell fell back to
+        # Matplotlib's whole image machinery -- silently, in the middle of the
+        # quantization that exists to prevent exactly that.
+        self._owned_box.clear()
+        self._owned_axes.clear()
+        self._box_exact.clear()
+        self._planned_ratio.clear()
+        self._quantized_bounds.clear()
         self._data_revision = None
         self._last_payload = None
         self._last_state = None
@@ -2317,16 +2330,32 @@ class MatplotlibRenderer:
         afterwards -- the arrays are handed out read-only.  The blit asked
         it again, of nine megabytes, on every draw of every image of every
         frame.
+
+        REMEMBERED WEAKLY, because the answer is about the array and not a
+        reason to keep it.  Held strongly, an exact-fill live image panel --
+        every revision composes a new front -- pinned one whole RGBA plane
+        per shot until the entry count reached its cap: about 4 MB each at
+        1024x1024 and DPR 2, so roughly a gigabyte over 256 shots, dropped
+        to nothing, and up again, per panel, for as long as it ran.
         """
 
         token = id(front)
         remembered = self._front_opacity.get(token)
-        if remembered is not None and remembered[0] is front:
+        if remembered is not None and remembered[0]() is front:
             return remembered[1]
         opaque = bool(front[..., 3].min() == 255)
-        if len(self._front_opacity) > 256:
-            self._front_opacity.clear()
-        self._front_opacity[token] = (front, opaque)
+        cache = self._front_opacity
+
+        def _evict(_dead: Any, token: int = token) -> None:
+            # An id is only reusable once its array is gone, and this runs
+            # as it goes; the identity check above covers the rest.
+            cache.pop(token, None)
+
+        try:
+            reference = weakref.ref(front, _evict)
+        except TypeError:  # pragma: no cover -- every ndarray takes one
+            return opaque
+        cache[token] = (reference, opaque)
         return opaque
 
     def _blit_exact_rgba_image(self, artist: Any, canvas: Any) -> bool:
@@ -2451,8 +2480,18 @@ class MatplotlibRenderer:
         self._color_limit_candidate = candidate
         with style_context(self.style):
             self._update_selectors(self._last_selectors)
-            if not self._paint_gesture_overlay():
-                self._compose_frame(chrome_stable=True)
+            # The overlay fast path is not tried here: a region is captured
+            # DURING a compose that has a gesture split, and the previous
+            # gesture's compose forgot it when its split went away, so at the
+            # start of a gesture there is never one to restore.  Asking
+            # anyway read like an optimisation and hid where one would
+            # actually pay -- every move of a colour-limit drag, which
+            # composes in full.  That cannot simply be switched on:
+            # _gesture_ordering takes its owner from the first selector
+            # artist at or after the split, which on an image panel is an
+            # image-axes selector and not the rail being dragged, so the
+            # rail's guides would be baked into the capture and freeze.
+            self._compose_frame(chrome_stable=True)
         return True
 
     def preview_selector(self, state: SelectorState) -> bool:
@@ -3940,70 +3979,6 @@ class MatplotlibRenderer:
             return
         out[...] = source[row_map][:, column_map]
 
-    def _box_sized_rgba_front(
-        self,
-        key: str,
-        rgba: np.ndarray,
-        extent: tuple[float, float, float, float],
-        x_limits: tuple[float, float],
-        y_limits: tuple[float, float],
-        axes: Any,
-    ) -> np.ndarray:
-        """Resize a composed RGBA front to its axes' pixel box.
-
-        A 10x10 heatmap cell paid Matplotlib's full image machinery on
-        every draw of every cell; at the box size the compose's exact
-        row-copy blit takes over, and a facet of 64 such cells stops
-        re-rendering 64 images per frame.  Nearest-neighbour placement is
-        computed here instead of inside Agg -- boundary rows may land one
-        pixel from Agg's fixed-point choice, which changes no value or
-        coordinate semantics.  Anything but an integer-box resize of a
-        view-filling front is returned unchanged.
-
-        Both directions, because a camera frame lands just ABOVE its box:
-        the front store's mip level is chosen so one sample is about one
-        display pixel and then refuses a marginal reduction, so a 2048
-        frame in a 504 box arrives as 512 and Agg re-resampled those eight
-        rows on every single draw -- four milliseconds a frame to lose
-        1.6% of a picture we had already composed.
-        """
-
-        rows, columns = rgba.shape[:2]
-        rect = _image_destination_rect(
-            axes.bbox,
-            tuple(float(v) for v in extent),
-            tuple(float(v) for v in x_limits),
-            tuple(float(v) for v in y_limits),
-        )
-        if rect is None:
-            return rgba
-        box_w, box_h = rect[2], rect[3]
-        if box_w == columns and box_h == rows:
-            return rgba
-        cache_name = f"{key}:rgba_box"
-        cache_key = (id(rgba), box_w, box_h)
-        cached = self._artists.get(cache_name)
-        if cached is not None and cached[0] == cache_key:
-            return cached[1]
-        row_map = np.minimum(
-            ((np.arange(box_h) + 0.5) * (rows / box_h)).astype(np.intp),
-            rows - 1,
-        )
-        column_map = np.minimum(
-            ((np.arange(box_w) + 0.5) * (columns / box_w)).astype(np.intp),
-            columns - 1,
-        )
-        if kernels.engaged():
-            sized = np.empty((box_h, box_w, 4), dtype=np.uint8)
-            kernels.gather_rows_columns(
-                np.ascontiguousarray(rgba), row_map, column_map, sized
-            )
-        else:
-            sized = rgba[row_map][:, column_map]
-        sized.setflags(write=False)
-        self._artists[cache_name] = (cache_key, sized)
-        return sized
-
     def _height_bars_active(self, key: str, state: DisplayState) -> bool:
         """Whether this image surface paints the height-bar presentation.
 
@@ -4333,21 +4308,16 @@ class MatplotlibRenderer:
             )
             self._artists[key] = image
         else:
-            # A drag frame is rendered at a fraction of the box, and a front
-            # that is not the size of the rectangle it lands in cannot be
-            # copied -- so Matplotlib scaled it up on every draw instead, and
-            # the budget that saved 20 ms of scene paid 29 ms for the
-            # resample.  Scale it here, with the same nearest-neighbour
-            # gather the heatmap's box-sizing uses, and the copy applies to
-            # a preview exactly as it does to a committed frame.
-            frame = self._box_sized_rgba_front(
-                f"{key}:scene",
-                frame,
-                scene_extent,
-                tuple(map(float, axes.get_xlim())),
-                tuple(map(float, axes.get_ylim())),
-                axes,
-            )
+            # No resize: render_height_bars returns exactly (box_h, box_w),
+            # so the front is already the size of the rectangle it lands in
+            # and the compose's row-copy blit takes it as it is.  A resize
+            # used to be attempted here for a drag frame "rendered at a
+            # fraction of the box" -- a resolution budget this renderer no
+            # longer has: the scene is rendered at the box size throughout a
+            # gesture, and what a drag changes is the compose partition, not
+            # the pixel count.  The call could therefore never resize
+            # anything, while still computing a destination rectangle per
+            # frame and discarding it.
             self._install_image_front(image, frame)
             extent_key = f"{key}:applied_extent"
             if self._artists.get(extent_key) != scene_extent:

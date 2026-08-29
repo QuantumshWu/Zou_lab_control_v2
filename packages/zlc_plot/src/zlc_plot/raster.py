@@ -531,6 +531,9 @@ class RasterPlotHost:
         self._sequence = 0
         self._front: RasterFront | None = None
         self._initial_metadata: tuple[object, object] | None = None
+        #: The configure target still queued, so a call that coalesces on
+        #: top of it carries its fields forward.  See ``configure``.
+        self._queued_configuration: dict[str, object] | None = None
         self._initial_error: BaseException | None = None
         #: Built on demand by :meth:`qt_widget`; a headless host never has one.
         self._qt_widget = None
@@ -1513,23 +1516,35 @@ class RasterPlotHost:
         viewport: RectangleRange | None | object = _UNSET,
         facet_focus: int | None | object = _UNSET,
         fit: Mapping[str, object] | None | object = _UNSET,
-        fit_live: bool = True,
+        fit_live: bool | object = _UNSET,
     ) -> Future[RasterOperation["DisplayDescription"]]:
-        """Submit one complete desired plot target as one raster operation.
+        """Submit a desired plot target as one raster operation.
 
         ``parameter_updates`` identifies the fields authored in this
         transaction while ``parameters`` remains the coalescing-safe complete
         target. Plot, not the embedder, resolves transition-generated values.
+
+        A CALL NAMES THE FIELDS IT MEANS, and one that coalesces on top of a
+        queued call carries that call's other fields forward.  Every configure
+        shares one coalesce key, so a queued target is REPLACED by the next --
+        and the console sends two inside a single busy worker window: the
+        Setting form's semantic/parameters/fit, and a sibling gesture's
+        viewport or facet_focus.  Whichever arrived first had its fields
+        silently dropped, with nothing told: an edit in Setting simply did
+        not take, or a mirrored viewport did not follow.
         """
 
-        configuration = {
-            "semantic": None if semantic is None else dict(semantic),
-            "parameters": None if parameters is None else dict(parameters),
-            "parameter_updates": (
-                None if parameter_updates is None else dict(parameter_updates)
-            ),
-            "size": size,
-        }
+        configuration: dict[str, object] = {}
+        # None is "not named" for these four -- they have no clearing value --
+        # so a viewport-only call no longer says "and no semantic".
+        if semantic is not None:
+            configuration["semantic"] = dict(semantic)
+        if parameters is not None:
+            configuration["parameters"] = dict(parameters)
+        if parameter_updates is not None:
+            configuration["parameter_updates"] = dict(parameter_updates)
+        if size is not None:
+            configuration["size"] = size
         if data is not _UNSET:
             configuration["data"] = data
         if image_overlay is not _UNSET:
@@ -1544,9 +1559,24 @@ class RasterPlotHost:
             configuration["facet_focus"] = facet_focus
         if fit is not _UNSET:
             configuration["fit"] = None if fit is None else dict(fit)
-        configuration["fit_live"] = fit_live
+        if fit_live is not _UNSET:
+            configuration["fit_live"] = fit_live
+
+        with self._condition:
+            queued = self._queued_configuration
+            if queued is not None:
+                merged = dict(queued)
+                merged.update(configuration)
+                configuration = merged
+            self._queued_configuration = configuration
+
+        def forget() -> None:
+            with self._condition:
+                if self._queued_configuration is configuration:
+                    self._queued_configuration = None
+
         pending = self._dispatch_session(
-            lambda: self._require_session().configure(**configuration),
+            lambda: (forget(), self._require_session().configure(**configuration))[1],
             _mode=_DispatchMode.ADAPTIVE,
             coalesce_key="configuration",
         )
