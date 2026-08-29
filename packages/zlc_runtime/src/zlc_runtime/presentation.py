@@ -752,7 +752,22 @@ class BoardScheduler:
             )
         )
 
-    def on_tick(self) -> SignalFront:
+    def on_tick(self, *, stage: bool = True) -> SignalFront:
+        """Freeze one front, advance the display clock, and stage what is due.
+
+        ``stage=False`` withholds ONLY the last of those three.  They were one
+        call, so a console that wanted to stop the picture stopped the clock
+        with it -- and stopped more than the clock, because ``plane.freeze()``
+        below is not a read: it is the sole pump of the latest-only processor
+        lane (it routes new publications in and drains finished work out), so
+        every selection- and fit-derived signal on the board stopped being
+        computed too.  Freezing a picture is not idling an instrument.
+
+        Withholding staging accumulates nothing: ``group_due`` is a pure
+        function of the elapsed clock, so a resumed board stages on its own
+        next boundary with its cadence phase intact.
+        """
+
         if self._closed:
             return self._last_front
         # The reader declares what it reads.  The port list IS the truth of
@@ -771,6 +786,8 @@ class BoardScheduler:
             raise TypeError("signal data plane freeze() must return SignalFront")
         self._last_front = front
         elapsed = self._clock.advance()
+        if not stage:
+            return front
         # A presentation-paced follower's batch (a rolling trace of a
         # panel's fit signal) is published during its source pair's commit
         # and therefore stages one tick behind it.  Cohorts formed while

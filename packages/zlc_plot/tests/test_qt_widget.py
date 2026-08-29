@@ -94,14 +94,29 @@ def test_qt_widget_receives_front_and_commits_area_drag() -> None:
     except Exception as error:  # pragma: no cover - environment-dependent
         pytest.skip(f"Qt5 offscreen unavailable: {error}")
 
+    # TWO series on purpose.  The hover below is here to prove a pointer
+    # event round-trips to the worker and comes back as a new front, and
+    # choosing a series is what a hover DOES -- but a lone line is not a
+    # choice, so on one series the hover is now correctly inert and would
+    # prove nothing.
+    columns = np.linspace(0.0, 1.0, 20)
     schema = DatasetSchema.create(
         Axis.create("repeat", size=1),
-        PointTable.from_columns({"x": np.linspace(0.0, 1.0, 20)}),
+        PointTable.from_columns(
+            {
+                "x": np.tile(columns, 2),
+                "series": np.repeat((0.0, 1.0), columns.size),
+            }
+        ),
         dtype=np.float64,
         generation="qt-widget-test",
     )
-    snapshot = DatasetSnapshot(schema, np.linspace(0.0, 1.0, 20).reshape(1, -1), 0)
-    host = RasterPlotHost.from_plot(snapshot, CurvePlot(AxisRef.point("x")))
+    values = np.concatenate((columns, columns + 0.35)).reshape(1, -1)
+    snapshot = DatasetSnapshot(schema, values, 0)
+    host = RasterPlotHost.from_plot(
+        snapshot,
+        CurvePlot(AxisRef.point("x"), group=AxisRef.point("series")),
+    )
     widget = None
     try:
         def forbidden_wait(*_args, **_kwargs):

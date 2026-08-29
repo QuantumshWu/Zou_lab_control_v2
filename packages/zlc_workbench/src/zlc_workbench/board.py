@@ -146,10 +146,15 @@ class LiveBoard:
 
         return self._clock.base_ms
 
-    def tick(self) -> object:
-        """Freeze one front and stage whatever is due.  NOT the GUI thread."""
+    def tick(self, *, stage: bool = True) -> object:
+        """Freeze one front and stage whatever is due.  NOT the GUI thread.
 
-        return self._scheduler.on_tick()
+        ``stage=False`` is a paused DISPLAY: the front is still frozen and the
+        clock still advances, so the bench keeps running and its derived
+        signals keep being computed; only the picture stops changing.
+        """
+
+        return self._scheduler.on_tick(stage=stage)
 
     def submit_projection(self, project: Callable[[], object]):
         """Submit one coalesced panel input projection off the owner thread."""

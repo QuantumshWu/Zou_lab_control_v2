@@ -788,20 +788,57 @@ def test_removing_a_panel_takes_the_card_away_and_closes_its_host(presenter, ses
     assert "0 panel" in presenter.view.summary
 
 
-def test_pausing_stops_the_beat_without_tearing_anything_down(presenter, session) -> None:
+def test_pausing_freezes_the_picture_and_keeps_the_bench_running(
+    presenter, session
+) -> None:
+    """Pause is a display state, not an idle bench.
+
+    The beat used to skip board.tick() entirely while paused.  The tick is
+    the only periodic caller of the plane's freeze, and that freeze is not a
+    read: it routes new publications into the latest-only processor lane and
+    drains finished work back out.  So pausing the picture also stopped the
+    display clock and stopped every selection- and fit-derived signal from
+    being computed -- which is why a test elsewhere in this file had to
+    freeze the plane by hand inside a wait loop to make a paused board make
+    progress at all.
+    """
+
     node, snapshot = _one_shot(session)
     presenter.add_panel(node.signal_key("frames"), snapshot)
     assert presenter.view.paused is False
 
-    presenter.view.pause_toggled.emit(True)
-    assert presenter.view.paused is True
-    assert "paused" in presenter.view.summary
-    presenter.beat()  # must be a no-op rather than an error
+    # Freezing the plane cannot be the observable: other steps of the beat
+    # freeze it too (a panel schema lookup does).  What the rule is ABOUT is
+    # the wiring -- the beat must still tick, and withhold only staging.
+    ticks: list[bool] = []
+    original = presenter.board.tick
 
-    presenter.view.pause_toggled.emit(False)
-    assert presenter.view.paused is False
-    assert "running" in presenter.view.summary
-    presenter.beat()
+    def recorded(*, stage: bool = True):
+        ticks.append(stage)
+        return original(stage=stage)
+
+    presenter.board.tick = recorded
+    try:
+        presenter.view.pause_toggled.emit(True)
+        assert presenter.view.paused is True
+        assert "paused" in presenter.view.summary
+
+        ticks.clear()
+        presenter.beat()
+        assert ticks == [False], (
+            "a paused console must still tick with staging withheld -- the "
+            "tick is the only periodic pump of the derived-signal lane and "
+            "the only thing that advances the display clock"
+        )
+
+        presenter.view.pause_toggled.emit(False)
+        assert presenter.view.paused is False
+        assert "running" in presenter.view.summary
+        ticks.clear()
+        presenter.beat()
+        assert ticks == [True]
+    finally:
+        presenter.board.tick = original
 
 
 def test_header_save_layout_writes_no_panel_dataset(
@@ -2117,7 +2154,14 @@ def test_roi_histogram_window_growth_waits_for_current_signal_generation(
         current_roi.event_ref.generation == first_roi.event_ref.generation
         and time.monotonic() < deadline
     ):
-        session.signal_plane.freeze()
+        # THE BEAT PUMPS IT, not this loop.  A paused console used to skip
+        # the tick, and the tick is the only periodic caller of the plane's
+        # freeze -- which is what routes a new publication into the
+        # latest-only processor lane and drains the finished work back out.
+        # So this loop had to freeze the plane by hand to make a
+        # selection-derived signal advance at all, which is exactly the
+        # defect: Pause was stopping the bench, not the picture.
+        presenter.beat()
         time.sleep(0.005)
         candidate = session.signal_plane.latest_publication(roi_signal)
         if candidate is not None:

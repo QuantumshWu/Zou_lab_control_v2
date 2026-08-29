@@ -4045,12 +4045,18 @@ class ConsolePresenter:
         )
 
     def beat(self) -> None:
-        """Advance lifecycle always; Pause freezes only the Monitor tick.
+        """Advance lifecycle always; Pause freezes only the PICTURE.
 
-        The commit runs even while paused: Pause stops NEW shots from being
-        staged, but a batch already travelling must still land -- atomically,
-        as one group -- or pausing at the wrong moment would freeze half a
-        causal group one shot behind the other half.
+        PAUSE IS NOT AN IDLE BENCH.  It used to skip the tick entirely, and
+        the tick is the only periodic caller of the plane's freeze -- which
+        is not a read but the sole pump of the latest-only processor lane --
+        so pausing the display also stopped the display clock and stopped
+        every selection- and fit-derived signal from being computed at all.
+        The tick now always runs and only STAGING is withheld.
+
+        The commit runs even while paused: a batch already travelling must
+        still land -- atomically, as one group -- or pausing at the wrong
+        moment would freeze half a causal group one shot behind the other.
         """
 
         # The turn is claimed before any of its work: a completion that
@@ -4065,8 +4071,7 @@ class ConsolePresenter:
             self._advance_close()
             return
         self._settle_panel_hosts()
-        if not self._paused:
-            self.board.tick()
+        self.board.tick(stage=not self._paused)
         self.board.commit(admit_new=not self._paused)
         self._report_panel_errors()
         self.poll_logic()

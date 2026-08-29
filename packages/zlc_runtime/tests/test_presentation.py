@@ -839,3 +839,45 @@ def test_board_scheduler_owes_missing_value_until_the_next_base_tick() -> None:
     port.futures[0].set_result("ready")
     arbiter.drain(lambda _panel_id: port)
     assert len(port.accepted) == 1
+
+
+def test_a_paused_display_still_freezes_the_plane_and_advances_the_clock() -> None:
+    """Pause withholds STAGING.  It does not idle the instrument.
+
+    on_tick does three things in one call: it freezes a front, it advances
+    the display clock, and it stages what is due.  A console that wanted to
+    stop the picture used to skip the whole call -- and the freeze is not a
+    read, it is the sole pump of the latest-only processor lane, so pausing
+    the display also stopped every selection- and fit-derived signal from
+    being computed, and stopped the clock that decides when anything is due
+    again.
+
+    Withholding staging must accumulate nothing: group_due is a pure
+    function of the elapsed clock, so a resumed board stages on its own next
+    boundary with its cadence phase intact.
+    """
+
+    plane = _Plane(_front())
+    arbiter = SurfaceBatchArbiter(_Sink())
+    port = _Port("camera", "camera/frame")
+    clock = HarmonicClock((100, 200, 400, 800))
+    scheduler = BoardScheduler(plane, clock, arbiter, lambda: (port,))
+
+    scheduler.on_tick(stage=False)
+    assert plane.freezes == 1, "a paused display must still pump the plane"
+    assert clock.base_ms > 0
+    assert port.updates == [], "a paused display must stage nothing"
+
+    for _ in range(3):
+        scheduler.on_tick(stage=False)
+    assert plane.freezes == 4
+    assert port.updates == []
+
+    # Resumed, the very next boundary stages -- the phase was never lost.
+    staged = 0
+    for _ in range(8):
+        scheduler.on_tick()
+        if port.updates:
+            staged = len(port.updates)
+            break
+    assert staged, "a resumed board must stage on its own next boundary"

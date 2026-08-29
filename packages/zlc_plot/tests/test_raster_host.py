@@ -15,6 +15,7 @@ from zlc_plot import (
     CurvePlot,
     FacetGridPlot,
     HistogramPlot,
+    PlotLabels,
     PlotSession,
     Reduction,
     SelectorKind,
@@ -1550,3 +1551,175 @@ def test_a_revision_the_session_already_holds_is_nothing_to_do() -> None:
             ) from None
     finally:
         host.close(timeout=10.0)
+
+
+def _click_series(renderer, axes, px, py):
+    """One ordinary click, as the pointer path delivers it."""
+
+    renderer.series_focus("press", axes, px, py, hit_radius=10.0, click_radius=4.0)
+    return renderer.series_focus(
+        "release", axes, px, py, hit_radius=10.0, click_radius=4.0
+    )
+
+
+def test_one_series_is_not_a_choice() -> None:
+    """A lone line has nothing to choose between, so it does not respond.
+
+    Focus dimmed the only curve on screen and grew an inspector naming it,
+    because nothing on the path ever asked how many series an axes carried.
+    """
+
+    x = np.linspace(0.0, 1.0, 64)
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns({"x": x}),
+        dtype=np.float64,
+        generation="single-series",
+    )
+    session = PlotSession(
+        DatasetSnapshot(schema, np.sin(x)[None], 0),
+        CurvePlot(AxisRef.point("x")),
+    )
+    try:
+        renderer = session._renderer
+        axes = renderer.primary_axes
+        assert len(renderer._series_lines[id(axes)]) == 1
+        px, py = axes.transData.transform((0.5, float(np.sin(0.5))))
+
+        assert renderer.series_focus(
+            "move", axes, px, py, hit_radius=10.0
+        ) is False
+        assert renderer._series_hover is None
+        assert _click_series(renderer, axes, px, py) is False
+        assert renderer._series_locked is None
+    finally:
+        session.close()
+
+
+def test_a_grid_overview_does_not_choose_series() -> None:
+    """The overview is a chooser of CELLS; its only gesture enters one.
+
+    Series focus is dispatched beside the gesture handlers rather than
+    through them, so the guard that makes an overview inert for every other
+    gesture never ran for hover and click: a hover dimmed an overview cell's
+    siblings and an ordinary click locked one, eating the first half of the
+    double-click meant to enter the cell.
+    """
+
+    candidate = np.tile(np.arange(8.0), 6)
+    cell = np.repeat(np.arange(3.0), 16)
+    series = np.tile(np.repeat((0.0, 1.0), 8), 3)
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns(
+            {"candidate": candidate, "cell": cell, "series": series}
+        ),
+        dtype=np.float64,
+        generation="grid-series",
+    )
+    values = np.sin(candidate + 3.0 * series)[None]
+    session = PlotSession(
+        DatasetSnapshot(schema, values, 0),
+        FacetGridPlot(
+            AxisRef.point("cell"),
+            CurvePlot(AxisRef.point("candidate"), group=AxisRef.point("series")),
+        ),
+    )
+    try:
+        renderer = session._renderer
+        assert renderer._facet_focus_index is None, "this test needs the overview"
+        painted = [
+            (axis, entries)
+            for axis, entries in (
+                (axis, renderer._series_lines.get(id(axis), ()))
+                for _key, axis, _index in renderer.painted_surfaces
+            )
+            if len(entries) > 1
+        ]
+        assert painted, "the overview must actually paint multi-series cells"
+        axes, entries = painted[0]
+        line = entries[0][0]
+        x = np.asarray(line.get_xdata(), dtype=float)
+        y = np.asarray(line.get_ydata(), dtype=float)
+        finite = np.flatnonzero(np.isfinite(x) & np.isfinite(y))
+        px, py = axes.transData.transform((x[finite[0]], y[finite[0]]))
+
+        assert renderer.series_focus(
+            "move", axes, px, py, hit_radius=10.0
+        ) is False
+        assert renderer._series_hover is None
+        assert _click_series(renderer, axes, px, py) is False
+        assert renderer._series_locked is None
+
+        # And the gesture the overview DOES answer still works.
+        session.focus_facet(0)
+        assert renderer._facet_focus_index == 0
+    finally:
+        session.close()
+
+
+def test_a_dollar_sign_in_a_name_cannot_take_the_frame_down() -> None:
+    """Producer and operator text is a NAME, never mathtext.
+
+    Matplotlib reads ``$...$`` as mathtext, and mathtext is a real grammar:
+    an unpaired ``$``, an unknown command, a double subscript.  It raises out
+    of the DRAW rather than out of the edit that authored the label, so a
+    signal name carrying one takes the frame down and keeps taking it down --
+    the panel simply stops having a picture, which is not something an
+    operator can diagnose or undo.
+
+    Only this repository's own fit catalogue writes mathtext on purpose.
+    """
+
+    x = np.linspace(0.0, 1.0, 32)
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=2),
+        PointTable.from_columns({"x": x}),
+        dtype=np.float64,
+        generation="dollar-label",
+    )
+    values = np.sin(x)[None] * np.ones((2, 1))
+    for label in (
+        "cost $ per shot",
+        "$unpaired",
+        r"$\notacommand$",
+        "$a_b_c$",
+    ):
+        session = PlotSession(
+            DatasetSnapshot(schema, values, 1),
+            CurvePlot(
+                AxisRef.point("x"),
+                labels=PlotLabels(value=label, title=label, y=label),
+            ),
+        )
+        try:
+            session.set_size("2x2")
+            session.rgba()
+        finally:
+            session.close()
+
+
+def test_a_formula_that_cannot_be_drawn_is_shown_as_characters() -> None:
+    """Mathtext is decoration; it may not cost the plot.
+
+    A fit annotation is the one painted string this product writes as
+    mathtext on purpose, so it is the one string that can still fail inside
+    Matplotlib's DRAW rather than at the edit that authored it -- and a draw
+    that fails takes the whole frame, every frame, because the same text is
+    set again on the next one.
+    """
+
+    from zlc_plot.rendering import _drawable_text
+
+    good = r"$f(x)=H\frac{(\mathrm{FWHM}/2)^2}{(x-x_0)^2+(\mathrm{FWHM}/2)^2}+B$"
+    assert _drawable_text(good) == good
+
+    for broken in (r"$\notacommand$", "$a_b_c$", "$unpaired"):
+        drawn = _drawable_text(broken)
+        assert "$" not in drawn.replace(r"\$", ""), drawn
+        # And what comes back must itself be drawable.
+        assert _drawable_text(drawn) == drawn
+
+    # A line without dollars is returned untouched and uncopied.
+    plain = "logic/camera_measurement/frames = 3"
+    assert _drawable_text(plain) == plain

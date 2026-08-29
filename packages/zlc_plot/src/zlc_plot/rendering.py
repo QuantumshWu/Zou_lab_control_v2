@@ -132,6 +132,56 @@ def _series_slot(identity: object, count: int) -> int:
 
 
 _EXPLICIT_UNIT_SUFFIX = re.compile(r"(?:\[[^\[\]]+\]|\([^()]+\))\s*$")
+def _literal_text(text: str) -> str:
+    """Producer and operator text, made safe to hand a text artist.
+
+    A DOLLAR SIGN IN A NAME IS A DOLLAR SIGN.  Matplotlib reads ``$...$`` as
+    mathtext, and mathtext is a real grammar: an unpaired ``$``, a double
+    subscript, an unknown command -- any of them raises out of the DRAW, not
+    out of the edit that authored the label, so a signal name or a title
+    that happens to contain one takes the whole frame down and keeps taking
+    it down, and the panel simply stops having a picture.
+
+    Only this repository's own fit catalogue writes mathtext on purpose.
+    Everything that comes from a producer, a dataset or the operator is a
+    name, so its dollars are escaped and printed.
+    """
+
+    value = str(text)
+    return value.replace("$", r"\$") if "$" in value else value
+
+
+def _drawable_text(text: str) -> str:
+    """The same text, unless Matplotlib could not draw it.
+
+    THE FIT CATALOGUE IS THE ONLY MATHTEXT IN THIS PRODUCT, and it is the
+    only painted text that is not already escaped -- so this is the one
+    place left where a string can still fail in the DRAW rather than at the
+    edit that authored it, which is the failure an operator cannot
+    diagnose: the panel stops having a picture and stays that way, because
+    the same text is set again on every following frame.
+
+    Mathtext is decoration.  A formula that cannot be set is shown as the
+    characters it is made of and the plot is still drawn.  Judged with
+    Matplotlib's own parser rather than a guess at its grammar -- it
+    decides per LINE, and a line is mathtext when it holds an even, positive
+    number of unescaped dollars.
+    """
+
+    value = str(text)
+    if "$" not in value:
+        return value
+    try:
+        from matplotlib.mathtext import MathTextParser  # noqa: PLC0415
+
+        parser = MathTextParser("path")
+        for line in value.split("\n"):
+            parser.parse(line)
+    except Exception:  # noqa: BLE001 -- any refusal means "cannot be drawn"
+        return _literal_text(value)
+    return value
+
+
 def _quantity_label(value: Any, fallback: str, explicit: str | None = None) -> str:
     if explicit is not None:
         label = str(explicit)
@@ -139,7 +189,8 @@ def _quantity_label(value: Any, fallback: str, explicit: str | None = None) -> s
             return ""
     else:
         label = str(getattr(value, "label", fallback) or fallback)
-    unit = _unit_symbol(value)
+    label = _literal_text(label)
+    unit = _literal_text(_unit_symbol(value))
     if not unit or unit == "1":
         return label
     if explicit is not None and _EXPLICIT_UNIT_SUFFIX.search(label):
@@ -154,7 +205,7 @@ def _state_label(
     fallback: str | None,
 ) -> str | None:
     value = state.values.get(name)
-    return fallback if value is None else str(value)
+    return fallback if value is None else _literal_text(value)
 
 
 def _curve_x_limits(values: np.ndarray) -> tuple[float, float] | None:
@@ -3023,7 +3074,7 @@ class MatplotlibRenderer:
             # scope rows already use.
             axes.set_xticks(
                 np.asarray(labelled.x, dtype=float),
-                labels=labelled.x_labels,
+                labels=[_literal_text(name) for name in labelled.x_labels],
             )
         self._apply_series_focus(id(axes))
 
@@ -3138,6 +3189,15 @@ class MatplotlibRenderer:
         matched twice in a row and never can.
         """
 
+        # A focus taken where it was allowed must not survive onto a surface
+        # where it is not: leaving an expanded cell for the overview changes
+        # neither _series_locked nor _series_hover (session.py:2877), so
+        # without this the cell's dimming and its inspector came back with
+        # the overview.
+        for attribute in ("_series_locked", "_series_hover"):
+            state = getattr(self, attribute)
+            if state is not None and not self._series_focus_allowed(state[0]):
+                setattr(self, attribute, None)
         locked = self._series_locked
         active = locked or self._series_hover
         if only is not None:
@@ -3250,10 +3310,43 @@ class MatplotlibRenderer:
             self._series_annotations[axis_id] = annotation
             self._artists[f"series-inspector:{axis_id}"] = annotation
         annotation.set_text(
-            f"{'* ' if locked is not None else ''}{active[2] or 'Series'}"
+            f"{'* ' if locked is not None else ''}"
+            f"{_literal_text(active[2]) if active[2] else 'Series'}"
         )
         annotation.set_color(focus_line.get_color())
         annotation.set_visible(True)
+
+    def _accepts_series_focus(self, axes: Any | None) -> bool:
+        """Whether choosing a series is a meaningful gesture on this axes.
+
+        ONE OWNER for a rule that was written twice and applied once.  A
+        FacetGrid OVERVIEW is a chooser, not an interactive surface -- the
+        gesture layer says so for every other gesture
+        (_session_gesture.py:147) and the wheel said so inline right here --
+        but the press / move / release path is dispatched beside those
+        handlers rather than through them, so a hover dimmed the sibling
+        lines of an overview cell and an ordinary click locked one, eating
+        the first half of the double-click that was meant to enter the cell.
+
+        And ONE SERIES IS NOT A CHOICE.  Nothing asked how many lines an
+        axes carried, so a lone curve dimmed itself and grew an inspector
+        naming the only thing on screen.
+
+        ``_facet_focus_index`` is the overview marker; ``_focused_facet_index``
+        is which cell is selected and is 0 for any non-empty grid, so a
+        guard written against it would never fire.
+        """
+
+        return axes is not None and axes.get_visible() and (
+            self._series_focus_allowed(id(axes))
+        )
+
+    def _series_focus_allowed(self, axis_id: int) -> bool:
+        """The rule itself, by axes identity -- which is all a held focus keeps."""
+
+        if isinstance(self.spec, FacetGridPlot) and self._facet_focus_index is None:
+            return False
+        return len(self._series_lines.get(axis_id, ())) > 1
 
     def series_focus(self, action: str, axes: Any | None, px: float, py: float, *,
                      hit_radius: float, click_radius: float = 0.0, redraw: bool = True) -> bool:
@@ -3264,12 +3357,17 @@ class MatplotlibRenderer:
             None if before is None else before[1],
         )
         handled = False
+        # "leave" and "clear" are never guarded: they only RELEASE state, and
+        # both arrive with axes=None, so refusing them would strand a lock
+        # that Escape and a pointer leaving the canvas must always drop.
         if action == "press":
+            if not self._accepts_series_focus(axes):
+                return False
             hit = self._series_hit(axes, px, py, hit_radius)
             self._series_press = (px, py, None if hit is None else hit[1])
             return False
         if action == "move":
-            if self._series_locked is not None:
+            if self._series_locked is not None or not self._accepts_series_focus(axes):
                 return False
             hit = self._series_hit(axes, px, py, hit_radius)
             if (None if before is None else before[1]) == (None if hit is None else hit[1]):
@@ -3277,6 +3375,8 @@ class MatplotlibRenderer:
             self._series_hover = hit
         elif action == "release":
             press, self._series_press = self._series_press, None
+            if not self._accepts_series_focus(axes):
+                return False
             if press is None or math.hypot(px - press[0], py - press[1]) > (
                 click_radius * self.plan.device_pixel_ratio
             ):
@@ -3315,7 +3415,7 @@ class MatplotlibRenderer:
             locked is None or axes is None or id(axes) != locked[0]
             or not locked[1]
             or not isinstance(self.semantic_spec, (CurvePlot, RollingPlot))
-            or (isinstance(self.spec, FacetGridPlot) and self._facet_focus_index is None)
+            or not self._accepts_series_focus(axes)
         ):
             return False
         entries = self._series_lines.get(locked[0], ())
@@ -7216,7 +7316,7 @@ class MatplotlibRenderer:
             lines.append(overlay.formula)
         for parameter in overlay.parameter_display:
             lines.append(self._fit_parameter_line(parameter))
-        return "\n".join(lines)
+        return _drawable_text("\n".join(lines))
 
     @staticmethod
     def _fit_parameter_line(parameter: Any) -> str:
@@ -7225,7 +7325,8 @@ class MatplotlibRenderer:
             if parameter.standard_error is None
             else _compact_engineering(parameter.standard_error)
         )
-        unit = f" {parameter.unit}" if parameter.unit else ""
+        # The label is the catalogue's own mathtext; the unit is not.
+        unit = f" {_literal_text(parameter.unit)}" if parameter.unit else ""
         return (
             f"{parameter.label} = {_fit_parameter_value_text(parameter)} "
             f"± {uncertainty}{unit}"
@@ -7233,7 +7334,11 @@ class MatplotlibRenderer:
 
     def _fit_headline_annotation_text(self, overlay: FitOverlay) -> str:
         parameter = overlay.headline_parameter
-        return "" if parameter is None else self._fit_parameter_line(parameter)
+        return (
+            ""
+            if parameter is None
+            else _drawable_text(self._fit_parameter_line(parameter))
+        )
 
     def _restore_fit_source_lines(self) -> None:
         for line, was_visible in self._fit_hidden_source_lines:
