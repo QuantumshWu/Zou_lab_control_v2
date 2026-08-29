@@ -2793,6 +2793,69 @@ class MatplotlibRenderer:
             isolated_glyphs=True,
         )
 
+    def _paint_error_bars(
+        self,
+        axes: Any,
+        reused: tuple[Any, ...] | None,
+        x: np.ndarray,
+        y: np.ndarray,
+        low: np.ndarray,
+        high: np.ndarray,
+        colour: Any,
+        zorder: float,
+    ) -> tuple[Any, ...]:
+        """Draw one series' bars, reusing last revision's artists if they fit.
+
+        A bar is a vertical segment and two caps: a LineCollection whose
+        segments are (x, low)-(x, high), and two marker-only Line2Ds.  All
+        three take new data in place, so a revision is a data change --
+        which is what it is -- rather than a teardown and a rebuild.
+        """
+
+        policy = self.style.render
+        segments = np.stack(
+            (np.column_stack((x, low)), np.column_stack((x, high))), axis=1
+        )
+        capped = policy.uncertainty_bar_capsize_pt > 0
+        if reused is not None:
+            collections = [
+                artist for artist in reused if hasattr(artist, "set_segments")
+            ]
+            caps = [
+                artist for artist in reused if not hasattr(artist, "set_segments")
+            ]
+            if len(collections) == 1 and len(caps) == (2 if capped else 0):
+                collections[0].set_segments(segments)
+                collections[0].set_color(colour)
+                collections[0].set_zorder(zorder)
+                for cap, edge in zip(caps, (low, high)):
+                    cap.set_data(x, edge)
+                    cap.set_color(colour)
+                    cap.set_zorder(zorder)
+                return reused
+            for artist in reused:
+                artist.remove()
+        container = axes.errorbar(
+            x,
+            y,
+            # Asymmetric on purpose: the bounds were converted to display
+            # units, and an affine display unit makes the two arms differ.
+            yerr=(y - low, high - y),
+            fmt="none",
+            ecolor=colour,
+            alpha=policy.uncertainty_bar_alpha,
+            elinewidth=policy.uncertainty_bar_linewidth,
+            capsize=policy.uncertainty_bar_capsize_pt,
+            capthick=policy.uncertainty_bar_linewidth,
+            zorder=zorder,
+        )
+        _marker, caplines, barlinecols = container.lines
+        # Keep the artists on the axes; drop only the container bookkeeping
+        # so revisions do not accumulate.
+        if container in axes.containers:
+            axes.containers.remove(container)
+        return (*caplines, *barlinecols)
+
     def _mutate_series_artists(
         self,
         axes: Any,
@@ -2818,13 +2881,14 @@ class MatplotlibRenderer:
         extremes = np.array([np.inf, -np.inf, np.inf, -np.inf])
         series_lines: list[tuple[Any, object, str]] = []
         cycle = self.style.palette.line_cycle
-        # Bars are rebuilt per update (uncertainty panels are scan-point
-        # sized, never the million-point envelope path) and kept BY SERIES,
-        # so focus can move them with their line.
-        stale_bars = self._series_bars.pop(id(axes), {})
-        for artists in stale_bars.values():
-            for artist in artists:
-                artist.remove()
+        # Bars are kept BY SERIES so focus can move them with their line --
+        # and kept ACROSS revisions, because building them is the cost.  A
+        # 64-cell grid draws 640 points in total and spent 129 ms doing it:
+        # every revision destroyed and recreated 192 artists, paying for
+        # errorbar's masked-array bookkeeping, three transform trees and a
+        # colour conversion per cell, and handing the focus walk a fresh
+        # set of object identities that its memo could never match.
+        previous_bars = self._series_bars.pop(id(axes), {})
         bars_by_series: dict[object, tuple[Any, ...]] = {}
         for index, item in enumerate(series):
             colour = cycle[_series_slot(item.identity, len(cycle))]
@@ -2859,33 +2923,16 @@ class MatplotlibRenderer:
                     & (band_high > band_low)
                 )
                 if bool(np.any(band_where)):
-                    policy = self.style.render
-                    x_marked = item.x[band_where]
-                    y_marked = item.y[band_where]
-                    container = axes.errorbar(
-                        x_marked,
-                        y_marked,
-                        # Asymmetric on purpose: the bounds were converted
-                        # to display units, and an affine display unit
-                        # makes the two arms differ.
-                        yerr=(
-                            y_marked - band_low[band_where],
-                            band_high[band_where] - y_marked,
-                        ),
-                        fmt="none",
-                        ecolor=colour,
-                        alpha=policy.uncertainty_bar_alpha,
-                        elinewidth=policy.uncertainty_bar_linewidth,
-                        capsize=policy.uncertainty_bar_capsize_pt,
-                        capthick=policy.uncertainty_bar_linewidth,
-                        zorder=lines[index].get_zorder() - 0.1,
+                    bars_by_series[item.identity] = self._paint_error_bars(
+                        axes,
+                        previous_bars.pop(item.identity, None),
+                        item.x[band_where],
+                        item.y[band_where],
+                        band_low[band_where],
+                        band_high[band_where],
+                        colour,
+                        lines[index].get_zorder() - 0.1,
                     )
-                    _marker, caplines, barlinecols = container.lines
-                    bars_by_series[item.identity] = (*caplines, *barlinecols)
-                    # Keep the artists on the axes; drop only the
-                    # container bookkeeping so revisions do not accumulate.
-                    if container in axes.containers:
-                        axes.containers.remove(container)
             if limits is None and bool(np.any(item.valid)):
                 extremes[0] = min(
                     extremes[0],
@@ -2911,6 +2958,11 @@ class MatplotlibRenderer:
                         np.max(high_source, where=item.valid, initial=-np.inf)
                     ),
                 )
+        # Whatever was not claimed above belongs to a series this revision
+        # does not draw -- one that lost its band, or is gone.
+        for artists in previous_bars.values():
+            for artist in artists:
+                artist.remove()
         self._series_lines[id(axes)] = tuple(series_lines)
         if bars_by_series:
             self._series_bars[id(axes)] = bars_by_series

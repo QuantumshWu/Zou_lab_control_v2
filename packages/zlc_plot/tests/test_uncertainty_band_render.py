@@ -224,3 +224,78 @@ def test_hover_hit_tests_reuse_the_transformed_polyline() -> None:
         )
     finally:
         session.close()
+
+
+def test_a_revision_moves_the_bars_it_does_not_rebuild_them() -> None:
+    """The bars a revision draws are last revision's artists, with new data.
+
+    Rebuilding them cost the errorbar constructor, a masked-array copy,
+    three transform trees and a colour conversion per series per frame --
+    on a 64-cell grid drawing 640 points in total, 129 ms a revision --
+    and it handed the focus walk fresh object identities, which is why the
+    memo written to skip that walk could never match.
+
+    Two things have to hold together: the artists must be the SAME objects
+    (or nothing was saved), and their segments must follow the data (or
+    the picture is last revision's).  A frame is not compared against a
+    freshly opened session's, because a session that has seen history is
+    not required to frame its axes the same way -- limit retention is
+    deliberate -- so re-submitting one revision is what proves the drawing
+    itself does not drift.
+    """
+
+    session = PlotSession(
+        _snapshot(6, 1, 1.0),
+        CurvePlot(AxisRef.point("x"), labels=PlotLabels("band", "x", "y")),
+        parameters={"uncertainty": True},
+    )
+    try:
+        session.rgba()
+        bars = _bands(session)
+        assert bars, "the case must draw bars for this test to mean anything"
+        identities = [id(artist) for artist in bars]
+        segments = [np.array(bars[0].get_segments(), copy=True)]
+        for revision in range(2, 6):
+            session.update_data(_snapshot(6, revision, 1.0 + 0.3 * revision))
+            session.rgba()
+            current = _bands(session)
+            assert [id(artist) for artist in current] == identities
+            segments.append(np.array(current[0].get_segments(), copy=True))
+        moved = sum(
+            1
+            for before, after in zip(segments, segments[1:])
+            if before.shape != after.shape or not np.array_equal(before, after)
+        )
+        assert moved == len(segments) - 1, "reused bars must carry the new data"
+
+        # The same numbers twice, under the two revisions the session
+        # requires: one drawing must be the other, bit for bit.
+        settled = 0.5 + np.random.default_rng(99).standard_normal((6, 4))
+        session.update_data(DatasetSnapshot(_schema(6), settled, revision=6))
+        once = np.array(session.rgba(), copy=True)
+        session.update_data(DatasetSnapshot(_schema(6), settled, revision=7))
+        twice = np.array(session.rgba(), copy=True)
+        assert np.array_equal(once, twice)
+    finally:
+        session.close()
+
+
+def test_a_band_of_no_width_draws_no_bar() -> None:
+    """Zero is not an uncertainty; it is a tick mark that lies.
+
+    Every repeat identical means the spread really is zero, which is a
+    different statement from "unknown" (a single repeat, which reports NaN
+    and was already excluded).  Neither one gets a bar.
+    """
+
+    identical = np.tile(np.asarray([1.0, 2.0, 3.0, 4.0]), (6, 1))
+    session = PlotSession(
+        DatasetSnapshot(_schema(6), identical, revision=1),
+        CurvePlot(AxisRef.point("x"), labels=PlotLabels("band", "x", "y")),
+        parameters={"uncertainty": True},
+    )
+    try:
+        session.rgba()
+        assert _bands(session) == []
+    finally:
+        session.close()
