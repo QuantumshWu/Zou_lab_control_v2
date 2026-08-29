@@ -376,7 +376,7 @@ class ConsoleBench:
         module-level work a frame does outside it.
 
         A renderer-only tap hides the front store: the source reduction, the
-        pyramid and the block mean all live in ``_image_raster`` as plain
+        front store and the block mean all live in ``_image_raster`` as plain
         functions, and they were a third of some frames while every visible
         row said the renderer was cheap.  Module functions have exactly one
         instance, so watching them is safe where watching a class is not.

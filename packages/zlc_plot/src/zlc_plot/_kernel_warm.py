@@ -214,10 +214,12 @@ def _render(
         if not zoom_steps:
             return
         # A ZOOM IS NOT THE SAME WORK.  Cropping the viewport changes the
-        # reduction ratio, so a frame the mip pyramid served whole starts
-        # reducing, and one that was reducing starts drawing pixel for
-        # pixel through the direct colour table instead.  Warming only the
-        # opening view left an operator's first wheel notch compiling.
+        # reduction ratio, so a frame that was reducing starts drawing
+        # pixel for pixel through the direct colour table instead -- and a
+        # cropped view is strided, so making it contiguous COPIES, which
+        # is where a writable plane came from before every input was
+        # sealed.  Warming only the opening view left an operator's first
+        # wheel notch compiling.
         height, width = _plane_shape(snapshot)
         span = float(width)
         for _ in range(zoom_steps):
@@ -256,31 +258,25 @@ def representative_work() -> None:
 
     # EVERY DTYPE A PRODUCER PUBLISHES IS ANOTHER COMPILE.  A camera is
     # unsigned and may be either width; a derived plane is floating and may
-    # be either width.  Warming one of them leaves the others to the
-    # operator's first frame of each.
+    # be either width; a signed or wide integer plane is neither.  Warming
+    # one of them leaves the others to the operator's first frame of each.
     #
-    # And the SHAPES matter as much: a source that halves evenly is served
-    # by the mip pyramid and never reaches the area mean at all, so a
-    # power-of-two frame exercises the unsigned kernel and a ragged one the
-    # floating kernel -- which is the shape a real camera has.
+    # Frame SIZE is not a type -- numba does not see a shape -- but it does
+    # decide which kernel runs at all: a frame small enough to draw pixel
+    # for pixel takes the direct colour table, an oversampled one reduces
+    # and is then coloured from the float mean.  A zoom crosses between the
+    # two, which is the wheel notch that used to compile mid-gesture.
     #
-    # Small frames draw pixel for pixel, which is the direct colour table
-    # rather than the float pass over a mean; zoomed frames cross between
-    # the two, which is the wheel notch that used to compile.
-    # The NARROW UNSIGNED dtypes are the ones whose block sums are provably
-    # exact, so they take the integer kernel and the direct colour table.
+    # The narrow unsigned dtypes are the ones whose block sums are provably
+    # exact, so they alone take the integer kernel; everything else reduces
+    # through the floating one.
     for dtype in (np.uint8, np.uint16):
         _render(_image_snapshot(96, 96, dtype), image)
-        _render(_image_snapshot(2048, 2048, dtype), image, zoom_steps=5)
-    # EVERYTHING ELSE REDUCES THROUGH THE FLOATING KERNEL, one compile per
-    # dtype -- the wide and signed integers as much as the floats, because
-    # the judge turns them away for the same reason and a producer may
-    # publish any of them.
+        _render(_image_snapshot(1200, 1920, dtype), image, zoom_steps=5)
     for dtype in (np.uint32, np.int16, np.int32, np.float32, np.float64):
         _render(_image_snapshot(1200, 1920, dtype), image, zoom_steps=5)
     for dtype in (np.float32, np.float64):
-        # With holes: the masked block sum, which also counts.  A masked
-        # source bypasses the pyramid, so its shape is free.
+        # With holes: the masked block sum, which also counts.
         _render(_image_snapshot(1200, 1920, dtype, holes=True), image)
 
     series = _series_snapshot(8, 400)

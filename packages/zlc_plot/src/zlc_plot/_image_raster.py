@@ -322,59 +322,34 @@ def prepare_image_front(
     )
 
 
-def _source_reduces_in_one_compiled_pass(
-    dtype: Any,
-    row_block: float,
-    column_block: float,
-) -> bool:
-    """Would the display reduction take the compiled path from the SOURCE?
-
-    The pyramid exists to hand the reduction a smaller plane.  But a level is
-    a float32 MEAN, and the compiled block-sum only accepts unsigned integers
-    whose block sums are provably exact -- so building a level routes the
-    reduction away from the very kernel it would otherwise have hit.
-    Measured on a 1200x1920 uint8 camera frame at a 2x2 panel: the level
-    costs 2.9 ms to build and its float32 plane then costs 7.6 ms to reduce,
-    where the source reduces directly in 2.9.
-
-    Skipping the level is also the truer answer.  A mean of means is not the
-    mean unless the blocks divide evenly, and unevenly is the ordinary case:
-    the level only requires the SOURCE to halve evenly, never the display
-    blocks to.
-    """
-
-    if not kernels.engaged():
-        return False
-    if dtype.kind not in "u" or dtype.itemsize > 4:
-        return False
-    # One more sample per side than the ratio, which is the widest block a
-    # ragged partition can produce.
-    rows_per = int(math.ceil(row_block)) + 1
-    columns_per = int(math.ceil(column_block)) + 1
-    return (
-        rows_per * columns_per * int(np.iinfo(dtype).max)
-        < kernels.FLOAT32_EXACT_INTEGER
-    )
-
-
 class ImageFrontStore:
-    """Prepared-front LRU plus a per-revision mip pyramid for one image.
+    """Prepared-front LRU for one image.
 
-    Wheel zoom and pan change the viewport every step, so the exact-key cache
-    alone misses constantly.  The pyramid serves those misses from a coarser
-    power-of-two level whose 2x2 block means compose exactly with the final
-    area reduction, making gesture-time preparation O(display pixels) instead
-    of O(source pixels).  Masked sources bypass the pyramid: per-level count
-    planes are not worth their complexity for the rare sparse-validity case.
+    Wheel zoom and pan change the viewport every step, so the exact-key
+    cache alone misses constantly, and each miss reduces the source again.
+    This used to hold a mip pyramid as well: a coarser power-of-two level
+    whose 2x2 block means compose exactly with the final area reduction,
+    so a gesture's preparation cost O(display pixels) instead of O(source
+    pixels).
+
+    IT WAS WRITTEN BEFORE THE COMPILED BLOCK SUM EXISTED, and that kernel
+    took its reason away -- reducing straight from the source is now 0.7 to
+    2 ms, while building one level costs 7 to 14 ms on a floating frame.
+    Measured across three dtypes at 2048 square: on a first frame reducing
+    directly won by 3.3x and 10.5x; over a zoom the two were within a fifth
+    of each other either way, so at best the level paid itself back after a
+    hundred and thirty steps and at worst never; panning at a fixed zoom,
+    twelve cases across two display densities, it won none and tied one.
+
+    A source narrow enough to sum exactly already bypassed it, by a judge
+    written for exactly this reason.  That judge, the levels, their cache
+    and the token that invalidated it are all gone with it.
     """
 
     _LRU_CAPACITY = 6
-    _MAX_LEVEL = 16
 
     def __init__(self) -> None:
         self._fronts: "OrderedDict[tuple, PreparedImageFront]" = OrderedDict()
-        self._pyramid_token: tuple | None = None
-        self._pyramid: dict[int, np.ndarray] = {}
 
     def prepare(
         self,
@@ -400,25 +375,8 @@ class ImageFrontStore:
         if cached is not None:
             self._fronts.move_to_end(front_key)
             return cached
-        source = np.asarray(values)
-        level_values = values
-        level = 1
-        if source.ndim == 2 and source.dtype.kind in "biuf" and (
-            validity is None or _all_true(np.asarray(validity))
-        ):
-            level = self._pick_level(
-                source.shape,
-                extent,
-                x_limits=x_limits,
-                y_limits=y_limits,
-                display_pixel_shape=display_pixel_shape,
-                dtype=source.dtype,
-            )
-            if level > 1:
-                level_values = self._level(source, level, revision_token)
-                validity = None
         prepared = prepare_image_front(
-            level_values,
+            values,
             validity,
             extent,
             x_limits=x_limits,
@@ -430,85 +388,6 @@ class ImageFrontStore:
         while len(self._fronts) > self._LRU_CAPACITY:
             self._fronts.popitem(last=False)
         return prepared
-
-    def _pick_level(
-        self,
-        shape: tuple[int, int],
-        extent: tuple[float, float, float, float],
-        *,
-        x_limits: tuple[float, float],
-        y_limits: tuple[float, float],
-        display_pixel_shape: tuple[int, int],
-        dtype: Any = None,
-    ) -> int:
-        rows, columns = shape
-        left, right, bottom, top = (float(value) for value in extent)
-        column_start, column_stop = _index_window(
-            float(x_limits[0]), float(x_limits[1]), left, right, columns
-        )
-        row_start, row_stop = _index_window(
-            float(y_limits[0]), float(y_limits[1]), top, bottom, rows
-        )
-        display_width, display_height = display_pixel_shape
-        row_block = (row_stop - row_start) / max(1, int(display_height))
-        column_block = (column_stop - column_start) / max(1, int(display_width))
-        block = min(row_block, column_block)
-        if dtype is not None and _source_reduces_in_one_compiled_pass(
-            dtype, row_block, column_block
-        ):
-            return 1
-        level = 1
-        # Halve while at least one source sample per display pixel remains
-        # and the source divides evenly.  A residual oversample below the
-        # reduction policy's ratio is left to Matplotlib's resample stage —
-        # the same treatment fractional-DPR fronts already receive.
-        while (
-            level * 2 <= self._MAX_LEVEL
-            and block / (level * 2) >= 1.0
-            and rows % (level * 2) == 0
-            and columns % (level * 2) == 0
-        ):
-            level *= 2
-        return level
-
-    def _level(
-        self,
-        source: np.ndarray,
-        level: int,
-        revision_token: tuple,
-    ) -> np.ndarray:
-        if self._pyramid_token != revision_token:
-            self._pyramid_token = revision_token
-            self._pyramid = {}
-        cached = self._pyramid.get(level)
-        if cached is not None:
-            return cached
-        rows, columns = source.shape
-        mean_dtype = np.result_type(source.dtype, np.float32)
-        # One vectorized pass straight to the requested level: cascading
-        # through intermediate halvings would re-read the full plane once
-        # per step for identical block means.
-        blocks = source.reshape(
-            rows // level,
-            level,
-            columns // level,
-            level,
-        )
-        if source.dtype.kind in "bui" and source.dtype.itemsize <= 2:
-            # Integer sources sum exactly in int32 (block sums stay far below
-            # 2**31) and the float32 mean of the same block is exact too (a
-            # block sum of <=2**20 fits float32's 24-bit mantissa), so summing
-            # with SIMD integer adds and scaling once is bit-identical to
-            # mean() while roughly halving the pass over a camera frame.
-            reduced = blocks.sum(axis=(1, 3), dtype=np.int32).astype(
-                mean_dtype
-            )
-            reduced *= mean_dtype.type(1.0) / mean_dtype.type(level * level)
-        else:
-            reduced = blocks.mean(axis=(1, 3), dtype=mean_dtype)
-        reduced.setflags(write=False)
-        self._pyramid[level] = reduced
-        return reduced
 
 
 __all__ = [
