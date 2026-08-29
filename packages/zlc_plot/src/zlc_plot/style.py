@@ -856,6 +856,19 @@ def build_plot_style() -> PlotStyleConfig:
         RcParam("figure.autolayout", False),
         RcParam("figure.constrained_layout.use", False),
         RcParam("text.usetex", False),
+        # THE MATH FONT IS THIS LIBRARY'S DECISION, not whatever the hosting
+        # process happens to have.  Mathtext defaults to the artist's own
+        # font family for its "default" and "regular" faces, and the family
+        # this product ships is a UI face with no Greek: a fit label reading
+        # sigma then draws as a dummy box and says so once per text object
+        # per frame, which during a running experiment is a log full of
+        # "Font 'default' does not have a glyph for '\sigma'".  A fontset
+        # that ships with Matplotlib and covers the symbols the fit
+        # catalogue actually writes is the only thing that can promise this,
+        # and the fallback is named for the same reason: a missing glyph
+        # should be substituted, never reported and dropped.
+        RcParam("mathtext.fontset", "dejavusans"),
+        RcParam("mathtext.fallback", "cm"),
         RcParam("xtick.top", False),
         RcParam("ytick.right", False),
         RcParam("xtick.minor.top", False),

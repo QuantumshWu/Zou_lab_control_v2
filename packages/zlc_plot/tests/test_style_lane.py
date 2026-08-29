@@ -104,3 +104,71 @@ def test_one_thread_may_not_hold_the_lane_with_two_different_styles() -> None:
         with pytest.raises(RuntimeError, match="enter the style once"):
             with style_context(style, {"lines.linewidth": 3.5}):
                 pass
+
+
+def test_the_math_font_is_this_library_s_decision() -> None:
+    """A fit label reading sigma must draw as sigma, whatever the host did.
+
+    Mathtext takes its "default" and "regular" faces from the ARTIST's font
+    family, and the family this product ships is a UI face with no Greek.  A
+    hosting process that points mathtext at that family -- which is the
+    natural thing for an application that wants its math to match its
+    chrome -- makes every sigma in the fit catalogue draw as a dummy box and
+    say so once per text object per frame, which during a running experiment
+    is a log the operator cannot see past.
+
+    So the fontset is declared here rather than inherited: it must be one
+    that ships with Matplotlib and covers what the fit catalogue writes.
+    """
+
+    import logging
+
+    import matplotlib
+    import matplotlib.pyplot as plt
+
+    from zlc_plot.style import build_plot_style
+
+    records: list[str] = []
+
+    class Catch(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record.getMessage())
+
+    style = build_plot_style()
+    family = style.fonts.resolved_family
+    logger = logging.getLogger("matplotlib")
+    handler = Catch()
+    logger.addHandler(handler)
+    previous_level = logger.level
+    logger.setLevel(logging.WARNING)
+    hosted = {
+        "font.family": family,
+        "mathtext.fontset": "custom",
+        "mathtext.rm": family,
+        "mathtext.it": family,
+        "mathtext.bf": family,
+        "mathtext.fallback": "None",
+    }
+    try:
+        with matplotlib.rc_context(hosted):
+            # The host's own state does report it -- that is the premise.
+            records.clear()
+            figure = plt.figure(figsize=(2, 2), dpi=72)
+            figure.add_subplot().text(0.1, 0.5, r"$\sigma_L$ = 1.2")
+            figure.canvas.draw()
+            plt.close(figure)
+            assert records, (
+                "this test is meaningless unless the hosted state really "
+                "cannot draw a sigma"
+            )
+
+            records.clear()
+            with matplotlib.rc_context(style.matplotlib_rc_params()):
+                figure = plt.figure(figsize=(2, 2), dpi=72)
+                figure.add_subplot().text(0.1, 0.5, r"$\sigma_L$ = 1.2")
+                figure.canvas.draw()
+                plt.close(figure)
+            assert records == [], records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)

@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import lru_cache
 import hashlib
 from io import BytesIO
 import math
@@ -151,6 +152,7 @@ def _literal_text(text: str) -> str:
     return value.replace("$", r"\$") if "$" in value else value
 
 
+@lru_cache(maxsize=256)
 def _drawable_text(text: str) -> str:
     """The same text, unless Matplotlib could not draw it.
 
@@ -171,14 +173,27 @@ def _drawable_text(text: str) -> str:
     value = str(text)
     if "$" not in value:
         return value
-    try:
-        from matplotlib.mathtext import MathTextParser  # noqa: PLC0415
+    import logging  # noqa: PLC0415
 
+    from matplotlib.mathtext import MathTextParser  # noqa: PLC0415
+
+    # A CHECK IS NOT A SECOND DRAW.  Laying out mathtext looks up glyphs, and
+    # a glyph the math font lacks is reported -- so asking "can this be
+    # drawn" once per frame put a warning per frame into the operator's log
+    # for a symbol that was already going to be reported by the draw itself.
+    # The question is about the GRAMMAR; the font has its own answer and it
+    # is the draw's to give.
+    log = logging.getLogger("matplotlib")
+    previous = log.disabled
+    log.disabled = True
+    try:
         parser = MathTextParser("path")
         for line in value.split("\n"):
             parser.parse(line)
     except Exception:  # noqa: BLE001 -- any refusal means "cannot be drawn"
         return _literal_text(value)
+    finally:
+        log.disabled = previous
     return value
 
 
