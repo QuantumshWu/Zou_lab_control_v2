@@ -307,85 +307,6 @@ def representative_render() -> None:
     )
 
 
-def warm(force: bool = False) -> str:
-    """Compile (or load) the kernel's disk cache; returns the outcome.
-
-    The compiled signature is CLOSED: the driver normalizes every dtype
-    and layout at the kernel boundary, so one representative render
-    covers production forever.  A marker file remembers the toolchain
-    versions and this module's source hash -- when they match and the
-    cache is populated, warming is a millisecond no-op, which is what
-    ``bin\\warm_numba_cache.bat`` relies on to skip rebuilds.
-    """
-
-    if not HAVE_NUMBA:
-        return "numba is not installed; the numpy reference engine runs"
-    import hashlib
-    import sys
-
-    import numba
-
-    # install() leaves the variable unset when the checkout cannot be
-    # written; ask the owner rather than the environment it may not have set.
-    cache_dir = pathlib.Path(
-        os.environ.get("NUMBA_CACHE_DIR") or _kernel_cache.kernel_cache_dir()
-    )
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    source = pathlib.Path(__file__).read_bytes()
-    fingerprint = "|".join((
-        sys.version.split()[0],
-        np.__version__,
-        numba.__version__,
-        hashlib.sha256(source).hexdigest(),
-    ))
-    marker = cache_dir / "zlc_height3d.marker"
-    populated = any(cache_dir.glob("**/*.nbc"))
-    if (
-        not force
-        and populated
-        and marker.exists()
-        and marker.read_text(encoding="utf-8") == fingerprint
-    ):
-        return "cache is current; nothing to do"
-    from . import _height3d_raster as raster
-
-    previous = raster._ENGINE
-    raster._ENGINE = "numba"
-    try:
-        representative_render()
-    finally:
-        raster._ENGINE = previous
-    marker.write_text(fingerprint, encoding="utf-8")
-    return "kernel compiled and cached"
-
-
-def main() -> int:
-    """``zlc warm_numba``: compile-or-verify the kernel cache, say which.
-
-    A MISSING DEPENDENCY IS NOT A FAILURE HERE -- ``warm`` says so and
-    returns, because the numpy reference engine still draws.  So anything
-    that reaches this handler is a defect in the warmer or the kernel, and
-    the operator is told that rather than told to install something they
-    already have.
-    """
-
-    try:
-        print(warm())
-    except Exception as error:  # noqa: BLE001 -- this is a command-line front
-        import traceback  # noqa: PLC0415
-
-        traceback.print_exc()
-        print(f"\nwarmup failed: {type(error).__name__}: {error}")
-        print(
-            "This is a defect in the warmer or the kernel, not a missing "
-            "package: numba's absence is reported, never raised."
-        )
-        return 1
-    return 0
-
-
-if __name__ == "__main__":  # pragma: no cover
-    raise SystemExit(main())
 
 
 @njit(cache=True, parallel=True, nogil=True)
@@ -992,4 +913,3 @@ def _materialize(  # noqa: C901 - one kernel, mirrored from the reference
                 # Mirrors the reference: the frame is finished over the
                 # background, so it is opaque.
                 out[row, out_col, 3] = np.uint8(255)
-

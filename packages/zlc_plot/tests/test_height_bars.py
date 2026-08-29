@@ -1544,16 +1544,3 @@ def test_the_warmer_renders_what_production_renders() -> None:
         representative_render()
     finally:
         raster._ENGINE = previous
-
-
-def test_a_missing_numba_is_reported_not_raised() -> None:
-    """The one cause the launcher used to name is the one that cannot fail."""
-
-    from zlc_plot import _height3d_scanline as scanline
-
-    previous = scanline.HAVE_NUMBA
-    scanline.HAVE_NUMBA = False
-    try:
-        assert "numba is not installed" in scanline.warm()
-    finally:
-        scanline.HAVE_NUMBA = previous
