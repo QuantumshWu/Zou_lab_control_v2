@@ -116,7 +116,7 @@ def _area_mean(
         # samples wide -- and that bookkeeping, not the addition, is the cost.
         summed = np.empty(shape, dtype=np.float32)
         kernels.block_sum_unsigned(
-            np.ascontiguousarray(values), row_starts, column_starts, summed
+            kernels.readable(values), row_starts, column_starts, summed
         )
     elif all_valid and compiled:
         # Everything the exact-integer judge turns away -- every floating
@@ -127,7 +127,7 @@ def _area_mean(
         # and 35.1 -> 0.46 on 2048x2048.
         summed = np.empty(shape, dtype=mean_dtype)
         kernels.block_sum_float(
-            np.ascontiguousarray(values), row_starts, column_starts, summed
+            kernels.readable(values), row_starts, column_starts, summed
         )
     elif compiled:
         # Missing samples, in ONE pass.  The reference builds a whole
@@ -136,8 +136,8 @@ def _area_mean(
         summed = np.empty(shape, dtype=mean_dtype)
         counts = np.empty(shape, dtype=np.int64)
         kernels.block_sum_valid(
-            np.ascontiguousarray(values),
-            np.ascontiguousarray(valid),
+            kernels.readable(values),
+            kernels.readable(valid),
             row_starts,
             column_starts,
             summed,

@@ -3988,13 +3988,15 @@ def _kernel_counts(
         return None
     if bool(np.any(produced[:-1] >= produced[1:])):
         return None
-    flat = np.ascontiguousarray(selected)
+    flat = kernels.readable(selected)
     if flat.ndim != 1:
         return None
     threads = kernels.histogram_threads()
     partials = np.empty((threads, count), dtype=np.int64)
     counted = np.empty(count, dtype=np.int64)
-    kernels.uniform_histogram(flat, produced, count, partials, counted)
+    kernels.uniform_histogram(
+        flat, kernels.readable(produced), count, partials, counted
+    )
     return counted
 
 

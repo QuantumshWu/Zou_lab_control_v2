@@ -455,3 +455,44 @@ def test_the_centred_square_kernel_is_a_reduction_not_a_copy() -> None:
         )
     finally:
         kernels.ENGINE = previous
+
+
+def test_an_input_s_mutability_is_not_an_accident_of_where_it_came_from() -> None:
+    """One signature per dtype, not two.
+
+    Numba types an array's mutability: ``array(uint16, 2d, C)`` and
+    ``readonly array(uint16, 2d, C)`` are different types and compile the
+    same kernel twice.  Which one a plane is, is decided by whether
+    something upstream had to copy it -- ``ascontiguousarray`` returns a
+    read-only contiguous array unchanged but must COPY a strided one, and a
+    fresh copy is writable.  Which is to say: by whether the operator had
+    zoomed.  Measured across the image dtypes with and without a zoom, 23
+    compiled signatures of which 10 were the same code again.
+    """
+
+    numba = pytest.importorskip("numba")
+
+    sealed = np.zeros((8, 8), dtype=np.uint16)
+    sealed.setflags(write=False)
+    strided = np.zeros((8, 16), dtype=np.uint16)[:, 2:10]
+    strided.setflags(write=False)
+    writable = np.zeros((8, 8), dtype=np.uint16)
+
+    # The premise: without sealing, these are three different numba types.
+    raw = {
+        str(numba.typeof(np.ascontiguousarray(item)))
+        for item in (sealed, strided, writable)
+    }
+    assert len(raw) > 1, raw
+
+    typed = {
+        str(numba.typeof(kernels.readable(item)))
+        for item in (sealed, strided, writable)
+    }
+    assert len(typed) == 1, typed
+    assert "readonly" in typed.pop()
+
+    # And sealing a caller's array is a side effect on a value they own.
+    assert writable.flags.writeable
+    assert not kernels.readable(writable).flags.writeable
+    assert np.array_equal(kernels.readable(strided), strided)

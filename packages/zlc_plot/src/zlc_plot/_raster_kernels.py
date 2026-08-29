@@ -67,6 +67,31 @@ def engaged() -> bool:
     return HAVE_NUMBA
 
 
+def readable(array: Any) -> Any:
+    """A C-contiguous READ-ONLY view of ``array``: one signature, not two.
+
+    NUMBA TYPES MUTABILITY.  ``array(uint16, 2d, C)`` and ``readonly
+    array(uint16, 2d, C)`` are different types, so the same kernel compiles
+    a second time for each -- and which one a plane is, is an accident of
+    where it came from: a published snapshot is sealed, a prepared front is
+    sealed, but ``ascontiguousarray`` on a STRIDED read-only view has to
+    copy, and a fresh copy is writable.  Which is to say: whether the
+    operator had zoomed.  Measured across the image dtypes with and without
+    a zoom, 23 compiled signatures of which 10 were the same code again.
+
+    Every array that crosses into a kernel as an INPUT comes through here.
+    Outputs do not: they are written.
+    """
+
+    view = np.ascontiguousarray(array)
+    if view.flags.writeable:
+        # A view, never the caller's own array: sealing theirs would be a
+        # side effect on a value they still own.
+        view = view.view()
+        view.setflags(write=False)
+    return view
+
+
 # --------------------------------------------------------------- block sums
 #: Largest exactly-representable integer in float32.  A block sum above it
 #: would round, and the reference accumulates in float32 too -- so the exact
@@ -395,12 +420,12 @@ def masked_finite_extrema(values: Any, valid: Any) -> tuple[int, float, float] |
 
     if not engaged():
         return None
-    flat = np.ascontiguousarray(values).reshape(-1)
+    flat = readable(values).reshape(-1)
     if flat.dtype.kind != "f" or not flat.size:
         return None
     use_valid = valid is not None
     if use_valid:
-        mask = np.ascontiguousarray(np.asarray(valid, dtype=np.bool_)).reshape(-1)
+        mask = readable(np.asarray(valid, dtype=np.bool_)).reshape(-1)
         if mask.size != flat.size:
             return None
     else:

@@ -4172,7 +4172,12 @@ class MatplotlibRenderer:
         )
         source = np.ascontiguousarray(rgba)
         if kernels.engaged() and out.flags.c_contiguous:
-            kernels.gather_rows_columns(source, row_map, column_map, out)
+            kernels.gather_rows_columns(
+                kernels.readable(source),
+                kernels.readable(row_map),
+                kernels.readable(column_map),
+                out,
+            )
             return
         out[...] = source[row_map][:, column_map]
 
@@ -5435,7 +5440,7 @@ class MatplotlibRenderer:
             if kernels.engaged():
                 rgba = np.empty(values.shape + (4,), dtype=np.uint8)
                 kernels.colour_indexed(
-                    np.ascontiguousarray(values), table, rgba
+                    kernels.readable(values), kernels.readable(table), rgba
                 )
             else:
                 rgba = table[values]
@@ -5450,8 +5455,10 @@ class MatplotlibRenderer:
                 # between them but the answer.
                 rgba = np.empty(values.shape + (4,), dtype=np.uint8)
                 kernels.colour_float32(
-                    np.ascontiguousarray(values, dtype=np.float32),
-                    lut,
+                    kernels.readable(
+                        np.asarray(values, dtype=np.float32)
+                    ),
+                    kernels.readable(lut),
                     np.float32(vmin),
                     np.float32(256.0 / (vmax - vmin)),
                     rgba,

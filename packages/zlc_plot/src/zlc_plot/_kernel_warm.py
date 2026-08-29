@@ -70,6 +70,36 @@ def kernel_dispatchers() -> dict[str, Any]:
     return found
 
 
+def duplicate_signatures() -> tuple[str, ...]:
+    """Kernels compiled more than once for one type, by name.
+
+    Numba types an array's MUTABILITY, so a kernel handed a writable plane
+    and the same kernel handed a read-only one are two compilations of one
+    piece of code -- and which one a plane is, is an accident of whether
+    something upstream had to copy it.  Sealing every input at the boundary
+    is what makes this list empty; see ``_raster_kernels.readable``.
+    """
+
+    import re  # noqa: PLC0415
+
+    flags = re.compile(
+        r"Array\((\w+), (\d+), '(\w)', (?:True|False), aligned=(?:True|False)\)"
+    )
+    named: list[str] = []
+    for name, kernel in kernel_dispatchers().items():
+        seen: set[str] = set()
+        for signature in kernel.signatures:
+            shape = flags.sub(
+                lambda match: f"Array({match.group(1)},{match.group(2)},{match.group(3)})",
+                str(signature),
+            )
+            if shape in seen:
+                named.append(name)
+                break
+            seen.add(shape)
+    return tuple(sorted(named))
+
+
 def cold_kernels() -> tuple[str, ...]:
     """The kernels that have compiled nothing yet, by name."""
 
@@ -165,8 +195,15 @@ def _series_snapshot(repeats: int, points: int) -> Any:
     return owned_snapshot_from_arrays(schema=schema, values=values, revision=1)
 
 
-def _render(snapshot: Any, spec: Any, parameters: dict | None = None) -> None:
+def _render(
+    snapshot: Any,
+    spec: Any,
+    parameters: dict | None = None,
+    *,
+    zoom_steps: int = 0,
+) -> None:
     from . import PlotSession  # noqa: PLC0415
+    from .selectors import NumericRange  # noqa: PLC0415
 
     session = PlotSession(snapshot, spec)
     try:
@@ -174,8 +211,33 @@ def _render(snapshot: Any, spec: Any, parameters: dict | None = None) -> None:
         if parameters:
             session.set_parameters(dict(parameters))
         session.rgba()
+        if not zoom_steps:
+            return
+        # A ZOOM IS NOT THE SAME WORK.  Cropping the viewport changes the
+        # reduction ratio, so a frame the mip pyramid served whole starts
+        # reducing, and one that was reducing starts drawing pixel for
+        # pixel through the direct colour table instead.  Warming only the
+        # opening view left an operator's first wheel notch compiling.
+        height, width = _plane_shape(snapshot)
+        span = float(width)
+        for _ in range(zoom_steps):
+            span /= 1.7
+            half = span / 2.0
+            session.set_viewport(
+                NumericRange(width / 2.0 - half, width / 2.0 + half),
+                NumericRange(
+                    height / 2.0 - half * height / width,
+                    height / 2.0 + half * height / width,
+                ),
+            )
+            session.rgba()
     finally:
         session.close()
+
+
+def _plane_shape(snapshot: Any) -> tuple[int, int]:
+    shape = np.asarray(snapshot.block.values).shape
+    return int(shape[-3]), int(shape[-2])
 
 
 def representative_work() -> None:
@@ -192,22 +254,34 @@ def representative_work() -> None:
 
     image = ImagePlot(AxisRef.data("x"), AxisRef.data("y"))
 
-    # A raw unsigned frame small enough to draw a pixel per pixel: the
-    # direct colour table and the pixel gather.
-    _render(_image_snapshot(96, 96, np.uint16), image)
-
-    # Oversampled frames, which reduce.  The SHAPES matter as much as the
-    # dtypes: a source that halves evenly is served by the mip pyramid and
-    # never reaches the area mean at all, so a power-of-two frame exercises
-    # the unsigned kernel and a ragged one the floating kernel -- which is
-    # the shape its own docstring measured, and the shape a real camera has.
-    _render(_image_snapshot(2048, 2048, np.uint16), image)
-    _render(_image_snapshot(1200, 1920, np.float32), image)
-    _render(_image_snapshot(1200, 1920, np.float64), image)
-
-    # The same, with holes: the masked block sum, which also counts.  A
-    # masked source bypasses the pyramid, so its shape is free.
-    _render(_image_snapshot(1200, 1920, np.float64, holes=True), image)
+    # EVERY DTYPE A PRODUCER PUBLISHES IS ANOTHER COMPILE.  A camera is
+    # unsigned and may be either width; a derived plane is floating and may
+    # be either width.  Warming one of them leaves the others to the
+    # operator's first frame of each.
+    #
+    # And the SHAPES matter as much: a source that halves evenly is served
+    # by the mip pyramid and never reaches the area mean at all, so a
+    # power-of-two frame exercises the unsigned kernel and a ragged one the
+    # floating kernel -- which is the shape a real camera has.
+    #
+    # Small frames draw pixel for pixel, which is the direct colour table
+    # rather than the float pass over a mean; zoomed frames cross between
+    # the two, which is the wheel notch that used to compile.
+    # The NARROW UNSIGNED dtypes are the ones whose block sums are provably
+    # exact, so they take the integer kernel and the direct colour table.
+    for dtype in (np.uint8, np.uint16):
+        _render(_image_snapshot(96, 96, dtype), image)
+        _render(_image_snapshot(2048, 2048, dtype), image, zoom_steps=5)
+    # EVERYTHING ELSE REDUCES THROUGH THE FLOATING KERNEL, one compile per
+    # dtype -- the wide and signed integers as much as the floats, because
+    # the judge turns them away for the same reason and a producer may
+    # publish any of them.
+    for dtype in (np.uint32, np.int16, np.int32, np.float32, np.float64):
+        _render(_image_snapshot(1200, 1920, dtype), image, zoom_steps=5)
+    for dtype in (np.float32, np.float64):
+        # With holes: the masked block sum, which also counts.  A masked
+        # source bypasses the pyramid, so its shape is free.
+        _render(_image_snapshot(1200, 1920, dtype, holes=True), image)
 
     series = _series_snapshot(8, 400)
     # The centred second moment behind an uncertainty band.
@@ -275,6 +349,18 @@ def warm(force: bool = False) -> str:
         _height3d_raster._ENGINE = previous_h3d
 
     total = len(kernel_dispatchers())
+    twins = duplicate_signatures()
+    if twins:
+        # Two compilations of one kernel that differ only in whether their
+        # input was writable is not coverage, it is waste -- and it means an
+        # input reached a kernel without being sealed.  See
+        # ``_raster_kernels.readable``.
+        raise RuntimeError(
+            "these kernels compiled twice for the same code, differing only "
+            "in an input's mutability: " + ", ".join(twins)
+            + ".  An input reached them without going through "
+            "_raster_kernels.readable."
+        )
     cold = cold_kernels()
     if cold:
         # Reported, not written off: a marker written now would tell the
@@ -287,7 +373,8 @@ def warm(force: bool = False) -> str:
             "them; add the render that does."
         )
     marker.write_text(fingerprint, encoding="utf-8")
-    return f"{total} kernels compiled and cached"
+    signatures = sum(len(kernel.signatures) for kernel in kernel_dispatchers().values())
+    return f"{total} kernels, {signatures} signatures compiled and cached"
 
 
 def main() -> int:

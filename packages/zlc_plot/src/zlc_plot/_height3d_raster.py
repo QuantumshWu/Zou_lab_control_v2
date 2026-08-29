@@ -622,6 +622,7 @@ def render_height_bars(
         span = 256.0 / (value_high - value_low)
         shape = (*h_grid.shape, 3)
         if _scanline_selected():
+            from . import _raster_kernels as kernels
             from ._height3d_scanline import _derive_planes
 
             hz = np.empty(h_grid.shape, dtype=np.float64)
@@ -629,13 +630,13 @@ def render_height_bars(
             base_values = np.empty(h_grid.shape, dtype=np.float64)
             rgb_grid = np.empty(shape, dtype=np.float32)
             _derive_planes(
-                np.ascontiguousarray(h_grid),
-                finite_grid,
+                kernels.readable(h_grid),
+                kernels.readable(finite_grid),
                 float(value_low),
                 float(value_high),
                 float(z_unit),
                 float(span),
-                lut,
+                kernels.readable(lut),
                 hz,
                 top_values,
                 base_values,
