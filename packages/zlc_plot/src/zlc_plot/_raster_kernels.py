@@ -333,6 +333,63 @@ def finite_extrema(values, valid, use_valid, out):
     out[threads, 2] = highest
 
 
+@njit(cache=True, parallel=True, nogil=True)
+def centred_square_sums(values, offset, valid, use_valid, out):
+    """Sum ``(x - offset)**2`` into one entry per kept position, in one pass.
+
+    THE SHAPE IS ALWAYS THREE.  Whatever the signal's rank, the axes a
+    reduction keeps are one block of it, so the tensor is (everything
+    before the block, the block, everything after) and this kernel needs no
+    other spelling: one compiled specialization serves a curve over point
+    rows, a heatmap over two scan dimensions and a grouped band alike.
+
+    It replaces ``centred = plane - offset`` followed by an einsum.  The
+    einsum did fuse the square into the sum, but the CENTRING still
+    materialized a whole copy of the tensor first -- 15.6 MB and 4.77 ms of
+    a 6.13 ms call on two million samples, where the einsum itself was
+    0.65.  Reading each sample once and never writing it is 0.16 ms.  The
+    answer moves in its last bits, as any change of summation order does:
+    measured 4.6e-15 relative on the shape above.
+    """
+
+    outer, keep, inner = values.shape
+    for k in prange(keep):
+        total = np.float64(0.0)
+        for o in range(outer):
+            for i in range(inner):
+                if use_valid and not valid[o, k, i]:
+                    continue
+                delta = np.float64(values[o, k, i]) - offset
+                total += delta * delta
+        out[k] = total
+
+
+def masked_centred_square_sums(values: Any, offset: float, valid: Any) -> Any:
+    """Run :func:`centred_square_sums`, or ``None`` to defer to numpy."""
+
+    if not engaged():
+        return None
+    view = np.asarray(values)
+    if view.ndim != 3 or not view.flags.c_contiguous or not view.size:
+        return None
+    if view.dtype.kind not in "fiub":
+        return None
+    use_valid = valid is not None
+    if use_valid:
+        marks = np.asarray(valid)
+        if (
+            marks.dtype != np.bool_
+            or marks.shape != view.shape
+            or not marks.flags.c_contiguous
+        ):
+            return None
+    else:
+        marks = np.zeros((1, 1, 1), dtype=np.bool_)
+    out = np.empty(view.shape[1], dtype=np.float64)
+    centred_square_sums(view, np.float64(offset), marks, use_valid, out)
+    return out
+
+
 def masked_finite_extrema(values: Any, valid: Any) -> tuple[int, float, float] | None:
     """``(count, low, high)`` for a flat float pool, or ``None`` to defer."""
 

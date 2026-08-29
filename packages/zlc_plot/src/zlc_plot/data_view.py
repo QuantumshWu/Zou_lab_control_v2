@@ -1604,12 +1604,19 @@ class DataView:
 
             def mean_of_squares(plane: Any, offset: float) -> Any:
                 plane = np.asarray(plane, dtype=np.float64)
-                if all_valid:
+                per_group = _centred_square_sums(
+                    plane,
+                    offset,
+                    None if all_valid else usable,
+                    remaining,
+                    shape,
+                )
+                if per_group is None and all_valid:
                     centred = plane - offset
                     per_group = np.einsum(
                         f"{letters},{letters}->{output}", centred, centred
                     )
-                else:
+                elif per_group is None:
                     per_group = np.sum(
                         np.square(plane - offset),
                         axis=reduce_axes,
@@ -4273,6 +4280,57 @@ def _centred_square_sum(
                 np.sum(piece, where=where[start:stop], dtype=np.float64)
             )
     return total
+
+
+def _centred_square_sums(
+    plane: Any,
+    offset: float,
+    usable: Any | None,
+    kept: list[int],
+    shape: tuple[int, ...],
+) -> Any:
+    """Per kept position, the sum of squares about ``offset``, or None.
+
+    THE KEPT AXES ARE ONE BLOCK OR THEY ARE NOTHING.  A reduction that
+    keeps axis 1 and a group axis keeps a run of adjacent axes whenever a
+    three-dimensional view of the tensor exists at all, and where it does
+    the view costs nothing -- the array is C-contiguous, so the reshape is
+    a reshape and not a copy.  Where it does not, the caller's einsum is
+    still the answer.
+    """
+
+    if not kept or kept != list(range(kept[0], kept[-1] + 1)):
+        return None
+    array = np.asarray(plane)
+    if array.shape != tuple(shape) or not array.flags.c_contiguous:
+        return None
+    outer = 1
+    for axis in range(kept[0]):
+        outer *= int(shape[axis])
+    keep = 1
+    for axis in kept:
+        keep *= int(shape[axis])
+    inner = 1
+    for axis in range(kept[-1] + 1, len(shape)):
+        inner *= int(shape[axis])
+    marks = None
+    if usable is not None:
+        candidate = np.asarray(usable)
+        if (
+            candidate.dtype != np.bool_
+            or candidate.shape != tuple(shape)
+            or not candidate.flags.c_contiguous
+        ):
+            return None
+        marks = candidate.reshape(outer, keep, inner)
+    from . import _raster_kernels as kernels
+
+    summed = kernels.masked_centred_square_sums(
+        array.reshape(outer, keep, inner), float(offset), marks
+    )
+    if summed is None:
+        return None
+    return summed.reshape(tuple(int(shape[axis]) for axis in kept))
 
 
 def _sem_of_mean(

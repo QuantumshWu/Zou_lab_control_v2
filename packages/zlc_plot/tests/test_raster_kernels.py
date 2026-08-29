@@ -380,3 +380,78 @@ def test_no_module_keeps_its_own_copy_of_the_cache_path() -> None:
         "these modules set NUMBA_CACHE_DIR themselves instead of asking "
         "_kernel_cache: %s" % offenders
     )
+
+
+def test_the_centred_square_kernel_is_a_reduction_not_a_copy() -> None:
+    """One compiled specialization serves every signal rank.
+
+    The kept axes of a reduction are a BLOCK of the tensor, so the tensor
+    always views as (before, block, after) and the kernel is written on
+    that three-dimensional spelling alone -- a curve over point rows, a
+    grouped band and a two-dimensional scan heatmap all reach the same
+    compiled code, which is the only way a cache of compiled kernels is
+    worth having.
+
+    THE REFERENCE IS THE EINSUM, not a second numpy spelling of the
+    kernel: without the compiled engine the helper declines and its one
+    caller takes the einsum path it always had.  So the assertions are
+    that it declines when it must, and that where it does answer the
+    answer is the einsum's to within a summation order -- which is all a
+    different order can ever promise.
+    """
+
+    from zlc_plot.data_view import _centred_square_sums
+
+    rng = np.random.default_rng(4)
+    shape = (7, 40, 3, 5)
+    letters = "abcd"
+    plane = rng.normal(0.0, 1.0, shape)
+    offset = 0.37
+    previous = kernels.ENGINE
+    try:
+        kernels.ENGINE = "numpy"
+        assert _centred_square_sums(plane, offset, None, [1], shape) is None
+        kernels.ENGINE = "auto"
+        if not kernels.engaged():
+            pytest.skip("no compiled engine available")
+        for kept in ([1], [0, 1], [1, 2]):
+            compiled = _centred_square_sums(plane, offset, None, kept, shape)
+            assert compiled is not None
+            centred = plane - offset
+            einsum = np.einsum(
+                f"{letters},{letters}->{''.join(letters[axis] for axis in kept)}",
+                centred,
+                centred,
+            )
+            assert compiled.shape == einsum.shape
+            assert np.allclose(compiled, einsum, rtol=1e-12, atol=0.0)
+
+        # Kept axes that are not one block have no three-dimensional view,
+        # and the helper says so rather than copying to make one.
+        assert _centred_square_sums(plane, offset, None, [1, 3], shape) is None
+
+        # A non-contiguous plane is declined for the same reason: the
+        # kernel takes C-contiguous input so one layout compiles, not two.
+        assert (
+            _centred_square_sums(
+                np.asfortranarray(plane), offset, None, [1], shape
+            )
+            is None
+        )
+
+        marks = rng.random(shape) > 0.3
+        masked = _centred_square_sums(plane, offset, marks, [1], shape)
+        assert masked is not None
+        assert np.allclose(
+            masked,
+            np.sum(
+                np.square(plane - offset),
+                axis=(0, 2, 3),
+                where=marks,
+                dtype=np.float64,
+            ),
+            rtol=1e-12,
+            atol=0.0,
+        )
+    finally:
+        kernels.ENGINE = previous
