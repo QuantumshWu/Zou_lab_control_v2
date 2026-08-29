@@ -10,7 +10,7 @@
 
 1. 用户最新明确指令；
 2. 本文产品不变量；
-3. `IMPLEMENTATION_PLAN.md`当前Checkpoint；
+3. `IMPLEMENTATION_PLAN.md`当前实现状态与最新证据；
 4. 当前代码与实验事实。
 
 所有活文档只描述当前产品；Git记录不构成产品规格。
@@ -314,7 +314,7 @@ Node new chunk
 - Wheel必须包含bootstrap、八层、Calibration/Scan templates、SLM profile、Plot font及完整有效FPGA RTL/XDC/Tcl assets；installed environment check按distribution RECORD验证归属。
 - 正式evidence lanes：software、gui_offscreen、virtual_vertical、notebook_offline、real_screen和hardware runbooks。
 - Mock/virtual/offscreen证据不得冒充真hardware/optical acceptance。
-- Root Architecture只保存目标不变量；Implementation Plan只保存当前Checkpoint和最新证据。
+- Root Architecture只保存目标不变量；Implementation Plan只保存当前实现状态和最新证据。
 - 活文档保持current-only，不在尾部追加change log或修补记录。
 
 ## 11. 当前实现状态

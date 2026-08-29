@@ -1,4 +1,4 @@
-# ZLC — Current Implementation Checkpoint
+# ZLC — Current Implementation Status
 
 更新时间：2026-08-25
 
@@ -150,7 +150,6 @@
   均经formal `zlc figure_viewer --check`读取。上述证据属于此前冻结tree；本次Feedback/Curve
   最近一次pre-adaptive controller实测为6个probe candidate、22个总candidate、最佳34/35与ratio 1.1337。
 - Calibration weighted Gaussian/Empirical threshold当前worktree聚焦证据为`11 passed`：已知真值、label-invariance、窄bright＋尾部噪声、Empirical/fallback、Figure archive同模型重放、population-weighted Plot classifier、coordinate roundtrip与warm refresh。另对500组随机Gaussian参数核对解析交点，383组存在两均值间相关根，最大加权log-curve交点误差`3.37e-13`、相对数值最优误差`8.95e-17`。本cut未重跑正式Runtime/Workbench vertical。
-- Calibration weighted-threshold residual sweep：相对`68e2c4b`无新增文件、production class、兼容alias或第二fit owner；8个production文件净增334行，其中145行是Plot现有classifier owner对authoritative components的构造/重放，69行是既有bimodal owner的对称宽度先验与候选选择，其余120行是Calibration计算/report字段、target grammar和唯一stored tuple。新增production definitions只有selector validator与Plot现有mixin内两个直接方法；`_classifier_gaussian_components`只由同一PlotSession配置、rollback、refresh和recipe projection消费。三个既有test文件净增112行且没有新增test case：一个原threshold case改为label-invariance/weighted crossing/narrow-bright，一个既有artifact case增加exact component persistence，一个既有classifier case增加authoritative render；全部KEEP。active docs已同步，旧label-fit/equal-prior/balanced-fidelity语义搜索为零。唯一deferred是正式Runtime/Workbench vertical复跑。
 - Calibration site review当前聚焦证据：Runtime精确operator request/response与Stop、saved-frame完整review链及全descriptor virtual Calibration保持通过。正式`zlc task_console --template virtual`science路径以8 samples检测24 sites，排除`site_0000`后最终Calibration为23 sites、terminal移除全部自动preview；`site_review.npz`42,208 bytes、PNG 145,791 bytes，FigureViewer current reader成功重开。此前`parent=None`测试遗漏了真实parent会把frameless QWidget降为child的错误；当前`FluentDialogWindow`以`Qt.Window + WindowModal`保留Fluent顶层身份，真实parent测试核对active modal、确认响应及title-bar关闭，QTimer/TaskConsole同类回调中的nested loop正常退出。`zlc_ui.capture_window`取得精确1152×653 shared-screen capture，Fluent title/body边界为32/32、无native dialog chrome，35-site状态与controls完整显示。
 - SiteMap detector真实red为8帧50%-loading site在0/2/4/6出现：旧实现full-average `702.04σ`仍被split veto漏掉；新实现记录7个相邻变化、最大change `355.67σ`，定位误差0.030 pixel且同一35-site阵列全部找回。20个随机seed覆盖698个至少加载一次的sites，漏检0、spurious 0；完整site-detection `7 passed`，saved-frame review＋Workbench vertical chain `2 passed`。
 - 后续adaptive gain/formal-update accounting与Curve hover/lock切分运行6个直接聚焦用例，结果`6 passed`；未重新运行100-shot验收。
@@ -158,7 +157,6 @@
 - 固定nearest清理运行standalone/facet artist、Workbench parameter surface及Fluent Setting/Edit四个聚焦用例，结果`4 passed`。
 - Device Control当前回归：Workbench完整`425 passed`；Runtime完整加Figure grammar `112 passed`；adapter/camera/scan受影响组`53 passed`；Device Control Qt、风险revision、refresh close guard、in-flight latest-only和demo直接证据均通过。Atom完整回归同时暴露并修复Temperature sibling event record、Feedback输出声明和三条terminal/Stop残余；100-shot virtual Feedback仍为既有`34/35`上限，未用放宽断言冒充通过。
 - FigureViewer此前以formal launcher和`zlc_ui.capture_window`在真实Windows屏幕完成四条1152×653验收：current archive默认Image Monitor、点击Add panel新增Curve、从Setting点击Edit进入共享Fluent `PanelEditorView`、以及多层Flow展开树；四次均保持shared 90% window尺寸和固定左栏。右侧复用TaskConsole `ConsoleBoardView + PanelCardView`并置于白色work surface，支持每panel切saved dataset、alternate plot kind、Setting/remove/order与closable Edit；static Edit只保留Panel/Semantic/Display/Fit。用户当前重新裁决Info readout必须统一multiline并按实际visual layout紧包；旧的无换行单行分支会cutoff长内容且不能作为phantom inner-scroll的替代修复。固定Plot kind从Setting删除，动态Signal keyed-choice在reconcile写值前更新choice domain。
-- FigureViewer冻结树残余审计：相对`80116b5`无新增production/test文件或production class；production净增562行，其中Viewer presenter +327为multi-panel prepare/configure/atomic swap/retirement，FigureViewer view +97、InfoPane +61、Handle +28为复用board/card/Edit/Flow的直接UI owner，shared panel description projection +131由TaskConsole与Viewer两个consumer共同使用，PanelEditor/Form合计+16为static模式与dynamic keyed-choice正确reconcile，demo另净增18行；同时旧Console/card/modal path净删98行。Tests净增122行，只有一个新test function（用户明确报告的loaded-left-pane变宽），其余均扩展既有Viewer/Panel/Edit/atomic cases，全部KEEP且无重复fixture。`dataset_picked/set_datasets/set_figure_*/show_figure/run_host_dialog/kind_read_only`等旧API与ASCII Flow owner搜索为零；旧单panel `_host/dataset/recipe`镜像和unused candidate viewport已删除，新增状态只存在于唯一presenter `panels`、window cards/Edit tabs、固定pane width和Flow scene，不进入archive grammar或第二份plot lifecycle；无deferred残余。
 - FigureViewer Info readout当前根修：旧实现以单行控件掩盖multiline少算Qt block高度的问题，长无换行值因此cutoff，而multiline内部仍保留`maximum=1`的phantom scroll。InfoPane现统一复用`FluentReadoutMultiline`，唯一高度owner逐block读取`QTextLayout`实际像素并加document/widget margins；未设cap时horizontal/vertical range均为0，短值、显式两行和长无换行值实测为26/45/349 px且原文逐字符不变。现有UI用例扩展后相关文件`12 passed`；formal `capture_window`以1152×653真实FigureViewer重开Camera Figure，左栏一行readout保持紧凑。
 - FigureViewer Logic/Devices/Flow当前根修：archive内部`event-N`只作parent引用，Logic页以真实Logic identity显示递归去除device字段后的run参数；Devices页用run record的stable role→instance映射解释run/event snapshots，按实际device聚合并给每项保留Logic、sequence与scope，缺映射/identity/device key一律拒绝而不猜。Flow原位删除QTree owner，Workbench只投影唯一Logic/Device nodes和causal/device edges；Qt以layered+barycentric布局、独立edge ports与long-edge lane绘制，典型100 nodes同步构建约6.5 ms，3-device、diamond、真实DFS汇合及10-node长链均无edge穿node，长链horizontal range为0。Calibration/Temperature normal与partial report、SLM candidate/report、Seamless/Stepped/Temperature live均保存实际用到的device facts；Feedback pre-shot只记录SLM，post-shot冻结同candidate三设备，failure rollback不改变已存candidate provenance；Stepped tunable以完整scan values及逐点readback等值contract记录，不复制event history。聚焦回归`67 passed`，另Console Logic`34 passed`；formal Windows real-screen capture为1152×653、DPR 3、3-device Flow无横向scroll且节点/箭头无重叠。
 - Exact Scan Panel恢复当前证据：真实event chunk为`1×1×3×5`、canonical为`2×(65×2×2)×3×5`的Signal经实际SignalPlane与Plot host由真实`field.x=65`触发>64拒绝；拒绝前后Setting均保留`field.x/y/z` fate且不再出现phantom `point`，独立Curve Panel title保持canonical axes，Fluent form在`fit_unavailable`同时仍含三个Semantic controls。精确目标`20×(10×10×10)×3×35`的title authority输出`(20)×(10×10×10)×(3×35)`。多维FacetGrid默认最外层真实scan axis，不再以flattened point rows制造1000 cells或phantom point-row restriction。相同live projection与仅title metadata变化均不reconcile Setting form；固定Plot kind不再进入Setting，FacetGrid只保留可编辑Cell kind；Facet默认、feasibility、真实拒绝与Fluent Setting聚焦证据`22 passed`。
@@ -173,64 +171,6 @@
 - 第一次installed software尝试曾在重负载下出现一次本地SLM测试TCP connect timeout；
   同一wheel的精确case随后连续5/5通过，第二次完整installed software lane通过，因此没有
   用该不可复现事件改动产品remote timeout或server逻辑。
-
-### 3.2 Frozen-tree residual sweep
-
-- 本cut相对`1043aa7`的冻结统计为52 files：production 27 files
-  `+4,046/-3,320`（净+726）、tests 23 files `+1,356/-800`（净+556）、
-  active docs 2 files `+38/-24`（净+14）。无新增或删除文件。
-- Plot production净删48行；增量集中在Runtime净+298的exact axis/generation、
-  lease history与restart cleanup，以及Workbench净+476的staged/accepted surface、
-  Live/Edit/Viewer原子替换和overlay lineage。最大正增文件为Plot `data_view.py`
-  +174（`SelectionSubject`搬迁与统一axis projection）、Workbench `presentation.py` +171、
-  Workbench `console.py` +166、Runtime `selection_bridge.py` +155、Runtime `plane.py`
-  +140、Plot `figure_artifact.py` +106和Workbench `viewer.py` +88；全部是上述现有
-  owner的直接实现，全部KEEP。
-- Production class文本新增3、删除5，净删2。`ResolvedAxis`替换
-  `AxisDescriptor`，`SelectionSubject`从`session.py`移到`data_view.py`，`_ProjectedAxis`
-  替换`_ResolvedAxis`；同时删除`RollingHistoryPoint`和`PlotViewportObservation`。
-  Runtime六个`indexed_*` dict合并为唯一`indexed_history`；PanelBinding的accepted/host/focus
-  镜像与PlotPanelPort的presented/shown镜像已删除，当前pixels只由既有`_Prepared`
-  记录的`_surface`表达。新增definition无0-consumer；Figure selector encode/decode对与
-  Runtime锁内快照/锁外materialize分界是仅有的single-consumer helpers，均KEEP。
-- Test function从369减到366（净-3）；无新test文件或fixture，fixture数保持10。
-  7个新的直接用例全部KEEP，分别覆盖未上屏front手势拒绝、presentation debt、
-  fit跨restart identity、lease window、atomic surface accept、generation+revision publication identity
-  与Rolling viewport。旧label alias、`source_revisions`、revision-only和implementation-specific
-  materializer用例已删除或合并，无剩余文件级MERGE/DELETE项。
-- `AxisDescriptor`、`source_revisions`、`HistoryPool`、`AcceptedSurface`、
-  `editor_accepted_display`、`PlotViewportObservation`、revision-only publication lookup、
-  平行history owner、冲突标记与`git diff --check`残余均为0；workspace实验数据
-  未转换、未删除、未修改。
-- 下一未完成项是restart期间pending data surface不得覆盖较新的accepted selector/configuration；该顺序依赖将在独立worktree修复并重新跑Workbench全包。
-
-### 3.3 Calibration detected-site review增量残余审计
-
-- 相对父commit `4c0071b`冻结为32 files：production 17 files `+1373/-294`（净+1079），
-  tests 7 files `+277/-47`（净+230），active docs 8 files `+89/-3`（净+86）。新增production集中在Runtime operator-input lifecycle、
-  Calibration science/report、Plot point surface、Fluent point-review view/dialog和Workbench组合，
-  来自用户明确批准的通用Task人工输入边界与完整Fluent交互，不是compatibility或第二套Task framework。
-- Consumer graph只有五个owner且无重复：NodeHost唯一保存request/response/Stop；Calibration唯一
-  决定candidate→excluded→final SiteMap和报告；`zlc_plot`只拥有Image point/rectangle gesture与
-  overlay；`zlc_ui`只拥有Fluent modal/window/controls/local view state；Workbench只连接plain
-  identities与两个完整surface。未来manual Scan axis没有consumer、业务字段或UI，仅明确复用
-  NodeHost与FluentDialogWindow lifecycle。
-- Material positive production全部KEEP：Calibration `task.py/outputs.py`拥有science flow与typed
-  preview/report；Runtime `host.py`拥有精确阻塞/Stop；Plot `point_review.py`是唯一Image gesture
-  surface；UI `point_review_view.py`与`FluentDialogWindow`是唯一Fluent view/modal；Workbench
-  `console.py`与composition只路由request/publication/view。Calibration detector在
-  `calibration.py`净删115行，只保留相邻difference＋average两条证据。`_SiteReviewPublisher`只是
-  SignalDataPlane要求的短期companion identity，不保存第二份science或history。
-- 新增四个直接测试均KEEP且不重复：Runtime同一Host覆盖精确response、stale拒绝、跨run identity
-  与Stop；UI真实FluentDialogWindow覆盖全部Fluent control family和excluded result；Calibration
-  saved-frame真实NodeHost/SignalPlane覆盖剔除、最终SiteMap、summary和Figure；Site detection覆盖
-  single-frame、50%-loading、steady、dim、dense、border与pure-background。Plot层不保留平行dialog
-  test；Architecture、Guard A与Workbench view double只合并现有contract断言。
-- `dataset_output.py`、`plane.py`和`test_signal_plane.py`最终零diff；production无raw Qt review
-  controls或Plot→UI反向依赖；detector无偶奇/half state、absolute-frame sighting或全局saddle owner。
-  无旧API/alias、无第二个review owner、无Scan
-  compatibility、无conflict marker、`git diff --check`为0。唯一明确延后项是未来Scan
-  manual-value request的domain字段和业务UI，当前Calibration不包含它们。
 
 ## 4. 仍有效的FPGA build/timing证据
 

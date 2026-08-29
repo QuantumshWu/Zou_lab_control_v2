@@ -107,32 +107,3 @@ They constrain implementation method; product and architecture truth remain in
     repository-wide, full-tree, and detached full suites are reserved for a
     genuinely major phase boundary or the end of the active Goal; never run them
     reflexively after a small edit.
-15. After every context compaction, automatic continuation, or resumed turn,
-    read the persistent Checkpoint before selecting work. An item recorded there
-    as completed, settled, or "do not revisit" is closed and must not be
-    re-investigated, redesigned, reimplemented, or retested unless the user
-    explicitly reopens it or new current-state evidence directly contradicts it.
-    Conversation-summary uncertainty is never such evidence.
-16. Immediately after completing a step, write its exact decision, evidence,
-    commit, and next unfinished action into the Checkpoint. Do not leave the
-    status only in chat or memory; that is what causes completed work to be
-    repeated after compaction.
-17. A milestone cannot be marked complete or committed until a post-milestone
-    residual sweep compares its start and candidate trees and closes all of
-    the following: production consumer graph; obsolete names/APIs/aliases and
-    duplicate owners; production/test/docs LOC by category with every material
-    increase explained; tests classified KEEP/MERGE/DELETE with duplicate,
-    white-box, self-test, and obsolete-behaviour tests removed; active docs
-    reconciled to code; and every intentionally deferred item written into the
-    Checkpoint. Passing tests alone never satisfies this gate. If later evidence
-    reopens a completed milestone, finish this sweep and any resulting cleanup
-    before starting the next milestone.
-18. The residual sweep happens only after every implementation cut is merged and
-    the candidate tree is frozen. Per-agent handoffs, focused green runs, no-new-
-    class counts, and test-function counts are inputs, never substitutes for this
-    final audit. The frozen-tree audit must rank positive-net production and test
-    files, enumerate added definitions and stored state, count consumers of new
-    private helpers/adapters, and measure test bodies/fixtures as well as test
-    function counts. Every material positive-net file is KEEP, MERGE, DELETE, or
-    explicitly user-deferred with exact reasoning. A known safe deletion may not
-    be deferred while the milestone is marked sweep-complete.
