@@ -103,23 +103,6 @@ def _area_mean(
 ) -> np.ndarray | np.ma.MaskedArray:
     all_valid = _all_true(valid)
     mean_dtype = np.result_type(values.dtype, np.float32)
-    if all_valid:
-        rows, columns = values.shape
-        row_block = rows // row_starts.size
-        column_block = columns // column_starts.size
-        if (
-            rows == row_block * row_starts.size
-            and columns == column_block * column_starts.size
-        ):
-            # Evenly divisible blocks — the common power-of-two camera case —
-            # reduce with one vectorized reshape mean, several times faster
-            # than the ragged reduceat partition below.
-            return values.reshape(
-                row_starts.size,
-                row_block,
-                column_starts.size,
-                column_block,
-            ).mean(axis=(1, 3), dtype=mean_dtype)
     shape = (row_starts.size, column_starts.size)
     compiled = kernels.engaged()
     counts = None
@@ -161,7 +144,29 @@ def _area_mean(
             counts,
         )
     else:
+        # NO COMPILED KERNEL.  The reshape mean below is the fastest thing
+        # numpy alone can do here and the ragged partition is the general
+        # answer; both are slower than the kernels above, so this whole
+        # branch is what the interpreter falls back to, never a shortcut
+        # taken ahead of them.  Standing above the dispatch, the evenly
+        # divisible case -- every power-of-two camera frame, which is to
+        # say the common one -- returned from here and the kernels never
+        # ran at all: 7.18 ms against 1.01 reducing 2048 to 512, and 4.73
+        # against 0.31 reducing it to 256, for the identical answer.
         source = values if all_valid else np.where(valid, values, 0)
+        rows, columns = values.shape
+        row_block = rows // row_starts.size
+        column_block = columns // column_starts.size
+        if all_valid and (
+            rows == row_block * row_starts.size
+            and columns == column_block * column_starts.size
+        ):
+            return source.reshape(
+                row_starts.size,
+                row_block,
+                column_starts.size,
+                column_block,
+            ).mean(axis=(1, 3), dtype=mean_dtype)
         summed = _reduce_blocks(source, row_starts, column_starts, mean_dtype)
     if all_valid:
         # IN THE SUM'S OWN DTYPE.  ``np.diff`` answers in the index dtype,

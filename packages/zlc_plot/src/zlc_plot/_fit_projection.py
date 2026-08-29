@@ -995,11 +995,20 @@ class FitProjection:
             dtype=float,
         )
 
-    def _facet_mask(self, facet_index: int | None = None) -> np.ndarray:
+    def _facet_mask(self, facet_index: int | None = None) -> np.ndarray | None:
+        """The samples one cell owns, or None when no cell restricts them.
+
+        NO RESTRICTION IS NOT A FULL PLANE.  A grid of one -- every plot
+        that is not a facet -- answered this with a freshly allocated
+        all-true array as wide as the dataset, which its one caller then
+        ANDed into a mask it could not change: two megapixel passes and an
+        allocation, 1.87 ms per gesture, to say nothing.
+        """
+
         if self._view is None:
             raise TypeError("facet masking requires zlc_data.OwnedSnapshot")
         if not isinstance(self._spec, FacetGridPlot):
-            return np.ones(self._view.samples.shape, dtype=bool)
+            return None
         cells = tuple(getattr(self._payload, "cells", ()))
         selected = self._focused_facet_index if facet_index is None else facet_index
         if selected is None or selected < 0 or selected >= len(cells):
@@ -1093,9 +1102,13 @@ class FitProjection:
         target = displayed.value
         samples = self._view.samples
         semantic = self._semantic_spec()
-        candidate = np.asarray(valid, dtype=bool) & np.isfinite(
-            np.asarray(samples.value.canonical, dtype=float)
-        )
+        # ``valid`` is already the finiteness answer -- see _selector_mask --
+        # and asking it again of the CANONICAL values cast them to float64
+        # first: an 11.35 ms copy of a 2048-square camera frame, per
+        # gesture, to compute a plane that could not clear a bit.  What the
+        # crosshair does need is finiteness of the DISPLAY coordinates it
+        # measures distances in, and that is asked below.
+        candidate = np.array(valid, copy=True, dtype=bool)
         candidate &= self._rolling_visible_mask()
         if isinstance(semantic, HistogramPlot):
             x_values = np.asarray(samples.value.display, dtype=float)
@@ -1119,14 +1132,15 @@ class FitProjection:
         if flat_indices.size == 0:
             return result
 
-        points = np.column_stack(
-            (
-                x_values.reshape(-1)[flat_indices],
-                y_values.reshape(-1)[flat_indices],
-            )
-        )
+        x_candidates = x_values.reshape(-1)[flat_indices]
+        y_candidates = y_values.reshape(-1)[flat_indices]
         target_point = np.asarray((target.x, target.y), dtype=float)
         if point_transform is not None:
+            # A transform is the one thing that needs the two coordinates
+            # interleaved, because it is free to mix them.  Everything else
+            # keeps them apart: stacking two million points into one
+            # (N, 2) array copies both coordinates again for no reader.
+            points = np.column_stack((x_candidates, y_candidates))
             try:
                 transformed = np.asarray(
                     point_transform(np.vstack((points, target_point))),
@@ -1134,20 +1148,91 @@ class FitProjection:
                 )
                 if transformed.shape != (points.shape[0] + 1, 2):
                     raise ValueError("point transform returned the wrong shape")
-                points, target_point = transformed[:-1], transformed[-1]
+                x_candidates = transformed[:-1, 0]
+                y_candidates = transformed[:-1, 1]
+                target_point = transformed[-1]
             except (TypeError, ValueError):
                 pass
-        finite = np.all(np.isfinite(points), axis=1)
-        if not np.any(finite):
+        finite = np.isfinite(x_candidates) & np.isfinite(y_candidates)
+        if not bool(finite.any()):
             return result
-        flat_indices = flat_indices[finite]
-        delta = np.abs(points[finite] - target_point)
+        if not bool(finite.all()):
+            flat_indices = flat_indices[finite]
+            x_candidates = x_candidates[finite]
+            y_candidates = y_candidates[finite]
+        delta_x = np.abs(x_candidates - target_point[0])
+        delta_y = np.abs(y_candidates - target_point[1])
         if isinstance(semantic, ImagePlot):
-            nearest = int(np.argmin(np.hypot(delta[:, 0], delta[:, 1])))
+            nearest = int(np.argmin(np.hypot(delta_x, delta_y)))
         else:
-            nearest = int(np.lexsort((delta[:, 1], delta[:, 0]))[0])
+            # NEAREST IS A MINIMUM, NOT AN ORDER.  ``lexsort`` ranked every
+            # one of two million candidates to read element zero -- 384.2 ms
+            # of a 520.9 ms hover.  The smallest x distance, then the
+            # smallest y distance among those tied for it, names the same
+            # sample: both this and ``lexsort`` are stable, so ties resolve
+            # to the lowest flat index either way.
+            closest_x = delta_x.min()
+            tied = np.flatnonzero(delta_x == closest_x)
+            nearest = int(
+                tied[0]
+                if tied.size == 1
+                else tied[int(np.argmin(delta_y[tied]))]
+            )
         result.reshape(-1)[flat_indices[nearest]] = True
         return result
+
+    def _axis_range_plane(
+        self, ref: AxisRef, low: float, high: float
+    ) -> np.ndarray:
+        """Which samples fall inside [low, high] on one axis.
+
+        ASK THE AXIS, NOT EVERY SAMPLE.  A coordinate varies along exactly
+        one tensor dimension -- the invariant every dense projection rides
+        when it moves ``resolved.dimension`` to the end -- so a range test
+        has as many distinct answers as that axis is long, and the plane is
+        those answers seen from every position.  Comparing the materialized
+        plane twice and ANDing the results asked two million questions to
+        learn two thousand: 4.96 ms per gesture against 0.004 for the axis
+        and a broadcast, which allocates nothing at all.
+        """
+
+        assert self._view is not None
+        resolved = self._view._resolve(ref)
+        plane = np.asarray(resolved.coordinate.canonical)
+        dimension = int(resolved.dimension)
+        line = np.asarray(
+            plane[
+                tuple(
+                    slice(None) if axis == dimension else 0
+                    for axis in range(plane.ndim)
+                )
+            ],
+            dtype=float,
+        )
+        keep = (line >= low) & (line <= high)
+        return np.broadcast_to(
+            keep.reshape(
+                [-1 if axis == dimension else 1 for axis in range(plane.ndim)]
+            ),
+            plane.shape,
+        )
+
+    def _x_range_plane(self, low: float, high: float) -> np.ndarray:
+        """The x range test, through the axis where an axis owns x.
+
+        A rolling plot's x is a per-sample offset with no axis behind it --
+        see _x_sample_canonical -- so it stays a per-sample comparison.
+        """
+
+        source = (
+            None
+            if isinstance(self._spec, RollingPlot)
+            else self._x_selector_source()
+        )
+        if isinstance(source, AxisRef):
+            return self._axis_range_plane(source, low, high)
+        coordinate = self._x_sample_canonical()
+        return (coordinate >= low) & (coordinate <= high)
 
     def _selector_mask(
         self,
@@ -1157,22 +1242,21 @@ class FitProjection:
     ) -> np.ndarray:
         samples = self._view.samples
         mask = np.array(samples.valid_mask, copy=True, dtype=bool)
-        mask &= self._facet_mask(state.facet_index)
+        cell = self._facet_mask(state.facet_index)
+        if cell is not None:
+            mask &= cell
         value = np.asarray(samples.value.canonical)
         if state.kind is SelectorKind.X_RANGE:
-            coordinate = self._x_sample_canonical()
             assert isinstance(state.value, NumericRange)
-            mask &= (coordinate >= state.value.low) & (coordinate <= state.value.high)
+            mask &= self._x_range_plane(state.value.low, state.value.high)
         elif state.kind is SelectorKind.AREA:
             assert isinstance(state.value, RectangleRange)
-            x = self._x_sample_canonical()
-            mask &= (x >= state.value.x.low) & (x <= state.value.x.high)
+            mask &= self._x_range_plane(state.value.x.low, state.value.x.high)
             semantic = self._semantic_spec()
             if isinstance(semantic, ImagePlot):
-                y = np.asarray(
-                    self._coordinate(self._y_axis_ref()).canonical
+                mask &= self._axis_range_plane(
+                    self._y_axis_ref(), state.value.y.low, state.value.y.high
                 )
-                mask &= (y >= state.value.y.low) & (y <= state.value.y.high)
             elif not isinstance(semantic, HistogramPlot):
                 # A one-dimensional curve's vertical display coordinate is
                 # the observation itself.  AREA therefore filters both the
@@ -1183,7 +1267,13 @@ class FitProjection:
             mask &= value >= float(state.value)
         elif state.kind is SelectorKind.CROSSHAIR:
             return self._crosshair_sample_mask(state, mask, point_transform)
-        return mask & np.isfinite(value)
+        # VALIDITY ALREADY ANSWERED FINITENESS.  ``mask`` starts as the
+        # snapshot's validity plane, which DataView folds ``isfinite`` into
+        # for float samples and which integer samples satisfy by
+        # construction, and every branch above only ever removes samples.
+        # Asking again cost a 2-megapixel isfinite pass and an AND -- 3.10
+        # ms -- and could not, by construction, clear a single bit.
+        return mask
 
     def _fit_selector(
         self,
