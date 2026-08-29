@@ -100,30 +100,20 @@ def test_a_written_limit_means_the_number_on_the_axis() -> None:
         session.close()
 
 
-def test_a_faceted_histogram_neither_collapses_axes_nor_leases_history() -> None:
-    """It offers neither, because no facet build path does either.
+def test_a_faceted_histogram_leases_the_history_it_reads() -> None:
+    """It reads one now, so it asks Runtime to keep one.
 
-    The grid unwraps to its cell for both questions, so the cell's
-    `reduced` was accepted and ignored, and a `window` of 200 took a
-    200-shot lease on Runtime history that the facet build never reads.
+    The grid unwraps to its cell for this question, and for a while the
+    facet build read no history at all -- so the lease was a hold on
+    hundreds of shots for a picture drawn from the latest revision.  Both
+    halves are true now: the cells pool the window, and the lease pays for
+    what they pool.
     """
 
     grid = FacetGridPlot(facet=AxisRef.point("i"), cell=HistogramPlot())
-    assert history_window_requirement(grid, {"window": 200}) is None
+    assert history_window_requirement(grid, {"window": 200}) == 200
     assert history_window_requirement(HistogramPlot(), {"window": 200}) == 200
-
-    from zlc_plot.data_view import DataView, DataViewError
-
-    snapshot = _snapshot(1, 10.0)
-    view = DataView(snapshot)
-    view.validate_facet(grid)
-    with pytest.raises(DataViewError, match="cannot collapse axes"):
-        view.validate_facet(
-            FacetGridPlot(
-                facet=AxisRef.point("i"),
-                cell=HistogramPlot(reduced=(AxisRef.repeat(),)),
-            )
-        )
+    assert history_window_requirement(grid, {"window": 1}) is None
 
 
 def test_naming_one_point_coordinate_collapses_that_coordinate() -> None:
@@ -183,3 +173,58 @@ def test_first_is_the_first_value_and_not_the_largest() -> None:
     )
     assert list(map(int, first.counts)) == [1, 0, 0]
     assert list(map(int, largest.counts)) == [0, 0, 1]
+
+
+def test_a_reduced_histogram_is_binned_over_its_own_values() -> None:
+    """The domain covers what is BINNED, and a reduce changes what that is.
+
+    Site means over forty noisy shots span a few counts; the shots
+    themselves span a hundred.  Binned into a domain taken from the shots,
+    the six means landed in two bins out of twelve and the picture the
+    operator asked for was a spike in the middle of an empty axis.  The
+    rule was already written down for the history window -- "the domain has
+    to cover what is actually being binned" -- and only half applied.
+    """
+
+    from zlc_plot import AxisRef
+    from zlc_plot.specs import Reduction
+
+    sites, repeats = 6, 40
+    rng = np.random.default_rng(7)
+    means = np.linspace(100.0, 105.0, sites)
+    values = means[None, :] + rng.normal(0.0, 20.0, (repeats, sites))
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=repeats),
+        PointTable.from_columns({"i": [0.0]}),
+        data_axes=(Axis.create("site", size=sites),),
+        dtype=np.float64,
+        generation="reduced-domain",
+    )
+    snapshot = DatasetSnapshot(
+        schema, values.reshape(repeats, 1, sites), revision=1
+    )
+
+    pooled = PlotSession(snapshot, HistogramPlot())
+    reduced = PlotSession(
+        snapshot,
+        HistogramPlot(reduced=(AxisRef.repeat(),), reduction=Reduction.MEAN),
+    )
+    try:
+        for session in (pooled, reduced):
+            session.set_parameters({"bin_count": 12})
+        raw_span = float(values.max()) - float(values.min())
+        mean_span = float(values.mean(axis=0).max()) - float(values.mean(axis=0).min())
+
+        pooled_edges = _edges(pooled)
+        reduced_edges = _edges(reduced)
+        assert pooled_edges[-1] - pooled_edges[0] >= raw_span
+        # The reduced axis is sized for the means, not for the shots.
+        assert reduced_edges[-1] - reduced_edges[0] < 0.5 * raw_span
+        assert reduced_edges[-1] - reduced_edges[0] >= mean_span
+        # Every mean is inside it, and they are spread across the bins.
+        counts = np.asarray(reduced._payload.counts)
+        assert int(counts.sum()) == sites
+        assert int(np.count_nonzero(counts)) >= 4
+    finally:
+        pooled.close()
+        reduced.close()

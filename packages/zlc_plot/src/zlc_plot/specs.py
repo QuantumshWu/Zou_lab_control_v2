@@ -938,12 +938,6 @@ def history_window_requirement(
 
     if not isinstance(display, Mapping):
         raise TypeError("display must be a mapping")
-    if isinstance(spec, FacetGridPlot):
-        # A GRID READS NO HISTORY.  semantic_spec unwraps it to its cell, so
-        # a grid of histogram cells asked Runtime to retain a window that
-        # nothing in the facet build ever looks at -- a lease on hundreds of
-        # shots, held for a picture drawn from the latest revision alone.
-        return None
     semantic = semantic_spec(spec)
     if not isinstance(semantic, (RollingPlot, HistogramPlot)):
         return None

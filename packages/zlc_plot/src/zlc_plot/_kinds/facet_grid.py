@@ -29,13 +29,27 @@ def render(renderer: Any, payload: Any, state: Any, *, axes: Any, key: str) -> N
 def build_payload(projection: Any, view: Any, state: Any) -> None:
     spec = projection._spec
     cell = spec.cell
-    bins = projection._histogram_bins(view, state) if isinstance(cell, HistogramPlot) else None
+    bins = None
+    window = 1
+    if isinstance(cell, HistogramPlot):
+        # The cell's own vocabulary, honoured: a window pools the last N
+        # shots into each cell, and a reduced fate collapses the named axes
+        # inside each cell before its values are binned.  The shared edges
+        # are then taken from the pools the cells will actually bin, which is
+        # what keeps them comparable AND on scale.
+        window = int(state["window"])
+        pool, pool_valid = view.facet_histogram_pool(spec, window=window)
+        bins = projection._histogram_bins(
+            view, state, binned_values=pool, binned_valid=pool_valid
+        )
     uncertainty = bool(
         isinstance(cell, CurvePlot)
         and state["uncertainty"]
         and cell.reduction is Reduction.MEAN
     )
-    projection._payload = view.facet(spec, bins=bins, uncertainty=uncertainty)
+    projection._payload = view.facet(
+        spec, bins=bins, uncertainty=uncertainty, window=window
+    )
 
 
 def admits(schema: Any) -> bool:

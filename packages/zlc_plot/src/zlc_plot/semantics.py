@@ -494,18 +494,8 @@ def _chosen_spec(
 
 
 def _declares_reduced(spec: PlotSpec) -> bool:
-    """Whether this VIEW collapses the axes it is given, not just names them.
+    """Whether this kind carries an explicit list of collapsed axes."""
 
-    A facet grid's histogram cell carries the field -- semantic_spec unwraps
-    the grid to the cell -- but no facet build path collapses anything: the
-    positional and dense cell builders both bin the cell's samples as they
-    are.  Offered anyway, the row was accepted, written back into the spec,
-    and did nothing; the operator saw a fate they had chosen having no
-    effect, with no error to explain it.
-    """
-
-    if isinstance(spec, FacetGridPlot):
-        return False
     return hasattr(semantic_spec(spec), "reduced")
 
 

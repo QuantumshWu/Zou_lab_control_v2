@@ -22,28 +22,32 @@ def build_payload(projection: Any, view: Any, state: Any) -> None:
     if window <= 1:
         # One shot: the distribution of what was just measured.  No history is
         # consulted, and none is kept for it.
-        projection._payload = view.histogram(
-            bins=projection._histogram_bins(view, state),
-            reduce_axes=collapsed,
-            aggregation=aggregation,
-        )
-        return
+        values, valid = None, None
+    else:
+        # Runtime already owns and bounds cross-publication history.  DataView
+        # selects the last N history cells and bins their values in one pass;
+        # Plot never copies or retains per-shot raw pools.
+        values, valid = view.history_values(window)
 
-    # Runtime already owns and bounds cross-publication history.  DataView
-    # selects the last N history cells and bins their values in one pass;
-    # Plot never copies or retains per-shot raw pools.
-    values, valid = view.history_values(window)
-    projection._payload = view.histogram(
-        bins=projection._histogram_bins(
-            view,
-            state,
-            history_values=values,
-            history_valid=valid,
-        ),
+    # REDUCED ONCE.  The pool is what the domain must cover and what the bins
+    # then count, so it is derived here and handed to both -- rather than
+    # deriving it inside the binning, where the domain could not see it and
+    # took its limits from the raw samples instead.
+    pool, pool_valid = view.histogram_pool(
         values=values,
         valid=valid,
         reduce_axes=collapsed,
         aggregation=aggregation,
+    )
+    projection._payload = view.histogram(
+        bins=projection._histogram_bins(
+            view,
+            state,
+            binned_values=pool,
+            binned_valid=pool_valid,
+        ),
+        values=pool,
+        valid=pool_valid,
     )
 
 

@@ -817,27 +817,29 @@ class FitProjection:
         view: Any,
         state: DisplayState,
         *,
-        history_values: np.ndarray | None = None,
-        history_valid: np.ndarray | None = None,
+        binned_values: np.ndarray | None = None,
+        binned_valid: np.ndarray | None = None,
     ) -> np.ndarray:
         """Return stable display-unit edges for one histogram projection.
 
-        The optional history arrays are the zero-copy window selected by
-        DataView: the domain has to cover what is actually being binned, and
-        this revision alone is a different set of numbers from the last
-        hundred shots.
+        THE DOMAIN COVERS WHAT IS BINNED, so the caller says what that is.
+        It is not always this revision's samples: a window is the last N
+        shots, and a reduced spec bins one statistic per group, whose spread
+        is narrower than the raw pool's by construction -- taken from the raw
+        values, a reduced histogram landed in two bins out of twelve.  Named
+        for the history alone, this argument only ever answered half of that.
         """
 
         count = int(state["bin_count"])
         samples = view.samples
-        if history_values is None:
+        if binned_values is None:
             canonical = np.asarray(samples.value.canonical)
             valid = np.asarray(samples.valid_mask, dtype=bool)
         else:
-            if history_valid is None:
-                raise ValueError("history validity is required with history values")
-            canonical = np.asarray(history_values)
-            valid = np.asarray(history_valid, dtype=bool)
+            if binned_valid is None:
+                raise ValueError("binned validity is required with binned values")
+            canonical = np.asarray(binned_values)
+            valid = np.asarray(binned_valid, dtype=bool)
         integral = canonical.dtype.kind in "biu"
         if integral:
             has_values = bool(canonical.size) and bool(np.any(valid))

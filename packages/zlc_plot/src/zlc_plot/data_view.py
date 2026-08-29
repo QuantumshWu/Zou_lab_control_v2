@@ -537,6 +537,48 @@ class _Domain:
         return cached
 
 
+@dataclass(frozen=True)
+class _ReductionBuckets:
+    """The identity of what survives a reduction, and how it is laid out.
+
+    The layout travels with the codes because a consumer that knows which
+    kept axis it cares about can read that axis's index straight out of a
+    bucket number -- which is how a facet learns each bucket's cell without
+    asking every sample.
+    """
+
+    codes: NDArray[np.int64]
+    count: int
+    shape: tuple[int, ...]
+    axes: tuple[int, ...]
+    strides: tuple[int, ...]
+    extents: tuple[int, ...]
+    point_groups: NDArray[np.int64] | None
+
+    def axis_index(self, axis: int) -> NDArray[np.int64]:
+        """Which index along ``axis`` each bucket number stands for."""
+
+        position = self.axes.index(int(axis))
+        numbers = np.arange(self.count, dtype=np.int64)
+        return (numbers // self.strides[position]) % self.extents[position]
+
+
+@dataclass(frozen=True)
+class _FacetHistogramPlan:
+    """What each histogram cell of one grid will bin, decided once.
+
+    The shared bin edges must cover what is ACTUALLY binned, and with a
+    reduced cell that is the per-group statistic rather than the raw
+    samples -- so the projection asks for these pools before it chooses the
+    edges, and the cells then bin the very same arrays.  Asked twice per
+    frame, computed once.
+    """
+
+    pools: tuple[NDArray[Any], ...]
+    facet_values: tuple[AxisValue, ...]
+    pool: NDArray[Any]
+
+
 class DataView:
     """Resolve and aggregate one immutable dataset revision for renderers."""
 
@@ -550,6 +592,7 @@ class DataView:
         "_flat_cache",
         "_pooled_cache",
         "_positions_cache",
+        "_facet_histogram_cache",
         "_domain_carry",
         "_unit_registry_revision",
     )
@@ -624,6 +667,7 @@ class DataView:
         ] = {}
         self._pooled_cache: NDArray[Any] | None = None
         self._positions_cache: NDArray[np.int64] | None = None
+        self._facet_histogram_cache: tuple[object, "_FacetHistogramPlan"] | None = None
         #: Whole-dataset domains carried from the PREVIOUS revision's view.
         #: A domain is a fact about the coordinate plane alone -- np.unique
         #: over a million-point x column costs ~60 ms and its input rarely
@@ -2116,15 +2160,126 @@ class DataView:
         distribution of each site's mean over shots.
         """
 
-        if (values is None) != (valid is None):
-            raise ValueError("histogram history values and validity must appear together")
-        selected = self._samples.value.canonical if values is None else values
-        usable = self._samples.valid_mask if valid is None else valid
-        if reduce_axes:
-            selected, usable = self._collapse_axes(
-                selected, usable, reduce_axes, aggregation
-            )
+        selected, usable = self.histogram_pool(
+            values=values,
+            valid=valid,
+            reduce_axes=reduce_axes,
+            aggregation=aggregation,
+        )
         return self._histogram_from_values(bins, selected, valid=usable)
+
+    def _reduction_plan(
+        self, refs: Sequence[AxisRef]
+    ) -> tuple[tuple[int, ...], tuple[AxisRef, ...]]:
+        """What a reduction names: whole tensor axes, and point coordinates.
+
+        A POINT COORDINATE IS NOT A TENSOR AXIS.  Every point column and
+        every topology dimension resolves to dimension 1 -- the shared point
+        axis -- so mapping a ref straight to a numpy axis collapsed the WHOLE
+        point table for any of them, and a set() of dimensions made two
+        different columns literally the same reduction: on a detuning x power
+        scan, reducing detuning and reducing power were two fate rows
+        producing one byte-identical answer, neither of them the one the row
+        named.
+
+        Said once here because it is asked from two directions: a whole
+        tensor (a standalone histogram) and a set of sample positions (one
+        facet cell), which must agree on what survives.
+        """
+
+        coordinates: list[AxisRef] = []
+        dimensions: set[int] = set()
+        for ref in refs:
+            if ref.domain in (
+                AxisDomain.POINT_COORDINATE,
+                AxisDomain.POINT_DIMENSION,
+            ):
+                coordinates.append(ref)
+            else:
+                dimensions.add(int(self._resolve(ref).dimension))
+        if 1 in dimensions:
+            # The point axis goes whole, so naming one of its coordinates
+            # adds nothing to what is already being collapsed.
+            coordinates = []
+        return tuple(sorted(dimensions)), tuple(coordinates)
+
+    def _point_group_codes(
+        self, coordinates: Sequence[AxisRef]
+    ) -> tuple[NDArray[np.int64], int]:
+        """One group code per POINT ROW, from the coordinates NOT named."""
+
+        named = {self._resolve(ref).contract.axis_id for ref in coordinates}
+        table = self._schema.point_table
+        kept = tuple(
+            column
+            for column in table.columns
+            if column.coordinate_id not in named
+        )
+        return _point_row_codes(kept, table.row_count)
+
+    def _reduction_buckets(
+        self,
+        dimensions: Sequence[int],
+        coordinates: Sequence[AxisRef],
+        *,
+        shape: tuple[int, ...] | None = None,
+    ) -> "_ReductionBuckets":
+        """One bucket code per sample, naming what survives the reduction.
+
+        The bucket IS the identity of what is left when the named axes are
+        gone: the kept tensor indices, with the point axis standing for the
+        group its row falls in when a point coordinate is named.  Two
+        different readers want it -- a standalone histogram, which bins the
+        buckets, and a faceted one, which also asks which cell each bucket
+        fell in -- and they must agree on what survives, so it is built once
+        here.
+
+        Returns the codes together with the layout they were built on, so a
+        consumer can read one kept axis's index out of a bucket number.
+        """
+
+        shape = tuple(self._samples.value.canonical.shape) if shape is None else shape
+        collapse = set(int(axis) for axis in dimensions)
+        point_codes: NDArray[np.int64] | None = None
+        point_count = 0
+        if coordinates:
+            point_codes, point_count = self._point_group_codes(coordinates)
+
+        def extent(axis: int) -> int:
+            if axis == 1 and point_codes is not None:
+                return point_count
+            return int(shape[axis])
+
+        keep_axes = [axis for axis in range(len(shape)) if axis not in collapse]
+        out_shape = tuple(extent(axis) for axis in keep_axes)
+        stride, strides = 1, {}
+        for axis in reversed(keep_axes):
+            strides[axis] = stride
+            stride *= extent(axis)
+
+        def described(codes: NDArray[np.int64]) -> "_ReductionBuckets":
+            return _ReductionBuckets(
+                codes=codes,
+                count=max(1, stride),
+                shape=out_shape,
+                axes=tuple(keep_axes),
+                strides=tuple(strides[axis] for axis in keep_axes),
+                extents=out_shape,
+                point_groups=point_codes,
+            )
+
+        index = np.indices(shape, sparse=True)
+        bucket = np.zeros(shape, dtype=np.int64)
+        for axis in keep_axes:
+            place = (
+                point_codes[index[1]]
+                if axis == 1 and point_codes is not None
+                else index[axis]
+            )
+            # In place: each kept axis otherwise allocated a whole
+            # sample-sized plane to add one term to.
+            bucket += place * strides[axis]
+        return described(bucket)
 
     def _collapse_axes(
         self,
@@ -2142,38 +2297,17 @@ class DataView:
 
         if not isinstance(aggregation, Reduction):
             raise TypeError("aggregation must be Reduction")
-        # A POINT COORDINATE IS NOT A TENSOR AXIS.  Every point column and
-        # every topology dimension resolves to dimension 1 -- the shared
-        # point axis -- so mapping a ref straight to a numpy axis collapsed
-        # the WHOLE point table for any of them, and the set() made two
-        # different columns literally the same reduction: on a detuning x
-        # power scan, reducing detuning and reducing power were two fate
-        # rows producing one byte-identical answer, neither of them the one
-        # the row named.
-        coordinates: list[AxisRef] = []
-        dimensions: set[int] = set()
-        for ref in refs:
-            if ref.domain in (
-                AxisDomain.POINT_COORDINATE,
-                AxisDomain.POINT_DIMENSION,
-            ):
-                coordinates.append(ref)
-            else:
-                dimensions.add(int(self._resolve(ref).dimension))
-        if 1 in dimensions:
-            # The point axis goes whole, so naming one of its coordinates
-            # adds nothing to what is already being collapsed.
-            coordinates = []
+        dimensions, coordinates = self._reduction_plan(refs)
         if not dimensions and not coordinates:
             return values, valid
 
         usable = np.asarray(np.broadcast_to(valid, values.shape), dtype=bool)
         if coordinates:
             return self._collapse_by_coordinates(
-                values, usable, sorted(dimensions), coordinates, aggregation
+                values, usable, dimensions, coordinates, aggregation
             )
 
-        axes = tuple(sorted(dimensions))
+        axes = dimensions
         counts = np.count_nonzero(usable, axis=axes)
         present = counts > 0
         as_double = values.astype(np.float64, copy=False)
@@ -2231,98 +2365,107 @@ class DataView:
         detuning together is one mean, not a mean of means.
         """
 
-        named = {
-            self._resolve(ref).contract.axis_id for ref in coordinates
-        }
-        table = self._schema.point_table
-        kept = tuple(
-            column for column in table.columns if column.coordinate_id not in named
+        buckets = self._reduction_buckets(
+            dimensions, coordinates, shape=values.shape
         )
-        codes, bucket_count = _point_row_codes(kept, table.row_count)
-
-        collapse = set(int(axis) for axis in dimensions)
-        shape = values.shape
-        keep_axes = [axis for axis in range(values.ndim) if axis not in collapse]
-        out_shape = tuple(
-            bucket_count if axis == 1 else shape[axis] for axis in keep_axes
-        )
-        stride, strides = 1, {}
-        for axis in reversed(keep_axes):
-            strides[axis] = stride
-            stride *= bucket_count if axis == 1 else shape[axis]
-        index = np.indices(shape, sparse=True)
-        bucket = np.zeros(shape, dtype=np.int64)
-        for axis in keep_axes:
-            position = codes[index[1]] if axis == 1 else index[axis]
-            bucket = bucket + position * strides[axis]
-
+        out_shape = buckets.shape
         collapsed, counts = _aggregate_by_codes(
             values.astype(np.float64, copy=False).reshape(-1),
             usable.reshape(-1),
-            np.ascontiguousarray(bucket).reshape(-1),
-            max(1, stride),
+            np.ascontiguousarray(buckets.codes).reshape(-1),
+            buckets.count,
             aggregation,
         )
         present = (counts > 0).reshape(out_shape)
         collapsed = np.where(present, collapsed.reshape(out_shape), 0.0)
         return collapsed, present
 
-    def history_values(
-        self, window: int
-    ) -> tuple[NDArray[Any], NDArray[np.bool_]]:
-        """Return the last accepted history cells without binning policy."""
+    def history_validity(self, window: int) -> NDArray[np.bool_]:
+        """Which samples the last ``window`` shots contribute, over the WHOLE shape.
 
-        if isinstance(window, bool) or not isinstance(window, Integral):
-            raise TypeError("history window must be an integer")
-        window = int(window)
-        if window <= 0:
-            raise ValueError("history window must be positive")
+        The selection rule, said once and in the sample space every other
+        projection speaks.  ``history_values`` narrows this to the repeats
+        that can carry it, which is a saving and not a second rule; a facet
+        cannot take that narrowing -- its cells are indexed in the original
+        space -- so it takes this plane instead.
+        """
+
+        window = _history_window(window)
         values = self._samples.value.canonical
         validity = self._samples.valid_mask
         if self.has_primary_index:
-            column = self._schema.point_table.column(PRIMARY_INDEX_AXIS_ID)
-            ordered: list[int] = []
-            seen: set[int] = set()
-            for value in column.values:
-                if isinstance(value, bool) or not isinstance(value, Integral):
-                    raise TypeError(
-                        "primary-index coordinates must be integer source indices"
-                    )
-                source_index = int(value)
-                if source_index < 0:
-                    raise ValueError(
-                        "primary-index source indices must be non-negative"
-                    )
-                if not ordered or ordered[-1] != source_index:
-                    if source_index in seen or (
-                        ordered and source_index < ordered[-1]
-                    ):
-                        raise ValueError(
-                            "primary-index source indices must form ordered cells"
-                        )
-                    ordered.append(source_index)
-                    seen.add(source_index)
-            source_indices = tuple(ordered[-window:])
-            selected = np.isin(
-                np.asarray(column.values, dtype=object),
-                np.asarray(source_indices, dtype=object),
-            )
-            point_mask = np.reshape(
-                selected,
-                (1, selected.size, *([1] * (values.ndim - 2))),
-            )
-            point_mask = np.broadcast_to(point_mask, values.shape)
-            valid = (
+            point_mask = self._history_point_mask(window)
+            return (
                 point_mask
                 if _stride_zero_all_true(validity)
                 else np.asarray(validity, dtype=np.bool_) & point_mask
             )
-            pooled_values = values
-        else:
-            count = min(window, max(1, schema_repeat_count(self._schema)))
-            pooled_values = values[-count:]
-            valid = validity[-count:]
-        return pooled_values, valid
+        count = min(window, max(1, schema_repeat_count(self._schema)))
+        keep = np.zeros(values.shape[0], dtype=np.bool_)
+        keep[values.shape[0] - count:] = True
+        repeat_mask = np.broadcast_to(
+            keep.reshape(-1, *([1] * (values.ndim - 1))), values.shape
+        )
+        return (
+            repeat_mask
+            if _stride_zero_all_true(validity)
+            else np.asarray(validity, dtype=np.bool_) & repeat_mask
+        )
+
+    def _history_point_mask(self, window: int) -> NDArray[np.bool_]:
+        """The indexed-history selection, as a plane over the sample shape."""
+
+        values = self._samples.value.canonical
+        column = self._schema.point_table.column(PRIMARY_INDEX_AXIS_ID)
+        ordered: list[int] = []
+        seen: set[int] = set()
+        for value in column.values:
+            if isinstance(value, bool) or not isinstance(value, Integral):
+                raise TypeError(
+                    "primary-index coordinates must be integer source indices"
+                )
+            source_index = int(value)
+            if source_index < 0:
+                raise ValueError(
+                    "primary-index source indices must be non-negative"
+                )
+            if not ordered or ordered[-1] != source_index:
+                if source_index in seen or (
+                    ordered and source_index < ordered[-1]
+                ):
+                    raise ValueError(
+                        "primary-index source indices must form ordered cells"
+                    )
+                ordered.append(source_index)
+                seen.add(source_index)
+        source_indices = tuple(ordered[-window:])
+        selected = np.isin(
+            np.asarray(column.values, dtype=object),
+            np.asarray(source_indices, dtype=object),
+        )
+        return np.broadcast_to(
+            np.reshape(selected, (1, selected.size, *([1] * (values.ndim - 2)))),
+            values.shape,
+        )
+
+    def history_values(
+        self, window: int
+    ) -> tuple[NDArray[Any], NDArray[np.bool_]]:
+        """Return the last accepted history cells without binning policy.
+
+        The same selection as ``history_validity``, narrowed where it can be:
+        an unindexed dataset carries its shots on the repeat axis, so the
+        repeats outside the window are dropped rather than masked, and a
+        window of two over a thousand repeats reads two.
+        """
+
+        window = _history_window(window)
+        values = self._samples.value.canonical
+        validity = self._samples.valid_mask
+        if self.has_primary_index:
+            return values, self.history_validity(window)
+        count = min(window, max(1, schema_repeat_count(self._schema)))
+        return values[-count:], validity[-count:]
 
     def pooled_values(self) -> NDArray[Any]:
         """Every value this revision would pool, in canonical units.
@@ -2782,19 +2925,177 @@ class DataView:
             for index, source in enumerate(primary.values)
         )
 
+    def histogram_pool(
+        self,
+        *,
+        values: NDArray[Any] | None = None,
+        valid: NDArray[np.bool_] | None = None,
+        reduce_axes: Sequence[AxisRef] = (),
+        aggregation: Reduction = Reduction.MEAN,
+    ) -> tuple[NDArray[Any], NDArray[np.bool_]]:
+        """The values a histogram will ACTUALLY bin, and their validity.
+
+        Raw samples, or the history window, or the per-group statistic when
+        axes are reduced -- whichever this spec means.  It is a separate
+        question from binning them because the bin domain has to cover what
+        is binned: taken from the raw pool instead, a reduced histogram --
+        whose values are means, and therefore narrower by construction --
+        landed in two bins out of twelve.
+        """
+
+        if (values is None) != (valid is None):
+            raise ValueError("histogram pool values and validity must appear together")
+        selected = self._samples.value.canonical if values is None else values
+        usable = self._samples.valid_mask if valid is None else valid
+        if reduce_axes:
+            selected, usable = self._collapse_axes(
+                selected, usable, reduce_axes, aggregation
+            )
+        return selected, usable
+
+    def facet_histogram_pool(
+        self,
+        spec: FacetGridPlot,
+        *,
+        window: int = 1,
+    ) -> tuple[NDArray[Any], NDArray[np.bool_]]:
+        """Every value this grid's histogram cells will bin, and its validity.
+
+        The cells partition the samples, so without a reduction the union is
+        simply every sample the window admits -- and asking that costs
+        nothing, where building the partition would cost a walk of the whole
+        dataset that the dense paths exist to avoid.
+        """
+
+        cell = spec.cell
+        if not isinstance(cell, HistogramPlot):
+            raise TypeError("facet histogram pools require a Histogram cell")
+        if not cell.reduced:
+            validity = (
+                self.history_validity(window)
+                if _history_window(window) > 1
+                else self._samples.valid_mask
+            )
+            return self._samples.value.canonical, validity
+        plan = self._facet_histogram_plan(spec, window)
+        return plan.pool, np.ones(plan.pool.shape, dtype=np.bool_)
+
+    def _facet_histogram_plan(
+        self, spec: FacetGridPlot, window: int
+    ) -> "_FacetHistogramPlan":
+        window = _history_window(window)
+        key = (spec, window)
+        remembered = self._facet_histogram_cache
+        if remembered is not None and remembered[0] == key:
+            return remembered[1]
+        plan = self._build_facet_histogram_plan(spec, window)
+        self._facet_histogram_cache = (key, plan)
+        return plan
+
+    def _build_facet_histogram_plan(
+        self, spec: FacetGridPlot, window: int
+    ) -> "_FacetHistogramPlan":
+        cell = spec.cell
+        if not isinstance(cell, HistogramPlot):
+            raise TypeError("facet histogram pools require a Histogram cell")
+        if not cell.reduced:
+            raise ValueError("a facet histogram plan is only needed for a reduction")
+        shape = self._samples.value.canonical.shape
+        validity = (
+            self.history_validity(window)
+            if window > 1
+            else np.broadcast_to(self._samples.valid_mask, shape)
+        )
+        flat_values = np.asarray(self._samples.value.canonical).reshape(-1)
+        usable = np.asarray(validity, dtype=bool).reshape(-1)
+
+        dimensions, coordinates = self._reduction_plan(tuple(cell.reduced))
+        buckets = self._reduction_buckets(dimensions, coordinates)
+        codes = np.ascontiguousarray(buckets.codes).reshape(-1)
+        reduced, counts = _aggregate_by_codes(
+            flat_values, usable, codes, buckets.count, cell.reduction
+        )
+        present = np.asarray(counts) > 0
+
+        # ASK THE FACET AXIS, NOT EVERY SAMPLE.  The facet axis survives the
+        # reduction -- validate_facet refuses a grid that reduces the axis it
+        # facets by -- so a bucket lies in exactly one cell, and which one is
+        # already written in the bucket number.  Reading it per sample instead
+        # meant grouping two million positions to learn four answers: 0.40 s
+        # of a 0.58 s build, nearly all of it one argsort and one unique.
+        facet_axis = int(self._resolve(spec.facet).dimension)
+        strides_flat = [1] * len(shape)
+        for axis in range(len(shape) - 2, -1, -1):
+            strides_flat[axis] = strides_flat[axis + 1] * int(shape[axis + 1])
+        representatives = (
+            np.arange(int(shape[facet_axis]), dtype=np.int64)
+            * strides_flat[facet_axis]
+        )
+        domain = self._domain(spec.facet, representatives)
+        axis_codes = np.asarray(domain.codes, dtype=np.int64)
+        if facet_axis == 1 and buckets.point_groups is not None:
+            # The kept point axis stands for GROUPS of rows, and every row in
+            # a group shares the facet coordinate -- it is not the one being
+            # reduced -- so any row of the group names the group's cell.
+            grouped = np.full(int(buckets.extents[buckets.axes.index(1)]), -1, dtype=np.int64)
+            grouped[buckets.point_groups] = axis_codes
+            axis_codes = grouped
+        bucket_facet = axis_codes[buckets.axis_index(facet_axis)]
+
+        pools = tuple(
+            np.asarray(reduced[present & (bucket_facet == index)], dtype=float)
+            for index in range(len(domain.values))
+        )
+        joined = np.concatenate(pools) if pools else np.empty(0, dtype=float)
+        return _FacetHistogramPlan(pools, tuple(domain.values), joined)
+
+    def _reduced_histogram_facet(
+        self,
+        spec: FacetGridPlot,
+        shared_bins: int | Sequence[float],
+        window: int,
+    ) -> FacetData:
+        """Every cell of a reducing histogram grid, from one pass of the data.
+
+        One walk builds the buckets, one aggregation fills them, and the
+        cells are slices of that result -- rather than a reduction per cell,
+        which would re-derive the same identities once per facet value.
+        """
+
+        plan = self._facet_histogram_plan(spec, window)
+        cells = tuple(
+            FacetCell(
+                facet_index=index,
+                facet_value_canonical=facet_value.canonical,
+                facet_value_display=facet_value.display,
+                label=facet_value.label,
+                payload=self._histogram_from_values(shared_bins, plan.pools[index]),
+            )
+            for index, facet_value in enumerate(plan.facet_values)
+        )
+        return FacetData(
+            revision=self._samples.revision,
+            generation=self._samples.generation,
+            spec=spec,
+            cells=cells,
+        )
+
     def _histogram_from_positions(
         self,
         bins: int | Sequence[float],
         positions: NDArray[np.int64],
+        *,
+        validity: NDArray[np.bool_] | None = None,
     ) -> HistogramData:
+        mask = self._samples.valid_mask if validity is None else validity
         if positions is self._positions_cache:
             # The whole revision: bin values + mask directly, no gather.
             return self._histogram_from_values(
                 bins,
                 self._samples.value.canonical,
-                valid=self._samples.valid_mask,
+                valid=mask,
             )
-        flat_valid = self._samples.valid_mask.reshape(-1)
+        flat_valid = np.asarray(np.broadcast_to(mask, self._samples.value.canonical.shape)).reshape(-1)
         flat_values = self._samples.value.canonical.reshape(-1)
         return self._histogram_from_values(
             bins, flat_values[positions[flat_valid[positions]]]
@@ -2884,14 +3185,19 @@ class DataView:
         elif isinstance(cell, ImagePlot):
             self._validate_image_shape(cell.x, cell.y)
         elif isinstance(cell, HistogramPlot):
-            if cell.reduced:
-                # Refused rather than ignored.  No facet build path
-                # collapses a cell's axes, so a grid holding this spec
-                # would draw the pooled distribution under a name saying
-                # it had been reduced.
+            for ref in cell.reduced:
+                self._resolve(ref)
+            if any(
+                ref.physical_identity == spec.facet.physical_identity
+                for ref in cell.reduced
+            ):
+                # An axis cannot both name the cells and be averaged away
+                # inside them: the cells would have nothing to be told apart
+                # by.  The fate table gives an axis ONE fate, so this cannot
+                # arrive from the editor -- it can only be authored.
                 raise DataViewError(
-                    "a faceted histogram cell cannot collapse axes; "
-                    "remove the reduced fate or use a single panel"
+                    "a facet axis cannot also be reduced: the cells it names "
+                    "would be collapsed into one"
                 )
         else:
             raise TypeError(
@@ -2933,6 +3239,7 @@ class DataView:
         *,
         bins: int | Sequence[float] | None = None,
         uncertainty: bool = False,
+        window: int = 1,
     ) -> FacetData:
         self.validate_facet(spec)
         cell = spec.cell
@@ -2956,7 +3263,17 @@ class DataView:
             shared_bins = aligned_histogram_edges(values, int(bins))
         if isinstance(cell, HistogramPlot) and bins is None:
             raise DataViewError("histogram facet cells require explicit bins")
-        dense = self._dense_facet(spec, shared_bins, uncertainty)
+        if isinstance(cell, HistogramPlot) and cell.reduced:
+            # A reducing cell needs a per-sample bucket identity, which the
+            # slab paths below have no shape for; and one pass over the whole
+            # grid answers for every cell at once.
+            assert shared_bins is not None
+            return self._reduced_histogram_facet(spec, shared_bins, window)
+        # WHICH SAMPLES COUNT.  A window pools the last N shots, and that is
+        # a validity plane over the same shape as the mask it replaces, so
+        # every path below slices and gathers it identically.
+        validity = self.history_validity(window) if int(window) > 1 else None
+        dense = self._dense_facet(spec, shared_bins, uncertainty, validity=validity)
         if dense is not None:
             return dense
         factored = self._factored_facet(spec, uncertainty)
@@ -2967,6 +3284,7 @@ class DataView:
             shared_bins,
             self._all_positions(),
             uncertainty,
+            validity=validity,
         )
 
     def _facet_from_positions(
@@ -2975,6 +3293,8 @@ class DataView:
         shared_bins: int | Sequence[float] | None,
         base_positions: NDArray[np.int64],
         uncertainty: bool = False,
+        *,
+        validity: NDArray[np.bool_] | None = None,
     ) -> FacetData:
         cell = spec.cell
         cells: list[FacetCell] = []
@@ -3002,6 +3322,7 @@ class DataView:
                 payload = self._histogram_from_positions(
                     shared_bins,
                     cell_positions,
+                    validity=validity,
                 )
             cells.append(
                 FacetCell(
@@ -3024,6 +3345,8 @@ class DataView:
         spec: FacetGridPlot,
         shared_bins: int | Sequence[float] | None,
         uncertainty: bool = False,
+        *,
+        validity: NDArray[np.bool_] | None = None,
     ) -> FacetData | None:
         """Row-sliced twin of the dense projections, one cell at a time.
 
@@ -3039,7 +3362,7 @@ class DataView:
         facet = spec.facet
         cell = spec.cell
         values = self._samples.value.canonical
-        valid_mask = self._samples.valid_mask
+        valid_mask = self._samples.valid_mask if validity is None else validity
         if facet.domain is AxisDomain.REPEAT:
             slice_axis = 0
         elif facet.domain in (
@@ -4087,6 +4410,15 @@ def _point_row_codes(
         span *= int(_distinct.size)
     distinct, codes = np.unique(combined, return_inverse=True)
     return np.asarray(codes, dtype=np.int64), int(distinct.size)
+
+
+def _history_window(window: object) -> int:
+    if isinstance(window, bool) or not isinstance(window, Integral):
+        raise TypeError("history window must be an integer")
+    window = int(window)
+    if window <= 0:
+        raise ValueError("history window must be positive")
+    return window
 
 
 def _aggregate_by_codes(
