@@ -183,6 +183,7 @@ class ConsoleBench:
         # an image panel both read back "image" from the product, so reading
         # the kind off the panel loses what was declared.
         self._kinds: dict[str, str] = {}
+        self._labels: dict[str, str] = {}
         self._tmp = pathlib.Path(tempfile.mkdtemp(prefix="console-bench-"))
 
     # ------------------------------------------------------------ lifecycle
@@ -329,8 +330,39 @@ class ConsoleBench:
         self._until(
             lambda: self.surface(panel) is not None, f"{kind} card surface"
         )
-        self._kinds[panel.panel_id] = kind
+        self._name(panel, kind)
         return panel
+
+    def _name(self, panel, kind: str) -> str:
+        """The name this panel reports under.  ONE PANEL, ONE NAME.
+
+        The probe prefix, the live rows and the render-cost roll-up all
+        join on this string.  It used to be the declared kind alone, so a
+        chain -- two panels of the same kind, which is exactly what the
+        documented ``--chain image`` builds with the default ``--kind
+        image`` -- merged both renderers' self-times into one probe key,
+        emitted two rows called "image", and then divided the summed wall
+        time by whichever frame count survived the dict.  About double, and
+        the one thing a chain exists to separate, gone.
+        """
+
+        self._kinds[panel.panel_id] = kind
+        taken = {
+            name
+            for panel_id, name in self._labels.items()
+            if panel_id != panel.panel_id
+        }
+        name, ordinal = kind, 1
+        while name in taken:
+            ordinal += 1
+            name = f"{kind}#{ordinal}"
+        self._labels[panel.panel_id] = name
+        return name
+
+    def label(self, panel) -> str:
+        """What this panel is called in every report this run prints."""
+
+        return self._labels.get(panel.panel_id) or panel.panel_id
 
     def surface(self, panel):
         card = self.view._cards.get(panel.panel_id)
@@ -354,10 +386,7 @@ class ConsoleBench:
         # Four panels reporting under one class name is the class-level tap
         # again, one level up: _native_draw fired 85 times across a layout
         # and there was no way to say whose frames those were.
-        label = "%s[%s]" % (
-            type(self.renderer(panel)).__name__,
-            self._kinds.get(panel.panel_id) or panel.panel_id,
-        )
+        label = "%s[%s]" % (type(self.renderer(panel)).__name__, self.label(panel))
         renderer = self.renderer(panel)
         if seams is None:
             seams = renderer_seams(type(renderer))
@@ -448,6 +477,12 @@ class ConsoleBench:
         composed linearly.
         """
 
+        # Every row this returns, and every seam the probe rolled up, is
+        # keyed by a panel's name.  Two panels answering to one name merge
+        # both and then divide by one of their frame counts.
+        guards.require_distinct_labels(self.label(panel) for panel in panels)
+
+
         import psutil
 
         process = psutil.Process()
@@ -484,7 +519,7 @@ class ConsoleBench:
                 {
                     # The label the probe prefixes with, so the seam
                     # roll-up joins to these rows.
-                    "panel": self._kinds.get(panel.panel_id) or panel.state.kind,
+                    "panel": self.label(panel),
                     "frames": counter.count,
                     "frames_per_second": round(counter.count / elapsed, 1),
                     "frame_gap": stats(gaps),
@@ -567,7 +602,7 @@ class ConsoleBench:
         self._until(
             lambda: self.surface(panel) is not None, f"{kind} card on {signal}"
         )
-        self._kinds[panel.panel_id] = kind
+        self._name(panel, kind)
         return panel
 
     def edit_setting(self, panel, section: str, strict: bool = True, **values) -> dict:

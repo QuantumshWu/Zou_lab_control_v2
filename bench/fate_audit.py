@@ -4,13 +4,20 @@ For each combination it records what the editor OFFERS and what applying
 that offer actually PRODUCES -- including what happened to the axes the
 operator did not touch.
 """
-import glob
+import pathlib
 import sys
 from dataclasses import replace
 
-ROOT = r"C:\Users\eadri\WorkCode\zlc_v2_h3d"
-for p in sorted(glob.glob(ROOT + r"\packages\*\src")):
-    sys.path.insert(0, p)
+# THIS worktree.  This was an absolute path to another one -- a live
+# worktree of this repository that had stopped 75 commits back, whose
+# specs.py, session.py and data_view.py all differ from these.  The audit
+# printed its admissible kinds, its fate rows and its vacancies under this
+# repository's name, and nothing in the output distinguished the two.
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+for package in sorted((ROOT / "packages").glob("*/src")):
+    path = str(package)
+    if path not in sys.path:
+        sys.path.insert(0, path)
 
 import matplotlib
 matplotlib.use("Agg", force=True)
@@ -28,6 +35,13 @@ from zlc_plot.semantics import (
 from zlc_plot.specs import semantic_spec
 from zlc_plot._kinds import default_spec
 from zlc_plot._kinds import HANDLERS
+
+# Said before the first finding, so a reader can tell which tree answered.
+sys.path.insert(0, str(ROOT))
+from bench.plot_perf.common import provenance  # noqa: E402
+
+print(provenance())
+print()
 
 
 def survival_schema():

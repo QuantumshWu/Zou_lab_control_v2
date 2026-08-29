@@ -82,6 +82,26 @@ def require_panels(presenter, expected: int) -> tuple[str, ...]:
     return ids
 
 
+def require_distinct_labels(labels) -> tuple[str, ...]:
+    """Assert no two panels report under the same name.
+
+    Counting panels is not enough: two panels of the SAME KIND passed that
+    check and then shared a probe prefix, merging both renderers' self-times
+    into one key and dividing the sum by one panel's frame count.  A name is
+    what every report joins on, so it has to identify a panel.
+    """
+
+    names = tuple(labels)
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise HarnessError(
+            "panels report under duplicate names %s: every seam roll-up and "
+            "frame count joins on this name, so it must identify one panel."
+            % (duplicates,)
+        )
+    return names
+
+
 # ------------------------------------------------------------------- beat
 class ProductBeat:
     """Drive the console's beat the way the product drives it.

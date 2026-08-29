@@ -13,6 +13,27 @@ from typing import Callable
 from .common import SnapshotFeed, camera_feed, lattice_feed
 
 
+def open_session(case, feed):
+    """The session a case means, built the one way.
+
+    A case is a spec AND its parameters: ``presentation="height_bars"`` is
+    what makes the two h3d cases 3D at all, and it is not part of the spec.
+    Built by hand in each runner, the attribution runner left it out and
+    profiled two ordinary heatmaps under the 3D cases' own names, with
+    nothing in its report to say so.
+    """
+
+    from zlc_plot import PlotSession
+
+    from .common import SIZE_PRESET
+
+    session = PlotSession(feed.next(), case.spec())
+    session.set_size(SIZE_PRESET)
+    if case.parameters:
+        session.set_parameters(dict(case.parameters))
+    return session
+
+
 @dataclass(frozen=True)
 class Case:
     name: str

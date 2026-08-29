@@ -22,8 +22,7 @@ import matplotlib
 
 matplotlib.use("Agg", force=True)
 
-from .common import SIZE_PRESET
-from .cases import catalog  # noqa: E402
+from .cases import catalog, open_session  # noqa: E402
 from .common import stats, write_result  # noqa: E402
 
 
@@ -33,10 +32,7 @@ def run_case(case) -> dict:
     feed = case.feed()
     report: dict = {"case": case.name, "points": feed.size}
     t0 = time.perf_counter()
-    session = PlotSession(feed.next(), case.spec())
-    session.set_size(SIZE_PRESET)
-    if case.parameters:
-        session.set_parameters(dict(case.parameters))
+    session = open_session(case, feed)
     session.rgba()
     report["first_render_ms"] = round((time.perf_counter() - t0) * 1e3, 1)
     try:

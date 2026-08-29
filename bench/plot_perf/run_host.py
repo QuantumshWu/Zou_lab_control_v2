@@ -329,8 +329,15 @@ class HostBench:
             _inside(axis, 0.55 - 0.03 * i, 0.5 - 0.015 * i) for i in range(9)
         ]
         result = self._drag(path, button=self.QtCore.Qt.MiddleButton)
-        # Restore the viewport for later interactions.
-        self.host.dispatch(lambda: None)
+        # A pan COMMITS its viewport, and nothing here cleared it: an empty
+        # callback through dispatch() only republishes.  Every interaction
+        # after this one -- the wheel, and the live drag that re-reads the
+        # main axis -- was then measured on a view dragged a quarter of a
+        # width off centre and part letterboxed, which is different work
+        # from the one being asked about.
+        self.host.reset_viewport().result(5.0)
+        self.presented.wait_next(self.app, 2.0)
+        pump(self.app, 0.2)
         return result
 
     def _do_drag_orbit(self) -> dict:

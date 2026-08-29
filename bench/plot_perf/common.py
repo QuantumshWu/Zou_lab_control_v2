@@ -195,6 +195,24 @@ def camera_feed(
 SIZE_PRESET = "2x2"
 
 
+def provenance() -> str:
+    """Which tree these numbers came from, in the numbers' own output.
+
+    A bench that does not say where its packages came from cannot be told
+    apart from one measuring somebody else's checkout -- and one script in
+    here really was pointing at another worktree, 75 commits behind, while
+    printing results that read exactly like this repository's.
+    """
+
+    import zlc_data
+    import zlc_plot
+
+    lines = [f"root      {ROOT}"]
+    for module in (zlc_plot, zlc_data):
+        lines.append(f"{module.__name__:<10}{module.__file__}")
+    return "\n".join(lines)
+
+
 def qt_env():
     """Import Qt lazily so session-layer runs never touch it."""
 

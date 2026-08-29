@@ -20,8 +20,7 @@ import matplotlib
 
 matplotlib.use("Agg", force=True)
 
-from .common import SIZE_PRESET
-from .cases import catalog  # noqa: E402
+from .cases import catalog, open_session  # noqa: E402
 
 
 #: (bucket, predicate over "module:function") in priority order.  The first
@@ -62,12 +61,9 @@ def _entry_name(entry) -> str:
 
 
 def attribute(case, updates: int) -> dict:
-    from zlc_plot import PlotSession
-
     feed = case.feed()
-    session = PlotSession(feed.next(), case.spec())
+    session = open_session(case, feed)
     try:
-        session.set_size(SIZE_PRESET)
         session.rgba()
         for _ in range(2):                      # warm the caches
             session.update_data(feed.next())

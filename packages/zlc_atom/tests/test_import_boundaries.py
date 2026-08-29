@@ -31,12 +31,6 @@ def _absolute_imports(path: Path) -> tuple[str, ...]:
     return tuple(imports)
 
 
-def _parallel_imports(path: Path) -> tuple[str, ...]:
-    return tuple(
-        name for name in _absolute_imports(path) if name.startswith(PARALLEL_ROOTS)
-    )
-
-
 def _is_concrete_plugin(path: Path) -> bool:
     parts = path.relative_to(SRC).parts
     return (
@@ -101,12 +95,6 @@ assert "zlc_workbench" not in sys.modules
         text=True,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
-
-
-def test_b_half_parallel_import_policy_is_explicit() -> None:
-    b_half = _python_files("nodes", "install")
-    for path in b_half:
-        assert all(name.startswith(PARALLEL_ROOTS) for name in _parallel_imports(path)), path
 
 
 def test_virtual_runtime_branch_scan_is_non_vacuous_and_clean() -> None:
