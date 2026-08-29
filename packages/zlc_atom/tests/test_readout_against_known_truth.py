@@ -178,6 +178,26 @@ def test_a_threshold_is_the_weighted_crossing_of_the_unlabelled_fit() -> None:
     assert narrow_bright.dark_mean == pytest.approx(0.0, abs=0.4)
     assert narrow_bright.bright_mean == pytest.approx(5.0, abs=0.2)
 
+    # A CLAMP MAY NOT JUDGE THE FIT IT SHAPED.  The estimator floors the
+    # narrow sigma at the wide one over _MAX_WIDTH_RATIO, so a population
+    # whose true width ratio reaches that bound comes back sitting exactly on
+    # it -- and a validity rule that then demanded the ratio be strictly
+    # INSIDE the bound rejected such a fit for standing where it had been
+    # put.  This is that shape, and it is not a marginal one: fifty sigma of
+    # separation, both states heavily populated.  It was reported to the SLM
+    # feedback loop as a site that did not load.
+    rng = np.random.default_rng(17)
+    loaded = rng.random(120) < 0.45
+    pinned = fit_bimodal(
+        np.where(
+            loaded, rng.normal(130.0, 4.0, 120), rng.normal(5.9, 0.5, 120)
+        )
+    )
+    assert pinned.ok, (pinned.dark_sigma, pinned.bright_sigma)
+    widths = (pinned.dark_sigma, pinned.bright_sigma)
+    assert max(widths) / min(widths) >= 4.9, widths
+    assert pinned.dark_mean < pinned.threshold < pinned.bright_mean
+
     # Changing truth labels cannot move a Gaussian model or threshold.  It can
     # only change the empirical evaluation of that already chosen threshold.
     samples = np.concatenate(

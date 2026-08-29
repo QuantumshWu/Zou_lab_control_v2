@@ -470,12 +470,25 @@ def fit_bimodal(values: object, *, min_component_fraction: float = 0.01) -> Bimo
     # Descriptive: whether the two states are far enough apart, and populated
     # enough, for a shot to be assigned to one of them.  Every number above is
     # returned either way.
+    #
+    # A CLAMP MAY NOT JUDGE THE FIT IT SHAPED.  This also required the fitted
+    # width ratio to stay strictly inside _MAX_WIDTH_RATIO -- but that
+    # constant is the estimator's own floor on the narrow sigma, applied in
+    # _em_two_state, so a site whose TRUE ratio reaches it comes back pinned
+    # at exactly the bound and was then rejected for standing there.  In this
+    # readout the expected ratio is bright shot noise over dark read noise,
+    # sqrt(130/6) ~ 4.7, so the population sits astride the bound: six sites
+    # of a thirty-five site lattice -- dark 5.9 +/- 0.8, bright 130 +/- 4.0,
+    # fifty sigma apart, BIC gain +550 to +666 -- were reported to the
+    # feedback loop as sites that DID NOT LOAD.  Width is not what this
+    # sentence is about; distance and population are, and both are asked
+    # above.  The bound keeps its other two jobs: it stops a component
+    # collapsing onto a handful of samples, and ``interior`` still prefers a
+    # start that never had to touch it.
     separated = bool(
         np.isfinite(threshold)
         and separation > 0.5
         and minimum <= fraction <= 1.0 - minimum
-        and max(dark_sigma, bright_sigma)
-        < _MAX_WIDTH_RATIO * min(dark_sigma, bright_sigma) * (1.0 - 1e-9)
     )
     return BimodalFit(
         threshold,
