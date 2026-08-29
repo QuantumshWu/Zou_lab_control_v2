@@ -1331,6 +1331,12 @@ class _RunEvidence:
 
     change_hits: np.ndarray
     max_change_z: np.ndarray
+    #: The brightest this place ever stood above its own frame's background,
+    #: in that frame's noise.  A CHANGE is unsigned by design -- loading and
+    #: unloading are both evidence -- so the change statistics alone cannot
+    #: tell a trap that lit up from a hole that went dark when its
+    #: neighbours lit up.  The level can, and only the level can.
+    max_level_z: np.ndarray
     total_response: np.ndarray
     transitions: int
     background_sigma: float
@@ -1346,8 +1352,9 @@ def _accumulate_run(
 
     One pass, because it is one pass: a run of two thousand large frames is
     not walked again for the sake of tidiness.  What it keeps is where two
-    neighbouring frames changed, how large those changes were, and the light
-    on every frame for the independent average-image path.
+    neighbouring frames changed, how large those changes were, the brightest
+    any place ever stood on a single frame, and the light on every frame for
+    the independent average-image path.
     """
 
     from scipy import ndimage
@@ -1356,6 +1363,7 @@ def _accumulate_run(
     background_sigma = max(4.0 * spot_sigma, spot_sigma + 2.0)
     change_hits = np.zeros(stack.shape[1:], dtype=np.int64)
     max_change_z = np.zeros(stack.shape[1:], dtype=float)
+    max_level_z = np.full(stack.shape[1:], -np.inf, dtype=float)
     #: Every frame added up: a highly loaded site may hardly change between
     #: neighbours, but it remains bright in the complete average.
     total_response = np.zeros(stack.shape[1:], dtype=float)
@@ -1377,6 +1385,22 @@ def _accumulate_run(
         baseline = np.median(response, axis=(1, 2), keepdims=True)
         response = response - baseline
         total_response += np.sum(response, axis=0)
+
+        # The BRIGHTEST single frame, in that frame's own noise.  Read the
+        # same robust way the change statistic below is, so the two bars are
+        # comparable, and kept as a maximum because one loaded frame out of a
+        # hundred is exactly the evidence this detector exists to catch.
+        level_noise = 1.4826 * np.median(
+            np.abs(response), axis=(1, 2), keepdims=True
+        )
+        level_noise = np.maximum(
+            level_noise,
+            np.finfo(float).eps
+            * np.maximum(1.0, np.max(np.abs(response), axis=(1, 2), keepdims=True)),
+        )
+        max_level_z = np.maximum(
+            max_level_z, np.max(response / level_noise, axis=0)
+        )
 
         # A low-loading site can appear on one frame only.  Its evidence is
         # therefore the spatially shaped CHANGE between neighbouring frames,
@@ -1411,6 +1435,7 @@ def _accumulate_run(
     return _RunEvidence(
         change_hits,
         max_change_z,
+        np.where(np.isfinite(max_level_z), max_level_z, 0.0),
         total_response,
         transitions,
         background_sigma,
@@ -1424,6 +1449,7 @@ class _Admission:
     average: np.ndarray
     required: int
     single_change_cut: float
+    single_level_cut: float
     average_z: np.ndarray
     average_cut: float
 
@@ -1515,6 +1541,22 @@ def _admission_thresholds(
         )
     )
 
+    # How bright a place must have stood, once, to be called a trap at all.
+    # The same family-wise rule the single-change bar uses, over the family
+    # this statistic is drawn from: every pixel of every FRAME, rather than
+    # of every transition.
+    single_level_cut = (
+        float("inf")
+        if not frames
+        else max(
+            detection_sigma,
+            float(
+                sqrt(2.0)
+                * erfcinv(expected_false_sites / float(pixels * frames))
+            ),
+        )
+    )
+
     average_z = (average - average_baseline) / average_noise
     # How high a place must stand in the average: never below the operator's
     # authored detection sigma, and raised further when this image's number of
@@ -1530,6 +1572,7 @@ def _admission_thresholds(
         average,
         required,
         single_change_cut,
+        single_level_cut,
         average_z,
         average_cut,
     )
@@ -1587,8 +1630,29 @@ def _candidate_peaks(
     persistent = average == ndimage.maximum_filter(
         average, size=peak_window, mode="nearest"
     )
-    changed = persistent & (
-        (nearby_hits >= required) | (nearby_change_z >= single_change_cut)
+    # A CHANGE IS NOT A DIRECTION.  ``magnitude`` is an absolute value on
+    # purpose -- an atom leaving is as much evidence as one arriving -- so the
+    # change bars alone admit any place that merely MOVES, including the
+    # centre of a lattice vacancy: its four neighbours' negative
+    # difference-of-Gaussians lobes breathe as they load, and the hole is the
+    # least-negative point of the bowl they make, hence a local maximum of the
+    # average.  Measured on a nine-site lattice with one site never loaded,
+    # that hole came back as a published trap at max|change|z 3.0 -- while
+    # standing 1.5 sigma of BRIGHTNESS above background, against 250 to 440
+    # for every real trap, including one loading on a single frame in a
+    # hundred.  So the change path now also asks the question only the level
+    # can answer: was this place ever actually bright?
+    #
+    # Not the average: a trap loading once in a hundred frames has an average
+    # dominated by its neighbours' lobes and can sit BELOW background there,
+    # which is the sensitivity this detector was built for.
+    nearby_level_z = ndimage.maximum_filter(
+        evidence.max_level_z, size=3, mode="nearest"
+    )
+    changed = (
+        persistent
+        & (nearby_level_z >= admission.single_level_cut)
+        & ((nearby_hits >= required) | (nearby_change_z >= single_change_cut))
     )
     averaged = persistent & (average_z >= average_cut)
     candidates = np.argwhere((changed | averaged) & inside)
@@ -1682,6 +1746,13 @@ def detect_sites(
       shaped difference peak.  A site that loaded on only one frame therefore
       remains a possible site even when its complete average is weak.  The
       change threshold is measured on each difference image's own background.
+      A difference has no direction -- that is the point of it -- so this path
+      also asks the one question a difference cannot answer: was the place
+      ever actually BRIGHT?  Without that, the centre of a lattice vacancy
+      qualifies, because its neighbours' negative lobes breathe as they load
+      and leave the hole a local maximum of the average.  The brightness bar
+      is a single frame's, never the average's: a trap loading once in a
+      hundred frames has an average dominated by those same lobes.
     * IN THE AVERAGE.  A site whose changes remain below threshold, or a highly
       loaded site that hardly changes between neighbours, can still be plain
       in the complete average.

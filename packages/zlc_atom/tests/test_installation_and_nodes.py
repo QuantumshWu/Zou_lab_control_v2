@@ -419,6 +419,15 @@ def test_virtual_installation_runs_measurement_occupancy_and_same_shot_front(
         observable_sites = int(
             np.count_nonzero(installation.world._site_loading_probabilities() > 0.0)
         )
+        # Detection is allowed to be a possible-site superset -- one clear
+        # neighbouring-frame change must survive a weak average, and site
+        # review is where a real hologram's diffraction ghosts are removed --
+        # so what this pins is a RATCHET, not a ban: on this simulated
+        # lattice the detector produces no extras at all, and it should stay
+        # that way.  It produced three until the change path started asking
+        # whether a place had ever actually been BRIGHT; the three were the
+        # centres of lattice holes, admitted on their neighbours' unsigned
+        # difference lobes.
         assert result.calibration.n_sites == observable_sites
         assert all_sites - observable_sites >= int(np.ceil(0.10 * all_sites))
         assert result.calibration.frame_contract.image_shape == (96, 128)

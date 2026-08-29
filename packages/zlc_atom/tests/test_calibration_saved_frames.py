@@ -423,16 +423,27 @@ def test_nothing_is_written_unless_the_operator_asks(tmp_path: Path) -> None:
     box_model = next(
         model for model in result.calibration.models if model.kind.value == "box"
     )
+    # PAIRED BY THE COORDINATE EACH TARGET CARRIES, not by position.  A
+    # saved recipe holds a coordinate-addressed set, and the plot layer
+    # normalises it into a canonical order of its own -- so the site a
+    # target speaks for is the site it names, and reading it off the list
+    # index instead was a claim about a serialization order that the
+    # archive path only started to impose when the recipe began being
+    # encoded from the host's normalized description rather than from the
+    # caller's tuple.
+    by_site = {
+        int(target["scope"][0]["coordinate"]) - 1: target
+        for target in box_recipe["classifier_thresholds"]
+    }
+    usable = np.flatnonzero(box_model.usable_sites)
+    assert sorted(by_site) == list(usable)
     np.testing.assert_allclose(
-        [item["value"] for item in box_recipe["classifier_thresholds"]],
-        box_model.thresholds[box_model.usable_sites],
+        [by_site[site]["value"] for site in usable],
+        box_model.thresholds[usable],
     )
     box_report = result.report["models"]["box"]
-    for target, site in zip(
-        box_recipe["classifier_thresholds"],
-        np.flatnonzero(box_model.usable_sites),
-        strict=True,
-    ):
+    for site in usable:
+        target = by_site[int(site)]
         expected = np.asarray(
             [
                 box_report["gaussian_dark_mean"][site],

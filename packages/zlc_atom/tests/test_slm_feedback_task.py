@@ -155,7 +155,11 @@ class _Context:
     def report_progress(self, *args, **kwargs) -> None:
         self.progress.append((args, kwargs))
 
-    def commit_live(self, outputs):
+    def commit_live(self, outputs, *, source_publication=None):
+        # The NodeContext surface, whole.  Green only because this node has
+        # never passed source_publication; the plane double next door failed
+        # exactly this way when its own caller started to.
+        del source_publication
         committed = dict(outputs)
         self.commits.append(committed)
         return committed
@@ -2090,14 +2094,25 @@ def test_probe_combined_counts_as_formal_update_and_reuses_episode_baseline(
                 initial_phase, science_context["pattern_phase"]
             )
             assert state == {}
+        # THROUGH THE FREEZE, like every other expectation in this file.
+        # A solved pattern becomes the next episode's baseline only after it
+        # has been put on the device's 16-bit phase grid, so what comes back
+        # is 0.39998549, not 0.4 -- exactly representable, so this stays an
+        # equality and does not slacken into a tolerance.
         for initial_phase, state in solve_inputs[3:6]:
             np.testing.assert_array_equal(
-                initial_phase, np.full(target.shape, 0.4, dtype=np.float32)
+                initial_phase,
+                freeze_pattern_phase(
+                    np.full(target.shape, 0.4, dtype=np.float32), target.shape
+                ),
             )
             assert state == {"marker": 3}
         for initial_phase, state in solve_inputs[6:9]:
             np.testing.assert_array_equal(
-                initial_phase, np.full(target.shape, 0.7, dtype=np.float32)
+                initial_phase,
+                freeze_pattern_phase(
+                    np.full(target.shape, 0.7, dtype=np.float32), target.shape
+                ),
             )
             assert state == {"marker": 6}
         history = _load_history(result["artifact_path"])

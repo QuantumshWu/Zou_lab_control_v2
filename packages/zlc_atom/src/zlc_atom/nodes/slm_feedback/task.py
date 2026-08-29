@@ -2431,8 +2431,21 @@ class SlmFeedbackTask:
                 else None
             )
             if not isinstance(device_record, Mapping):
-                raise RuntimeError(
-                    "selected feedback candidate lost its device snapshot"
+                # NEVER MEASURED IS NOT LOST.  A candidate that has been
+                # applied but not yet shot carries no history at all, which
+                # is exactly what an operator Stop before the first batch
+                # leaves behind -- and reading that as a missing snapshot
+                # turned a graceful stop into a failed node, so the seal
+                # never happened and the original cancellation came back out
+                # of the handler.  A candidate that HAS a history and lost
+                # its record is still a real defect and still raises.
+                if isinstance(candidate_history, Mapping):
+                    raise RuntimeError(
+                        "selected feedback candidate lost its device snapshot"
+                    )
+                device_record = self._device_event_record(
+                    include_measurement=False,
+                    candidate=candidate_number,
                 )
             self._publish_candidate(
                 context,

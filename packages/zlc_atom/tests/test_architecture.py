@@ -50,10 +50,15 @@ class _CalibrationCoveragePlane(FakePlane):
         self.calibration_schema_fingerprints: list[str] = []
         self.calibration_preview_shapes: list[tuple[int, ...]] = []
 
-    def commit_live(self, producer, outputs):
+    def commit_live(self, producer, outputs, *, worker_source=None):
+        # THE FROZEN SIGNATURE, forwarded.  The plane grew a keyword-only
+        # worker_source -- the exact source publication a measurement worker
+        # read its value from, which Runtime owns as the direct parent edge --
+        # and a double that does not carry it turns every live commit into a
+        # TypeError, which the host reports as a failed task.
         output = outputs.get("capture_preview")
         if output is None:
-            return super().commit_live(producer, outputs)
+            return super().commit_live(producer, outputs, worker_source=worker_source)
         self.calibration_coverages.append(
             (output.coverage.written_cells, output.coverage.total_cells)
         )
@@ -61,7 +66,7 @@ class _CalibrationCoveragePlane(FakePlane):
             output.snapshot.block.schema.fingerprint
         )
         self.calibration_preview_shapes.append(output.snapshot.block.values.shape)
-        return super().commit_live(producer, outputs)
+        return super().commit_live(producer, outputs, worker_source=worker_source)
 
 
 class _RecordingCamera:

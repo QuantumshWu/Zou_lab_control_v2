@@ -236,7 +236,17 @@ def test_occupancy_classifies_only_event_cells_and_runtime_owns_full_history(
     assert not np.any(
         invalid["occupied"].snapshot.expanded_validity()[:, 0]
     )
-    assert all(not declaration.index_by_source for declaration in OCCUPANCY_OUTPUTS)
+    # WHICH outputs may be leased as history, not "none of them".  The flag
+    # declares a CAPABILITY -- the published geometry stays this cycle's
+    # frame either way, and Runtime builds the bounded per-shot Dataset only
+    # once a panel leases one.  A rolling occupation-rate panel needs one
+    # cell per parent cycle, so the site-sized verdicts and counts offer it;
+    # the judged frames stay latest-only, because retaining a full frame per
+    # shot is a memory decision no panel has asked for.
+    assert {
+        declaration.name: declaration.index_by_source
+        for declaration in OCCUPANCY_OUTPUTS
+    } == {"counts": True, "occupied": True, "frame_judged": False}
     assert invalid["frame_judged"].snapshot.block.values.shape[:2] == (1, windows)
     assert invalid["occupied"].snapshot.block.values.shape == (1, windows, 1)
     assert tuple(
