@@ -24,44 +24,8 @@ def positive_real(value: object, field: str) -> float:
     return finite_real(value, field, positive=True)
 
 
-def _snap_roi_axis(
-    origin: int,
-    extent: int,
-    *,
-    origin_step: int,
-    extent_step: int,
-    sensor_extent: int,
-) -> tuple[int, int]:
-    """The sensor's own grid, snapped so the region asked for is COVERED.
-
-    A subarray can only start and end on the steps the sensor declares, so a
-    region drawn on an image is never exactly the region a qCMOS takes.  Which
-    way it is rounded is a choice, and rounding the SIZE down was the wrong
-    one: the requested region then lost up to a step off its right and bottom
-    edges while its origin moved up and left, so a box drawn round the edge
-    traps cut them off -- silently, because the applied ROI is what everything
-    downstream then measures.
-
-    Selecting a region means covering it.  The origin rounds DOWN to its step
-    and the far edge rounds UP to the size step, so the applied subarray
-    contains what was asked for, clamped only by the sensor itself.
-    """
-
-    origin_step = max(1, int(origin_step))
-    extent_step = max(1, int(extent_step))
-    sensor_extent = int(sensor_extent)
-    start = max(0, min(int(origin), sensor_extent - 1))
-    stop = max(start + 1, min(int(origin) + int(extent), sensor_extent))
-    snapped_origin = (start // origin_step) * origin_step
-    covered = stop - snapped_origin
-    snapped_extent = -(-covered // extent_step) * extent_step
-    if snapped_origin + snapped_extent > sensor_extent:
-        # The far edge cannot be covered without leaving the sensor: take the
-        # largest legal subarray that still starts where it should.
-        snapped_extent = ((sensor_extent - snapped_origin) // extent_step) * extent_step
-    return snapped_origin, max(extent_step, snapped_extent)
-
 from ._dcam_driver import DcamProperty, DcamSdkDriver, DcamValue
+from .roi_grid import snap_roi_axis
 from ._owner_lane import CameraSdkOwnerLane
 from .contract import (
     CameraCaptureTerminalRecord,
@@ -325,14 +289,14 @@ class DcamCameraAdapter:
         ) = self._sensor_grid_on_owner()
         requested = tuple(int(value) for value in roi_xywh)
         x, y, width, height = requested
-        x, width = _snap_roi_axis(
+        x, width = snap_roi_axis(
             x,
             width,
             origin_step=h_origin_step,
             extent_step=h_size_step,
             sensor_extent=sensor_width,
         )
-        y, height = _snap_roi_axis(
+        y, height = snap_roi_axis(
             y,
             height,
             origin_step=v_origin_step,

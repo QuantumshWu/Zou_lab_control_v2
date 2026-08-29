@@ -8,7 +8,7 @@ import json
 import math
 from pathlib import Path
 import threading
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 
@@ -301,7 +301,7 @@ class SimulationWorld:
         self._qcmos_rng = np.random.default_rng(qcmos_seed)
         self._mot_rng = np.random.default_rng(mot_seed)
         self._lock = threading.RLock()
-        self._cameras: list[tuple[Any, Callable[..., np.ndarray] | None]] = []
+        self._cameras: list[Any] = []
         self._fire_count = 0
         site_count = len(self.geometry.site_centers_xy)
         self._slm_shape_yx = DEFAULT_SIMULATION_SLM_SHAPE_YX
@@ -665,14 +665,19 @@ class SimulationWorld:
         self._ensure_slm_propagation()
         return self._loading_probabilities(self._trap_intensities)
 
-    def register_camera(
-        self,
-        camera: Any,
-        renderer: Callable[..., np.ndarray] | None = None,
-    ) -> None:
+    def register_camera(self, camera: Any) -> None:
+        """Drive this camera from the program's own camera edges.
+
+        A registered camera is rendered by ``render_frame``: that is what a
+        camera in this world sees.  It used to accept a renderer of the
+        caller's choosing, which no installed device ever supplied -- only a
+        test did, to make a registered camera produce MOT frames.  The
+        installed MOT camera is free-running and is never registered at all.
+        """
+
         with self._lock:
-            if not any(existing is camera for existing, _renderer in self._cameras):
-                self._cameras.append((camera, renderer))
+            if not any(existing is camera for existing in self._cameras):
+                self._cameras.append(camera)
 
     def _load_shot(self) -> np.ndarray:
         self._ensure_slm_propagation()
@@ -978,7 +983,7 @@ class SimulationWorld:
                 for start_tick, end_tick in cameras_by_tick.get(tick, ()):
                     start = float(start_tick)
                     shot_occupancy = np.array(self._occupancy, copy=True)
-                    for device, registered_renderer in tuple(self._cameras):
+                    for device in tuple(self._cameras):
                         if not device.capture_state():
                             continue
                         point = device.working_point()
@@ -998,19 +1003,12 @@ class SimulationWorld:
                         probe_seconds = (
                             _overlap_ticks(start, integration_end, probe) / clock
                         )
-                        if registered_renderer is None:
-                            frame = self.render_frame(
-                                ordinal,
-                                exposure_seconds=exposure,
-                                probe_seconds=probe_seconds,
-                                occupancy=shot_occupancy,
-                            )
-                        else:
-                            frame = registered_renderer(
-                                ordinal,
-                                exposure_seconds=exposure,
-                                occupancy=shot_occupancy,
-                            )
+                        frame = self.render_frame(
+                            ordinal,
+                            exposure_seconds=exposure,
+                            probe_seconds=probe_seconds,
+                            occupancy=shot_occupancy,
+                        )
                         device.trigger(
                             1,
                             frame=frame,

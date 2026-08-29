@@ -33,10 +33,6 @@ class ReadoutModelKind(str, Enum):
 
 
 DEFAULT_READOUT_MODEL_CHOICE = "default"
-READOUT_MODEL_CHOICES = (
-    DEFAULT_READOUT_MODEL_CHOICE,
-    *(kind.value for kind in ReadoutModelKind),
-)
 
 
 def _exact_fields(
@@ -846,6 +842,13 @@ class TrapCalibration:
     default_model_kind: ReadoutModelKind
     frame_contract: FrameContract
     report: Mapping[str, Any] = field(default_factory=dict)
+    #: The last crop this calibration was read against, and the reading it
+    #: produced.  Rebasing is a pure function of (crop, binning, shape) and
+    #: those are fixed for a run, but it is asked once per camera cycle --
+    #: see ``rebased``.
+    _rebased: tuple[tuple, "TrapCalibration"] | None = field(
+        init=False, repr=False, compare=False, default=None
+    )
 
     def rebased(
         self,
@@ -868,6 +871,23 @@ class TrapCalibration:
         number that looks like a measurement.
         """
 
+        # ASKED EVERY CAMERA CYCLE, for a run whose crop never moves.  The
+        # occupancy processor validates the camera snapshot on each published
+        # cycle, and a run that crops differently from the calibration takes
+        # the rebuilding branch below every time: three ReadoutModels copying
+        # their PSF weights and boxes, a SiteMap deep-freezing its topology,
+        # and the whole saved report frozen again through _immutable_json_value
+        # -- measured at 1.0 ms per cycle for 100 sites and a 200-shot report,
+        # for an answer that cannot change while the run lasts.
+        key = (
+            None if roi_xywh is None else tuple(int(v) for v in roi_xywh),
+            tuple(int(v) for v in binning_yx),
+            tuple(int(v) for v in image_shape),
+        )
+        remembered = self._rebased
+        if remembered is not None and remembered[0] == key:
+            return remembered[1]
+
         contract = self.frame_contract
         binning = tuple(int(value) for value in binning_yx)
         if binning != tuple(contract.binning_yx):
@@ -884,6 +904,7 @@ class TrapCalibration:
                     f"{tuple(contract.image_shape)} and neither run records "
                     "the crop it came from, so the sites cannot be placed"
                 )
+            object.__setattr__(self, "_rebased", (key, self))
             return self
         old_x, old_y, _old_w, _old_h = (int(value) for value in contract.roi_xywh)
         new_x, new_y, new_w, new_h = (int(value) for value in roi_xywh)
@@ -895,6 +916,7 @@ class TrapCalibration:
         shift_x = (old_x - new_x) / float(binning[1])
         shift_y = (old_y - new_y) / float(binning[0])
         if shift_x == 0.0 and shift_y == 0.0 and shape == tuple(contract.image_shape):
+            object.__setattr__(self, "_rebased", (key, self))
             return self
         centers = np.asarray(self.site_map.centers_xy, dtype=float) + (shift_x, shift_y)
         radius = max(model.integration_half_width for model in self.models)
@@ -923,7 +945,7 @@ class TrapCalibration:
                     0,
                 )
             moved_models.append(replace(model, psf_boxes=boxes))
-        return replace(
+        moved = replace(
             self,
             site_map=replace(self.site_map, centers_xy=centers),
             models=tuple(moved_models),
@@ -933,6 +955,8 @@ class TrapCalibration:
                 roi_xywh=(new_x, new_y, new_w, new_h),
             ),
         )
+        object.__setattr__(self, "_rebased", (key, moved))
+        return moved
 
     def __post_init__(self) -> None:
         if not isinstance(self.site_map, SiteMap):
@@ -961,6 +985,7 @@ class TrapCalibration:
             "report",
             _immutable_json_value(self.report, "report"),
         )
+        object.__setattr__(self, "_rebased", None)
 
     @property
     def n_sites(self) -> int:
@@ -2714,7 +2739,6 @@ __all__ = [
     "AtomDetection",
     "CalibrationResult",
     "DEFAULT_READOUT_MODEL_CHOICE",
-    "READOUT_MODEL_CHOICES",
     "classify_threshold",
     "detect_sites",
     "FrameContract",

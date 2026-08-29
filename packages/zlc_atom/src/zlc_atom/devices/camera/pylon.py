@@ -25,6 +25,7 @@ from uuid import uuid4
 import numpy as np
 
 from ...authoring import AuthoringField, TunableField
+from .roi_grid import snap_roi_axis
 from .contract import (
     CameraAcquisitionMode,
     CameraCaptureTerminalRecord,
@@ -46,19 +47,6 @@ def _serialized(method):
             return method(self, *args, **kwargs)
 
     return call
-
-
-def _snap_to_increment(value: int, low: int, high: int, increment: int) -> int:
-    """Clamp into the camera's own range and align to its GenICam increment.
-
-    The hardware owns the legal grid, not a constant in our source: a value the
-    sensor cannot take is rejected outright, and one silently rounded elsewhere
-    would make the working point we record a lie.
-    """
-
-    increment = max(1, int(increment))
-    clamped = max(int(low), min(int(high), int(value)))
-    return int(low) + ((clamped - int(low)) // increment) * increment
 
 
 def _roi_request(
@@ -423,32 +411,30 @@ class PylonCameraAdapter:
             x, y, width, height = self._roi
             sensor_width = int(camera.WidthMax.GetValue())
             sensor_height = int(camera.HeightMax.GetValue())
-            width = _snap_to_increment(
+            # The hardware owns the grid; which way a request is rounded onto
+            # it is the same choice for every sensor, and it is made in one
+            # place.  This used to round the SIZE down and the offset down
+            # too, so the selected region lost its right and bottom edges
+            # while its origin moved up and left -- the failure the qCMOS
+            # adapter had already been fixed for.
+            x, width = snap_roi_axis(
+                x,
                 width,
-                camera.Width.GetMin(),
-                min(camera.Width.GetMax(), sensor_width),
-                camera.Width.GetInc(),
+                origin_step=int(camera.OffsetX.GetInc()),
+                extent_step=int(camera.Width.GetInc()),
+                sensor_extent=min(int(camera.Width.GetMax()), sensor_width),
+                minimum_extent=int(camera.Width.GetMin()),
             )
-            height = _snap_to_increment(
+            y, height = snap_roi_axis(
+                y,
                 height,
-                camera.Height.GetMin(),
-                min(camera.Height.GetMax(), sensor_height),
-                camera.Height.GetInc(),
+                origin_step=int(camera.OffsetY.GetInc()),
+                extent_step=int(camera.Height.GetInc()),
+                sensor_extent=min(int(camera.Height.GetMax()), sensor_height),
+                minimum_extent=int(camera.Height.GetMin()),
             )
             camera.Width.SetValue(width)
             camera.Height.SetValue(height)
-            x = _snap_to_increment(
-                x,
-                camera.OffsetX.GetMin(),
-                min(camera.OffsetX.GetMax(), sensor_width - width),
-                camera.OffsetX.GetInc(),
-            )
-            y = _snap_to_increment(
-                y,
-                camera.OffsetY.GetMin(),
-                min(camera.OffsetY.GetMax(), sensor_height - height),
-                camera.OffsetY.GetInc(),
-            )
             camera.OffsetX.SetValue(x)
             camera.OffsetY.SetValue(y)
             # Record what the sensor actually granted, not what we asked for.

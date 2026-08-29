@@ -265,8 +265,17 @@ def test_measurement_configuration_returns_sdk_readback_and_is_idle_only(fake_py
     point = adapter.set_exposure_seconds(0.012345)
     assert point.exposure_seconds == pytest.approx(0.012345)
     assert point.required_external_trigger_interval_seconds == pytest.approx(0.012345)
+    # COVERED, not clipped.  Width increments by 4 and Height by 2 on this
+    # sensor, so x 101..742 becomes 100..744 and y 51..532 becomes 50..532:
+    # the applied region contains the requested one.  Rounding the size down
+    # instead lost the right-hand two columns of every selection, silently,
+    # because the applied region is what everything downstream measures.
     assert point.roi_origin_yx == (50, 100)
-    assert point.roi_shape_yx == (480, 640)
+    assert point.roi_shape_yx == (482, 644)
+    top, left = point.roi_origin_yx
+    height, width = point.roi_shape_yx
+    assert left <= 101 and left + width >= 101 + 641
+    assert top <= 51 and top + height >= 51 + 481
 
     adapter.arm(None, source_group_sizes=None, buffer_frame_count=1, timeout=0.5)
     with pytest.raises(RuntimeError, match="while armed"):

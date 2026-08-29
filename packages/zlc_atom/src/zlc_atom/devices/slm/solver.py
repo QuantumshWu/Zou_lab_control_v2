@@ -708,16 +708,6 @@ def _mapping_seed(desired: np.ndarray, pupil: np.ndarray) -> np.ndarray:
     return seed
 
 
-def _quadratic_seed(shape: tuple[int, int]) -> np.ndarray:
-    """A defocus seed that is stronger under hard apertures."""
-
-    yy, xx = np.ogrid[
-        -1.0:1.0:shape[0] * 1j,
-        -1.0:1.0:shape[1] * 1j,
-    ]
-    return np.asarray(np.pi * (0.75 * xx * xx + yy * yy), dtype=np.float32)
-
-
 def _canonical_unshifted_phase(field: np.ndarray) -> np.ndarray:
     phase = np.empty(field.shape, dtype=np.float32)
 
@@ -1225,9 +1215,12 @@ def solve_phase(
             field = build_field(seed_phase)
         else:
             # Measured across horizons (12..300 iterations) the mapping seed
-            # dominates the quadratic seed on both apodized and hard
+            # dominates a quadratic defocus seed (pi * (0.75 x^2 + y^2) over
+            # the normalised aperture) on both apodized and hard
             # illumination: same iteration budget, better figure of merit
-            # and better interior uniformity every time.
+            # and better interior uniformity every time.  Kept as the
+            # measurement it is, rather than as a function that reads like a
+            # live alternative.
             radial = _radial_transport_seed(desired, pupil)
             if radial is not None:
                 image_seed = "radial-transport"
