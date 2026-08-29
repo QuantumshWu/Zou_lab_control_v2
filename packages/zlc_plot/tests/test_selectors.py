@@ -127,3 +127,77 @@ def test_backend_neutral_gesture_geometry_has_one_authority() -> None:
         NumericRange(0.0, 10.0),
         image_like=True,
     ) == RectangleRange(NumericRange(1.0, 11.0), NumericRange(-1.0, 9.0))
+
+
+def _float_image_with_holes(height: int = 48, width: int = 48, seed: int = 0):
+    """A float image that is NOT a camera: a third of its samples are NaN."""
+
+    from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+
+    rng = np.random.default_rng(seed)
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns({"shot": np.asarray([0.0])}),
+        data_axes=(
+            Axis.create("y", values=[float(i) for i in range(height)]),
+            Axis.create("x", values=[float(i) for i in range(width)]),
+        ),
+        dtype=np.float64,
+        generation="float-image",
+    )
+    values = rng.normal(0.0, 1.0, (1, 1, height, width))
+    values[rng.random(values.shape) < 0.35] = np.nan
+    return DatasetSnapshot(schema, values, 1), values
+
+
+def test_validity_is_the_finiteness_answer_for_float_samples() -> None:
+    """No consumer may ask ``isfinite`` of the values a second time.
+
+    The selector mask and the crosshair both used to AND ``isfinite(value)``
+    into a mask derived from the validity plane -- for an integer camera
+    frame that also cast the whole frame to float64 first.  Neither could
+    clear a bit, and the reason is not the dtype: DataView folds finiteness
+    into validity for FLOAT samples and integers satisfy it by
+    construction.  An image is not a camera, so the float case is the one
+    that has to be nailed down.
+    """
+
+    from zlc_plot import AxisRef, ImagePlot, PlotSession
+
+    snapshot, values = _float_image_with_holes()
+    session = PlotSession(snapshot, ImagePlot(AxisRef.data("x"), AxisRef.data("y")))
+    try:
+        session.set_size("2x2")
+        session.rgba()
+        valid = np.asarray(session._view.samples.valid_mask, dtype=bool)
+        assert np.array_equal(valid, np.isfinite(values))
+    finally:
+        session.close()
+
+
+def test_crosshair_never_lands_on_a_non_finite_sample() -> None:
+    from zlc_plot import AxisRef, ImagePlot, PlotSession
+
+    snapshot, values = _float_image_with_holes()
+    session = PlotSession(snapshot, ImagePlot(AxisRef.data("x"), AxisRef.data("y")))
+    try:
+        session.set_size("2x2")
+        session.rgba()
+        projection = session._projection
+        rng = np.random.default_rng(5)
+        for _ in range(24):
+            state = SelectorState(
+                SelectorKind.CROSSHAIR,
+                CrosshairPoint(
+                    float(rng.uniform(0.0, values.shape[3] - 1)),
+                    float(rng.uniform(0.0, values.shape[2] - 1)),
+                ),
+                facet_index=None,
+            )
+            picked = np.flatnonzero(
+                np.asarray(projection._selector_mask(state)).reshape(-1)
+            )
+            assert picked.size == 1
+            assert np.isfinite(values.reshape(-1)[picked[0]])
+    finally:
+        session.close()

@@ -607,9 +607,29 @@ class GestureSessionMixin:
         return NumericRange(float(np.min(finite)), float(np.max(finite)))
 
     def _value_bounds(self) -> NumericRange:
-        values = np.asarray(self._projected._value_quantity().canonical, dtype=float)
-        finite = values[np.isfinite(values)]
-        return NumericRange(float(np.min(finite)), float(np.max(finite)))
+        # IN THE SAMPLES' OWN DTYPE.  Casting the value plane to float64 to
+        # ask for its extremes copied a whole camera frame, and gathering
+        # ``values[isfinite(values)]`` copied most of it a second time --
+        # the sibling above already refuses to materialize megapixels per
+        # call, and this is the same refusal.  Integers have no non-finite
+        # values to skip; floats get the one-pass masked kernel the
+        # histogram bins already use, and numpy's ``where=`` when it is
+        # not compiled.
+        values = np.asarray(self._projected._value_quantity().canonical)
+        if values.dtype.kind != "f":
+            return NumericRange(float(np.min(values)), float(np.max(values)))
+        from ._raster_kernels import masked_finite_extrema
+
+        extrema = masked_finite_extrema(values, None)
+        if extrema is not None:
+            count, low, high = extrema
+            if count:
+                return NumericRange(low, high)
+        finite = np.isfinite(values)
+        return NumericRange(
+            float(np.min(values, where=finite, initial=np.inf)),
+            float(np.max(values, where=finite, initial=-np.inf)),
+        )
 
     def _selector_x_bounds(
         self,

@@ -2846,10 +2846,17 @@ class MatplotlibRenderer:
             band_low = band_high = None
             if item.band is not None:
                 band_low, band_high = item.band
+                # AN UNCERTAINTY OF ZERO IS NOT AN UNCERTAINTY TO DRAW.
+                # A bar of no height is a tick mark that says nothing and
+                # reads as a measurement someone made; a point with no
+                # spread simply has no bar.  A bucket that CANNOT have one
+                # -- a single sample -- already reports NaN rather than
+                # zero and is excluded by finiteness above.
                 band_where = (
                     item.valid
                     & np.isfinite(band_low)
                     & np.isfinite(band_high)
+                    & (band_high > band_low)
                 )
                 if bool(np.any(band_where)):
                     policy = self.style.render
@@ -2966,7 +2973,7 @@ class MatplotlibRenderer:
                 np.asarray(labelled.x, dtype=float),
                 labels=labelled.x_labels,
             )
-        self._apply_series_focus()
+        self._apply_series_focus(id(axes))
 
     def _series_hit(self, axes: Any | None, px: float, py: float, radius: float
                     ) -> tuple[int, object, str, float, float] | None:
@@ -3066,9 +3073,25 @@ class MatplotlibRenderer:
                         return hit
         return hit
 
-    def _apply_series_focus(self) -> None:
+    def _apply_series_focus(self, only: int | None = None) -> None:
+        """Style every series for the current focus, or just one cell's.
+
+        ``only`` names ONE axes.  The per-cell painter calls it that way,
+        because the artists it just built are the only ones that can need
+        styling; calling the whole-figure walk from inside the per-cell
+        loop styled every cell once per cell -- 4096 walks to dress 64
+        cells, 43.14 ms of a 169 ms revision on a 64-cell grid.  The memo
+        below cannot absorb that: its token names the error-bar artists,
+        and those are rebuilt every revision by design, so it never
+        matched twice in a row and never can.
+        """
+
         locked = self._series_locked
         active = locked or self._series_hover
+        if only is not None:
+            # One cell's artists were just replaced, so the figure-wide
+            # token no longer describes the figure.
+            self._series_focus_applied = None
         # Focus styling is a pure function of (focus state, the exact line
         # artists alive).  Data revisions reuse their artists, so replaying
         # the whole property walk over 64 cells' series on every frame was
@@ -3090,13 +3113,16 @@ class MatplotlibRenderer:
                 for artist in artists
             ),
         )
-        if getattr(self, "_series_focus_applied", None) == token:
-            return
-        self._series_focus_applied = token
+        if only is None:
+            if getattr(self, "_series_focus_applied", None) == token:
+                return
+            self._series_focus_applied = token
         identity = None if active is None else active[1]
         focus_line = None
         bar_alpha = self.style.render.uncertainty_bar_alpha
         for axis_id, entries in self._series_lines.items():
+            if only is not None and axis_id != only:
+                continue
             axis_bars = self._series_bars.get(axis_id, {})
             for line, series_id, _label in entries:
                 focused = identity is not None and series_id == identity
@@ -3147,6 +3173,10 @@ class MatplotlibRenderer:
                     line.set_markeredgewidth(line.get_linewidth())
                 if focused and active is not None and axis_id == active[0]:
                     focus_line = line
+        if only is not None and (active is None or only != active[0]):
+            # The inspector belongs to the focused cell, and this call did
+            # not touch it.
+            return
         for annotation in self._series_annotations.values():
             annotation.set_visible(False)
         if active is None or focus_line is None:

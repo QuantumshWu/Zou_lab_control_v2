@@ -573,6 +573,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         self._semantic_probe_cache: dict[
             tuple[object, object], str | int | None
         ] = {}
+        # The whole description, for the inputs that produced it.  The
+        # entry HOLDS its schema rather than naming it by address: this
+        # renderer has already been bitten once by an id-keyed cache
+        # silently hitting on a recycled address.
+        self._semantics_memo: tuple[object, tuple[object, ...], object] | None = None
         plan = self._resolve_plan()
         # Automatic sizing is an initial recommendation.  Once consumed, the
         # resulting named preset is authoritative just like a user selection.
@@ -1049,12 +1054,33 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             data = self._projection.data
             schema = snapshot_schema(data) if isinstance(data, OwnedSnapshot) else None
             spec = self._spec
-            return describe_semantics(
+            # A REVISION IS NOT A SEMANTIC EVENT.  This is derived from the
+            # schema, the spec, and the surface the layout gate judges
+            # against -- never from sample values -- yet the live-frame
+            # commit path asks for it on every published frame, and got
+            # back a description equal in every field to the last one:
+            # 0.96 to 1.34 ms per frame, of which 84 to 88 per cent was
+            # this call, most of it one Python walk per coordinate of
+            # every axis.
+            inputs = (
+                spec,
+                snapshot_generation(data) if isinstance(data, OwnedSnapshot) else None,
+                self._size,
+                self._device_pixel_ratio,
+                self._defaults.layout,
+                self._defaults.style,
+            )
+            memo = self._semantics_memo
+            if memo is not None and memo[0] is schema and memo[1] == inputs:
+                return memo[2]
+            description = describe_semantics(
                 schema,
                 spec,
                 layout=self._defaults.layout,
                 feasibility=self._semantic_feasibility,
             )
+            self._semantics_memo = (schema, inputs, description)
+            return description
 
     def _semantic_feasibility(self, name: str, value: object) -> str | None:
         """Return why one semantic edit would be rejected, or None if viable.
