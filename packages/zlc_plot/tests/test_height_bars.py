@@ -1519,3 +1519,41 @@ def test_a_height_field_keeps_its_scale_when_the_heat_map_would_not() -> None:
         assert _relim_retains("normal") is True
     finally:
         session.close()
+
+
+def test_the_warmer_renders_what_production_renders() -> None:
+    """A warmup that cannot run is a compile of a signature nothing uses.
+
+    ``colours`` became the colormap's own 256-row table when the driver
+    stopped carrying a plane three times the size of the data, and the
+    warmer kept handing in one colour per cell -- so ``bin/warm_numba_cache``
+    raised for every operator who ran it, under a message telling them to
+    install a package they already had.  Two ends were changed and the one
+    caller between them was not.
+
+    Run on the reference engine, so this catches the drift without paying
+    for a compile.
+    """
+
+    from zlc_plot import _height3d_raster as raster
+    from zlc_plot._height3d_scanline import representative_render
+
+    previous = raster._ENGINE
+    raster._ENGINE = "numpy"
+    try:
+        representative_render()
+    finally:
+        raster._ENGINE = previous
+
+
+def test_a_missing_numba_is_reported_not_raised() -> None:
+    """The one cause the launcher used to name is the one that cannot fail."""
+
+    from zlc_plot import _height3d_scanline as scanline
+
+    previous = scanline.HAVE_NUMBA
+    scanline.HAVE_NUMBA = False
+    try:
+        assert "numba is not installed" in scanline.warm()
+    finally:
+        scanline.HAVE_NUMBA = previous

@@ -19,8 +19,8 @@ set "PYTHONPATH=%ZLC_HOME%\packages\zlc_plot\src;%PYTHONPATH%"
 set "ZLC_RC=%ERRORLEVEL%"
 if not "%ZLC_RC%"=="0" (
   echo.
-  echo Warmup failed -- it needs numba and numpy on this interpreter
-  echo ^(pip install -c constraints.txt numba^).
+  echo Warmup failed -- see the traceback above.  A missing numba is NOT
+  echo a failure here: it is reported and the numpy reference engine runs.
   if "%ZLC_NO_PAUSE%"=="" pause
 )
 exit /b %ZLC_RC%

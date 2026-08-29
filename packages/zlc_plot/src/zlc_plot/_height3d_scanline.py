@@ -280,6 +280,33 @@ def _rim_stroke(  # find the creases, stamp them, and blend, in one pass
                     out[ty, tx, channel] = np.uint8(value)
 
 
+def representative_render() -> None:
+    """The ONE render whose compiled signature covers production.
+
+    It lives here, called by both the warmer and a test, because a warmup
+    that renders something the product cannot is a warmup that compiles a
+    signature nothing uses -- and this one had drifted: ``colours`` became
+    the colormap's own 256-row table when the driver stopped carrying a
+    plane three times the size of the data, and the warmer kept handing in
+    one colour per cell.  It had raised for every operator who ran it since,
+    under a message about a missing dependency.
+    """
+
+    from . import _height3d_raster as raster  # noqa: PLC0415
+
+    heights = np.linspace(0.0, 1.0, 12).reshape(3, 4)
+    colours = np.linspace(0.0, 1.0, 256 * 3, dtype=np.float32).reshape(256, 3)
+    raster.render_height_bars(
+        heights,
+        colours,
+        camera=raster.HeightBarCamera(),
+        value_limits=(0.0, 1.0),
+        width=64,
+        height=48,
+        supersample=2,
+    )
+
+
 def warm(force: bool = False) -> str:
     """Compile (or load) the kernel's disk cache; returns the outcome.
 
@@ -320,22 +347,12 @@ def warm(force: bool = False) -> str:
         and marker.read_text(encoding="utf-8") == fingerprint
     ):
         return "cache is current; nothing to do"
-    from .import _height3d_raster as raster
+    from . import _height3d_raster as raster
 
     previous = raster._ENGINE
     raster._ENGINE = "numba"
     try:
-        heights = np.linspace(0.0, 1.0, 12).reshape(3, 4)
-        colors = np.full((3, 4, 3), 0.5, dtype=np.float32)
-        raster.render_height_bars(
-            heights,
-            colors,
-            camera=raster.HeightBarCamera(),
-            value_limits=(0.0, 1.0),
-            width=64,
-            height=48,
-            supersample=2,
-        )
+        representative_render()
     finally:
         raster._ENGINE = previous
     marker.write_text(fingerprint, encoding="utf-8")
@@ -343,9 +360,27 @@ def warm(force: bool = False) -> str:
 
 
 def main() -> int:
-    """``zlc warm_numba``: compile-or-verify the kernel cache, say which."""
+    """``zlc warm_numba``: compile-or-verify the kernel cache, say which.
 
-    print(warm())
+    A MISSING DEPENDENCY IS NOT A FAILURE HERE -- ``warm`` says so and
+    returns, because the numpy reference engine still draws.  So anything
+    that reaches this handler is a defect in the warmer or the kernel, and
+    the operator is told that rather than told to install something they
+    already have.
+    """
+
+    try:
+        print(warm())
+    except Exception as error:  # noqa: BLE001 -- this is a command-line front
+        import traceback  # noqa: PLC0415
+
+        traceback.print_exc()
+        print(f"\nwarmup failed: {type(error).__name__}: {error}")
+        print(
+            "This is a defect in the warmer or the kernel, not a missing "
+            "package: numba's absence is reported, never raised."
+        )
+        return 1
     return 0
 
 
