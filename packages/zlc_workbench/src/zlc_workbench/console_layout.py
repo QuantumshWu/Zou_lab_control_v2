@@ -356,12 +356,6 @@ def _boolean(value: object, where: str) -> bool:
     return value
 
 
-def _integer(value: object, where: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise LayoutError(f"{where} must be an integer")
-    return value
-
-
 __all__ = [
     "LAYOUT_FORMAT",
     "LayoutDocument",

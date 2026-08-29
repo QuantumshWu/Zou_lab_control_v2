@@ -3026,6 +3026,21 @@ class ConsolePresenter:
                         if not swapped:
                             candidate_port.reject(update, error)
                             candidate_port.close()
+                            # AND THE OLD ONE GOES.  The state already names
+                            # the new signal -- the title, the Setting form
+                            # and the schema all describe it -- so leaving
+                            # the old port attached kept the card drawing
+                            # the signal the panel no longer targets, beat
+                            # after beat, with no gesture that could
+                            # re-attach it: a second retarget to the same
+                            # signal is a no-op because the state already
+                            # equals it.  Portless, the panel is a panel
+                            # waiting to mount, which _refresh_console_
+                            # projection retries as soon as the signal has
+                            # a value.
+                            if binding.port is not None:
+                                binding.port.close()
+                                binding.port = None
                         else:
                             self._panel_presented(binding, accepted)
                         binding.reported_condition = _error_text(error)
@@ -3554,7 +3569,7 @@ class ConsolePresenter:
                 panel_id, host, event, frozen=frozen
             ),
         )
-        host.subscribe_display(
+        source.subscribe_display_observation(
             lambda state: self._enqueue_panel_display(panel_id, host, state)
         )
         source.subscribe_observation(
@@ -4206,8 +4221,11 @@ class ConsolePresenter:
                 if fitting is None:
                     incompatible.append((state.signal, state.kind))
                     continue
-                binding.state = state
-                binding.parameter_surface = self._unbound_panel_parameters(state)
+                # state and parameter_surface were assigned again here with
+                # the very values the PanelBinding was constructed from a few
+                # lines above -- a second full kind-vocabulary build per panel
+                # on every saved-board load, and a reader who had to prove the
+                # two were equal before concluding nothing happened.
                 binding.port = self._make_panel_port(binding)
         except Exception as error:
             for binding in panels:
@@ -4410,8 +4428,6 @@ class ConsolePresenter:
         bridge_selection = initial_selection
         if bridge_selection is not None:
             initial_publication = binding.display_publication
-            if initial_publication is None:
-                initial_publication = binding.display_publication
             if initial_publication is None:
                 # The host may render before its first board acceptance.  Wait
                 # for that exact publication rather than restoring from latest.
@@ -6049,6 +6065,9 @@ class ConsolePresenter:
             or (binding.host is not None and binding.host.running)
         )
         source_specs = dataset_inputs(binding.descriptor)
+        source_options, source_labels, source_groups = self._source_choices(
+            binding.descriptor, binding.node_id
+        )
         return {
             "node_id": binding.node_id,
             "api_name": str(binding.descriptor.api_name),
@@ -6079,15 +6098,9 @@ class ConsolePresenter:
                 else "Signal"
             ),
             "source_signal": binding.draft.source_signal,
-            "source_options": self._source_options(
-                binding.descriptor, binding.node_id
-            ),
-            "source_labels": self._source_labels(
-                binding.descriptor, binding.node_id
-            ),
-            "source_groups": self._source_groups(
-                binding.descriptor, binding.node_id
-            ),
+            "source_options": source_options,
+            "source_labels": source_labels,
+            "source_groups": source_groups,
             "device_keys": dict(binding.draft.device_keys),
             "device_options": options,
             "ui_contributions": tuple(binding.descriptor.ui_contributions),
@@ -6545,7 +6558,11 @@ class ConsolePresenter:
             status = f"waiting for {waiting}" if waiting else "restart queued"
         return state, str(status)
 
-    def _show_logic(self, binding: LogicBinding) -> None:
+    def _show_logic(
+        self,
+        binding: LogicBinding,
+        descriptions: Mapping[str, Any] | None = None,
+    ) -> None:
         """What one node is doing, pushed only when it changed.
 
         A row rewritten every beat is a row an operator cannot read a status
@@ -6563,9 +6580,11 @@ class ConsolePresenter:
                 for output in self._logic_outputs(binding)
             )
         )
-        descriptions = {
-            item.name: item for item in self.session.signal_plane.describe_signals()
-        }
+        if descriptions is None:
+            descriptions = {
+                item.name: item
+                for item in self.session.signal_plane.describe_signals()
+            }
         names = tuple(dict.fromkeys(direct_names))
         published = []
         for name in names:
@@ -6615,8 +6634,16 @@ class ConsolePresenter:
         self,
         descriptor: Any,
         consumer_node_id: str,
+        *,
+        descriptions: Sequence[Any] | None = None,
     ) -> tuple[str, ...]:
-        """Stable keys whose declared Dataset contract matches this input."""
+        """Stable keys whose declared Dataset contract matches this input.
+
+        ``descriptions`` lets a caller that already read the plane hand that
+        read in.  Three of these questions are asked side by side about one
+        unchanged plane, and each used to take the lock and rebuild the
+        whole description list again.
+        """
 
         specs = dataset_inputs(descriptor)
         if not specs:
@@ -6625,6 +6652,8 @@ class ConsolePresenter:
         def accepts(contract_id: str | None) -> bool:
             return any(spec.accepts(contract_id) for spec in specs)
 
+        if descriptions is None:
+            descriptions = self.session.signal_plane.describe_signals()
         compatible: set[str] = set()
         for binding in self.logic.values():
             if binding.node_id == consumer_node_id:
@@ -6634,50 +6663,46 @@ class ConsolePresenter:
                     compatible.add(stable_signal_key(binding.node_id, output.name))
         compatible.update(
             description.name
-            for description in self.session.signal_plane.describe_signals()
+            for description in descriptions
             if description.owner_id != consumer_node_id
             and accepts(description.contract_id)
         )
         return tuple(sorted(compatible))
 
-    def _source_labels(
+    def _source_choices(
         self,
         descriptor: Any,
         consumer_node_id: str,
-    ) -> dict[str, str]:
-        compatible = set(
-            self._source_options(descriptor, consumer_node_id)
-        )
-        return {
-            row.name: row.label
-            for row in project_signals(self.session.signal_plane)
-            if row.name in compatible
-        }
+    ) -> tuple[tuple[str, ...], dict[str, str], dict[str, str]]:
+        """The compatible sources, their labels and their groups, from ONE read.
 
-    def _source_groups(
-        self,
-        descriptor: Any,
-        consumer_node_id: str,
-    ) -> dict[str, str]:
-        """Which producer each compatible source belongs under.
-
-        The same producer grouping every signal chooser shows: the plane's
-        projection for published signals, and the declaring node's id for a
-        compatible output that has not published yet.
+        A Logic editor open beside a running scan re-projects on every 100 ms
+        beat -- ``_observation_status`` changes every tick -- and these three
+        answers were built from five full plane scans plus two projections,
+        every one of them the same question about a plane that had not moved.
         """
 
-        compatible = set(self._source_options(descriptor, consumer_node_id))
-        groups = {
-            row.name: row.producer
+        descriptions = tuple(self.session.signal_plane.describe_signals())
+        options = self._source_options(
+            descriptor, consumer_node_id, descriptions=descriptions
+        )
+        compatible = set(options)
+        rows = tuple(
+            row
             for row in project_signals(self.session.signal_plane)
             if row.name in compatible
-        }
+        )
+        labels = {row.name: row.label for row in rows}
+        # Which producer each compatible source belongs under: the plane's
+        # projection for published signals, and the declaring node's id for a
+        # compatible output that has not published yet.
+        groups = {row.name: row.producer for row in rows}
         for binding in self.logic.values():
             for output in self._logic_outputs(binding):
                 key = stable_signal_key(binding.node_id, output.name)
                 if key in compatible:
                     groups.setdefault(key, binding.node_id)
-        return groups
+        return options, labels, groups
 
     def _build_logic_candidate(
         self,
@@ -6999,8 +7024,18 @@ class ConsolePresenter:
         moments of the same host lifecycle.
         """
 
+        # ONE read for every row, which is what "one current state read"
+        # above has always claimed.  Each row rebuilt the plane's whole
+        # description list for itself, on every 100 ms beat, from a plane
+        # that cannot move while the GUI thread holds the turn: five rows
+        # meant five full scans and five sets of throwaway dataclasses,
+        # taking the same lock the publishing threads commit under.
+        descriptions = {
+            item.name: item
+            for item in self.session.signal_plane.describe_signals()
+        }
         for binding in tuple(self.logic.values()):
-            self._show_logic(binding)
+            self._show_logic(binding, descriptions)
         self._project_task_takeover()
         state = "paused" if self._paused else "running"
         running = sum(

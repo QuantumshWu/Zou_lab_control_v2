@@ -279,6 +279,29 @@ class LiveBoard:
         return True
 
 
+def _guarded_slot(turn: Callable[[], None], what: str) -> Callable[[], None]:
+    """Wrap a callable that is about to become a Qt slot.
+
+    ONE OWNER for the boundary.  PyQt calls qFatal() on anything that leaves
+    a slot, and the process dies where it stands -- taking a running
+    experiment, every mounted panel and the traceback with it.  There are
+    two hops into the GUI thread in this project, the timer and the
+    completion wake, and the guard was written on one of them.
+
+    Logged, not swallowed: the next tick still runs, and the instrument
+    outlives the defect.  Callers that drive these directly (tests, headless
+    benches) are untouched and still raise.
+    """
+
+    def guarded() -> None:
+        try:
+            turn()
+        except Exception:  # noqa: BLE001 -- the boundary IS total
+            _LOG.exception("Qt-driven %s failed", what)
+
+    return guarded
+
+
 def attach_qt(beat: Callable[[], None], *, interval_ms: int) -> Any:
     """Drive one beat from a Qt event loop.
 
@@ -288,16 +311,9 @@ def attach_qt(beat: Callable[[], None], *, interval_ms: int) -> Any:
     test exercises, and Pause, node polling and panel-error reporting were dead
     on screen while passing headlessly.
 
-    A timer callback IS the GUI thread, which is the one hop that has to be
-    here and cannot be anywhere else.  It is therefore also the boundary
-    where an exception stops being reportable: PyQt calls qFatal() on
-    anything that leaves a slot, and the process dies where it stands --
-    taking a running experiment, every mounted panel and the traceback with
-    it.  Every view signal in the console is wrapped for exactly that
-    reason; the beat, which runs continuously and touches everything, was
-    connected raw, and a box drawn on a retired run ended the session.  So
-    the guard lives HERE, at the one hop, and covers every timer this
-    project drives.
+    A timer callback IS the GUI thread, and it is therefore also the boundary
+    where an exception stops being reportable.  ``_guarded_slot`` owns that
+    rule for both hops that cross it; see its docstring.
     """
 
     from PyQt5 import QtCore  # noqa: PLC0415 -- only a Qt application needs this
@@ -308,18 +324,9 @@ def attach_qt(beat: Callable[[], None], *, interval_ms: int) -> Any:
     if interval <= 0:
         raise ValueError("attach_qt interval_ms must be positive")
 
-    def guarded_beat() -> None:
-        try:
-            beat()
-        except Exception:  # noqa: BLE001 -- the boundary IS total
-            # Logged, not swallowed: the next tick still runs, and the
-            # instrument outlives the defect.  Callers that beat directly
-            # (tests, headless benches) are untouched and still raise.
-            _LOG.exception("Qt-driven beat failed")
-
     timer = QtCore.QTimer()
     timer.setInterval(interval)
-    timer.timeout.connect(guarded_beat)
+    timer.timeout.connect(_guarded_slot(beat, "beat"))
     timer.start()
     return timer
 
@@ -421,7 +428,15 @@ def attach_qt_owner_turn(turn: Callable[[], None]) -> Callable[[], None]:
         woke = QtCore.pyqtSignal()
 
     relay = _OwnerTurnRelay()
-    relay.woke.connect(turn, type=QtCore.Qt.QueuedConnection)
+    # Guarded like the timer, because this is the SAME hop.  Without it the
+    # very same exception was a log line when it arrived on the beat and the
+    # death of the process when it arrived on a completion wake -- a saved
+    # selector that its exact publication cannot honour reaches this one
+    # first, through _settle_panel_hosts on the tick after the first surface
+    # is accepted.
+    relay.woke.connect(
+        _guarded_slot(turn, "owner turn"), type=QtCore.Qt.QueuedConnection
+    )
 
     def trigger(relay: "_OwnerTurnRelay" = relay) -> None:
         relay.woke.emit()

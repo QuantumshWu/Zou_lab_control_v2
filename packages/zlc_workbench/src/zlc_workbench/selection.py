@@ -703,6 +703,28 @@ class PlotSelectionSource:
 
         return self._install(self._host.subscribe_viewport, _on_viewport)
 
+    def subscribe_display_observation(
+        self,
+        callback: Callable[[object], object],
+    ) -> Callable[[], None]:
+        """Report display-state changes through the SAME release list.
+
+        This one used to be installed straight on the host, so its
+        unsubscribe was dropped on the floor: every rebind of an unchanged
+        Edit host added another identical display callback and released
+        none, and each colour-limit drag afterwards enqueued one panel
+        interaction per Refresh the operator had pressed.
+        """
+
+        if not callable(callback):
+            raise TypeError("display observation callback must be callable")
+
+        def _on_display(state: object) -> None:
+            self._last_error = None
+            self._deliver(callback, state)
+
+        return self._install(self._host.subscribe_display, _on_display)
+
     def subscribe_focus_observation(
         self,
         callback: Callable[
