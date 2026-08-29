@@ -232,6 +232,9 @@ def axis_catalog(
     box died as "not uniquely present".
     """
 
+    cached = schema._axis_catalog
+    if cached is not None:
+        return cached
     catalog: list[tuple[str, AxisId, AxisSpec, str]] = []
     repeat_axis = schema.repeat_axis
     catalog.append((repeat_axis.name, repeat_axis.axis_id, repeat_axis, "repeat"))
@@ -277,7 +280,15 @@ def axis_catalog(
                 (axis.axis_id.value, axis.axis_id, axis, "data"),
             )
         )
-    return tuple(catalog)
+    # ONCE PER SCHEMA.  Every AxisSpec above re-runs
+    # canonical_coordinate_scalar over a tuple PointColumn already
+    # canonicalised -- 26 ms of the 41 ms selection_indices costs on a
+    # 200x200 scan, and a committed ROI pays it on every publication for
+    # a catalog that cannot change.  Cached exactly as the fingerprint
+    # and the topology's cell indices are.
+    answer = tuple(catalog)
+    object.__setattr__(schema, "_axis_catalog", answer)
+    return answer
 
 
 def selection_indices(

@@ -60,11 +60,35 @@ def _jsonable(value: Any, path: str = "metadata") -> Any:
     raise TypeError(f"{path} contains unsupported metadata type {type(value).__name__}")
 
 
-def _claimed_members(key: str, value: np.ndarray | OwnedSnapshot) -> tuple[str, ...]:
-    if isinstance(value, OwnedSnapshot) and isinstance(
-        value.block.validity, (CellValidity, DatasetComponentValidity)
+def _snapshot_members(key: str, snapshot: OwnedSnapshot) -> dict[str, str]:
+    """Which member each of a snapshot's planes is written under.
+
+    ONE OWNER for the naming, because a figure holds several datasets and
+    their members share one flat namespace.  This was written out three
+    times -- here, in the writer's keyword arguments, and again as a
+    hard-coded pair the reader compares against -- so the day the block
+    grew a sigma plane, two of the three were updated and the third wrote
+    it as the bare name ``sigma``: outside any dataset's namespace, so
+    nothing claimed it, two sigma-carrying datasets silently overwrote
+    each other, and the reader rejected the file it had just written.
+
+    A plane added tomorrow is namespaced by construction and needs no
+    second edit anywhere.
+    """
+
+    members = {"values_key": key}
+    if isinstance(
+        snapshot.block.validity, (CellValidity, DatasetComponentValidity)
     ):
-        return key, f"{key}.validity"
+        members["validity_key"] = f"{key}.validity"
+    if snapshot.block.sigma is not None:
+        members["sigma_key"] = f"{key}.sigma"
+    return members
+
+
+def _claimed_members(key: str, value: np.ndarray | OwnedSnapshot) -> tuple[str, ...]:
+    if isinstance(value, OwnedSnapshot):
+        return tuple(_snapshot_members(key, value).values())
     return (key,)
 
 
@@ -111,10 +135,7 @@ def write_figure_archive(
     for key, value in arrays.items():
         if isinstance(value, OwnedSnapshot):
             manifest = snapshot_manifest(
-                value,
-                stored,
-                values_key=key,
-                validity_key=f"{key}.validity",
+                value, stored, **_snapshot_members(key, value)
             )
             ref = dict(manifest["ref"])
             ref.pop("schema_fingerprint", None)
@@ -258,7 +279,14 @@ def _validate_datasets(
             raise ValueError(f"figure dataset {name!r} must own its same-named array")
         snapshot_from_manifest(manifest, arrays, embedded=True)
         keys = manifest_array_keys(manifest)
-        if keys not in ((name,), (name, f"{name}.validity")):
+        # THE NAMESPACE RULE, not a list of the names in it.  Comparing
+        # against a fixed pair meant every plane a block grew had to be
+        # added here too, and the one that was not -- sigma -- made the
+        # writer produce files this rejected.
+        if name not in keys or any(
+            member != name and not member.startswith(f"{name}.")
+            for member in keys
+        ):
             raise ValueError(f"figure dataset {name!r} uses non-canonical member names")
         duplicate = referenced.intersection(keys)
         if duplicate:

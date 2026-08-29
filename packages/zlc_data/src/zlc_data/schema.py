@@ -377,6 +377,13 @@ class DatasetSchema:
     _structure_fingerprint: str | None = field(
         init=False, repr=False, compare=False, default=None
     )
+    #: Cached on first request, like the fingerprint beside it.  Building
+    #: it re-validates every point coordinate the PointColumn already
+    #: canonicalised: 26 ms on a 200x200 scan, and a committed ROI rebuilds
+    #: it twice per publication for a map that cannot change.
+    _axis_catalog: tuple | None = field(
+        init=False, repr=False, compare=False, default=None
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.repeat_axis, AxisSpec) or self.repeat_axis.role != REPEAT:
@@ -412,6 +419,7 @@ class DatasetSchema:
             _validate_grid_topology(self.point_table, self.grid_topology)
         object.__setattr__(self, "_fingerprint", None)
         object.__setattr__(self, "_structure_fingerprint", None)
+        object.__setattr__(self, "_axis_catalog", None)
 
     @property
     def physical_shape(self) -> tuple[int, ...]:
