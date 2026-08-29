@@ -58,6 +58,14 @@ _AXIS_LIMIT_EFFECTS = (
     | RenderEffect.OVERLAY
     | RenderEffect.INTERACTION_REPROJECT
 )
+#: The histogram's VALUE axis, unlike every other limit pair, is not
+#: resolved at render time: x_relim_mode/x_min/x_max are read only inside
+#: _histogram_bins, which runs when the payload is built.  Without
+#: PAYLOAD_PROJECTION the bins the operator asked for arrived at the next
+#: data revision -- and never at all once acquisition stopped.
+_HISTOGRAM_VALUE_AXIS_EFFECTS = (
+    _AXIS_LIMIT_EFFECTS | RenderEffect.PAYLOAD_PROJECTION
+)
 _HISTOGRAM_REPRESENTATION_EFFECTS = (
     RenderEffect.BASE_GEOMETRY
     | RenderEffect.AXIS_TRANSFORM
@@ -622,7 +630,7 @@ def _histogram_parameters() -> tuple[ParameterSpec[object], ...]:
         ParameterSpec(
             "x_relim_mode",
             str,
-            _AXIS_LIMIT_EFFECTS,
+            _HISTOGRAM_VALUE_AXIS_EFFECTS,
             default=RelimMode.NORMAL.value,
             normalizer=_relim_mode,
             label="Value limits",
@@ -631,7 +639,7 @@ def _histogram_parameters() -> tuple[ParameterSpec[object], ...]:
         ParameterSpec(
             "x_min",
             (int, float),
-            _AXIS_LIMIT_EFFECTS,
+            _HISTOGRAM_VALUE_AXIS_EFFECTS,
             default=None,
             normalizer=_finite_or_none,
             allow_none=True,
@@ -640,7 +648,7 @@ def _histogram_parameters() -> tuple[ParameterSpec[object], ...]:
         ParameterSpec(
             "x_max",
             (int, float),
-            _AXIS_LIMIT_EFFECTS,
+            _HISTOGRAM_VALUE_AXIS_EFFECTS,
             default=None,
             normalizer=_finite_or_none,
             allow_none=True,
@@ -930,6 +938,12 @@ def history_window_requirement(
 
     if not isinstance(display, Mapping):
         raise TypeError("display must be a mapping")
+    if isinstance(spec, FacetGridPlot):
+        # A GRID READS NO HISTORY.  semantic_spec unwraps it to its cell, so
+        # a grid of histogram cells asked Runtime to retain a window that
+        # nothing in the facet build ever looks at -- a lease on hundreds of
+        # shots, held for a picture drawn from the latest revision alone.
+        return None
     semantic = semantic_spec(spec)
     if not isinstance(semantic, (RollingPlot, HistogramPlot)):
         return None

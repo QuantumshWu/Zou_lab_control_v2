@@ -2142,13 +2142,38 @@ class DataView:
 
         if not isinstance(aggregation, Reduction):
             raise TypeError("aggregation must be Reduction")
-        dimensions = sorted(
-            {int(self._resolve(ref).dimension) for ref in refs}
-        )
-        if not dimensions:
+        # A POINT COORDINATE IS NOT A TENSOR AXIS.  Every point column and
+        # every topology dimension resolves to dimension 1 -- the shared
+        # point axis -- so mapping a ref straight to a numpy axis collapsed
+        # the WHOLE point table for any of them, and the set() made two
+        # different columns literally the same reduction: on a detuning x
+        # power scan, reducing detuning and reducing power were two fate
+        # rows producing one byte-identical answer, neither of them the one
+        # the row named.
+        coordinates: list[AxisRef] = []
+        dimensions: set[int] = set()
+        for ref in refs:
+            if ref.domain in (
+                AxisDomain.POINT_COORDINATE,
+                AxisDomain.POINT_DIMENSION,
+            ):
+                coordinates.append(ref)
+            else:
+                dimensions.add(int(self._resolve(ref).dimension))
+        if 1 in dimensions:
+            # The point axis goes whole, so naming one of its coordinates
+            # adds nothing to what is already being collapsed.
+            coordinates = []
+        if not dimensions and not coordinates:
             return values, valid
-        axes = tuple(dimensions)
+
         usable = np.asarray(np.broadcast_to(valid, values.shape), dtype=bool)
+        if coordinates:
+            return self._collapse_by_coordinates(
+                values, usable, sorted(dimensions), coordinates, aggregation
+            )
+
+        axes = tuple(sorted(dimensions))
         counts = np.count_nonzero(usable, axis=axes)
         present = counts > 0
         as_double = values.astype(np.float64, copy=False)
@@ -2166,7 +2191,7 @@ class DataView:
                     if aggregation is Reduction.MEAN
                     else totals
                 )
-            else:
+            elif aggregation in (Reduction.MIN, Reduction.MAX):
                 ufunc = np.min if aggregation is Reduction.MIN else np.max
                 collapsed = ufunc(
                     as_double,
@@ -2176,6 +2201,70 @@ class DataView:
                         np.inf if aggregation is Reduction.MIN else -np.inf
                     ),
                 )
+            elif aggregation is Reduction.FIRST:
+                # FIRST used to fall into the else branch above and come
+                # back as MAX -- no error, no warning, just a different
+                # statistic drawn under the name the operator chose.  Every
+                # other reducer in this file dispatches it explicitly.
+                collapsed, present = _leading_along_axes(
+                    as_double, usable, axes
+                )
+            else:
+                raise AssertionError(f"unsupported reduction: {aggregation!r}")
+        return collapsed, present
+
+    def _collapse_by_coordinates(
+        self,
+        values: NDArray[Any],
+        usable: NDArray[np.bool_],
+        dimensions: Sequence[int],
+        coordinates: Sequence[AxisRef],
+        aggregation: Reduction,
+    ) -> tuple[NDArray[Any], NDArray[np.bool_]]:
+        """Collapse named point coordinates, keeping the rest apart.
+
+        Reducing "detuning" over a detuning x power scan means one value
+        per power, not one value for the whole scan: the point rows are
+        grouped by the coordinates NOT named, and each group is reduced.
+        The whole tensor axes named alongside are reduced in the same pass,
+        so a joint reduction stays joint -- a mean over repeats and
+        detuning together is one mean, not a mean of means.
+        """
+
+        named = {
+            self._resolve(ref).contract.axis_id for ref in coordinates
+        }
+        table = self._schema.point_table
+        kept = tuple(
+            column for column in table.columns if column.coordinate_id not in named
+        )
+        codes, bucket_count = _point_row_codes(kept, table.row_count)
+
+        collapse = set(int(axis) for axis in dimensions)
+        shape = values.shape
+        keep_axes = [axis for axis in range(values.ndim) if axis not in collapse]
+        out_shape = tuple(
+            bucket_count if axis == 1 else shape[axis] for axis in keep_axes
+        )
+        stride, strides = 1, {}
+        for axis in reversed(keep_axes):
+            strides[axis] = stride
+            stride *= bucket_count if axis == 1 else shape[axis]
+        index = np.indices(shape, sparse=True)
+        bucket = np.zeros(shape, dtype=np.int64)
+        for axis in keep_axes:
+            position = codes[index[1]] if axis == 1 else index[axis]
+            bucket = bucket + position * strides[axis]
+
+        collapsed, counts = _aggregate_by_codes(
+            values.astype(np.float64, copy=False).reshape(-1),
+            usable.reshape(-1),
+            np.ascontiguousarray(bucket).reshape(-1),
+            max(1, stride),
+            aggregation,
+        )
+        present = (counts > 0).reshape(out_shape)
+        collapsed = np.where(present, collapsed.reshape(out_shape), 0.0)
         return collapsed, present
 
     def history_values(
@@ -2794,7 +2883,17 @@ class DataView:
             )
         elif isinstance(cell, ImagePlot):
             self._validate_image_shape(cell.x, cell.y)
-        elif not isinstance(cell, HistogramPlot):
+        elif isinstance(cell, HistogramPlot):
+            if cell.reduced:
+                # Refused rather than ignored.  No facet build path
+                # collapses a cell's axes, so a grid holding this spec
+                # would draw the pooled distribution under a name saying
+                # it had been reduced.
+                raise DataViewError(
+                    "a faceted histogram cell cannot collapse axes; "
+                    "remove the reduced fate or use a single panel"
+                )
+        else:
             raise TypeError(
                 "facet cell must be CurvePlot, ImagePlot, or HistogramPlot"
             )
@@ -3944,6 +4043,50 @@ def _bucket_sums(
         weights=group.astype(np.float64, copy=False),
         minlength=bucket_count,
     )
+
+
+def _leading_along_axes(
+    values: NDArray[Any],
+    usable: NDArray[np.bool_],
+    axes: tuple[int, ...],
+) -> tuple[NDArray[Any], NDArray[np.bool_]]:
+    """The first usable entry along ``axes``, in the array's own order."""
+
+    moved_values = np.moveaxis(values, axes, range(-len(axes), 0))
+    moved_usable = np.moveaxis(usable, axes, range(-len(axes), 0))
+    head = moved_values.shape[: moved_values.ndim - len(axes)]
+    flat_values = moved_values.reshape(head + (-1,))
+    flat_usable = moved_usable.reshape(head + (-1,))
+    present = flat_usable.any(axis=-1)
+    first = np.argmax(flat_usable, axis=-1)
+    taken = np.take_along_axis(flat_values, first[..., None], axis=-1)[..., 0]
+    return np.where(present, taken, 0.0), present
+
+
+def _point_row_codes(
+    columns: Sequence[Any],
+    row_count: int,
+) -> tuple[NDArray[np.int64], int]:
+    """One small-int group code per point row, from the columns given.
+
+    With no columns left every row is one group: naming every coordinate
+    is naming the point axis.
+    """
+
+    if not columns:
+        return np.zeros(int(row_count), dtype=np.int64), 1
+    combined = np.zeros(int(row_count), dtype=np.int64)
+    span = 1
+    for column in columns:
+        # Codes per column rather than one np.unique over the stacked rows:
+        # a column may be TEXT, and object arrays have no row-wise unique.
+        _distinct, local = np.unique(
+            np.asarray(column.values), return_inverse=True
+        )
+        combined = combined + np.asarray(local, dtype=np.int64) * span
+        span *= int(_distinct.size)
+    distinct, codes = np.unique(combined, return_inverse=True)
+    return np.asarray(codes, dtype=np.int64), int(distinct.size)
 
 
 def _aggregate_by_codes(

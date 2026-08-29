@@ -902,10 +902,17 @@ class FitProjection:
         # an operator asking for a steady count scale silently also asked
         # for a steady value domain, and could not ask for either alone.
         mode = str(state["x_relim_mode"])
+        # Retention is what NORMAL means: keep the limits already on
+        # screen unless the data leaves them.  Written as "not tight" it
+        # also caught FIXED, and retention widens on overflow -- the one
+        # thing fixed exists to forbid.  So a pinned axis held only until
+        # the first revision that outgrew it, and every limit written
+        # afterwards was swallowed: the elif below could never run again
+        # for that bin count.
         retain_domain = (
             previous is not None
             and previous.requested_bins == count
-            and mode != "tight"
+            and mode == "normal"
         )
         if retain_domain:
             assert previous is not None
@@ -923,8 +930,29 @@ class FitProjection:
                     if data_high > high:
                         high = data_high + padding
         elif mode == "fixed":
-            low = float(state["x_min"])
-            high = float(state["x_max"])
+            if not has_values:
+                data_low, data_high = 0.0, 1.0
+
+            def _written(key: str, fallback: float) -> float:
+                # WRITTEN IN DISPLAY UNITS.  "Value minimum" and "Value
+                # maximum" sit beside the drawn axis, and a half-supplied
+                # pair is completed from axes.get_xlim(), which is display
+                # space.  This domain is canonical -- the edges convert on
+                # the way out -- so a value axis canonical in 's' and shown
+                # in 'ms' read a written 10 as ten SECONDS and drew a
+                # 10000 ms axis.
+                value = state[key]
+                if value is None:
+                    return fallback
+                return float(
+                    samples.value.display_unit.convert_value_to(
+                        np.asarray(float(value), dtype=float),
+                        samples.value.canonical_unit,
+                    )
+                )
+
+            low = _written("x_min", data_low)
+            high = _written("x_max", data_high)
         else:
             if not has_values:
                 data_low, data_high = 0.0, 1.0
@@ -990,7 +1018,52 @@ class FitProjection:
             raise IndexError("facet index is outside the current grid")
         return cells[selected].payload
 
+    def _rolling_sample_offsets(self) -> np.ndarray:
+        """The rolling x that each sample of THIS revision sits at.
+
+        The rolling axis is "shots from latest", and one revision is one
+        shot: every sample of it shares a single offset.  That offset is
+        zero, because the window is a SUFFIX of the history and its x is
+        measured from the newest entry (``absolute - absolute[-1]``), so
+        the point the window ends on is this revision.  The points behind
+        it are history entries, not samples of this snapshot -- nothing
+        here can be selected at a negative offset.
+        """
+
+        if self._view is None:
+            raise TypeError("rolling offsets require zlc_data.OwnedSnapshot")
+        return np.zeros(self._view.samples.shape, dtype=float)
+
+    def _x_sample_canonical(self) -> np.ndarray:
+        """Where each sample sits on the x axis, in that axis's own space.
+
+        ONE OWNER.  The range selector, the area filter and the crosshair
+        each need it, and each derived it from ``_x_ref()`` -- which for a
+        rolling plot is a PLACEHOLDER, a token standing in where the
+        generic code needs an AxisRef shape.  Reading that token's
+        coordinates handed back point-row ORDINALS (0..P-1) to be compared
+        against shot OFFSETS (-(N-1)..0): ordinal 0 was the only value the
+        two domains shared, so point rows 1..P-1 could never be selected,
+        every surviving crosshair candidate reported the same x, and a
+        range over the older shots came back with row 0 of every shot.
+        """
+
+        if isinstance(self._spec, RollingPlot):
+            return self._rolling_sample_offsets()
+        source = self._x_selector_source()
+        return np.asarray(
+            self._coordinate(source).canonical
+            if isinstance(source, AxisRef)
+            else source.canonical
+        )
+
     def _rolling_visible_mask(self) -> np.ndarray:
+        """Which samples of this revision the rolling curve actually draws.
+
+        All of them or none: they share one offset, and the window either
+        covers it or does not.
+        """
+
         if self._view is None:
             raise TypeError("rolling masking requires zlc_data.OwnedSnapshot")
         if not isinstance(self._spec, RollingPlot):
@@ -1001,8 +1074,7 @@ class FitProjection:
         shots = np.asarray(series[0].x.canonical, dtype=float).reshape(-1)
         if shots.size == 0:
             return np.zeros(self._view.samples.shape, dtype=bool)
-        coordinate = np.asarray(self._coordinate(self._x_ref()).canonical)
-        return np.isin(coordinate, shots)
+        return np.isin(self._rolling_sample_offsets(), shots)
 
     def _crosshair_sample_mask(
         self,
@@ -1027,14 +1099,12 @@ class FitProjection:
             x_values = np.asarray(samples.value.display, dtype=float)
             y_values = np.full(samples.shape, target.y, dtype=float)
         else:
-            x_coordinate = self._coordinate(self._x_ref())
             x_values = (
                 self._coordinate_values_to_display(
-                    np.asarray(x_coordinate.canonical, dtype=float),
-                    self._x_ref(),
+                    self._x_sample_canonical(), self._x_ref()
                 )
                 if isinstance(self._spec, RollingPlot)
-                else np.asarray(x_coordinate.display, dtype=float)
+                else np.asarray(self._coordinate(self._x_ref()).display, dtype=float)
             )
             y_values = (
                 np.asarray(self._coordinate(self._y_axis_ref()).display, dtype=float)
@@ -1088,22 +1158,12 @@ class FitProjection:
         mask &= self._facet_mask(state.facet_index)
         value = np.asarray(samples.value.canonical)
         if state.kind is SelectorKind.X_RANGE:
-            source = self._x_selector_source()
-            coordinate = np.asarray(
-                self._coordinate(source).canonical
-                if isinstance(source, AxisRef)
-                else source.canonical
-            )
+            coordinate = self._x_sample_canonical()
             assert isinstance(state.value, NumericRange)
             mask &= (coordinate >= state.value.low) & (coordinate <= state.value.high)
         elif state.kind is SelectorKind.AREA:
             assert isinstance(state.value, RectangleRange)
-            x_source = self._x_selector_source()
-            x = np.asarray(
-                self._coordinate(x_source).canonical
-                if isinstance(x_source, AxisRef)
-                else x_source.canonical
-            )
+            x = self._x_sample_canonical()
             mask &= (x >= state.value.x.low) & (x <= state.value.x.high)
             semantic = self._semantic_spec()
             if isinstance(semantic, ImagePlot):
