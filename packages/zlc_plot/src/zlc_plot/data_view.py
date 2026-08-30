@@ -3839,12 +3839,15 @@ class DataView:
             # grid answers for every cell at once.
             assert shared_bins is not None
             return self._reduced_histogram_facet(spec, shared_bins, window)
-        # WHICH SAMPLES COUNT.  A window pools the last N shots, and that is
-        # a validity plane over the same shape as the mask it replaces, so
-        # every path below slices and gathers it identically.
+        # WHICH SAMPLES COUNT.  Window is part of the Histogram cell's own
+        # vocabulary; Image and Curve cells have no such control and consume
+        # every valid facet already retained by Runtime.  Treating their
+        # internal default ``1`` as a window left all history facet titles in
+        # place while masking every cell except the latest one.
         validity = (
             self.history_validity(window)
-            if self.has_primary_index or int(window) > 1
+            if isinstance(cell, HistogramPlot)
+            and (self.has_primary_index or int(window) > 1)
             else None
         )
         dense = self._dense_facet(spec, shared_bins, uncertainty, validity=validity)

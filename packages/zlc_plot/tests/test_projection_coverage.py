@@ -4,9 +4,11 @@ import numpy as np
 import pytest
 
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from zlc_data import PRIMARY_INDEX
+from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
 from zlc_plot.data_view import DataView, DataViewError
 from zlc_plot.kinds import AxisRef
-from zlc_plot.specs import Reduction
+from zlc_plot.specs import FacetGridPlot, ImagePlot, Reduction
 
 
 def _snapshot(*, data_axes=(), points=None, values=None) -> DatasetSnapshot:
@@ -115,6 +117,41 @@ def test_facet_curve_cell_pools_the_point_domain_too() -> None:
             np.asarray(cell.payload.series[0].y.canonical),
             values[repeat].mean(axis=0),
         )
+
+
+def test_image_facets_do_not_apply_histogram_window_to_history_axis() -> None:
+    """A Facet Image has no window control, so every retained cell is data."""
+
+    point_table = PointTable.from_columns(
+        {"source index": [-4, -3, -2, -1, 0]},
+        ids={"source index": str(PRIMARY_INDEX_AXIS_ID)},
+        roles={"source index": PRIMARY_INDEX},
+    )
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        point_table,
+        data_axes=(
+            Axis.create("y", values=[0.0, 1.0]),
+            Axis.create("x", values=[0.0, 1.0, 2.0]),
+        ),
+        dtype=np.float64,
+        generation="indexed-image-facets",
+    )
+    snapshot = DatasetSnapshot(schema, np.ones(schema.shape), revision=0)
+    spec = FacetGridPlot(
+        AxisRef.point(str(PRIMARY_INDEX_AXIS_ID)),
+        ImagePlot(AxisRef.data("x"), AxisRef.data("y")),
+    )
+
+    cells = DataView(snapshot).facet(spec).cells
+    assert [cell.label for cell in cells] == [
+        "source index=-4",
+        "source index=-3",
+        "source index=-2",
+        "source index=-1",
+        "source index=0",
+    ]
+    assert all(np.all(cell.payload.valid) for cell in cells)
 
 
 def test_validate_curve_refuses_a_text_x_that_cannot_be_plotted() -> None:
