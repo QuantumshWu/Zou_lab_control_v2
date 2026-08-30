@@ -506,6 +506,13 @@ def _qt5_plot_widget_class() -> type[Any]:
     class _Qt5PlotWidget(QtWidgets.QWidget):
         """QImage-only frontend over a serial worker-owned plot session."""
 
+        # Qt may enter the Python event-filter virtual while the native
+        # QWidget is being constructed or torn down, outside the interval in
+        # which the instance dictionary is complete.  The window filter owns
+        # no target at either boundary; keep that sentinel valid for the
+        # widget's whole native lifetime.
+        _interaction_window = None
+
         _front_ready = QtCore.pyqtSignal()
         _gesture_ready = QtCore.pyqtSignal(object)
         _invoke_ready = QtCore.pyqtSignal(object)
