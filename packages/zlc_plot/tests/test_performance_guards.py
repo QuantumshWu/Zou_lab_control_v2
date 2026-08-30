@@ -255,20 +255,22 @@ def test_large_contiguous_facet_cells_are_views_with_bounded_peak(
     shares: list[bool] = []
     histogram_inputs: list[tuple[bool, bool]] = []
     original = DataView._dense_image_data
-    original_histogram = DataView._histogram_from_values
+    original_histogram = data_view_module._facet_kernel_counts
 
     def observed(self, _x, _y, _xr, _yr, values, usable, aggregation):
         shares.append(np.shares_memory(values, snapshot.block.values))
         return original(self, _x, _y, _xr, _yr, values, usable, aggregation)
 
-    def observed_histogram(self, bins, values, *, valid=None):
+    def observed_histogram(values, valid, *args, **kwargs):
         histogram_inputs.append(
             (np.shares_memory(values, snapshot.block.values), valid is not None)
         )
-        return original_histogram(self, bins, values, valid=valid)
+        return original_histogram(values, valid, *args, **kwargs)
 
     monkeypatch.setattr(DataView, "_dense_image_data", observed)
-    monkeypatch.setattr(DataView, "_histogram_from_values", observed_histogram)
+    monkeypatch.setattr(
+        data_view_module, "_facet_kernel_counts", observed_histogram
+    )
     tracemalloc.start()
     tracemalloc.reset_peak()
     payload = view.facet(spec)
@@ -282,7 +284,10 @@ def test_large_contiguous_facet_cells_are_views_with_bounded_peak(
     assert len(payload.cells) == 4
     assert len(histogram.cells) == 4
     assert shares == [True] * 4
-    assert histogram_inputs == [(True, True)] * 4
+    # Histogram cells are counted together in one tensor pass; the old guard
+    # expected four calls to the retired per-cell owner and therefore failed
+    # precisely when the batched path did its job.
+    assert histogram_inputs == [(True, True)]
     assert all(not cell.payload.valid.flags.owndata for cell in payload.cells)
     assert peak < 64 << 20
 

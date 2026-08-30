@@ -72,6 +72,25 @@ def catalog() -> tuple[Case, ...]:
             ("hover_series", "click_series", "drag_main", "pan_drag", "wheel_main"),
         ),
         Case(
+            "curve_tensor_group_2M",
+            lattice_2m,
+            lambda: CurvePlot(
+                AxisRef.data("frame"), group=AxisRef.data("site")
+            ),
+            ("hover_series", "click_series", "drag_main"),
+            notes="tensor x and tensor group",
+        ),
+        Case(
+            "curve_point_group_2M",
+            lattice_2m,
+            lambda: CurvePlot(
+                AxisRef.point_dimension("ax"),
+                group=AxisRef.point_dimension("ay"),
+            ),
+            ("hover_series", "click_series", "drag_main"),
+            notes="two point-topology roles",
+        ),
+        Case(
             "curve_20M",
             lattice_20m,
             lambda: CurvePlot(AxisRef.point("ax")),
@@ -90,6 +109,22 @@ def catalog() -> tuple[Case, ...]:
                 AxisRef.point_dimension("ax"), AxisRef.point_dimension("ay")
             ),
             ("drag_main", "drag_clim", "click_main", "pan_drag", "wheel_main"),
+        ),
+        Case(
+            "image_mixed_axes_2M",
+            lattice_2m,
+            lambda: ImagePlot(
+                AxisRef.point_dimension("ax"), AxisRef.data("site")
+            ),
+            ("drag_main", "drag_clim", "click_main", "pan_drag", "wheel_main"),
+            notes="one point-topology and one tensor image axis",
+        ),
+        Case(
+            "image_repeat_data_2M",
+            lattice_2m,
+            lambda: ImagePlot(AxisRef.data("site"), AxisRef.repeat()),
+            ("drag_main", "drag_clim", "click_main", "pan_drag", "wheel_main"),
+            notes="two tensor image axes, including repeat",
         ),
         Case(
             "image_camera_4M",
@@ -176,6 +211,29 @@ def catalog() -> tuple[Case, ...]:
             ),
             ("dclick_cell",),
             notes="64 heatmap cells (ax x ay per site)",
+        ),
+        Case(
+            "facet64_histogram_2M",
+            lambda: lattice_feed(
+                repeats=16, rows=2000, frames=1, sites=64, dims=(10, 10, 20)
+            ),
+            lambda: FacetGridPlot(
+                AxisRef.data("site"), HistogramPlot()
+            ),
+            ("dclick_cell",),
+            notes="64 pooled histogram cells",
+        ),
+        Case(
+            "facet34_mixed_image_2M",
+            lattice_2m,
+            lambda: FacetGridPlot(
+                AxisRef.data("site"),
+                ImagePlot(
+                    AxisRef.point_dimension("ax"), AxisRef.data("frame")
+                ),
+            ),
+            ("dclick_cell",),
+            notes="34 mixed-axis image cells",
         ),
         Case(
             "fit_curve_2M",

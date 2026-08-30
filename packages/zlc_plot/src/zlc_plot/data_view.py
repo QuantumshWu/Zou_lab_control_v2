@@ -679,11 +679,20 @@ class DataView:
         if (
             inherit_domains_from is not None
             and isinstance(inherit_domains_from, DataView)
+            and inherit_domains_from._schema.fingerprint == schema.fingerprint
             and inherit_domains_from._axis_display_units == overrides
             and inherit_domains_from._unit_registry is registry
             and inherit_domains_from._unit_registry_revision
             == self._unit_registry_revision
         ):
+            # Resolved declared axes are immutable schema/unit facts, not
+            # revision data.  Rebuilding a two-million-coordinate repeat axis
+            # converted its stored tuple, allocated an identity index, gathered
+            # the same coordinates and froze two copies on every live frame.
+            # Carry the small cache under the same exact context gate as the
+            # domains; copy the dict so either view may still resolve another
+            # axis without mutating its sibling.
+            self._axis_cache = dict(inherit_domains_from._axis_cache)
             self._domain_carry = inherit_domains_from._domain_carry
         self._samples = SampleProjection(
             revision=snapshot_revision(snapshot),
@@ -945,6 +954,11 @@ class DataView:
         factored = self._factored_curve(x, groups, aggregation, uncertainty)
         if factored is not None:
             return factored
+        exact = self._curve_from_axes(
+            x, groups, aggregation, uncertainty=uncertainty
+        )
+        if exact is not None:
+            return exact
         positions = self._all_positions()
         return self._curve_from_positions(
             x, positions, groups, aggregation, uncertainty
@@ -959,20 +973,21 @@ class DataView:
     ) -> CurveData | None:
         """Project one declared dense data axis without materializing samples.
 
-        The narrow twin of ``_dense_data_image``: an ungrouped curve over a
-        declared DATA axis with finite, strictly increasing coordinates is a
-        straight tensor reduction along every other dimension -- the same
-        operation the generic path performs by flattening every sample into a
-        (position, value) pair and aggregating per unique coordinate code,
-        which on a camera frame is millions of pairs, a sort, and a Python
-        loop of per-bucket reductions.  Groups, point domains, facet subsets
-        and unordered coordinates keep the generic algorithm.
+        A curve whose x/group axes are real tensor dimensions is one masked
+        reduction along every other dimension. Flattening it into millions
+        of (position, value) pairs and rediscovering those dimensions with
+        codes is never legitimate. Point-domain groups and unordered x
+        coordinates keep the generic algorithm.
         """
 
-        if groups or x.domain is not AxisDomain.DATA:
+        tensor_domains = (AxisDomain.REPEAT, AxisDomain.DATA)
+        if x.domain not in tensor_domains or any(
+            group.domain not in tensor_domains for group in groups
+        ):
             return None
         try:
             x_resolved = self._resolve(x)
+            group_resolved = tuple(self._resolve(group) for group in groups)
         except AxisResolutionError:
             # Let the normal resolver produce the public missing-axis error.
             return None
@@ -984,6 +999,32 @@ class DataView:
             # only a strictly increasing declared domain is bit-identical.
             return None
 
+        dimensions = [int(x_resolved.dimension)]
+        group_domains = []
+        group_orders = []
+        shape = self._samples.value.canonical.shape
+        for group, resolved in zip(groups, group_resolved):
+            dimension = int(resolved.dimension)
+            if dimension in dimensions:
+                return None
+            dimensions.append(dimension)
+            stride = 1
+            for size in shape[dimension + 1:]:
+                stride *= int(size)
+            representatives = np.arange(shape[dimension], dtype=np.int64) * stride
+            domain = self._domain(group, representatives)
+            codes = np.asarray(domain.codes, dtype=np.int64)
+            if (
+                domain.canonical.size != shape[dimension]
+                or codes.shape != (shape[dimension],)
+                or bool((codes < 0).any())
+                or np.unique(codes).size != codes.size
+            ):
+                return None
+            order = _inverse_code_order(codes)
+            group_domains.append(domain)
+            group_orders.append(order)
+
         return self._dense_curve_data(
             x,
             x_resolved,
@@ -992,6 +1033,10 @@ class DataView:
             aggregation,
             uncertainty,
             self._samples.sigma,
+            groups=groups,
+            group_domains=tuple(group_domains),
+            group_dimensions=tuple(dimensions[1:]),
+            group_orders=tuple(group_orders),
         )
 
     def _dense_curve_data(
@@ -1003,75 +1048,205 @@ class DataView:
         aggregation: Reduction,
         uncertainty: bool = False,
         sigma: NDArray[Any] | None = None,
+        *,
+        groups: tuple[AxisRef, ...] = (),
+        group_domains: tuple = (),
+        group_dimensions: tuple[int, ...] = (),
+        group_orders: tuple[NDArray[np.int64] | None, ...] = (),
     ) -> CurveData:
         """One dense curve out of one (possibly row-sliced) value tensor."""
 
         x_canonical = np.asarray(x_resolved.domain_canonical)
         nx = int(x_canonical.size)
 
+        group_sizes = tuple(int(domain.size) for domain in group_domains)
+        combinations = math.prod(group_sizes) if group_sizes else 1
+
         def laid_out(array: NDArray[Any]) -> NDArray[Any]:
-            return np.reshape(
-                np.moveaxis(array, x_resolved.dimension, -1), (-1, nx), order="C"
-            )
+            kept = (int(x_resolved.dimension), *group_dimensions)
+            destinations = tuple(range(np.ndim(array) - len(kept), np.ndim(array)))
+            moved = np.moveaxis(array, kept, destinations)
+            return np.reshape(moved, (-1, nx, combinations), order="C")
+
+        def code_ordered(array: NDArray[Any]) -> NDArray[Any]:
+            result = np.asarray(array).reshape((nx, *group_sizes))
+            for position, order in enumerate(group_orders):
+                if order is not None:
+                    result = np.take(result, order, axis=1 + position)
+            return result.reshape(nx, combinations)
 
         moved = laid_out(values)
         moved_usable = laid_out(usable)
-        y, counts = _masked_leading_reduce(moved, moved_usable, aggregation)
-        y = np.asarray(y, dtype=np.float64)
+        identity = _leading_identity(moved, moved_usable)
+        if identity is not None:
+            # Nothing is pooled: every kept (x, group...) bucket owns exactly
+            # one physical sample.  All five Reduction choices are therefore
+            # the identity.  The general reducer still scanned validity and
+            # materialised an int64 count plane, then the identity group order
+            # copied both full planes once more.
+            y, valid_plane = identity
+            counts = (
+                np.broadcast_to(np.asarray(1, dtype=np.int64), y.shape)
+                if _stride_zero_all_true(valid_plane)
+                else valid_plane.astype(np.int64)
+            )
+        else:
+            y, counts = _masked_leading_reduce(moved, moved_usable, aggregation)
+            valid_plane = None
+        y = code_ordered(np.asarray(y, dtype=np.float64))
+        counts = code_ordered(counts)
+        if valid_plane is not None:
+            valid_plane = code_ordered(valid_plane)
         sem = None
         if uncertainty:
-            # The SEM is the SAME reduction run over the squares: no second
-            # kernel, no binomial special case -- for a boolean column the
-            # sample spread sqrt(p(1-p)) IS the binomial spread.
-            def mean_of_squares(plane: Any, offset: float) -> Any:
-                reduced, _ = _masked_leading_reduce(
-                    np.square(
-                        np.asarray(plane, dtype=np.float64) - offset
-                    ),
-                    moved_usable,
-                    Reduction.MEAN,
+            if identity is not None and sigma is None:
+                # One sample cannot state a scatter.  With no sample-owned
+                # sigma the exact answer is NaN in every identity bucket;
+                # reducing values and their squares over two million
+                # singleton buckets only rediscovers that invariant.
+                sem = np.broadcast_to(
+                    np.asarray(np.nan, dtype=np.float64), y.shape
                 )
-                return reduced
+            else:
+                # The SEM is the SAME reduction run over the squares: no second
+                # kernel, no binomial special case -- for a boolean column the
+                # sample spread sqrt(p(1-p)) IS the binomial spread.
+                def mean_of_squares(plane: Any, offset: float) -> Any:
+                    reduced, _ = _masked_leading_reduce(
+                        np.square(
+                            np.asarray(plane, dtype=np.float64) - offset
+                        ),
+                        moved_usable,
+                        Reduction.MEAN,
+                    )
+                    return code_ordered(reduced)
 
-            sem = _sem_of_mean(
-                y,
-                counts,
-                moved,
-                None if sigma is None else laid_out(sigma),
-                mean_of_squares,
-            )
-        valid = (counts > 0) & np.isfinite(y)
-        y_display = self._samples.value.canonical_unit.convert_value_to(
-            y, self._samples.value.display_unit
+                sem = _sem_of_mean(
+                    y,
+                    counts,
+                    moved,
+                    None if sigma is None else laid_out(sigma),
+                    mean_of_squares,
+                )
+        x_quantity = QuantityArray(
+            x_canonical,
+            np.asarray(x_resolved.domain_display),
+            x_resolved.coordinate.canonical_unit,
+            x_resolved.coordinate.display_unit,
+            x_resolved.coordinate.label,
         )
-        series = CurveSeries(
-            x=QuantityArray(
-                x_canonical,
-                np.asarray(x_resolved.domain_display),
-                x_resolved.coordinate.canonical_unit,
-                x_resolved.coordinate.display_unit,
-                x_resolved.coordinate.label,
-            ),
-            x_labels=_axis_coordinate_labels(x_resolved, x_canonical),
-            y=QuantityArray(
-                y,
-                y_display,
-                self._samples.value.canonical_unit,
-                self._samples.value.display_unit,
-                self._samples.value.label,
-            ),
-            valid=valid,
-            counts=counts,
-            sem=sem,
-            group_key=(),
-            label=self._samples.value.label,
+        series = self._series_from_columns(
+            x_quantity,
+            _axis_coordinate_labels(x_resolved, x_canonical),
+            tuple(group_domains),
+            group_sizes,
+            y,
+            counts,
+            sem,
+            valid_plane=valid_plane,
         )
         return CurveData(
             revision=self._samples.revision,
             generation=self._samples.generation,
             x_ref=x,
-            group_by=(),
-            series=(series,),
+            group_by=groups,
+            series=series,
+        )
+
+    def _curve_from_axes(
+        self,
+        x: AxisRef,
+        groups: tuple[AxisRef, ...],
+        aggregation: Reduction,
+        *,
+        uncertainty: bool = False,
+    ) -> CurveData | None:
+        """Exact full-Dataset Curve aggregation without position planes."""
+
+        projection = self._axis_projection((*groups, x))
+        domains, axis_codes, dimensions = projection
+        domains, values, counts, presence = self._aggregate_axes(
+            (*groups, x), aggregation, projection=projection
+        )
+        group_domains = domains[:-1]
+        x_domain = domains[-1]
+        nx = int(x_domain.size)
+
+        def columns(array: NDArray[Any]) -> NDArray[Any]:
+            return np.moveaxis(np.asarray(array), -1, 0).reshape(nx, -1)
+
+        resolved = self._resolve(x)
+        x_quantity = QuantityArray(
+            np.asarray(x_domain.canonical),
+            np.asarray(x_domain.display),
+            resolved.coordinate.canonical_unit,
+            resolved.coordinate.display_unit,
+            resolved.coordinate.label,
+        )
+        group_sizes = tuple(int(domain.size) for domain in group_domains)
+        sem = None
+        if uncertainty:
+            shape = (*group_sizes, nx)
+            means = np.asarray(values, dtype=np.float64).reshape(shape)
+            flat_means = means.reshape((-1, nx))
+            references = np.asarray(
+                [_sem_reference(row) for row in flat_means],
+                dtype=np.float64,
+            )
+            offsets = np.broadcast_to(
+                references[:, None], flat_means.shape
+            ).reshape(-1)
+            domain_sizes = tuple(int(domain.size) for domain in domains)
+            squared = _axis_kernel_aggregate(
+                self._samples.value.canonical,
+                self._samples.valid_mask,
+                axis_codes,
+                dimensions,
+                domain_sizes,
+                Reduction.SUM,
+                offsets=offsets,
+            )
+            if squared is None:
+                return None
+            square_sums = squared[0].reshape(shape)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                mean_squares = square_sums / counts
+            sigma_squares = None
+            if self._samples.sigma is not None:
+                propagated = _axis_kernel_aggregate(
+                    self._samples.sigma,
+                    self._samples.valid_mask,
+                    axis_codes,
+                    dimensions,
+                    domain_sizes,
+                    Reduction.SUM,
+                    offsets=np.zeros(offsets.shape, dtype=np.float64),
+                )
+                if propagated is None:
+                    return None
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    sigma_squares = propagated[0].reshape(shape) / counts
+            sem = _sem_from_moments(
+                means - offsets.reshape(shape),
+                mean_squares,
+                counts,
+                sigma_squares,
+            )
+        return CurveData(
+            revision=self._samples.revision,
+            generation=self._samples.generation,
+            x_ref=x,
+            group_by=groups,
+            series=self._series_from_columns(
+                x_quantity,
+                _axis_coordinate_labels(resolved, np.asarray(x_domain.canonical)),
+                group_domains,
+                group_sizes,
+                columns(values),
+                columns(counts),
+                None if sem is None else columns(sem),
+                used_plane=columns(presence),
+            ),
         )
 
     def _factored_curve(
@@ -1101,9 +1276,68 @@ class DataView:
         oracle tests hold both to that).
         """
 
-        planes = self._factored_planes((x,), groups, aggregation, uncertainty)
+        point_domains = (
+            AxisDomain.POINT_COORDINATE,
+            AxisDomain.POINT_DIMENSION,
+        )
+        point_groups = tuple(group for group in groups if group.domain in point_domains)
+        tensor_groups = tuple(group for group in groups if group not in point_groups)
+        row_refs = (*point_groups, x)
+        planes = self._factored_planes(
+            row_refs, tensor_groups, aggregation, uncertainty
+        )
         if planes is None:
             return None
+        if point_groups:
+            point_sizes = planes.row_sizes[:-1]
+            nx = planes.row_sizes[-1]
+            tensor_sizes = planes.group_sizes
+            shape = (*point_sizes, nx, *tensor_sizes)
+
+            def columns(array: NDArray[Any]) -> NDArray[Any]:
+                moved = np.moveaxis(np.asarray(array).reshape(shape), len(point_sizes), 0)
+                internal = (*point_groups, *tensor_groups)
+                permutation = [0] + [
+                    1 + internal.index(group) for group in groups
+                ]
+                return np.transpose(moved, permutation).reshape(nx, -1)
+
+            presence = np.moveaxis(
+                planes.row_presence.reshape((*point_sizes, nx)),
+                len(point_sizes),
+                0,
+            )
+            presence = np.broadcast_to(
+                presence.reshape((nx, *point_sizes, *([1] * len(tensor_sizes)))),
+                (nx, *point_sizes, *tensor_sizes),
+            )
+            internal = (*point_groups, *tensor_groups)
+            permutation = [0] + [1 + internal.index(group) for group in groups]
+            used = np.transpose(presence, permutation).reshape(nx, -1)
+            domain_by_group = {
+                group: domain
+                for group, domain in zip(point_groups, planes.row_domains[:-1])
+            }
+            domain_by_group.update(zip(tensor_groups, planes.group_domains))
+            group_domains = tuple(domain_by_group[group] for group in groups)
+            group_sizes = tuple(int(domain.size) for domain in group_domains)
+            series = self._series_from_columns(
+                planes.x_quantity,
+                planes.x_labels,
+                group_domains,
+                group_sizes,
+                columns(planes.y_plane),
+                columns(planes.counts_plane),
+                None if planes.sem_plane is None else columns(planes.sem_plane),
+                used_plane=used,
+            )
+            return CurveData(
+                revision=self._samples.revision,
+                generation=self._samples.generation,
+                x_ref=x,
+                group_by=groups,
+                series=series,
+            )
         series = self._series_from_planes(
             planes,
             planes.group_domains,
@@ -1140,15 +1374,25 @@ class DataView:
 
         cell = spec.cell
         row_domains = (AxisDomain.POINT_COORDINATE, AxisDomain.POINT_DIMENSION)
-        if (
-            isinstance(cell, ImagePlot)
-            and cell.x.domain in row_domains
-            and cell.y.domain in row_domains
-        ):
+        if isinstance(cell, ImagePlot):
             return self._factored_facet_images(spec, cell)
         if not isinstance(cell, CurvePlot):
             return None
         cell_groups = () if cell.group is None else (cell.group,)
+        if (
+            spec.facet.domain in (AxisDomain.REPEAT, AxisDomain.DATA)
+            and cell.x.domain in (AxisDomain.REPEAT, AxisDomain.DATA)
+        ):
+            combined = self._dense_data_curve(
+                cell.x,
+                (spec.facet, *cell_groups),
+                cell.reduction,
+                uncertainty,
+            )
+            if combined is not None:
+                return self._curve_groups_to_facets(
+                    spec, cell, cell_groups, combined
+                )
         row_facet = spec.facet.domain in (
             AxisDomain.POINT_COORDINATE,
             AxisDomain.POINT_DIMENSION,
@@ -1170,7 +1414,17 @@ class DataView:
         else:
             return None
         if planes is None:
-            return None
+            combined = self._curve_from_axes(
+                cell.x,
+                (spec.facet, *cell_groups),
+                cell.reduction,
+                uncertainty=uncertainty,
+            )
+            if combined is None:
+                return None
+            return self._curve_groups_to_facets(
+                spec, cell, cell_groups, combined
+            )
         if row_facet:
             facet_domain = planes.row_domains[0]
             facet_size, nx = planes.row_sizes
@@ -1265,6 +1519,56 @@ class DataView:
             cells=tuple(cells),
         )
 
+    def _curve_groups_to_facets(
+        self,
+        spec: FacetGridPlot,
+        cell: CurvePlot,
+        cell_groups: tuple[AxisRef, ...],
+        combined: CurveData,
+    ) -> FacetData:
+        """Split one `(facet, *groups)` Curve projection into cell views."""
+
+        grouped: list[tuple[AxisValue, list[CurveSeries]]] = []
+        for series in combined.series:
+            facet_value = series.group_key[0]
+            if not grouped or grouped[-1][0] != facet_value:
+                grouped.append((facet_value, []))
+            key = series.group_key[1:]
+            label = self._samples.value.label if not key else ", ".join(
+                item.label for item in key
+            )
+            grouped[-1][1].append(CurveSeries(
+                x=series.x,
+                x_labels=series.x_labels,
+                y=series.y,
+                valid=series.valid,
+                counts=series.counts,
+                sem=series.sem,
+                group_key=key,
+                label=label,
+            ))
+        return FacetData(
+            revision=self._samples.revision,
+            generation=self._samples.generation,
+            spec=spec,
+            cells=tuple(
+                FacetCell(
+                    facet_index=index,
+                    facet_value_canonical=value.canonical,
+                    facet_value_display=value.display,
+                    label=value.label,
+                    payload=CurveData(
+                        revision=self._samples.revision,
+                        generation=self._samples.generation,
+                        x_ref=cell.x,
+                        group_by=cell_groups,
+                        series=tuple(series),
+                    ),
+                )
+                for index, (value, series) in enumerate(grouped)
+            ),
+        )
+
     def _factored_facet_images(
         self,
         spec: FacetGridPlot,
@@ -1296,7 +1600,37 @@ class DataView:
         else:
             return None
         if planes is None:
-            return None
+            domains, z, counts, presence = self._aggregate_axes(
+                (spec.facet, cell.y, cell.x), cell.reduction
+            )
+            facet_domain, y_domain, x_domain = domains
+            cells = []
+            for facet_index, facet_value in enumerate(facet_domain.values):
+                geometry = presence[facet_index]
+                if not bool(geometry.any()):
+                    continue
+                cells.append(FacetCell(
+                    facet_index=len(cells),
+                    facet_value_canonical=facet_value.canonical,
+                    facet_value_display=facet_value.display,
+                    label=facet_value.label,
+                    payload=self._image_from_planes(
+                        cell.x,
+                        cell.y,
+                        x_domain,
+                        y_domain,
+                        z[facet_index],
+                        counts[facet_index],
+                        used_y=geometry.any(axis=1),
+                        used_x=geometry.any(axis=0),
+                    ),
+                ))
+            return FacetData(
+                revision=self._samples.revision,
+                generation=self._samples.generation,
+                spec=spec,
+                cells=tuple(cells),
+            )
         if row_facet:
             facet_domain, y_domain, x_domain = planes.row_domains
             facet_size, ny, nx = planes.row_sizes
@@ -1464,8 +1798,7 @@ class DataView:
             # The generic path walks series in CODE order (value-sorted for
             # value-derived domains); the tensor dimension is in INDEX
             # order.  This tiny permutation is the bridge.
-            order = np.empty(codes.size, dtype=np.int64)
-            order[codes] = np.arange(codes.size, dtype=np.int64)
+            order = _inverse_code_order(codes)
             group_domains.append(domain)
             group_orders.append(order)
 
@@ -1542,7 +1875,8 @@ class DataView:
         def code_ordered(plane: NDArray[Any]) -> NDArray[Any]:
             plane = to_groups_order(plane)
             for position, order in enumerate(group_orders):
-                plane = np.take(plane, order, axis=1 + position)
+                if order is not None:
+                    plane = np.take(plane, order, axis=1 + position)
             return plane.reshape(rows, combos)
 
         counts_pg = code_ordered(counts_pg)
@@ -1682,6 +2016,31 @@ class DataView:
         if x_quantity is None:
             x_quantity = planes.x_quantity
             x_labels = planes.x_labels
+        return self._series_from_columns(
+            x_quantity,
+            x_labels,
+            group_domains,
+            group_sizes,
+            y_plane,
+            counts_plane,
+            sem_plane,
+        )
+
+    def _series_from_columns(
+        self,
+        x_quantity: QuantityArray,
+        x_labels: tuple[str, ...] | None,
+        group_domains: tuple,
+        group_sizes: tuple[int, ...],
+        y_plane: NDArray[np.float64],
+        counts_plane: NDArray[np.int64],
+        sem_plane: NDArray[np.float64] | None,
+        *,
+        used_plane: NDArray[np.bool_] | None = None,
+        valid_plane: NDArray[np.bool_] | None = None,
+    ) -> tuple[CurveSeries, ...]:
+        """One shared x column and its tensor-ordered group columns."""
+
         combos = 1
         for size in group_sizes:
             combos *= size
@@ -1698,23 +2057,61 @@ class DataView:
             sem_column = (
                 None if sem_plane is None else sem_plane[:, flat_index]
             )
+            shown_x = x_quantity
+            shown_labels = x_labels
+            if used_plane is not None:
+                used = np.asarray(used_plane[:, flat_index], dtype=np.bool_)
+            else:
+                used = None
+            if used is not None and not bool(used.all()):
+                shown_x = QuantityArray(
+                    np.asarray(x_quantity.canonical)[used],
+                    np.asarray(x_quantity.display)[used],
+                    x_quantity.canonical_unit,
+                    x_quantity.display_unit,
+                    x_quantity.label,
+                )
+                shown_labels = (
+                    None
+                    if x_labels is None
+                    else tuple(label for label, keep in zip(x_labels, used) if keep)
+                )
+                y_column = y_column[used]
+                counts_column = counts_column[used]
+                if sem_column is not None:
+                    sem_column = sem_column[used]
+            valid_column = (
+                np.asarray(valid_plane[:, flat_index], dtype=np.bool_)
+                if valid_plane is not None
+                else (counts_column > 0) & np.isfinite(y_column)
+            )
+            # These arrays are either immutable source views or fresh results
+            # owned by this projection.  Seal the latter before the public
+            # immutable wrappers consume them, otherwise their validators make
+            # a second full-size safety copy of storage no caller can mutate.
+            for array in (y_column, counts_column, valid_column):
+                if array.flags.writeable:
+                    array.setflags(write=False)
+            y_display = value.canonical_unit.convert_value_to(
+                y_column, value.display_unit
+            )
+            if y_display.flags.writeable:
+                y_display.setflags(write=False)
             label = value.label if not key else ", ".join(
                 item.label for item in key
             )
             series.append(
                 CurveSeries(
-                    x=x_quantity,
-                    x_labels=x_labels,
+                    x=shown_x,
+                    x_labels=shown_labels,
                     y=QuantityArray(
                         y_column,
-                        value.canonical_unit.convert_value_to(
-                            y_column, value.display_unit
-                        ),
+                        y_display,
                         value.canonical_unit,
                         value.display_unit,
                         value.label,
                     ),
-                    valid=(counts_column > 0) & np.isfinite(y_column),
+                    valid=valid_column,
                     counts=counts_column,
                     sem=sem_column,
                     group_key=key,
@@ -1856,8 +2253,7 @@ class DataView:
         factored = self._factored_image(x, y, aggregation)
         if factored is not None:
             return factored
-        positions = self._all_positions()
-        return self._image_from_positions(x, y, positions, aggregation)
+        return self._image_from_axes(x, y, aggregation)
 
     def _dense_data_image(
         self,
@@ -1875,9 +2271,9 @@ class DataView:
         every flattened sample by its two declared data-axis indices.
         """
 
-        if x.domain is not AxisDomain.DATA or y.domain is not AxisDomain.DATA:
+        tensor_domains = (AxisDomain.REPEAT, AxisDomain.DATA)
+        if x.domain not in tensor_domains or y.domain not in tensor_domains:
             return None
-        assert x.axis_id is not None and y.axis_id is not None
         # From the resolver, which is the one thing that decides what an axis
         # reference means.  This used to build its own map keyed on the axis
         # NAME, while the resolver accepts a name OR a full axis id -- so
@@ -1945,11 +2341,9 @@ class DataView:
             (-1, ny, nx),
             order="C",
         )
-        if moved.shape[0] == 1:
-            z = np.asarray(moved[0])
-            valid = np.asarray(moved_usable[0], dtype=np.bool_)
-            if z.dtype.kind in "fc":
-                valid = valid & np.isfinite(z)
+        identity = _leading_identity(moved, moved_usable)
+        if identity is not None:
+            z, valid = identity
         else:
             z, counts = _masked_leading_reduce(moved, moved_usable, aggregation)
             valid = (counts > 0) & np.isfinite(z)
@@ -2085,6 +2479,125 @@ class DataView:
                 self._samples.value.label,
             ),
             valid=(counts > 0) & np.isfinite(z),
+        )
+
+    def _axis_projection(
+        self, refs: tuple[AxisRef, ...]
+    ) -> tuple[tuple[_Domain, ...], tuple[NDArray[np.int64], ...], tuple[int, ...]]:
+        """Resolve each kept axis to its small code vector and tensor dimension."""
+
+        shape = self._samples.value.canonical.shape
+        domains = []
+        axis_codes = []
+        dimensions = []
+        for ref in refs:
+            resolved = self._resolve(ref)
+            dimension = int(resolved.dimension)
+            stride = 1
+            for size in shape[dimension + 1:]:
+                stride *= int(size)
+            representatives = np.arange(shape[dimension], dtype=np.int64) * stride
+            domain = self._domain(ref, representatives)
+            codes = np.asarray(domain.codes, dtype=np.int64)
+            axis_codes.append(codes)
+            dimensions.append(dimension)
+            domains.append(domain)
+        return tuple(domains), tuple(axis_codes), tuple(dimensions)
+
+    def _aggregate_axes(
+        self,
+        refs: tuple[AxisRef, ...],
+        aggregation: Reduction,
+        *,
+        projection: tuple[
+            tuple[_Domain, ...],
+            tuple[NDArray[np.int64], ...],
+            tuple[int, ...],
+        ] | None = None,
+    ) -> tuple[tuple[_Domain, ...], NDArray[Any], NDArray[np.int64], NDArray[np.bool_]]:
+        """Aggregate the full Dataset once by small per-axis code vectors.
+
+        Each coordinate is fixed by one physical tensor dimension. Combining
+        those axis-sized codes by broadcasting preserves the generic path's
+        row-major bucket order without materialising positions or one full
+        coordinate plane per axis. The returned presence ignores value
+        validity and therefore describes geometry, not measurement success.
+        """
+
+        shape = self._samples.value.canonical.shape
+        domains, axis_codes, dimensions = (
+            self._axis_projection(refs) if projection is None else projection
+        )
+        domain_sizes = tuple(int(domain.size) for domain in domains)
+        compiled = _axis_kernel_aggregate(
+            self._samples.value.canonical,
+            self._samples.valid_mask,
+            tuple(axis_codes),
+            tuple(dimensions),
+            domain_sizes,
+            aggregation,
+        )
+        if compiled is not None:
+            reduced, counts, present = compiled
+            return (
+                tuple(domains),
+                reduced.reshape(domain_sizes),
+                counts.reshape(domain_sizes),
+                present.reshape(domain_sizes),
+            )
+        combined: Any = np.int64(0)
+        admitted: Any = np.bool_(True)
+        for dimension, domain, codes in zip(
+            dimensions, domains, axis_codes, strict=True
+        ):
+            reshape = [1] * len(shape)
+            reshape[dimension] = codes.size
+            placed = codes.reshape(reshape)
+            combined = combined * int(domain.size) + np.where(
+                placed >= 0, placed, 0
+            )
+            admitted = admitted & (placed >= 0)
+        full_codes = np.broadcast_to(combined, shape).reshape(-1)
+        full_admitted = np.broadcast_to(admitted, shape).reshape(-1)
+        full_codes = np.where(full_admitted, full_codes, -1)
+        usable = (
+            np.asarray(
+                np.broadcast_to(self._samples.valid_mask, shape),
+                dtype=np.bool_,
+            ).reshape(-1)
+            & full_admitted
+        )
+        bucket_count = math.prod(domain_sizes)
+        reduced, counts = _aggregate_by_codes(
+            self._samples.value.canonical.reshape(-1),
+            usable,
+            full_codes,
+            bucket_count,
+            aggregation,
+        )
+        present = np.bincount(
+            full_codes[full_admitted], minlength=bucket_count
+        ) > 0
+        out_shape = domain_sizes
+        return (
+            tuple(domains),
+            np.asarray(reduced).reshape(out_shape),
+            np.asarray(counts).reshape(out_shape),
+            np.asarray(present).reshape(out_shape),
+        )
+
+    def _image_from_axes(
+        self,
+        x: AxisRef,
+        y: AxisRef,
+        aggregation: Reduction,
+    ) -> ImageData:
+        domains, z, counts, _presence = self._aggregate_axes(
+            (y, x), aggregation
+        )
+        y_domain, x_domain = domains
+        return self._image_from_planes(
+            x, y, x_domain, y_domain, z, counts
         )
 
     def _image_from_positions(
@@ -3149,24 +3662,7 @@ class DataView:
         valid: NDArray[np.bool_] | None = None,
     ) -> HistogramData:
         _require_real_numeric(values, None)
-        canonical_bins: int | NDArray[Any]
-        if isinstance(bins, bool):
-            raise TypeError("histogram bin count must be an integer")
-        if isinstance(bins, (int, np.integer)):
-            if int(bins) <= 0:
-                raise ValueError("histogram bin count must be positive")
-            canonical_bins = int(bins)
-        else:
-            edges = np.asarray(tuple(bins))
-            _require_real_numeric(edges, None)
-            if edges.ndim != 1 or edges.size < 2 or not np.all(np.isfinite(edges)):
-                raise ValueError("histogram edges must be a finite one-dimensional sequence")
-            edges = self._samples.value.display_unit.convert_value_to(
-                edges, self._samples.value.canonical_unit
-            )
-            if np.any(np.diff(edges) <= 0):
-                raise ValueError("histogram edges must be strictly increasing")
-            canonical_bins = edges
+        canonical_bins = self._canonical_histogram_bins(bins)
         if isinstance(canonical_bins, int):
             source = np.asarray(values)
             if valid is None or bool(np.all(valid)):
@@ -3177,6 +3673,41 @@ class DataView:
         else:
             counts = histogram_counts(values, canonical_bins, valid)
             edges = canonical_bins
+        return self._histogram_from_counts(edges, counts)
+
+    def _canonical_histogram_bins(
+        self, bins: int | Sequence[float]
+    ) -> int | NDArray[Any]:
+        """Validate bins once and express explicit edges canonically."""
+
+        if isinstance(bins, bool):
+            raise TypeError("histogram bin count must be an integer")
+        if isinstance(bins, (int, np.integer)):
+            if int(bins) <= 0:
+                raise ValueError("histogram bin count must be positive")
+            return int(bins)
+        edges = np.asarray(tuple(bins))
+        _require_real_numeric(edges, None)
+        if edges.ndim != 1 or edges.size < 2 or not np.all(np.isfinite(edges)):
+            raise ValueError(
+                "histogram edges must be a finite one-dimensional sequence"
+            )
+        edges = self._samples.value.display_unit.convert_value_to(
+            edges, self._samples.value.canonical_unit
+        )
+        if np.any(np.diff(edges) <= 0):
+            raise ValueError("histogram edges must be strictly increasing")
+        return edges
+
+    def _histogram_from_counts(
+        self,
+        edges: NDArray[Any],
+        counts: NDArray[np.int64],
+    ) -> HistogramData:
+        """Speak already-counted canonical bins as one Histogram payload."""
+
+        edges = np.asarray(edges)
+        counts = np.asarray(counts, dtype=np.int64)
         centers = (edges[:-1] + edges[1:]) / 2.0
         display_edges = self._samples.value.canonical_unit.convert_value_to(
             edges, self._samples.value.display_unit
@@ -3390,13 +3921,12 @@ class DataView:
     ) -> FacetData | None:
         """Row-sliced twin of the dense projections, one cell at a time.
 
-        A facet over the repeat axis or any point-domain axis selects whole
-        repeats or whole point rows, and slicing those preserves the
-        regularity the dense paths rely on: each cell is the same dense
-        tensor, shorter.  Cells over DATA axes therefore reduce through the
-        same kernel as their single-kind projections -- no (position, value)
-        pairs, no code sort, no per-pixel grouping.  Facets over DATA axes
-        and grouped curve cells keep the generic algorithm.
+        A facet over a tensor dimension selects slices of the same dense
+        block, and slicing preserves the regularity the cell projection
+        relies on. Repeat/point facets shorten those axes; a Histogram over
+        a DATA facet bins a view of each data-axis slice. No case needs
+        (position, value) pairs, code sorting, or per-sample grouping.
+        Curve/Image DATA facets keep their one-pass factored paths.
         """
 
         facet = spec.facet
@@ -3411,6 +3941,14 @@ class DataView:
             AxisDomain.POINT_DIMENSION,
         ):
             slice_axis = 1
+        elif (
+            facet.domain is AxisDomain.DATA
+            and isinstance(cell, HistogramPlot)
+        ):
+            try:
+                slice_axis = int(self._resolve(facet).dimension)
+            except AxisResolutionError:
+                return None
         else:
             return None
 
@@ -3451,18 +3989,31 @@ class DataView:
         # One representative element per candidate slice puts the existing
         # domain machinery (labels, declared indices, units) to work on an
         # array the size of the SLICE COUNT, not of the dataset.
-        data_size = 1
-        for size in values.shape[2:]:
-            data_size *= int(size)
-        if slice_axis == 0:
-            representatives = np.arange(values.shape[0], dtype=np.int64) * (
-                values.shape[1] * data_size
-            )
-        else:
-            representatives = np.arange(values.shape[1], dtype=np.int64) * data_size
+        stride = 1
+        for size in values.shape[slice_axis + 1:]:
+            stride *= int(size)
+        representatives = (
+            np.arange(values.shape[slice_axis], dtype=np.int64)
+            * stride
+        )
         domain = self._domain(facet, representatives)
         if not domain.values:
             return None
+        batch_edges = None
+        batch_counts = None
+        if isinstance(cell, HistogramPlot):
+            assert shared_bins is not None
+            canonical_bins = self._canonical_histogram_bins(shared_bins)
+            if not isinstance(canonical_bins, int):
+                batch_edges = canonical_bins
+                batch_counts = _facet_kernel_counts(
+                    values,
+                    valid_mask,
+                    np.asarray(domain.codes, dtype=np.int64),
+                    slice_axis,
+                    len(domain.values),
+                    batch_edges,
+                )
 
         cells: list[FacetCell] = []
         for facet_index, facet_value in enumerate(domain.values):
@@ -3490,9 +4041,9 @@ class DataView:
             def sliced(plane: Any) -> Any:
                 if plane is None:
                     return None
-                return (
-                    plane[selected] if slice_axis == 0 else plane[:, selected]
-                )
+                slices = [slice(None)] * np.ndim(plane)
+                slices[slice_axis] = selected
+                return plane[tuple(slices)]
 
             cell_values = sliced(values)
             cell_valid = sliced(valid_mask)
@@ -3518,10 +4069,16 @@ class DataView:
                 )
             else:
                 assert shared_bins is not None
-                payload = self._histogram_from_values(
-                    shared_bins,
-                    cell_values,
-                    valid=cell_valid,
+                payload = (
+                    self._histogram_from_counts(
+                        batch_edges, batch_counts[facet_index]
+                    )
+                    if batch_counts is not None and batch_edges is not None
+                    else self._histogram_from_values(
+                        shared_bins,
+                        cell_values,
+                        valid=cell_valid,
+                    )
                 )
             cells.append(
                 FacetCell(
@@ -4000,6 +4557,139 @@ def _kernel_counts(
     return counted
 
 
+def _facet_kernel_counts(
+    values: NDArray[Any],
+    valid: NDArray[np.bool_],
+    facet_codes: NDArray[np.int64],
+    facet_dimension: int,
+    facet_count: int,
+    edges: NDArray[Any],
+) -> NDArray[np.int64] | None:
+    """Count all regular tensor Facet cells in one compiled pass."""
+
+    from . import _raster_kernels as kernels
+
+    if not kernels.engaged() or edges.ndim != 1 or edges.size < 2:
+        return None
+    first = float(edges[0])
+    last = float(edges[-1])
+    count = int(edges.size) - 1
+    bin_type = np.result_type(first, last, values)
+    if np.issubdtype(bin_type, np.integer):
+        bin_type = np.result_type(bin_type, float)
+    if bin_type != np.float64:
+        return None
+    produced = np.linspace(first, last, count + 1, dtype=bin_type)
+    if not np.array_equal(produced, edges) or bool(
+        np.any(produced[:-1] >= produced[1:])
+    ):
+        return None
+    source = np.asarray(values)
+    flat = kernels.readable(source).reshape(-1)
+    use_valid = not (
+        _stride_zero_all_true(valid) or bool(np.asarray(valid).all())
+    )
+    marks = (
+        kernels.readable(
+            np.asarray(np.broadcast_to(valid, source.shape), dtype=np.bool_)
+        ).reshape(-1)
+        if use_valid
+        else np.zeros(1, dtype=np.bool_)
+    )
+    stride = 1
+    for size in source.shape[facet_dimension + 1:]:
+        stride *= int(size)
+    threads = kernels.histogram_threads()
+    partials = np.empty((threads, facet_count, count), dtype=np.int64)
+    counted = np.empty((facet_count, count), dtype=np.int64)
+    kernels.uniform_facet_histograms(
+        flat,
+        marks,
+        use_valid,
+        kernels.readable(np.asarray(facet_codes, dtype=np.int64)),
+        stride,
+        kernels.readable(produced),
+        count,
+        partials,
+        counted,
+    )
+    return counted
+
+
+def _axis_kernel_aggregate(
+    values: NDArray[Any],
+    valid: NDArray[np.bool_],
+    codes: tuple[NDArray[np.int64], ...],
+    dimensions: tuple[int, ...],
+    domain_sizes: tuple[int, ...],
+    aggregation: Reduction,
+    *,
+    offsets: NDArray[np.float64] | None = None,
+) -> tuple[NDArray[np.float64], NDArray[np.int64], NDArray[np.bool_]] | None:
+    """Compiled exact-order aggregation from axis-sized code vectors."""
+
+    from . import _raster_kernels as kernels
+
+    operations = {
+        Reduction.MEAN: 0,
+        Reduction.SUM: 1,
+        Reduction.MIN: 2,
+        Reduction.MAX: 3,
+        Reduction.FIRST: 4,
+    }
+    operation = 5 if offsets is not None else operations.get(aggregation)
+    source = np.asarray(values)
+    if operation is None or not kernels.engaged() or source.dtype.kind == "c":
+        return None
+    maximum = max((code.size for code in codes), default=0)
+    table = np.full((len(codes), maximum), -1, dtype=np.int64)
+    for index, code in enumerate(codes):
+        table[index, : code.size] = code
+    shape = source.shape
+    strides = []
+    for dimension in dimensions:
+        stride = 1
+        for size in shape[dimension + 1:]:
+            stride *= int(size)
+        strides.append(stride)
+    use_valid = not (
+        _stride_zero_all_true(valid) or bool(np.asarray(valid).all())
+    )
+    marks = (
+        kernels.readable(
+            np.asarray(np.broadcast_to(valid, shape), dtype=np.bool_)
+        ).reshape(-1)
+        if use_valid
+        else np.zeros(1, dtype=np.bool_)
+    )
+    bucket_count = math.prod(domain_sizes)
+    out = np.empty(bucket_count, dtype=np.float64)
+    counts = np.empty(bucket_count, dtype=np.int64)
+    presence = np.empty(bucket_count, dtype=np.bool_)
+    kernels.aggregate_axis_codes(
+        kernels.readable(source).reshape(-1),
+        kernels.readable(marks),
+        use_valid,
+        kernels.readable(table),
+        kernels.readable(
+            np.asarray([code.size for code in codes], dtype=np.int64)
+        ),
+        kernels.readable(np.asarray(domain_sizes, dtype=np.int64)),
+        kernels.readable(np.asarray(strides, dtype=np.int64)),
+        bucket_count,
+        operation,
+        (
+            kernels.readable(np.zeros(1, dtype=np.float64))
+            if offsets is None
+            else kernels.readable(np.asarray(offsets, dtype=np.float64))
+        ),
+        out,
+        counts,
+        presence,
+    )
+    return out, counts, presence
+
+
 def histogram_counts(
     values: NDArray[Any],
     edges: NDArray[Any],
@@ -4135,6 +4825,18 @@ def _validate_aggregation(value: Reduction) -> Reduction:
     return value
 
 
+def _inverse_code_order(codes: NDArray[np.int64]) -> NDArray[np.int64] | None:
+    """Tensor-index order to value-domain order, or no work when identical."""
+
+    selected = np.asarray(codes, dtype=np.int64)
+    natural = np.arange(selected.size, dtype=np.int64)
+    if np.array_equal(selected, natural):
+        return None
+    order = np.empty(selected.size, dtype=np.int64)
+    order[selected] = natural
+    return order
+
+
 def _finite_coordinate(values: NDArray[Any]) -> NDArray[np.bool_]:
     if values.dtype.kind in "biufc":
         return np.isfinite(values)
@@ -4145,6 +4847,25 @@ def _require_real_numeric(values: NDArray[Any], ref: AxisRef | None) -> None:
     if np.asarray(values).dtype.kind not in "biuf":
         target = "dataset values" if ref is None else repr(ref)
         raise DataViewError(f"{target} must be real numeric for this projection")
+
+
+def _leading_identity(
+    values: NDArray[Any],
+    usable: NDArray[np.bool_],
+) -> tuple[NDArray[Any], NDArray[np.bool_]] | None:
+    """The value and validity planes when no tensor dimension is pooled.
+
+    ``DataView`` has already merged numeric finiteness into ``usable`` at its
+    immutable snapshot boundary.  Rechecking the value plane here would scan
+    every identity bucket a second time -- the whole two-million-point curve
+    and the whole singleton camera image -- to rediscover the same mask.
+    """
+
+    if values.shape[0] != 1:
+        return None
+    value = np.asarray(values[0])
+    valid = np.asarray(usable[0], dtype=np.bool_)
+    return value, valid
 
 
 def _masked_leading_reduce(
@@ -4163,8 +4884,46 @@ def _masked_leading_reduce(
     is the contract.
     """
 
-    if values.shape[0] == 1:
-        return np.asarray(values[0]), np.asarray(usable[0], dtype=np.int64)
+    identity = _leading_identity(values, usable)
+    if identity is not None:
+        value, valid = identity
+        return value, np.asarray(valid, dtype=np.int64)
+    if _stride_zero_all_true(usable) or bool(np.all(usable)):
+        # With no holes, ``where=usable`` and a separately summed count plane
+        # are pure overhead.  Plain leading-axis reductions are NumPy's
+        # contiguous fast path and produce the same dtype/order; counts are
+        # the constant pool size and need no allocation.
+        count = int(values.shape[0])
+        counts = np.broadcast_to(
+            np.asarray(count, dtype=np.int64), values.shape[1:]
+        )
+        if aggregation is Reduction.MEAN:
+            result = np.mean(values, axis=0)
+        elif aggregation is Reduction.SUM:
+            result = np.sum(values, axis=0)
+        elif aggregation is Reduction.MIN:
+            result = np.min(np.asarray(values, dtype=np.float64), axis=0)
+        elif aggregation is Reduction.MAX:
+            result = np.max(np.asarray(values, dtype=np.float64), axis=0)
+        elif aggregation is Reduction.FIRST:
+            result = np.asarray(values[0])
+        else:
+            raise AssertionError(f"unsupported reduction: {aggregation!r}")
+        return np.asarray(result), counts
+    from . import _raster_kernels as kernels
+
+    reduction_code = {
+        Reduction.MEAN: kernels.REDUCE_MEAN,
+        Reduction.SUM: kernels.REDUCE_SUM,
+        Reduction.MIN: kernels.REDUCE_MIN,
+        Reduction.MAX: kernels.REDUCE_MAX,
+        Reduction.FIRST: kernels.REDUCE_FIRST,
+    }[aggregation]
+    fused = kernels.fused_masked_leading_float64(
+        values, usable, reduction_code
+    )
+    if fused is not None:
+        return fused
     counts = np.sum(usable, axis=0, dtype=np.int64)
     with warnings.catch_warnings():
         # Empty positions are intentionally NaN and marked invalid by the

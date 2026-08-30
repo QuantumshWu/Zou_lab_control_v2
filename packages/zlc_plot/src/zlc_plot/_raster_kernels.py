@@ -1,4 +1,4 @@
-"""Numba kernels for the four hot passes of the display-front pipeline.
+"""Numba kernels for hot numeric passes of the display-front pipeline.
 
 Like :mod:`_height3d_scanline`, this module exists for SPEED ONLY.  Each
 kernel mirrors a numpy reference that stays where it lives and stays the
@@ -9,7 +9,7 @@ operation, in the same dtypes and the same order, and a standing contract
 test runs both and asserts bit equality, so the two can never drift apart
 silently.
 
-Why they are faster is the same story four times: numpy answers each of
+Why they are faster is the same story throughout: numpy answers each of
 these questions with several full passes over a megapixel plane (a copy, a
 scaled plane, a clipped plane, an index plane, a gather), or with a
 general-purpose routine paying for a generality the caller does not need
@@ -303,6 +303,138 @@ def uniform_histogram(values, edges, bins, partials, out):
         out[b] = total
 
 
+@njit(cache=True, parallel=True, nogil=True)
+def uniform_facet_histograms(
+    values,
+    valid,
+    use_valid,
+    facet_codes,
+    facet_stride,
+    edges,
+    bins,
+    partials,
+    out,
+):
+    """Count every tensor facet into ``out[facet, bin]`` in one pass.
+
+    ``facet_codes`` maps the physical tensor index to the value-sorted
+    Facet cell. It therefore handles duplicate and non-monotonic authored
+    coordinates without building one facet code per sample. Binning is the
+    exact operation used by :func:`uniform_histogram` above.
+    """
+
+    facets = out.shape[0]
+    threads = partials.shape[0]
+    chunk = (values.size + threads - 1) // threads
+    axis_size = facet_codes.size
+    for t in prange(threads):
+        stop = min((t + 1) * chunk, values.size)
+        for facet in range(facets):
+            for b in range(bins):
+                partials[t, facet, b] = 0
+        for p in range(t * chunk, stop):
+            if use_valid and not valid[p]:
+                continue
+            facet = facet_codes[(p // facet_stride) % axis_size]
+            if facet < 0:
+                continue
+            sample = np.float64(values[p])
+            if not (sample >= edges[0] and sample <= edges[bins]):
+                continue
+            index = np.int64(
+                ((sample - edges[0]) / (edges[bins] - edges[0])) * bins
+            )
+            if index == bins:
+                index -= 1
+            if sample < edges[index]:
+                index -= 1
+            if sample >= edges[index + 1] and index != bins - 1:
+                index += 1
+            partials[t, facet, index] += 1
+    for facet in prange(facets):
+        for b in range(bins):
+            total = np.int64(0)
+            for t in range(threads):
+                total += partials[t, facet, b]
+            out[facet, b] = total
+
+
+@njit(cache=True, nogil=True)
+def aggregate_axis_codes(
+    values,
+    valid,
+    use_valid,
+    axis_codes,
+    axis_sizes,
+    domain_sizes,
+    axis_strides,
+    bucket_count,
+    operation,
+    offsets,
+    out,
+    counts,
+    presence,
+):
+    """Reduce a tensor by axis-sized codes, preserving row-major order."""
+
+    for bucket in range(bucket_count):
+        counts[bucket] = 0
+        presence[bucket] = False
+        if operation == 2:
+            out[bucket] = np.inf
+        elif operation == 3:
+            out[bucket] = -np.inf
+        else:
+            out[bucket] = 0.0
+    for position in range(values.size):
+        bucket = 0
+        admitted = True
+        for axis in range(axis_sizes.size):
+            index = (position // axis_strides[axis]) % axis_sizes[axis]
+            code = axis_codes[axis, index]
+            if code < 0:
+                admitted = False
+                break
+            bucket = bucket * domain_sizes[axis] + code
+        if not admitted:
+            continue
+        presence[bucket] = True
+        if use_valid and not valid[position]:
+            continue
+        sample = np.float64(values[position])
+        if operation == 2:
+            # ``np.minimum.reduceat`` propagates NaN and, for equal values,
+            # keeps the later operand (observable for signed zero).  The
+            # compiled path is the same reduction in the same row-major
+            # order, so preserve both details rather than using a plain
+            # comparison.
+            if sample != sample:
+                out[bucket] = sample
+            elif out[bucket] == out[bucket] and sample <= out[bucket]:
+                out[bucket] = sample
+        elif operation == 3:
+            if sample != sample:
+                out[bucket] = sample
+            elif out[bucket] == out[bucket] and sample >= out[bucket]:
+                out[bucket] = sample
+        elif operation == 4:
+            if counts[bucket] == 0:
+                out[bucket] = sample
+        elif operation == 5:
+            delta = sample - offsets[bucket]
+            out[bucket] += delta * delta
+        else:
+            out[bucket] += sample
+        counts[bucket] += 1
+    if operation == 0:
+        for bucket in range(bucket_count):
+            if counts[bucket] > 0:
+                out[bucket] /= counts[bucket]
+    for bucket in range(bucket_count):
+        if counts[bucket] == 0:
+            out[bucket] = np.nan
+
+
 def histogram_threads() -> int:
     """How many lanes :func:`uniform_histogram` should be given."""
 
@@ -311,6 +443,98 @@ def histogram_threads() -> int:
     from numba import get_num_threads
 
     return int(get_num_threads())
+
+
+# ------------------------------------------------------- masked tensor reduce
+REDUCE_MEAN = 0
+REDUCE_SUM = 1
+REDUCE_MIN = 2
+REDUCE_MAX = 3
+REDUCE_FIRST = 4
+_MASKED_LEADING_MIN_SAMPLES = 32768
+
+
+@njit(cache=True, parallel=True, nogil=True)
+def masked_leading_float64(values, valid, reduction, out, counts):
+    """Reduce ``(pool, outputs)`` once, producing values and counts together.
+
+    The NumPy reference first sums the mask and then walks the value plane
+    again under ``where=``.  With holes, every output bucket needs both facts;
+    this kernel obtains them in the same leading-axis order in one pass.
+    Equality updates for extrema deliberately retain NumPy's last signed zero.
+    """
+
+    pool, outputs = values.shape
+    for column in prange(outputs):
+        count = 0
+        accumulator = 0.0
+        found = False
+        if reduction == REDUCE_MIN:
+            accumulator = np.inf
+        elif reduction == REDUCE_MAX:
+            accumulator = -np.inf
+        for row in range(pool):
+            if not valid[row, column]:
+                continue
+            sample = values[row, column]
+            count += 1
+            if reduction == REDUCE_MEAN or reduction == REDUCE_SUM:
+                accumulator += sample
+            elif reduction == REDUCE_MIN:
+                if sample <= accumulator:
+                    accumulator = sample
+            elif reduction == REDUCE_MAX:
+                if sample >= accumulator:
+                    accumulator = sample
+            elif not found:
+                accumulator = sample
+                found = True
+        counts[column] = count
+        if count == 0:
+            out[column] = np.nan
+        elif reduction == REDUCE_MEAN:
+            out[column] = accumulator / count
+        else:
+            out[column] = accumulator
+
+
+def fused_masked_leading_float64(
+    values: Any, valid: Any, reduction: int
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Run the fused leading reduction where its arithmetic is exact."""
+
+    if not engaged():
+        return None
+    source = np.asarray(values)
+    marks = np.asarray(valid, dtype=np.bool_)
+    if (
+        source.dtype != np.float64
+        or source.shape != marks.shape
+        or source.ndim < 2
+        or source.size < _MASKED_LEADING_MIN_SAMPLES
+    ):
+        return None
+    pool = int(source.shape[0])
+    shape = source.shape[1:]
+    flat_source = np.reshape(source, (pool, -1), order="C")
+    flat_marks = np.reshape(marks, (pool, -1), order="C")
+    if (
+        flat_source.shape[1] < 2
+        or not flat_source.flags.c_contiguous
+        or not flat_marks.flags.c_contiguous
+    ):
+        # A copied reorder changes NumPy's floating reduction order for the
+        # ordinary (x, pool) tensor layout at pool>=4, in addition to costing
+        # 5--10 ms over two million values.  Keep that exact strided question
+        # on its NumPy reference.  One output column likewise uses NumPy's
+        # pairwise contiguous reduction and gives prange no parallel work.
+        return None
+    flat = readable(flat_source)
+    flat_valid = readable(flat_marks)
+    out = np.empty(flat.shape[1], dtype=np.float64)
+    counts = np.empty(flat.shape[1], dtype=np.int64)
+    masked_leading_float64(flat, flat_valid, int(reduction), out, counts)
+    return out.reshape(shape), counts.reshape(shape)
 
 # ------------------------------------------------------------------ extrema
 @njit(cache=True, parallel=True, nogil=True)
@@ -408,8 +632,9 @@ def masked_centred_square_sums(values: Any, offset: float, valid: Any) -> Any:
             or not marks.flags.c_contiguous
         ):
             return None
+        marks = readable(marks)
     else:
-        marks = np.zeros((1, 1, 1), dtype=np.bool_)
+        marks = readable(np.zeros((1, 1, 1), dtype=np.bool_))
     out = np.empty(view.shape[1], dtype=np.float64)
     centred_square_sums(view, np.float64(offset), marks, use_valid, out)
     return out

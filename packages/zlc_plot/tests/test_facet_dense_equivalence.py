@@ -144,6 +144,7 @@ _EDGES = tuple(float(edge) for edge in np.linspace(0.0, 4000.0, 7))
             ),
             None,
         ),
+        (FacetGridPlot(AxisRef.data("sy"), HistogramPlot()), _EDGES),
         (
             FacetGridPlot(AxisRef.point_dimension("bias_x"), HistogramPlot()),
             _EDGES,
@@ -158,11 +159,19 @@ def test_dense_facet_equals_the_generic_path(spec, bins) -> None:
     _assert_facets_equal(dense, generic)
 
 
-def test_facet_projection_takes_the_dense_path_for_scan_cells(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "spec,bins",
+    [
+        (FacetGridPlot(AxisRef.point_dimension("bias_x"), _IMAGE_CELL), None),
+        (FacetGridPlot(AxisRef.data("sy"), HistogramPlot()), _EDGES),
+    ],
+)
+def test_facet_projection_takes_the_dense_tensor_path(
+    monkeypatch, spec, bins
+) -> None:
     """facet() itself must route these cells densely, not just allow it."""
 
     view = DataView(_scan_of_frames())
-    spec = FacetGridPlot(AxisRef.point_dimension("bias_x"), _IMAGE_CELL)
     routed = {}
     original = DataView._dense_facet
 
@@ -178,7 +187,7 @@ def test_facet_projection_takes_the_dense_path_for_scan_cells(monkeypatch) -> No
 
     DataView._dense_facet = spying
     try:
-        view.facet(spec)
+        view.facet(spec, bins=bins)
     finally:
         DataView._dense_facet = original
     assert routed.get("dense") is True

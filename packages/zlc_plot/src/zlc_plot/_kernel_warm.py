@@ -195,6 +195,59 @@ def _series_snapshot(repeats: int, points: int) -> Any:
     return owned_snapshot_from_arrays(schema=schema, values=values, revision=1)
 
 
+def _mixed_snapshot(
+    *, repeats: int = 4, points: int = 12, sites: int = 5,
+    holes: bool = False,
+) -> Any:
+    """One point-coordinate × data-axis block for joint-axis kernels."""
+
+    from zlc_data import (  # noqa: PLC0415
+        COMPONENT,
+        REPEAT,
+        SCAN_POINT,
+        AxisId,
+        AxisSpec,
+        DatasetSchema,
+        PointColumn,
+        PointTable,
+        ValidityContract,
+        ValueSchema,
+        owned_snapshot_from_arrays,
+    )
+
+    schema = DatasetSchema(
+        AxisSpec(
+            AxisId("warm.repeat"), "repeat", REPEAT,
+            repeats, tuple(range(repeats)),
+        ),
+        PointTable(
+            points,
+            (
+                PointColumn(
+                    AxisId("x"), "x", SCAN_POINT, PointColumn.NUMERIC,
+                    tuple(float(index % 4) for index in range(points)),
+                ),
+                PointColumn(
+                    AxisId("group"), "group", SCAN_POINT, PointColumn.NUMERIC,
+                    tuple(float(index // 4) for index in range(points)),
+                ),
+            ),
+        ),
+        None,
+        ValueSchema(
+            (AxisSpec(AxisId("site"), "site", COMPONENT, sites,
+                      tuple(float(index) for index in range(sites))),),
+            ValidityContract.value(),
+            np.dtype(np.float64),
+            None,
+        ),
+    )
+    values = np.random.default_rng(2).normal(size=(repeats, points, sites))
+    if holes:
+        values[1::3, 2::11, :] = np.nan
+    return owned_snapshot_from_arrays(schema=schema, values=values, revision=1)
+
+
 def _render(
     snapshot: Any,
     spec: Any,
@@ -251,7 +304,13 @@ def representative_work() -> None:
     cases.
     """
 
-    from . import AxisRef, CurvePlot, HistogramPlot, ImagePlot  # noqa: PLC0415
+    from . import (  # noqa: PLC0415
+        AxisRef,
+        CurvePlot,
+        FacetGridPlot,
+        HistogramPlot,
+        ImagePlot,
+    )
     from . import _height3d_scanline  # noqa: PLC0415
 
     image = ImagePlot(AxisRef.data("x"), AxisRef.data("y"))
@@ -284,6 +343,26 @@ def representative_work() -> None:
     _render(series, CurvePlot(AxisRef.point("x")), {"uncertainty": True})
     # Uniform binning and the masked extrema that choose its domain.
     _render(series, HistogramPlot())
+    _render(
+        _image_snapshot(24, 32, np.float64),
+        FacetGridPlot(AxisRef.data("y"), HistogramPlot()),
+    )
+    mixed = _mixed_snapshot()
+    _render(mixed, ImagePlot(AxisRef.point("x"), AxisRef.data("site")))
+    _render(
+        mixed,
+        CurvePlot(AxisRef.data("site"), group=AxisRef.point("group")),
+        {"uncertainty": True},
+    )
+    # The fused value+count leading reduction exists only for a genuinely
+    # holey, C-laid-out floating tensor; an all-valid curve takes NumPy's
+    # plain reduction and a transposed tensor deliberately stays on its exact
+    # NumPy reference instead of being copied merely to reach the kernel.
+    _render(
+        _mixed_snapshot(repeats=8, points=1024, sites=8, holes=True),
+        CurvePlot(AxisRef.data("site")),
+        {"uncertainty": False},
+    )
 
     # The scan-line renderer's own five.  Its bare render reaches three of
     # them; the other two belong to the SCENE -- the edge-occlusion sampler

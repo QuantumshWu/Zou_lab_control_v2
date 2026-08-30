@@ -20,7 +20,14 @@ import pytest
 
 from zlc_plot import _raster_kernels as kernels
 from zlc_plot._image_raster import _area_mean, _reduction_starts
-from zlc_plot.data_view import histogram_counts
+from zlc_plot import Reduction
+from zlc_plot.data_view import (
+    _aggregate_by_codes,
+    _axis_kernel_aggregate,
+    _facet_kernel_counts,
+    _masked_leading_reduce,
+    histogram_counts,
+)
 
 
 def _both_engines(call):
@@ -128,6 +135,29 @@ def test_the_uniform_histogram_kernel_matches_numpy_bit_for_bit() -> None:
     )
     np.testing.assert_array_equal(reference, compiled)
 
+    values = rng.normal(size=(5, 7, 3, 11))
+    valid = rng.random(values.shape) > 0.2
+    facet_codes = np.asarray([2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0])
+    expected = []
+    previous = kernels.ENGINE
+    try:
+        kernels.ENGINE = "numpy"
+        for facet in range(3):
+            selected = np.flatnonzero(facet_codes == facet)
+            expected.append(histogram_counts(
+                values[..., selected],
+                edges,
+                valid[..., selected],
+            ))
+        kernels.ENGINE = "auto"
+        batched = _facet_kernel_counts(
+            values, valid, facet_codes, 3, 3, edges
+        )
+    finally:
+        kernels.ENGINE = previous
+    assert batched is not None
+    np.testing.assert_array_equal(np.asarray(expected), batched)
+
 
 def test_the_histogram_kernel_declines_a_float32_pool() -> None:
     """numpy would do that pool's arithmetic in float32; the kernel would not.
@@ -142,6 +172,56 @@ def test_the_histogram_kernel_declines_a_float32_pool() -> None:
     edges = np.linspace(0.0, 10.0, 21)
     reference, compiled = _both_engines(lambda: histogram_counts(pool, edges))
     np.testing.assert_array_equal(reference, compiled)
+
+
+def test_joint_axis_kernel_matches_the_exact_bucket_reduction() -> None:
+    pytest.importorskip("numba")
+    rng = np.random.default_rng(11)
+    values = rng.normal(size=(3, 7, 5))
+    valid = rng.random(values.shape) > 0.2
+    row_codes = np.asarray([1, 0, 2, 1, 0, 2, 1], dtype=np.int64)
+    data_codes = np.asarray([2, 0, 1, 2, 0], dtype=np.int64)
+    combined = np.broadcast_to(
+        row_codes.reshape(1, 7, 1) * 3 + data_codes.reshape(1, 1, 5),
+        values.shape,
+    ).reshape(-1)
+    usable = valid.reshape(-1)
+    for reduction in Reduction:
+        expected, expected_counts = _aggregate_by_codes(
+            values.reshape(-1), usable, combined, 9, reduction
+        )
+        got = _axis_kernel_aggregate(
+            values,
+            valid,
+            (row_codes, data_codes),
+            (1, 2),
+            (3, 3),
+            reduction,
+        )
+        assert got is not None
+        actual, actual_counts, presence = got
+        np.testing.assert_array_equal(expected, actual)
+        np.testing.assert_array_equal(expected_counts, actual_counts)
+        np.testing.assert_array_equal(presence, np.ones(9, dtype=np.bool_))
+
+
+@pytest.mark.parametrize("reduction", (Reduction.MIN, Reduction.MAX))
+def test_joint_axis_extrema_preserve_nan_and_signed_zero(reduction) -> None:
+    pytest.importorskip("numba")
+    values = np.asarray([[0.0, -0.0, np.nan, 2.0]], dtype=np.float64)
+    valid = np.ones(values.shape, dtype=np.bool_)
+    codes = np.asarray([0, 0, 1, 1], dtype=np.int64)
+    expected, expected_counts = _aggregate_by_codes(
+        values.reshape(-1), valid.reshape(-1), codes, 2, reduction
+    )
+    got = _axis_kernel_aggregate(
+        values, valid, (codes,), (1,), (2,), reduction
+    )
+    assert got is not None
+    actual, actual_counts, presence = got
+    np.testing.assert_array_equal(expected.view(np.uint64), actual.view(np.uint64))
+    np.testing.assert_array_equal(expected_counts, actual_counts)
+    np.testing.assert_array_equal(presence, np.ones(2, dtype=np.bool_))
 
 
 def test_the_colour_and_gather_kernels_match_their_references() -> None:
@@ -496,3 +576,82 @@ def test_an_input_s_mutability_is_not_an_accident_of_where_it_came_from() -> Non
     assert writable.flags.writeable
     assert not kernels.readable(writable).flags.writeable
     assert np.array_equal(kernels.readable(strided), strided)
+
+
+def test_masked_leading_tensor_matrix_matches_numpy_bit_for_bit() -> None:
+    """Pool size, reducer and holes never select different arithmetic."""
+
+    pytest.importorskip("numba")
+    rng = np.random.default_rng(29)
+    previous = kernels.ENGINE
+    try:
+        for pool in (1, 2, 4, 8, 32):
+            values = rng.normal(size=(pool, 257))
+            # Equal signed zeros expose an extrema kernel that keeps the first
+            # tie where NumPy keeps the last one.
+            values[:, 0] = np.resize(np.asarray((0.0, -0.0)), pool)
+            holey = rng.random(values.shape) > 0.25
+            holey[:, 1] = False
+            for valid in (
+                np.broadcast_to(np.asarray(True), values.shape),
+                holey,
+            ):
+                for reduction in Reduction:
+                    kernels.ENGINE = "numpy"
+                    reference = _masked_leading_reduce(
+                        values, valid, reduction
+                    )
+                    kernels.ENGINE = "auto"
+                    compiled = _masked_leading_reduce(
+                        values, valid, reduction
+                    )
+                    np.testing.assert_array_equal(
+                        compiled[0], reference[0]
+                    )
+                    np.testing.assert_array_equal(
+                        compiled[1], reference[1]
+                    )
+
+        # Above the measured dispatch crossover the compiled path must
+        # actually engage, still under every reducer and pool size.  Keeping
+        # the output fixed distinguishes pool work from output construction.
+        for pool in (2, 4, 8, 32):
+            values = rng.normal(size=(pool, 16384))
+            valid = rng.random(values.shape) > 0.2
+            for reduction in Reduction:
+                kernels.ENGINE = "numpy"
+                reference = _masked_leading_reduce(values, valid, reduction)
+                kernels.ENGINE = "auto"
+                compiled = _masked_leading_reduce(values, valid, reduction)
+                np.testing.assert_array_equal(compiled[0], reference[0])
+                np.testing.assert_array_equal(compiled[1], reference[1])
+
+        # The common (x, pool) source becomes a non-contiguous (pool, x)
+        # reduction view.  Copying it to satisfy one compiled signature both
+        # costs a full plane and changes NumPy's float summation order; the
+        # dispatcher must decline it.  A single output column also stays on
+        # NumPy's pairwise reduction because there is no prange width.
+        original = rng.normal(size=(8192, 4, 1))
+        original_valid = rng.random(original.shape) > 0.2
+        strided = np.reshape(
+            np.moveaxis(original, (0, 2), (1, 2)), (4, 8192)
+        )
+        strided_valid = np.reshape(
+            np.moveaxis(original_valid, (0, 2), (1, 2)), (4, 8192)
+        )
+        assert not strided.flags.c_contiguous
+        one_column = rng.normal(size=(32768, 1))
+        one_valid = rng.random(one_column.shape) > 0.2
+        for values, valid in (
+            (strided, strided_valid),
+            (one_column, one_valid),
+        ):
+            for reduction in Reduction:
+                kernels.ENGINE = "numpy"
+                reference = _masked_leading_reduce(values, valid, reduction)
+                kernels.ENGINE = "auto"
+                compiled = _masked_leading_reduce(values, valid, reduction)
+                np.testing.assert_array_equal(compiled[0], reference[0])
+                np.testing.assert_array_equal(compiled[1], reference[1])
+    finally:
+        kernels.ENGINE = previous
