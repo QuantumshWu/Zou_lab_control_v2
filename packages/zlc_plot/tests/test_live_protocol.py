@@ -127,10 +127,16 @@ def test_unsuccessful_exact_retry_does_not_invalidate_public_fit_event() -> None
         assert event.selection.sample_count == 26 * 26
         assert event.selection.selector_kind is SelectorKind.AREA
         np.testing.assert_allclose(
-            result.parameter_values, reference.parameter_values, rtol=0.0, atol=1e-9
+            result.parameter_values,
+            reference.parameter_values,
+            rtol=5e-11,
+            atol=1e-9,
         )
         np.testing.assert_allclose(
-            result.covariance, reference.covariance, rtol=0.0, atol=1e-9
+            result.covariance,
+            reference.covariance,
+            rtol=2e-9,
+            atol=1e-9,
         )
         assert result.reduced_chi_square == pytest.approx(
             reference.reduced_chi_square, rel=0.0, abs=1e-9

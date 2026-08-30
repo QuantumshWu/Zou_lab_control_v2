@@ -54,12 +54,6 @@ _COUNT_FLOOR = 1e-9
 _REGULAR_IMAGE_CAPABILITIES = frozenset(
     {"regular_image_radial", "regular_image_separable"}
 )
-# End-to-end multi-cell crossover against the separable image solver: both
-# image models win through 1,024 valid pixels; at 1,152 anisotropic can lose.
-# Public single-image fits stay separable to preserve exact retry semantics.
-_COMPILED_REGULAR_IMAGE_MAX_POINTS = 1024
-
-
 class FitCancelled(RuntimeError):
     pass
 
@@ -1526,31 +1520,6 @@ class FitEngine:
             return None
         return descriptor if registered is model else None
 
-    @staticmethod
-    def _compact_regular_image(
-        image: RegularImageFitInput,
-    ) -> tuple[ArrayTuple, np.ndarray, np.ndarray] | None:
-        """Return the exact small-image coordinate selection or ``None``."""
-
-        values = np.asarray(image.observations)
-        valid = np.isfinite(values)
-        if image.valid_mask is not None:
-            valid &= image.valid_mask
-        if int(np.count_nonzero(valid)) > _COMPILED_REGULAR_IMAGE_MAX_POINTS:
-            return None
-        rows, columns = np.nonzero(valid)
-        coordinates = (
-            image.x_coordinates[columns],
-            image.y_coordinates[rows],
-        )
-        observed = np.asarray(values[valid], dtype=np.float64)
-        indices = (
-            np.flatnonzero(valid.reshape(-1)).astype(np.int64, copy=False)
-            if image.selected_indices is None
-            else np.asarray(image.selected_indices[valid], dtype=np.int64)
-        )
-        return coordinates, observed, indices
-
     def fit_batch(
         self,
         model: str | FitModelSpec,
@@ -1571,11 +1540,11 @@ class FitEngine:
         """Fit independent cells through one numerical owner.
 
         Built-ins with a compiled descriptor enter one independent batched
-        solve.  A custom model, a caller-replaced model, a custom engine that
-        overrides :meth:`fit`, or a regular-image input keeps the public
-        scalar route exactly as authored.  A failed cell is reported in the
-        matching failure slot; it is never silently sent through a second
-        numerical implementation.
+        solve.  Regular images use the shared separable batch owner, including
+        a one-cell public fit.  A custom model, caller-replaced model or custom
+        engine keeps the authored scalar implementation.  A failed cell is
+        reported in the matching failure slot; it is never silently sent
+        through a second numerical implementation.
         """
 
         spec = self.registry.get(model) if isinstance(model, str) else model
@@ -1642,6 +1611,40 @@ class FitEngine:
                     failures.append(None)
             return tuple(results), tuple(failures)
 
+        if (
+            spec.capabilities & _REGULAR_IMAGE_CAPABILITIES
+            and all(
+                isinstance(item, RegularImageFitInput)
+                for item in coordinate_items
+            )
+        ):
+            if any(item is not None for item in value_items):
+                raise TypeError(
+                    "observations belong inside RegularImageFitInput and must "
+                    "not also be passed separately"
+                )
+            if any(item is not None for item in sigma_items):
+                raise TypeError(
+                    "regular-image fitting has no per-point sigma channel"
+                )
+            if any(item is not None for item in index_items):
+                raise TypeError(
+                    "regular-image selected_indices belong inside "
+                    "RegularImageFitInput"
+                )
+            from ._fit_radial import fit_regular_separable_images
+
+            return fit_regular_separable_images(
+                spec,
+                coordinate_items,  # type: ignore[arg-type]
+                data_revisions=revision_items,
+                initial=initial,
+                warm_starts=warm_items,
+                bounds=bounds,
+                options=options or FitOptions(),
+                cancelled=cancelled,
+            )
+
         results: list[FitResult | None] = [None] * count
         failures: list[str | None] = [None] * count
         compiled_cells: list[int] = []
@@ -1651,31 +1654,6 @@ class FitEngine:
         compiled_indices: list[np.ndarray | None] = []
         compiled_revisions: list[int] = []
         compiled_warm: list[Mapping[str, float] | Sequence[float] | None] = []
-        small_regular: dict[
-            int,
-            tuple[ArrayTuple, np.ndarray, np.ndarray],
-        ] = {}
-        if spec.capabilities & _REGULAR_IMAGE_CAPABILITIES:
-            by_size: dict[int, list[int]] = {}
-            for cell, coordinate_item in enumerate(coordinate_items):
-                if (
-                    isinstance(coordinate_item, RegularImageFitInput)
-                    and value_items[cell] is None
-                    and sigma_items[cell] is None
-                    and index_items[cell] is None
-                ):
-                    compact = self._compact_regular_image(coordinate_item)
-                    if compact is not None:
-                        small_regular[cell] = compact
-                        by_size.setdefault(compact[1].size, []).append(cell)
-            compiled_regular_cells = {
-                cell
-                for cells in by_size.values()
-                if len(cells) >= 2
-                for cell in cells
-            }
-        else:
-            compiled_regular_cells = set()
         for cell, coordinate_item in enumerate(coordinate_items):
             if not isinstance(coordinate_item, RegularImageFitInput):
                 compiled_cells.append(cell)
@@ -1705,33 +1683,22 @@ class FitEngine:
                     raise ValueError(
                         "this model does not declare a regular-image capability"
                     )
-                compact = small_regular.get(cell)
-                if cell not in compiled_regular_cells or compact is None:
-                    results[cell] = self.fit(
-                        spec,
-                        coordinate_item,
-                        data_revision=revision_items[cell],
-                        initial=initial,
-                        warm_start=warm_items[cell],
-                        bounds=bounds,
-                        options=options,
-                        cancelled=cancelled,
-                    )
-                    continue
-                compact_coordinates, compact_values, compact_indices = compact
+                results[cell] = self.fit(
+                    spec,
+                    coordinate_item,
+                    data_revision=revision_items[cell],
+                    initial=initial,
+                    warm_start=warm_items[cell],
+                    bounds=bounds,
+                    options=options,
+                    cancelled=cancelled,
+                )
+                continue
             except FitCancelled:
                 raise
             except Exception as error:
                 failures[cell] = str(error) or type(error).__name__
                 continue
-            compiled_cells.append(cell)
-            compiled_coordinates.append(compact_coordinates)
-            compiled_observations.append(compact_values)
-            compiled_sigmas.append(None)
-            compiled_indices.append(compact_indices)
-            compiled_revisions.append(revision_items[cell])
-            compiled_warm.append(warm_items[cell])
-
         if not compiled_cells:
             return tuple(results), tuple(failures)
         solved, failed = self._fit_compiled_batch(
@@ -2030,16 +1997,22 @@ class FitEngine:
                     failures[cell] = str(error) or type(error).__name__
             return tuple(results), tuple(failures)
 
-        buckets: dict[int, list[int]] = {}
+        buckets: dict[tuple[int, bytes], list[int]] = {}
         for cell, item in prepared.items():
-            buckets.setdefault(int(item["solver_values"].size), []).append(cell)
+            digest = hashlib.blake2b(digest_size=20)
+            for axis in item["compiled_coords"]:
+                values = np.ascontiguousarray(axis, dtype=np.float64)
+                digest.update(str(values.shape).encode("ascii"))
+                digest.update(memoryview(values).cast("B"))
+            key = (int(item["solver_values"].size), digest.digest())
+            buckets.setdefault(key, []).append(cell)
 
         for bucket in buckets.values():
             check()
             items = [prepared[cell] for cell in bucket]
-            coordinate_stack = tuple(
-                np.stack([item["compiled_coords"][axis] for item in items])
-                for axis in range(model.independent_arity)
+            shared_coordinates = tuple(
+                np.ascontiguousarray(axis, dtype=np.float64)
+                for axis in items[0]["compiled_coords"]
             )
             value_stack = np.stack([item["solver_values"] for item in items])
             weight_stack: np.ndarray | None = None
@@ -2085,17 +2058,9 @@ class FitEngine:
                 )
             )
 
-            contexts: list[np.ndarray] = []
-            for item in items:
-                canonical = tuple(
-                    np.asarray(axis, dtype=np.float64)
-                    for axis in item["compiled_coords"]
-                )
-                contexts.append(self._compiled_context(descriptor, canonical))
-            context = (
-                contexts[0]
-                if all(item is contexts[0] for item in contexts[1:])
-                else np.stack(contexts)
+            context = self._compiled_context(
+                descriptor,
+                shared_coordinates,
             )
 
             try:
@@ -2106,7 +2071,7 @@ class FitEngine:
                 )
                 output = solve(
                     descriptor,
-                    tuple(axis[0] if len(bucket) == 1 else axis for axis in coordinate_stack),
+                    shared_coordinates,
                     value_stack[0] if len(bucket) == 1 else value_stack,
                     base_lower=base_lower,
                     base_upper=base_upper,

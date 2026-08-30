@@ -1085,7 +1085,7 @@ def _prepare_serial(
     for cell in range(observations.shape[0]):
         counts[cell], statuses[cell] = _prepare_one(
             prepare_callback,
-            coordinates[cell],
+            coordinates[0],
             observations[cell],
             valid[cell],
             contexts[cell],
@@ -1133,7 +1133,7 @@ def _prepare_parallel(
     for cell in prange(observations.shape[0]):
         counts[cell], statuses[cell] = _prepare_one(
             prepare_callback,
-            coordinates[cell],
+            coordinates[0],
             observations[cell],
             valid[cell],
             contexts[cell],
@@ -1639,7 +1639,7 @@ def _solve_serial(
             winner_seed[cell],
         ) = _solve_cell(
             objective_callback,
-            coordinates[cell],
+            coordinates[0],
             observations[cell],
             valid[cell],
             full_seeds[cell],
@@ -1710,7 +1710,7 @@ def _solve_parallel(
             winner_seed[cell],
         ) = _solve_cell(
             objective_callback,
-            coordinates[cell],
+            coordinates[0],
             observations[cell],
             valid[cell],
             full_seeds[cell],
@@ -1923,7 +1923,7 @@ def _finalize_serial(
             covariance_valid[cell],
         ) = _finalize_one(
             value_jacobian_callback,
-            coordinates[cell],
+            coordinates[0],
             observations[cell],
             valid[cell],
             parameters[cell],
@@ -1964,7 +1964,7 @@ def _finalize_parallel(
             covariance_valid[cell],
         ) = _finalize_one(
             value_jacobian_callback,
-            coordinates[cell],
+            coordinates[0],
             observations[cell],
             valid[cell],
             parameters[cell],
@@ -2045,24 +2045,16 @@ def _seed_cube(
 
 def _coordinate_stack(
     coordinates: Sequence[np.ndarray],
-    cells: int,
     points: int,
 ) -> np.ndarray:
     if not coordinates:
         raise ValueError("compiled fit requires at least one coordinate axis")
-    stack = np.empty((cells, len(coordinates), points), dtype=np.float64)
+    stack = np.empty((1, len(coordinates), points), dtype=np.float64)
     for axis, values in enumerate(coordinates):
         array = np.asarray(values, dtype=np.float64)
-        if array.ndim == 1:
-            if array.shape != (points,):
-                raise ValueError("compiled fit coordinates must match observations")
-            stack[:, axis, :] = array
-        elif array.shape == (cells, points):
-            stack[:, axis, :] = array
-        else:
-            raise ValueError(
-                "compiled fit coordinates must be (N,) or per-cell (B,N)"
-            )
+        if array.shape != (points,):
+            raise ValueError("compiled fit coordinates must be shared 1D axes")
+        stack[0, axis, :] = array
     return np.ascontiguousarray(stack)
 
 
@@ -2073,12 +2065,12 @@ def _canonicalize_coordinates(
     *,
     already_canonical: bool,
 ) -> tuple[np.ndarray, np.ndarray]:
-    canonical = np.array(coordinates, dtype=np.float64, order="C", copy=True)
-    cells, axes, _points = canonical.shape
+    cells, axes, _points = coordinates.shape
     origins = np.zeros((cells, axes), dtype=np.float64)
     origin_axis = descriptor.coordinate_origin
     if origin_axis is None or already_canonical:
-        return canonical, origins
+        return coordinates, origins
+    canonical = np.array(coordinates, dtype=np.float64, order="C", copy=True)
     if origin_axis >= axes:
         raise ValueError("compiled fit coordinate_origin exceeds coordinate arity")
     for cell in range(cells):
@@ -2098,8 +2090,9 @@ def _context_stack(
     coordinates: np.ndarray,
     valid: np.ndarray,
     context: np.ndarray | Sequence[np.ndarray] | None,
+    *,
+    cells: int,
 ) -> np.ndarray:
-    cells = coordinates.shape[0]
     if context is not None:
         array = np.asarray(context, dtype=np.float64)
         if array.ndim == 2:
@@ -2111,7 +2104,10 @@ def _context_stack(
     shape: tuple[int, int] | None = None
     for cell in range(cells):
         compact = tuple(
-            np.asarray(coordinates[cell, axis, valid[cell]], dtype=np.float64)
+            np.asarray(
+                coordinates[0, axis, valid[cell]],
+                dtype=np.float64,
+            )
             for axis in range(coordinates.shape[1])
         )
         item = np.asarray(descriptor.context_builder(compact), dtype=np.float64)
@@ -2210,20 +2206,26 @@ def _solve_compiled(
     use_warm: bool | Sequence[bool],
     coordinates_are_canonical: bool,
     parallel: bool,
+    finalize: bool,
 ) -> CompiledFitOutput:
     if not isinstance(descriptor, CompiledFitDescriptor):
         raise TypeError("descriptor must be CompiledFitDescriptor")
     _ensure_compiled_abi(descriptor, parallel=parallel)
-    values = np.asarray(observations, dtype=np.float64)
+    values = np.asarray(observations)
     if values.ndim == 1:
         values = values.reshape(1, -1)
     elif values.ndim != 2:
         raise ValueError("compiled fit observations must have shape (N,) or (B,N)")
-    values = np.array(values, dtype=np.float64, order="C", copy=True)
+    if (
+        values.dtype != np.float64
+        or not values.flags.c_contiguous
+        or not values.flags.writeable
+    ):
+        values = np.array(values, dtype=np.float64, order="C", copy=True)
     cells, points = values.shape
     if cells == 0 or points == 0:
         raise ValueError("compiled fit observations cannot be empty")
-    coordinate_values = _coordinate_stack(coordinates, cells, points)
+    coordinate_values = _coordinate_stack(coordinates, points)
     if valid is None:
         valid_values = np.ones((cells, points), dtype=np.bool_)
     else:
@@ -2243,7 +2245,17 @@ def _solve_compiled(
         valid_values,
         already_canonical=bool(coordinates_are_canonical),
     )
-    contexts = _context_stack(descriptor, coordinate_values, valid_values, context)
+    if coordinate_origins.shape[0] == 1 and cells > 1:
+        coordinate_origins = np.zeros(
+            (cells, coordinate_origins.shape[1]), dtype=np.float64
+        )
+    contexts = _context_stack(
+        descriptor,
+        coordinate_values,
+        valid_values,
+        context,
+        cells=cells,
+    )
 
     lower_input = np.asarray(base_lower, dtype=np.float64)
     if lower_input.ndim == 1:
@@ -2476,8 +2488,6 @@ def _solve_compiled(
         lane_iterations,
     )
 
-    fitted = np.full((cells, points), np.nan, dtype=np.float64)
-    residuals = np.full((cells, points), np.nan, dtype=np.float64)
     covariance = np.full(
         (cells, parameter_count, parameter_count),
         np.nan,
@@ -2486,25 +2496,34 @@ def _solve_compiled(
     standard_errors = np.full((cells, parameter_count), np.nan, dtype=np.float64)
     reduced = np.full(cells, math.inf, dtype=np.float64)
     covariance_valid = np.zeros(cells, dtype=np.bool_)
-    finalize_kernel = _finalize_parallel if parallel else _finalize_serial
-    finalize_kernel(
-        descriptor.value_jacobian,
-        coordinate_values,
-        values,
-        valid_values,
-        parameters,
-        free_index_values,
-        weight_values,
-        use_weights_value,
-        bool(poisson),
-        loss_code,
-        fitted,
-        residuals,
-        covariance,
-        standard_errors,
-        reduced,
-        covariance_valid,
-    )
+    if finalize:
+        fitted = np.full((cells, points), np.nan, dtype=np.float64)
+        residuals = np.full((cells, points), np.nan, dtype=np.float64)
+        finalize_kernel = _finalize_parallel if parallel else _finalize_serial
+        finalize_kernel(
+            descriptor.value_jacobian,
+            coordinate_values,
+            values,
+            valid_values,
+            parameters,
+            free_index_values,
+            weight_values,
+            use_weights_value,
+            bool(poisson),
+            loss_code,
+            fitted,
+            residuals,
+            covariance,
+            standard_errors,
+            reduced,
+            covariance_valid,
+        )
+    else:
+        # Regular-image fits retain the source image and materialize fitted
+        # values only when a consumer asks.  They need the common independent
+        # TRF result, not an eager B x N x P Jacobian and two B x N planes.
+        fitted = np.empty((cells, 0), dtype=np.float64)
+        residuals = np.empty((cells, 0), dtype=np.float64)
     success = statuses > STATUS_MAX_NFEV
     covariance_valid &= statuses >= STATUS_MAX_NFEV
     return CompiledFitOutput(
@@ -2556,6 +2575,7 @@ def solve_compiled_batch(
     warm_seeds: np.ndarray | Sequence[float] | None = None,
     use_warm: bool | Sequence[bool] = False,
     coordinates_are_canonical: bool = False,
+    finalize: bool = True,
 ) -> CompiledFitOutput:
     """Solve independent cells in one ``prange`` compiled invocation."""
 
@@ -2584,6 +2604,7 @@ def solve_compiled_batch(
         use_warm=use_warm,
         coordinates_are_canonical=coordinates_are_canonical,
         parallel=True,
+        finalize=bool(finalize),
     )
 
 
@@ -2612,6 +2633,7 @@ def solve_compiled_single(
     warm_seeds: np.ndarray | Sequence[float] | None = None,
     use_warm: bool | Sequence[bool] = False,
     coordinates_are_canonical: bool = False,
+    finalize: bool = True,
 ) -> CompiledFitOutput:
     """Solve exactly one cell through the serial form of the compiled core."""
 
@@ -2645,6 +2667,7 @@ def solve_compiled_single(
         use_warm=use_warm,
         coordinates_are_canonical=coordinates_are_canonical,
         parallel=False,
+        finalize=bool(finalize),
     )
 
 

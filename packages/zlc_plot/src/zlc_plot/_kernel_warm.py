@@ -44,6 +44,7 @@ _KERNEL_MODULE_NAMES = (
     "_raster_kernels",
     "_height3d_scanline",
     "_fit_compiled",
+    "_fit_radial",
 )
 
 
@@ -324,7 +325,11 @@ def representative_work(*, include_compiled_fit: bool = True) -> None:
         HistogramPlot,
         ImagePlot,
     )
-    from . import _fit_compiled, _height3d_scanline  # noqa: PLC0415
+    from . import (  # noqa: PLC0415
+        _fit_compiled,
+        _fit_radial,
+        _height3d_scanline,
+    )
 
     image = ImagePlot(AxisRef.data("x"), AxisRef.data("y"))
 
@@ -395,6 +400,7 @@ def representative_work(*, include_compiled_fit: bool = True) -> None:
     # and its first Fit must only deserialize this cache, never JIT a solver.
     if include_compiled_fit:
         _fit_compiled.warm_production_cache()
+        _fit_radial.warm_production_cache()
 
 
 # ------------------------------------------------------------ the warmer
