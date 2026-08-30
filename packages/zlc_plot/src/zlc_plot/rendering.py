@@ -7234,6 +7234,17 @@ class MatplotlibRenderer:
                     key, prepared, mapping[0], cmap_cache[1], limits
                 )
             if rgba is not None:
+                axes = image.axes
+                composed = self._view_filling_rgba_front(
+                    key,
+                    rgba,
+                    prepared.extent,
+                    tuple(map(float, axes.get_xlim())),
+                    tuple(map(float, axes.get_ylim())),
+                    axes,
+                )
+                if composed is not None:
+                    rgba, _drawn_extent = composed
                 self._install_image_front(image, rgba)
                 self._artists[f"{key}:applied_front"] = rgba
             # The artist clim stays authoritative for selector geometry and

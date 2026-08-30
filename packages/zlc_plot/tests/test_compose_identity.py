@@ -108,8 +108,10 @@ def test_color_limit_preview_composes_without_touching_chrome() -> None:
     )
     try:
         session.update_data(_snapshot(schema, size, 200.0, 2, seed=10))
+        session.set_viewport(NumericRange(-64.5, 191.5), NumericRange(-0.5, 127.5))
         renderer = session._renderer
         before = renderer._background_signature
+        before_front = np.array(renderer._artists["image:applied_front"], copy=True)
         with renderer.raster_transaction():
             renderer.preview_color_limits(20.0, 150.0)
         # The preview repainted pixels without invalidating the chrome
@@ -118,6 +120,14 @@ def test_color_limit_preview_composes_without_touching_chrome() -> None:
         assert renderer._background_signature == before
         image = renderer._artists["image"]
         assert tuple(map(float, image.get_clim())) == (20.0, 150.0)
+        preview_front = renderer._artists["image:applied_front"]
+        assert preview_front.shape == before_front.shape
+        background = renderer._axes_background_rgba(image.axes)
+        _rows, columns = renderer._artists["image:view_sampling"][1]
+        column, column_stop, _column_map = columns
+        assert column > 0 and column_stop < preview_front.shape[1]
+        assert np.all(preview_front[:, :column] == background)
+        assert np.all(preview_front[:, column_stop:] == background)
     finally:
         session.close()
 
