@@ -1094,27 +1094,18 @@ SemanticDescription.fate = _description_fate  # type: ignore[attr-defined]
 SemanticDescription.axes_offering = _description_axes_offering  # type: ignore[attr-defined]
 
 
-SemanticFeasibility = Callable[[str, object], "str | None"]
-
-
 def describe_semantics(
     schema: DatasetSchema | None,
     spec: PlotSpec,
     *,
     layout: PlotLayoutConfig = DEFAULT_LAYOUT,
-    feasibility: SemanticFeasibility | None = None,
 ) -> SemanticDescription:
-    """Describe semantic choices mechanically from the registry and schema.
+    """Describe the complete registry/schema semantic vocabulary.
 
-    No frontend or plot-kind branch is involved in constructing the editor
-    contract.  A handler owns admissibility and the names it contributes;
-    generic field projection supplies the candidate axes and current values.
-
-    ``feasibility`` receives ``(field name, candidate field value)`` and
-    returns a rejection reason or None.  Every offered choice is checked and
-    infeasible ones are omitted outright — an editor only ever lists options
-    that can actually be used.  Without a feasibility callback, only
-    semantic composition (``updated_spec``) is checked.
+    No frontend, renderer or surface-capacity probe participates.  A handler
+    owns the roles it declares; generic field projection offers those roles
+    on every axis.  The later replacement transaction validates whether one
+    authored combination can actually be rendered.
     """
 
     if not isinstance(layout, PlotLayoutConfig):
@@ -1157,8 +1148,6 @@ def describe_semantics(
     kinds = tuple(handler.kind for handler in HANDLERS if handler.admits(schema))
 
     def _reason(name: str, field_value: object) -> str | None:
-        if feasibility is not None:
-            return feasibility(name, field_value)
         try:
             updated_spec(schema, spec, name, field_value)
         except SemanticVacancy:
@@ -1271,20 +1260,12 @@ def describe_semantics(
             # default's label stops lying about the axis's fate.
             offered[0] = (default_fate, "(shot axis)")
         for role in roles:
-            # ``facet`` is offered by the same rule as every other role.
-            # It used to be hidden on any axis the CELL already consumed,
-            # which made it the one role whose option list depended on
-            # where the other axes happened to sit -- and the swap that
-            # resolves every other collision was never reached.  Two
-            # consequences, one cause: an operator could not promote a
-            # cell axis to the facet at all, and the fate an EARLIER swap
-            # had legitimately put there ("site = facet", reached by
-            # giving repeat the x role) was not in its own row's
-            # vocabulary when the table was replayed against the kind's
-            # default spec -- which is the "value is outside this plot
-            # vocabulary" the next edit died on.
-            if _reason(name, role) is None or current == role:
-                offered.append((role, _ROLE_LABELS[role]))
+            # Fate rows are the plot kind's vocabulary, not a preview of
+            # whether today's data and surface can render the result.  Every
+            # axis therefore lists every role the kind declares.  The actual
+            # replace/layout transaction owns cell capacity and projection
+            # validation and reports a refusal without rewriting this table.
+            offered.append((role, _ROLE_LABELS[role]))
         pins = _scope_coordinates(schema, ref)
         fields.append(
             SemanticField(
@@ -1329,7 +1310,6 @@ __all__ = [
     "SemanticChoice",
     "SemanticCycleChoices",
     "SemanticDescription",
-    "SemanticFeasibility",
     "SemanticField",
     "axis_choices_for_schema",
     "axis_size",

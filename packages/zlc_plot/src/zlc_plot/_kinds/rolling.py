@@ -37,11 +37,6 @@ def admits(schema: Any) -> bool:
     return default_spec(schema) is not None
 
 
-def validate(view: Any, spec: Any) -> None:
-    # Rolling reduces whole revisions; only an authored group can be invalid.
-    view.validate_rolling(spec.group)
-
-
 def label_roles(spec: Any) -> tuple[tuple[str, tuple], ...]:
     """A rolling plot's x is the shot counter; its y names the value."""
 
@@ -71,5 +66,4 @@ HANDLER = KindHandler(
     admits,
     default_spec,
     label_roles,
-    validate,
 )

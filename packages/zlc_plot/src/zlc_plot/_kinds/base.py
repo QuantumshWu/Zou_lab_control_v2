@@ -20,11 +20,6 @@ DefaultSpecHandler = Callable[[Any], Any]
 # role the slot describes, e.g. ("x", ("axis", spec.x)) or ("y", ("value",)).
 # Label carry-over across semantic edits matches these roles, never slots.
 LabelRolesHandler = Callable[[Any], tuple[tuple[str, tuple], ...]]
-# validate(view, spec) raises when the projection would reject the spec on
-# this dataset.  It runs no aggregation: the semantic feasibility probe calls
-# it instead of building payloads, and every DataView projection method calls
-# the same underlying checks, so probe and build can never drift.
-ValidateHandler = Callable[[Any, Any], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,7 +34,6 @@ class KindHandler:
     admits: AdmitsHandler
     default_spec: DefaultSpecHandler
     label_roles: LabelRolesHandler
-    validate: ValidateHandler
 
     def __post_init__(self) -> None:
         if not isinstance(self.display_name, str) or not self.display_name.strip():
@@ -48,5 +42,3 @@ class KindHandler:
             raise TypeError("kind default_spec must be callable")
         if not callable(self.label_roles):
             raise TypeError("kind label_roles must be callable")
-        if not callable(self.validate):
-            raise TypeError("kind validate must be callable")

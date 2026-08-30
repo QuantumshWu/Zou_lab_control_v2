@@ -1,11 +1,9 @@
-"""Semantic domains offer exactly the usable options.
+"""Semantic domains keep vocabulary separate from render feasibility.
 
-Regression for the semantic-UX audit finding: choice domains used to be a
-schema-level enumeration, so editors offered options (curve x=repeat, facet
-pairs beyond the cell cap) that every click rejected.  The session probes
-each candidate through the real replacement validation and omits infeasible
-ones outright; the property below holds for every field of every described
-session: every offered option succeeds when submitted.
+Axis fate rows enumerate every role declared by the plot kind.  Projection
+and layout feasibility belong to the subsequent replacement transaction;
+they may reject a submitted table, but never erase roles from its vocabulary.
+Non-fate fields may still be probed where their own contract requires it.
 """
 
 from __future__ import annotations
@@ -202,16 +200,8 @@ def test_curve_x_repeat_is_offered_and_draws() -> None:
         session.close()
 
 
-def test_facet_beyond_cell_cap_is_not_offered_but_a_cell_axis_is() -> None:
-    """The facet row is filtered by FEASIBILITY, never by bookkeeping.
-
-    An axis of more coordinates than the layout has cells cannot be
-    faceted and is not offered -- that is a fact about the drawing.  An
-    axis the cell currently uses is a different matter entirely: taking
-    the facet swaps, exactly as taking x or group does, so it stays
-    offered.  Excluding it was the one place a role's option list
-    depended on where the other axes sat.
-    """
+def test_facet_vocabulary_does_not_predict_layout_capacity() -> None:
+    """Every axis offers facet; the actual layout still enforces its cap."""
 
     points = PointTable.from_columns(
         {"big": np.arange(400.0), "few": np.arange(400.0) % 7}
@@ -229,11 +219,16 @@ def test_facet_beyond_cell_cap_is_not_offered_but_a_cell_axis_is() -> None:
     try:
         offering = session.describe_semantics().axes_offering("facet")
         assert AxisRef.repeat() in offering
-        # 400 cells against a 64-cell layout: it would refuse, so it is
-        # not offered.
-        assert AxisRef.point("big") not in offering
-        # the cell's own x axis, small enough to facet, IS offered
+        assert AxisRef.point("big") in offering
         assert AxisRef.point("few") in offering
+        candidate = updated_spec(
+            schema,
+            session.spec,
+            fate_field_name(AxisRef.point("big")),
+            "facet",
+        )
+        with pytest.raises(ValueError, match="facet_max_cells"):
+            session.replace_spec(candidate)
     finally:
         session.close()
 
@@ -295,15 +290,8 @@ def test_user_can_reach_a_single_mean_line_on_grouped_data() -> None:
         session.close()
 
 
-def test_semantic_probe_never_builds_a_payload(monkeypatch) -> None:
-    """The feasibility probe is validation-only.
-
-    Building candidate payloads made a kind switch scale with the largest
-    candidate's cell count (a facet over point rows built 1281 cells and
-    froze the GUI for minutes).  Probe and build share the DataView
-    ``validate_*`` authorities instead, so describing semantics must never
-    aggregate anything.
-    """
+def test_describing_semantics_never_builds_a_payload(monkeypatch) -> None:
+    """Vocabulary projection reads schema/spec only; it never aggregates."""
 
     from zlc_plot._fit_projection import FitProjection
 
@@ -320,56 +308,6 @@ def test_semantic_probe_never_builds_a_payload(monkeypatch) -> None:
         monkeypatch.setattr(FitProjection, "_build_payload_from_view", spy)
         session.describe_semantics()
         assert calls == []
-    finally:
-        session.close()
-
-
-def test_semantic_probe_cache_survives_display_and_size_edits(monkeypatch) -> None:
-    """The expensive validation is a function of (generation, spec pair) ONLY.
-
-    The cache used to key on the display revision, every state value, the
-    viewport, the size and the DPR, so EVERY display-parameter edit
-    invalidated everything and a describe re-paid the full validation
-    sweep (measured 3.18 s on a big camera facet).  The size/DPR-dependent
-    facet layout gate is evaluated per call from the cached cell count
-    instead of being folded into the key, so neither a display edit nor a
-    size change may trigger one further ``_validate_candidate_spec`` call.
-    """
-
-    from zlc_plot.session import _SEMANTIC_PROBE_CACHE_MAX
-
-    session = PlotSession(
-        _grid_snapshot(),
-        FacetGridPlot(
-            AxisRef.point_dimension("row"),
-            CurvePlot(AxisRef.point_dimension("col")),
-        ),
-    )
-    try:
-        session.describe_semantics()  # populates the probe cache
-
-        calls: list[object] = []
-        original = session._validate_candidate_spec
-
-        def spy(candidate):
-            calls.append(candidate)
-            return original(candidate)
-
-        monkeypatch.setattr(session, "_validate_candidate_spec", spy)
-
-        session.set_parameter("show_grid", True)
-        session.describe_semantics()
-        assert calls == [], "a display edit re-paid the validation sweep"
-
-        selected_size = next(
-            name
-            for name in session.defaults.layout.size_names
-            if name != session.surface_plan.preset
-        )
-        session.set_size(selected_size)
-        session.describe_semantics()
-        assert calls == [], "a size change re-paid the validation sweep"
-        assert len(session._semantic_probe_cache) <= _SEMANTIC_PROBE_CACHE_MAX
     finally:
         session.close()
 

@@ -28,10 +28,6 @@ def admits(schema: Any) -> bool:
     return default_spec(schema) is not None
 
 
-def validate(view: Any, spec: Any) -> None:
-    view.validate_image(spec.x, spec.y)
-
-
 def label_roles(spec: Any) -> tuple[tuple[str, tuple], ...]:
     """Image x/y name their axes; the value slot names the color scale."""
 
@@ -117,5 +113,4 @@ HANDLER = KindHandler(
     admits,
     default_spec,
     label_roles,
-    validate,
 )

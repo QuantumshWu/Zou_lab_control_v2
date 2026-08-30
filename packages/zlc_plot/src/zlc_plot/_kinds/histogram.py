@@ -56,11 +56,6 @@ def admits(schema: Any) -> bool:
     return default_spec(schema) is not None
 
 
-def validate(view: Any, spec: Any) -> None:
-    # A histogram pools every acquired value; any dataset admits it.
-    return None
-
-
 def label_roles(spec: Any) -> tuple[tuple[str, tuple], ...]:
     """A histogram's x names the plotted value; its y is always a count."""
 
@@ -90,5 +85,4 @@ HANDLER = KindHandler(
     admits,
     default_spec,
     label_roles,
-    validate,
 )

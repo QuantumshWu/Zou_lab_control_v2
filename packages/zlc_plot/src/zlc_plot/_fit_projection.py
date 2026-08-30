@@ -648,12 +648,7 @@ class FitProjection:
         return scoped
 
     def _build_view(self) -> None:
-        """Construct the unit-aware DataView without projecting any payload.
-
-        The semantic feasibility probe stops here and runs the registry
-        ``validate`` handlers on the view; only a committed replacement pays
-        for aggregation.
-        """
+        """Construct the unit-aware DataView without projecting a payload."""
 
         assert isinstance(self._data, OwnedSnapshot)
         from .data_view import DataView

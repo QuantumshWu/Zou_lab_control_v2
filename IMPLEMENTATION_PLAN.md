@@ -25,6 +25,9 @@
   viewport、selectors、facet focus和causal lineage graph；FigureViewer与TaskConsole使用同一个Plot host路径。
 - Plot axis/semantic identity已收口为`AxisRef(domain, axis_id)`稳定key；scope只接受tagged
   latest或tagged typed coordinate value，不再让display label或裸文本控制字进入truth。
+- Fate Setting不再预跑candidate render/layout feasibility：所有axis始终列出plot kind声明的全部roles；
+  64-cell等容量限制只在真实replace/layout transaction执行。旧semantic probe、cache和kind validate
+  wrapper已删除，schema vocabulary不再随size、DPR或renderer可用性改变。
 - Runtime是唯一跨publication history owner；active leases的signal-level event/indexed表示变化
   通过presentation epoch使同signal全部Panel重新投影，不增加scientific publication/revision。
   Runtime内部绝对ordinal在materialize时统一转换为以最新为0的相对primary-index；Plot与

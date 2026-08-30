@@ -5012,7 +5012,7 @@ def test_the_semantic_form_appears_the_moment_a_signal_connects(
     Deriving them needs only schema + spec, so they are on the surface the
     moment add_panel or a signal connect holds a snapshot -- BEFORE any
     host settles, marked provisional until the host's description replaces
-    them with feasibility-filtered choices and fit models.
+    them with the same complete vocabulary plus accepted fit models.
     """
 
     node, snapshot = _one_shot(session)

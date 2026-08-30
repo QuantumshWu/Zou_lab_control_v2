@@ -86,7 +86,6 @@ from .fit import (
     FitResult,
 )
 from .kinds import AxisRef, PlotKind
-from ._kinds import handler_for
 from .layout import FacetTopology, SurfacePlan, resolve_surface
 from .parameters import ParameterSchema, RenderEffect
 from .primitives import (
@@ -135,19 +134,12 @@ from .specs import (
 )
 from .state import DisplayState, DisplayStateStore
 from .semantics import (
-    SemanticVacancy,
     SemanticDescription,
     composed_spec,
     describe_semantics,
     updated_spec,
 )
 from .session_policy import replace_spec_initial_state
-
-
-# Semantic probes are cheap validation work, but the edit surface can contain
-# many candidate specs (especially facet choices).  Keep the cache bounded and
-# make the bound visible to both the UI adapter and its performance guards.
-_SEMANTIC_PROBE_CACHE_MAX = 256
 
 
 _ProjectionInput = OwnedSnapshot | PulseTimelineData
@@ -567,12 +559,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         self._configuration_display_events: list[DisplayState] | None = None
         self._configuration_fit_events: list[FitEvent | None] | None = None
         self._configuration_fit_commit_actions: list[Callable[[], None]] | None = None
-        # Feasibility probes are cached per candidate spec for the current
-        # dataset generation; see _semantic_feasibility.
-        self._semantic_probe_generation: object = None
-        self._semantic_probe_cache: dict[
-            tuple[object, object], str | int | None
-        ] = {}
         # The whole description, for the inputs that produced it.  The
         # entry HOLDS its schema rather than naming it by address: this
         # renderer has already been bitten once by an id-keyed cache
@@ -1042,12 +1028,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             )
 
     def describe_semantics(self) -> SemanticDescription:
-        """Return the registry-derived semantic edit domain for this session.
-
-        Choice domains are checked against the live projection: an option
-        whose edit the projection or layout would reject is delivered
-        disabled with its rejection reason instead of failing on click.
-        """
+        """Return the registry/schema semantic vocabulary for this session."""
 
         with self._lock:
             self._assert_open()
@@ -1065,10 +1046,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             inputs = (
                 spec,
                 snapshot_generation(data) if isinstance(data, OwnedSnapshot) else None,
-                self._size,
-                self._device_pixel_ratio,
                 self._defaults.layout,
-                self._defaults.style,
             )
             memo = self._semantics_memo
             if memo is not None and memo[0] is schema and memo[1] == inputs:
@@ -1077,133 +1055,9 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 schema,
                 spec,
                 layout=self._defaults.layout,
-                feasibility=self._semantic_feasibility,
             )
             self._semantics_memo = (schema, inputs, description)
             return description
-
-    def _semantic_feasibility(self, name: str, value: object) -> str | None:
-        """Return why one semantic edit would be rejected, or None if viable.
-
-        The probe runs validation only, never aggregation, and its cost is
-        split along what each check actually depends on.  The EXPENSIVE
-        candidate validation (spec composition, the projection constructor,
-        the unit-aware view, the registry ``validate`` handler -- the same
-        checks every DataView projection method runs) is a function of the
-        dataset generation and the (current spec, candidate) pair alone, so
-        it is cached on exactly that: a display-parameter edit invalidates
-        NOTHING, and a describe after one re-pays zero validation sweeps.
-        The cheap facet layout gate reads the LIVE surface inputs (size,
-        DPR) against the cached facet cell count, so it is re-evaluated on
-        every call instead of being folded into the key.  The cache is
-        bounded because a long-lived UI can visit unbounded candidate
-        combinations.
-        """
-
-        with self._lock:
-            data = self._projection.data
-            schema = snapshot_schema(data) if isinstance(data, OwnedSnapshot) else None
-            try:
-                candidate = updated_spec(schema, self._spec, name, value)
-            except SemanticVacancy:
-                # A vacant required role is a panel state, not an
-                # infeasible edit; the option stays offered.
-                return None
-            except Exception as error:
-                return str(error) or type(error).__name__
-            if candidate == self._spec:
-                return None
-            generation = (
-                snapshot_generation(data)
-                if isinstance(data, OwnedSnapshot)
-                else None
-            )
-            if generation != self._semantic_probe_generation:
-                self._semantic_probe_generation = generation
-                self._semantic_probe_cache = {}
-            cache_key = (candidate, self._spec)
-            cache = self._semantic_probe_cache
-            if cache_key not in cache:
-                result: str | int | None
-                try:
-                    result = self._validate_candidate_spec(candidate)
-                except Exception as error:
-                    result = str(error) or type(error).__name__
-                if len(cache) >= _SEMANTIC_PROBE_CACHE_MAX:
-                    cache.pop(next(iter(cache)))
-                cache[cache_key] = result
-            cached = cache[cache_key]
-            if isinstance(cached, str):
-                return cached
-            if cached is not None:
-                # The layout capacity is judged from the facet domain sizes;
-                # the committed path derives the identical topology from its
-                # payload.
-                try:
-                    resolve_surface(
-                        self._size,
-                        candidate.kind,
-                        FacetTopology(cell_count=max(int(cached), 1)),
-                        device_pixel_ratio=self._device_pixel_ratio,
-                        layout=self._defaults.layout,
-                        style=self._defaults.style,
-                    )
-                except Exception as error:
-                    return str(error) or type(error).__name__
-            return None
-
-    def _validate_candidate_spec(self, spec: PlotSpec) -> int | None:
-        """Run the replacement validation front without building any payload.
-
-        Returns the facet cell count for FacetGrid candidates -- the one
-        input the caller's per-call layout gate needs -- and None for every
-        other kind.  The layout gate itself lives with the caller because it
-        depends on live surface inputs (size, DPR) this validation must not
-        be keyed on.
-        """
-
-        data = self._projection.data
-        FitProjection._validate_input(data, spec)
-        schema = parameter_schema_for(spec, style=self._defaults.style)
-        old_state = self.display_state
-        initial_state = replace_spec_initial_state(
-            self._spec,
-            spec,
-            old_state.values,
-            schema,
-            size=self._size or self.surface_plan.preset,
-            viewport=self._viewport,
-            parameters=None,
-        )
-        display_store = DisplayStateStore(
-            schema,
-            self._filled_store_values(schema, initial_state.parameters),
-            initial_revision=old_state.revision + 1,
-        )
-        projection = FitProjection(
-            data=data,
-            revision=self.data_revision,
-            spec=spec,
-            context=ProjectionContext(
-                display_store.state,
-                SelectorSnapshot(()),
-                viewport=initial_state.viewport,
-                focused_facet_index=0 if isinstance(spec, FacetGridPlot) else None,
-            ),
-            unit_registry=self._unit_registry,
-            defaults=self._defaults,
-            histogram_projection=None,
-        )
-        if not isinstance(data, OwnedSnapshot):
-            return None
-        projection._build_view()
-        view = projection._view
-        assert view is not None
-        handler_for(spec).validate(view, spec)
-        if isinstance(spec, FacetGridPlot):
-            return int(view.facet_cell_count(spec))
-        return None
-
 
     @property
     def selectors(self) -> tuple[SelectorState, ...]:
@@ -1302,12 +1156,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         payload: Any,
         state: DisplayState,
     ) -> SurfacePlan:
-        """Resolve the layout plan a (spec, payload) pair produces.
-
-        Shared by the committed render path and the semantic feasibility
-        probe, so layout rejections (the facet cell cap) come from one
-        authority in both.
-        """
+        """Resolve the layout plan a committed (spec, payload) pair produces."""
 
         topology = None
         if isinstance(spec, FacetGridPlot):
@@ -2553,12 +2402,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         parameters: Mapping[str, object] | None,
         size: str,
     ) -> tuple[Any, Any, DisplayStateStore, int | None, FitProjection]:
-        """Build and validate everything a spec replacement would commit.
-
-        Shared by ``replace_spec`` and the semantic feasibility probe so a
-        candidate is judged by exactly the validation the real replacement
-        runs.  Nothing here mutates session state.
-        """
+        """Build and validate everything a spec replacement would commit."""
 
         data = self._projection.data
         FitProjection._validate_input(data, spec)

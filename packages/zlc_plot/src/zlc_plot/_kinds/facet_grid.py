@@ -60,10 +60,6 @@ def admits(schema: Any) -> bool:
     return isinstance(schema, DatasetSchema)
 
 
-def validate(view: Any, spec: Any) -> None:
-    view.validate_facet(spec)
-
-
 def label_roles(spec: Any) -> tuple[tuple[str, tuple], ...]:
     """Facet labels describe the cell; the grid itself only adds a title."""
 
@@ -323,5 +319,4 @@ HANDLER = KindHandler(
     admits,
     default_spec,
     label_roles,
-    validate,
 )

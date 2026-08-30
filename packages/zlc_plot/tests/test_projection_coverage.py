@@ -158,8 +158,7 @@ def test_validate_curve_refuses_a_text_x_that_cannot_be_plotted() -> None:
     """Whatever passes validate_curve projects, and whatever projects passed.
 
     The real-numeric requirement used to live at the two BUILD sites only,
-    so a text coordinate passed validation (and the feasibility probe) and
-    then raised on the first draw.
+    so a text coordinate passed validation and then raised on the first draw.
     """
 
     snapshot = _snapshot(points={"label": ["a", "b"]})

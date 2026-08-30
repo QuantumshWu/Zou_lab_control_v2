@@ -891,9 +891,9 @@ class DataView:
     ) -> None:
         """Check a curve projection without computing it.
 
-        This is the single validation authority shared by :meth:`curve` and
-        the semantic feasibility probe: whatever passes here projects, and
-        whatever projects passed here.
+        This is the single validation authority shared by the explicit
+        validation API and :meth:`curve`: whatever passes here projects,
+        and whatever projects passed here.
 
         An axis this projection does not name -- repeat, an unplotted scan
         dimension, a dense data axis -- is not a defect: it pools under the

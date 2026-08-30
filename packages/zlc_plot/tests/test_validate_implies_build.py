@@ -3,10 +3,8 @@
 ``DataView.validate_curve`` promises it in its own docstring: "whatever
 passes here projects, and whatever projects passed here".  That promise was
 false: the real-numeric coordinate requirement lived at the BUILD sites
-only, so a text point column sailed through validation (and through the
-semantic feasibility probe, which is validation-only by design) and then
-raised on the first draw -- an offered option that every click rejects, the
-exact defect class the probe exists to prevent.
+only, so a text point column sailed through validation and then raised on the
+first draw.
 
 The guard states the contract directly and mechanically: for a
 representative set of schemas and specs, whichever way the ``validate_*``

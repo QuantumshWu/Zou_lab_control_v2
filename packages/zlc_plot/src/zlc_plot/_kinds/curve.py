@@ -33,10 +33,6 @@ def admits(schema: Any) -> bool:
     return default_spec(schema) is not None
 
 
-def validate(view: Any, spec: Any) -> None:
-    view.validate_curve(spec.x, group_by=() if spec.group is None else (spec.group,))
-
-
 def label_roles(spec: Any) -> tuple[tuple[str, tuple], ...]:
     """A curve's x names its x axis; its y always names the plotted value."""
 
@@ -139,5 +135,4 @@ HANDLER = KindHandler(
     admits,
     default_spec,
     label_roles,
-    validate,
 )

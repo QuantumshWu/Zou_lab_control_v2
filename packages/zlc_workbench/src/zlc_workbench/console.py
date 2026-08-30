@@ -2787,10 +2787,9 @@ class ConsolePresenter:
             # nothing the operator typed to refuse.
             "fit_refused": "",
             "fit_outputs": tuple((str(name), str(label)) for name, label in fit_outputs),
-            # Schema-projected, not yet host-described: the fate rows are
-            # real (they come from schema+spec alone) but choices are not
-            # feasibility-filtered and fit models are absent, so the host's
-            # description still replaces this surface when it arrives.
+            # Schema-projected, not yet host-described: the fate rows and
+            # choices are already complete; fit models are absent, so the
+            # host's description still replaces this surface when it arrives.
             "semantic_provisional": bool(semantic_provisional),
         }
 
@@ -2846,7 +2845,7 @@ class ConsolePresenter:
         spec alone, so a dead host cannot take them away.  Display controls
         come from the kind vocabulary; only fit truly needs a live host,
         and the host's own description still replaces this surface when it
-        arrives (feasibility-filtered choices, exact values, fit models).
+        arrives (accepted values and fit models).
         """
 
         from zlc_plot.semantics import describe_semantics
