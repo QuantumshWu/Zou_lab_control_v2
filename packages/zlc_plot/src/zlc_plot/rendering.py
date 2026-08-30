@@ -17,6 +17,7 @@ import math
 from numbers import Real
 from pathlib import Path
 import re
+from threading import RLock
 from enum import Enum
 from time import perf_counter
 from types import MappingProxyType
@@ -70,6 +71,28 @@ from .state import DisplayState
 from .style import PlotStyleConfig, style_context
 from .ticks import apply_declared_ticks, apply_smart_ticks
 from ._validation import readonly_copy
+
+
+_MATHTEXT_DRAW_LOCK = RLock()
+
+
+def _lock_renderer_mathtext(renderer: Any) -> None:
+    """Serialize Matplotlib's process-global parser, not whole plot draws."""
+
+    parser = getattr(renderer, "mathtext_parser", None)
+    if parser is None or getattr(parser, "_zlc_locked_parse", False):
+        return
+    with _MATHTEXT_DRAW_LOCK:
+        if getattr(parser, "_zlc_locked_parse", False):
+            return
+        parse = parser.parse
+
+        def locked_parse(*args: Any, **kwargs: Any) -> Any:
+            with _MATHTEXT_DRAW_LOCK:
+                return parse(*args, **kwargs)
+
+        parser.parse = locked_parse
+        parser._zlc_locked_parse = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,9 +210,10 @@ def _drawable_text(text: str) -> str:
     previous = log.disabled
     log.disabled = True
     try:
-        parser = MathTextParser("path")
-        for line in value.split("\n"):
-            parser.parse(line)
+        with _MATHTEXT_DRAW_LOCK:
+            parser = MathTextParser("path")
+            for line in value.split("\n"):
+                parser.parse(line)
     except Exception:  # noqa: BLE001 -- any refusal means "cannot be drawn"
         return _literal_text(value)
     finally:
@@ -2500,6 +2524,9 @@ class MatplotlibRenderer:
         draw = getattr(canvas, "draw", None)
         if not callable(draw):
             raise RuntimeError("the native canvas has no callable draw method")
+        get_renderer = getattr(canvas, "get_renderer", None)
+        if callable(get_renderer):
+            _lock_renderer_mathtext(get_renderer())
         draw()
 
     @contextmanager

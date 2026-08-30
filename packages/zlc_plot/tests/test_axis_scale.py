@@ -17,7 +17,9 @@ under the pointer was wrong.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import math
+from threading import Barrier
 
 import numpy as np
 import pytest
@@ -132,6 +134,25 @@ def test_the_transform_agrees_with_matplotlib_on_a_log_axis() -> None:
                 )
     finally:
         session.close()
+
+
+def test_concurrent_log_histograms_share_one_safe_mathtext_parser() -> None:
+    workers = 6
+    sessions = tuple(_histogram_session() for _ in range(workers))
+    gate = Barrier(workers)
+
+    def paint(session: PlotSession) -> None:
+        gate.wait(timeout=30.0)
+        for enabled in (True, False, True):
+            session.set_parameters({"log_y": enabled})
+        assert np.asarray(session.rgba()).size
+
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            tuple(pool.map(paint, sessions))
+    finally:
+        for session in sessions:
+            session.close()
 
 
 def test_a_body_drag_slides_the_box_instead_of_stretching_it() -> None:
