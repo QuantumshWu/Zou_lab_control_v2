@@ -2,8 +2,8 @@
 
 The scenario is intentionally specific: CameraMeasurement's own FacetGrid
 preview, a 40x500 Area-derived ROI, a 40-shot Histogram history lease, a
-source-index FacetGrid of Image cells with live anisotropic-Gaussian fits, and
-a Curve over source index grouped by the ROI's 40-sample spatial-y axis.
+source-index FacetGrid of Image or Curve cells with live fits, and a Curve over
+source index grouped by the ROI's 40-sample spatial-y axis.
 
 Run from the repository root on the real display::
 
@@ -404,11 +404,21 @@ def _window_revision_rate(
     return begin, finish
 
 
-def run(*, seconds: float, baseline_seconds: float) -> dict:
+def run(*, seconds: float, baseline_seconds: float, panel3: str) -> dict:
+    if panel3 not in {"image", "curve"}:
+        raise ValueError("panel3 must be 'image' or 'curve'")
+    panel3_label = (
+        "panel3 facet-fit-40"
+        if panel3 == "image"
+        else "panel3 facet-curve-fit-40"
+    )
+    fit_model = (
+        "anisotropic_gaussian_center" if panel3 == "image" else "gaussian_offset"
+    )
     labels = (
         "panel1 camera-grid",
         "panel2 histogram-40",
-        "panel3 facet-fit-40",
+        panel3_label,
         "panel4 curve-40",
     )
     bench = ConsoleBench()
@@ -421,7 +431,8 @@ def run(*, seconds: float, baseline_seconds: float) -> dict:
             "roi_yx": [40, 500],
             "history_window": 40,
             "panel_size": "2x2",
-            "fit": "anisotropic_gaussian_center",
+            "panel3": panel3,
+            "fit": fit_model,
         },
     }
     with bench:
@@ -484,13 +495,34 @@ def run(*, seconds: float, baseline_seconds: float) -> dict:
             timeout=30.0,
         )
 
-        grid = bench.add_panel_on(roi_signal, "facet_grid", size="2x2")
+        if panel3 == "curve":
+            grid = bench.presenter.add_selected_panel("facet_grid")
+            bench.view.panel_state_changed.emit(
+                grid.panel_id,
+                {"cell_kind": "curve", "signal": roi_signal, "size": "2x2"},
+            )
+            bench._until(
+                lambda: (
+                    grid.state.cell_kind == "curve"
+                    and grid.host is not None
+                    and bench.surface(grid) is not None
+                    and bench.surface(grid).presented_front is not None
+                ),
+                "Curve-cell FacetGrid",
+            )
+            bench._name(grid, "facet_grid:curve")
+        else:
+            grid = bench.add_panel_on(roi_signal, "facet_grid", size="2x2")
         bench._labels[grid.panel_id] = labels[2]
-        grid_roles = _assign_roles(bench, grid, {"source index": "facet"})
+        bench._pump(3.0)
+        grid_assignments = {"source index": "facet"}
+        if panel3 == "curve":
+            grid_assignments.update({"spatial-x": "x", "spatial-y": "reduced"})
+        grid_roles = _assign_roles(bench, grid, grid_assignments)
         fit_activation = bench.edit_setting(
             grid,
             "fit",
-            model="anisotropic_gaussian_center",
+            model=fit_model,
         )
         bench._until(
             lambda: (
@@ -498,7 +530,7 @@ def run(*, seconds: float, baseline_seconds: float) -> dict:
                 and grid.host._session.last_fit is not None
                 and len(tuple(getattr(grid.host._session.last_fit, "results", ()))) == 40
             ),
-            "40-cell anisotropic Gaussian fit",
+            f"40-cell {fit_model} fit",
             timeout=60.0,
         )
 
@@ -632,13 +664,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seconds", type=float, default=15.0)
     parser.add_argument("--baseline-seconds", type=float, default=6.0)
+    parser.add_argument("--panel3", choices=("image", "curve"), default="curve")
     arguments = parser.parse_args()
     payload = run(
         seconds=max(3.0, float(arguments.seconds)),
         baseline_seconds=max(3.0, float(arguments.baseline_seconds)),
+        panel3=str(arguments.panel3),
     )
     _print(payload)
-    path = write_result(payload, "console-mot-roi-four-panel")
+    path = write_result(
+        payload,
+        f"console-mot-roi-four-panel-{arguments.panel3}",
+    )
     print(f"\nwrote {path}")
 
 
