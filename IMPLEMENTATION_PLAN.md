@@ -47,6 +47,7 @@
   2.04M MEAN compute为204.124→9.719 ms，真实Windows Rolling Host中位为
   264.37→58.85 ms、P90为286.34→66.89 ms；70组reduction/validity/group矩阵满足
   既有浮点数值等价与结构精确contract，聚焦回归63项通过。
+- 可独立删除的极限Facet/Fit cut：Curve Facet的mean/SEM按`facet×x`一次归约，Image/Curve/uncertainty/fit line/ellipse/annotation直接生成最终RGBA；overview不维护逐cell动态artist，focused及line interaction按需回到原公共artist路径。RegularImage完整warm batch直接full refine并对失败cell cold fallback；Board先stage active-fit surface。真实DPR3、2×2、MOT 40×约500 ROI、40-shot四panel长窗：Curve-Fit critical path中位/P90/best `67.78/71.44/59.47 ms`，Image-Fit `80.16/84.82/70.38 ms`；实际显示仍受0.1 s exposure与100 ms cadence限制，不把处理能力冒充source fps。warmer为`62 kernels / 76 signatures`，聚焦Plot `30 passed`、Runtime/Workbench presentation `51 passed`、RegularImage fit `11 passed`。
 - Panel Edit/Setting性能cut在同一真实Windows Camera Facet链上完成：Direct Producer不再嵌套
   LogicEditor而只打开已有Logic tab；Qt owner在Host首次render前传入screen DPR；正常已settle
   Edit首开`update_projection 3→1`、`refresh_panel_editor 3→0`、Form reconcile `19→4`、

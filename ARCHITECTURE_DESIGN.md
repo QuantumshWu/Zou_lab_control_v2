@@ -167,6 +167,9 @@ Node new chunk
   focused cell；相同shape但不同axis roles绝不共享数值范围。Live configure接受的新viewport
   必须写回此identity，Frozen/Edit/Viewer只能重放仍匹配的范围。
 - ImagePlot及FacetGrid的image cell统一使用`nearest`像素呈现；interpolation不是Parameter、PanelState、Figure recipe或UI字段，任何Logic/Task不得另行设置。
+- Facet overview及无hover/lock的steady Curve可以从同一accepted payload、style token与axes transform直接生成native RGBA；它不是第二份科学状态。focused cell仍走公共kind renderer，standalone Curve在首次line interaction时从当前accepted series物化既有artist，随后hover/lock/滚轮继续由原interaction owner处理。
+- 同一shot的Surface仍原子accept；staging只把active-fit surface排在display-only sibling之前，使更深依赖链先启动，不改变panel cadence、cohort membership或accept顺序。
+- RegularImage live batch在完整warm seed可用时直接做full refinement；任一cell失败或无warm seed时仍走cold proxy并只重试必要cell。warm不能成为不可恢复的authority。
 - Title/layout等非plot变化不得re-fit。
 - 删除重复configure/clear/replay与多front handoff。
 - Qt owner必须在RasterPlotHost第一次render前把当前screen DPR以plain scalar交给Plot；不得先按默认DPR生成front，再在Widget挂载后为同一data/state重画一次。Form consumer在FormSpec结构和实际Widget值均已匹配时只接受新metadata，不得reconcile；keyed runtime choice domain真实变化仍强制刷新。

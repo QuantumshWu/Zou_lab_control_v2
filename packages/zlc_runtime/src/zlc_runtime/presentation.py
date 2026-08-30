@@ -648,6 +648,17 @@ class BoardScheduler:
             result[panel_id] = port
         return result
 
+    @staticmethod
+    def _stage_order(ports: Sequence[SurfacePort]) -> tuple[SurfacePort, ...]:
+        """Start deeper surfaces first while retaining order among peers."""
+
+        return tuple(
+            sorted(
+                ports,
+                key=lambda port: -int(getattr(port, "presentation_priority", 0)),
+            )
+        )
+
     def _blocked_surface_panels(
         self,
         ports: Sequence[SurfacePort],
@@ -778,7 +789,7 @@ class BoardScheduler:
         # floats at its own latest publication -- a camera panel one shot
         # ahead of the panel derived from it.  The plane no-ops on an
         # unchanged set, so this scheduler is the sole declaration authority.
-        ports = tuple(self._ports())
+        ports = self._stage_order(tuple(self._ports()))
         displayed = self._displayed_signals(ports)
         self._plane.set_front_signals(displayed)
         front = self._plane.freeze()
@@ -980,7 +991,7 @@ class BoardScheduler:
         eligible = self._owed | (self._admission_owed if admit_new else set())
         if self._closed or not eligible:
             return self._last_front
-        ports = tuple(self._ports())
+        ports = self._stage_order(tuple(self._ports()))
         displayed = self._displayed_signals(ports)
         self._plane.set_front_signals(displayed)
         front = self._plane.freeze()

@@ -296,7 +296,6 @@ def run(*, updates: int) -> dict:
             roi,
             specs["panel3 facet-curve-fit-40"],
             updates=updates,
-            parameters={"uncertainty": False},
             fit={"model": "gaussian_offset", "fit_all_facets": True},
         ),
         _case(

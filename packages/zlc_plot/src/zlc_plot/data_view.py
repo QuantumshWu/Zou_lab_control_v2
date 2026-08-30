@@ -4035,6 +4035,33 @@ class DataView:
         domain = self._domain(facet, representatives)
         if not domain.values:
             return None
+        if isinstance(cell, CurvePlot):
+            assert x_resolved is not None
+            batch_curve = self._dense_curve_facet_payloads(
+                cell,
+                x_resolved,
+                values,
+                valid_mask,
+                slice_axis,
+                np.asarray(domain.codes, dtype=np.int64),
+                uncertainty,
+            )
+            if batch_curve is not None:
+                return FacetData(
+                    revision=self._samples.revision,
+                    generation=self._samples.generation,
+                    spec=spec,
+                    cells=tuple(
+                        FacetCell(
+                            facet_index=index,
+                            facet_value_canonical=value.canonical,
+                            facet_value_display=value.display,
+                            label=value.label,
+                            payload=batch_curve[index],
+                        )
+                        for index, value in enumerate(domain.values)
+                    ),
+                )
         batch_edges = None
         batch_counts = None
         if isinstance(cell, HistogramPlot):
@@ -4130,6 +4157,145 @@ class DataView:
             generation=self._samples.generation,
             spec=spec,
             cells=tuple(cells),
+        )
+
+    def _dense_curve_facet_payloads(
+        self,
+        cell: CurvePlot,
+        x_resolved: "_ProjectedAxis",
+        values: NDArray[Any],
+        usable: NDArray[np.bool_],
+        facet_dimension: int,
+        facet_codes: NDArray[np.int64],
+        uncertainty: bool,
+    ) -> tuple[CurveData, ...] | None:
+        """Reduce every one-to-one tensor Facet Curve in one numeric pass."""
+
+        facet_size = int(values.shape[facet_dimension])
+        x_dimension = int(x_resolved.dimension)
+        x_canonical = np.asarray(x_resolved.domain_canonical)
+        nx = int(x_canonical.size)
+        if (
+            x_dimension == facet_dimension
+            or facet_codes.shape != (facet_size,)
+            or bool(np.any(facet_codes < 0))
+            or np.unique(facet_codes).size != facet_size
+            or int(np.max(facet_codes)) + 1 != facet_size
+        ):
+            return None
+
+        moved = np.moveaxis(
+            values,
+            (facet_dimension, x_dimension),
+            (-2, -1),
+        ).reshape(-1, facet_size, nx)
+        moved_usable = np.moveaxis(
+            usable,
+            (facet_dimension, x_dimension),
+            (-2, -1),
+        ).reshape(moved.shape)
+        if not moved.flags.c_contiguous:
+            moved = np.ascontiguousarray(moved)
+        if not moved_usable.flags.c_contiguous:
+            moved_usable = np.ascontiguousarray(moved_usable)
+        y, counts = _masked_leading_reduce(
+            moved, moved_usable, cell.reduction
+        )
+        y = np.asarray(y, dtype=np.float64)
+        counts = np.broadcast_to(np.asarray(counts, dtype=np.int64), y.shape)
+        sem = None
+        if uncertainty:
+            moved_sigma = None
+            if self._samples.sigma is not None:
+                moved_sigma = np.moveaxis(
+                    self._samples.sigma,
+                    (facet_dimension, x_dimension),
+                    (-2, -1),
+                ).reshape(moved.shape)
+                if not moved_sigma.flags.c_contiguous:
+                    moved_sigma = np.ascontiguousarray(moved_sigma)
+
+            def mean_of_squares(plane: Any, offset: float) -> Any:
+                array = np.asarray(plane)
+                marks = (
+                    None
+                    if _stride_zero_all_true(moved_usable)
+                    else moved_usable
+                )
+                from . import _raster_kernels as kernels
+
+                sums = kernels.masked_centred_square_sums(
+                    array.reshape(array.shape[0], -1, 1),
+                    offset,
+                    None if marks is None else marks.reshape(array.shape[0], -1, 1),
+                )
+                if sums is None:
+                    reduced, _ = _masked_leading_reduce(
+                        np.square(np.asarray(array, dtype=np.float64) - offset),
+                        moved_usable,
+                        Reduction.MEAN,
+                    )
+                    return reduced
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    return np.where(
+                        counts > 0,
+                        sums.reshape(facet_size, nx) / counts,
+                        np.nan,
+                    )
+
+            sem = _sem_of_mean(
+                y, counts, moved, moved_sigma, mean_of_squares
+            )
+
+        order = _inverse_code_order(facet_codes)
+        if order is not None:
+            y = np.take(y, order, axis=0)
+            counts = np.take(counts, order, axis=0)
+            if sem is not None:
+                sem = np.take(sem, order, axis=0)
+        valid = (counts > 0) & np.isfinite(y)
+        value = self._samples.value
+        y_display = value.canonical_unit.convert_value_to(
+            y, value.display_unit
+        )
+        x_quantity = QuantityArray(
+            x_canonical,
+            np.asarray(x_resolved.domain_display),
+            x_resolved.coordinate.canonical_unit,
+            x_resolved.coordinate.display_unit,
+            x_resolved.coordinate.label,
+        )
+        x_labels = _axis_coordinate_labels(x_resolved, x_canonical)
+        for array in (y, counts, valid, y_display):
+            if array.flags.writeable:
+                array.setflags(write=False)
+        if sem is not None and sem.flags.writeable:
+            sem.setflags(write=False)
+        return tuple(
+            CurveData(
+                revision=self._samples.revision,
+                generation=self._samples.generation,
+                x_ref=cell.x,
+                group_by=(),
+                series=(
+                    CurveSeries(
+                        x=x_quantity,
+                        x_labels=x_labels,
+                        y=QuantityArray(
+                            y[index],
+                            y_display[index],
+                            value.canonical_unit,
+                            value.display_unit,
+                            value.label,
+                        ),
+                        valid=valid[index],
+                        counts=counts[index],
+                        sem=None if sem is None else sem[index],
+                        label=value.label,
+                    ),
+                ),
+            )
+            for index in range(facet_size)
         )
 
     def _all_positions(self) -> NDArray[np.int64]:

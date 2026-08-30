@@ -190,6 +190,14 @@ class PlotPanelPort:
     def display_interval_ms(self) -> int:
         return self._interval_ms
 
+    @property
+    def presentation_priority(self) -> int:
+        """Start a deeper fit surface before same-shot display-only siblings."""
+
+        with self._state_lock:
+            fit = getattr(self._projection_target, "fit", None)
+        return 1 if fit else 0
+
     def set_display_interval(self, milliseconds: int) -> None:
         """How often this panel redraws.
 
