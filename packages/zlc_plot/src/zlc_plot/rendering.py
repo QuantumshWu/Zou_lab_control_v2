@@ -1359,6 +1359,9 @@ class MatplotlibRenderer:
         self._boundary_chrome_cache: dict[
             int, tuple[tuple[Any, Any, float], ...]
         ] = {}
+        self._boundary_chrome_commands: dict[
+            int, tuple[tuple[str, Any, tuple[Any, ...], dict[str, Any]], ...]
+        ] = {}
         self._boundary_chrome_signature: tuple[object, ...] | None = None
         #: Canonical raw data behind each displayed line.  The artist may hold
         #: a display-resolution envelope, but fit-source presentation and any
@@ -1620,6 +1623,7 @@ class MatplotlibRenderer:
         self._series_hit_cache.clear()
         self._series_hover = self._series_locked = self._series_press = None
         self._boundary_chrome_cache.clear()
+        self._boundary_chrome_commands.clear()
         self._boundary_chrome_signature = None
         self._selector_artists.clear()
         self._selector_topologies.clear()
@@ -2114,7 +2118,15 @@ class MatplotlibRenderer:
         )
         if signature != self._boundary_chrome_signature:
             self._boundary_chrome_cache.clear()
+            self._boundary_chrome_commands.clear()
             self._boundary_chrome_signature = signature
+        commands_to_record: list[Any] = []
+        facet_overview_axes = (
+            set(self._axes.get("facet_cell", ()))
+            if isinstance(self.spec, FacetGridPlot)
+            and self._facet_focus_index is None
+            else set()
+        )
         for axes in {entry[1].axes for entry in tuple(collected)}:
             if not axes.get_visible():
                 continue
@@ -2135,9 +2147,15 @@ class MatplotlibRenderer:
                 else self._boundary_chrome_cache.get(id(axes))
             )
             if cached is not None:
+                if axes not in facet_overview_axes:
+                    for artist, _owner, _zorder in cached:
+                        self._boundary_chrome_commands.pop(id(artist), None)
                 for artist, owner, zorder in cached:
                     keyed(artist, owner, zorder)
                 continue
+            previous = self._boundary_chrome_cache.get(id(axes), ())
+            for artist, _owner, _zorder in previous:
+                self._boundary_chrome_commands.pop(id(artist), None)
             entries: list[tuple[Any, Any, float]] = []
             for axis in (axes.xaxis, axes.yaxis):
                 if id(axis) in dynamic_axis_ids:
@@ -2181,8 +2199,64 @@ class MatplotlibRenderer:
             ]
             self._boundary_chrome_cache[id(axes)] = tuple(entries)
             for artist, owner, zorder in entries:
+                if (
+                    axes in facet_overview_axes
+                    and id(artist) not in self._boundary_chrome_commands
+                ):
+                    commands_to_record.append(artist)
                 keyed(artist, owner, zorder)
+        if commands_to_record:
+            self._record_boundary_chrome_commands(commands_to_record)
         return collected
+
+    def _record_boundary_chrome_commands(self, artists: Sequence[Any]) -> None:
+        """Freeze Agg path commands for stable tick marks and spines."""
+
+        from matplotlib.backends.backend_agg import RendererAgg
+
+        width = int(round(float(self._figure.bbox.width)))
+        height = int(round(float(self._figure.bbox.height)))
+        recorder = RendererAgg(width, height, self._figure.dpi)
+        active: list[tuple[str, Any, tuple[Any, ...], dict[str, Any]]] = []
+        for method_name in (
+            "draw_path",
+            "draw_markers",
+            "draw_path_collection",
+        ):
+            original = getattr(recorder, method_name)
+
+            def record(
+                gc: Any,
+                *args: Any,
+                _name: str = method_name,
+                _original: Any = original,
+                **kwargs: Any,
+            ) -> Any:
+                frozen = recorder.new_gc()
+                frozen.copy_properties(gc)
+                active.append((_name, frozen, args, dict(kwargs)))
+                return _original(gc, *args, **kwargs)
+
+            setattr(recorder, method_name, record)
+        for artist in artists:
+            active = []
+            artist.draw(recorder)
+            if active:
+                self._boundary_chrome_commands[id(artist)] = tuple(active)
+
+    def _draw_dynamic_artist(
+        self,
+        artist: Any,
+        renderer: Any,
+        canvas: Any,
+    ) -> None:
+        commands = self._boundary_chrome_commands.get(id(artist))
+        if commands is not None:
+            for method_name, gc, args, kwargs in commands:
+                getattr(renderer, method_name)(gc, *args, **kwargs)
+            return
+        if not self._blit_exact_rgba_image(artist, canvas):
+            artist.draw(renderer)
 
     def _chrome_meets_data(self, artist: Any, axes: Any) -> bool:
         """Whether this chrome artist shares pixels with its data region.
@@ -2261,6 +2335,7 @@ class MatplotlibRenderer:
             # not see.  The boundary cache is only ever trusted between two
             # consecutive reusable frames.
             self._boundary_chrome_cache.clear()
+            self._boundary_chrome_commands.clear()
         dynamics = self._dynamic_artists()
         ordered = sorted(dynamics, key=lambda entry: entry[0])
         # Where the gesture's own artists begin, in the one z-order a full
@@ -2330,8 +2405,7 @@ class MatplotlibRenderer:
                 self._gesture_overlay = tuple(ordered[split:])
                 self._gesture_selector_ids = selector_ids
             if artist.get_visible():
-                if not self._blit_exact_rgba_image(artist, canvas):
-                    artist.draw(renderer)
+                self._draw_dynamic_artist(artist, renderer, canvas)
         if split is None:
             self._forget_gesture_region()
         self._raster_generation += 1
@@ -2387,8 +2461,7 @@ class MatplotlibRenderer:
         renderer = get_renderer()
         for _key, artist in self._gesture_overlay:
             if artist.get_visible():
-                if not self._blit_exact_rgba_image(artist, canvas):
-                    artist.draw(renderer)
+                self._draw_dynamic_artist(artist, renderer, canvas)
         self._raster_generation += 1
         self._composed_generation = self._raster_generation
         return True
@@ -7632,11 +7705,17 @@ class MatplotlibRenderer:
             return
         if family == "ellipse":
             ring_token = self.style.artists.point_occupied
-            center = axis.scatter(
+            (center,) = axis.plot(
                 (),
                 (),
-                color=self.style.artists.fit_ellipse_color,
-                s=self.style.artists.fit_ellipse_center_area_pt2,
+                linestyle="none",
+                marker="o",
+                markersize=math.sqrt(
+                    self.style.artists.fit_ellipse_center_area_pt2
+                ),
+                markerfacecolor=self.style.artists.fit_ellipse_color,
+                markeredgecolor=self.style.artists.fit_ellipse_color,
+                markeredgewidth=1.0,
                 clip_on=True,
                 zorder=self.style.artists.fit_ellipse_zorder,
             )
@@ -7722,9 +7801,7 @@ class MatplotlibRenderer:
             glyph = overlay.ellipse_glyph
             if glyph is None:
                 raise RuntimeError("ellipse fit family requires one ellipse glyph")
-            center.set_offsets(
-                np.asarray(((glyph.center_x, glyph.center_y),), dtype=float)
-            )
+            center.set_data((glyph.center_x,), (glyph.center_y,))
             ring.set_center((glyph.center_x, glyph.center_y))
             ring.set_width(2.0 * glyph.radius_x)
             ring.set_height(2.0 * glyph.radius_y)

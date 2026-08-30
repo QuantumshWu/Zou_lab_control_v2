@@ -129,15 +129,16 @@ def test_image_fit_ring_uses_the_occupied_point_ring_style(faceted: bool) -> Non
         assert (ring.get_width(), ring.get_height()) == pytest.approx(
             (2.0 * glyph.radius_x, 2.0 * glyph.radius_y), rel=0.0, abs=0.0
         )
-        assert center.get_offsets()[0] == pytest.approx(
+        center_x, center_y = center.get_data()
+        assert (center_x[0], center_y[0]) == pytest.approx(
             (glyph.center_x, glyph.center_y), rel=0.0, abs=0.0
         )
-        assert center.get_facecolors()[0] == pytest.approx(
+        assert to_rgba(center.get_markerfacecolor()) == pytest.approx(
             to_rgba(renderer.style.artists.fit_ellipse_color)
         )
         center_area = renderer.style.artists.fit_ellipse_center_area_pt2
         assert center_area == 2.25
-        assert tuple(center.get_sizes()) == (center_area,)
+        assert center.get_markersize() ** 2 == pytest.approx(center_area)
         assert annotation.get_visible() and annotation.get_text()
     finally:
         session.close()

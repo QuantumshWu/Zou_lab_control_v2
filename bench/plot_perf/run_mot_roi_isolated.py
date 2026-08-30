@@ -144,6 +144,8 @@ def _specs(feeds: dict) -> dict:
         "panel1 standalone-image": camera_image,
         "panel2 histogram-40": HistogramPlot(),
         "panel3 facet-fit-40": FacetGridPlot(source, roi_image),
+        "panel3b facet-curve-40": FacetGridPlot(source, CurvePlot(roi_x)),
+        "panel3c facet-histogram-40": FacetGridPlot(source, HistogramPlot()),
         "panel4 curve-40": CurvePlot(source, group=roi_y),
     }
 
@@ -287,6 +289,19 @@ def run(*, updates: int) -> dict:
             specs["panel3 facet-fit-40"],
             updates=updates,
             fit={"model": "anisotropic_gaussian_center", "fit_all_facets": True},
+        ),
+        _case(
+            "panel3b facet-curve-40",
+            roi,
+            specs["panel3b facet-curve-40"],
+            updates=updates,
+            parameters={"uncertainty": False},
+        ),
+        _case(
+            "panel3c facet-histogram-40",
+            roi,
+            specs["panel3c facet-histogram-40"],
+            updates=updates,
         ),
         _case(
             "panel4 curve-40",
