@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 from enum import Enum
+import hashlib
 import math
 import re
 from numbers import Real
@@ -17,6 +19,7 @@ from scipy.ndimage import median_filter
 from scipy.optimize import least_squares, minimize, minimize_scalar
 from scipy.signal import find_peaks
 
+from . import _fit_compiled as _compiled_fit
 from ._validation import finite_real as _finite_real
 from ._validation import integer, text as _text
 from .kinds import AxisRef
@@ -51,6 +54,10 @@ _COUNT_FLOOR = 1e-9
 _REGULAR_IMAGE_CAPABILITIES = frozenset(
     {"regular_image_radial", "regular_image_separable"}
 )
+# End-to-end multi-cell crossover against the separable image solver: both
+# image models win through 1,024 valid pixels; at 1,152 anisotropic can lose.
+# Public single-image fits stay separable to preserve exact retry semantics.
+_COMPILED_REGULAR_IMAGE_MAX_POINTS = 1024
 
 
 class FitCancelled(RuntimeError):
@@ -322,6 +329,7 @@ class FitModelSpec:
     coordinate_relations: tuple[UnitRelation, ...] | None = None
     default_for: tuple[FitTarget, ...] = ()
     capabilities: frozenset[str] = frozenset()
+    compiled_descriptor: _compiled_fit.CompiledFitDescriptor | None = None
 
     def __post_init__(self) -> None:
         model_id = _text(self.model_id, "fit model id")
@@ -400,6 +408,13 @@ class FitModelSpec:
             raise TypeError("bounds_initializer must be callable or None")
         if self.jacobian is not None and not callable(self.jacobian):
             raise TypeError("jacobian must be callable or None")
+        if self.compiled_descriptor is not None and not isinstance(
+            self.compiled_descriptor,
+            _compiled_fit.CompiledFitDescriptor,
+        ):
+            raise TypeError(
+                "compiled_descriptor must be CompiledFitDescriptor or None"
+            )
         if not isinstance(self.presentation, FitPresentationSpec):
             raise TypeError("presentation must be FitPresentationSpec")
         coordinate_relations = self.coordinate_relations
@@ -1009,6 +1024,43 @@ class FitResult:
             "fixed_parameter_names": self.fixed_parameter_names,
         }
         values.update(overrides)
+        if set(overrides).issubset({"parameter_units", "batch_revision"}):
+            batch_revision = integer(values["batch_revision"], "batch_revision")
+            if batch_revision < 0:
+                raise ValueError("batch_revision must be non-negative")
+            units = dict(values["parameter_units"])
+            unknown = set(units) - set(self.model.parameter_names)
+            if unknown:
+                raise ValueError(
+                    f"fit result units name unknown parameters: {sorted(unknown)}"
+                )
+            parameter_units = MappingProxyType({
+                name: _text(
+                    units.get(name, ""),
+                    f"fit parameter unit {name}",
+                    allow_empty=True,
+                )
+                for name in self.model.parameter_names
+            })
+            clone = object.__new__(FitResult)
+            for name in (
+                "model",
+                "parameter_values",
+                "standard_errors",
+                "covariance",
+                "source_revision",
+                "success",
+                "message",
+                "reduced_chi_square",
+                "covariance_valid",
+                "fixed_parameter_names",
+            ):
+                object.__setattr__(clone, name, values[name])
+            for name in ("fitted_values", "residuals", "selected_indices"):
+                _FIT_RESULT_RAW[name].__set__(clone, values[name])
+            object.__setattr__(clone, "parameter_units", parameter_units)
+            object.__setattr__(clone, "batch_revision", batch_revision)
+            return clone
         return FitResult(**values)
 
     def with_parameter_units(self, units: Mapping[str, str]) -> "FitResult":
@@ -1059,6 +1111,61 @@ def _install_lazy_fit_result_fields() -> None:
 
 
 _install_lazy_fit_result_fields()
+
+
+def _fit_result_from_validated_batch_row(
+    *,
+    model: FitModelSpec,
+    parameter_values: np.ndarray,
+    standard_errors: np.ndarray,
+    covariance: np.ndarray,
+    fitted_values: np.ndarray,
+    residuals: np.ndarray,
+    selected_indices: np.ndarray,
+    source_revision: int,
+    success: bool,
+    message: str,
+    reduced_chi_square: float,
+    covariance_valid: bool,
+    parameter_units: Mapping[str, str],
+    fixed_parameter_names: tuple[str, ...],
+) -> FitResult:
+    """Build one row after its entire compiled batch passed validation.
+
+    The public constructor deliberately copies every incoming array to make an
+    isolated immutable result.  Compiled output already owns one private batch
+    backing, so copying and re-validating it 64 times costs more than the
+    solve.  This factory accepts only read-only rows from a backing validated
+    once by ``FitEngine`` and fills the same frozen slots directly.
+    """
+
+    arrays = (
+        parameter_values,
+        standard_errors,
+        covariance,
+        fitted_values,
+        residuals,
+        selected_indices,
+    )
+    if any(np.asarray(item).flags.writeable for item in arrays):
+        raise RuntimeError("compiled fit result backing must be read-only")
+    result = object.__new__(FitResult)
+    object.__setattr__(result, "model", model)
+    object.__setattr__(result, "parameter_values", parameter_values)
+    object.__setattr__(result, "standard_errors", standard_errors)
+    object.__setattr__(result, "covariance", covariance)
+    _FIT_RESULT_RAW["fitted_values"].__set__(result, fitted_values)
+    _FIT_RESULT_RAW["residuals"].__set__(result, residuals)
+    _FIT_RESULT_RAW["selected_indices"].__set__(result, selected_indices)
+    object.__setattr__(result, "source_revision", source_revision)
+    object.__setattr__(result, "success", success)
+    object.__setattr__(result, "message", message)
+    object.__setattr__(result, "reduced_chi_square", reduced_chi_square)
+    object.__setattr__(result, "covariance_valid", covariance_valid)
+    object.__setattr__(result, "parameter_units", parameter_units)
+    object.__setattr__(result, "batch_revision", 0)
+    object.__setattr__(result, "fixed_parameter_names", fixed_parameter_names)
+    return result
 
 
 #: How many shots a fitted component must hold to be a POPULATION.  Below
@@ -1352,9 +1459,896 @@ class FacetFitBatchResult:
             result[name] = values
         return MappingProxyType(result)
 
+
 class FitEngine:
     def __init__(self, registry: FitModelRegistry | None = None) -> None:
         self.registry = registry or default_fit_registry()
+        self._compiled_context_lock = threading.RLock()
+        self._compiled_contexts: OrderedDict[tuple[Any, ...], np.ndarray] = (
+            OrderedDict()
+        )
+
+    def _compiled_context(
+        self,
+        descriptor: _compiled_fit.CompiledFitDescriptor,
+        coordinates: ArrayTuple,
+    ) -> np.ndarray:
+        """Return one immutable coordinate plan from a small exact LRU."""
+
+        digest = hashlib.blake2b(digest_size=20)
+        digest.update(descriptor.cache_key.encode("utf-8"))
+        signature: list[Any] = [descriptor.cache_key, len(coordinates)]
+        for axis in coordinates:
+            values = np.ascontiguousarray(axis, dtype=np.float64)
+            signature.extend((values.shape, values.dtype.str))
+            digest.update(memoryview(values).cast("B"))
+        key = (*signature, digest.digest())
+        with self._compiled_context_lock:
+            cached = self._compiled_contexts.get(key)
+            if cached is not None:
+                self._compiled_contexts.move_to_end(key)
+                return cached
+        built = _readonly(
+            np.asarray(
+                descriptor.context_builder(coordinates),
+                dtype=np.float64,
+            )
+        )
+        if built.ndim != 2:
+            raise ValueError("compiled fit context_builder must return a 2D array")
+        with self._compiled_context_lock:
+            existing = self._compiled_contexts.get(key)
+            if existing is not None:
+                self._compiled_contexts.move_to_end(key)
+                return existing
+            self._compiled_contexts[key] = built
+            while len(self._compiled_contexts) > 16:
+                self._compiled_contexts.popitem(last=False)
+        return built
+
+    def _compiled_descriptor(
+        self,
+        model: FitModelSpec,
+    ) -> _compiled_fit.CompiledFitDescriptor | None:
+        """Return the descriptor only for this registry's exact model.
+
+        ``dataclasses.replace`` is intentionally a customization boundary: a
+        caller replacing an evaluator or Jacobian must not accidentally keep
+        running the compiled callbacks attached to the original built-in.
+        """
+
+        descriptor = model.compiled_descriptor
+        if descriptor is None:
+            return None
+        try:
+            registered = self.registry.get(model.model_id)
+        except ValueError:
+            return None
+        return descriptor if registered is model else None
+
+    @staticmethod
+    def _compact_regular_image(
+        image: RegularImageFitInput,
+    ) -> tuple[ArrayTuple, np.ndarray, np.ndarray] | None:
+        """Return the exact small-image coordinate selection or ``None``."""
+
+        values = np.asarray(image.observations)
+        valid = np.isfinite(values)
+        if image.valid_mask is not None:
+            valid &= image.valid_mask
+        if int(np.count_nonzero(valid)) > _COMPILED_REGULAR_IMAGE_MAX_POINTS:
+            return None
+        rows, columns = np.nonzero(valid)
+        coordinates = (
+            image.x_coordinates[columns],
+            image.y_coordinates[rows],
+        )
+        observed = np.asarray(values[valid], dtype=np.float64)
+        indices = (
+            np.flatnonzero(valid.reshape(-1)).astype(np.int64, copy=False)
+            if image.selected_indices is None
+            else np.asarray(image.selected_indices[valid], dtype=np.int64)
+        )
+        return coordinates, observed, indices
+
+    def fit_batch(
+        self,
+        model: str | FitModelSpec,
+        coordinates: Sequence[Sequence[np.ndarray] | RegularImageFitInput],
+        observations: Sequence[np.ndarray | None],
+        *,
+        observation_sigmas: Sequence[np.ndarray | None] | None = None,
+        selected_indices: Sequence[np.ndarray | None] | None = None,
+        data_revisions: Sequence[int] | None = None,
+        initial: Mapping[str, float] | Sequence[float] | None = None,
+        warm_starts: Sequence[
+            Mapping[str, float] | Sequence[float] | None
+        ] | None = None,
+        bounds: Mapping[str, tuple[float | None, float | None]] | None = None,
+        options: FitOptions | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> tuple[tuple[FitResult | None, ...], tuple[str | None, ...]]:
+        """Fit independent cells through one numerical owner.
+
+        Built-ins with a compiled descriptor enter one independent batched
+        solve.  A custom model, a caller-replaced model, a custom engine that
+        overrides :meth:`fit`, or a regular-image input keeps the public
+        scalar route exactly as authored.  A failed cell is reported in the
+        matching failure slot; it is never silently sent through a second
+        numerical implementation.
+        """
+
+        spec = self.registry.get(model) if isinstance(model, str) else model
+        if not isinstance(spec, FitModelSpec):
+            raise TypeError("model must be a registered id or FitModelSpec")
+        coordinate_items = tuple(coordinates)
+        value_items = tuple(observations)
+        count = len(coordinate_items)
+        if count == 0:
+            raise ValueError("fit batch cannot be empty")
+        if len(value_items) != count:
+            raise ValueError("fit batch observations must match coordinates")
+
+        def sequence_or_default(
+            values: Sequence[Any] | None,
+            default: Any,
+            name: str,
+        ) -> tuple[Any, ...]:
+            resolved = (default,) * count if values is None else tuple(values)
+            if len(resolved) != count:
+                raise ValueError(f"fit batch {name} must match coordinates")
+            return resolved
+
+        sigma_items = sequence_or_default(
+            observation_sigmas,
+            None,
+            "observation_sigmas",
+        )
+        index_items = sequence_or_default(
+            selected_indices,
+            None,
+            "selected_indices",
+        )
+        revision_items = sequence_or_default(data_revisions, 0, "data_revisions")
+        warm_items = sequence_or_default(warm_starts, None, "warm_starts")
+
+        descriptor = self._compiled_descriptor(spec)
+        custom_fit = type(self).fit is not FitEngine.fit
+        if descriptor is None or custom_fit:
+            results: list[FitResult | None] = []
+            failures: list[str | None] = []
+            for cell in range(count):
+                try:
+                    result = self.fit(
+                        spec,
+                        coordinate_items[cell],
+                        value_items[cell],
+                        observation_sigma=sigma_items[cell],
+                        selected_indices=index_items[cell],
+                        data_revision=revision_items[cell],
+                        initial=initial,
+                        warm_start=warm_items[cell],
+                        bounds=bounds,
+                        options=options,
+                        cancelled=cancelled,
+                    )
+                except FitCancelled:
+                    raise
+                except Exception as error:
+                    results.append(None)
+                    failures.append(str(error) or type(error).__name__)
+                else:
+                    results.append(result)
+                    failures.append(None)
+            return tuple(results), tuple(failures)
+
+        results: list[FitResult | None] = [None] * count
+        failures: list[str | None] = [None] * count
+        compiled_cells: list[int] = []
+        compiled_coordinates: list[Sequence[np.ndarray]] = []
+        compiled_observations: list[np.ndarray | None] = []
+        compiled_sigmas: list[np.ndarray | None] = []
+        compiled_indices: list[np.ndarray | None] = []
+        compiled_revisions: list[int] = []
+        compiled_warm: list[Mapping[str, float] | Sequence[float] | None] = []
+        small_regular: dict[
+            int,
+            tuple[ArrayTuple, np.ndarray, np.ndarray],
+        ] = {}
+        if spec.capabilities & _REGULAR_IMAGE_CAPABILITIES:
+            by_size: dict[int, list[int]] = {}
+            for cell, coordinate_item in enumerate(coordinate_items):
+                if (
+                    isinstance(coordinate_item, RegularImageFitInput)
+                    and value_items[cell] is None
+                    and sigma_items[cell] is None
+                    and index_items[cell] is None
+                ):
+                    compact = self._compact_regular_image(coordinate_item)
+                    if compact is not None:
+                        small_regular[cell] = compact
+                        by_size.setdefault(compact[1].size, []).append(cell)
+            compiled_regular_cells = {
+                cell
+                for cells in by_size.values()
+                if len(cells) >= 2
+                for cell in cells
+            }
+        else:
+            compiled_regular_cells = set()
+        for cell, coordinate_item in enumerate(coordinate_items):
+            if not isinstance(coordinate_item, RegularImageFitInput):
+                compiled_cells.append(cell)
+                compiled_coordinates.append(coordinate_item)
+                compiled_observations.append(value_items[cell])
+                compiled_sigmas.append(sigma_items[cell])
+                compiled_indices.append(index_items[cell])
+                compiled_revisions.append(revision_items[cell])
+                compiled_warm.append(warm_items[cell])
+                continue
+            try:
+                if value_items[cell] is not None:
+                    raise TypeError(
+                        "observations belong inside RegularImageFitInput and "
+                        "must not also be passed separately"
+                    )
+                if sigma_items[cell] is not None:
+                    raise TypeError(
+                        "regular-image fitting has no per-point sigma channel"
+                    )
+                if index_items[cell] is not None:
+                    raise TypeError(
+                        "regular-image selected_indices belong inside "
+                        "RegularImageFitInput"
+                    )
+                if not (spec.capabilities & _REGULAR_IMAGE_CAPABILITIES):
+                    raise ValueError(
+                        "this model does not declare a regular-image capability"
+                    )
+                compact = small_regular.get(cell)
+                if cell not in compiled_regular_cells or compact is None:
+                    results[cell] = self.fit(
+                        spec,
+                        coordinate_item,
+                        data_revision=revision_items[cell],
+                        initial=initial,
+                        warm_start=warm_items[cell],
+                        bounds=bounds,
+                        options=options,
+                        cancelled=cancelled,
+                    )
+                    continue
+                compact_coordinates, compact_values, compact_indices = compact
+            except FitCancelled:
+                raise
+            except Exception as error:
+                failures[cell] = str(error) or type(error).__name__
+                continue
+            compiled_cells.append(cell)
+            compiled_coordinates.append(compact_coordinates)
+            compiled_observations.append(compact_values)
+            compiled_sigmas.append(None)
+            compiled_indices.append(compact_indices)
+            compiled_revisions.append(revision_items[cell])
+            compiled_warm.append(warm_items[cell])
+
+        if not compiled_cells:
+            return tuple(results), tuple(failures)
+        solved, failed = self._fit_compiled_batch(
+            spec,
+            descriptor,
+            compiled_coordinates,
+            compiled_observations,
+            observation_sigmas=compiled_sigmas,
+            selected_indices=compiled_indices,
+            data_revisions=compiled_revisions,
+            initial=initial,
+            warm_starts=compiled_warm,
+            bounds=bounds,
+            options=options,
+            cancelled=cancelled,
+        )
+        for local, cell in enumerate(compiled_cells):
+            results[cell] = solved[local]
+            failures[cell] = failed[local]
+        return tuple(results), tuple(failures)
+
+    def _fit_compiled_batch(
+        self,
+        model: FitModelSpec,
+        descriptor: _compiled_fit.CompiledFitDescriptor,
+        coordinates: Sequence[Sequence[np.ndarray] | RegularImageFitInput],
+        observations: Sequence[np.ndarray | None],
+        *,
+        observation_sigmas: Sequence[np.ndarray | None],
+        selected_indices: Sequence[np.ndarray | None],
+        data_revisions: Sequence[int],
+        initial: Mapping[str, float] | Sequence[float] | None,
+        warm_starts: Sequence[
+            Mapping[str, float] | Sequence[float] | None
+        ],
+        bounds: Mapping[str, tuple[float | None, float | None]] | None,
+        options: FitOptions | None,
+        cancelled: Callable[[], bool] | None,
+    ) -> tuple[tuple[FitResult | None, ...], tuple[str | None, ...]]:
+        """Pack finite cells, solve equal-size buckets, and restore metadata."""
+
+        opts = options or FitOptions()
+        started = time.monotonic()
+
+        def check() -> None:
+            if cancelled is not None and cancelled():
+                raise FitCancelled("fit cancelled")
+            if (
+                opts.deadline_seconds is not None
+                and time.monotonic() - started > opts.deadline_seconds
+            ):
+                raise FitDeadlineExceeded("fit deadline exceeded")
+
+        check()
+        parameter_count = len(model.parameters)
+        base_lower = np.asarray(
+            [item.bounds[0] for item in model.parameters],
+            dtype=np.float64,
+        )
+        base_upper = np.asarray(
+            [item.bounds[1] for item in model.parameters],
+            dtype=np.float64,
+        )
+        requested_lower, requested_upper = _solver_bounds(model, None, bounds)
+        requested_mask = np.asarray(
+            [item.name in (bounds or {}) for item in model.parameters],
+            dtype=np.bool_,
+        )
+        fixed_names, free_indices = _fixed_parameter_partition(model, bounds)
+        free_index = np.asarray(free_indices, dtype=np.int64)
+        counted = model.targets == (FitTarget.HISTOGRAM,)
+
+        results: list[FitResult | None] = [None] * len(coordinates)
+        failures: list[str | None] = [None] * len(coordinates)
+        prepared: dict[int, dict[str, Any]] = {}
+        for cell, coordinate_item in enumerate(coordinates):
+            check()
+            try:
+                if isinstance(coordinate_item, RegularImageFitInput):
+                    raise TypeError(
+                        "regular-image inputs belong to the separable fit route"
+                    )
+                incoming = observations[cell]
+                if incoming is None:
+                    raise TypeError("observations are required for coordinate fitting")
+                coords = _coordinate_arrays(
+                    tuple(coordinate_item),
+                    model.independent_arity,
+                )
+                values = np.asarray(incoming, dtype=np.float64).reshape(-1)
+                if any(axis.shape != values.shape for axis in coords):
+                    raise ValueError(
+                        "coordinates and observations must have equal flattened shape"
+                    )
+                sigma = observation_sigmas[cell]
+                sigma_array: np.ndarray | None = None
+                if sigma is not None:
+                    sigma_array = np.asarray(sigma, dtype=np.float64).reshape(-1)
+                    if sigma_array.shape != values.shape:
+                        raise ValueError("observation_sigma must match observations")
+                    if counted:
+                        raise ValueError(
+                            "histogram targets weight themselves by counts; an "
+                            "external sigma has no meaning there"
+                        )
+                indices_item = selected_indices[cell]
+                if indices_item is None:
+                    indices = np.arange(values.size, dtype=np.int64)
+                else:
+                    indices = np.asarray(indices_item, dtype=np.int64).reshape(-1)
+                    if indices.shape != values.shape:
+                        raise ValueError(
+                            "selected_indices must match observations"
+                        )
+                finite = np.isfinite(values)
+                for axis in coords:
+                    finite &= np.isfinite(axis)
+                if not bool(np.all(finite)):
+                    coords = tuple(axis[finite] for axis in coords)
+                    values = values[finite]
+                    indices = indices[finite]
+                    if sigma_array is not None:
+                        sigma_array = sigma_array[finite]
+                if values.size <= len(free_indices):
+                    raise ValueError(
+                        "fit requires more finite observations than free parameters"
+                    )
+                revision = integer(data_revisions[cell], "data_revision")
+                if revision < 0:
+                    raise ValueError("data_revision must be non-negative")
+
+                origin = 0.0
+                effective_model = model
+                origin_axis = descriptor.coordinate_origin
+                if origin_axis is not None:
+                    if origin_axis >= len(coords):
+                        raise ValueError(
+                            "compiled coordinate origin exceeds model arity"
+                        )
+                    origin = float(np.min(coords[origin_axis]))
+                    if origin_axis != 0 or model.independent_arity != 1:
+                        raise ValueError(
+                            "result-model anchoring currently requires axis 0"
+                        )
+                    effective_model = model.anchored_at(origin)
+
+                solver_coords = coords
+                solver_values = values
+                weights: np.ndarray | None = None
+                binned = False
+                if sigma_array is not None:
+                    usable = sigma_array[
+                        np.isfinite(sigma_array) & (sigma_array > 0.0)
+                    ]
+                    if usable.size:
+                        floor = float(np.min(usable))
+                        bounded = np.where(
+                            np.isfinite(sigma_array) & (sigma_array > 0.0),
+                            sigma_array,
+                            floor,
+                        )
+                        weights = 1.0 / bounded
+                elif (
+                    not counted
+                    and bool(free_indices)
+                    and model.independent_arity == 1
+                    and opts.max_exact_points is not None
+                    and values.size > 2 * opts.max_exact_points
+                ):
+                    compressed = _binned_curve_statistics(
+                        coords[0],
+                        values,
+                        opts.max_exact_points,
+                    )
+                    if compressed is not None:
+                        solver_coords, solver_values, weights = compressed
+                        binned = True
+                compiled_coords = solver_coords
+                if descriptor.coordinate_origin is not None:
+                    origin_axis = descriptor.coordinate_origin
+                    compiled_coords = tuple(
+                        axis - origin if index == origin_axis else axis
+                        for index, axis in enumerate(solver_coords)
+                    )
+            except Exception as error:
+                failures[cell] = str(error) or type(error).__name__
+                continue
+
+            # Authored and warm values are explicit public inputs.  Invalid
+            # values are a caller error, not a reason to silently run cold.
+            authored = (
+                None
+                if initial is None or not free_indices
+                else _initial_values(
+                    effective_model,
+                    solver_coords,
+                    solver_values,
+                    initial,
+                )
+            )
+            warm_item = warm_starts[cell]
+            warm = (
+                None
+                if warm_item is None or not free_indices
+                else _initial_values(
+                    effective_model,
+                    solver_coords,
+                    solver_values,
+                    warm_item,
+                )
+            )
+            prepared[cell] = {
+                "coords": coords,
+                "values": values,
+                "indices": indices,
+                "solver_coords": solver_coords,
+                "compiled_coords": compiled_coords,
+                "solver_values": solver_values,
+                "weights": weights,
+                "binned": binned,
+                "revision": revision,
+                "origin": origin,
+                "model": effective_model,
+                "authored": authored,
+                "warm": warm,
+            }
+
+        if not free_indices:
+            fixed_values = np.asarray(requested_lower, dtype=np.float64)
+            count = parameter_count
+            empty_units = MappingProxyType({
+                name: "" for name in model.parameter_names
+            })
+            for cell, item in prepared.items():
+                check()
+                try:
+                    fitted = item["model"].evaluate(
+                        item["coords"],
+                        fixed_values,
+                    ).reshape(-1)
+                    if (
+                        fitted.shape != item["values"].shape
+                        or not np.all(np.isfinite(fitted))
+                    ):
+                        raise RuntimeError("fixed fit evaluation is non-finite")
+                    residuals = item["values"] - fitted
+                    if counted:
+                        expected = np.maximum(fitted, _COUNT_FLOOR)
+                        with np.errstate(divide="ignore", invalid="ignore"):
+                            logarithm = np.where(
+                                item["values"] > 0.0,
+                                item["values"]
+                                * np.log(item["values"] / expected),
+                                0.0,
+                            )
+                        deviance = 2.0 * np.maximum(
+                            expected - item["values"] + logarithm,
+                            0.0,
+                        )
+                        quality = np.copysign(
+                            np.sqrt(deviance),
+                            expected - item["values"],
+                        )
+                    elif item["weights"] is None:
+                        quality = residuals
+                    else:
+                        quality = residuals * item["weights"]
+                    parameters = _readonly(fixed_values)
+                    errors = _readonly(np.zeros(count, dtype=np.float64))
+                    covariance = _readonly(
+                        np.zeros((count, count), dtype=np.float64)
+                    )
+                    fitted = _readonly(fitted)
+                    residuals = _readonly(residuals)
+                    indices = _readonly(item["indices"])
+                    results[cell] = _fit_result_from_validated_batch_row(
+                        model=item["model"],
+                        parameter_values=parameters,
+                        standard_errors=errors,
+                        covariance=covariance,
+                        fitted_values=fitted,
+                        residuals=residuals,
+                        selected_indices=indices,
+                        source_revision=item["revision"],
+                        success=True,
+                        message="all parameters fixed",
+                        reduced_chi_square=float(
+                            np.dot(quality, quality) / item["values"].size
+                        ),
+                        covariance_valid=True,
+                        parameter_units=empty_units,
+                        fixed_parameter_names=fixed_names,
+                    )
+                    failures[cell] = None
+                except Exception as error:
+                    failures[cell] = str(error) or type(error).__name__
+            return tuple(results), tuple(failures)
+
+        buckets: dict[int, list[int]] = {}
+        for cell, item in prepared.items():
+            buckets.setdefault(int(item["solver_values"].size), []).append(cell)
+
+        for bucket in buckets.values():
+            check()
+            items = [prepared[cell] for cell in bucket]
+            coordinate_stack = tuple(
+                np.stack([item["compiled_coords"][axis] for item in items])
+                for axis in range(model.independent_arity)
+            )
+            value_stack = np.stack([item["solver_values"] for item in items])
+            weight_stack: np.ndarray | None = None
+            if any(item["weights"] is not None for item in items):
+                weight_stack = np.stack(
+                    [
+                        np.ones_like(item["solver_values"])
+                        if item["weights"] is None
+                        else item["weights"]
+                        for item in items
+                    ]
+                )
+            authored_flags = np.asarray(
+                [item["authored"] is not None for item in items],
+                dtype=np.bool_,
+            )
+            authored_stack = (
+                None
+                if not bool(np.any(authored_flags))
+                else np.stack(
+                    [
+                        np.zeros(parameter_count, dtype=np.float64)
+                        if item["authored"] is None
+                        else item["authored"]
+                        for item in items
+                    ]
+                )
+            )
+            warm_flags = np.asarray(
+                [item["warm"] is not None for item in items],
+                dtype=np.bool_,
+            )
+            warm_stack = (
+                None
+                if not bool(np.any(warm_flags))
+                else np.stack(
+                    [
+                        np.zeros(parameter_count, dtype=np.float64)
+                        if item["warm"] is None
+                        else item["warm"]
+                        for item in items
+                    ]
+                )
+            )
+
+            contexts: list[np.ndarray] = []
+            for item in items:
+                canonical = tuple(
+                    np.asarray(axis, dtype=np.float64)
+                    for axis in item["compiled_coords"]
+                )
+                contexts.append(self._compiled_context(descriptor, canonical))
+            context = (
+                contexts[0]
+                if all(item is contexts[0] for item in contexts[1:])
+                else np.stack(contexts)
+            )
+
+            try:
+                solve = (
+                    _compiled_fit.solve_compiled_single
+                    if len(bucket) == 1
+                    else _compiled_fit.solve_compiled_batch
+                )
+                output = solve(
+                    descriptor,
+                    tuple(axis[0] if len(bucket) == 1 else axis for axis in coordinate_stack),
+                    value_stack[0] if len(bucket) == 1 else value_stack,
+                    base_lower=base_lower,
+                    base_upper=base_upper,
+                    valid=None,
+                    context=context,
+                    requested_lower=requested_lower,
+                    requested_upper=requested_upper,
+                    requested_mask=requested_mask,
+                    free_indices=free_index,
+                    weights=(
+                        None
+                        if weight_stack is None
+                        else weight_stack[0] if len(bucket) == 1 else weight_stack
+                    ),
+                    poisson=counted,
+                    loss=opts.loss,
+                    max_nfev=opts.max_nfev,
+                    ftol=1.0e-8,
+                    xtol=1.0e-8,
+                    gtol=1.0e-8,
+                    authored_seeds=(
+                        None
+                        if authored_stack is None
+                        else authored_stack[0]
+                        if len(bucket) == 1
+                        else authored_stack
+                    ),
+                    use_authored=(
+                        bool(authored_flags[0])
+                        if len(bucket) == 1
+                        else authored_flags
+                    ),
+                    warm_seeds=(
+                        None
+                        if warm_stack is None
+                        else warm_stack[0]
+                        if len(bucket) == 1
+                        else warm_stack
+                    ),
+                    use_warm=(
+                        bool(warm_flags[0]) if len(bucket) == 1 else warm_flags
+                    ),
+                    coordinates_are_canonical=(
+                        descriptor.coordinate_origin is not None
+                    ),
+                )
+                check()
+            except (FitCancelled, FitDeadlineExceeded):
+                raise
+            except Exception as error:
+                message = str(error) or type(error).__name__
+                for cell in bucket:
+                    failures[cell] = message
+                continue
+
+            fixed_index = tuple(
+                index
+                for index in range(parameter_count)
+                if index not in free_indices
+            )
+            for local, cell in enumerate(bucket):
+                item = prepared[cell]
+                if int(output.status[local]) in {
+                    _compiled_fit.STATUS_INVALID,
+                    _compiled_fit.STATUS_NO_CANDIDATE,
+                }:
+                    continue
+                covariance_valid = bool(output.covariance_valid[local])
+                if item["binned"]:
+                    fitted = item["model"].evaluate(
+                        item["coords"],
+                        output.parameters[local],
+                    ).reshape(-1)
+                    residuals = item["values"] - fitted
+                    reduced = float(
+                        np.dot(residuals, residuals)
+                        / max(item["values"].size - len(free_indices), 1)
+                    )
+                    compiled_reduced = float(output.reduced_chi_square[local])
+                    output.reduced_chi_square[local] = reduced
+                    item["final_fitted"] = _readonly(fitted)
+                    item["final_residuals"] = _readonly(residuals)
+                    if (
+                        fitted.shape != item["values"].shape
+                        or not np.all(np.isfinite(fitted))
+                        or not np.all(np.isfinite(residuals))
+                    ):
+                        item["final_error"] = (
+                            "compiled fit returned invalid full-data arrays"
+                        )
+                    if covariance_valid:
+                        if compiled_reduced > 0.0:
+                            ratio = reduced / compiled_reduced
+                            output.covariance[local] *= ratio
+                            output.standard_errors[local] *= math.sqrt(ratio)
+                        elif reduced > 0.0:
+                            output.covariance_valid[local] = False
+                            covariance_valid = False
+                if not covariance_valid:
+                    output.covariance[local].fill(np.nan)
+                    output.standard_errors[local].fill(np.nan)
+                    if fixed_index:
+                        output.covariance[local, fixed_index, :] = 0.0
+                        output.covariance[local, :, fixed_index] = 0.0
+                        output.standard_errors[local, fixed_index] = 0.0
+
+            statuses = np.asarray(output.status)
+            active = ~np.isin(
+                statuses,
+                (
+                    _compiled_fit.STATUS_INVALID,
+                    _compiled_fit.STATUS_NO_CANDIDATE,
+                ),
+            )
+            covariance_rows = active & np.asarray(output.covariance_valid)
+            batch_error: str | None = None
+            try:
+                expected_points = value_stack.shape[1]
+                if (
+                    output.parameters.shape != (len(bucket), parameter_count)
+                    or output.standard_errors.shape
+                    != (len(bucket), parameter_count)
+                    or output.covariance.shape
+                    != (len(bucket), parameter_count, parameter_count)
+                    or output.fitted_values.shape
+                    != (len(bucket), expected_points)
+                    or output.residuals.shape != (len(bucket), expected_points)
+                    or output.reduced_chi_square.shape != (len(bucket),)
+                ):
+                    raise ValueError("compiled fit returned invalid batch shapes")
+                if (
+                    not np.all(np.isfinite(output.parameters[active]))
+                    or not np.all(np.isfinite(output.fitted_values[active]))
+                    or not np.all(np.isfinite(output.residuals[active]))
+                    or not np.all(
+                        np.isfinite(output.reduced_chi_square[active])
+                    )
+                    or np.any(output.reduced_chi_square[active] < 0.0)
+                ):
+                    raise ValueError("compiled fit returned invalid batch arrays")
+                if bool(np.any(covariance_rows)):
+                    covariance_values = output.covariance[covariance_rows]
+                    error_values = output.standard_errors[covariance_rows]
+                    diagonal = np.diagonal(
+                        covariance_values,
+                        axis1=1,
+                        axis2=2,
+                    )
+                    if (
+                        not np.all(np.isfinite(covariance_values))
+                        or not np.all(np.isfinite(error_values))
+                        or not np.allclose(
+                            covariance_values,
+                            np.swapaxes(covariance_values, 1, 2),
+                            rtol=1e-12,
+                            atol=1e-15,
+                        )
+                        or np.any(diagonal < 0.0)
+                        or np.any(error_values < 0.0)
+                        or not np.allclose(
+                            error_values**2,
+                            diagonal,
+                            rtol=1e-10,
+                            atol=1e-15,
+                        )
+                    ):
+                        raise ValueError(
+                            "compiled fit returned invalid batch covariance"
+                        )
+            except Exception as error:
+                batch_error = str(error) or type(error).__name__
+
+            for backing in (
+                output.parameters,
+                output.standard_errors,
+                output.covariance,
+                output.fitted_values,
+                output.residuals,
+                output.reduced_chi_square,
+                output.covariance_valid,
+                output.success,
+                output.status,
+                output.coordinate_origins,
+            ):
+                backing.setflags(write=False)
+            empty_units = MappingProxyType({
+                name: "" for name in model.parameter_names
+            })
+            for local, cell in enumerate(bucket):
+                item = prepared[cell]
+                status = int(output.status[local])
+                if status in {
+                    _compiled_fit.STATUS_INVALID,
+                    _compiled_fit.STATUS_NO_CANDIDATE,
+                }:
+                    failures[cell] = _compiled_fit.termination_message(status)
+                    continue
+                if batch_error is not None or "final_error" in item:
+                    failures[cell] = batch_error or item["final_error"]
+                    continue
+                parameters = output.parameters[local]
+                errors = output.standard_errors[local]
+                covariance = output.covariance[local]
+                fitted = (
+                    item["final_fitted"]
+                    if item["binned"]
+                    else output.fitted_values[local]
+                )
+                residuals = (
+                    item["final_residuals"]
+                    if item["binned"]
+                    else output.residuals[local]
+                )
+                indices = _readonly(item["indices"])
+                reduced = float(output.reduced_chi_square[local])
+                covariance_valid = bool(output.covariance_valid[local])
+                try:
+                    if indices.shape != fitted.shape:
+                        raise ValueError(
+                            "selected indices must identify every fitted observation"
+                        )
+                    results[cell] = _fit_result_from_validated_batch_row(
+                        model=item["model"],
+                        parameter_values=parameters,
+                        standard_errors=errors,
+                        covariance=covariance,
+                        fitted_values=fitted,
+                        residuals=residuals,
+                        selected_indices=indices,
+                        source_revision=item["revision"],
+                        success=bool(output.success[local]),
+                        message=_compiled_fit.termination_message(status),
+                        reduced_chi_square=reduced,
+                        covariance_valid=covariance_valid,
+                        parameter_units=empty_units,
+                        fixed_parameter_names=fixed_names,
+                    )
+                except Exception as error:
+                    failures[cell] = str(error) or type(error).__name__
+                else:
+                    failures[cell] = None
+        return tuple(results), tuple(failures)
 
     def fit(
         self,
@@ -1375,6 +2369,7 @@ class FitEngine:
         if not isinstance(spec, FitModelSpec):
             raise TypeError("model must be a registered id or FitModelSpec")
         opts = options or FitOptions()
+        descriptor = self._compiled_descriptor(spec)
         if isinstance(coordinates, RegularImageFitInput):
             if observations is not None:
                 raise TypeError(
@@ -1408,6 +2403,26 @@ class FitEngine:
             )
         if observations is None:
             raise TypeError("observations are required for coordinate-array fitting")
+
+        if descriptor is not None:
+            results, failures = self._fit_compiled_batch(
+                spec,
+                descriptor,
+                (tuple(coordinates),),
+                (observations,),
+                observation_sigmas=(observation_sigma,),
+                selected_indices=(selected_indices,),
+                data_revisions=(data_revision,),
+                initial=initial,
+                warm_starts=(warm_start,),
+                bounds=bounds,
+                options=opts,
+                cancelled=cancelled,
+            )
+            result = results[0]
+            if result is None:
+                raise ValueError(failures[0] or "compiled fit failed")
+            return result
 
         coords = _coordinate_arrays(tuple(coordinates), spec.independent_arity)
         values = np.asarray(observations, dtype=np.float64).reshape(-1)
@@ -2798,6 +3813,7 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             candidate_initializer=_lorentzian_candidates,
             bounds_initializer=_lorentzian_bounds,
             default_for=(FitTarget.SERIES,),
+            compiled_descriptor=_compiled_fit.lorentzian_descriptor(),
         ),
         FitModelSpec(
             "gaussian_offset",
@@ -2821,6 +3837,7 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             (FitTarget.SERIES,),
             formula=r"$f(x)=A e^{-\frac{1}{2}((x-x_0)/\sigma)^2}+B$",
             jacobian=_gaussian_offset_jacobian,
+            compiled_descriptor=_compiled_fit.gaussian_offset_descriptor(),
         ),
         FitModelSpec(
             "histogram_gaussian",
@@ -2843,6 +3860,7 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             (FitTarget.HISTOGRAM,),
             formula=r"$f(x)=A e^{-\frac{1}{2}((x-x_0)/\sigma)^2}$",
             jacobian=_histogram_gaussian_jacobian,
+            compiled_descriptor=_compiled_fit.histogram_gaussian_descriptor(),
         ),
         FitModelSpec(
             "bimodal_gaussian",
@@ -2887,6 +3905,7 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
                 ),
             ),
             default_for=(FitTarget.HISTOGRAM,),
+            compiled_descriptor=_compiled_fit.bimodal_gaussian_descriptor(),
         ),
         FitModelSpec(
             "symmetric_lorentzian_doublet",
@@ -2925,6 +3944,9 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             jacobian=_symmetric_lorentzian_doublet_jacobian,
             candidate_initializer=_doublet_candidates,
             bounds_initializer=_doublet_bounds,
+            compiled_descriptor=(
+                _compiled_fit.symmetric_lorentzian_doublet_descriptor()
+            ),
         ),
         FitModelSpec(
             "damped_sine",
@@ -2959,6 +3981,7 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             candidate_initializer=_damped_sine_candidates,
             bounds_initializer=_damped_sine_bounds,
             capabilities=frozenset({_DOMAIN_ANCHORED}),
+            compiled_descriptor=_compiled_fit.damped_sine_descriptor(),
         ),
         FitModelSpec(
             "exponential_decay",
@@ -2982,6 +4005,7 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             candidate_initializer=_exponential_candidates,
             bounds_initializer=_exponential_bounds,
             capabilities=frozenset({_DOMAIN_ANCHORED}),
+            compiled_descriptor=_compiled_fit.exponential_decay_descriptor(),
         ),
         FitModelSpec(
             "anisotropic_gaussian_center",
@@ -3026,6 +4050,9 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             ),
             coordinate_relations=(AXIS_0, AXIS_1),
             capabilities=frozenset({"regular_image_separable"}),
+            compiled_descriptor=(
+                _compiled_fit.anisotropic_gaussian_center_descriptor()
+            ),
         ),
         FitModelSpec(
             "radial_gaussian_center",
@@ -3067,6 +4094,7 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             coordinate_relations=(AXIS_0, AXIS_0),
             default_for=(FitTarget.IMAGE,),
             capabilities=frozenset({"regular_image_radial"}),
+            compiled_descriptor=_compiled_fit.radial_gaussian_center_descriptor(),
         ),
     )
 

@@ -52,15 +52,23 @@ def test_every_module_that_defines_a_kernel_is_looked_in() -> None:
 
 
 def test_the_warmer_finds_every_kernel_it_looks_for() -> None:
-    """Every ``@njit`` in those modules is a dispatcher the warmer sees."""
+    """Every declared production dispatcher is visible to the warmer."""
 
     pytest.importorskip("numba")
     found = _kernel_warm.kernel_dispatchers()
     declared = 0
     for module in _kernel_warm.kernel_modules():
-        source = pathlib.Path(module.__file__).read_text(encoding="utf-8")
-        declared += sum(
-            1 for line in source.splitlines() if line.startswith("@njit")
+        provider = getattr(module, "production_dispatchers", None)
+        declared += (
+            len(provider())
+            if callable(provider)
+            else sum(
+                1
+                for line in pathlib.Path(module.__file__)
+                .read_text(encoding="utf-8")
+                .splitlines()
+                if line.startswith("@njit")
+            )
         )
     assert declared > 0
     assert len(found) == declared, sorted(found)
@@ -81,7 +89,7 @@ def test_the_work_the_warmer_runs_is_work_the_product_can_do() -> None:
     _raster_kernels.ENGINE = "numpy"
     _height3d_raster._ENGINE = "numpy"
     try:
-        _kernel_warm.representative_work()
+        _kernel_warm.representative_work(include_compiled_fit=False)
     finally:
         _raster_kernels.ENGINE = previous_plot
         _height3d_raster._ENGINE = previous_h3d

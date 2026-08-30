@@ -116,6 +116,7 @@ class _SolvedLiveFit:
 
     started: _StartedFitRequest
     result: "FitResult | FacetFitBatchResult"
+    selections: tuple[FitSelection | None, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

@@ -40,7 +40,11 @@ from . import _kernel_cache
 #: sees every dispatcher; adding a third module means adding it here, and
 #: :func:`kernel_dispatchers` will then report its kernels cold until the
 #: work below asks for them.
-_KERNEL_MODULE_NAMES = ("_raster_kernels", "_height3d_scanline")
+_KERNEL_MODULE_NAMES = (
+    "_raster_kernels",
+    "_height3d_scanline",
+    "_fit_compiled",
+)
 
 
 def kernel_modules() -> tuple[Any, ...]:
@@ -64,7 +68,16 @@ def kernel_dispatchers() -> dict[str, Any]:
     found: dict[str, Any] = {}
     for module in kernel_modules():
         short = module.__name__.rsplit(".", 1)[-1]
-        for name, value in vars(module).items():
+        provider = getattr(module, "production_dispatchers", None)
+        values = (
+            (
+                (getattr(value, "py_func", value).__name__, value)
+                for value in provider()
+            )
+            if callable(provider)
+            else vars(module).items()
+        )
+        for name, value in values:
             if isinstance(value, Dispatcher):
                 found[f"{short}.{name}"] = value
     return found
@@ -295,7 +308,7 @@ def _plane_shape(snapshot: Any) -> tuple[int, int]:
     return int(shape[-3]), int(shape[-2])
 
 
-def representative_work() -> None:
+def representative_work(*, include_compiled_fit: bool = True) -> None:
     """Render what production renders, until every kernel has been asked.
 
     Each case names the kernels it is here for.  They are not asserted
@@ -311,7 +324,7 @@ def representative_work() -> None:
         HistogramPlot,
         ImagePlot,
     )
-    from . import _height3d_scanline  # noqa: PLC0415
+    from . import _fit_compiled, _height3d_scanline  # noqa: PLC0415
 
     image = ImagePlot(AxisRef.data("x"), AxisRef.data("y"))
 
@@ -375,6 +388,13 @@ def representative_work() -> None:
         image,
         {"presentation": "height_bars"},
     )
+
+    # Nine model callbacks plus the shared serial/parallel TRF and strict SVD
+    # finalizers.  This is intentionally explicit work while dispatcher
+    # discovery remains generic: an experiment may select any built-in model,
+    # and its first Fit must only deserialize this cache, never JIT a solver.
+    if include_compiled_fit:
+        _fit_compiled.warm_production_cache()
 
 
 # ------------------------------------------------------------ the warmer

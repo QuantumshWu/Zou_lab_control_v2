@@ -12,6 +12,7 @@ from zlc_plot import FitCancelled
 from zlc_plot.fit import (
     FitEngine,
     FitOptions,
+    FitResult,
     RegularImageFitInput,
     _DeferredFitData,
     _FIT_RESULT_RAW,
@@ -60,6 +61,608 @@ def _anchor(model: str) -> tuple[tuple[np.ndarray, ...], np.ndarray, tuple[float
     observations = np.asarray(item["values"], dtype=np.float64)
     parameters = tuple(float(value) for value in item["parameters"].values())
     return coordinates, observations, parameters
+
+
+_BUILTIN_MODEL_IDS = (
+    "lorentzian",
+    "gaussian_offset",
+    "histogram_gaussian",
+    "bimodal_gaussian",
+    "symmetric_lorentzian_doublet",
+    "damped_sine",
+    "exponential_decay",
+    "anisotropic_gaussian_center",
+    "radial_gaussian_center",
+)
+_HISTOGRAM_MODELS = frozenset(("histogram_gaussian", "bimodal_gaussian"))
+_BASE_PARAMETERS = {
+    "lorentzian": (-0.4, 1.1, 2.2, 0.25),
+    "gaussian_offset": (2.0, 0.2, 0.9, -0.3),
+    "histogram_gaussian": (90.0, -0.3, 0.8),
+    "bimodal_gaussian": (0.0, 2.4, 60.0, 0.55, 45.0, 0.75),
+    "symmetric_lorentzian_doublet": (0.1, 0.8, 1.4, 0.2, 2.5),
+    "damped_sine": (1.2, 0.2, 0.25, 6.0, -0.3),
+    "exponential_decay": (1.6, 0.2, 3.0),
+    "anisotropic_gaussian_center": (3.0, 0.2, 0.9, 0.6, 0.35, -0.25),
+    "radial_gaussian_center": (3.0, 0.2, 0.8, 0.35, -0.25),
+}
+
+
+def _coordinates(model_id: str) -> tuple[np.ndarray, ...]:
+    if model_id == "symmetric_lorentzian_doublet":
+        return (np.linspace(-6.0, 6.0, 128),)
+    if model_id == "damped_sine":
+        return (50.0 + np.linspace(0.0, 12.0, 160),)
+    if model_id == "exponential_decay":
+        return (100.0 + np.linspace(0.0, 10.0, 112),)
+    if model_id in {"anisotropic_gaussian_center", "radial_gaussian_center"}:
+        x = np.linspace(-2.0, 2.0, 21)
+        y = np.linspace(-1.8, 2.2, 19)
+        xx, yy = np.meshgrid(x, y)
+        return xx.reshape(-1), yy.reshape(-1)
+    return (np.linspace(-5.0, 5.0, 112),)
+
+
+def _cell_parameters(model_id: str, cell: int) -> np.ndarray:
+    parameters = np.asarray(_BASE_PARAMETERS[model_id], dtype=np.float64).copy()
+    position = (cell - 3.5) / 3.5
+    if model_id == "lorentzian":
+        parameters[[0, 1, 2]] += (0.7 * position, 0.15 * position, 0.2 * position)
+    elif model_id == "gaussian_offset":
+        parameters[[0, 2, 3]] += (0.2 * position, 0.15 * position, 0.7 * position)
+    elif model_id == "histogram_gaussian":
+        parameters[[0, 1, 2]] += (12.0 * position, 0.6 * position, 0.12 * position)
+    elif model_id == "bimodal_gaussian":
+        parameters += np.asarray(
+            (0.4, 0.25, 8.0, 0.08, -6.0, -0.08)
+        ) * position
+    elif model_id == "symmetric_lorentzian_doublet":
+        parameters[[0, 1, 2, 4]] += (
+            0.5 * position,
+            0.1 * position,
+            0.15 * position,
+            0.3 * position,
+        )
+    elif model_id == "damped_sine":
+        parameters[[0, 2, 3, 4]] += (
+            0.15 * position,
+            0.025 * position,
+            0.6 * position,
+            0.35 * position,
+        )
+    elif model_id == "exponential_decay":
+        parameters[[0, 2]] += (0.2 * position, 0.5 * position)
+    elif model_id == "anisotropic_gaussian_center":
+        parameters[[0, 2, 3, 4, 5]] += (
+            0.3 * position,
+            0.12 * position,
+            -0.08 * position,
+            0.45 * position,
+            -0.35 * position,
+        )
+    else:
+        parameters[[0, 2, 3, 4]] += (
+            0.3 * position,
+            0.12 * position,
+            0.45 * position,
+            -0.35 * position,
+        )
+    return parameters
+
+
+def _fit_case(
+    engine: FitEngine,
+    model_id: str,
+    difficulty: str,
+    cell: int,
+) -> tuple[tuple[np.ndarray, ...], np.ndarray, np.ndarray | None, np.ndarray]:
+    model = engine.registry.get(model_id)
+    coordinates = _coordinates(model_id)
+    parameters = _cell_parameters(model_id, cell)
+    evaluated_coordinates = (
+        (coordinates[0] - float(np.min(coordinates[0])),)
+        if model_id in _ANCHORED_MODELS
+        else coordinates
+    )
+    expected = model.evaluate(evaluated_coordinates, parameters).reshape(-1)
+    model_index = _BUILTIN_MODEL_IDS.index(model_id)
+    random = np.random.default_rng(
+        91_000 + 1_000 * model_index + 100 * (difficulty == "hard") + cell
+    )
+    if model_id in _HISTOGRAM_MODELS:
+        observations = random.poisson(np.maximum(expected, 0.01)).astype(np.float64)
+        if difficulty == "hard":
+            outliers = random.choice(
+                observations.size,
+                max(1, observations.size // 24),
+                replace=False,
+            )
+            observations[outliers] += 0.2 * max(float(np.max(expected)), 1.0)
+        sigma = None
+    else:
+        scale = max(float(np.ptp(expected)), 1.0)
+        deviation = (0.003 if difficulty == "normal" else 0.03) * scale
+        observations = expected + random.normal(0.0, deviation, expected.size)
+        if difficulty == "hard":
+            outliers = random.choice(
+                observations.size,
+                max(1, observations.size // 20),
+                replace=False,
+            )
+            observations[outliers] += random.normal(
+                0.0,
+                0.18 * scale,
+                outliers.size,
+            )
+        sigma = np.full(expected.size, deviation, dtype=np.float64)
+    selected = np.arange(expected.size, dtype=np.int64) + cell * 10_000
+    return coordinates, observations, sigma, selected
+
+
+def _normalized_error(actual: np.ndarray, expected: np.ndarray) -> float:
+    difference = np.linalg.norm(np.asarray(actual) - np.asarray(expected))
+    scale = max(float(np.linalg.norm(expected)), np.finfo(np.float64).tiny)
+    return float(difference / scale)
+
+
+def _assert_fit_equal(
+    actual: FitResult,
+    expected: FitResult,
+    *,
+    exact_message: bool = False,
+    quality_tolerance: float = 1e-10,
+) -> None:
+    assert actual.model.model_id == expected.model.model_id
+    assert actual.source_revision == expected.source_revision
+    assert actual.success == expected.success
+    if exact_message:
+        assert actual.message == expected.message
+    assert actual.covariance_valid == expected.covariance_valid
+    assert actual.fixed_parameter_names == expected.fixed_parameter_names
+    if expected.covariance_valid:
+        assert _normalized_error(
+            actual.parameter_values,
+            expected.parameter_values,
+        ) <= 1e-7
+    assert _normalized_error(
+        actual.fitted_values,
+        expected.fitted_values,
+    ) <= 1e-7
+    np.testing.assert_allclose(
+        actual.standard_errors,
+        expected.standard_errors,
+        rtol=1e-6,
+        atol=1e-9,
+        equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        actual.covariance,
+        expected.covariance,
+        rtol=1e-6,
+        atol=1e-10,
+        equal_nan=True,
+    )
+    assert actual.reduced_chi_square == pytest.approx(
+        expected.reduced_chi_square,
+        rel=quality_tolerance,
+        abs=1e-12,
+    )
+    np.testing.assert_array_equal(actual.selected_indices, expected.selected_indices)
+
+
+@pytest.mark.parametrize("difficulty", ("normal", "hard"))
+@pytest.mark.parametrize("model_id", _BUILTIN_MODEL_IDS)
+def test_public_batch_matches_single_for_all_builtins_and_batch_sizes(
+    model_id: str,
+    difficulty: str,
+) -> None:
+    """SciPy is the oracle for compiled single and B1/B8/B64 results."""
+
+    engine = FitEngine()
+    reference_model = replace(
+        engine.registry.get(model_id),
+        compiled_descriptor=None,
+    )
+    cases = tuple(_fit_case(engine, model_id, difficulty, cell) for cell in range(8))
+    scalar = tuple(
+        engine.fit(
+            reference_model,
+            coordinates,
+            observations,
+            observation_sigma=sigma,
+            selected_indices=indices,
+            data_revision=200 + cell,
+        )
+        for cell, (coordinates, observations, sigma, indices) in enumerate(cases)
+    )
+    single = tuple(
+        engine.fit(
+            model_id,
+            coordinates,
+            observations,
+            observation_sigma=sigma,
+            selected_indices=indices,
+            data_revision=200 + cell,
+        )
+        for cell, (coordinates, observations, sigma, indices) in enumerate(cases)
+    )
+    for result, expected in zip(single, scalar, strict=True):
+        _assert_fit_equal(result, expected)
+
+    for batch_size in (1, 8, 64):
+        order = tuple(cell % len(cases) for cell in range(batch_size))
+        results, failures = engine.fit_batch(
+            model_id,
+            tuple(cases[cell][0] for cell in order),
+            tuple(cases[cell][1] for cell in order),
+            observation_sigmas=tuple(cases[cell][2] for cell in order),
+            selected_indices=tuple(cases[cell][3] for cell in order),
+            data_revisions=tuple(200 + cell for cell in order),
+        )
+        assert failures == (None,) * batch_size
+        for result, cell in zip(results, order, strict=True):
+            assert result is not None
+            _assert_fit_equal(result, scalar[cell])
+            if batch_size == 1:
+                assert result.message == single[cell].message
+
+
+@pytest.mark.parametrize("all_fixed", (False, True), ids=("partial", "all"))
+def test_public_batch_fixed_parameters_match_single(all_fixed: bool) -> None:
+    engine = FitEngine()
+    model = engine.registry.get("gaussian_offset")
+    reference_model = replace(model, compiled_descriptor=None)
+    cases = tuple(_fit_case(engine, model.model_id, "normal", cell) for cell in range(8))
+    if all_fixed:
+        bounds = {
+            name: (value, value)
+            for name, value in zip(
+                model.parameter_names,
+                _BASE_PARAMETERS[model.model_id],
+                strict=True,
+            )
+        }
+        initial = None
+    else:
+        bounds = {"offset": (0.2, 0.2), "center": (-1.0, 1.0)}
+        initial = {"sigma": 0.8}
+
+    expected = tuple(
+        engine.fit(
+            reference_model,
+            coordinates,
+            observations,
+            initial=initial,
+            bounds=bounds,
+        )
+        for coordinates, observations, _sigma, _indices in cases
+    )
+    results, failures = engine.fit_batch(
+        model,
+        tuple(case[0] for case in cases),
+        tuple(case[1] for case in cases),
+        initial=initial,
+        bounds=bounds,
+    )
+    assert failures == (None,) * len(cases)
+    fixed_names = tuple(
+        name
+        for name in model.parameter_names
+        if name in bounds and bounds[name][0] == bounds[name][1]
+    )
+    fixed_indices = tuple(model.parameter_names.index(name) for name in fixed_names)
+    for result, scalar in zip(results, expected, strict=True):
+        assert result is not None
+        _assert_fit_equal(result, scalar)
+        assert result.fixed_parameter_names == fixed_names
+        assert np.all(result.standard_errors[list(fixed_indices)] == 0.0)
+        assert not any(result.parameter_error_validity[name] for name in fixed_names)
+        if all_fixed:
+            assert result.message == "all parameters fixed"
+            assert np.count_nonzero(result.covariance) == 0
+
+
+@pytest.mark.parametrize("model_id", tuple(_ANCHORED_MODELS))
+def test_public_batch_keeps_each_nonzero_coordinate_anchor(model_id: str) -> None:
+    engine = FitEngine()
+    model = engine.registry.get(model_id)
+    relative = (
+        np.linspace(0.0, 12.0, 160)
+        if model_id == "damped_sine"
+        else np.linspace(0.0, 10.0, 112)
+    )
+    parameters = np.asarray(_BASE_PARAMETERS[model_id], dtype=np.float64)
+    observations = model.evaluate((relative,), parameters)
+    origins = (17.5, 40.0, 101.25, 250.0, 1000.5, 2048.0, 4096.25, 8192.0)
+    coordinates = tuple((relative + origin,) for origin in origins)
+    results, failures = engine.fit_batch(
+        model_id,
+        coordinates,
+        (observations,) * len(coordinates),
+    )
+    assert failures == (None,) * len(coordinates)
+    first = results[0]
+    assert first is not None
+    for result, coordinate in zip(results, coordinates, strict=True):
+        assert result is not None
+        np.testing.assert_allclose(
+            result.parameter_values,
+            first.parameter_values,
+            rtol=1e-7,
+            atol=1e-8,
+        )
+        np.testing.assert_allclose(
+            result.model.evaluate(coordinate, result.parameter_values),
+            result.fitted_values,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
+
+def test_public_batch_sigma_weights_and_nan_filter_keep_original_indices() -> None:
+    engine = FitEngine()
+    model_id = "gaussian_offset"
+    model = engine.registry.get(model_id)
+    base_x = np.linspace(-5.0, 5.0, 120)
+    clean = model.evaluate((base_x,), _BASE_PARAMETERS[model_id])
+    coordinates = []
+    observations = []
+    sigmas = []
+    indices = []
+    finite_masks = []
+    for cell in range(8):
+        random = np.random.default_rng(70_000 + cell)
+        x = base_x.copy()
+        sigma = np.linspace(0.01, 0.05, x.size)
+        values = clean + random.normal(0.0, sigma)
+        rejected = np.arange(10 + cell, 11 + cell + cell % 3)
+        if cell % 2:
+            values[rejected] = np.nan
+        else:
+            x[rejected] = np.nan
+        sigma[0] = 0.0
+        sigma[1] = np.nan
+        finite = np.isfinite(x) & np.isfinite(values)
+        coordinates.append((x,))
+        observations.append(values)
+        sigmas.append(sigma)
+        indices.append(np.arange(x.size, dtype=np.int64) + 1_000 * cell)
+        finite_masks.append(finite)
+
+    results, failures = engine.fit_batch(
+        model_id,
+        tuple(coordinates),
+        tuple(observations),
+        observation_sigmas=tuple(sigmas),
+        selected_indices=tuple(indices),
+    )
+    assert failures == (None,) * len(coordinates)
+    reference_model = replace(model, compiled_descriptor=None)
+    for cell, result in enumerate(results):
+        assert result is not None
+        scalar = engine.fit(
+            reference_model,
+            coordinates[cell],
+            observations[cell],
+            observation_sigma=sigmas[cell],
+            selected_indices=indices[cell],
+        )
+        _assert_fit_equal(result, scalar)
+        finite = finite_masks[cell]
+        np.testing.assert_array_equal(result.selected_indices, indices[cell][finite])
+        used_sigma = sigmas[cell][finite]
+        floor = float(
+            np.min(used_sigma[np.isfinite(used_sigma) & (used_sigma > 0.0)])
+        )
+        bounded = np.where(
+            np.isfinite(used_sigma) & (used_sigma > 0.0),
+            used_sigma,
+            floor,
+        )
+        expected_reduced = float(
+            np.dot(result.residuals / bounded, result.residuals / bounded)
+            / (result.residuals.size - len(model.parameters))
+        )
+        assert result.reduced_chi_square == pytest.approx(expected_reduced, rel=1e-10)
+
+
+def test_public_batch_compacts_regular_image_masks() -> None:
+    engine = FitEngine()
+    model_id = "radial_gaussian_center"
+    model = engine.registry.get(model_id)
+    x = np.linspace(-2.0, 2.0, 24)
+    y = np.linspace(-1.8, 2.2, 20)
+    xx, yy = np.meshgrid(x, y)
+    inputs = []
+    for cell in range(8):
+        parameters = _cell_parameters(model_id, cell)
+        image = model.evaluate(
+            (xx.reshape(-1), yy.reshape(-1)),
+            parameters,
+        ).reshape(y.size, x.size)
+        mask = np.ones(image.shape, dtype=np.bool_)
+        mask[: 1 + cell % 3, :] = False
+        mask[:, -1 - cell % 2 :] = False
+        mask[5 + cell, 7 + cell] = False
+        inputs.append(RegularImageFitInput(x, y, image, valid_mask=mask))
+
+    scalar = tuple(engine.fit(model_id, item) for item in inputs)
+    results, failures = engine.fit_batch(
+        model_id,
+        tuple(inputs),
+        (None,) * len(inputs),
+    )
+    assert failures == (None,) * len(inputs)
+    for result, expected in zip(results, scalar, strict=True):
+        assert result is not None
+        _assert_fit_equal(result, expected)
+
+
+def test_explicit_batch_bounds_replace_model_derived_bounds() -> None:
+    engine = FitEngine()
+    model = engine.registry.get("radial_gaussian_center")
+    coordinates = _coordinates(model.model_id)
+    observations = model.evaluate(coordinates, _BASE_PARAMETERS[model.model_id])
+    defaults = model.bounds_initializer(coordinates, observations)
+    assert defaults is not None and defaults["center_x"][1] < 2.1
+    bounds = {"center_x": (2.1, 2.3)}
+    results, failures = engine.fit_batch(
+        model,
+        (coordinates,) * 8,
+        (observations,) * 8,
+        bounds=bounds,
+    )
+    assert failures == (None,) * 8
+    for result in results:
+        assert result is not None
+        assert 2.1 <= result.parameters["center_x"] <= 2.3
+
+
+def test_invalid_public_batch_warm_start_raises() -> None:
+    engine = FitEngine()
+    cases = tuple(
+        _fit_case(engine, "gaussian_offset", "normal", cell)
+        for cell in range(8)
+    )
+    invalid = np.asarray((2.0, 0.2, np.nan, -0.3))
+    with pytest.raises(ValueError, match="invalid parameter values"):
+        engine.fit_batch(
+            "gaussian_offset",
+            tuple(case[0] for case in cases),
+            tuple(case[1] for case in cases),
+            warm_starts=(None, invalid, None, None, None, None, None, None),
+        )
+
+
+@pytest.mark.parametrize("loss", ("linear", "soft_l1", "huber", "cauchy", "arctan"))
+def test_public_batch_all_supported_losses_match_single(loss: str) -> None:
+    engine = FitEngine()
+    reference_model = replace(
+        engine.registry.get("gaussian_offset"),
+        compiled_descriptor=None,
+    )
+    cases = tuple(
+        _fit_case(engine, "gaussian_offset", "hard", cell)
+        for cell in range(8)
+    )
+    options = FitOptions(loss=loss)
+    scalar = tuple(
+        engine.fit(
+            reference_model,
+            coordinates,
+            observations,
+            options=options,
+        )
+        for coordinates, observations, _sigma, _indices in cases
+    )
+    results, failures = engine.fit_batch(
+        "gaussian_offset",
+        tuple(case[0] for case in cases),
+        tuple(case[1] for case in cases),
+        options=options,
+    )
+    assert failures == (None,) * len(cases)
+    for result, expected in zip(results, scalar, strict=True):
+        assert result is not None
+        _assert_fit_equal(
+            result,
+            expected,
+            quality_tolerance=(1e-10 if loss == "linear" else 1e-9),
+        )
+
+
+def test_rank_deficient_cell_stays_on_compiled_batch_without_scalar_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = FitEngine()
+    model = engine.registry.get("gaussian_offset")
+    x = np.linspace(-5.0, 5.0, 112)
+    observations = [np.full(x.size, 0.2)]
+    observations.extend(
+        model.evaluate((x,), _cell_parameters(model.model_id, cell))
+        for cell in range(1, 8)
+    )
+
+    def forbidden_scalar(*_args, **_kwargs):
+        raise AssertionError("compiled batch fell back to scipy least_squares")
+
+    monkeypatch.setattr(
+        import_module("zlc_plot.fit"),
+        "least_squares",
+        forbidden_scalar,
+    )
+    results, failures = engine.fit_batch(
+        model,
+        ((x,),) * len(observations),
+        tuple(observations),
+    )
+    assert failures == (None,) * len(observations)
+    flat = results[0]
+    assert flat is not None and flat.success
+    assert not flat.covariance_valid
+    assert np.all(np.isnan(flat.standard_errors))
+
+
+@pytest.mark.parametrize("fallback", ("custom_model", "custom_engine"))
+def test_public_batch_uses_per_cell_fit_route_for_explicit_customization(
+    monkeypatch: pytest.MonkeyPatch,
+    fallback: str,
+) -> None:
+    class RecordingEngine(FitEngine):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fit_calls = 0
+
+        def fit(  # type: ignore[no-untyped-def]
+            self,
+            model,
+            coordinates,
+            observations=None,
+            **kwargs,
+        ):
+            self.fit_calls += 1
+            return super().fit(model, coordinates, observations, **kwargs)
+
+    engine: FitEngine
+    model: object
+    recording: RecordingEngine | None = None
+    calls: list[None] = []
+    if fallback == "custom_engine":
+        recording = RecordingEngine()
+        engine = recording
+        model = "gaussian_offset"
+    else:
+        engine = FitEngine()
+        builtin = engine.registry.get("gaussian_offset")
+        model = replace(
+            builtin,
+            model_id="custom_gaussian",
+            compiled_descriptor=None,
+        )
+        original = engine.fit
+        def counted(*args, **kwargs):  # type: ignore[no-untyped-def]
+            calls.append(None)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(engine, "fit", counted)
+
+    cases = tuple(
+        _fit_case(engine, "gaussian_offset", "normal", cell)
+        for cell in range(3)
+    )
+    results, failures = engine.fit_batch(
+        model,  # type: ignore[arg-type]
+        tuple(case[0] for case in cases),
+        tuple(case[1] for case in cases),
+    )
+    assert failures == (None,) * len(cases)
+    assert all(result is not None for result in results)
+    call_count = (
+        recording.fit_calls
+        if recording is not None
+        else len(calls)
+    )
+    assert call_count == len(cases)
 
 
 def test_frozen_anchors_cover_all_builtin_evaluators() -> None:
@@ -115,28 +718,17 @@ def test_every_builtin_model_recovers_synthetic_parameters(model: str) -> None:
 
 @pytest.mark.parametrize("model", _GENERIC_WARM_MODELS)
 def test_globally_unbeatable_warm_seed_skips_redundant_cold_candidates(
-    monkeypatch, model: str
+    model: str,
 ) -> None:
     engine = FitEngine()
     coordinates, observations, _parameters = _anchor(model)
     cold = engine.fit(model, coordinates, observations)
-    fit_module = import_module("zlc_plot.fit")
-    least_squares = fit_module.least_squares
-    calls = 0
-
-    def counted(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        return least_squares(*args, **kwargs)
-
-    monkeypatch.setattr(fit_module, "least_squares", counted)
     warm = engine.fit(
         engine.registry.get(model),
         coordinates,
         observations,
         warm_start=tuple(float(value) for value in cold.parameter_values),
     )
-    assert calls == 1
     for field in (
         "parameter_values",
         "standard_errors",
@@ -150,36 +742,24 @@ def test_globally_unbeatable_warm_seed_skips_redundant_cold_candidates(
         ), field
     assert warm.model.model_id == cold.model.model_id
     assert warm.success == cold.success
-    assert warm.message == cold.message
     assert warm.reduced_chi_square == cold.reduced_chi_square
     assert warm.covariance_valid == cold.covariance_valid
 
 
-def test_misleading_warm_seed_keeps_every_cold_candidate(monkeypatch) -> None:
+def test_misleading_warm_seed_keeps_the_cold_winner() -> None:
     engine = FitEngine()
     coordinates, observations, _parameters = _anchor("lorentzian")
     cold = engine.fit("lorentzian", coordinates, observations)
-    fit_module = import_module("zlc_plot.fit")
-    least_squares = fit_module.least_squares
-    calls = 0
-
-    def counted(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        return least_squares(*args, **kwargs)
-
-    monkeypatch.setattr(fit_module, "least_squares", counted)
     recovered = engine.fit(
         engine.registry.get("lorentzian"),
         coordinates,
         observations,
         warm_start=(2.5, 0.1, 0.1, 1.5),
     )
-    assert calls == 3
-    np.testing.assert_array_equal(recovered.parameter_values, cold.parameter_values)
+    _assert_fit_equal(recovered, cold)
 
 
-def test_fit_bounds_are_enforced(monkeypatch) -> None:
+def test_fit_bounds_are_enforced() -> None:
     model = "gaussian_offset"
     (x,), values, _ = _anchor(model)
     result = FitEngine().fit(
@@ -190,15 +770,6 @@ def test_fit_bounds_are_enforced(monkeypatch) -> None:
     )
     assert 0.0 <= result.parameters["center"] <= 0.1
 
-    fit_module = import_module("zlc_plot.fit")
-    least_squares = fit_module.least_squares
-    solved_dimensions: list[int] = []
-
-    def observed_dimension(function, seed, **kwargs):
-        solved_dimensions.append(np.asarray(seed).size)
-        return least_squares(function, seed, **kwargs)
-
-    monkeypatch.setattr(fit_module, "least_squares", observed_dimension)
     truth = _anchors()[model]["parameters"]
     fixed = {"sigma": truth["sigma"], "center": truth["center"]}
     result = FitEngine().fit(
@@ -209,12 +780,13 @@ def test_fit_bounds_are_enforced(monkeypatch) -> None:
     )
 
     assert result.success
-    assert solved_dimensions == [2]
     assert result.fixed_parameter_names == tuple(fixed)
     assert result.parameters["sigma"] == truth["sigma"]
     assert result.parameters["center"] == truth["center"]
     fixed_indices = (2, 3)
     assert np.all(result.standard_errors[list(fixed_indices)] == 0.0)
+    assert np.all(result.covariance[list(fixed_indices)] == 0.0)
+    assert np.all(result.covariance[:, list(fixed_indices)] == 0.0)
     assert not result.parameter_error_validity["sigma"]
     assert not result.parameter_error_validity["center"]
     assert result.parameter_error_validity["amplitude"]

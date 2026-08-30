@@ -56,11 +56,6 @@ FitCallback = Callable[[FitEvent | None], object]
 # seeds survive data revisions independently of user fit requests.
 _CLASSIFIER_REQUEST_GENERATION = -1
 
-# Facet cells are solved serially: scipy's trf holds the GIL for these small
-# per-cell problems, and a measured 4-thread pool was ~20% SLOWER than the
-# serial loop (25.9 ms pooled vs 14.2 ms serial for 8x4000-point solves).
-# Raise this only with a measurement showing the pool winning.
-
 # Warm-seed memory hardening: a degenerate accepted solve must never seed
 # later revisions (one poisoned seed used to replicate itself into every
 # following frame).  Thresholds, in order of application:
@@ -675,12 +670,101 @@ class FitSessionMixin:
             for index in range(len(cells))
         )
 
+        selections: list[FitSelection | None] = []
+        selection_failures: list[str | None] = []
+        for index in range(len(cells)):
+            try:
+                selections.append(
+                    projection.fit_selection(
+                        model,
+                        selector_kind=selector_kind,
+                        facet_index=index,
+                    )
+                )
+                selection_failures.append(None)
+            except Exception as error:
+                selections.append(None)
+                selection_failures.append(str(error) or type(error).__name__)
+
+        parameter_units = projection._fit_parameter_units(model)
+        batch_results: list[FitResult | None] = [None] * len(cells)
+        batch_failures = list(selection_failures)
+        selected_cells = tuple(
+            index
+            for index, selection in enumerate(selections)
+            if selection is not None
+        )
+        selected = tuple(selections[index] for index in selected_cells)
+        if selected:
+            exact = tuple(
+                selection for selection in selected if selection is not None
+            )
+            try:
+                solved, failed = self._fit_engine.fit_batch(
+                    model,
+                    tuple(
+                        selection.regular_image
+                        if selection.regular_image is not None
+                        else selection.coordinates
+                        for selection in exact
+                    ),
+                    tuple(
+                        None
+                        if selection.regular_image is not None
+                        else selection.observations
+                        for selection in exact
+                    ),
+                    observation_sigmas=tuple(
+                        selection.observation_sigma for selection in exact
+                    ),
+                    selected_indices=tuple(
+                        selection.selected_indices for selection in exact
+                    ),
+                    data_revisions=tuple(
+                        selection.data_revision for selection in exact
+                    ),
+                    initial=initial,
+                    warm_starts=tuple(
+                        warm_starts[index] for index in selected_cells
+                    ),
+                    bounds=bounds,
+                    options=options,
+                    cancelled=cancelled,
+                )
+            except FitCancelled:
+                raise
+            except Exception as error:
+                message = str(error) or type(error).__name__
+                solved = (None,) * len(exact)
+                failed = (message,) * len(exact)
+            for local, index in enumerate(selected_cells):
+                result = solved[local]
+                batch_results[index] = (
+                    None
+                    if result is None
+                    else result.with_parameter_units(parameter_units)
+                )
+                batch_failures[index] = failed[local]
+
         def solve_cell(
             index: int,
         ) -> tuple[FitResult | None, str | None, FitSelection | None, FitOverlay]:
             if cancelled is not None and bool(cancelled()):
                 raise FitCancelled("facet fit cancelled")
-            warm = warm_starts[index]
+            selection = selections[index]
+            failure = selection_failures[index]
+            if selection is None:
+                assert failure is not None
+                return (
+                    None,
+                    failure,
+                    None,
+                    FitOverlay(
+                        success=False,
+                        diagnostic=failure,
+                        facet_index=index,
+                    ),
+                )
             try:
                 # The request's own selector, not the default priority: the
                 # batch used to solve one domain and the accepted record report
@@ -688,20 +772,19 @@ class FitSessionMixin:
                 # One batch, one domain: the region the operator drew
                 # applies to every cell, so only the computed cell varies --
                 # the focused facet still says whose selectors may speak.
-                selection = projection.fit_selection(
-                    model, selector_kind=selector_kind, facet_index=index
-                )
-                result = self._solve_fit_selection(
-                    projection,
-                    model,
-                    selection,
-                    initial=initial,
-                    bounds=bounds,
-                    options=options,
-                    cancelled=cancelled,
-                    request_generation=request_generation,
-                    warm_start=warm,
-                )
+                result = batch_results[index]
+                if result is None:
+                    message = batch_failures[index] or "fit failed"
+                    return (
+                        None,
+                        message,
+                        None,
+                        FitOverlay(
+                            success=False,
+                            diagnostic=message,
+                            facet_index=index,
+                        ),
+                    )
                 overlay = projection._make_fit_overlay(result, selection)
             except FitCancelled:
                 raise
@@ -864,7 +947,10 @@ class FitSessionMixin:
         """Solve one exact pair or fail it without advancing visible data."""
 
         try:
-            result = self._solve_started_fit(started, cancelled=cancelled)
+            result, selections = self._solve_started_fit_parts(
+                started,
+                cancelled=cancelled,
+            )
             if started.cancellation.is_set() or (
                 cancelled is not None and bool(cancelled())
             ):
@@ -876,7 +962,7 @@ class FitSessionMixin:
             if failed is not None:
                 self._resolve_fit_completion(failed)
             raise
-        return _SolvedLiveFit(started, result)
+        return _SolvedLiveFit(started, result, selections)
 
     def solve_live_frame(
         self,
@@ -933,6 +1019,7 @@ class FitSessionMixin:
                 result,
                 solved.started,
                 projection,
+                facet_selections=solved.selections,
             )
             event = self._fit_event(accepted)
             completion = self._live_fit_completion
@@ -1017,13 +1104,30 @@ class FitSessionMixin:
     ) -> FitResult | FacetFitBatchResult:
         """Execute one frozen fit request on the caller or analysis worker."""
 
+        result, _selections = self._solve_started_fit_parts(
+            started,
+            cancelled=cancelled,
+        )
+        return result
+
+    def _solve_started_fit_parts(
+        self,
+        started: _StartedFitRequest,
+        *,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> tuple[
+        FitResult | FacetFitBatchResult,
+        tuple[FitSelection | None, ...],
+    ]:
+        """Solve once and retain the exact Facet selections for live accept."""
+
         def should_cancel() -> bool:
             return started.cancellation.is_set() or (
                 cancelled is not None and bool(cancelled())
             )
 
         if started.request.all_facets:
-            batch, _selections = self._fit_facet_batch(
+            batch, selections = self._fit_facet_batch(
                 started.projection,
                 started.request.model,
                 initial=started.request.initial,
@@ -1033,7 +1137,7 @@ class FitSessionMixin:
                 request_generation=started.request_generation,
                 selector_kind=started.request.selector_kind,
             )
-            return self._stamp_fit_batch_revision(batch)
+            return self._stamp_fit_batch_revision(batch), selections
         selection = started.selection
         if selection is None:
             # Deferred live restart: freeze the selection here, off the
@@ -1059,7 +1163,7 @@ class FitSessionMixin:
             cancelled=should_cancel,
             request_generation=started.request_generation,
         )
-        return self._stamp_fit_batch_revision(result)
+        return self._stamp_fit_batch_revision(result), ()
 
     def _submit_started_fit(
         self,
@@ -1756,6 +1860,8 @@ class FitSessionMixin:
         result: FitResult | FacetFitBatchResult,
         started: _StartedFitRequest,
         projection: FitProjection,
+        *,
+        facet_selections: Sequence[FitSelection | None] = (),
     ) -> tuple[_AcceptedFit, tuple[FitSelection | None, ...]]:
         """Resolve one fit against exactly the projection it was solved from."""
 
@@ -1774,11 +1880,26 @@ class FitSessionMixin:
         else:
             overlay = None
             overlays = batch.overlays
-            selections = self._facet_fit_selections(
-                projection,
-                batch.model,
-                selector_kind=started.request.selector_kind,
-            )
+            selections = tuple(facet_selections)
+            if selections:
+                if len(selections) != len(batch.results):
+                    raise RuntimeError(
+                        "facet fit selections do not match the completed batch"
+                    )
+                if any(
+                    selected is not None
+                    and selected.data_revision != projection.data_revision
+                    for selected in selections
+                ):
+                    raise RuntimeError(
+                        "facet fit selection does not match its data projection"
+                    )
+            else:
+                selections = self._facet_fit_selections(
+                    projection,
+                    batch.model,
+                    selector_kind=started.request.selector_kind,
+                )
         return (
             _AcceptedFit(
                 result=result,
