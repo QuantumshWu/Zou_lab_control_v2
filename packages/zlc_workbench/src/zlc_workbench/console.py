@@ -1311,9 +1311,24 @@ class ConsolePresenter:
             )
             if ui_changed:
                 binding.parameter_surface = controls
+        # The title strip is data metadata, not control metadata.  A Monitor
+        # derivation can replace its generation with the same axis vocabulary
+        # but a different ROI shape; in that case ``controls`` compares equal
+        # even though the exact accepted Dataset changed.  Include the shape
+        # projected from THIS accepted surface in the same presentation
+        # decision so pixels and their dimensions advance atomically.
+        shown = getattr(plot_input, "snapshot", plot_input)
+        shown_schema = getattr(getattr(shown, "block", None), "schema", None)
+        shape_changed = False
+        if shown_schema is not None:
+            accepted_shape = panel_data_shape(shown_schema, description)
+            shape_changed = any(
+                binding.parameter_surface.get(name) != value
+                for name, value in accepted_shape.items()
+            )
         interaction_changed = self._normalize_panel_interaction(binding)
         if binding.frozen_data is not None and not binding.refresh_requested:
-            if state_changed or ui_changed or interaction_changed:
+            if state_changed or ui_changed or shape_changed or interaction_changed:
                 self._publish_panel_state(binding)
             return
         binding.refresh_requested = False

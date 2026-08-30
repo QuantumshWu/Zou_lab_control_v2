@@ -1788,6 +1788,11 @@ class MatplotlibRenderer:
                 () if scene_3d else painted_fit_overlays,
                 overview=overview,
                 model_id=frame.fit_model_id,
+                facet_parameter=(
+                    state["facet_fit_parameter"]
+                    if isinstance(self.spec, FacetGridPlot)
+                    else None
+                ),
             )
             cells = tuple(getattr(payload, "cells", ()))
             for key, axes, index in painted:
@@ -7381,8 +7386,21 @@ class MatplotlibRenderer:
             f"± {uncertainty}{unit}"
         )
 
-    def _fit_headline_annotation_text(self, overlay: FitOverlay) -> str:
+    def _fit_headline_annotation_text(
+        self,
+        overlay: FitOverlay,
+        parameter_name: str | None = None,
+    ) -> str:
         parameter = overlay.headline_parameter
+        if parameter_name is not None:
+            parameter = next(
+                (
+                    candidate
+                    for candidate in overlay.parameter_display
+                    if candidate.name == parameter_name
+                ),
+                parameter,
+            )
         return (
             ""
             if parameter is None
@@ -7663,9 +7681,13 @@ class MatplotlibRenderer:
         annotation.set_text(content)
         annotation.set_visible(bool(content))
 
-    def _update_fit_headline_annotation(self, overlay: FitOverlay) -> None:
+    def _update_fit_headline_annotation(
+        self,
+        overlay: FitOverlay,
+        parameter_name: str | None = None,
+    ) -> None:
         annotation = self._fit_slots["annotation"]
-        content = self._fit_headline_annotation_text(overlay)
+        content = self._fit_headline_annotation_text(overlay, parameter_name)
         annotation.set_text(content)
         annotation.set_visible(bool(content))
 
@@ -7737,6 +7759,7 @@ class MatplotlibRenderer:
         self,
         overlays: tuple[FitOverlay, ...],
         model_id: str | None,
+        parameter_name: str | None = None,
     ) -> None:
         """Paint all cell fit curves without per-cell parameter annotations."""
 
@@ -7816,7 +7839,7 @@ class MatplotlibRenderer:
                 diagnostic.set_visible(True)
             else:
                 self._update_fit_primitives(family, overlay)
-                self._update_fit_headline_annotation(overlay)
+                self._update_fit_headline_annotation(overlay, parameter_name)
         self._fit_slots = {}
         self._fit_axis = None
         self._fit_family = None
@@ -7828,9 +7851,14 @@ class MatplotlibRenderer:
         *,
         overview: bool,
         model_id: str | None,
+        facet_parameter: str | None = None,
     ) -> None:
         if overview:
-            self._update_facet_fit_overview(overlays, model_id)
+            self._update_facet_fit_overview(
+                overlays,
+                model_id,
+                facet_parameter,
+            )
             return
         self._update_single_fit(overlays[0] if overlays else None, model_id)
 

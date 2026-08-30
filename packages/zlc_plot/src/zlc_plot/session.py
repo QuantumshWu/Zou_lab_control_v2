@@ -914,8 +914,25 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             )
         return MappingProxyType(sources)
 
-    def _parameter_choice_overrides(self) -> Mapping[str, tuple[object, ...]]:
+    def _parameter_choice_overrides(
+        self,
+        fit_models: tuple[FitModelSpec, ...],
+    ) -> Mapping[str, tuple[object, ...]]:
         result: dict[str, tuple[object, ...]] = {}
+        if "facet_fit_parameter" in self._parameter_schema:
+            accepted = self._accepted_fit
+            request = self._live_fit_request or (
+                None if accepted is None else accepted.request
+            )
+            models = (request.model,) if request is not None else fit_models
+            result["facet_fit_parameter"] = (
+                "model headline",
+                *tuple(dict.fromkeys(
+                    name
+                    for model in models
+                    for name in model.parameter_names
+                )),
+            )
         if self._view is None:
             if "x_display_unit" in self._parameter_schema:
                 choices = self._parameter_schema["x_display_unit"].choices
@@ -1000,6 +1017,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                     )
                 else:
                     fit_expression, fit_expression_error = failure
+            fit_models = self.fit_models
             return DisplayDescription(
                 kind=self._spec.kind,
                 spec=self._spec,
@@ -1007,7 +1025,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 size_choices=self._defaults.layout.size_names,
                 parameter_schema=self._parameter_schema,
                 display_state=self.display_state,
-                parameter_choices=self._parameter_choice_overrides(),
+                parameter_choices=self._parameter_choice_overrides(fit_models),
                 limits=self._current_display_limits(),
                 viewport=self._viewport,
                 semantics=semantics,
@@ -1022,7 +1040,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 ),
                 facet_focus=self._facet_focus_index,
                 fit=fit,
-                fit_models=self.fit_models,
+                fit_models=fit_models,
                 fit_expression=fit_expression,
                 fit_expression_error=fit_expression_error,
             )

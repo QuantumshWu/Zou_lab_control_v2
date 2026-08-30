@@ -1013,6 +1013,16 @@ def _parameter_schema_for_context(
                     effects=_FACET_UNIT_EFFECTS,
                 )
             )
+            entries.append(
+                ParameterSpec(
+                    "facet_fit_parameter",
+                    str,
+                    RenderEffect.OVERLAY,
+                    default="model headline",
+                    normalizer=_normalize_nonempty_text,
+                    label="Cell fit value",
+                )
+            )
         entries.append(_unit_parameter("value_display_unit"))
     if semantic_kind in {PlotKind.CURVE, PlotKind.ROLLING}:
         entries.extend(_curve_parameters())

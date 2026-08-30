@@ -864,9 +864,32 @@ class FitSessionMixin:
         else:
             request = prepared_request
         selection: FitSelection | None = None
+        display_reset = None
         with self._render_lock:
             with self._lock:
                 self._assert_open()
+                if "facet_fit_parameter" in self._parameter_schema:
+                    selected_parameter = self.display_state[
+                        "facet_fit_parameter"
+                    ]
+                    if (
+                        selected_parameter != "model headline"
+                        and selected_parameter not in request.model.parameter_names
+                    ):
+                        previous_display = self.display_state
+                        prepared_display = self._parameter_schema.prepare_updates(
+                            {"facet_fit_parameter": "model headline"}
+                        )
+                        candidate_display = (
+                            self._parameter_schema._transition_prepared(
+                                previous_display.values,
+                                prepared_display,
+                            )
+                        )
+                        display_reset = self._display_store._commit_prepared(
+                            previous_display,
+                            candidate_display,
+                        )
                 projection = self._projected
                 if not request.all_facets:
                     try:
@@ -911,6 +934,8 @@ class FitSessionMixin:
                 superseded.set_exception(FitCancelled("fit request superseded"))
 
         self._commit_fit_actions(retire_previous_request)
+        if display_reset is not None:
+            self._notify_display(display_reset)
         return started
 
     def _pair_started(
