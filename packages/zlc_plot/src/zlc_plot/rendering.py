@@ -2987,9 +2987,19 @@ class MatplotlibRenderer:
         """
 
         policy = self.style.render
-        segments = np.stack(
-            (np.column_stack((x, low)), np.column_stack((x, high))), axis=1
-        )
+        def update_segments(collection: Any) -> None:
+            shape = (x.size, 2, 2)
+            segments = getattr(collection, "_zlc_segment_buffer", None)
+            if not isinstance(segments, np.ndarray) or segments.shape != shape:
+                segments = np.empty(shape, dtype=float)
+                collection.set_segments(segments)
+                collection._zlc_segment_buffer = segments
+            segments[:, 0, 0] = x
+            segments[:, 1, 0] = x
+            segments[:, 0, 1] = low
+            segments[:, 1, 1] = high
+            collection.stale = True
+
         capped = policy.uncertainty_bar_capsize_pt > 0
         if reused is not None:
             collections = [
@@ -2999,13 +3009,9 @@ class MatplotlibRenderer:
                 artist for artist in reused if not hasattr(artist, "set_segments")
             ]
             if len(collections) == 1 and len(caps) == (2 if capped else 0):
-                collections[0].set_segments(segments)
-                collections[0].set_color(colour)
-                collections[0].set_zorder(zorder)
+                update_segments(collections[0])
                 for cap, edge in zip(caps, (low, high)):
                     cap.set_data(x, edge)
-                    cap.set_color(colour)
-                    cap.set_zorder(zorder)
                 return reused
             for artist in reused:
                 artist.remove()
@@ -3028,6 +3034,8 @@ class MatplotlibRenderer:
         # so revisions do not accumulate.
         if container in axes.containers:
             axes.containers.remove(container)
+        for collection in barlinecols:
+            update_segments(collection)
         return (*caplines, *barlinecols)
 
     def _mutate_series_artists(
@@ -3075,9 +3083,8 @@ class MatplotlibRenderer:
                 plotted_y,
                 isolated_glyphs=isolated_glyphs,
             )
-            lines[index].set_color(colour)
-            lines[index].set_linewidth(self.style.artists.curve.linewidth)
-            lines[index].set_alpha(self.style.artists.curve.alpha)
+            if lines[index].get_color() != colour:
+                lines[index].set_color(colour)
             if lines[index].get_label() != item.label:
                 lines[index].set_label(item.label)
             series_lines.append((lines[index], item.identity, item.label))
@@ -3323,40 +3330,46 @@ class MatplotlibRenderer:
                 setattr(self, attribute, None)
         locked = self._series_locked
         active = locked or self._series_hover
-        if only is not None:
-            # One cell's artists were just replaced, so the figure-wide
-            # token no longer describes the figure.
-            self._series_focus_applied = None
-        # Focus styling is a pure function of (focus state, the exact line
-        # artists alive).  Data revisions reuse their artists, so replaying
-        # the whole property walk over 64 cells' series on every frame was
-        # 17 ms of setting every value to itself.
-        token = (
-            locked,
-            self._series_hover,
-            tuple(
-                id(line)
-                for entries in self._series_lines.values()
-                for line, _series_id, _label in entries
-            ),
-            # Error-bar artists are rebuilt per revision; fresh ones carry
-            # default properties until this walk styles them.
-            tuple(
-                id(artist)
-                for bars in self._series_bars.values()
-                for artists in bars.values()
-                for artist in artists
-            ),
-        )
-        if only is None:
-            if getattr(self, "_series_focus_applied", None) == token:
-                return
-            self._series_focus_applied = token
+        # Focus styling is a pure function of focus plus exact line/series/bar
+        # identities.  All of those artists now survive data revisions, so a
+        # per-axes token turns the steady update into zero property writes;
+        # topology, reorder, hover and lock each change the token themselves.
+        applied = getattr(self, "_series_focus_applied_axes", {})
+        applied = {
+            axis_id: token
+            for axis_id, token in applied.items()
+            if axis_id in self._series_lines
+        }
+        tokens: dict[int, tuple[Any, ...]] = {}
+        for axis_id, entries in self._series_lines.items():
+            if only is not None and axis_id != only:
+                continue
+            axis_bars = self._series_bars.get(axis_id, {})
+            tokens[axis_id] = (
+                locked,
+                self._series_hover,
+                tuple(
+                    (id(line), series_id)
+                    for line, series_id, _label in entries
+                ),
+                tuple(
+                    (series_id, tuple(id(artist) for artist in artists))
+                    for series_id, artists in axis_bars.items()
+                ),
+            )
+        pending = {
+            axis_id
+            for axis_id, token in tokens.items()
+            if applied.get(axis_id) != token
+        }
+        if not pending:
+            self._series_focus_applied_axes = applied
+            return
         identity = None if active is None else active[1]
         focus_line = None
         bar_alpha = self.style.render.uncertainty_bar_alpha
         for axis_id, entries in self._series_lines.items():
-            if only is not None and axis_id != only:
+            if axis_id not in pending:
                 continue
             axis_bars = self._series_bars.get(axis_id, {})
             for line, series_id, _label in entries:
@@ -3408,6 +3421,8 @@ class MatplotlibRenderer:
                     line.set_markeredgewidth(line.get_linewidth())
                 if focused and active is not None and axis_id == active[0]:
                     focus_line = line
+            applied[axis_id] = tokens[axis_id]
+        self._series_focus_applied_axes = applied
         if only is not None and (active is None or only != active[0]):
             # The inspector belongs to the focused cell, and this call did
             # not touch it.

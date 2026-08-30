@@ -1111,9 +1111,39 @@ class DataView:
                 # kernel, no binomial special case -- for a boolean column the
                 # sample spread sqrt(p(1-p)) IS the binomial spread.
                 def mean_of_squares(plane: Any, offset: float) -> Any:
+                    array = np.asarray(plane)
+                    marks = (
+                        None
+                        if _stride_zero_all_true(moved_usable)
+                        else moved_usable
+                    )
+                    if array.ndim == 3 and array.flags.c_contiguous:
+                        from . import _raster_kernels as kernels
+
+                        flat = array.reshape(array.shape[0], -1, 1)
+                        flat_marks = (
+                            None
+                            if marks is None
+                            else np.asarray(marks).reshape(flat.shape)
+                        )
+                        square_sums = kernels.masked_centred_square_sums(
+                            flat,
+                            offset,
+                            flat_marks,
+                        )
+                        if square_sums is not None:
+                            ordered = code_ordered(
+                                square_sums.reshape(nx, combinations)
+                            )
+                            with np.errstate(invalid="ignore", divide="ignore"):
+                                return np.where(
+                                    counts > 0,
+                                    ordered / counts,
+                                    np.nan,
+                                )
                     reduced, _ = _masked_leading_reduce(
                         np.square(
-                            np.asarray(plane, dtype=np.float64) - offset
+                            np.asarray(array, dtype=np.float64) - offset
                         ),
                         moved_usable,
                         Reduction.MEAN,
