@@ -70,7 +70,7 @@ def _indexed_layout(schema: DatasetSchema) -> tuple[object, ...] | None:
     if primary.role != PRIMARY_INDEX:
         return None
     coordinates = tuple(primary.values)
-    if any(type(value) is not int or value < 0 for value in coordinates):
+    if any(type(value) is not int for value in coordinates):
         return None
     unique: list[int] = []
     counts: list[int] = []
@@ -83,6 +83,8 @@ def _indexed_layout(schema: DatasetSchema) -> tuple[object, ...] | None:
         else:
             counts[-1] += 1
     if not counts or len(set(counts)) != 1:
+        return None
+    if unique[-1] != 0:
         return None
     inner_count = counts[0]
 

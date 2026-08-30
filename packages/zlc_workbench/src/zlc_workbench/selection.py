@@ -68,6 +68,7 @@ __all__ = [
     "observation_matches_plot_input",
     "observation_predates_plot_input",
     "same_plot_run",
+    "plot_generation_matches_plot_input",
     "plot_identity_matches_plot_input",
     "panel_plot_selectors",
     "attach_selection_bridge",
@@ -131,6 +132,18 @@ def same_plot_run(left: object, right: object) -> bool:
     return first is not None and first == generation(right)
 
 
+def plot_generation_matches_plot_input(
+    plot_input: object,
+    data_generation: object,
+) -> bool:
+    """Whether a generation value belongs to this accepted Plot input."""
+
+    snapshot = getattr(plot_input, "snapshot", plot_input)
+    ref = getattr(snapshot, "ref", None)
+    generation = getattr(getattr(ref, "stream_generation", None), "value", None)
+    return generation is not None and generation == str(data_generation)
+
+
 def observation_predates_plot_input(
     observation: object,
     plot_input: object,
@@ -175,12 +188,10 @@ def same_plot_generation(observation: object, plot_input: object) -> bool:
     was cut from.
     """
 
-    snapshot = getattr(plot_input, "snapshot", plot_input)
-    ref = getattr(snapshot, "ref", None)
-    generation = getattr(getattr(ref, "stream_generation", None), "value", None)
-    if generation is None:
-        return False
-    return generation == str(getattr(observation, "data_generation", None))
+    return plot_generation_matches_plot_input(
+        plot_input,
+        getattr(observation, "data_generation", None),
+    )
 
 
 #: Plot kinds the runtime can derive from -- all of them.  A region cuts
@@ -1036,13 +1047,16 @@ def attach_selection_bridge(
     )
 
     def exact_publication(observation: PlotSelectionObservation):
+        resolved_by_presentation = bool(
+            source_publication_for is not None
+            and observation.data_generation is not None
+        )
         publication = (
             source_publication_for(
                 str(observation.data_generation),
                 observation.data_revision,
             )
-            if source_publication_for is not None
-            and observation.data_generation is not None
+            if resolved_by_presentation
             else plane.latest_publication(source_signal)
         )
         if publication is None:
@@ -1052,9 +1066,10 @@ def attach_selection_bridge(
                 "selection publication resolver must return SignalPublication or None"
             )
         source_value = publication.value(source_signal)
-        if source_value is None or not observation_matches_plot_input(
-            observation,
-            source_value.snapshot,
+        if source_value is None:
+            return None
+        if not resolved_by_presentation and not observation_matches_plot_input(
+            observation, source_value.snapshot
         ):
             return None
         return publication

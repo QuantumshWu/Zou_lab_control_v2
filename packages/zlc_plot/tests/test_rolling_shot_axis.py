@@ -160,7 +160,7 @@ def test_replace_spec_keeps_history_for_an_equivalent_rolling_spec() -> None:
 
 
 def test_primary_index_history_keeps_source_order_holes_and_site_groups() -> None:
-    source = [10, 10, 12, 12]
+    source = [-2, -2, 0, 0]
     indexed_schema = DatasetSchema.create(
         Axis.create("repeat", size=1),
         PointTable.from_columns(
@@ -184,7 +184,7 @@ def test_primary_index_history_keeps_source_order_holes_and_site_groups() -> Non
     history = DataView(snapshot).rolling_history_samples(
         group=AxisRef.data("site"), aggregation=Reduction.MEAN
     )
-    assert tuple(sample.source_index for sample in history) == (10, 12)
+    assert tuple(sample.source_index for sample in history) == (-2, 0)
     assert all(sample.revision == 9 for sample in history)
     assert all(
         sample.generation == snapshot.ref.stream_generation.value

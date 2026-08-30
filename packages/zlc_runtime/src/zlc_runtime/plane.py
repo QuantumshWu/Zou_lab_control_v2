@@ -698,8 +698,9 @@ def _materialize_indexed_dataset(
     capacity: int,
 ) -> OwnedSnapshot:
     start = max(first_index, latest_index - capacity + 1)
-    indices = tuple(range(start, latest_index + 1))
-    schema = _indexed_schema(event_schema, indices)
+    absolute_indices = tuple(range(start, latest_index + 1))
+    relative_indices = tuple(index - latest_index for index in absolute_indices)
+    schema = _indexed_schema(event_schema, relative_indices)
     point_count = event_schema.point_table.row_count
     trailing = (slice(None),) * len(event_schema.cell_schema.data_axes)
 

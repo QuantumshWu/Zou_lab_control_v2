@@ -46,7 +46,7 @@ def _indexed_schema(shots: int) -> DatasetSchema:
         "source index",
         PRIMARY_INDEX,
         PointColumn.NUMERIC,
-        tuple(range(shots)),
+        tuple(range(1 - shots, 1)),
     )
     return _schema(PointTable(shots, (column,)))
 

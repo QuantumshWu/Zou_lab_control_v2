@@ -299,7 +299,7 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
             AxisId("zlc_data.primary-index")
         )
         assert source_index.role == PRIMARY_INDEX
-        assert source_index.values == (2, 3, 4)
+        assert source_index.values == (-2, -1, 0)
         np.testing.assert_allclose(
             snapshot.block.values.reshape(-1),
             (22.0, 0.0, 44.0),
@@ -371,7 +371,7 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
         )
         assert trimmed.block.schema.point_table.column(
             AxisId("zlc_data.primary-index")
-        ).values == (3, 4)
+        ).values == (-1, 0)
         assert trimmed_record["device_settings"]["camera"]["epoch_ranges"] == (
             (5, 5),
         )
@@ -456,7 +456,7 @@ def test_indexed_history_retains_only_the_requested_window() -> None:
         primary = snapshot.block.schema.point_table.column(
             AxisId("zlc_data.primary-index")
         )
-        assert primary.values == tuple(range(51, 151))
+        assert primary.values == tuple(range(-99, 1))
     finally:
         if history is not None:
             history.close()

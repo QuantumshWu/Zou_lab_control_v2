@@ -5,6 +5,8 @@ from __future__ import annotations
 import numpy as np
 
 from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from zlc_data import PRIMARY_INDEX
+from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
 from zlc_plot import HistogramPlot, PlotSession
 from zlc_plot.data_view import DataView
 
@@ -71,6 +73,30 @@ def test_a_nonindexed_window_never_invents_cross_publication_history() -> None:
         assert int(np.asarray(session._payload.counts).sum()) == 8
         session.set_parameter("window", 3)
         assert int(np.asarray(session._payload.counts).sum()) == 8
+    finally:
+        session.close()
+
+
+def test_window_one_selects_latest_relative_index_without_owning_history() -> None:
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=1),
+        PointTable.from_columns(
+            {"source index": [-1, 0]},
+            ids={"source index": str(PRIMARY_INDEX_AXIS_ID)},
+            roles={"source index": PRIMARY_INDEX},
+        ),
+        dtype=np.float64,
+        generation="shared-indexed-histogram",
+    )
+    session = PlotSession(
+        DatasetSnapshot(schema, np.asarray([[10.0, 20.0]]), revision=0),
+        HistogramPlot(),
+        parameters={"window": 1, "bin_count": 4},
+    )
+    try:
+        assert int(np.asarray(session._payload.counts).sum()) == 1
+        session.set_parameter("window", 2)
+        assert int(np.asarray(session._payload.counts).sum()) == 2
     finally:
         session.close()
 

@@ -2046,11 +2046,11 @@ def test_a_second_region_reaches_the_bridge_on_a_live_panel(
     assert narrow[-1] * narrow[-2] < wide[-1] * wide[-2], (narrow, wide)
 
 
-def test_roi_histogram_window_growth_waits_for_current_signal_generation(
+def test_history_transition_is_immediate_and_interactions_follow_indexed_front(
     presenter,
     session,
 ) -> None:
-    """A display edit never rematerializes a retired ROI publication."""
+    """Lease transitions and current-host interactions share one truth."""
 
     from zlc_workbench.logic import stable_signal_key
 
@@ -2060,7 +2060,7 @@ def test_roi_histogram_window_growth_waits_for_current_signal_generation(
         values={
             "exposure_seconds": 0.002,
             "repeat": 0,
-            "frames_per_cycle": 1,
+            "frames_per_cycle": 3,
         },
         device_keys={"camera": "camera"},
         open_editor=False,
@@ -2218,23 +2218,76 @@ def test_roi_histogram_window_growth_waits_for_current_signal_generation(
     )
     assert companion.history_lease is None
 
+    grid = presenter.add_panel(
+        roi_signal,
+        current_roi.value(roi_signal).snapshot,
+        kind="facet_grid",
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: grid.host is not None
+        and grid.port is not None
+        and _accepted(grid.port, "publication") is not None
+        and grid.bridge is not None
+        and grid.selections is not None,
+    )
+    grid.host.focus_facet(0).result(timeout=10)
+    _commit_area(grid.host, lower_fraction=0.25, upper_fraction=0.75)
+    grid.host.set_crosshair_selector(1.0, 1.0).result(timeout=10)
+    presenter.commit_surfaces()
+    _settle_panel_hosts(
+        presenter,
+        lambda: (
+            grid.state.focused_cell == 0
+            and bool(grid.state.selector)
+            and bool(grid.state.crosshair)
+        ),
+    )
+    retained_interaction = (
+        grid.state.focused_cell,
+        dict(grid.state.selector),
+        dict(grid.state.crosshair),
+    )
+    before_interaction_shot = session.signal_plane.latest_publication(roi_signal)
+    assert before_interaction_shot is not None
+    session.fire(shots=1)
+    _settle_panel_hosts(
+        presenter,
+        lambda: (
+            (latest_roi := session.signal_plane.latest_publication(roi_signal))
+            is not None
+            and latest_roi.event_ref != before_interaction_shot.event_ref
+            and (
+                grid.state.focused_cell,
+                dict(grid.state.selector),
+                dict(grid.state.crosshair),
+            )
+            == retained_interaction
+        ),
+    )
+    presenter.remove_panel(grid.panel_id)
+
     indexed_port = histogram.port
     assert presenter.update_panel_state(
         histogram.panel_id,
         {"display": {"window": 1}},
     )
+    assert histogram.history_lease is None
+    immediate = session.signal_plane.current_dataset(roi_signal)
+    assert all(
+        str(column.coordinate_id) != "zlc_data.primary-index"
+        for column in immediate.block.schema.point_table.columns
+    )
     _settle_panel_hosts(
         presenter,
-        lambda: (
-            histogram.port is indexed_port
-            and histogram.port.presentation_current
-            and _accepted(histogram.port, "publication") is not None
-            and histogram.host is not None
-            and companion.port.presentation_current
-            and _accepted(companion.port, "publication") is not None
-            and histogram.history_lease is None
+        lambda: all(
+            panel.port.presentation_current
+            and _accepted(panel.port, "publication") is not None
+            for panel in (histogram, companion)
         ),
     )
+    assert histogram.port is indexed_port
+    assert histogram.history_lease is None
     assert histogram.history_lease is None
     latest = session.signal_plane.current_dataset(roi_signal)
     assert all(

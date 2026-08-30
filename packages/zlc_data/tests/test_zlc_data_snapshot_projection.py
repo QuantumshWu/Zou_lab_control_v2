@@ -11,13 +11,19 @@ from zlc_data.axis import (
     AxisId,
     AxisSpec,
     CoordinateFrameId,
+    PRIMARY_INDEX,
     REPEAT,
     SITE,
     SPATIAL_X,
 )
 from zlc_data.schema import DatasetSchema, PointColumn, PointTable, ValueSchema
 from zlc_data.selection import IndexRangeSelection, Selection, take_indices
-from zlc_data.snapshot_projection import materialize_derived_dataset, restrict_snapshot
+from zlc_data.snapshot_projection import (
+    PRIMARY_INDEX_AXIS_ID,
+    indexed_schemas_compatible,
+    materialize_derived_dataset,
+    restrict_snapshot,
+)
 from zlc_data.validity import VALID, ValidityContract
 from zlc_data.value import (
     BlockId,
@@ -153,6 +159,8 @@ def test_restriction_projects_values_validity_coordinates_labels_and_units_toget
             "count",
         ),
     )
+
+
     values = np.arange(np.prod(schema.physical_shape), dtype="<f4").reshape(
         schema.physical_shape
     )
@@ -195,6 +203,34 @@ def test_restriction_projects_values_validity_coordinates_labels_and_units_toget
     np.testing.assert_array_equal(projected.block.values, values[1:3, 0:2, 1:4])
     np.testing.assert_array_equal(
         projected.expanded_validity(), validity[1:3, 0:2, 1:4]
+    )
+
+
+def _indexed_schema(offsets: tuple[int, ...]) -> DatasetSchema:
+    repeat = AxisSpec(AxisId("repeat"), "repeat", REPEAT, 1, (0,))
+    primary = PointColumn(
+        PRIMARY_INDEX_AXIS_ID,
+        "source index",
+        PRIMARY_INDEX,
+        PointColumn.NUMERIC,
+        offsets,
+    )
+    return DatasetSchema(
+        repeat,
+        PointTable(len(offsets), (primary,)),
+        None,
+        ValueSchema.scalar(np.dtype("<f4"), "count"),
+    )
+
+
+def test_relative_indexed_windows_share_one_event_layout() -> None:
+    assert indexed_schemas_compatible(
+        _indexed_schema((-1, 0)),
+        _indexed_schema((-2, -1, 0)),
+    )
+    assert not indexed_schemas_compatible(
+        _indexed_schema((4, 5)),
+        _indexed_schema((5, 6)),
     )
 
 

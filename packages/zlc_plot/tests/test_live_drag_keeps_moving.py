@@ -128,8 +128,8 @@ def test_a_live_panel_keeps_presenting_while_a_selector_is_dragged(
         host.close()
 
 
-def _sliding_history(first_shot: int, rows: int = 5):
-    """One bounded shot history: absolute shot numbers that SLIDE."""
+def _sliding_history(_first_shot: int, rows: int = 5):
+    """One bounded history exposed as offsets from its latest shot."""
 
     from zlc_data import (
         AxisId,
@@ -146,7 +146,7 @@ def _sliding_history(first_shot: int, rows: int = 5):
     column = PointColumn(
         AxisId("zlc_data.primary-index"), "source index", PRIMARY_INDEX,
         PointColumn.NUMERIC,
-        tuple(float(first_shot + index) for index in range(rows)),
+        tuple(float(index - rows + 1) for index in range(rows)),
     )
     schema = RoleDatasetSchema(
         AxisSpec(AxisId("repeat"), "repeat", REPEAT, 1, (0,)),
@@ -159,17 +159,7 @@ def _sliding_history(first_shot: int, rows: int = 5):
 
 @pytest.mark.gui
 def test_a_sliding_shot_history_is_not_a_new_geometry_under_a_drag() -> None:
-    """A rolling panel past its window renames its own coordinates.
-
-    Its x IS the absolute shot number, so once the window is full every
-    shot slides the whole axis forward -- and the schema's full fingerprint
-    with it, because that name includes every coordinate value.  A source
-    that also re-generations each publication therefore declared a NEW
-    GEOMETRY on every shot, and a new geometry cancels the gesture: the
-    area the operator was dragging open vanished the moment a shot landed.
-    Sliding coordinates are not a new world; the axes, their roles and
-    units and the shape are all exactly what they were.
-    """
+    """A new generation over the same relative history keeps its gesture."""
 
     from zlc_data.value import owned_snapshot_from_arrays
     from zlc_plot import RollingPlot, ensure_qt5_application

@@ -279,9 +279,8 @@ class RollingSample:
         if source_index is not None and (
             isinstance(source_index, bool)
             or not isinstance(source_index, Integral)
-            or int(source_index) < 0
         ):
-            raise TypeError("rolling source_index must be non-negative or None")
+            raise TypeError("rolling source_index must be an integer or None")
         if (
             values.ndim != 1
             or valid.shape != values.shape
@@ -2942,22 +2941,22 @@ class DataView:
         for value in column.values:
             if isinstance(value, bool) or not isinstance(value, Integral):
                 raise TypeError(
-                    "primary-index coordinates must be integer source indices"
+                    "primary-index coordinates must be integer relative offsets"
                 )
             source_index = int(value)
-            if source_index < 0:
-                raise ValueError(
-                    "primary-index source indices must be non-negative"
-                )
             if not ordered or ordered[-1] != source_index:
                 if source_index in seen or (
                     ordered and source_index < ordered[-1]
                 ):
                     raise ValueError(
-                        "primary-index source indices must form ordered cells"
+                        "primary-index offsets must form ordered cells"
                     )
                 ordered.append(source_index)
                 seen.add(source_index)
+        if ordered and ordered[-1] != 0:
+            raise ValueError(
+                "relative primary-index coordinates must end at latest offset 0"
+            )
         source_indices = tuple(ordered[-window:])
         selected = np.isin(
             np.asarray(column.values, dtype=object),
@@ -3493,7 +3492,7 @@ class DataView:
         if not cell.reduced:
             validity = (
                 self.history_validity(window)
-                if _history_window(window) > 1
+                if self.has_primary_index or _history_window(window) > 1
                 else self._samples.valid_mask
             )
             return self._samples.value.canonical, validity
@@ -3523,7 +3522,7 @@ class DataView:
         shape = self._samples.value.canonical.shape
         validity = (
             self.history_validity(window)
-            if window > 1
+            if self.has_primary_index or window > 1
             else np.broadcast_to(self._samples.valid_mask, shape)
         )
         dimensions, coordinates = self._reduction_plan(tuple(cell.reduced))
@@ -3843,7 +3842,11 @@ class DataView:
         # WHICH SAMPLES COUNT.  A window pools the last N shots, and that is
         # a validity plane over the same shape as the mask it replaces, so
         # every path below slices and gathers it identically.
-        validity = self.history_validity(window) if int(window) > 1 else None
+        validity = (
+            self.history_validity(window)
+            if self.has_primary_index or int(window) > 1
+            else None
+        )
         dense = self._dense_facet(spec, shared_bins, uncertainty, validity=validity)
         if dense is not None:
             return dense

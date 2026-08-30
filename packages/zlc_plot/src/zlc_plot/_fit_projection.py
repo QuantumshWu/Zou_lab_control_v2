@@ -731,7 +731,7 @@ class FitProjection:
         # is also what lets a composed frame keep its cached chrome
         # instead of re-laying the tick labels on each shot.
         start = len(history) - visible_size
-        absolute = np.asarray(
+        source_coordinates = np.asarray(
             [
                 sample.source_index
                 if sample.source_index is not None
@@ -740,7 +740,7 @@ class FitProjection:
             ],
             dtype=float,
         )
-        x_values = absolute - absolute[-1]
+        x_values = source_coordinates - source_coordinates[-1]
         unit = self._view.samples.value.display_unit
         canonical_unit = self._view.samples.value.canonical_unit
         x_unit = resolve_unit("1", DEFAULT_UNITS)

@@ -27,6 +27,11 @@
   latest或tagged typed coordinate value，不再让display label或裸文本控制字进入truth。
 - Runtime是唯一跨publication history owner；active leases的signal-level event/indexed表示变化
   通过presentation epoch使同signal全部Panel重新投影，不增加scientific publication/revision。
+  Runtime内部绝对ordinal在materialize时统一转换为以最新为0的相对primary-index；Plot与
+  Workbench只把它当普通AxisRef，不自动scope或建立history专用interaction路径。
+- Panel window demand在authored state接受时先于Plot render同步；最后lease的`10→1`在调用
+  返回前释放并切回event表示。当前host的Focus/Area/Crosshair按同generation与accepted轴词汇
+  接受，owner落后一版不得否决indexed front，Facet只忽略其自身focus cell这一层subject差异。
 - Rolling history投影在现有`DataView`内一次归约：规则repeat tensor直接沿非保留轴
   reduction，其余repeat与primary-index分别按`(repeat, group)`、`(source index, group)`
   联合bucket；旧`O(history × samples)`逐history mask循环已删除，Runtime history owner不变。

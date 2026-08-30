@@ -103,9 +103,9 @@ from .selection import (
     PlotSelectionSource,
     panel_selection_document,
     panel_selection_binds_a_revision,
-    observation_predates_plot_input,
     same_plot_run,
     same_plot_generation,
+    plot_generation_matches_plot_input,
     panel_selection_from_document,
     panel_selection_matches_subject,
     panel_selection_output_catalog,
@@ -170,6 +170,38 @@ def _same_panel_selection(left: object, right: object) -> bool:
         )
 
     return signature(left) == signature(right)
+
+
+def _panel_interaction_subject_matches(
+    description: object,
+    subject: object,
+) -> bool:
+    """Whether one current-host interaction uses this accepted vocabulary."""
+
+    accepted = description.selection_subject
+    if accepted == subject:
+        return True
+    from zlc_plot.specs import FacetGridPlot
+
+    spec = description.spec
+    if not isinstance(spec, FacetGridPlot):
+        return False
+    facet = spec.facet
+
+    def without_facet(value: object) -> object:
+        scope = tuple(
+            (ref, coordinate)
+            for ref, coordinate in value.scope
+            if ref.physical_identity != facet.physical_identity
+        )
+        repeat_index = (
+            None
+            if str(getattr(facet.domain, "value", facet.domain)) == "repeat"
+            else value.repeat_index
+        )
+        return replace(value, scope=scope, repeat_index=repeat_index)
+
+    return without_facet(accepted) == without_facet(subject)
 
 
 _PLOT_TARGET = attrgetter(
@@ -2650,6 +2682,26 @@ class ConsolePresenter:
                 self._refresh_console_projection()
                 return True
             if plot_changed:
+                self._cancel_panel_configuration(binding)
+                try:
+                    history_invalidated = self._sync_panel_history(
+                        binding,
+                        candidate,
+                        schema=candidate_schema,
+                    )
+                except Exception as error:
+                    binding.state = current
+                    self._report(
+                        f"{panel_id}: {_error_text(error)}",
+                        severity="error",
+                    )
+                    self._publish_panel_state(binding)
+                    self._refresh_console_projection()
+                    return False
+                if history_invalidated:
+                    self._publish_panel_state(binding)
+                    self._refresh_console_projection()
+                    return True
                 # Both hosts already own the immutable Dataset they display. A
                 # history-window edit is a Plot projection over those bytes;
                 # Runtime's lease controls only what future publications retain.
@@ -2662,7 +2714,6 @@ class ConsolePresenter:
                     and candidate.overlay_signal != current.overlay_signal
                 ):
                     live_overlay = None
-                self._cancel_panel_configuration(binding)
                 if binding.port is not None:
                     # The operator's decision takes effect NOW, not when
                     # the host finishes redrawing to it: until the port
@@ -4741,47 +4792,16 @@ class ConsolePresenter:
                 plot_input,
                 data_generation,
                 data_revision,
+            ) or plot_generation_matches_plot_input(
+                plot_input,
+                data_generation,
             )
         else:
             identity_matches = observation_matches_plot_input(
                 observation,
                 plot_input,
-            )
+            ) or same_plot_generation(observation, plot_input)
             subject = getattr(observation, "subject", None)
-            if not identity_matches:
-                # A region that cuts nothing upstream is not tied to the
-                # revision it was drawn on.  It says "here, on this
-                # picture", and one shot later it is the same picture with
-                # one more point -- nothing is derived from that
-                # publication, so nothing about the region goes stale.
-                # Demanding the exact revision meant a ROLLING panel, whose
-                # host advances on every single shot while this bookkeeping
-                # necessarily lags it, could never have a region accepted
-                # at all: the operator drew, the mark appeared, and the
-                # panel forgot it before the next frame.
-                #
-                # And a region something IS cut from is stale when it was
-                # drawn on an OLDER picture -- not when it was drawn on a
-                # newer one.  The host renders every revision it is handed
-                # while this bookkeeping runs on the board's beat, so a
-                # hand draws on a picture that is routinely ahead of the
-                # accepted one: measured on a live camera panel, every
-                # committed region arrived exactly one revision ahead.
-                # Equality refused the future along with the past, so a
-                # deriving region could never be committed on a live panel
-                # at all -- the ROI kept the shape of the first box drawn
-                # and no later box ever reached the bridge.
-                state = getattr(observation, "state", None)
-                identity_matches = bool(
-                    state is not None
-                    and same_plot_generation(observation, plot_input)
-                    and (
-                        not panel_selection_binds_a_revision(state)
-                        or not observation_predates_plot_input(
-                            observation, plot_input
-                        )
-                    )
-                )
         if (
             publication is None
             or plot_input is None
@@ -4794,7 +4814,7 @@ class ConsolePresenter:
             or subject is None
             or semantic_spec(description.spec).kind is not subject.plot_kind
             or exact_subject
-            and description.selection_subject != subject
+            and not _panel_interaction_subject_matches(description, subject)
         ):
             return None
         return publication, description

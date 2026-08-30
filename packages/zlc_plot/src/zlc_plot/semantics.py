@@ -677,15 +677,11 @@ def _scope_coordinates(
     """The real coordinate domain behind this axis's one Scope fate."""
 
     resolved = resolve_axis(schema, ref)
-    latest = bool(
-        ref.domain is AxisDomain.POINT_COORDINATE
-        and ref.axis_id == PRIMARY_INDEX_AXIS_ID.value
-    )
-    if resolved.size < 2 and not latest:
+    if resolved.size < 2:
         return None
     coordinates = resolved.coordinates
     labels = resolved.coordinate_labels
-    if ref.domain is AxisDomain.POINT_COORDINATE and not latest:
+    if ref.domain is AxisDomain.POINT_COORDINATE:
         # Point columns may repeat one logical coordinate over many source
         # rows.  Scope selects that coordinate, not an occurrence of it, so
         # retain the first label exactly once.  Dense declared axes and the
@@ -711,7 +707,7 @@ def _scope_coordinates(
     return SemanticCycleChoices(
         coordinates,
         labels,
-        latest,
+        False,
     )
 
 
@@ -735,10 +731,7 @@ def axis_admits_scope(
         return False
     coordinate = scope_coordinate_from_fate(value)
     if coordinate is LATEST_COORDINATE:
-        return (
-            ref.domain is AxisDomain.POINT_COORDINATE
-            and ref.axis_id == PRIMARY_INDEX_AXIS_ID.value
-        )
+        return resolve_axis(schema, ref).size > 0
     resolved = resolve_axis(schema, ref)
     label = resolved.label
     return any(

@@ -19,14 +19,15 @@ def build_payload(projection: Any, view: Any, state: Any) -> None:
     spec = projection._semantic_spec()
     collapsed = tuple(getattr(spec, "reduced", ()))
     aggregation = getattr(spec, "reduction", None)
-    if window <= 1:
+    if window <= 1 and not view.has_primary_index:
         # One shot: the distribution of what was just measured.  No history is
         # consulted, and none is kept for it.
         values, valid = None, None
     else:
-        # Runtime already owns and bounds cross-publication history.  DataView
-        # selects the last N history cells and bins their values in one pass;
-        # Plot never copies or retains per-shot raw pools.
+        # Runtime already owns and bounds cross-publication history.  If some
+        # other consumer keeps the signal indexed, window=1 still selects the
+        # ordinary axis coordinate 0 (latest) instead of pooling every retained
+        # cell.  Plot never copies or retains per-shot raw pools.
         values, valid = view.history_values(window)
 
     # REDUCED ONCE.  The pool is what the domain must cover and what the bins

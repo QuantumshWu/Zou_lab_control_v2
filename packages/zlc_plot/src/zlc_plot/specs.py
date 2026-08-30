@@ -927,13 +927,9 @@ def history_window_requirement(
 ) -> int | None:
     """Bounded source-index history this accepted view actually requests.
 
-    A primary-index ``latest`` scope is only a projection rule for an indexed
-    Dataset that already exists.  Ordinary Curve/Image panels acquire that
-    scope automatically while some real history consumer is alive, so treating
-    it as demand would make those panels keep Runtime history alive forever.
-    Resource demand comes only from a vocabulary that exposes a bounded
-    history window; scope then decides how that already-retained Dataset is
-    projected.
+    A fate on the materialized primary-index axis is an ordinary Dataset
+    projection and never owns retention.  Resource demand comes only from a
+    vocabulary that exposes a bounded history window.
     """
 
     if not isinstance(display, Mapping):
