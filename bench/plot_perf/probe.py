@@ -38,7 +38,7 @@ import time
 from collections import defaultdict
 
 
-_TOTALS: dict[str, list] = defaultdict(lambda: [0, 0.0, 0.0])
+_TOTALS: dict[str, list] = defaultdict(lambda: [0, 0.0, 0.0, 0.0, 0.0])
 _local = threading.local()
 _lock = threading.Lock()
 
@@ -74,6 +74,8 @@ def _timed(name, function):
                 row[0] += 1
                 row[1] += gross - frame.children
                 row[2] += cpu_gross - frame.cpu_children
+                row[3] += gross
+                row[4] += cpu_gross
 
     return wrapper
 
@@ -148,14 +150,34 @@ def watch_module(module, *names: str, prefix: str = "") -> list[str]:
     return bound
 
 
+def watch_attribute(instance, *names: str, prefix: str = "") -> list[str]:
+    """Time callable attributes already bound on one object.
+
+    PlotPanelPort owns projection/presentation callbacks as instance fields,
+    not class methods.  Reaching for the callback's class would time every
+    panel (and lambdas have no useful class seam), so this is the instance-
+    field counterpart of :func:`watch`.
+    """
+
+    label = prefix or type(instance).__name__
+    bound: list[str] = []
+    for name in names:
+        original = getattr(instance, name, None)
+        if original is None or not callable(original):
+            continue
+        setattr(instance, name, _timed(f"{label}.{name}", original))
+        bound.append(name)
+    return bound
+
+
 def rows(seconds: float) -> list[dict]:
     """Every seam, heaviest first, as plain numbers."""
 
     with _lock:
         items = sorted(
             (
-                (name, count, total, cpu)
-                for name, (count, total, cpu) in _TOTALS.items()
+                (name, count, total, cpu, gross, gross_cpu)
+                for name, (count, total, cpu, gross, gross_cpu) in _TOTALS.items()
             ),
             key=lambda row: -row[2],
         )
@@ -166,12 +188,17 @@ def rows(seconds: float) -> list[dict]:
             "self_ms_total": round(total * 1e3, 1),
             "self_ms_per_call": round(total / count * 1e3, 2) if count else 0.0,
             "cpu_ms_per_call": round(cpu / count * 1e3, 2) if count else 0.0,
+            "gross_ms_total": round(gross * 1e3, 1),
+            "gross_ms_per_call": round(gross / count * 1e3, 2) if count else 0.0,
+            "gross_cpu_ms_per_call": (
+                round(gross_cpu / count * 1e3, 2) if count else 0.0
+            ),
             # What fraction of the wall time this thread was actually running.
             # Well under 1 means the seam WAITED; optimising it would not help.
             "cpu_share": round(cpu / total, 2) if total > 0 else 0.0,
             "per_second": round(count / seconds, 1) if seconds > 0 else 0.0,
         }
-        for name, count, total, cpu in items
+        for name, count, total, cpu, gross, gross_cpu in items
     ]
 
 

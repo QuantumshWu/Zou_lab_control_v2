@@ -164,6 +164,13 @@ class _PanelFronts:
         return False
 
     def reset(self) -> None:
+        # Baseline the picture that is ALREADY on screen.  Clearing the count
+        # while leaving ``_last`` as None counts that old front on the first
+        # poll of the measurement window, inflating every run by one frame.
+        widget = self._bench.surface(self._panel)
+        self._last = (
+            None if widget is None else getattr(widget, "presented_front", None)
+        )
         self.count = 0
         self.stamps.clear()
 
@@ -371,7 +378,13 @@ class ConsoleBench:
         return panel.host._session._renderer
 
     # ---------------------------------------------------------- measurement
-    def instrument(self, panel, *, seams=None) -> list[str]:
+    def instrument(
+        self,
+        panel,
+        *,
+        seams=None,
+        module_seams: bool = True,
+    ) -> list[str]:
         """Bind self-time probes to THIS panel's renderer, and to the
         module-level work a frame does outside it.
 
@@ -406,7 +419,7 @@ class ConsoleBench:
         import zlc_plot._image_raster as raster
         import zlc_plot._height3d_raster as h3d
 
-        if not getattr(ConsoleBench, "_module_seams_bound", False):
+        if module_seams and not getattr(ConsoleBench, "_module_seams_bound", False):
             for module, names in (
                 (raster, ("prepare_image_front", "_area_mean", "_reduce_blocks")),
                 (h3d, ("render_height_bars", "_stroke_rims")),
@@ -417,6 +430,80 @@ class ConsoleBench:
                     except Exception:
                         continue
             ConsoleBench._module_seams_bound = True
+        return bound
+
+    def instrument_pipeline(self, panel) -> dict[str, list[str]]:
+        """Bind low-overhead stage probes to one complete panel pipeline.
+
+        These are instance taps: four panels may run the same classes, but
+        every row remains attributable to the exact panel that paid it.
+        Inclusive (gross) timing is retained by ``probe`` for stage latency;
+        nested self timing still adds without double-counting for hotspot
+        attribution.
+        """
+
+        label = self.label(panel)
+        port = panel.port
+        host = panel.host
+        session = host._session
+        widget = self.surface(panel)
+        if port is None or widget is None:
+            raise guards.HarnessError(f"{label} has no live port/widget to instrument")
+
+        bound = {
+            "port": probe.watch(
+                port,
+                "prepare",
+                "accept",
+                "_put_on_screen",
+                prefix=f"PanelPort[{label}]",
+            ),
+            "port_callbacks": probe.watch_attribute(
+                port,
+                "_project_input",
+                "_present",
+                prefix=f"PanelPort[{label}]",
+            ),
+            "host": probe.watch(
+                host,
+                "update_data",
+                "_enqueue_data_frame",
+                "_begin_data_frame",
+                "_on_frame_prepared",
+                "_on_frame_solved",
+                "_dispatch_frame_commit",
+                "_on_frame_committed",
+                prefix=f"RasterHost[{label}]",
+            ),
+            "session": probe.watch(
+                session,
+                "prepare_live_frame",
+                "_prepare_live_frame_worker",
+                "solve_live_frame",
+                "_solve_live_pair",
+                "_solve_started_fit_parts",
+                "_fit_facet_batch",
+                "_solve_fit_selection",
+                "commit_live_frame",
+                "_accept_pair_fit",
+                "_present_projection_transaction",
+                "_update_renderer",
+                "describe_display",
+                prefix=f"PlotSession[{label}]",
+            ),
+            "fit_engine": probe.watch(
+                session._fit_engine,
+                "fit",
+                "fit_batch",
+                prefix=f"FitEngine[{label}]",
+            ),
+            "qt": probe.watch(
+                widget,
+                "present_front",
+                "_install_front",
+                prefix=f"QtWidget[{label}]",
+            ),
+        }
         return bound
 
     def density(self, panel) -> dict:
@@ -466,7 +553,13 @@ class ConsoleBench:
         guards.require_panels(self.presenter, len(panels))
         return panels
 
-    def live_all(self, panels, seconds: float = 10.0) -> dict:
+    def live_all(
+        self,
+        panels,
+        seconds: float = 10.0,
+        *,
+        window_start=None,
+    ) -> dict:
         """Every panel measured in ONE window, plus what the process paid.
 
         A panel measured alone is a floor.  Panels share one machine, one
@@ -491,6 +584,8 @@ class ConsoleBench:
         probe.reset()
         for counter in counters:
             counter.reset()
+        if window_start is not None:
+            window_start()
 
         cpu_before = process.cpu_times()
         rss_before = process.memory_info().rss
@@ -1288,20 +1383,27 @@ def render_cost(seams, frames_by_panel: dict) -> list[dict]:
     """
 
     totals: dict[str, list] = {}
+    renders: dict[str, int] = {}
     for row in seams:
         seam = row["seam"]
-        if "[" not in seam or "]" not in seam:
+        # Pipeline probes use the same ``[panel]`` identity, but they are not
+        # renderer children.  Accept only the renderer/canvas prefix; otherwise
+        # FitEngine time is counted once as fit and again as "render cost".
+        if not seam.startswith("MatplotlibRenderer[") or "]" not in seam:
             continue
         panel = seam[seam.index("[") + 1:seam.index("]")]
+        if seam == f"MatplotlibRenderer[{panel}].present":
+            renders[panel] = int(row["calls"])
         entry = totals.setdefault(panel, [0.0, 0.0])
         entry[0] += row["self_ms_total"]
         entry[1] += row["self_ms_per_call"] * row["calls"] * row["cpu_share"]
     out = []
     for panel, (wall, cpu) in sorted(totals.items(), key=lambda i: -i[1][0]):
-        frames = max(1, frames_by_panel.get(panel, 0))
+        frames = max(1, renders.get(panel, frames_by_panel.get(panel, 0)))
         out.append({
             "panel": panel,
             "frames": frames,
+            "presented_frames": int(frames_by_panel.get(panel, 0)),
             "wall_ms_per_frame": round(wall / frames, 2),
             "cpu_ms_per_frame": round(cpu / frames, 2),
         })
