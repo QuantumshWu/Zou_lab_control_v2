@@ -28,6 +28,7 @@ from .form import (
 from ..fluent import (
     GREY,
     FluentComboBox,
+    FluentCycleComboBox,
     FluentDoubleSpinBox,
     FluentLabel,
     FluentLineEdit,
@@ -114,10 +115,12 @@ def _being_edited(widget: QtWidgets.QWidget) -> bool:
     cursor.  Clearing an optional field is worse: the value becomes None,
     the Auto switch takes it, and the box is DISABLED mid-word.
 
-    So the rule is one sentence: while the operator is inside a widget, that
-    widget's value, its Auto switch and its enabled state are theirs.  The
-    projection lands the moment they leave.  Composite editors are checked by
-    ancestry, because focus sits on the inner spin box, not the host.
+    So the rule is one sentence for controls that can hold a partial draft:
+    while the operator is inside one, its value, Auto switch and enabled state
+    are theirs.  A choice activation is already a complete typed edit, so
+    reconcile deliberately does not use this focus guard for choice fields.
+    Composite editors are checked by ancestry, because focus sits on the inner
+    spin box, not the host.
     """
 
     focused = QtWidgets.QApplication.focusWidget()
@@ -529,20 +532,31 @@ class _ChoiceHandler(FormWidgetHandler):
         if value is None:
             return None
         choice = field.choice_for(value)
-        if choice is None:
-            raise _value_error(field, "value is not one of the typed choices")
-        return choice.value
+        if choice is not None:
+            return choice.value
+        cycle = field.cycle_choice_for(value)
+        if cycle is not None:
+            return cycle[1]
+        raise _value_error(field, "value is not one of the typed choices")
 
     @staticmethod
-    def _fill(widget: FluentComboBox, choices: tuple[FormChoice, ...]) -> None:
+    def _fill(field: FormFieldProps, widget: FluentComboBox) -> None:
         widget.clear()
-        for choice in choices:
+        for choice in field.choices:
             widget.addItem(choice.label, choice.value)
+        if field.cycle_choices is not None:
+            if not isinstance(widget, FluentCycleComboBox):
+                raise TypeError("cycle choices require FluentCycleComboBox")
+            widget.setCycleChoices(field.cycle_label, field.cycle_choices)
 
     def build(self, field, value, on_change, context=None):
         del context
-        widget = FluentComboBox()
-        self._fill(widget, field.choices)
+        widget = (
+            FluentCycleComboBox()
+            if field.cycle_choices is not None
+            else FluentComboBox()
+        )
+        self._fill(field, widget)
         self.write(field, widget, value)
         widget.setEnabled(not field.unavailable)
         widget.setToolTip(field.unavailable_reason or field.description)
@@ -560,9 +574,15 @@ class _ChoiceHandler(FormWidgetHandler):
             widget.setCurrentIndex(-1)
             return
         choice = field.choice_for(prepared)
-        assert choice is not None
-        index = next(index for index, item in enumerate(field.choices) if item is choice)
-        widget.setCurrentIndex(index)
+        if choice is not None:
+            index = next(
+                index for index, item in enumerate(field.choices) if item is choice
+            )
+            widget.setCurrentIndex(index)
+            return
+        if not isinstance(widget, FluentCycleComboBox):
+            raise TypeError("cycle value requires FluentCycleComboBox")
+        widget.setCycleValue(prepared)
 
     def is_empty(self, field, widget):
         del field
@@ -572,12 +592,14 @@ class _ChoiceHandler(FormWidgetHandler):
         del context
         current = self.read(field, widget)
         desired = tuple((choice.label, choice.value) for choice in field.choices)
+        if field.cycle_choices is not None:
+            desired = (*desired, (field.cycle_label, None))
         existing = tuple(
             (widget.itemText(index), widget.itemData(index))
             for index in range(widget.count())
         )
         if existing != desired:
-            self._fill(widget, field.choices)
+            self._fill(field, widget)
             self.write(field, widget, current)
         widget.setEnabled(not field.unavailable)
         widget.setToolTip(field.unavailable_reason or field.description)
@@ -780,7 +802,9 @@ def _widget_family(field: FormFieldProps) -> str:
     if field.kind in {"text", "int", "float", "number"}:
         return prefix + "line-edit"
     if field.kind == "choice":
-        return prefix + "choice"
+        return prefix + (
+            "choice-cycle" if field.cycle_choices is not None else "choice"
+        )
     if field.kind == "bool":
         return "bool"
     if field.kind == "axis_range":
@@ -853,8 +877,12 @@ def _reconfigure_widget(
         _IntHandler._configure_spin(field, widget)
     elif isinstance(widget, _LosslessFloatSpinBox):
         _FloatHandler._configure_spin(field, widget)
-    elif isinstance(widget, FluentComboBox) and old_field.choices != field.choices:
-        _ChoiceHandler._fill(widget, field.choices)
+    elif isinstance(widget, FluentComboBox) and (
+        old_field.choices != field.choices
+        or old_field.cycle_choices != field.cycle_choices
+        or old_field.cycle_label != field.cycle_label
+    ):
+        _ChoiceHandler._fill(field, widget)
         widget.setEnabled(not field.unavailable)
 
 
@@ -1237,7 +1265,15 @@ class FluentParameterForm(QtWidgets.QWidget):
             (
                 key
                 for key, widget in self._widgets.items()
-                if _being_edited(widget)
+                # A choice has no partial draft: activating a row completes
+                # the edit.  Focus returns to the collapsed combo while the
+                # owner projects the resulting vocabulary, so treating that
+                # focus like an unfinished text cursor lets a choice-domain
+                # refill reset the visible value to its first row (Reduced)
+                # and then suppresses the accepted value that should restore
+                # it.
+                if self._fields[key].kind != "choice"
+                and _being_edited(widget)
             ),
             None,
         )
@@ -1303,7 +1339,12 @@ class FluentParameterForm(QtWidgets.QWidget):
                         field.key in self._auto_switches
                         and incoming[field.key] is None
                     )
-                    editing = _being_edited(widget)
+                    # Choice edits are atomic.  Their owner projection must
+                    # always win after a domain refill even though the combo
+                    # still owns keyboard focus from the activation click.
+                    editing = (
+                        field.kind != "choice" and _being_edited(widget)
+                    )
                     if (
                         not editing
                         and not selected

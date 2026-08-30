@@ -7,7 +7,7 @@ application state or domain model.
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 import logging
 import math
 import os
@@ -2094,7 +2094,23 @@ class FluentComboBox(QtWidgets.QAbstractButton):
             return
         self.setCurrentIndex(index.row())
         self.hidePopup()
+        # The click completed a choice in the popup, but the popup view owned
+        # keyboard focus when it disappeared.  Return focus to the collapsed
+        # control: a cycle choice such as Scope deliberately interprets the
+        # next wheel notch only while this control is focused, and otherwise
+        # it is impossible to enter that state through the real popup path.
+        # Popup teardown itself posts a later focus change, so an immediate
+        # setFocus is overwritten after this callback returns.  Restore on
+        # the next owner turn, after that teardown has completed.
+        QtCore.QTimer.singleShot(0, self._restore_collapsed_focus)
         self.activated.emit(index.row())
+
+    def _restore_collapsed_focus(self) -> None:
+        try:
+            if self.isVisible() and self.isEnabled():
+                self.setFocus(QtCore.Qt.MouseFocusReason)
+        except RuntimeError:
+            pass
 
     def _ensure_popup_view(self) -> QtWidgets.QAbstractItemView:
         view = self._popup_view
@@ -2628,6 +2644,147 @@ class FluentComboBox(QtWidgets.QAbstractButton):
             event.accept()
             return
         super().keyPressEvent(event)
+
+
+class FluentCycleComboBox(FluentComboBox):
+    """A small popup choice with one lazily cycled sub-domain.
+
+    The popup contains ordinary actions plus one action such as ``Scope``.
+    Selecting that action paints ``Scope: <value>`` in the collapsed control;
+    a wheel changes ``<value>`` only after the control has focus.  The
+    sub-domain never enters the Qt item model, so a large scientific axis does
+    not create a large popup or thousands of QStandardItems.
+    """
+
+    def __init__(self, parent=None):
+        self._cycle_choices: Sequence[tuple[object, str]] | None = None
+        self._cycle_label = ""
+        self._cycle_row = -1
+        self._cycle_position = -1
+        super().__init__(parent)
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
+
+    @staticmethod
+    def _typed_equal(left: object, right: object) -> bool:
+        return type(left) is type(right) and bool(left == right)
+
+    def clear(self) -> None:
+        super().clear()
+        self._cycle_choices = None
+        self._cycle_label = ""
+        self._cycle_row = -1
+        self._cycle_position = -1
+
+    def setCycleChoices(  # noqa: N802 - Qt API name
+        self,
+        label: str,
+        choices: Sequence[tuple[object, str]],
+    ) -> None:
+        """Append the one popup action backed by ``choices``."""
+
+        if self._cycle_row >= 0:
+            raise RuntimeError("cycle choices must be configured after clear()")
+        if not isinstance(label, str) or not label.strip():
+            raise ValueError("cycle label must be non-empty text")
+        if not isinstance(choices, Sequence) or not len(choices):
+            raise ValueError("cycle choices must be a non-empty sequence")
+        self._cycle_choices = choices
+        self._cycle_label = label.strip()
+        self._cycle_position = 0
+        self._cycle_row = self.count()
+        self.addItem(self._cycle_label)
+
+    def _cycle_choice(self, position: int) -> tuple[object, str]:
+        choices = self._cycle_choices
+        if choices is None:
+            raise RuntimeError("cycle choices are not configured")
+        choice = choices[int(position)]
+        if (
+            not isinstance(choice, tuple)
+            or len(choice) != 2
+            or not isinstance(choice[1], str)
+            or not choice[1].strip()
+        ):
+            raise TypeError(
+                "cycle choices must yield (value, non-empty label) pairs"
+            )
+        return choice[0], choice[1]
+
+    def setCycleValue(self, value: object) -> None:  # noqa: N802 - Qt API name
+        choices = self._cycle_choices
+        if choices is None:
+            raise RuntimeError("cycle choices are not configured")
+        selected = next(
+            (
+                position
+                for position in range(len(choices))
+                if self._typed_equal(self._cycle_choice(position)[0], value)
+            ),
+            -1,
+        )
+        if selected < 0:
+            raise ValueError("value is not in the cycle choices")
+        changed_value = selected != self._cycle_position
+        self._cycle_position = selected
+        changed_row = self.currentIndex() != self._cycle_row
+        super().setCurrentIndex(self._cycle_row)
+        if changed_value and not changed_row:
+            self.currentTextChanged.emit(self.currentText())
+            self.update()
+
+    def setCurrentIndex(self, index: int) -> None:  # noqa: N802 - Qt API name
+        selected = int(index)
+        if selected == self._cycle_row and self._cycle_position < 0:
+            self._cycle_position = 0
+        super().setCurrentIndex(selected)
+
+    def currentData(self, role: int = QtCore.Qt.UserRole) -> object:  # noqa: N802
+        if (
+            role == QtCore.Qt.UserRole
+            and self.currentIndex() == self._cycle_row
+            and self._cycle_position >= 0
+        ):
+            return self._cycle_choice(self._cycle_position)[0]
+        return super().currentData(role)
+
+    def currentText(self) -> str:  # noqa: N802 - Qt API name
+        if self.currentIndex() == self._cycle_row and self._cycle_position >= 0:
+            return f"{self._cycle_label}: {self._cycle_choice(self._cycle_position)[1]}"
+        return super().currentText()
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        view = self._popup_view
+        if view is not None and view.isVisible():
+            super().wheelEvent(event)
+            return
+        if not self.hasFocus() or self.currentIndex() != self._cycle_row:
+            event.ignore()
+            return
+        delta = int(event.angleDelta().y())
+        if delta == 0:
+            event.ignore()
+            return
+        choices = self._cycle_choices
+        if choices is None:
+            event.ignore()
+            return
+        step = -1 if delta > 0 else 1
+        candidate = self._cycle_position + step
+        current_value = self._cycle_choice(self._cycle_position)[0]
+        while 0 <= candidate < len(choices):
+            if not self._typed_equal(
+                self._cycle_choice(candidate)[0], current_value
+            ):
+                break
+            candidate += step
+        if not (0 <= candidate < len(choices)):
+            event.accept()
+            return
+        self._cycle_position = candidate
+        self.currentTextChanged.emit(self.currentText())
+        self.update()
+        self.activated.emit(self._cycle_row)
+        event.accept()
 
 
 class _ExpandableTreeView(QtWidgets.QTreeView):

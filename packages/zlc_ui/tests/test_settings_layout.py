@@ -238,6 +238,102 @@ assert form.auto_switch_for('title').isChecked()
     )
 
 
+def test_compound_choice_only_cycles_its_large_domain_when_focused() -> None:
+    """Scope stays one popup fate; its real coordinates belong to the wheel."""
+
+    _run_qt(
+        """
+import zou_lab_control
+from PyQt5 import QtCore, QtGui, QtWidgets
+from zlc_ui.qt import ensure_qt_app
+from zlc_ui.form import FormChoice, FormFieldProps, FormSpec
+from zlc_ui.form.qt_form import FluentParameterForm
+from zlc_ui.fluent import FluentCycleComboBox
+
+app = ensure_qt_app(['scope-cycle'])
+cycles = tuple((("scope-value", value), str(value)) for value in range(1024))
+field = FormFieldProps(
+    'fate:y', 'choice', 'spatial-y', default='reduce', required=True,
+    choices=(FormChoice('(reduced)', 'reduce'), FormChoice('Y axis', 'y')),
+    cycle_choices=cycles, cycle_label='Scope',
+)
+form = FluentParameterForm(FormSpec((field,)), {'fate:y': 'reduce'})
+combo = form.widget_for('fate:y')
+assert isinstance(combo, FluentCycleComboBox)
+assert combo.count() == 3, '1024 coordinates must not become popup rows'
+assert combo.itemText(2) == 'Scope'
+
+body = QtWidgets.QWidget()
+layout = QtWidgets.QVBoxLayout(body)
+layout.addWidget(form)
+layout.addStretch()
+body.setMinimumHeight(1200)
+scroll = QtWidgets.QScrollArea()
+scroll.setWidget(body)
+scroll.resize(420, 240)
+scroll.show()
+app.processEvents()
+bar = scroll.verticalScrollBar()
+assert bar.maximum() > 0
+
+def send(delta):
+    event = QtGui.QWheelEvent(
+        QtCore.QPointF(combo.rect().center()),
+        QtCore.QPointF(combo.mapToGlobal(combo.rect().center())),
+        QtCore.QPoint(), QtCore.QPoint(0, delta),
+        QtCore.Qt.NoButton, QtCore.Qt.NoModifier,
+        QtCore.Qt.NoScrollPhase, False,
+    )
+    QtWidgets.QApplication.sendEvent(combo, event)
+    app.processEvents()
+    return event.isAccepted()
+
+# Even with focus, an ordinary fate never consumes the page wheel.
+combo.setFocus(QtCore.Qt.MouseFocusReason)
+assert not send(-120)
+assert form.read_value('fate:y') == 'reduce'
+
+# Scope begins at the first real coordinate.  Selecting it through the real
+# popup commit returns focus to the collapsed control, so the next wheel
+# notch can advance it without an extra click that would reopen the popup.
+scroll.activateWindow()
+app.processEvents()
+combo._commit_flat_index(combo.model().index(2, 0))
+app.processEvents()
+assert combo.currentText() == 'Scope: 0'
+assert combo.hasFocus()
+seen = []
+form.changed.connect(seen.append)
+assert send(-120)
+assert form.read_value('fate:y') == ('scope-value', 1)
+assert combo.currentText() == 'Scope: 1'
+assert seen == ['fate:y']
+
+# Choosing Scope changes the plot vocabulary while the combo still owns
+# focus: X/Y may disappear from this row when those roles move elsewhere.
+# Reconcile must project the accepted Scope value, not let rebuilding the
+# ordinary popup rows reset the focused combo to Reduced.
+changed_field = FormFieldProps(
+    'fate:y', 'choice', 'spatial-y', default=('scope-value', 1), required=True,
+    choices=(FormChoice('(reduced)', 'reduce'),),
+    cycle_choices=cycles, cycle_label='Scope',
+)
+form.reconcile(
+    FormSpec((changed_field,)),
+    {'fate:y': ('scope-value', 1)},
+)
+assert form.read_value('fate:y') == ('scope-value', 1)
+assert combo.currentText() == 'Scope: 1'
+
+# The same wheel without focus is left to the containing page.
+scroll.setFocus(QtCore.Qt.MouseFocusReason)
+assert not send(-120)
+assert form.read_value('fate:y') == ('scope-value', 1)
+scroll.close()
+"""
+    )
+
+
 def test_every_field_applies_as_it_is_typed_and_none_is_written_over() -> None:
     """One rule for the whole form, and the operator owns their cursor.
 

@@ -4553,11 +4553,20 @@ def test_a_panel_says_what_kind_of_data_it_is_drawing(presenter, session) -> Non
         (field, value)
         for field in binding.parameter_surface["semantic"]
         if str(field["key"]).startswith("fate:")
-        for _label, value in tuple(field["choices"])
+        for value, _label in tuple(field["cycle_choices"] or ())
         if is_scope_fate(value)
     )
     assert presenter.update_panel_state(
         binding.panel_id, {"semantic": {str(fate["key"]): pinned}}
+    )
+    projected = next(
+        field
+        for field in binding.parameter_surface["semantic"]
+        if str(field["key"]) == str(fate["key"])
+    )
+    assert projected["value"] == pinned, (
+        "the authored cycle value must not be replaced by the older accepted "
+        "surface while its configuration is in flight"
     )
     _settle_panel_hosts(
         presenter,

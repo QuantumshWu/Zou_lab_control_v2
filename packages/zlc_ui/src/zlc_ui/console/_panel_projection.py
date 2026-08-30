@@ -125,6 +125,8 @@ def parameter_form_spec(fields: object) -> FormSpec:
                 minimum=minimum,
                 maximum=maximum,
                 choices=choices,
+                cycle_choices=field.get("cycle_choices"),
+                cycle_label=str(field.get("cycle_label") or ""),
                 allow_blank=allow_none if kind in {"int", "number", "float"} else None,
                 unavailable_reason=str(field.get("unavailable_reason") or ""),
                 automatic=automatic,

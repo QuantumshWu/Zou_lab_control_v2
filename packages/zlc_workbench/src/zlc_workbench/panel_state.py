@@ -127,6 +127,16 @@ def semantic_entries(description: object) -> tuple[dict[str, object], ...]:
                 (str(label), _state_value(value))
                 for value, label in tuple(field.choices)
             ),
+            # Scope is one fate, not thousands of dropdown rows.  Keep the
+            # plot-owned lazy coordinate domain intact for the Form control;
+            # the values it yields are the same tagged fates written to
+            # PanelState, so Workbench owns no parallel selected coordinate.
+            "cycle_choices": getattr(field, "cycle_choices", None),
+            "cycle_label": (
+                "Scope"
+                if getattr(field, "cycle_choices", None) is not None
+                else ""
+            ),
             "minimum": None,
             "maximum": None,
             "step": None,

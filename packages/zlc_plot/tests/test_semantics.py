@@ -22,6 +22,7 @@ from zlc_plot.semantics import (
     axis_size,
     composed_spec,
     fate_field_name,
+    is_scope_fate,
     scope_fate,
     updated_spec,
 )
@@ -82,7 +83,9 @@ def test_a_pinned_axis_narrows_everything_the_panel_shows() -> None:
         for field in describe_semantics(schema, HistogramPlot()).fields
         if field.name == fate_field_name(AxisRef.point("row"))
     )
-    assert (scope_fate(1.0), "= 1") in row.choices
+    assert row.cycle_choices is not None
+    assert len(row.cycle_choices) == 2
+    assert (scope_fate(1.0), "1") in tuple(row.cycle_choices)
 
     spec = updated_spec(schema, HistogramPlot(), row.name, scope_fate(1.0))
     assert spec.scope == ((AxisRef.point("row"), 1.0),)
@@ -100,6 +103,21 @@ def test_a_pinned_axis_narrows_everything_the_panel_shows() -> None:
         assert int(np.asarray(unscoped._payload.counts).sum()) == 8
     finally:
         unscoped.close()
+
+
+def test_a_scoped_axis_can_take_a_curve_role_again() -> None:
+    snapshot = _snapshot()
+    schema = snapshot.block.schema
+    row = AxisRef.point("row")
+    name = fate_field_name(row)
+    base = CurvePlot(AxisRef.point("x"))
+    scoped = updated_spec(schema, base, name, scope_fate(1.0))
+
+    as_x = updated_spec(schema, scoped, name, "x")
+    assert as_x.x == row and as_x.scope == ()
+
+    as_group = updated_spec(schema, scoped, name, "group")
+    assert as_group.group == row and as_group.scope == ()
 
 
 def test_semantic_choices_are_labeled_once_and_kind_domain_is_registry_filtered() -> None:
@@ -265,8 +283,11 @@ def test_equal_display_names_keep_distinct_stable_fate_keys() -> None:
     assert rows[left] != rows[right]
     assert description.field(rows[left]).label == "channel"
     assert description.field(rows[right]).label == "channel"
-    assert scope_fate(2.0) not in description.field(rows[left]).choice_values
-    assert scope_fate(2.0) in description.field(rows[right]).choice_values
+    left_cycles = description.field(rows[left]).cycle_choices
+    right_cycles = description.field(rows[right]).cycle_choices
+    assert left_cycles is not None and right_cycles is not None
+    assert scope_fate(2.0) not in tuple(value for value, _label in left_cycles)
+    assert scope_fate(2.0) in tuple(value for value, _label in right_cycles)
 
 
 def test_exact_data_axis_id_wins_over_another_axis_name() -> None:
@@ -318,15 +339,15 @@ def test_categorical_scope_values_do_not_collide_with_fate_tokens() -> None:
     )
     description = describe_semantics(schema, HistogramPlot())
     field = description.field(fate_field_name(ref))
+    assert field.cycle_choices is not None
     scoped_choices = {
         label: value
-        for value, label in field.choices
-        if str(label).startswith("= ")
+        for value, label in field.cycle_choices
     }
     assert scoped_choices == {
-        "= x": scope_fate("x"),
-        "= reduce": scope_fate("reduce"),
-        "= latest": scope_fate("latest"),
+        "x": scope_fate("x"),
+        "reduce": scope_fate("reduce"),
+        "latest": scope_fate("latest"),
     }
     assert scope_fate("latest") != scope_fate(LATEST_COORDINATE)
 
@@ -584,6 +605,7 @@ def test_a_scan_dimension_of_a_long_sweep_still_offers_its_scope() -> None:
         REPEAT,
         SCAN_POINT,
         SITE,
+        SPATIAL_Y,
         ValidityContract,
         ValueSchema,
     )
@@ -608,7 +630,10 @@ def test_a_scan_dimension_of_a_long_sweep_still_offers_its_scope() -> None:
             cells,
         ),
         ValueSchema(
-            (AxisSpec(AxisId("occ.site"), "site", SITE, 34),),
+            (
+                AxisSpec(AxisId("occ.site"), "site", SITE, 34),
+                AxisSpec(AxisId("camera.y"), "spatial-y", SPATIAL_Y, 1024),
+            ),
             ValidityContract.components(AxisId("occ.site")),
             np.dtype("<f8"),
             "1",
@@ -622,10 +647,15 @@ def test_a_scan_dimension_of_a_long_sweep_still_offers_its_scope() -> None:
             if item.name
             == fate_field_name(AxisRef.point_dimension(dimension))
         )
-        pins = [label for _value, label in field.choices if str(label).startswith("= ")]
+        assert field.cycle_choices is not None
+        pins = [label for _value, label in field.cycle_choices]
         assert len(pins) == 10, (
             f"{dimension} must offer its ten coordinates as scopes, got {pins}"
         )
+    spatial = description.field(fate_field_name(AxisRef.data("camera.y")))
+    assert spatial.cycle_choices is not None
+    assert len(spatial.cycle_choices) == 1024
+    assert all(not is_scope_fate(value) for value in spatial.choice_values)
 
 
 def test_taking_an_occupied_role_swaps_fates_never_repairs() -> None:

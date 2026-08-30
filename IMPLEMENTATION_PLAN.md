@@ -60,6 +60,9 @@
 - PanelState只保存authored target；Live、Frozen和FigureViewer都以Plot成功返回的完整accepted
   `DisplayDescription`判断当前pixels、能力与交互。Selector/viewport observation携exact Dataset
   generation+revision，TaskConsole Console核对后才持久化、镜像或发布derivation。
+- 大轴Scope不再受256项popup上限控制：Plot description携惰性真实coordinate domain，Setting/Edit
+  共用的Fluent cycle choice只显示一个Scope action，focused wheel写回原有tagged scope fate；1024坐标
+  轴的popup仍只有普通fate加一行Scope，未聚焦滚轮不改值。
 
 ## 2. 当前代码收口状态
 

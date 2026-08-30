@@ -8,7 +8,7 @@ it never loads Qt.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 import math
@@ -147,6 +147,13 @@ class FormFieldProps:
     minimum: int | float | None = None
     maximum: int | float | None = None
     choices: tuple[FormChoice, ...] = ()
+    #: Optional lazy sub-domain behind one extra popup action.  Popup rows stay
+    #: small (for example, one ``Scope`` fate); while that action is current,
+    #: a focused wheel moves through these exact typed ``(value, label)``
+    #: pairs.  The sequence may be lazy so a large scientific axis is not
+    #: copied into a Qt item model merely to say that Scope exists.
+    cycle_choices: Sequence[tuple[object, str]] | None = None
+    cycle_label: str = ""
     allow_blank: bool | None = None
     path_mode: Literal["file", "dir"] = "file"
     file_filter: str = "All files (*)"
@@ -218,6 +225,25 @@ class FormFieldProps:
             if any(_typed_equal(choice.value, prior.value) for prior in choices[:index]):
                 raise ValueError(f"field {self.key!r} has duplicate typed choice values")
 
+        cycle_choices = self.cycle_choices
+        if cycle_choices is not None:
+            if self.kind != "choice":
+                raise ValueError(
+                    f"non-choice field {self.key!r} cannot declare cycle choices"
+                )
+            if not isinstance(cycle_choices, Sequence) or not len(cycle_choices):
+                raise ValueError(
+                    f"field {self.key!r} cycle choices must be a non-empty sequence"
+                )
+            if not isinstance(self.cycle_label, str) or not self.cycle_label.strip():
+                raise ValueError(
+                    f"field {self.key!r} cycle choices need a non-empty label"
+                )
+        elif self.cycle_label:
+            raise ValueError(
+                f"field {self.key!r} cycle label requires cycle choices"
+            )
+
         if self.kind == "choice":
             if not choices:
                 if not self.required:
@@ -235,8 +261,12 @@ class FormFieldProps:
                     )
             if self.minimum is not None or self.maximum is not None:
                 raise ValueError(f"choice field {self.key!r} cannot declare numeric bounds")
-            if self.default is not None and not any(
-                _typed_equal(self.default, choice.value) for choice in choices
+            if (
+                self.default is not None
+                and not any(
+                    _typed_equal(self.default, choice.value) for choice in choices
+                )
+                and self.cycle_choice_for(self.default) is None
             ):
                 raise ValueError(f"field {self.key!r} default is not a typed choice value")
         elif choices:
@@ -378,7 +408,12 @@ class FormFieldProps:
         value that could be mistaken for a real device role.
         """
 
-        return self.kind == "choice" and self.required and not self.choices
+        return (
+            self.kind == "choice"
+            and self.required
+            and not self.choices
+            and self.cycle_choices is None
+        )
 
     @property
     def unavailable(self) -> bool:
@@ -404,6 +439,27 @@ class FormFieldProps:
             (choice for choice in self.choices if _typed_equal(value, choice.value)),
             None,
         )
+
+    def cycle_choice_for(self, value: object) -> tuple[int, object, str] | None:
+        """Return ``(index, exact value, label)`` from the lazy wheel domain."""
+
+        if self.kind != "choice" or self.cycle_choices is None:
+            return None
+        for index in range(len(self.cycle_choices)):
+            choice = self.cycle_choices[index]
+            if (
+                not isinstance(choice, tuple)
+                or len(choice) != 2
+                or not isinstance(choice[1], str)
+                or not choice[1].strip()
+            ):
+                raise TypeError(
+                    f"field {self.key!r} cycle choices must yield "
+                    "(value, non-empty label) pairs"
+                )
+            if _typed_equal(value, choice[0]):
+                return index, choice[0], choice[1]
+        return None
 
 
 @dataclass(frozen=True, slots=True)

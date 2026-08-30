@@ -7,7 +7,7 @@ other frontends can render without knowing individual plot classes.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, TypeAlias
@@ -36,6 +36,85 @@ from .specs import (
 SemanticChoice = tuple[object, str]
 
 
+@dataclass(frozen=True, slots=True)
+class SemanticCycleChoices(Sequence[SemanticChoice]):
+    """Lazy coordinate choices for one compound semantic fate.
+
+    A fate menu has a handful of actions (Reduced, X, Y, ... and Scope),
+    while Scope itself moves through the axis's real coordinate domain.  The
+    two are deliberately not one flat list: flattening made the presence of
+    the Scope capability depend on whether a dropdown was willing to build
+    every coordinate row.
+
+    The schema already owns immutable coordinate/label sequences.  This view
+    keeps those sequences by reference and creates one tagged scope value only
+    when the frontend asks for that position, so describing a two-million
+    coordinate axis remains constant-memory work.
+    """
+
+    coordinates: Sequence[object]
+    labels: tuple[str, ...] | None = None
+    include_latest: bool = False
+
+    def __post_init__(self) -> None:
+        coordinates = self.coordinates
+        if not hasattr(coordinates, "__len__") or not hasattr(
+            coordinates, "__getitem__"
+        ):
+            raise TypeError("scope coordinates must be an indexed sequence")
+        labels = self.labels
+        if labels is not None:
+            labels = tuple(labels)
+            if len(labels) != len(coordinates):
+                raise ValueError("scope labels must match scope coordinates")
+            if any(not isinstance(label, str) or not label for label in labels):
+                raise ValueError("scope labels must be non-empty strings")
+            object.__setattr__(self, "labels", labels)
+        if not isinstance(self.include_latest, bool):
+            raise TypeError("include_latest must be bool")
+
+    def __len__(self) -> int:
+        return len(self.coordinates) + int(self.include_latest)
+
+    def __getitem__(self, index: int | slice) -> SemanticChoice | tuple[SemanticChoice, ...]:
+        if isinstance(index, slice):
+            return tuple(self[position] for position in range(*index.indices(len(self))))
+        selected = int(index)
+        if selected < 0:
+            selected += len(self)
+        if selected < 0 or selected >= len(self):
+            raise IndexError(index)
+        if self.include_latest:
+            if selected == 0:
+                return scope_fate(LATEST_COORDINATE), "Latest"
+            selected -= 1
+        raw = self.coordinates[selected]
+        coordinate = canonical_coordinate_scalar(raw, "scope coordinate")
+        label = (
+            self.labels[selected]
+            if self.labels is not None
+            else "(null)"
+            if coordinate is None
+            else f"{coordinate:g}"
+            if isinstance(coordinate, (int, float))
+            else str(coordinate)
+        )
+        return scope_fate(coordinate), label
+
+    def contains_value(self, value: object) -> bool:
+        """Whether one already-tagged scope value belongs to this domain."""
+
+        if not is_scope_fate(value):
+            return False
+        coordinate = scope_coordinate_from_fate(value)
+        if coordinate is LATEST_COORDINATE:
+            return self.include_latest
+        return any(
+            canonical_coordinate_scalar(item, "scope coordinate") == coordinate
+            for item in self.coordinates
+        )
+
+
 def _unique_values(values: Iterable[object]) -> tuple[object, ...]:
     """Keep the first occurrence of each semantic value without stringifying it."""
 
@@ -62,6 +141,7 @@ class SemanticField:
     choices: tuple[SemanticChoice, ...]
     required: bool
     rebuild: bool = True
+    cycle_choices: SemanticCycleChoices | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip():
@@ -85,9 +165,19 @@ class SemanticField:
                 continue
             choices.append((choice[0], choice[1]))
         choice_values = tuple(choice[0] for choice in choices)
+        cycle_choices = self.cycle_choices
+        if cycle_choices is not None and not isinstance(
+            cycle_choices, SemanticCycleChoices
+        ):
+            raise TypeError("semantic cycle choices must be SemanticCycleChoices")
         if self.required and self.value is None:
             raise ValueError(f"required semantic field {self.name!r} cannot be None")
-        if choices and not any(self.value == choice for choice in choice_values):
+        current_is_cycle = bool(
+            cycle_choices is not None and cycle_choices.contains_value(self.value)
+        )
+        if choices and not current_is_cycle and not any(
+            self.value == choice for choice in choice_values
+        ):
             raise ValueError(
                 f"current value for semantic field {self.name!r} is not in choices"
             )
@@ -401,13 +491,6 @@ _ROLE_LABELS = {
 FATE_REDUCE = "reduce"
 FATE_POOL = "pool"
 
-#: An axis with more coordinates than this gets no scope row.  A dropdown of
-#: two thousand pixel rows is not an editor, and truncating one silently would
-#: claim a coverage it does not have; those axes are cut with a box selector,
-#: which is the gesture that suits them.
-SCOPE_CHOICE_LIMIT = 256
-
-
 _SCOPE_VALUE_TAG = "scope-value"
 _SCOPE_LATEST_TAG = "scope-latest"
 
@@ -590,50 +673,46 @@ def _fate_row_axes(
 def _scope_coordinates(
     schema: DatasetSchema,
     ref: AxisRef,
-) -> tuple[SemanticChoice, ...] | None:
-    """Every coordinate this axis can be pinned to, or None if it takes no row.
-
-    An axis of one value is already pinned, and one of thousands is cut with a
-    box instead -- see SCOPE_CHOICE_LIMIT.
-    """
+) -> SemanticCycleChoices | None:
+    """The real coordinate domain behind this axis's one Scope fate."""
 
     resolved = resolve_axis(schema, ref)
-    label = resolved.label
-    values = resolved.coordinates
-    labels = resolved.coordinate_labels
-    # The pinnable coordinates are the DISTINCT ones, judged after the
-    # dedup: a scan dimension lists one value per ROW, so a ten-coordinate
-    # sweep of a thousand rows arrived here as a thousand values and the
-    # size cap refused the very axis a scope exists for.  A labelled axis
-    # pins by the name the operator reads everywhere else -- "0-1", "box"
-    # -- not by its bare numeric identity.
-    first_labels: dict[CoordinateScalar, str] = {}
-    for index, value in enumerate(values):
-        coordinate = canonical_coordinate_scalar(value, f"{label} coordinate")
-        if coordinate not in first_labels:
-            if len(first_labels) >= SCOPE_CHOICE_LIMIT + 1:
-                break
-            first_labels[coordinate] = (
-                labels[index]
-                if labels is not None
-                else "(null)"
-                if coordinate is None
-                else f"{coordinate:g}"
-                if isinstance(coordinate, (int, float))
-                else str(coordinate)
-            )
-    if len(first_labels) < 2 or len(first_labels) > SCOPE_CHOICE_LIMIT:
-        choices: tuple[SemanticChoice, ...] = ()
-    else:
-        choices = tuple(
-            (scope_fate(value), text) for value, text in first_labels.items()
-        )
-    if (
+    latest = bool(
         ref.domain is AxisDomain.POINT_COORDINATE
         and ref.axis_id == PRIMARY_INDEX_AXIS_ID.value
-    ):
-        return ((scope_fate(LATEST_COORDINATE), "Latest"), *choices)
-    return choices or None
+    )
+    if resolved.size < 2 and not latest:
+        return None
+    coordinates = resolved.coordinates
+    labels = resolved.coordinate_labels
+    if ref.domain is AxisDomain.POINT_COORDINATE and not latest:
+        # Point columns may repeat one logical coordinate over many source
+        # rows.  Scope selects that coordinate, not an occurrence of it, so
+        # retain the first label exactly once.  Dense declared axes and the
+        # Runtime primary index are already coordinate domains and remain
+        # zero-copy, including large camera axes.
+        unique: dict[
+            tuple[type, CoordinateScalar], tuple[CoordinateScalar, str | None]
+        ] = {}
+        for index, raw in enumerate(coordinates):
+            coordinate = canonical_coordinate_scalar(raw, "scope coordinate")
+            key = (type(coordinate), coordinate)
+            if key not in unique:
+                unique[key] = (
+                    coordinate,
+                    None if labels is None else labels[index],
+                )
+        coordinates = tuple(value for value, _label in unique.values())
+        labels = (
+            None
+            if labels is None
+            else tuple(label for _value, label in unique.values())
+        )
+    return SemanticCycleChoices(
+        coordinates,
+        labels,
+        latest,
+    )
 
 
 def axis_admits_scope(
@@ -643,13 +722,9 @@ def axis_admits_scope(
 ) -> bool:
     """Whether a scope fate names a coordinate this axis actually HAS.
 
-    The row's dropdown lists at most ``SCOPE_CHOICE_LIMIT`` coordinates,
-    because a two-thousand-entry menu is not an editor -- but that is a
-    fact about the MENU.  Whether a pin is legal is a fact about the
-    DATA, and reading the menu for it conflated two different questions:
-    a legal pin on a large axis and a pin whose coordinate the data no
-    longer has both came back "not offered", so a saved board could not
-    tell "too many to list" from "gone".
+    Scope is one fate in the popup; its coordinates are a separate cycling
+    domain.  Whether a pin is legal is therefore always a fact about the DATA,
+    never about how many rows a menu happens to materialize.
 
     A pin whose coordinate is gone is a statement with no referent under
     this representation -- the same shape as a fate naming an axis that
@@ -670,17 +745,6 @@ def axis_admits_scope(
         canonical_coordinate_scalar(item, f"{label} coordinate") == coordinate
         for item in resolved.coordinates
     )
-
-
-def _scope_choice_label(value: object) -> str:
-    coordinate = scope_coordinate_from_fate(value)
-    if coordinate is LATEST_COORDINATE:
-        return "Latest"
-    if coordinate is None:
-        return "(null)"
-    if isinstance(coordinate, (int, float)):
-        return f"{coordinate:g}"
-    return str(coordinate)
 
 
 def _kind_label(kind: PlotKind) -> str:
@@ -830,6 +894,7 @@ def composed_spec(
             if scoped.physical_identity == axis.physical_identity:
                 scope.pop(scoped)
 
+    role_targets: dict[str, AxisRef] = {}
     if fate_values:
         declared_roles = tuple(
             role for role in ROLE_FATES if role in _field_names(candidate)
@@ -838,7 +903,6 @@ def composed_spec(
             role: _role_holder(candidate, role) for role in declared_roles
         }
         desired_roles = dict(current_roles)
-        role_targets: dict[str, AxisRef] = {}
         edited_identities = {
             axis.physical_identity for axis in fate_values
         }
@@ -945,6 +1009,22 @@ def composed_spec(
 
         for role in declared_roles:
             rest[role] = desired_roles[role]
+
+    if role_targets:
+        # A scoped axis promoted back to X/Group/Facet must stop being scoped
+        # before the role-bearing dataclass is constructed.  `_settled`
+        # removes the conflict too, but it runs after `replace`; by then the
+        # dataclass has already (correctly) rejected an axis that appears in
+        # both places.  Apply only removals here.  Newly authored scopes still
+        # wait until roles have been vacated and are attached by `_settled`.
+        before_roles = dict(_scope_terms(candidate))
+        for target in role_targets.values():
+            for scoped in tuple(before_roles):
+                if scoped.physical_identity == target.physical_identity:
+                    before_roles.pop(scoped)
+        terms = tuple(before_roles.items())
+        if terms != tuple(_scope_terms(candidate).items()):
+            candidate = replace(candidate, scope=terms)
 
     def _settled(candidate: PlotSpec) -> PlotSpec:
         """Attach the scope to the FINISHED candidate and repair the conflict.
@@ -1213,17 +1293,16 @@ def describe_semantics(
             if _reason(name, role) is None or current == role:
                 offered.append((role, _ROLE_LABELS[role]))
         pins = _scope_coordinates(schema, ref)
-        if pins is not None:
-            offered.extend((value, f"= {text}") for value, text in pins)
-        if is_scope_fate(current) and not any(
-            current == value for value, _label in offered
-        ):
-            # A saved/programmatic scope may name a coordinate on an axis too
-            # large for a dropdown.  The current truth remains visible and can
-            # be moved back to a role; the editor still does not fabricate a
-            # truncated list of alternative coordinates.
-            offered.append((current, f"= {_scope_choice_label(current)}"))
-        fields.append(SemanticField(name, label, current, tuple(offered), True))
+        fields.append(
+            SemanticField(
+                name,
+                label,
+                current,
+                tuple(offered),
+                True,
+                cycle_choices=pins,
+            )
+        )
         fate_rows.append((ref, name))
     if "reduction" in declared:
         fields.append(
@@ -1255,6 +1334,7 @@ def describe_semantics(
 
 __all__ = [
     "SemanticChoice",
+    "SemanticCycleChoices",
     "SemanticDescription",
     "SemanticFeasibility",
     "SemanticField",

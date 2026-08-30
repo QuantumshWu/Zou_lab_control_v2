@@ -888,6 +888,8 @@ class PanelCardView(FluentGroupBox):
                         minimum=field.minimum,
                         maximum=field.maximum,
                         choices=field.choices,
+                        cycle_choices=field.cycle_choices,
+                        cycle_label=field.cycle_label,
                         allow_blank=field.allow_blank,
                         unavailable_reason=field.unavailable_reason,
                         automatic=field.automatic,

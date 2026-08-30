@@ -3877,9 +3877,22 @@ class ConsolePresenter:
                     continue
                 value = authored[key]
                 choices = tuple(field.get("choices") or ())
+                cycle_choices = field.get("cycle_choices")
+                cycle_contains = getattr(cycle_choices, "contains_value", None)
+                if callable(cycle_contains):
+                    cycle_legal = bool(cycle_contains(value))
+                elif cycle_choices is None:
+                    cycle_legal = False
+                else:
+                    cycle_legal = any(
+                        value == cycle_value
+                        for cycle_value, _label in cycle_choices
+                    )
                 if not choices or (
                     value is None and bool(field.get("allow_none"))
-                ) or any(value == choice for _label, choice in choices):
+                ) or cycle_legal or any(
+                    value == choice for _label, choice in choices
+                ):
                     legal[key] = value
             surface[section] = tuple(
                 {
