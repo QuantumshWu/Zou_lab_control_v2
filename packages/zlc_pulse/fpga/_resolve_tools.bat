@@ -132,9 +132,11 @@ exit /b 0
 
 :zlc_python_product_environment
 rem Every human-facing command launched from a checkout must import THAT
-rem checkout, independently of the caller's working directory.  Keeping this
-rem beside interpreter resolution makes Python selection and product selection
-rem one decision for _launch, FPGA build/program, and resource estimation.
+rem checkout, independently of the caller's working directory and of editable
+rem installs left in the selected interpreter.  The product dispatcher lives at
+rem the root, while each layer deliberately lives under packages/<layer>/src;
+rem injecting only the root leaves those layers to whichever unrelated editable
+rem install happens to be registered in site-packages.
 rem The installer is the sole exception: /installed clears source injection so
 rem its final check proves the installed distribution rather than the checkout.
 if /I "%~1"=="/installed" (
@@ -143,11 +145,13 @@ if /I "%~1"=="/installed" (
   exit /b 0
 )
 if defined ZLC_CHECKOUT_PRODUCT_ROOT if /I "%ZLC_CHECKOUT_PRODUCT_ROOT%"=="%ZLC_TOOL_REPO_ROOT%" exit /b 0
+set "ZLC_CHECKOUT_PYTHONPATH=%ZLC_TOOL_REPO_ROOT%;%ZLC_TOOL_REPO_ROOT%\packages\zlc_data\src;%ZLC_TOOL_REPO_ROOT%\packages\zlc_durable\src;%ZLC_TOOL_REPO_ROOT%\packages\zlc_runtime\src;%ZLC_TOOL_REPO_ROOT%\packages\zlc_plot\src;%ZLC_TOOL_REPO_ROOT%\packages\zlc_ui\src;%ZLC_TOOL_REPO_ROOT%\packages\zlc_pulse\src;%ZLC_TOOL_REPO_ROOT%\packages\zlc_atom\src;%ZLC_TOOL_REPO_ROOT%\packages\zlc_workbench\src"
 if defined PYTHONPATH (
-  set "PYTHONPATH=%ZLC_TOOL_REPO_ROOT%;%PYTHONPATH%"
+  set "PYTHONPATH=%ZLC_CHECKOUT_PYTHONPATH%;%PYTHONPATH%"
 ) else (
-  set "PYTHONPATH=%ZLC_TOOL_REPO_ROOT%"
+  set "PYTHONPATH=%ZLC_CHECKOUT_PYTHONPATH%"
 )
+set "ZLC_CHECKOUT_PYTHONPATH="
 set "ZLC_CHECKOUT_PRODUCT_ROOT=%ZLC_TOOL_REPO_ROOT%"
 exit /b 0
 

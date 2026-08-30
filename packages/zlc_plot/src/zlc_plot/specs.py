@@ -106,6 +106,8 @@ _ROLLING_WINDOW_EFFECTS = (
     | RenderEffect.INTERACTION_REPROJECT
 )
 
+FACET_FIT_PARAMETER = "facet_fit_parameter"
+
 
 class Reduction(str, Enum):
     """How repeated samples that share a plotted coordinate are combined."""
@@ -1015,7 +1017,7 @@ def _parameter_schema_for_context(
             )
             entries.append(
                 ParameterSpec(
-                    "facet_fit_parameter",
+                    FACET_FIT_PARAMETER,
                     str,
                     RenderEffect.OVERLAY,
                     default="model headline",
@@ -1179,6 +1181,7 @@ def parameter_schema_for_kind(
 
 
 __all__ = [
+    "FACET_FIT_PARAMETER",
     "accepts_classifier_thresholds",
     "CellPlot",
     "CurvePlot",

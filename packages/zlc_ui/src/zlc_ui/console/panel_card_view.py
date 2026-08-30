@@ -1173,9 +1173,23 @@ class PanelCardView(FluentGroupBox):
             value = self._settings_form.read_value(name)
             section, separator, parameter_key = name.partition("__")
             if separator and section in {"semantic", "display", "fit"}:
+                fields = tuple(
+                    parameter_fields(self._parameter_surface, section)
+                )
+                selected = next(
+                    field
+                    for field in fields
+                    if str(field["key"]) == parameter_key
+                )
+                owner = str(selected.get("edit_section") or section)
+                owned = tuple(
+                    field
+                    for field in fields
+                    if str(field.get("edit_section") or section) == owner
+                )
                 patch: dict[str, object] = {
-                    section: parameter_edit_values(
-                        parameter_fields(self._parameter_surface, section),
+                    owner: parameter_edit_values(
+                        owned,
                         parameter_key,
                         lambda key: self._settings_form.read_value(
                             f"{section}__{key}"

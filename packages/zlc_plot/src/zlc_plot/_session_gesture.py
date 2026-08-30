@@ -9,6 +9,7 @@ import math
 import numpy as np
 
 from ._axis_transform import AxisTransform
+from ._axis_scale import axis_space, axis_value
 from ._gesture_engine import (
     _ColorGesture,
     _ColorLimitDrag,
@@ -456,18 +457,10 @@ class GestureSessionMixin:
             growth = self._defaults.interaction.wheel_zoom_factor
             self.set_parameter("camera_zoom", zoom * growth ** -ticks)
             return
-        # Zoom against the axes' CURRENT limits, not the painted snapshot the
-        # frontend sampled: a queued tick must compound onto the previous one
-        # instead of re-deriving the same stale target and short-circuiting.
-        try:
-            inverted = axes.transData.inverted().transform(
-                (float(event.x), float(event.y))
-            )
-            center_x, center_y = float(inverted[0]), float(inverted[1])
-        except Exception:
-            return
-        if not (math.isfinite(center_x) and math.isfinite(center_y)):
-            return
+        # Zoom the CURRENT limits about their own centre.  Pointer position is
+        # only a routing fact (which axes received the wheel); it is not plot
+        # state and must not turn zoom into an implicit pan.  Work in the
+        # axis' drawn space so a log range contracts symmetrically on screen.
         zoom_factor = self._defaults.interaction.wheel_zoom_factor
         # ``step`` carries accumulated wheel ticks (positive = up); one tick
         # reproduces the historical single-notch factor exactly, a coalesced
@@ -478,16 +471,21 @@ class GestureSessionMixin:
         factor = zoom_factor ** ticks
         x_axes = NumericRange(*sorted(map(float, axes.get_xlim())))
         y_axes = NumericRange(*sorted(map(float, axes.get_ylim())))
-        zoomed_x = NumericRange(
-            center_x + (x_axes.low - center_x) * factor,
-            center_x + (x_axes.high - center_x) * factor,
-        )
+
+        def centered(value: NumericRange, scale: str) -> NumericRange:
+            low = axis_space(value.low, scale)
+            high = axis_space(value.high, scale)
+            middle = (low + high) / 2.0
+            half = (high - low) * factor / 2.0
+            return NumericRange(
+                axis_value(middle - half, scale),
+                axis_value(middle + half, scale),
+            )
+
+        zoomed_x = centered(x_axes, str(axes.get_xscale()))
         zoomed_y = y_axes
         if isinstance(self._projected._semantic_spec(), ImagePlot):
-            zoomed_y = NumericRange(
-                center_y + (y_axes.low - center_y) * factor,
-                center_y + (y_axes.high - center_y) * factor,
-            )
+            zoomed_y = centered(y_axes, str(axes.get_yscale()))
         self.set_viewport(self._viewport_x_from_axes(zoomed_x), zoomed_y)
 
     def _zoom_to_selection_or_reset(self) -> None:

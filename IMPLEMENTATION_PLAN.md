@@ -35,10 +35,12 @@
 - Panel window demand在authored state接受时先于Plot render同步；最后lease的`10→1`在调用
   返回前释放并切回event表示。当前host的Focus/Area/Crosshair按同generation与accepted轴词汇
   接受，owner落后一版不得否决indexed front，Facet只忽略其自身focus cell这一层subject差异。
-- Panel title shape现与exact accepted surface原子推进：ROI selector导致派生Image/Histogram换schema时，
-  即使PanelState与control vocabulary不变也会重投影三段shape strip。FacetGrid新增display参数
-  `facet_fit_parameter`，普通下拉的动态choices为`Model headline`加当前fit model parameters；切换仅重画
-  cell annotation不重fit，model不兼容时回到`Model headline`。
+- Panel title shape现由PanelCard独立accepted-data projection持有，不再从Setting parameter surface
+  读取；ROI selector导致派生Image/Histogram换schema时，每次surface accept都直接重投影三段shape
+  strip，PanelState/control相等不再阻止。FacetGrid新增display参数
+  `facet_fit_parameter`，Workbench在fit model存在时把它放在Fit expression下方、通过通用
+  `edit_section=display`写回display owner；普通下拉choices为`Model headline`加当前fit model
+  parameters。切换仅重画cell annotation不重fit，model不兼容时回到`Model headline`。
 - Rolling history投影在现有`DataView`内一次归约：规则repeat tensor直接沿非保留轴
   reduction，其余repeat与primary-index分别按`(repeat, group)`、`(source index, group)`
   联合bucket；旧`O(history × samples)`逐history mask循环已删除，Runtime history owner不变。

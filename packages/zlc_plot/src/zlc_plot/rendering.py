@@ -58,6 +58,7 @@ from .selectors import (
     SelectorState,
 )
 from .specs import (
+    FACET_FIT_PARAMETER,
     CurvePlot,
     FacetGridPlot,
     HistogramPlot,
@@ -663,48 +664,50 @@ def _box_on_aspect(
     return (width, height)
 
 
-def _picture_pixel_rect(
-    box_w: int,
-    box_h: int,
-    extent: tuple[float, float, float, float],
-    x_limits: tuple[float, float],
-    y_limits: tuple[float, float],
-    origin: str,
-) -> tuple[int, int, int, int] | None:
-    """Where the picture lands inside its box, in whole pixels.
+def _view_nearest_map(
+    output_count: int,
+    source_count: int,
+    view_start: float,
+    view_stop: float,
+    source_start: float,
+    source_stop: float,
+) -> tuple[int, int, np.ndarray] | None:
+    """Map viewport pixel centres to nearest source samples.
 
-    ``(row, column, width, height)``, rows counted from the array's own first
-    row -- the picture's top under ``origin="upper"`` and its bottom under
-    ``lower``, which is the convention the artist reads it with.  The picture
-    is not the box whenever the view reaches past it, which a square field
-    showing a wide camera frame always does.
+    The returned interval names the contiguous output pixels that actually
+    lie inside the source extent; its array contains the source index for each
+    one.  Computing from data coordinates, rather than rounding a picture
+    rectangle and stretching into it, keeps image pixels on the same axes
+    transform as selectors and every other data-coordinate artist.
     """
 
-    if box_w < 1 or box_h < 1:
+    count = int(output_count)
+    samples = int(source_count)
+    bounds = tuple(
+        map(float, (view_start, view_stop, source_start, source_stop))
+    )
+    if (
+        count < 1
+        or samples < 1
+        or not all(math.isfinite(value) for value in bounds)
+        or bounds[0] == bounds[1]
+        or bounds[2] == bounds[3]
+    ):
         return None
-    x_low, x_high = sorted(float(v) for v in x_limits)
-    y_low, y_high = sorted(float(v) for v in y_limits)
-    if x_high <= x_low or y_high <= y_low:
+    centres = bounds[0] + (
+        (np.arange(count, dtype=np.float64) + 0.5)
+        * ((bounds[1] - bounds[0]) / count)
+    )
+    position = (centres - bounds[2]) / (bounds[3] - bounds[2])
+    inside = np.isfinite(position) & (position >= 0.0) & (position < 1.0)
+    output = np.flatnonzero(inside)
+    if not output.size:
         return None
-    left, right, upper, lower = (float(v) for v in extent)
-    pic_x0, pic_x1 = sorted((left, right))
-    pic_y0, pic_y1 = sorted((upper, lower))
-    scale_x = box_w / (x_high - x_low)
-    scale_y = box_h / (y_high - y_low)
-    column = int(round((pic_x0 - x_low) * scale_x))
-    width = int(round((pic_x1 - pic_x0) * scale_x))
-    height = int(round((pic_y1 - pic_y0) * scale_y))
-    if str(origin) == "lower":
-        row = int(round((pic_y0 - y_low) * scale_y))
-    else:
-        row = int(round((y_high - pic_y1) * scale_y))
-    if width < 1 or height < 1:
-        return None
-    column = max(0, min(column, box_w - 1))
-    row = max(0, min(row, box_h - 1))
-    width = max(1, min(width, box_w - column))
-    height = max(1, min(height, box_h - row))
-    return (row, column, width, height)
+    start = int(output[0])
+    stop = int(output[-1]) + 1
+    mapped = np.floor(position[start:stop] * samples).astype(np.intp)
+    np.clip(mapped, 0, samples - 1, out=mapped)
+    return start, stop, mapped
 
 
 def _image_destination_rect(
@@ -1789,7 +1792,7 @@ class MatplotlibRenderer:
                 overview=overview,
                 model_id=frame.fit_model_id,
                 facet_parameter=(
-                    state["facet_fit_parameter"]
+                    state[FACET_FIT_PARAMETER]
                     if isinstance(self.spec, FacetGridPlot)
                     else None
                 ),
@@ -3890,9 +3893,8 @@ class MatplotlibRenderer:
 
         # The image panel shows a SQUARE field: an authored requirement, so
         # a frame that is not square is letterboxed rather than reshaped.
-        # What that costs is paid elsewhere -- see ``_box_on_aspect``, which
-        # sizes the square box so the letterboxed picture still lands on
-        # whole pixels, which is what lets the compose copy it.
+        # The viewport-sized RGBA front below samples that letterbox in data
+        # coordinates, while the box itself stays a whole-pixel copy target.
         home_extent = (
             _square_image_limits(
                 extent,
@@ -3959,13 +3961,39 @@ class MatplotlibRenderer:
         # nearest-decimated to 945 on the way into the front.  One picture
         # filtered two different ways, and a fifth of the reduction done
         # twice.
-        picture_shape = _picture_pixel_rect(
-            max(display_pixel_shape[0], 1),
-            max(display_pixel_shape[1], 1),
-            extent,
-            tuple(map(float, x_limits)),
-            tuple(map(float, y_limits)),
-            policy.image_origin,
+        display_width = max(display_pixel_shape[0], 1)
+        display_height = max(display_pixel_shape[1], 1)
+        column_sampling = _view_nearest_map(
+            display_width,
+            values.shape[1],
+            float(x_limits[0]),
+            float(x_limits[1]),
+            float(extent[0]),
+            float(extent[1]),
+        )
+        row_view = (
+            (float(y_limits[1]), float(y_limits[0]))
+            if policy.image_origin == "upper"
+            else (float(y_limits[0]), float(y_limits[1]))
+        )
+        row_source = (
+            (float(extent[3]), float(extent[2]))
+            if policy.image_origin == "upper"
+            else (float(extent[2]), float(extent[3]))
+        )
+        row_sampling = _view_nearest_map(
+            display_height,
+            values.shape[0],
+            *row_view,
+            *row_source,
+        )
+        picture_shape = (
+            None
+            if column_sampling is None or row_sampling is None
+            else (
+                column_sampling[1] - column_sampling[0],
+                row_sampling[1] - row_sampling[0],
+            )
         )
         prepared: PreparedImageFront = store.prepare(
             values,
@@ -3976,7 +4004,7 @@ class MatplotlibRenderer:
             display_pixel_shape=(
                 display_pixel_shape
                 if picture_shape is None
-                else (picture_shape[2], picture_shape[3])
+                else picture_shape
             ),
             policy=policy.image_front,
             revision_token=(
@@ -4094,51 +4122,72 @@ class MatplotlibRenderer:
         y_limits: tuple[float, float],
         axes: Any,
     ) -> tuple[np.ndarray, tuple[float, float, float, float]] | None:
-        """Compose the front AT THE BOX, with the picture on whole pixels.
+        """Sample the picture onto the viewport's exact data transform.
 
-        The front used to be the picture, and the picture is not always the
-        view: a square field shows a wide camera frame with a band above and
-        below, and a zoom lands the crop wherever the wheel put it.  Matplotlib
-        then placed that front by transform, on half pixels, and rounded its
-        output size up -- which is a resample, twenty milliseconds of it a
-        frame, of an image we had already composed.
+        The output front fills the axes so the final Matplotlib operation stays
+        a copy.  Each output pixel centre is mapped through ``x_limits`` and
+        ``y_limits`` into the prepared image extent before nearest sampling.
+        Selector geometry uses those same limits, so changing the viewport can
+        never move image data relative to a selector.
 
-        Sizing the front to the box removes the question instead of answering
-        it.  The picture goes in at a whole-pixel rectangle computed here, the
-        band beside it takes the axes' own background, and the artist's extent
-        becomes the VIEW -- so extent, limits and box are one rectangle and the
-        copy always applies.  Nothing has to give: the field stays square, the
-        picture keeps its shape, and it is now placed exactly rather than
-        resampled onto a half-pixel grid.
-
-        Returns ``(front, extent)``, or ``None`` when the geometry cannot be
-        measured.
+        Returns ``(front, viewport_extent)``, or ``None`` only when the axes
+        geometry itself cannot be measured.
         """
 
         bbox = axes.bbox
         box_w = int(round(float(bbox.width)))
         box_h = int(round(float(bbox.height)))
-        placed = _picture_pixel_rect(
-            box_w, box_h, extent, x_limits, y_limits,
-            self.style.render.image_origin,
-        )
-        if placed is None:
+        if box_w < 1 or box_h < 1:
             return None
-        row, column, width, height = placed
         view_extent = (
             float(x_limits[0]),
             float(x_limits[1]),
             float(y_limits[0]),
             float(y_limits[1]),
         )
-        if (row, column, height, width) == (0, 0, box_h, box_w):
-            return self._resized_rgba(rgba, width, height), view_extent
-        # The band does not change between frames and the buffer is nine
-        # megabytes; filling it per frame cost eight milliseconds to paint
-        # pixels that were already the right colour.  It is kept, refilled
-        # only when the picture moves in it, and the picture is gathered
-        # straight into its rows -- which are contiguous whenever the band
-        # is above and below, the letterboxed case.
+        origin = self.style.render.image_origin
+        sampling_signature = (
+            box_h,
+            box_w,
+            tuple(map(int, rgba.shape[:2])),
+            tuple(map(float, extent)),
+            view_extent,
+            origin,
+        )
+        sampling_key = f"{key}:view_sampling"
+        cached_sampling = self._artists.get(sampling_key)
+        if cached_sampling is not None and cached_sampling[0] == sampling_signature:
+            row_sampling, column_sampling = cached_sampling[1]
+        else:
+            column_sampling = _view_nearest_map(
+                box_w,
+                rgba.shape[1],
+                view_extent[0],
+                view_extent[1],
+                float(extent[0]),
+                float(extent[1]),
+            )
+            row_view = (
+                (view_extent[3], view_extent[2])
+                if origin == "upper"
+                else (view_extent[2], view_extent[3])
+            )
+            row_source = (
+                (float(extent[3]), float(extent[2]))
+                if origin == "upper"
+                else (float(extent[2]), float(extent[3]))
+            )
+            row_sampling = _view_nearest_map(
+                box_h,
+                rgba.shape[0],
+                *row_view,
+                *row_source,
+            )
+            self._artists[sampling_key] = (
+                sampling_signature,
+                (row_sampling, column_sampling),
+            )
+
         background = self._axes_background_rgba(axes)
         shape = (box_h, box_w, tuple(background))
         cache_name = f"{key}:view_front"
@@ -4148,24 +4197,30 @@ class MatplotlibRenderer:
         else:
             front = np.empty((box_h, box_w, 4), dtype=np.uint8)
             self._artists[cache_name] = (shape, front)
-        # Only the band, never the whole buffer.  Every pixel outside the
-        # window is painted here and every pixel inside it is overwritten
-        # by the picture below, so the frame is complete either way -- and
-        # a pan that slides the picture by a pixel stopped repainting nine
-        # megabytes to change the colour of a few thousand.
+        if row_sampling is None or column_sampling is None:
+            front[...] = background
+            return front, view_extent
+
+        row, row_stop, row_map = row_sampling
+        column, column_stop, column_map = column_sampling
+        height = row_stop - row
+        width = column_stop - column
+        # Only the band outside the sampled rectangle is background work;
+        # every pixel inside is overwritten by the coordinate-derived gather.
         if row:
             front[:row] = background
-        if row + height < box_h:
-            front[row + height:] = background
+        if row_stop < box_h:
+            front[row_stop:] = background
         if column:
             front[row : row + height, :column] = background
-        if column + width < box_w:
-            front[row : row + height, column + width:] = background
+        if column_stop < box_w:
+            front[row:row_stop, column_stop:] = background
         window = front[row : row + height, column : column + width]
-        if window.flags.c_contiguous:
-            self._resize_rgba_into(rgba, window)
+        source = np.ascontiguousarray(rgba)
+        if kernels.engaged() and window.flags.c_contiguous:
+            kernels.gather_rows_columns(source, row_map, column_map, window)
         else:
-            window[...] = self._resized_rgba(rgba, width, height)
+            window[...] = source[row_map][:, column_map]
         return front, view_extent
 
     @staticmethod
@@ -4176,42 +4231,6 @@ class MatplotlibRenderer:
         if colour.size == 3:
             colour = np.append(colour, 1.0)
         return np.clip(np.rint(colour * 255.0), 0, 255).astype(np.uint8)
-
-    def _resized_rgba(
-        self, rgba: np.ndarray, width: int, height: int
-    ) -> np.ndarray:
-        """Nearest-neighbour resize of a composed front, in one gather."""
-
-        if rgba.shape[0] == height and rgba.shape[1] == width:
-            return rgba
-        sized = np.empty((height, width, 4), dtype=np.uint8)
-        self._resize_rgba_into(rgba, sized)
-        return sized
-
-    @staticmethod
-    def _resize_rgba_into(rgba: np.ndarray, out: np.ndarray) -> None:
-        """Gather *rgba* into *out* at its size, nearest neighbour."""
-
-        rows, columns = rgba.shape[:2]
-        height, width = out.shape[:2]
-        row_map = np.minimum(
-            ((np.arange(height) + 0.5) * (rows / height)).astype(np.intp),
-            rows - 1,
-        )
-        column_map = np.minimum(
-            ((np.arange(width) + 0.5) * (columns / width)).astype(np.intp),
-            columns - 1,
-        )
-        source = np.ascontiguousarray(rgba)
-        if kernels.engaged() and out.flags.c_contiguous:
-            kernels.gather_rows_columns(
-                kernels.readable(source),
-                kernels.readable(row_map),
-                kernels.readable(column_map),
-                out,
-            )
-            return
-        out[...] = source[row_map][:, column_map]
 
     def _height_bars_active(self, key: str, state: DisplayState) -> bool:
         """Whether this image surface paints the height-bar presentation.

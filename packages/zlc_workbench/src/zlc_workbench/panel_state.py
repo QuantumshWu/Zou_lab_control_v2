@@ -13,7 +13,7 @@ from zlc_plot import (
     describe_semantics,
     normalize_classifier_threshold_targets,
 )
-from zlc_plot.specs import limit_pair_for
+from zlc_plot.specs import FACET_FIT_PARAMETER, limit_pair_for
 from zlc_plot.semantics import (
     FATE_PREFIX,
     SemanticVacancy,
@@ -26,6 +26,7 @@ from zlc_plot.semantics import (
 
 
 __all__ = [
+    "FACET_FIT_PARAMETER",
     "PanelFrozenData",
     "PanelState",
     "allows_image_overlay",
@@ -207,7 +208,19 @@ def panel_surface_from_description(
         description.display_state.values,
         choice_overrides=description.parameter_choices,
     )
-    display = tuple(control_document(control) for control in controls)
+    facet_fit_control = next(
+        (
+            control
+            for control in controls
+            if str(getattr(control, "name", "")) == FACET_FIT_PARAMETER
+        ),
+        None,
+    )
+    display = tuple(
+        control_document(control)
+        for control in controls
+        if control is not facet_fit_control
+    )
     resolved_models = tuple(description.fit_models)
     accepted_fit = dict(description.fit)
     current_model = accepted_fit.get("model")
@@ -278,6 +291,16 @@ def panel_surface_from_description(
                 ),
             }
         )
+        if facet_fit_control is not None:
+            fit_fields.append(
+                {
+                    **control_document(facet_fit_control),
+                    # The field is presented beside the fit it annotates, but
+                    # its value remains display state so changing text never
+                    # submits or repeats a solve.
+                    "edit_section": "display",
+                }
+            )
     fit = tuple(fit_fields)
     fit_outputs = fit_output_fields(accepted_fit, resolved_models)
 

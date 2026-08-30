@@ -119,6 +119,7 @@ from .selectors import (
     normalize_classifier_threshold_targets,
 )
 from .specs import (
+    FACET_FIT_PARAMETER,
     CurvePlot,
     FacetGridPlot,
     HistogramPlot,
@@ -919,13 +920,13 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         fit_models: tuple[FitModelSpec, ...],
     ) -> Mapping[str, tuple[object, ...]]:
         result: dict[str, tuple[object, ...]] = {}
-        if "facet_fit_parameter" in self._parameter_schema:
+        if FACET_FIT_PARAMETER in self._parameter_schema:
             accepted = self._accepted_fit
             request = self._live_fit_request or (
                 None if accepted is None else accepted.request
             )
             models = (request.model,) if request is not None else fit_models
-            result["facet_fit_parameter"] = (
+            result[FACET_FIT_PARAMETER] = (
                 "model headline",
                 *tuple(dict.fromkeys(
                     name
@@ -4168,8 +4169,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
     ) -> RectangleRange | None:
         """An image viewport is a WHOLE number of source pixels.
 
-        A wheel notch lands the view wherever the cursor was, and the front
-        the renderer prepares covers whole source pixels -- so the picture
+        A wheel notch contracts the view around its centre, and the front the
+        renderer prepares covers whole source pixels -- so the picture
         sat 0.15 px inside its own axes, which is not a rectangle of whole
         canvas pixels, so the composed front could not be copied and every
         zoomed-in frame paid Matplotlib's image machinery instead: 27 ms a

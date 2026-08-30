@@ -43,7 +43,11 @@ from .selectors import (
     _classifier_threshold_key,
     normalize_classifier_threshold_targets,
 )
-from .specs import accepts_classifier_thresholds, FacetGridPlot
+from .specs import (
+    accepts_classifier_thresholds,
+    FACET_FIT_PARAMETER,
+    FacetGridPlot,
+)
 
 if TYPE_CHECKING:
     from .session import PlotSession
@@ -868,9 +872,9 @@ class FitSessionMixin:
         with self._render_lock:
             with self._lock:
                 self._assert_open()
-                if "facet_fit_parameter" in self._parameter_schema:
+                if FACET_FIT_PARAMETER in self._parameter_schema:
                     selected_parameter = self.display_state[
-                        "facet_fit_parameter"
+                        FACET_FIT_PARAMETER
                     ]
                     if (
                         selected_parameter != "model headline"
@@ -878,7 +882,7 @@ class FitSessionMixin:
                     ):
                         previous_display = self.display_state
                         prepared_display = self._parameter_schema.prepare_updates(
-                            {"facet_fit_parameter": "model headline"}
+                            {FACET_FIT_PARAMETER: "model headline"}
                         )
                         candidate_display = (
                             self._parameter_schema._transition_prepared(

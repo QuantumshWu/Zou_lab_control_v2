@@ -87,6 +87,7 @@ from .panel_catalog import (
     task_console_panel_kind,
 )
 from .panel_state import (
+    FACET_FIT_PARAMETER,
     PanelFrozenData,
     PanelState,
     control_document,
@@ -880,12 +881,20 @@ class ConsolePresenter:
         binding: PanelBinding,
         *,
         target: PanelState | None = None,
-        notify_presented: bool = True,
         sync_history: bool = True,
     ) -> PlotPanelPort:
         """Wire one panel to the board through the single product path."""
 
         selected = binding.state if target is None else target
+        port: PlotPanelPort | None = None
+
+        def presented(surface: object) -> None:
+            # A retarget is rendered and accepted before it replaces the live
+            # port.  Ignore that one candidate callback; once this exact port
+            # is installed, every later accepted surface advances the card.
+            if binding.port is port:
+                self._panel_presented(binding, surface)
+
         port = PlotPanelPort(
             binding.panel_id,
             selected.signal,
@@ -903,11 +912,7 @@ class ConsolePresenter:
             ),
             accept_host=lambda old: self._accept_panel_host(binding, old),
             retire_host=self._retire_plot_host,
-            on_presented=(
-                (lambda surface: self._panel_presented(binding, surface))
-                if notify_presented
-                else None
-            ),
+            on_presented=presented,
             present=lambda host, operation: self._present_panel_operation(
                 binding, host, operation
             ),
@@ -2646,7 +2651,6 @@ class ConsolePresenter:
             candidate_port = self._make_panel_port(
                 binding,
                 target=candidate,
-                notify_presented=False,
                 sync_history=False,
             )
             try:
@@ -2789,6 +2793,10 @@ class ConsolePresenter:
 
         display_entries: list[dict[str, object]] = []
         for control in controls:
+            if str(getattr(control, "name", "")) == FACET_FIT_PARAMETER:
+                # This display-owned value appears only after a fit model is
+                # active, in the Fit section below its expression field.
+                continue
             entry = control_document(control)
             display_entries.append(entry)
         return {
@@ -3933,11 +3941,12 @@ class ConsolePresenter:
         surface["science_locked"] = science_locked
         surface["paints_images"] = self._paints_image_surfaces(binding)
         for section in ("semantic", "display", "fit"):
-            authored = dict(getattr(binding.state, section))
             declared = tuple(surface.get(section, ()))
             legal: dict[str, object] = {}
             for field in declared:
                 key = str(field["key"])
+                owner = str(field.get("edit_section") or section)
+                authored = dict(getattr(binding.state, owner))
                 if key not in authored:
                     continue
                 value = authored[key]

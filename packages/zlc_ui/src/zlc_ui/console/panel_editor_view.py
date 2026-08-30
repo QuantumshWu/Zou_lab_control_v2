@@ -524,15 +524,22 @@ class PanelEditorView(QtWidgets.QWidget):
 
     def _mapping_value_changed(self, section: str, key: str) -> None:
         try:
+            selected = self._parameter_fields[section][key]
+            owner = str(selected.get("edit_section") or section)
+            owned = tuple(
+                field
+                for field in self._parameter_fields[section].values()
+                if str(field.get("edit_section") or section) == owner
+            )
             values = parameter_edit_values(
-                self._parameter_fields[section].values(),
+                owned,
                 key,
                 self.parameter_forms[section].read_value,
             )
         except (KeyError, TypeError, ValueError) as error:
             self.snapshot_label.setText(str(error))
             return
-        self.state_changed.emit({section: values})
+        self.state_changed.emit({owner: values})
 
     def _open_producer(self) -> None:
         node_id = str(self._projection.get("producer_node_id") or "")
