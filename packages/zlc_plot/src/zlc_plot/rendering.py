@@ -2639,18 +2639,32 @@ class MatplotlibRenderer:
                 lane_offsets.append(len(xs))
         if not xs:
             return True
-        kernels.raster_error_bars(
-            kernels.readable(np.concatenate(xs)),
-            kernels.readable(np.concatenate(lows)),
-            kernels.readable(np.concatenate(highs)),
-            kernels.readable(np.asarray(offsets, dtype=np.int64)),
-            kernels.readable(np.asarray(colours, dtype=np.uint8)),
-            kernels.readable(np.asarray(widths, dtype=np.float64)),
-            kernels.readable(np.asarray(cap_widths, dtype=np.float64)),
-            kernels.readable(np.asarray(clips, dtype=np.int32)),
-            kernels.readable(np.asarray(lane_offsets, dtype=np.int64)),
-            canvas_rgba,
-        )
+        previous_threads = None
+        if len(lane_offsets) > 8 and kernels.HAVE_NUMBA:
+            from numba import config, get_num_threads, set_num_threads
+
+            previous_threads = int(get_num_threads())
+            selected_threads = min(int(config.NUMBA_NUM_THREADS), 8)
+            if selected_threads > previous_threads:
+                set_num_threads(selected_threads)
+            else:
+                previous_threads = None
+        try:
+            kernels.raster_error_bars(
+                kernels.readable(np.concatenate(xs)),
+                kernels.readable(np.concatenate(lows)),
+                kernels.readable(np.concatenate(highs)),
+                kernels.readable(np.asarray(offsets, dtype=np.int64)),
+                kernels.readable(np.asarray(colours, dtype=np.uint8)),
+                kernels.readable(np.asarray(widths, dtype=np.float64)),
+                kernels.readable(np.asarray(cap_widths, dtype=np.float64)),
+                kernels.readable(np.asarray(clips, dtype=np.int32)),
+                kernels.readable(np.asarray(lane_offsets, dtype=np.int64)),
+                canvas_rgba,
+            )
+        finally:
+            if previous_threads is not None:
+                set_num_threads(previous_threads)
         return True
 
     def _raster_facet_curve_command(self, canvas: Any) -> bool:

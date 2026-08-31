@@ -20,6 +20,7 @@ from zlc_data.snapshot_projection import (
 )
 from zlc_durable import atomic_write_file
 
+from . import _raster_kernels as kernels
 from .data_contract import (
     DEFAULT_UNITS,
     UnitRegistry,
@@ -519,6 +520,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         self._analysis_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix=_ANALYSIS_THREAD_PREFIX,
+            initializer=kernels.configure_worker_threads,
         )
         self._fit_cancel = Event()
         #: Request-scoped cancellation for live pair solves.  Set only on

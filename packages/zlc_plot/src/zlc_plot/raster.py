@@ -24,6 +24,7 @@ import numpy as np
 from PIL import Image
 from zlc_durable import atomic_write_bytes
 
+from . import _raster_kernels as kernels
 from .units import UnitRegistry
 
 from ._axis_transform import AxisTransform
@@ -2375,6 +2376,7 @@ class RasterPlotHost:
         return _HANDS.busy()
 
     def _run(self) -> None:
+        kernels.configure_worker_threads()
         try:
             try:
                 from .session import PlotSession
