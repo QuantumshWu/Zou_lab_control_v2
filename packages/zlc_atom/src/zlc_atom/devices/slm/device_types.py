@@ -346,6 +346,9 @@ def _find_sdk_directory(authored: str = "") -> Path | None:
 
     direct = [
         authored,
+        # The family's own vendor folder outranks every ambient location:
+        # it is the ONE documented place the operator is told to use.
+        str(Path(__file__).resolve().parent / "vendor"),
         os.environ.get("HAMAMATSU_SLM_SDK", ""),
         *os.environ.get("PATH", "").split(os.pathsep),
         str(Path.cwd()),

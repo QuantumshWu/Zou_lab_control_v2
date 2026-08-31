@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from zlc_atom.devices.rf.contract import RfSourceBase, snap_to_grid
+from zlc_atom.devices.vendor import resolve_vendor_file
 
 #: The instrument's own units, from the vendor API reference.
 FREQUENCY_UNIT_HZ = 10.0
@@ -116,10 +117,14 @@ class CtypesLmsLibrary:
 
 @dataclass(frozen=True)
 class VaunixLmsConfig:
-    """Which brick, through which DLL, inside which authored window."""
+    """Which brick, inside which authored window.
+
+    WHERE the vendor DLL lives is a machine fact, not an apparatus fact:
+    the driver looks in this family's ``vendor/`` folder (see the README
+    there), so the configuration never carries a path nobody can check.
+    """
 
     serial: int
-    dll_path: str = "vnx_fmsynth.dll"
     frequency_low_hz: float = 500e6
     frequency_high_hz: float = 8e9
     power_low_dbm: float = -40.0
@@ -130,7 +135,15 @@ class VaunixLmsRfSource(RfSourceBase):
     def __init__(self, config: VaunixLmsConfig, *, library: LmsLibrary | None = None) -> None:
         self.config = config
         self._library = (
-            library if library is not None else CtypesLmsLibrary(config.dll_path)
+            library
+            if library is not None
+            else CtypesLmsLibrary(
+                resolve_vendor_file(
+                    __file__,
+                    "vnx_fmsynth.dll",
+                    what="the Vaunix LMS SDK (64-bit)",
+                )
+            )
         )
         self._handle = self._library.open_device(int(config.serial))
         super().__init__(

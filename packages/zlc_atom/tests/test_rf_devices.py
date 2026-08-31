@@ -219,11 +219,51 @@ def test_every_interaction_narrates_at_the_contract_layer(caplog) -> None:
     )
 
 
-def test_a_machine_without_the_vaunix_dll_simply_finds_no_bricks(monkeypatch) -> None:
+def test_vendor_files_live_with_the_family_and_missing_means_instructions(
+    tmp_path, monkeypatch
+) -> None:
+    """The vendor lookup is the folder beside the module, nowhere magic.
+
+    Resolution: an absolute path in vendor/vendor.json, else the file in
+    vendor/ itself; missing yields the exact instruction (which file, into
+    which folder), which is what the scan strip and the open error show.
+    """
+
+    import json
+
+    from zlc_atom.devices.vendor import resolve_vendor_file
+
+    anchor = tmp_path / "family" / "driver.py"
+    vendor = tmp_path / "family" / "vendor"
+    vendor.mkdir(parents=True)
+    anchor.write_text("", encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError) as caught:
+        resolve_vendor_file(str(anchor), "thing.dll", what="the Thing SDK")
+    message = str(caught.value)
+    assert "copy thing.dll into" in message and str(vendor) in message
+
+    (vendor / "thing.dll").write_bytes(b"")
+    assert resolve_vendor_file(
+        str(anchor), "thing.dll", what="the Thing SDK"
+    ) == str(vendor / "thing.dll")
+
+    elsewhere = tmp_path / "elsewhere.dll"
+    elsewhere.write_bytes(b"")
+    (vendor / "vendor.json").write_text(
+        json.dumps({"thing.dll": str(elsewhere)}), encoding="utf-8"
+    )
+    assert resolve_vendor_file(
+        str(anchor), "thing.dll", what="the Thing SDK"
+    ) == str(elsewhere)
+
+    # The Lab Brick scan surfaces that instruction rather than shrugging.
+    import zlc_atom.devices.vendor as vendor_module
     import zlc_atom.devices.rf.device_types as module
 
-    def _no_dll(_path):
-        raise FileNotFoundError("Could not find module 'vnx_fmsynth.dll'")
+    def _missing(_anchor, filename, *, what):
+        raise FileNotFoundError(f"{what} is not installed: copy {filename} into ...")
 
-    monkeypatch.setattr(module, "CtypesLmsLibrary", _no_dll)
-    assert module._discover_vaunix() == ()
+    monkeypatch.setattr(vendor_module, "resolve_vendor_file", _missing)
+    with pytest.raises(FileNotFoundError, match="copy vnx_fmsynth.dll into"):
+        module._discover_vaunix()

@@ -37,9 +37,16 @@ class VisaScpiLink:
     def __init__(self, resource: str, *, timeout_seconds: float = 5.0) -> None:
         if not isinstance(resource, str) or not resource.strip():
             raise ValueError("VISA resource name is required")
-        import pyvisa
+        try:
+            import pyvisa
 
-        manager = pyvisa.ResourceManager()
+            manager = pyvisa.ResourceManager()
+        except Exception as error:
+            raise RuntimeError(
+                "no VISA backend is available: install NI-VISA system-wide "
+                "(or `pip install pyvisa-py`), then restart the bench "
+                f"({type(error).__name__}: {error})"
+            ) from error
         self._resource = manager.open_resource(resource.strip())
         self._resource.timeout = int(float(timeout_seconds) * 1000.0)
 

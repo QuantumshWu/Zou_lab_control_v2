@@ -66,9 +66,6 @@ VAUNIX_LMS_SCHEMA = AuthoringSchema(
             "serial", "int", "Serial number", None, required=True, minimum=1
         ),
         AuthoringField(
-            "dll_path", "str", "Vaunix DLL path", "vnx_fmsynth.dll"
-        ),
-        AuthoringField(
             "frequency_low_hz",
             "float",
             "Frequency low (Hz)",
@@ -118,7 +115,6 @@ def _vaunix_factory(context, key: str, values: dict) -> InstalledLeaf:
     authored = VAUNIX_LMS_SCHEMA.project_values(values)
     config = VaunixLmsConfig(
         serial=int(authored["serial"]),
-        dll_path=str(authored["dll_path"]),
         frequency_low_hz=float(authored["frequency_low_hz"]),
         frequency_high_hz=float(authored["frequency_high_hz"]),
         power_low_dbm=float(authored["power_low_dbm"]),
@@ -135,14 +131,20 @@ def _vaunix_factory(context, key: str, values: dict) -> InstalledLeaf:
 
 
 def _discover_vaunix() -> tuple[DeviceInstanceConfig, ...]:
-    """Every attached Lab Brick, by serial -- a count read, no opens."""
+    """Every attached Lab Brick, by serial -- a count read, no opens.
 
-    try:
-        library = CtypesLmsLibrary("vnx_fmsynth.dll")
-    except OSError:
-        # No vendor DLL on this machine means no bricks to find, the same
-        # ordinary emptiness as no bricks attached -- not a scan error.
-        return ()
+    A missing vendor DLL raises the INSTRUCTION (which file, into which
+    folder) rather than an empty result: the scan strip is exactly where
+    an operator wondering "why no bricks?" is looking.
+    """
+
+    from zlc_atom.devices.vendor import resolve_vendor_file
+
+    library = CtypesLmsLibrary(
+        resolve_vendor_file(
+            __file__, "vnx_fmsynth.dll", what="the Vaunix LMS SDK (64-bit)"
+        )
+    )
     return tuple(
         DeviceInstanceConfig(
             instance_id=f"lms_{serial}",
