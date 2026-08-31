@@ -673,11 +673,13 @@ def _fate_row_axes(
 def _scope_coordinates(
     schema: DatasetSchema,
     ref: AxisRef,
+    *,
+    include_latest: bool = False,
 ) -> SemanticCycleChoices | None:
     """The real coordinate domain behind this axis's one Scope fate."""
 
     resolved = resolve_axis(schema, ref)
-    if resolved.size < 2:
+    if resolved.size < 2 and not include_latest:
         return None
     coordinates = resolved.coordinates
     labels = resolved.coordinate_labels
@@ -707,7 +709,7 @@ def _scope_coordinates(
     return SemanticCycleChoices(
         coordinates,
         labels,
-        False,
+        bool(include_latest),
     )
 
 
@@ -1255,9 +1257,9 @@ def describe_semantics(
             offered.append((FATE_REDUCE, "reduced"))
         if spec.kind is PlotKind.ROLLING and _is_primary_index_axis(schema, ref):
             # Rolling does not reduce the Runtime's shot index away -- it
-            # ROLLS along it.  The row still offers "= Latest" and the
-            # per-shot pins, which genuinely narrow the window; only the
-            # default's label stops lying about the axis's fate.
+            # ROLLS along it.  Its ordinary relative-coordinate pins genuinely
+            # narrow the window; only the default's label stops lying about
+            # the axis's fate.
             offered[0] = (default_fate, "(shot axis)")
         for role in roles:
             # Fate rows are the plot kind's vocabulary, not a preview of
@@ -1266,7 +1268,19 @@ def describe_semantics(
             # replace/layout transaction owns cell capacity and projection
             # validation and reports a refusal without rewriting this table.
             offered.append((role, _ROLE_LABELS[role]))
-        pins = _scope_coordinates(schema, ref)
+        authored_latest = bool(
+            is_scope_fate(current)
+            and scope_coordinate_from_fate(current) is LATEST_COORDINATE
+        )
+        # Latest is a valid programmatic spec intent and remains dynamic as
+        # data grows, but it is not injected into ordinary UI vocabulary.
+        # Relative history therefore exposes/pins coordinate 0; only a spec
+        # that explicitly authored Latest sees that one extra cycle value.
+        pins = _scope_coordinates(
+            schema,
+            ref,
+            include_latest=authored_latest,
+        )
         fields.append(
             SemanticField(
                 name,

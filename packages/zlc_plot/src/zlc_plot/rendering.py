@@ -1611,6 +1611,7 @@ class MatplotlibRenderer:
 
         if not isinstance(plan, SurfacePlan):
             raise TypeError("plan must be SurfacePlan")
+        self._retire_composition_epoch()
         figure = self._figure
         with style_context(
             self.style,
@@ -1776,6 +1777,13 @@ class MatplotlibRenderer:
             scene_3d = self._height_bars_active(
                 self.primary_surface[0], state
             )
+            if scene_3d != self._height_bars_scene:
+                # Heatmap and height-bars do not share a data coordinate
+                # surface.  Retire the complete composition epoch before
+                # either scene exposes pixels; otherwise the first returning
+                # heatmap restores the 3D background and only the next
+                # revision repairs it.
+                self._retire_composition_epoch()
             self._height_bars_scene = scene_3d
             # Every painted surface honours the requested view, not just the
             # selected one: a FacetGrid overview shows N cells of the same
@@ -1975,6 +1983,23 @@ class MatplotlibRenderer:
 
     def _mark_axes_chrome_dirty(self, *axes: Any) -> None:
         self._chrome_dirty_axes.update(axes)
+
+    def _retire_composition_epoch(self) -> None:
+        """Forget every cache whose pixels belong to the previous surface.
+
+        Layout, Facet overview/focus, and 2D/3D presentation transitions are
+        the three owners of a new surface geometry.  They all retire through
+        this one operation so no first frame can inherit background pixels or
+        cache-miss history from the surface it replaced.
+        """
+
+        self._background_region = None
+        self._background_signature = None
+        self._chrome_churn = 0
+        self._boundary_chrome_cache.clear()
+        self._boundary_chrome_commands.clear()
+        self._boundary_chrome_signature = None
+        self._forget_gesture_region()
 
     @property
     def raster_generation(self) -> int:
@@ -7070,12 +7095,7 @@ class MatplotlibRenderer:
         # the repeated-miss escape hatch and full-draw a different picture;
         # the next revision then returned to native compose, producing the
         # visible one-frame geometry/style jump reported by the operator.
-        self._background_region = None
-        self._background_signature = None
-        self._chrome_churn = 0
-        self._boundary_chrome_cache.clear()
-        self._boundary_chrome_commands.clear()
-        self._forget_gesture_region()
+        self._retire_composition_epoch()
         if previous is not None:
             key = f"facet:{previous}"
             for suffix in self._FACET_FOCUS_CHROME_SUFFIXES:
