@@ -72,7 +72,7 @@ pulse_editor = "zlc_workbench.apps.pulse_editor:main"
 pulse_server = "zlc_pulse.remote:_main"
 slm_server = "zlc_atom.devices.slm.device_types:main"
 task_console = "zlc_workbench.apps.task_console:main"
-warm_numba = "zlc_plot._height3d_scanline:main"
+warm_numba = "zlc_plot._kernel_warm:main"
 
 [project.entry-points."zou_lab_control.evidence"]
 software = "zou_lab_control.__main__:evidence"

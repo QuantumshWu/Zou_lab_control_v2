@@ -202,6 +202,9 @@ class DeviceManagerHandle(QtCore.QObject):
     def set_templates(self, templates: tuple[tuple[str, str], ...]) -> None:
         self._view.set_templates(templates)
 
+    def set_remoted(self, instance_ids) -> None:
+        self._view.set_remoted(instance_ids)
+
     def set_loaded_devices(
         self,
         devices: tuple[tuple[str, str, str], ...],
