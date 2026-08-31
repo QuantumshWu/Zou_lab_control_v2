@@ -14,6 +14,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, fields, is_dataclass
 import argparse
 import json
+import logging
 import math
 import socket
 import socketserver
@@ -111,13 +112,24 @@ def _log_fields(**values: object) -> str:
     return " ".join(rendered)
 
 
+#: The embedding sink beside stdout: a bench that serves its own board shows
+#: this logger's records in a window, where the .bat console used to scroll.
+_LOG = logging.getLogger(__name__)
+
+
 def _server_log(event: str, *, client: str | None = None, detail: str = "") -> None:
-    """Print one timestamped lifecycle event without dumping payload contents."""
+    """Narrate one lifecycle event, without dumping payload contents.
+
+    stdout is the CLI console's sink; the ``zlc_pulse.remote`` logger carries
+    the same line for an embedding process.  Both always fire -- a server has
+    exactly one story, whoever is watching.
+    """
 
     fields = _log_fields(client=client)
     if detail:
         fields = f"{fields} {detail}" if fields else detail
     suffix = f" {fields}" if fields else ""
+    line = f"ZLC {event}{suffix}"
     now = time.time()
     local = time.localtime(now)
     timestamp = (
@@ -125,7 +137,8 @@ def _server_log(event: str, *, client: str | None = None, detail: str = "") -> N
         + f".{int(now * 1000) % 1000:03d}"
         + time.strftime("%z", local)
     )
-    print(f"[{timestamp}] ZLC {event}{suffix}", flush=True)
+    print(f"[{timestamp}] {line}", flush=True)
+    _LOG.info(line)
 
 
 #: The last line each client got for each POLLED event.  A poll is a question,
@@ -1425,6 +1438,198 @@ class RemotePulseStreamer:
             pass
 
 
+def open_local_streamer(
+    *,
+    backend: str = "auto",
+    uart_port: str | None = None,
+    uart_baud: int = 3_000_000,
+    state_dir: str = "fpga/build/state",
+) -> PulseStreamer:
+    """Build, open and SAFE-check the one local board this process owns.
+
+    This is the deployment half of what the server CLI does, shared verbatim
+    with :class:`LocalPulseService`: the canonical ``streamer_config.json``,
+    the XDC target, the backend probe, the transport, and the first stable
+    SAFE readback.  Every step narrates through :func:`_server_log`, so the
+    story reads the same from a console or from a bench window.
+    """
+
+    config = load_streamer_config()
+    if config["source"] is None or config["warnings"]:
+        detail = "; ".join(config["warnings"]) or "canonical config source is missing"
+        raise RuntimeError(
+            f"deployment requires a valid streamer_config.json without fallback: {detail}"
+        )
+    target = pulse_target_from_xdc(config_path=config["source"])
+    resolution = resolve_backend(
+        backend,
+        uart_port=uart_port,
+        uart_baud=uart_baud,
+        target=target,
+        params=config["params"],
+        clock_hz=config["clock_hz"],
+    )
+    _server_log(
+        "BACKEND RESOLVED",
+        detail=_log_fields(
+            requested=resolution.requested,
+            selected=resolution.backend,
+            uart_port=resolution.uart_port,
+            reason=resolution.reason,
+            attempts="; ".join(resolution.attempts) or None,
+        ),
+    )
+    if resolution.backend == "jtag-axi":
+        _server_log(
+            "BACKEND NOTE",
+            detail="resident vivado.exe ~1-2 GB; prefer UART on memory-constrained hosts",
+        )
+
+    from .transport import (
+        MemoryRegisterTransport,
+        UartRegisterTransport,
+        VivadoAxiRegisterTransport,
+    )
+
+    if resolution.backend == "memory":
+        transport = MemoryRegisterTransport(
+            geom=config["params"],
+            record_history=False,
+        )
+    elif resolution.backend == "uart":
+        if not resolution.uart_port:  # pragma: no cover - resolver guarantees this.
+            raise RuntimeError("UART resolution did not return a port")
+        transport = UartRegisterTransport(
+            port=resolution.uart_port,
+            baud=int(uart_baud),
+        )
+    else:
+        transport = VivadoAxiRegisterTransport(state_dir=state_dir)
+    streamer = PulseStreamer(
+        transport,
+        config["params"],
+        config["clock_hz"],
+        target=target,
+    )
+    backend_label = {
+        "jtag-axi": "JTAG-to-AXI",
+        "uart": "UART",
+        "memory": "memory mock",
+    }[resolution.backend]
+    _server_log(
+        "CONFIG",
+        detail=_log_fields(
+            backend=f"{backend_label} ({resolution.backend})",
+            geometry=config["source"],
+            channels=config["params"].channel_count,
+            dac_buses=config["params"].bus_count,
+            target_ports=len(target.ports),
+            clock_hz=f"{config['clock_hz']:.0f}",
+        ),
+    )
+    _server_log("HARDWARE CONNECTING", detail=_log_fields(action="open_deployed_streamer"))
+    try:
+        streamer.open()
+        initial_safe = streamer.safe()
+        if not initial_safe.stable:
+            raise RuntimeError(
+                "initial SAFE readback was not stable: "
+                f"status_reads={_compact_tuple(initial_safe.status_reads)}"
+            )
+    except BaseException:
+        streamer.close()
+        raise
+    _server_log(
+        "HARDWARE CONNECTED",
+        detail=_log_fields(
+            geometry_handshake=True,
+            safe_readback=initial_safe.stable,
+            status_reads=_compact_tuple(initial_safe.status_reads),
+            clock_enable_words=_compact_tuple(initial_safe.clock_enable_words),
+        ),
+    )
+    return streamer
+
+
+class LocalPulseService:
+    """One board opened, owned and served by THIS process.
+
+    What ``run_server.bat`` used to be, as an object a bench can hold: build
+    the deployed streamer (or accept an already-open one), listen for clients
+    on a background thread, and put every lifecycle event on the
+    ``zlc_pulse.remote`` logger so the machine that owns the board can watch
+    its server the way the old console window allowed.
+    """
+
+    def __init__(
+        self,
+        streamer: PulseStreamer | None = None,
+        *,
+        backend: str = "auto",
+        uart_port: str | None = None,
+        uart_baud: int = 3_000_000,
+        state_dir: str = "fpga/build/state",
+        host: str = DEFAULT_BIND_HOST,
+        port: int = DEFAULT_PORT,
+    ) -> None:
+        _server_log(
+            "SERVER STARTING",
+            detail=_log_fields(
+                requested_backend=backend if streamer is None else "supplied streamer",
+                endpoint=f"{host}:{int(port)}",
+                python=sys.executable,
+            ),
+        )
+        self._owns_streamer = streamer is None
+        if streamer is None:
+            streamer = open_local_streamer(
+                backend=backend,
+                uart_port=uart_port,
+                uart_baud=uart_baud,
+                state_dir=state_dir,
+            )
+        elif not isinstance(streamer, PulseStreamer):
+            raise TypeError("streamer must be a PulseStreamer")
+        self.streamer = streamer
+        try:
+            self._server = PulseRemoteServer((host, int(port)), streamer)
+        except BaseException:
+            if self._owns_streamer:
+                streamer.close()
+            raise
+        self.host = str(host)
+        self.port = int(self._server.server_address[1])
+        self._thread = threading.Thread(
+            target=self._server.serve_forever,
+            kwargs={"poll_interval": 0.1},
+            name=f"pulse-server:{self.port}",
+            daemon=True,
+        )
+        self._thread.start()
+        listen_host = self.host or "0.0.0.0"
+        if listen_host == "0.0.0.0":
+            listen_host = "0.0.0.0 (all interfaces)"
+        _server_log("RPC LISTENING", detail=_log_fields(endpoint=f"{listen_host}:{self.port}"))
+        _server_log("READY", detail=_log_fields(hardware="connected", waiting_for_client=True))
+        _print_client_endpoints(self.host, self.port)
+
+    def close(self) -> None:
+        """Stop listening, drop any client, and close what this service opened."""
+
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5.0)
+        if self._owns_streamer:
+            self.streamer.close()
+        _server_log("SERVER CLOSED", detail=_log_fields(device_session="closed"))
+
+    def __enter__(self) -> "LocalPulseService":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
+
+
 def serve(
     streamer: PulseStreamer,
     host: str = DEFAULT_BIND_HOST,
@@ -1518,105 +1723,26 @@ def _main(argv: list[str] | None = None) -> int:
         ),
     )
 
-    try:
-        resolution = resolve_backend(
-            args.backend,
-            uart_port=args.uart_port,
-            uart_baud=args.uart_baud,
-            target=target,
-            params=config["params"],
-            clock_hz=config["clock_hz"],
-        )
-    except BackendResolutionError as exc:
-        _server_log(
-            "BACKEND FAILED",
-            detail=_log_fields(
-                requested=args.backend,
-                error=str(exc),
-                attempts="; ".join(exc.attempts),
-            ),
-        )
-        print(f"ERROR: {exc}", file=sys.stderr, flush=True)
-        return 2
-
-    _server_log(
-        "BACKEND RESOLVED",
-        detail=_log_fields(
-            requested=resolution.requested,
-            selected=resolution.backend,
-            uart_port=resolution.uart_port,
-            reason=resolution.reason,
-            attempts="; ".join(resolution.attempts) or None,
-        ),
-    )
-    if resolution.backend == "jtag-axi":
-        _server_log(
-            "BACKEND NOTE",
-            detail="resident vivado.exe ~1-2 GB; prefer UART on memory-constrained hosts",
-        )
-
     streamer: PulseStreamer | None = None
     try:
-        from .transport import (
-            MemoryRegisterTransport,
-            UartRegisterTransport,
-            VivadoAxiRegisterTransport,
-        )
-
-        if resolution.backend == "memory":
-            transport = MemoryRegisterTransport(
-                geom=config["params"],
-                record_history=False,
+        try:
+            streamer = open_local_streamer(
+                backend=args.backend,
+                uart_port=args.uart_port,
+                uart_baud=args.uart_baud,
+                state_dir=args.state_dir,
             )
-        elif resolution.backend == "uart":
-            if not resolution.uart_port:  # pragma: no cover - resolver guarantees this.
-                raise RuntimeError("UART resolution did not return a port")
-            transport = UartRegisterTransport(
-                port=resolution.uart_port,
-                baud=args.uart_baud,
+        except BackendResolutionError as exc:
+            _server_log(
+                "BACKEND FAILED",
+                detail=_log_fields(
+                    requested=args.backend,
+                    error=str(exc),
+                    attempts="; ".join(exc.attempts),
+                ),
             )
-        else:
-            transport = VivadoAxiRegisterTransport(state_dir=args.state_dir)
-        streamer = PulseStreamer(
-            transport,
-            config["params"],
-            config["clock_hz"],
-            target=target,
-        )
-        backend_label = {
-            "jtag-axi": "JTAG-to-AXI",
-            "uart": "UART",
-            "memory": "memory mock",
-        }[resolution.backend]
-        _server_log(
-            "CONFIG",
-            detail=_log_fields(
-                backend=f"{backend_label} ({resolution.backend})",
-                geometry=config["source"],
-                channels=config["params"].channel_count,
-                dac_buses=config["params"].bus_count,
-                target_ports=len(target.ports),
-                clock_hz=f"{config['clock_hz']:.0f}",
-            ),
-        )
-        _server_log("HARDWARE CONNECTING", detail=_log_fields(action="open_deployed_streamer"))
-        streamer.open()
-        initial_safe = streamer.safe()
-        if not initial_safe.stable:
-            raise RuntimeError(
-                "initial SAFE readback was not stable: "
-                f"status_reads={_compact_tuple(initial_safe.status_reads)}"
-            )
-        _server_log(
-            "HARDWARE CONNECTED",
-            # Keep the human-facing "hardware CONNECTED" wording aligned with run_server.bat.
-            detail=_log_fields(
-                geometry_handshake=True,
-                safe_readback=initial_safe.stable,
-                status_reads=_compact_tuple(initial_safe.status_reads),
-                clock_enable_words=_compact_tuple(initial_safe.clock_enable_words),
-            ),
-        )
+            print(f"ERROR: {exc}", file=sys.stderr, flush=True)
+            return 2
         serve(streamer, args.host, args.port)
     except KeyboardInterrupt:
         _server_log("SERVER STOPPING", detail=_log_fields(reason="keyboard interrupt"))
@@ -1644,6 +1770,7 @@ __all__ = [
     "BACKEND_CHOICES",
     "BackendResolution",
     "BackendResolutionError",
+    "LocalPulseService",
     "MAX_FRAME_BYTES",
     "REMOTE_METHODS",
     "PulseRemoteServer",
@@ -1654,6 +1781,7 @@ __all__ = [
     "connect",
     "decode_tree",
     "encode_tree",
+    "open_local_streamer",
     "resolve_backend",
     "serve",
 ]

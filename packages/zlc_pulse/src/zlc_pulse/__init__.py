@@ -106,14 +106,17 @@ __all__ = [
     "scan_rows_to_wire",
     "scan_rows_from_wire",
     "RemoteError",
+    "LocalPulseService",
 ]
 
 
 def __getattr__(name: str):
     if name in {
         "RemotePulseStreamer", "RemoteError", "serve", "connect",
+        "LocalPulseService",
     }:
         from .remote import (
+            LocalPulseService,
             RemoteError,
             RemotePulseStreamer,
             connect,
@@ -126,6 +129,7 @@ def __getattr__(name: str):
                 "RemoteError": RemoteError,
                 "serve": serve,
                 "connect": connect,
+                "LocalPulseService": LocalPulseService,
             }
         )
         return globals()[name]

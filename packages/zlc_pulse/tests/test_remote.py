@@ -1034,3 +1034,46 @@ def test_an_unsendable_reply_costs_the_answer_not_the_board(monkeypatch) -> None
                 client.close()
     finally:
         streamer.close()
+
+
+def test_local_pulse_service_serves_a_supplied_streamer_and_narrates(caplog) -> None:
+    """The .bat's job as an object: listen, serve a loopback client, close.
+
+    The lines the console used to print go to the ``zlc_pulse.remote``
+    logger too, which is where a bench window watches its own server.
+    """
+
+    import logging
+
+    from zlc_pulse.remote import LocalPulseService
+
+    geom = replace(StreamerParams(), max_edges=8, bank_size=2)
+    streamer = PulseStreamer(
+        MemoryRegisterTransport(geom=geom), geom, 50e6, target=_BOARD_TARGET
+    )
+    streamer.open()
+    try:
+        with caplog.at_level(logging.INFO, logger="zlc_pulse.remote"):
+            service = LocalPulseService(streamer, host="127.0.0.1", port=0)
+            try:
+                assert service.port > 0
+                client = RemotePulseStreamer(
+                    "127.0.0.1", service.port, poll_interval=0.001
+                )
+                with client:
+                    assert client.safe().stable
+            finally:
+                service.close()
+        events = [record.getMessage() for record in caplog.records]
+        assert any(line.startswith("ZLC RPC LISTENING") for line in events)
+        assert any(line.startswith("ZLC READY") for line in events)
+        assert any(line.startswith("ZLC SERVER CLOSED") for line in events)
+        # A closed service no longer listens; the port is truly released.
+        with pytest.raises(OSError):
+            socket.create_connection(("127.0.0.1", service.port), timeout=0.5)
+        # The owner client's close IS the device close: the protocol's
+        # single-owner law, not a service detail.
+        with pytest.raises(RuntimeError, match="not open"):
+            streamer.safe()
+    finally:
+        streamer.close()
