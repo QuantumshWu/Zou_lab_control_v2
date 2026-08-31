@@ -19,6 +19,10 @@ from pathlib import Path
 import sys
 
 
+import logging
+
+_LOG = logging.getLogger(__name__)
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the neutral-atom task console.")
     parser.add_argument(
@@ -464,27 +468,52 @@ class ExperimentGuiFlow:
             "device_session_id": "",
         }
         self._device_control_risk[key] = None
+        # Each gesture guarded where it becomes a Qt slot: the projection
+        # under these handlers can raise (a closing session, a device that
+        # stopped answering), and an exception leaving a slot is qFatal --
+        # the crash arrives ON the control the operator is touching, so the
+        # report lands there too.
         control.refresh_requested.connect(
-            lambda selected=key: self._request_device_control_refresh(selected)
+            self._guard_control_gesture(
+                control,
+                "refresh",
+                lambda selected=key: self._request_device_control_refresh(selected),
+            )
         )
         control.risk_toggled.connect(
-            lambda accepted, selected=key: self._set_device_control_risk(
-                selected, accepted
+            self._guard_control_gesture(
+                control,
+                "risk toggle",
+                lambda accepted, selected=key: self._set_device_control_risk(
+                    selected, accepted
+                ),
             )
         )
         control.field_desired_changed.connect(
-            lambda field, value, selected=key: self._set_device_control_desired(
-                selected, field, value
+            self._guard_control_gesture(
+                control,
+                "field edit",
+                lambda field, value, selected=key: self._set_device_control_desired(
+                    selected, field, value
+                ),
             )
         )
         control.field_live_apply_toggled.connect(
-            lambda field, enabled, selected=key: self._set_device_control_live(
-                selected, field, enabled
+            self._guard_control_gesture(
+                control,
+                "live toggle",
+                lambda field, enabled, selected=key: self._set_device_control_live(
+                    selected, field, enabled
+                ),
             )
         )
         control.field_apply_requested.connect(
-            lambda field, value, selected=key: self._queue_device_tune(
-                selected, field, value
+            self._guard_control_gesture(
+                control,
+                "apply",
+                lambda field, value, selected=key: self._queue_device_tune(
+                    selected, field, value
+                ),
             )
         )
         self._request_device_control_refresh(key)
@@ -928,6 +957,32 @@ class ExperimentGuiFlow:
         self._device_tune_pending.pop((key, field), None)
         if key in self._device_control_models:
             self._queue_device_tune(key, field, requested)
+
+    def _guard_control_gesture(self, control, what, action):
+        """One generic-control gesture, unable to kill the bench.
+
+        Same law as the console's view-signal guard; the flow outlives
+        every control window, so a plain closure carries no lifetime risk,
+        and the report lands on the control the operator was touching.
+        Driving the underlying methods directly (as the tests do) still
+        raises.
+        """
+
+        def guarded(*args):
+            try:
+                action(*args)
+            except Exception as error:  # noqa: BLE001 -- the boundary IS total
+                _LOG.exception("device control %s failed", what)
+                try:
+                    control.show_status(
+                        f"internal error in {what}: "
+                        f"{type(error).__name__}: {error}",
+                        "error",
+                    )
+                except Exception:
+                    _LOG.exception("device control status report failed")
+
+        return guarded
 
     def _generic_control_close_guard(self, key: str, control: object) -> bool:
         if str(key) in self._device_refresh_active:

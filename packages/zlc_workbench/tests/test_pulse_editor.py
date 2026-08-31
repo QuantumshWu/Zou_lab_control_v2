@@ -3371,3 +3371,29 @@ def test_a_dead_server_connection_never_holds_the_window_hostage(sequence) -> No
         assert "did not go safe" in str(error)
     else:
         raise AssertionError("a connected SAFE refusal must still block close")
+
+
+def test_a_defective_handler_warns_instead_of_killing_the_editor(sequence) -> None:
+    """The editor's forty-one view signals cross the same qFatal boundary.
+
+    A dead remote connection raising out of a gesture used to end the
+    process; guarded at connect time, it is a warning and the editor keeps
+    running -- while direct calls (the rest of this suite) still raise.
+    """
+
+    view = _EditorView()
+    presenter = PulseEditorPresenter(view, sequence)
+
+    def detonate(*_args):
+        raise LookupError("wired to fail")
+
+    presenter.move_period = detonate
+    view.move_period_requested.emit("p0", 1)
+    assert any(
+        "internal error in move_period" in warning and "wired to fail" in warning
+        for warning in view.warnings
+    ), view.warnings
+    import pytest as _pytest
+
+    with _pytest.raises(LookupError):
+        presenter.move_period("p0", 1)

@@ -24,9 +24,13 @@ the last good state.
 
 from __future__ import annotations
 
+import logging
+
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from functools import wraps as _wraps
 from pathlib import Path
+from weakref import ref as _weak_ref
 from threading import Event
 from typing import Any
 
@@ -67,6 +71,9 @@ from zlc_ui import (
 
 from .device_use import DeviceClaim, DeviceLease, DeviceUseBusy, DeviceUseCoordinator
 from .pulse_state import PulseEditorState, read_pulse, write_pulse
+
+
+_LOG = logging.getLogger(__name__)
 
 
 __all__ = [
@@ -1043,49 +1050,80 @@ class PulseEditorPresenter:
 
     # --------------------------------------------------------------- wiring
 
+    def _guarded(self, handler):
+        """Wrap one view-signal handler so a defect cannot kill the bench.
+
+        Same law as the console's guard: an exception leaving a Qt slot is
+        qFatal -- the process dies with the experiment.  Crossing into Qt it
+        becomes a warning in the editor and a stderr traceback, and the window keeps running.  Called directly
+        (as the tests call them) these methods still raise.
+        """
+
+        name = handler.__name__
+        # A WEAK reference, deliberately: Qt strong-refs a plain callable,
+        # so a closure over the bound method would make the view keep this
+        # presenter -- and everything it owns -- alive with the window.
+        reference = _weak_ref(self)
+
+        @_wraps(handler)
+        def guarded(*args, **kwargs):
+            presenter = reference()
+            if presenter is None:
+                return None
+            try:
+                return getattr(presenter, name)(*args, **kwargs)
+            except Exception as error:  # noqa: BLE001 -- the boundary IS total
+                _LOG.exception("pulse editor handler %s failed", name)
+                presenter._warn(
+                    f"internal error in {name}: {type(error).__name__}: {error}"
+                )
+                return None
+
+        return guarded
+
     def _connect(self) -> None:
         view = self.view
-        view.document_name_committed.connect(self.set_document_name)
-        view.port_label_committed.connect(self.set_port_label)
-        view.period_name_committed.connect(self.set_period_name)
-        view.duration_committed.connect(self.set_duration)
-        view.digital_committed.connect(self.set_digital)
-        view.analog_committed.connect(self.set_analog)
-        view.delay_committed.connect(self.set_delay)
-        view.insert_period_requested.connect(self.insert_period)
-        view.move_period_requested.connect(self.move_period)
-        view.remove_period_requested.connect(self.remove_period)
-        view.repeat_committed.connect(self.set_repeat)
-        view.visible_ports_committed.connect(self.set_visible_ports)
-        view.clear_port_requested.connect(self.clear_port)
+        view.document_name_committed.connect(self._guarded(self.set_document_name))
+        view.port_label_committed.connect(self._guarded(self.set_port_label))
+        view.period_name_committed.connect(self._guarded(self.set_period_name))
+        view.duration_committed.connect(self._guarded(self.set_duration))
+        view.digital_committed.connect(self._guarded(self.set_digital))
+        view.analog_committed.connect(self._guarded(self.set_analog))
+        view.delay_committed.connect(self._guarded(self.set_delay))
+        view.insert_period_requested.connect(self._guarded(self.insert_period))
+        view.move_period_requested.connect(self._guarded(self.move_period))
+        view.remove_period_requested.connect(self._guarded(self.remove_period))
+        view.repeat_committed.connect(self._guarded(self.set_repeat))
+        view.visible_ports_committed.connect(self._guarded(self.set_visible_ports))
+        view.clear_port_requested.connect(self._guarded(self.clear_port))
         # From the button that raises it.  The schedule page also declared a
         # clear_all_requested that nothing ever emitted, and this listened to
         # that one -- so the toolbar's Clear All did nothing at all.
-        view.clear_all_requested.connect(self.clear_all)
-        view.page_changed.connect(self.show_page)
-        view.binding_cycle_requested.connect(self.cycle_binding)
-        view.scan_array_load_requested.connect(self.load_scan_array)
-        view.scan_source_edited.connect(self.edit_scan_source)
-        view.feedback_requested.connect(self._warn)
-        view.scan_repeats_committed.connect(self.set_scan_repeats)
-        view.scan_hold_requested.connect(self.hold_scan_point)
-        view.scan_step_requested.connect(self.step_scan_point)
-        view.scan_program_load_requested.connect(self.load_scan_program)
-        view.scan_template_requested.connect(self.write_scan_template)
-        view.scan_run_requested.connect(self.run_scan_program)
-        view.scan_array_save_requested.connect(self.save_scan_array)
-        view.scan_progress_refresh_requested.connect(self.refresh_scan_progress)
-        view.connection_requested.connect(self.connect_to)
-        view.fire_requested.connect(self._fire_from_view)
-        view.stop_requested.connect(self.stop)
-        view.sync_requested.connect(self.sync_from_sequencer)
-        view.save_requested.connect(self.save_pulse)
-        view.load_requested.connect(self.ask_for_pulse)
-        view.preview_include_off_toggled.connect(self._on_include_off)
-        view.preview_size_committed.connect(self.set_preview_size)
-        view.preview_selectors_toggled.connect(self.set_preview_selectors)
-        view.preview_save_requested.connect(self.save_preview_image)
-        view.target_apply_requested.connect(self.apply_target)
+        view.clear_all_requested.connect(self._guarded(self.clear_all))
+        view.page_changed.connect(self._guarded(self.show_page))
+        view.binding_cycle_requested.connect(self._guarded(self.cycle_binding))
+        view.scan_array_load_requested.connect(self._guarded(self.load_scan_array))
+        view.scan_source_edited.connect(self._guarded(self.edit_scan_source))
+        view.feedback_requested.connect(self._guarded(self._warn))
+        view.scan_repeats_committed.connect(self._guarded(self.set_scan_repeats))
+        view.scan_hold_requested.connect(self._guarded(self.hold_scan_point))
+        view.scan_step_requested.connect(self._guarded(self.step_scan_point))
+        view.scan_program_load_requested.connect(self._guarded(self.load_scan_program))
+        view.scan_template_requested.connect(self._guarded(self.write_scan_template))
+        view.scan_run_requested.connect(self._guarded(self.run_scan_program))
+        view.scan_array_save_requested.connect(self._guarded(self.save_scan_array))
+        view.scan_progress_refresh_requested.connect(self._guarded(self.refresh_scan_progress))
+        view.connection_requested.connect(self._guarded(self.connect_to))
+        view.fire_requested.connect(self._guarded(self._fire_from_view))
+        view.stop_requested.connect(self._guarded(self.stop))
+        view.sync_requested.connect(self._guarded(self.sync_from_sequencer))
+        view.save_requested.connect(self._guarded(self.save_pulse))
+        view.load_requested.connect(self._guarded(self.ask_for_pulse))
+        view.preview_include_off_toggled.connect(self._guarded(self._on_include_off))
+        view.preview_size_committed.connect(self._guarded(self.set_preview_size))
+        view.preview_selectors_toggled.connect(self._guarded(self.set_preview_selectors))
+        view.preview_save_requested.connect(self._guarded(self.save_preview_image))
+        view.target_apply_requested.connect(self._guarded(self.apply_target))
 
     # ------------------------------------------------------------- the pulse
 

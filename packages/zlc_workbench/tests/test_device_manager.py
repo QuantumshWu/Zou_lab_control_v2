@@ -1408,3 +1408,31 @@ def test_adding_a_type_whose_required_field_has_no_default_is_a_draft(tmp_path) 
         assert flipped.parameters["serial"] is None
     finally:
         manager.close()
+
+
+def test_a_defective_handler_is_an_error_line_not_a_dead_bench(tmp_path) -> None:
+    """User-reported crash family: an exception leaving a Qt slot is qFatal.
+
+    Every view signal is wrapped where it becomes a slot, so a defect in a
+    handler lands on the status strip and the bench keeps running.  Called
+    directly -- as this suite calls handlers everywhere else -- the method
+    still raises, so defects stay loud where loudness costs nothing.
+    """
+
+    view = _ManagerView()
+    manager = DeviceManagerPresenter(view, tmp_path / "apparatus.json")
+    try:
+        def detonate(_key):
+            raise LookupError("wired to fail")
+
+        manager.remove_device = detonate
+        view.device_remove_requested.emit("rf")
+        severity, text = view.status[-1]
+        assert severity == "error"
+        assert "internal error in remove_device" in text
+        assert "wired to fail" in text
+        with pytest.raises(LookupError):
+            manager.remove_device("rf")
+    finally:
+        del manager.remove_device
+        manager.close()

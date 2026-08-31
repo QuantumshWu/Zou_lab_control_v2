@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from functools import partial
 from pathlib import Path
+import logging
 import threading
 import time
 
@@ -24,6 +25,9 @@ from zlc_ui.fluent import (
 
 from zlc_atom.data import snapshot_from_array
 from .device import SlmAdapter, canonical_phase
+
+
+_LOG = logging.getLogger(__name__)
 from .solver import (
     compose_science_phase, freeze_pattern_phase,
     imported_target, load_science_context, load_target, preset_checkerboard,
@@ -165,13 +169,19 @@ class SlmEditorControl(QtCore.QObject):
         self._phase_host.set_interaction_enabled(False)
         self._wavefront_host.set_interaction_enabled(False)
         self._body = self._build_body()
-        self._solve_ready.connect(self._finish_solve)
+        self._solve_ready.connect(self._guarded("solve finish", self._finish_solve))
         self._command_ready.connect(
-            self._finish_command, QtCore.Qt.QueuedConnection
+            self._guarded("command finish", self._finish_command),
+            QtCore.Qt.QueuedConnection,
         )
         self._device_poll = QtCore.QTimer(self)
         self._device_poll.setInterval(100)
-        self._device_poll.timeout.connect(self._sync_device_state)
+        # The HOT boundary: this fires ten times a second and reads the
+        # device directly -- a remote transport hiccup must be a status
+        # line, never ten chances a second to kill the whole bench.
+        self._device_poll.timeout.connect(
+            self._guarded("device poll", self._sync_device_state)
+        )
         self._device_poll.start()
         self._sync_device_state()
         self._queue_solve()
@@ -323,10 +333,16 @@ class SlmEditorControl(QtCore.QObject):
             buttons.addWidget(button)
         buttons.addStretch(1)
         self._adopt = FluentButton("Adopt device command", files)
-        self._adopt.clicked.connect(self._adopt_device_command)
+        self._adopt.clicked.connect(
+            self._guarded(
+                "adopt", lambda _checked=False: self._adopt_device_command()
+            )
+        )
         buttons.addWidget(self._adopt)
         self._send = FluentButton("Send to SLM", files)
-        self._send.clicked.connect(self.send)
+        self._send.clicked.connect(
+            self._guarded("send", lambda _checked=False: self.send())
+        )
         self._sync_send_enabled()
         buttons.addWidget(self._send)
         root.addWidget(files)
@@ -806,6 +822,31 @@ class SlmEditorControl(QtCore.QObject):
     @property
     def command_active(self) -> bool:
         return self._command_active
+
+    def _guarded(self, what: str, handler):
+        """Wrap one device-touching slot so a defect cannot kill the bench.
+
+        Same law as the workbench guards: an exception leaving a Qt slot is
+        qFatal.  Everything here lives and dies with this one widget, so a
+        plain closure carries no lifetime risk; the defect becomes a status
+        line and a stderr traceback, and the editor keeps running.  Driving
+        the methods directly (as the tests do) still raises.
+        """
+
+        def guarded(*args):
+            try:
+                handler(*args)
+            except Exception as error:  # noqa: BLE001 -- the boundary IS total
+                _LOG.exception("SLM editor %s failed", what)
+                try:
+                    self._status.setText(
+                        f"internal error in {what}: "
+                        f"{type(error).__name__}: {error}"
+                    )
+                except Exception:
+                    _LOG.exception("SLM editor status report failed")
+
+        return guarded
 
     def _sync_device_state(self) -> None:
         if self._closed:

@@ -25,7 +25,9 @@ from collections.abc import Callable, Sequence
 from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
+from functools import wraps as _wraps
 from threading import Lock
+from weakref import ref as _weak_ref
 import logging
 import time
 
@@ -43,6 +45,8 @@ from zlc_atom.install import (
 )
 from .authoring_form import display_value, project_schema
 
+
+_LOG = logging.getLogger(__name__)
 
 __all__ = ["DeviceManagerPresenter"]
 
@@ -211,24 +215,56 @@ class DeviceManagerPresenter:
 
     # ------------------------------------------------------------------ wiring
 
+    def _guarded(self, handler):
+        """Wrap one view-signal handler so a defect cannot kill the bench.
+
+        Same law as the console's guard: an exception leaving a Qt slot is
+        qFatal -- the process dies with the experiment.  Crossing into Qt it
+        becomes an error line on the status strip and a stderr traceback, and the window keeps running.  Called directly
+        (as the tests call them) these methods still raise.
+        """
+
+        name = handler.__name__
+        # A WEAK reference, deliberately: Qt strong-refs a plain callable,
+        # so a closure over the bound method would make the view keep this
+        # presenter -- and everything it owns -- alive with the window.
+        reference = _weak_ref(self)
+
+        @_wraps(handler)
+        def guarded(*args, **kwargs):
+            presenter = reference()
+            if presenter is None:
+                return None
+            try:
+                return getattr(presenter, name)(*args, **kwargs)
+            except Exception as error:  # noqa: BLE001 -- the boundary IS total
+                _LOG.exception("device manager handler %s failed", name)
+                presenter._report(
+                    f"internal error in {name}: {type(error).__name__}: {error}",
+                    severity="error",
+                )
+                return None
+
+        return guarded
+
     def _connect(self) -> None:
-        self.view.device_add_requested.connect(self.add_device)
-        self.view.device_remove_requested.connect(self.remove_device)
-        self.view.role_committed.connect(self.set_role)
-        self.view.type_picked.connect(self.set_type)
-        self.view.parameter_committed.connect(self.commit_parameters)
-        self.view.template_selected.connect(self.new_from_template)
-        self.view.discovery_requested.connect(self.discover)
-        self.view.discovered_add_requested.connect(self.add_discovered)
-        self.view.load_requested.connect(self.load_from_dialog)
-        self.view.save_requested.connect(self.save)
-        self.view.save_as_requested.connect(self.save_as)
-        self.view.cancel_requested.connect(self.cancel)
-        self.view.lifecycle_requested.connect(self.toggle_lifecycle)
-        self.view.device_open_requested.connect(self.open_device)
-        self.view.device_remote_toggled.connect(self.toggle_remote)
-        self.view.device_close_requested.connect(self.close_device)
-        self.view.device_log_requested.connect(self.show_device_log)
+        self.view.device_add_requested.connect(self._guarded(self.add_device))
+        self.view.device_remove_requested.connect(self._guarded(self.remove_device))
+        self.view.role_committed.connect(self._guarded(self.set_role))
+        self.view.type_picked.connect(self._guarded(self.set_type))
+        self.view.parameter_committed.connect(self._guarded(self.commit_parameters))
+        self.view.template_selected.connect(self._guarded(self.new_from_template))
+        self.view.discovery_requested.connect(self._guarded(self.discover))
+        self.view.discovered_add_requested.connect(self._guarded(self.add_discovered))
+        self.view.load_requested.connect(self._guarded(self.load_from_dialog))
+        self.view.save_requested.connect(self._guarded(self.save))
+        self.view.save_as_requested.connect(self._guarded(self.save_as))
+        self.view.cancel_requested.connect(self._guarded(self.cancel))
+        self.view.lifecycle_requested.connect(self._guarded(self.toggle_lifecycle))
+        self.view.device_open_requested.connect(self._guarded(self.open_device))
+        self.view.device_remote_toggled.connect(self._guarded(self.toggle_remote))
+        self.view.device_close_requested.connect(self._guarded(self.close_device))
+        self.view.device_log_requested.connect(self._guarded(self.show_device_log))
         # What this machine cannot offer is named too, with the reason: a
         # family that will not import used to be simply absent, which reads
         # exactly like a family that does not exist.
