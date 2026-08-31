@@ -103,7 +103,6 @@ from .primitives import (
 from .rendering import (
     MatplotlibRenderer,
     RenderFrame,
-    _image_axis_span,
     _image_cell_aspect,
 )
 from .selectors import (
@@ -1183,7 +1182,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             topology = FacetTopology(
                 cell_count=max(cell_count, 1),
                 cell_height_over_width=(
-                    self._drawn_image_height_over_width(payload)
+                    1.0
                     if isinstance(semantic_spec(spec), ImagePlot)
                     else None
                 ),
@@ -1198,7 +1197,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             device_pixel_ratio=self._device_pixel_ratio,
             rolling_side_distribution=side_distribution,
             image_height_over_width=(
-                self._drawn_image_height_over_width(payload)
+                1.0
                 if isinstance(spec, ImagePlot)
                 else None
             ),
@@ -1222,25 +1221,6 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         except KeyError:
             return False
         return str(presentation) == ImagePresentation.HEIGHT_BARS.value
-
-    def _drawn_image_height_over_width(self, payload: Any) -> float | None:
-        """The shape the renderer will actually DRAW an image at.
-
-        Cell pitch selects y/x scale, so the full-data box has
-        height/width=rows/columns independent of scan step and display unit.
-        """
-
-        cells = tuple(getattr(payload, "cells", ()))
-        if cells:
-            payload = getattr(cells[0], "payload", None)
-        if payload is None or not hasattr(payload, "x") or not hasattr(payload, "y"):
-            return 1.0
-        aspect = _image_cell_aspect(payload.x, payload.y)
-        x_span = _image_axis_span(payload.x)
-        y_span = _image_axis_span(payload.y)
-        if aspect is None or x_span is None or y_span is None:
-            return None
-        return y_span * aspect / x_span
 
     def _update_renderer(
         self,
@@ -4174,10 +4154,10 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         limits the axes carry are the same number.  The move is under half a
         source pixel -- a thousandth of a 900-pixel view.
 
-        THE TWO AXES SNAP TOGETHER at the source rows/columns ratio.  A camera
-        1920x1200 therefore keeps an 8:5 viewport, while a 50x50 scan keeps a
-        square one.  This preserves the fixed layout box and square screen
-        cells through zoom without moving either limit off the source grid.
+        THE TWO AXES SNAP TOGETHER in cell units.  The display frame stays
+        square and one x cell stays the same screen size as one y cell; a
+        rectangular camera footprint is letterboxed rather than allowed to
+        reshape the axes.  Both limits remain on the source grid.
         """
 
         if selected is None or not isinstance(semantic_spec(self._spec), ImagePlot):
@@ -4226,23 +4206,18 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             lows.append(first)
             counts.append(last - first)
 
-        full_counts = tuple(
-            np.asarray(getattr(values, "display", values)).size
-            for values in axes_values
-        )
-        divisor = math.gcd(*full_counts)
-        units = (full_counts[0] // divisor, full_counts[1] // divisor)
-        multiple = max(
-            math.ceil(counts[0] / units[0]),
-            math.ceil(counts[1] / units[1]),
-        )
-        wanted = (multiple * units[0], multiple * units[1])
+        aspect = _image_cell_aspect(*axes_values)
+        if aspect is None or not math.isclose(
+            pitches[0], pitches[1] * aspect, rel_tol=1e-9, abs_tol=0.0
+        ):
+            return selected
+        wanted = max(counts)
         for index, count in enumerate(counts):
-            missing = wanted[index] - count
+            missing = wanted - count
             if missing <= 0:
                 continue
             lows[index] -= missing // 2
-            counts[index] = wanted[index]
+            counts[index] = wanted
 
         snapped = [
             NumericRange(

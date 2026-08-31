@@ -1767,6 +1767,9 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
     accepted = main.host._session._accepted_fit
     assert accepted is not None and accepted.selection is not None
     assert accepted.selection.selector_kind is SelectorKind.AREA
+    # The Image display frame and its cells are square.  A centred 20% x 20%
+    # selector therefore covers the same whole-cell span on both axes even
+    # though the 96x128 source footprint is letterboxed in that frame.
     assert accepted.selection.sample_count == 26 * 26
     rolling = presenter.add_panel(
         fit_signal,
@@ -1907,8 +1910,9 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
     )
     assert _accepted(rolling.port, "publication") is shown_before_edit
     assert rolling.frozen_data is frozen_before_edit
-    assert rolling.port.presentation_current, (
-        "the old accepted surface remains current until configure accepts"
+    assert not rolling.port.presentation_current, (
+        "the old complete surface stays visible, but a changed representation "
+        "is display debt until its replacement is accepted"
     )
     _settle_panel_hosts(
         presenter,
@@ -1932,7 +1936,6 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
             and rolling_offsets() == retained_offsets
         ),
     )
-    from zlc_data import LATEST_COORDINATE
     from zlc_plot import AxisRef
     from zlc_plot.semantics import fate_field_name, scope_fate
 
@@ -1941,7 +1944,9 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
     )
     assert presenter.update_panel_state(
         rolling.panel_id,
-        {"semantic": {primary_fate: scope_fate(LATEST_COORDINATE)}},
+        # History exposes ordinary relative coordinates.  Zero is the latest
+        # retained event; Plot no longer needs a history-only Latest sentinel.
+        {"semantic": {primary_fate: scope_fate(0)}},
     )
     _settle_panel_hosts(
         presenter,

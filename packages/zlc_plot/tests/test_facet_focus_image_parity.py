@@ -240,7 +240,8 @@ def test_focused_image_cell_matches_the_standalone_image_surface() -> None:
         assert focused.primary_axes.get_title() == "bias=0"
 
         # SAME GEOMETRY, not merely the same chrome.  Standalone and focused
-        # surfaces both use the source rows/columns box and square cells.
+        # surfaces both use the fixed square frame, square cells and the same
+        # letterboxed source footprint.
         # To the pixel, not to the last bit: the focused cell measures its
         # box from the union of the overview's cells and the standalone from
         # the data region, and those two arrive at the same rectangle by
@@ -333,7 +334,8 @@ def test_focused_cell_crosshair_keeps_its_value_rail() -> None:
 def test_overview_slots_are_shaped_for_what_the_renderer_draws() -> None:
     """The layout's declared cell aspect IS the aspect the cell is drawn at.
 
-    Height over width is rows/columns; scan coordinate step never changes it.
+    Every overview slot is the same fixed square Image frame; source shape and
+    scan coordinate step affect only the footprint inside it.
     """
 
     session = PlotSession(_frames_scan_snapshot(), _FACET_SPEC, size="4x4")
@@ -369,15 +371,15 @@ def test_overview_view_limits_apply_to_every_visible_cell() -> None:
         visible = [axis for axis in cells if axis.get_visible()]
         assert len(visible) == 3
         for axis in visible:
-            assert tuple(map(float, axis.get_xlim())) == (3.5, 36.5)
-            assert tuple(map(float, sorted(axis.get_ylim()))) == (4.5, 26.5)
+            assert tuple(map(float, axis.get_xlim())) == (9.5, 30.5)
+            assert tuple(map(float, sorted(axis.get_ylim()))) == (4.5, 25.5)
         # ...and every cell prepares its RASTER for the view it shows, which
         # is what the standalone image does.  Honouring the request on the
         # selected cell only left the rest showing a full-extent front cropped
         # to a zoom: the same pixels, at a fraction of the resolution.
         for index in range(len(visible)):
             prepared = session._renderer._artists[f"facet:{index}:prepared_current"]
-            assert tuple(map(float, prepared.extent)) == (3.5, 36.5, 26.5, 4.5)
+            assert tuple(map(float, prepared.extent)) == (9.5, 30.5, 25.5, 4.5)
     finally:
         session.close()
 

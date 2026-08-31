@@ -1787,9 +1787,16 @@ def test_a_grid_overview_does_not_choose_series() -> None:
     try:
         renderer = session._renderer
         assert renderer._facet_focus_index is None, "this test needs the overview"
-        command = renderer._artists.get("curve:prepared")
-        assert isinstance(command, dict)
-        assert all(len(cell_series) > 1 for cell_series in command["series"])
+        # Series interaction belongs to the prepared cell scene, not to one
+        # particular consumer.  With SEM the scene is materialized as public
+        # Line2D/error-bar artists; without SEM the same scene may stay in the
+        # native command until an interaction needs it.  Either way every
+        # overview cell carries the two real series this guard must refuse.
+        renderer._materialize_prepared_curve()
+        assert all(
+            len(renderer._series_lines.get(id(axis), ())) > 1
+            for _key, axis, _index in renderer.painted_surfaces
+        )
         _key, axes, _index = renderer.painted_surfaces[0]
         px = float(axes.bbox.x0 + axes.bbox.width / 2.0)
         py = float(axes.bbox.y0 + axes.bbox.height / 2.0)

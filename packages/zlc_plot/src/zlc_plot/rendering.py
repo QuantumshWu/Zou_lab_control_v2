@@ -750,6 +750,44 @@ def _image_destination_rect(
     return (int(round(x_start)), int(round(y_start)), width, height)
 
 
+def _square_image_limits(
+    extent: tuple[float, float, float, float],
+    *,
+    coordinate_aspect: float,
+) -> tuple[float, float, float, float]:
+    """Letterbox one image footprint inside a fixed square viewport.
+
+    ``coordinate_aspect`` is the screen length of one y-coordinate unit per
+    x-coordinate unit.  For a regular image it is derived from cell pitches,
+    so the effective span below is measured in *cells*, not in authored scan
+    units: unequal scan steps cannot stretch a cell.  Padding changes only the
+    viewport; the image extent, canonical coordinates and data stay untouched.
+    """
+
+    left, right, upper, lower = map(float, extent)
+    scale = float(coordinate_aspect)
+    x_span = abs(right - left)
+    y_span = abs(lower - upper) * scale
+    if (
+        x_span <= 0.0
+        or y_span <= 0.0
+        or not math.isfinite(scale)
+        or scale <= 0.0
+    ):
+        raise ValueError("image extent spans must be positive")
+    if x_span > y_span:
+        padding = (x_span - y_span) / (2.0 * scale)
+        direction = 1.0 if lower > upper else -1.0
+        upper -= direction * padding
+        lower += direction * padding
+    elif y_span > x_span:
+        padding = (y_span - x_span) / 2.0
+        direction = 1.0 if right > left else -1.0
+        left -= direction * padding
+        right += direction * padding
+    return left, right, upper, lower
+
+
 def _image_axis_span(coordinates: Any) -> float | None:
     """How wide one image axis is, EXTENT-wise, in display units.
 
@@ -4810,11 +4848,18 @@ class MatplotlibRenderer:
             self._hide_height_bars_chrome(key)
             self._mark_axes_chrome_dirty(axes)
 
-        # Cell pitch chooses the axes aspect; the authored data extent fills
-        # that box.  Padding canonical coordinates to force a square field
-        # made unequal scan steps into rectangular cells and turned zoom into
-        # a layout edit.
-        home_extent = extent
+        # The Image surface is a fixed square frame.  The picture keeps its
+        # rows/columns footprint inside it and the shorter side is letterboxed;
+        # cell-pitch aspect (rather than canonical physical step) makes every
+        # sample square even when two scan axes use different step sizes.
+        # Canonical extent remains the picture and therefore remains the sole
+        # authority for ticks, selectors, overlays and fit geometry.
+        if coordinate_aspect is None:
+            raise ValueError("image cell geometry has no finite coordinate aspect")
+        home_extent = _square_image_limits(
+            extent,
+            coordinate_aspect=coordinate_aspect,
+        )
         self._home_limits[id(axes)] = (
             (float(home_extent[0]), float(home_extent[1])),
             (float(home_extent[2]), float(home_extent[3])),
@@ -4833,7 +4878,7 @@ class MatplotlibRenderer:
         self._set_ylim(axes, *y_limits)
         if axes.get_anchor() != policy.image_anchor:
             axes.set_anchor(policy.image_anchor)
-        wanted_aspect = "auto" if coordinate_aspect is None else coordinate_aspect
+        wanted_aspect = coordinate_aspect
         if (
             axes.get_aspect() != wanted_aspect
             or axes.get_adjustable() != "box"
@@ -7018,6 +7063,19 @@ class MatplotlibRenderer:
         previous = self._facet_focus_chrome_index
         if previous == index:
             return
+        # Overview/focus is a new surface geometry, not evidence that a
+        # stable background cache keeps missing.  Retire the entire previous
+        # composition epoch here, before axes are removed/created.  Leaving
+        # ``_chrome_churn`` from the overview made the first focused frame hit
+        # the repeated-miss escape hatch and full-draw a different picture;
+        # the next revision then returned to native compose, producing the
+        # visible one-frame geometry/style jump reported by the operator.
+        self._background_region = None
+        self._background_signature = None
+        self._chrome_churn = 0
+        self._boundary_chrome_cache.clear()
+        self._boundary_chrome_commands.clear()
+        self._forget_gesture_region()
         if previous is not None:
             key = f"facet:{previous}"
             for suffix in self._FACET_FOCUS_CHROME_SUFFIXES:
@@ -7041,8 +7099,6 @@ class MatplotlibRenderer:
             for axis in removed:
                 self._chrome_dirty_axes.discard(axis)
                 axis.remove()
-            self._background_region = None
-            self._forget_gesture_region()
         if index is not None:
             assert self.plan.facet_focus_axes is not None
             for item in self.plan.facet_focus_axes:
@@ -7051,8 +7107,6 @@ class MatplotlibRenderer:
                 axis = self._figure.add_axes(item.box.matplotlib_bounds())
                 axis.set_gid(item.role)
                 self._axes.setdefault(item.role, []).append(axis)
-            self._background_region = None
-            self._forget_gesture_region()
         self._facet_focus_chrome_index = index
 
     def _planned_image_box_ratio(self, role: str) -> float | None:
@@ -9189,7 +9243,15 @@ class MatplotlibRenderer:
             self._series_locked = self._series_hover = None
             self._apply_series_focus()
             with style_context(self.style):
-                self._figure.savefig(path, dpi=dpi or self.plan.dpi, **kwargs)
+                # ``savefig`` creates a private renderer internally, so the
+                # live-draw hook cannot wrap that renderer's mathtext parser.
+                # It must join the same process-global parser lane here or a
+                # concurrent live fit/title draw can corrupt either parse and
+                # turn an otherwise valid signal label into ParseException.
+                # Export is deliberately rare; serialising this one call does
+                # not put ordinary raster work behind a figure-wide lock.
+                with _MATHTEXT_DRAW_LOCK:
+                    self._figure.savefig(path, dpi=dpi or self.plan.dpi, **kwargs)
         finally:
             self._series_locked, self._series_hover = locked, hover
             self._apply_series_focus()

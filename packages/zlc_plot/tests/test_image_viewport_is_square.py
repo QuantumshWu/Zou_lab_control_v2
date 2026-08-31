@@ -1,4 +1,4 @@
-"""Image viewports keep whole square cells and the source rows/columns ratio."""
+"""Every Image keeps one square frame made of whole square cells."""
 
 from __future__ import annotations
 
@@ -52,8 +52,8 @@ def _samples(session, viewport):
     return counts
 
 
-def test_a_snapped_viewport_preserves_the_source_cell_aspect() -> None:
-    """Every rectangle keeps the source rows/columns ratio and whole cells."""
+def test_a_snapped_viewport_is_square_in_cell_units() -> None:
+    """Every zoom keeps equal whole-cell spans inside the square frame."""
 
     session = PlotSession(
         _square_field_snapshot(),
@@ -75,7 +75,7 @@ def test_a_snapped_viewport_preserves_the_source_cell_aspect() -> None:
                     NumericRange(low_x, high_x), NumericRange(low_y, high_y)
                 ),
             )
-            assert x_count * 48 == y_count * 64, (
+            assert x_count == y_count, (
                 (low_x, high_x, low_y, high_y), x_count, y_count
             )
     finally:
@@ -112,6 +112,7 @@ def test_unequal_scan_steps_still_draw_square_cells_and_keep_the_zoom_box() -> N
     try:
         axes = session._renderer.primary_axes
         before = tuple(map(float, axes.bbox.bounds))
+        assert before[2] == pytest.approx(before[3], abs=1.0e-9)
         x_step = float(short[1] - short[0])
         y_step = float(long[1] - long[0])
         origin = axes.transData.transform((short[0], long[0]))

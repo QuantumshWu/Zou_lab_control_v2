@@ -160,16 +160,17 @@ def test_image_display_unit_change_preserves_canonical_pixel_geometry() -> None:
         image = session._renderer._artists["image"]
         after_bbox = tuple(float(value) for value in axes.bbox.bounds)
         assert np.allclose(after_bbox, before_bbox, rtol=0.0, atol=1.0e-9)
+        assert after_bbox[2] == pytest.approx(after_bbox[3], abs=1.0e-9)
         assert axes.get_aspect() == pytest.approx(80.0)
         np.testing.assert_array_equal(np.asarray(image.get_array()), before_array)
         # The display extent changes by the unit conversion, while the
-        # renderer's physical box and prepared image remain invariant.  The
-        # picture fills its rows/columns-shaped box; changing display unit
-        # changes only coordinate numbers, not physical cell geometry.
+        # renderer's physical square and prepared image remain invariant.  The
+        # RGBA artist fills the square viewport; the prepared extent remains
+        # the real data footprint inside that letterboxed view.
         prepared = session._renderer._artists["image:prepared_current"]
         assert np.isclose(float(prepared.extent[1]), 100.0 * 2.1)
         assert tuple(map(float, image.get_extent())) == pytest.approx(
-            tuple(map(float, prepared.extent))
+            (*map(float, axes.get_xlim()), *map(float, axes.get_ylim()))
         )
     finally:
         session.close()
@@ -181,6 +182,14 @@ def test_non_equivalent_image_still_uses_square_screen_cells() -> None:
         axes = session._renderer.primary_axes
         image = session._renderer._artists["image"]
         assert axes.get_aspect() == pytest.approx(0.8)
+        bbox = tuple(map(float, axes.bbox.bounds))
+        assert bbox[2] == pytest.approx(bbox[3], abs=1.0e-9)
+        x = np.linspace(-2.0, 2.0, 21)
+        y = np.linspace(-3.0, 3.0, 25)
+        origin = axes.transData.transform((x[0], y[0]))
+        x_pixels = axes.transData.transform((x[1], y[0]))[0] - origin[0]
+        y_pixels = axes.transData.transform((x[0], y[1]))[1] - origin[1]
+        assert abs(x_pixels) == pytest.approx(abs(y_pixels), rel=1.0e-9)
         extent = tuple(float(value) for value in image.get_extent())
         assert np.allclose(axes.get_xlim(), extent[:2])
         assert np.allclose(axes.get_ylim(), extent[2:])

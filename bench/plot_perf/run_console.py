@@ -310,11 +310,120 @@ class ConsoleBench:
         with guards.ProductBeat(self.app, self.presenter) as beat:
             beat.run(seconds)
 
-    def _until(self, predicate, what: str, timeout: float = 60.0) -> None:
+    def report_cursor(self) -> int:
+        """Mark the operator-visible report stream before one action.
+
+        Presenter work is asynchronous: a call can accept a request and the
+        worker can reject it one owner turn later.  A benchmark that remembers
+        only the return value loses the actual failure and eventually calls it
+        a timeout.  The cursor makes that interval explicit without clearing
+        reports needed by the final run summary.
+        """
+
+        return len(self.reports)
+
+    def reports_since(self, cursor: int) -> tuple[tuple[str, str], ...]:
+        """Every status emitted after ``cursor``, in product order."""
+
+        selected = int(cursor)
+        if selected < 0 or selected > len(self.reports):
+            raise ValueError("report cursor is outside this benchmark run")
+        return tuple(self.reports[selected:])
+
+    def errors_since(self, cursor: int = 0) -> tuple[str, ...]:
+        """Every operator-visible error after one report cursor."""
+
+        return tuple(
+            message
+            for severity, message in self.reports_since(cursor)
+            if severity == "error"
+        )
+
+    def require_no_errors(self, cursor: int, what: str) -> None:
+        """Fail one measured interval with the exact product errors it saw."""
+
+        errors = self.errors_since(cursor)
+        if errors:
+            raise guards.HarnessError(
+                f"{what} failed: " + " | ".join(errors)
+            )
+
+    def _until(
+        self,
+        predicate,
+        what: str,
+        timeout: float = 60.0,
+        *,
+        report_cursor: int | None = None,
+        allow_errors: bool = False,
+    ) -> None:
+        """Wait for one product condition, with its error channel attached.
+
+        A new presenter ``error`` is a terminal answer to the action being
+        awaited, not background text to ignore until the wall clock expires.
+        Callers deliberately exercising a refusal can opt out; ordinary mount,
+        fit, history, selector, device and save waits all fail immediately with
+        the exact operator-visible sentence.
+        """
+
+        # With no explicit action cursor, ANY error in this benchmark run
+        # invalidates the wait.  This also catches a synchronous presenter
+        # error emitted in the narrow interval between a trigger and its
+        # following ``_until`` call; starting at the call itself lost it.
+        cursor = 0 if report_cursor is None else int(report_cursor)
+        outcome: dict[str, object] = {}
+
+        def answered() -> bool:
+            if not allow_errors:
+                errors = self.errors_since(cursor)
+                if errors:
+                    outcome["errors"] = errors
+                    return True
+            if predicate():
+                outcome["success"] = True
+                return True
+            return False
+
         with guards.ProductBeat(self.app, self.presenter) as beat:
-            if beat.run_until(predicate, timeout):
-                return
-        raise guards.HarnessError(f"timed out waiting for {what}")
+            completed = beat.run_until(answered, timeout)
+        if outcome.get("success") is True:
+            return
+        errors = tuple(outcome.get("errors", ()))
+        if errors:
+            raise guards.HarnessError(
+                f"{what} failed: " + " | ".join(str(error) for error in errors)
+            )
+        reports = self.reports_since(cursor)
+        detail = (
+            ""
+            if not reports
+            else "; reports: "
+            + " | ".join(f"{severity}: {message}" for severity, message in reports)
+        )
+        if not completed:
+            raise guards.HarnessError(f"timed out waiting for {what}{detail}")
+        raise guards.HarnessError(f"{what} did not complete{detail}")
+
+    def perform(self, what: str, trigger, complete, *, timeout: float = 60.0):
+        """Submit one asynchronous action and wait for success or real error."""
+
+        cursor = self.report_cursor()
+        result = trigger()
+        if result is False:
+            reports = self.reports_since(cursor)
+            detail = " | ".join(
+                f"{severity}: {message}" for severity, message in reports
+            )
+            raise guards.HarnessError(
+                f"{what} was refused" + (f": {detail}" if detail else "")
+            )
+        self._until(
+            complete,
+            what,
+            timeout,
+            report_cursor=cursor,
+        )
+        return result
 
     # --------------------------------------------------------------- panels
     def add_panel(self, kind: str, *, size: str = SIZE_PRESET, display=None):
@@ -520,9 +629,11 @@ class ConsoleBench:
         self._pump(1.0)
         probe.reset()
         presented.reset()
+        cursor = self.report_cursor()
         origin = time.perf_counter()
         with guards.ProductBeat(self.app, self.presenter) as beat:
             elapsed = beat.run(seconds, tick=presented.poll)
+        self.require_no_errors(cursor, f"{self.label(panel)} live window")
         gaps = [
             b - a for a, b in zip(presented.stamps, presented.stamps[1:])
         ]
@@ -587,6 +698,7 @@ class ConsoleBench:
         if window_start is not None:
             window_start()
 
+        cursor = self.report_cursor()
         cpu_before = process.cpu_times()
         rss_before = process.memory_info().rss
 
@@ -597,6 +709,7 @@ class ConsoleBench:
         origin = time.perf_counter()
         with guards.ProductBeat(self.app, self.presenter) as beat:
             elapsed = beat.run(seconds, tick=tick)
+        self.require_no_errors(cursor, "multi-panel live window")
 
         cpu_after = process.cpu_times()
         used = (
@@ -717,6 +830,7 @@ class ConsoleBench:
         current.update(values)
         fronts = _PanelFronts(self, panel)
         fronts.poll()
+        cursor = self.report_cursor()
         started = time.perf_counter()
         self.view.panel_state_changed.emit(panel.panel_id, {section: current})
         answered = None
@@ -724,6 +838,11 @@ class ConsoleBench:
         while time.monotonic() < deadline:
             self.presenter.beat()
             self.app.processEvents()
+            errors = self.errors_since(cursor)
+            if errors:
+                raise guards.HarnessError(
+                    f"{section} edit failed: " + " | ".join(errors)
+                )
             if fronts.poll():
                 answered = time.perf_counter() - started
                 break

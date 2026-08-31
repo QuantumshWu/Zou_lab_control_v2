@@ -136,20 +136,25 @@ def test_the_transform_agrees_with_matplotlib_on_a_log_axis() -> None:
         session.close()
 
 
-def test_concurrent_log_histograms_share_one_safe_mathtext_parser() -> None:
+def test_concurrent_live_draws_and_exports_share_one_safe_mathtext_parser(
+    tmp_path,
+) -> None:
     workers = 6
     sessions = tuple(_histogram_session() for _ in range(workers))
     gate = Barrier(workers)
 
-    def paint(session: PlotSession) -> None:
+    def paint(item: tuple[int, PlotSession]) -> None:
+        index, session = item
         gate.wait(timeout=30.0)
         for enabled in (True, False, True):
             session.set_parameters({"log_y": enabled})
+        session.save(tmp_path / f"concurrent-{index}.png")
         assert np.asarray(session.rgba()).size
 
     try:
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            tuple(pool.map(paint, sessions))
+            tuple(pool.map(paint, enumerate(sessions)))
+        assert len(tuple(tmp_path.glob("concurrent-*.png"))) == workers
     finally:
         for session in sessions:
             session.close()
