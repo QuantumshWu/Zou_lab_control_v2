@@ -982,3 +982,55 @@ def test_a_payload_the_server_cannot_read_costs_the_client_its_answer_only() -> 
             assert not safed, "an unreadable request must not safe a running board"
         finally:
             connection.close()
+
+
+def test_an_unsendable_reply_costs_the_answer_not_the_board(monkeypatch) -> None:
+    """A result too large for the frame is the client's problem, briefly.
+
+    ``_send_frame`` raises for a reply past the 8 MiB cap, and that raise
+    landed outside the per-request try -- where the only handler is
+    ``except OSError`` -- so the server read its own oversized answer as
+    the client hanging up, AUTO-SAFEd a running board, and told the
+    operator a rival editor had taken it.  The sibling of this defect (a
+    decode error on the REQUEST) was fixed by moving the decode inside the
+    try; the encode half survived until now.
+    """
+
+    source = _sequence()
+    geom = _sequence_geometry()
+    streamer = PulseStreamer(
+        MemoryRegisterTransport(geom=geom), geom, 50e6, target=source.target
+    )
+    streamer.open()
+    original_dispatch = PulseRemoteServer.dispatch
+    safes: list[str] = []
+    original_safe = streamer.safe
+
+    def counted_safe() -> None:
+        safes.append("safe")
+        original_safe()
+
+    monkeypatch.setattr(streamer, "safe", counted_safe)
+
+    def giant_snapshot(self, method, params, *, client, connection):
+        if method == "snapshot":
+            return {"blob": "x" * (9 * 1024 * 1024)}
+        return original_dispatch(self, method, params, client=client, connection=connection)
+
+    monkeypatch.setattr(PulseRemoteServer, "dispatch", giant_snapshot)
+    try:
+        with _server(streamer) as server:
+            client = _client(server)
+            try:
+                safes.clear()
+                with pytest.raises(Exception, match="could not encode its reply"):
+                    client.snapshot()
+                # The connection survived and the board was never safed: the
+                # SAME client keeps working.
+                monkeypatch.setattr(PulseRemoteServer, "dispatch", original_dispatch)
+                assert client.describe() is not None
+                assert safes == []
+            finally:
+                client.close()
+    finally:
+        streamer.close()

@@ -70,8 +70,7 @@ class PySerialLink:
         serial_port = self._require_open()
         serial_port.reset_input_buffer()
         serial_port.write_timeout = _remaining(deadline, "UART write")
-        serial_port.write(request)
-        serial_port.flush()
+        self._write(serial_port, request)
         self.last_shortfall = ""
         replies = self._read_replies(1, deadline=deadline, stop=stop)
         if not replies:
@@ -92,10 +91,34 @@ class PySerialLink:
         serial_port = self._require_open()
         serial_port.reset_input_buffer()
         serial_port.write_timeout = _remaining(deadline, "UART write")
-        serial_port.write((b"\xff" * 8).join(requests))
-        serial_port.flush()
+        self._write(serial_port, (b"\xff" * 8).join(requests))
         self.last_shortfall = ""
         return self._read_replies(len(requests), deadline=deadline, stop=stop)
+
+    def _write(self, serial_port, payload: bytes) -> None:
+        """Write and drain, speaking THIS layer's timeout vocabulary.
+
+        pyserial reports a write that missed its timeout as
+        ``SerialTimeoutException`` -- an OSError, not a TimeoutError -- so
+        every ``except TimeoutError`` above this line (the retry loop in
+        ``_deliver``, the reconnect guard in the device) looked straight
+        past it: one slow WriteFile was a hard failure on the first
+        attempt, with pyserial's own words and no resend, on a line whose
+        whole retry machinery exists for exactly that moment.  The
+        translation lives here because the link is where pyserial's
+        vocabulary stops being spoken.
+        """
+
+        import serial
+
+        try:
+            serial_port.write(payload)
+            serial_port.flush()
+        except serial.SerialTimeoutException as error:
+            raise TimeoutError(
+                f"UART write timed out on {self.port} at {self.baud} baud: "
+                f"{len(payload)} byte(s) were not accepted in time"
+            ) from error
 
     def _read_replies(self, count: int, *, deadline: float, stop: threading.Event | None) -> list[bytes]:
         serial_port = self._require_open()
@@ -330,14 +353,30 @@ class UartRegisterTransport:
     def _attempt_budget(self, frames: "Sequence[bytes]") -> float:
         """How long one attempt may reasonably take for THESE frames.
 
-        The bytes' own time on the wire, both directions, plus flat host
-        slack.  Small on purpose: this is what a retry costs, and three of
-        them are still well under one old five-second wait.
+        SCALED BY WHAT IS BEING SENT, like ``_deadline`` above -- they are
+        the same physical claim, and this one was written flat.  A scan
+        start streams its point table as sixty-four full frames: 223 ms of
+        wire, over which the flat 80 ms of host slack left the first two
+        attempts an 8 per cent margin for the USB latency timer, the
+        driver's flush and the scheduler together.  A pulse On/Off strobe
+        is one frame and twenty microseconds of wire, over which the same
+        80 ms was a 4000 per cent margin.  So the same bench saw strobes
+        that never failed and scan starts that timed out at random -- the
+        operator's exact report.
+
+        The budget is the wire time with a host factor (an attempt whose
+        host runs half again slower than the line is late, not lost), the
+        flat scheduling slack, and a small per-frame term for reply
+        handling (replies arrive batched by the ~16 ms USB latency timer).
+        Overshooting here is benign -- a successful attempt returns the
+        moment its replies land -- while undershooting burns a resend of
+        everything still outstanding.
         """
 
         payload = sum(len(frame) + 8 for frame in frames)
         payload += framing.reply_frame_len(0) * len(frames)
-        return payload * 10.0 / max(1.0, float(self.baud)) + self.retry_slack
+        on_the_wire = payload * 10.0 / max(1.0, float(self.baud))
+        return on_the_wire * 1.5 + self.retry_slack + 0.002 * len(frames)
 
     def _classify(
         self,

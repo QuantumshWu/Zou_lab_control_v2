@@ -279,3 +279,113 @@ def test_a_retry_costs_milliseconds_not_seconds() -> None:
     transport = UartRegisterTransport(link=_Idle())
     ten_frames = [framing.encode_write(index * 4, (0,), seq=index) for index in range(10)]
     assert transport._attempt_budget(ten_frames) < 0.2
+
+
+def test_the_attempt_budget_scales_with_the_transfer() -> None:
+    """A scan start is sixty-four full frames, not a strobe.
+
+    The budget and the deadline are the same physical claim about the same
+    bytes, and the budget was written flat: 80 ms of host slack over 223 ms
+    of wire left the first two attempts an 8 per cent margin, so the same
+    bench saw one-frame strobes that never failed and scan starts that
+    timed out at random -- the operator's exact report.  The budget must
+    exceed the wire time by a real host factor, not a constant.
+    """
+
+    from zlc_pulse.transport import uart_frame as framing
+    from zlc_pulse.transport.uart import UartRegisterTransport
+
+    class _Idle:
+        port = "COM-TEST"
+        baud = 3_000_000
+
+        def open(self) -> None: ...
+
+        def close(self) -> None: ...
+
+    transport = UartRegisterTransport(link=_Idle())
+    table = [
+        framing.encode_write(index * 4, tuple(range(256)), seq=index)
+        for index in range(64)
+    ]
+    wire = (
+        sum(len(frame) + 8 for frame in table)
+        + framing.reply_frame_len(0) * len(table)
+    ) * 10.0 / 3_000_000.0
+    budget = transport._attempt_budget(table)
+    # The host factor is the contract: an attempt whose host runs half
+    # again slower than the line is late, not lost.  The old flat form gave
+    # this transfer 0.08 s of absolute headroom -- 1.36x wire -- and failed
+    # in the field, so the bar sits above what the defect provided.
+    assert budget >= wire * 1.5, (
+        f"a {wire * 1e3:.0f} ms transfer got only {(budget - wire) * 1e3:.0f} ms "
+        "of host headroom"
+    )
+
+
+def test_a_slow_write_is_a_timeout_this_layer_can_retry() -> None:
+    """pyserial's write timeout is an OSError; the link translates it.
+
+    ``SerialTimeoutException`` is not a ``TimeoutError``, so every retry
+    handler above the link looked straight past it: one slow WriteFile was
+    a hard first-attempt failure with pyserial's own words and no resend,
+    on a line whose retry machinery exists for exactly that moment.
+    """
+
+    import time
+
+    import pytest
+    import serial
+
+    from zlc_pulse.transport.uart import PySerialLink
+
+    class _StalledPort:
+        write_timeout = None
+
+        def reset_input_buffer(self) -> None: ...
+
+        def write(self, payload: bytes) -> None:
+            raise serial.SerialTimeoutException("write timeout")
+
+        def flush(self) -> None: ...
+
+    link = PySerialLink("COM-TEST")
+    link._serial = _StalledPort()
+    with pytest.raises(TimeoutError, match="UART write timed out on COM-TEST"):
+        link.exchange(b"\x01\x02\x03\x04", deadline=time.monotonic() + 1.0)
+    with pytest.raises(TimeoutError, match="UART write timed out on COM-TEST"):
+        link.write_batch([b"\x01\x02"], deadline=time.monotonic() + 1.0)
+
+
+def test_a_write_timeout_on_an_early_attempt_is_retried() -> None:
+    """The first attempt stalling in the WRITE path must not end the call."""
+
+    from zlc_pulse.transport import uart_frame as framing
+    from zlc_pulse.transport.uart import UartRegisterTransport
+
+    class _FirstWriteStalls:
+        port = "COM-TEST"
+        baud = 3_000_000
+        last_shortfall = ""
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def open(self) -> None: ...
+
+        def close(self) -> None: ...
+
+        def write_batch(self, requests, *, deadline, stop=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise TimeoutError("UART write timed out on COM-TEST")
+            return [
+                framing.encode_reply(request[3], framing.ST_OK, ())
+                for request in requests
+            ]
+
+    link = _FirstWriteStalls()
+    transport = UartRegisterTransport(link=link)
+    transport.start()
+    transport.write_words([(0, 1), (4, 2), (8, 3)])
+    assert link.calls == 2

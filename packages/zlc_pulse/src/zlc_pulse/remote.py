@@ -731,7 +731,43 @@ class _RemoteHandler(socketserver.BaseRequestHandler):
                         "ok": False,
                         "error": {"type": type(exc).__name__, "message": str(exc)},
                     }
-                _send_frame(self.request, response)
+                try:
+                    _send_frame(self.request, response)
+                except (TypeError, ValueError) as exc:
+                    # THE ANSWER, NOT THE CONNECTION.  A result the frame
+                    # cannot carry -- an ``applied()`` echoing a scan table
+                    # past the 8 MiB cap -- used to raise out of this loop,
+                    # where the only handler is ``except OSError``: the
+                    # server read its own oversized answer as the client
+                    # hanging up, and AUTO-SAFEd a running board while
+                    # blaming a rival editor.  The sibling of this defect
+                    # (decode errors on the REQUEST) was fixed by moving the
+                    # decode inside the try; the encode half survived.  An
+                    # unsendable answer costs the client its answer and
+                    # nothing else.
+                    _server_log(
+                        "RPC REPLY ERROR",
+                        client=client,
+                        detail=_log_fields(
+                            method=method,
+                            error=f"{type(exc).__name__}: "
+                            f"{str(exc).replace(chr(10), ' ')}",
+                        ),
+                    )
+                    _send_frame(
+                        self.request,
+                        {
+                            "id": request_id,
+                            "ok": False,
+                            "error": {
+                                "type": type(exc).__name__,
+                                "message": (
+                                    "the server could not encode its reply: "
+                                    + str(exc)
+                                ),
+                            },
+                        },
+                    )
                 if not claimed:
                     return
         except OSError as exc:
