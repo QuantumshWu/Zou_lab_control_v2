@@ -1061,10 +1061,16 @@ def test_a_device_axis_is_the_outer_loop_and_the_device_is_verified() -> None:
     # beyond it is the UNSWEPT context -- the power and output the whole
     # scan ran at -- plus the identity and epoch to match it to a session.
     snapshot = record["device_snapshots"]["tunable:rf"]
+    # The run-start snapshot carries the whole surface, the safety window
+    # included: provenance should say what fence the scan ran inside.
     assert set(snapshot["settings"]) == {
         "frequency_hz",
         "power_dbm",
         "output_enabled",
+        "frequency_low_hz",
+        "frequency_high_hz",
+        "power_low_dbm",
+        "power_high_dbm",
     }
     assert snapshot["device_session_id"] == "vaunix-lms:1001"
     assert "settings_epoch" in snapshot

@@ -277,11 +277,17 @@ control = open_device_control(
 )
 assert isinstance(control, DeviceControlHandle)
 assert not isinstance(control, QtWidgets.QWidget), 'a QWidget escaped zlc_ui'
-target = screen_fit_window_size(WINDOW_SCREEN_FRACTION)
-assert control._window.size() == target, (
-    control._window.size().width(), control._window.size().height(),
-    target.width(), target.height(),
+# Snug fit (user decree): the control opens at half the standard width and
+# its content's own height -- a fixed screen fraction full of blank space
+# is exactly what it must not be.  It stays resizable.
+standard = screen_fit_window_size(WINDOW_SCREEN_FRACTION)
+size = control._window.size()
+view_hint = control._view.sizeHint()
+assert size.width() <= max(standard.width() // 2, view_hint.width()) + 1, (
+    size.width(), standard.width(), view_hint.width(),
 )
+assert size.height() < standard.height(), (size.height(), standard.height())
+assert size.height() >= view_hint.height(), (size.height(), view_hint.height())
 refresh_events = []
 risk_events = []
 desired_events = []

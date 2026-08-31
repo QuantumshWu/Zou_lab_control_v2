@@ -26,28 +26,6 @@ RIGOL_DG4000_SCHEMA = AuthoringSchema(
             required=True,
         ),
         AuthoringField(
-            "frequency_low_hz",
-            "float",
-            "Frequency low (Hz)",
-            1e3,
-            minimum=1e-6,
-            unit="Hz",
-        ),
-        AuthoringField(
-            "frequency_high_hz",
-            "float",
-            "Frequency high (Hz)",
-            160e6,
-            minimum=1e-6,
-            unit="Hz",
-        ),
-        AuthoringField(
-            "power_low_dbm", "float", "Power low (dBm)", -30.0, unit="dBm"
-        ),
-        AuthoringField(
-            "power_high_dbm", "float", "Power high (dBm)", 10.0, unit="dBm"
-        ),
-        AuthoringField(
             "timeout_seconds",
             "float",
             "VISA timeout (s)",
@@ -65,28 +43,6 @@ VAUNIX_LMS_SCHEMA = AuthoringSchema(
         AuthoringField(
             "serial", "int", "Serial number", None, required=True, minimum=1
         ),
-        AuthoringField(
-            "frequency_low_hz",
-            "float",
-            "Frequency low (Hz)",
-            500e6,
-            minimum=1e-6,
-            unit="Hz",
-        ),
-        AuthoringField(
-            "frequency_high_hz",
-            "float",
-            "Frequency high (Hz)",
-            8e9,
-            minimum=1e-6,
-            unit="Hz",
-        ),
-        AuthoringField(
-            "power_low_dbm", "float", "Power low (dBm)", -40.0, unit="dBm"
-        ),
-        AuthoringField(
-            "power_high_dbm", "float", "Power high (dBm)", 10.0, unit="dBm"
-        ),
     )
 )
 
@@ -95,10 +51,6 @@ def _rigol_factory(context, key: str, values: dict) -> InstalledLeaf:
     authored = RIGOL_DG4000_SCHEMA.project_values(values)
     config = RigolDg4000Config(
         resource=str(authored["resource"]),
-        frequency_low_hz=float(authored["frequency_low_hz"]),
-        frequency_high_hz=float(authored["frequency_high_hz"]),
-        power_low_dbm=float(authored["power_low_dbm"]),
-        power_high_dbm=float(authored["power_high_dbm"]),
         timeout_seconds=float(authored["timeout_seconds"]),
     )
     source = RigolDg4000RfSource(config)
@@ -115,10 +67,6 @@ def _vaunix_factory(context, key: str, values: dict) -> InstalledLeaf:
     authored = VAUNIX_LMS_SCHEMA.project_values(values)
     config = VaunixLmsConfig(
         serial=int(authored["serial"]),
-        frequency_low_hz=float(authored["frequency_low_hz"]),
-        frequency_high_hz=float(authored["frequency_high_hz"]),
-        power_low_dbm=float(authored["power_low_dbm"]),
-        power_high_dbm=float(authored["power_high_dbm"]),
     )
     source = VaunixLmsRfSource(config)
     return bind_rf_source(

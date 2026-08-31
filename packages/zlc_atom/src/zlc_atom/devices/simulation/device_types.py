@@ -69,28 +69,6 @@ VIRTUAL_SLM_SCHEMA = AuthoringSchema(())
 VIRTUAL_RF_SCHEMA = AuthoringSchema(
     (
         AuthoringField("serial", "int", "Serial number", 1001, minimum=1),
-        AuthoringField(
-            "frequency_low_hz",
-            "float",
-            "Frequency low (Hz)",
-            500e6,
-            minimum=1e-6,
-            unit="Hz",
-        ),
-        AuthoringField(
-            "frequency_high_hz",
-            "float",
-            "Frequency high (Hz)",
-            8e9,
-            minimum=1e-6,
-            unit="Hz",
-        ),
-        AuthoringField(
-            "power_low_dbm", "float", "Power low (dBm)", -40.0, unit="dBm"
-        ),
-        AuthoringField(
-            "power_high_dbm", "float", "Power high (dBm)", 10.0, unit="dBm"
-        ),
     )
 )
 
@@ -225,10 +203,6 @@ def _rf_factory(context, key: str, values: dict) -> InstalledLeaf:
     authored = VIRTUAL_RF_SCHEMA.project_values(values)
     config = VaunixLmsConfig(
         serial=int(authored["serial"]),
-        frequency_low_hz=float(authored["frequency_low_hz"]),
-        frequency_high_hz=float(authored["frequency_high_hz"]),
-        power_low_dbm=float(authored["power_low_dbm"]),
-        power_high_dbm=float(authored["power_high_dbm"]),
     )
     return bind_rf_source(
         context,

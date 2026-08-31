@@ -43,6 +43,18 @@ FREQUENCY_FIELD = "frequency_hz"
 POWER_FIELD = "power_dbm"
 OUTPUT_FIELD = "output_enabled"
 
+#: The bench's safety window is a CONTROL knob, not an apparatus fact: the
+#: operator adjusts it on the control panel (plain Apply, never live) or
+#: through the same ``tune`` API, and nothing else may scan it.  It is
+#: deliberately unbounded and non-live so scan_ports_for_devices never
+#: offers it as an axis.  (name, label, unit) per policy field.
+WINDOW_FIELDS = (
+    ("frequency_low_hz", "Frequency low (Hz)", "Hz"),
+    ("frequency_high_hz", "Frequency high (Hz)", "Hz"),
+    ("power_low_dbm", "Power low (dBm)", "dBm"),
+    ("power_high_dbm", "Power high (dBm)", "dBm"),
+)
+
 #: Interactions narrate HERE, in the contract, so every path that moves a
 #: knob -- a scan's device axis, the control panel, a notebook, a remote
 #: client -- leaves the same trace.  Each line ends with ``device=<identity>``
@@ -269,6 +281,18 @@ class RfSourceBase:
                         dependency_group=(channel_field(channel, OUTPUT_FIELD),),
                     )
                 )
+            for name, label, unit in WINDOW_FIELDS:
+                current = float(self._window_value(name))
+                fields.append(
+                    TunableField(
+                        metadata=AuthoringField(
+                            name, "float", label, current, unit=unit
+                        ),
+                        current=current,
+                        live_write=False,
+                        dependency_group=(name,),
+                    )
+                )
         return tuple(fields)
 
     def tunable_values(self) -> dict[str, Any]:
@@ -284,6 +308,8 @@ class RfSourceBase:
                 values[channel_field(channel, OUTPUT_FIELD)] = bool(
                     self._read_output(channel)
                 )
+            for name, _label, _unit in WINDOW_FIELDS:
+                values[name] = float(self._window_value(name))
             return values
 
     @property
@@ -321,8 +347,72 @@ class RfSourceBase:
         )
         return effective
 
+    def _window_value(self, name: str) -> float:
+        return {
+            "frequency_low_hz": self._frequency_bounds[0],
+            "frequency_high_hz": self._frequency_bounds[1],
+            "power_low_dbm": self._power_bounds[0],
+            "power_high_dbm": self._power_bounds[1],
+        }[name]
+
+    def _tune_window(self, selected: str, value: Any) -> float:
+        """Move one edge of the bench's window, never a knob under it.
+
+        A change that would strand a channel's CURRENT value outside the
+        new window is refused by name: policy may fence a knob in, but
+        silently dragging a set output to a new frequency is an output
+        change nobody commanded.  Move the knob first, then the fence.
+        """
+
+        requested = float(value)
+        if not math.isfinite(requested):
+            raise ValueError(f"{selected} must be finite")
+        with self._condition:
+            frequency_low, frequency_high = self._frequency_bounds
+            power_low, power_high = self._power_bounds
+            window = {
+                "frequency_low_hz": (requested, frequency_high),
+                "frequency_high_hz": (frequency_low, requested),
+                "power_low_dbm": (power_low, power_high),
+                "power_high_dbm": (power_low, power_high),
+            }
+            if selected == "power_low_dbm":
+                window[selected] = (requested, power_high)
+            elif selected == "power_high_dbm":
+                window[selected] = (power_low, requested)
+            low, high = window[selected]
+            if not low < high:
+                raise ValueError(
+                    f"{selected}={requested:g} would leave an empty window "
+                    f"[{low:g}, {high:g}]"
+                )
+            frequency_window = selected.startswith("frequency")
+            for channel in self._channels:
+                current = float(
+                    self._read_frequency(channel)
+                    if frequency_window
+                    else self._read_power(channel)
+                )
+                if not (low <= current <= high):
+                    kind = FREQUENCY_FIELD if frequency_window else POWER_FIELD
+                    knob = channel_field(channel, kind)
+                    raise ValueError(
+                        f"{selected}={requested:g} would strand {knob} at "
+                        f"{current:g}; move the knob inside the new window "
+                        "first"
+                    )
+            if frequency_window:
+                self._frequency_bounds = (low, high)
+            else:
+                self._power_bounds = (low, high)
+            self._settings_epoch += 1
+            self._condition.notify_all()
+            return requested
+
     def _resolve_tune(self, name: str, value: Any) -> Any:
         selected = str(name)
+        if any(selected == entry[0] for entry in WINDOW_FIELDS):
+            return self._tune_window(selected, value)
         routed = self._routing.get(selected)
         if routed is None:
             offered = ", ".join(sorted(self._routing))
@@ -361,6 +451,7 @@ __all__ = [
     "FREQUENCY_FIELD",
     "OUTPUT_FIELD",
     "POWER_FIELD",
+    "WINDOW_FIELDS",
     "RfSource",
     "RfSourceBase",
     "channel_field",

@@ -94,6 +94,10 @@ def test_one_instrument_is_one_instance_with_every_channel_s_knobs() -> None:
         "ch2_frequency_hz",
         "ch2_power_dbm",
         "ch2_output_enabled",
+        "frequency_low_hz",
+        "frequency_high_hz",
+        "power_low_dbm",
+        "power_high_dbm",
     ]
 
     assert source.tune("ch1_frequency_hz", 80e6) == 80e6
@@ -150,9 +154,55 @@ def test_the_scan_facing_fields_carry_bounds_and_units() -> None:
         # so scan_ports_for_devices never offers it.
         output = by_name[f"{channel}_output_enabled"].metadata
         assert output.minimum is None and output.maximum is None
+        assert by_name[f"{channel}_frequency_hz"].live_write
     for field in by_name.values():
-        assert field.live_write
         assert field.dependency_group == (field.metadata.name,)
+
+
+def test_the_window_is_a_control_knob_and_never_a_scan_axis() -> None:
+    """The bench's safety window moved to the control panel, off Init.
+
+    It is adjusted with plain Apply (never live), or through the same
+    ``tune`` API -- and the scan add-axis combo must never offer it: the
+    window fields are non-live and unbounded, which is exactly what
+    scan_ports_for_devices excludes.  Tightening an edge past a channel's
+    CURRENT value is refused by name: policy may fence a knob in, never
+    silently drag a set output to a new value.
+    """
+
+    from zlc_atom.nodes.scan.plan import scan_ports_for_devices
+
+    source, _instrument = _rigol()
+    by_name = {field.metadata.name: field for field in source.tunable_fields()}
+    for name in (
+        "frequency_low_hz",
+        "frequency_high_hz",
+        "power_low_dbm",
+        "power_high_dbm",
+    ):
+        window = by_name[name]
+        assert not window.live_write, "the window applies, never live"
+        assert window.metadata.minimum is None and window.metadata.maximum is None
+
+    ports = scan_ports_for_devices({"rf": source})
+    offered = {port.port.split(":")[-1] for port in ports}
+    assert offered == {
+        "ch1_frequency_hz", "ch1_power_dbm", "ch2_frequency_hz", "ch2_power_dbm"
+    }
+
+    before = source.settings_provenance()["settings_epoch"]
+    assert source.tune("frequency_high_hz", 80e6) == 80e6
+    assert source.tunable_values()["frequency_high_hz"] == 80e6
+    assert source.settings_provenance()["settings_epoch"] == before + 1
+    # The channel knobs' own scan bounds follow the window immediately.
+    by_name = {field.metadata.name: field for field in source.tunable_fields()}
+    assert by_name["ch1_frequency_hz"].metadata.maximum == 80e6
+
+    source.tune("ch1_frequency_hz", 50e6)
+    with pytest.raises(ValueError, match="strand ch1_frequency_hz at 5e"):
+        source.tune("frequency_high_hz", 20e6)
+    with pytest.raises(ValueError, match="empty window"):
+        source.tune("frequency_low_hz", 90e6)
 
 
 def test_the_lab_brick_speaks_its_own_units_and_refuses_off_grid() -> None:

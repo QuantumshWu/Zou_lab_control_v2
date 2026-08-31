@@ -59,7 +59,26 @@ def open_device_control(
             WINDOW_SCREEN_FRACTION if window_ratio is None else float(window_ratio)
         ),
     )
-    return DeviceControlHandle(window, held["view"])
+    view = held["view"]
+    # Snug fit: a control's field set is fixed for the window's life, so the
+    # window takes the content's own height (plus the chrome) and half the
+    # standard width, instead of a big screen fraction full of blank space.
+    # It stays resizable -- this is the OPENING size, not a fixed one.
+    chrome = max(0, window.height() - view.height())
+    hint = view.sizeHint()
+    width = max(window.width() // 2, hint.width())
+    height = hint.height() + chrome
+    screen = window.screen()
+    available = None if screen is None else screen.availableGeometry()
+    if available is not None:
+        height = min(height, int(available.height() * 0.9))
+        width = min(width, available.width())
+    window.resize(width, height)
+    if available is not None:
+        frame = window.frameGeometry()
+        frame.moveCenter(available.center())
+        window.move(frame.topLeft())
+    return DeviceControlHandle(window, view)
 
 
 def open_pulse_editor(
