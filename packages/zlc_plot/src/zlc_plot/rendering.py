@@ -1951,10 +1951,8 @@ class MatplotlibRenderer:
             if any(
                 isinstance(self._artists.get(key), dict)
                 for key in (
-                    "image:native_command",
-                    "facet:image_native",
-                    "facet:curve_native",
-                    "curve:native",
+                    "image:prepared",
+                    "curve:prepared",
                     "facet:fit_native",
                 )
             ):
@@ -2287,14 +2285,19 @@ class MatplotlibRenderer:
         lines = data + fit
         if (
             not data
-            and not isinstance(self._artists.get("facet:curve_native"), dict)
-            and not isinstance(self._artists.get("curve:native"), dict)
+            and not isinstance(self._artists.get("curve:prepared"), dict)
         ) or any(
             line.get_linestyle() not in ("-", "solid")
             or line.get_marker() not in (None, "None", "none", "")
             for line in lines
         ):
             return None
+        for line in lines:
+            path = line.get_transform().transform_path(line.get_path())
+            if path.codes is not None or not bool(
+                np.all(np.isfinite(path.vertices))
+            ):
+                return None
         if any(
             len(artists) != 3
             or not hasattr(artists[-1], "_zlc_segment_buffer")
@@ -2302,96 +2305,6 @@ class MatplotlibRenderer:
         ):
             return None
         return bars, data, fit
-
-    def _raster_curve_bars(
-        self, groups: Sequence[tuple[Any, ...]], canvas: Any
-    ) -> bool:
-        """Paint current dense uncertainty bars as display-column envelopes."""
-
-        if not groups:
-            return True
-        canvas_rgba = np.asarray(canvas.buffer_rgba())
-        if (
-            canvas_rgba.dtype != np.uint8
-            or canvas_rgba.ndim != 3
-            or canvas_rgba.shape[2] != 4
-            or not canvas_rgba.flags.c_contiguous
-            or not canvas_rgba.flags.writeable
-        ):
-            return False
-        height, width = canvas_rgba.shape[:2]
-        x_values: list[np.ndarray] = []
-        low_values: list[np.ndarray] = []
-        high_values: list[np.ndarray] = []
-        offsets = [0]
-        colours = np.empty((len(groups), 4), dtype=np.uint8)
-        widths = np.empty(len(groups), dtype=np.float64)
-        cap_widths = np.empty(len(groups), dtype=np.float64)
-        clips = np.empty((len(groups), 4), dtype=np.int32)
-        for index, artists in enumerate(groups):
-            low_cap, _high_cap, collection = artists
-            segments = np.asarray(collection._zlc_segment_buffer, dtype=np.float64)
-            if segments.ndim != 3 or segments.shape[1:] != (2, 2):
-                return False
-            display = collection.get_transform().transform(
-                segments.reshape(-1, 2)
-            ).reshape(segments.shape)
-            x_values.append(np.asarray(display[:, 0, 0], dtype=np.float64))
-            first_y = float(height) - display[:, 0, 1]
-            second_y = float(height) - display[:, 1, 1]
-            low_values.append(np.minimum(first_y, second_y))
-            high_values.append(np.maximum(first_y, second_y))
-            offsets.append(offsets[-1] + segments.shape[0])
-            edge = np.asarray(collection.get_edgecolor(), dtype=float)
-            if edge.ndim != 2 or edge.shape[0] < 1 or edge.shape[1] != 4:
-                return False
-            colours[index] = np.clip(np.rint(edge[0] * 255.0), 0, 255).astype(
-                np.uint8
-            )
-            line_widths = np.asarray(collection.get_linewidths(), dtype=float)
-            if not line_widths.size:
-                return False
-            widths[index] = max(
-                1.0, float(line_widths[0]) * float(self._figure.dpi) / 72.0
-            )
-            cap_widths[index] = max(
-                widths[index],
-                float(low_cap.get_markersize()) * float(self._figure.dpi) / 72.0,
-            )
-            box = collection.axes.bbox
-            clips[index] = (
-                max(0, int(math.floor(float(box.x0)))),
-                max(0, int(math.floor(float(height) - float(box.y1)))),
-                min(width, int(math.ceil(float(box.x1)))),
-                min(height, int(math.ceil(float(height) - float(box.y0)))),
-            )
-        shape = (len(groups), width)
-        cache = self._artists.get("curve:native_bar_envelope")
-        if (
-            not isinstance(cache, tuple)
-            or len(cache) != 2
-            or cache[0].shape != shape
-            or cache[1].shape != shape
-        ):
-            cache = (
-                np.empty(shape, dtype=np.float64),
-                np.empty(shape, dtype=np.float64),
-            )
-            self._artists["curve:native_bar_envelope"] = cache
-        kernels.raster_error_envelopes(
-            kernels.readable(np.concatenate(x_values)),
-            kernels.readable(np.concatenate(low_values)),
-            kernels.readable(np.concatenate(high_values)),
-            kernels.readable(np.asarray(offsets, dtype=np.int64)),
-            kernels.readable(colours),
-            kernels.readable(widths),
-            kernels.readable(cap_widths),
-            kernels.readable(clips),
-            cache[0],
-            cache[1],
-            canvas_rgba,
-        )
-        return True
 
     def _raster_grouped_curve_command(
         self,
@@ -2415,48 +2328,28 @@ class MatplotlibRenderer:
         height, width = canvas_rgba.shape[:2]
         y = np.stack([item.y for item in series])
         valid = np.stack([item.valid for item in series])
-        use_band = all(item.band is not None for item in series)
-        if use_band:
-            band_low = np.stack([item.band[0] for item in series])
-            band_high = np.stack([item.band[1] for item in series])
-        else:
-            band_low = np.empty((len(series), points), dtype=np.float64)
-            band_high = np.empty((len(series), points), dtype=np.float64)
         shape = (len(series), points)
         geometry = self._artists.get("curve:grouped_geometry")
         if (
-            not isinstance(geometry, tuple)
-            or geometry[0].shape != shape + (2,)
+            not isinstance(geometry, np.ndarray)
+            or geometry.shape != shape + (2,)
         ):
-            geometry = (
-                np.empty(shape + (2,), dtype=np.float64),
-                np.empty(shape, dtype=np.float64),
-                np.empty(shape, dtype=np.float64),
-                np.empty(shape, dtype=np.float64),
-            )
+            geometry = np.empty(shape + (2,), dtype=np.float64)
             self._artists["curve:grouped_geometry"] = geometry
         affine = np.asarray(axes.transData.get_affine().to_values(), dtype=np.float64)
         kernels.transform_curve_batch(
             kernels.readable(np.asarray(series[0].x, dtype=np.float64)),
             kernels.readable(y),
             kernels.readable(valid),
-            kernels.readable(band_low),
-            kernels.readable(band_high),
-            bool(use_band),
             kernels.readable(affine),
             np.float64(height),
-            geometry[0],
-            geometry[1],
-            geometry[2],
-            geometry[3],
+            geometry,
         )
         from matplotlib.colors import to_rgba
 
         cycle = self.style.palette.line_cycle
         line_policy = self.style.artists.curve
-        render_policy = self.style.render
         line_colours = []
-        bar_colours = []
         for item in series:
             colour = cycle[_series_slot(item.identity, len(cycle))]
             rgba = np.asarray(to_rgba(colour), dtype=float)
@@ -2464,10 +2357,6 @@ class MatplotlibRenderer:
             line_rgba[3] *= float(line_policy.alpha)
             line_colours.append(
                 np.clip(np.rint(line_rgba * 255.0), 0, 255).astype(np.uint8)
-            )
-            rgba[3] *= float(render_policy.uncertainty_bar_alpha)
-            bar_colours.append(
-                np.clip(np.rint(rgba * 255.0), 0, 255).astype(np.uint8)
             )
         offsets = np.arange(
             0, (len(series) + 1) * points, points, dtype=np.int64
@@ -2499,43 +2388,8 @@ class MatplotlibRenderer:
                 np.empty(scratch_shape, dtype=np.float64),
             )
             self._artists["curve:grouped_envelope"] = scratch
-        if use_band:
-            bar_widths = np.full(
-                len(series),
-                max(
-                    1.0,
-                    render_policy.uncertainty_bar_linewidth
-                    * float(self._figure.dpi)
-                    / 72.0,
-                ),
-                dtype=np.float64,
-            )
-            cap_widths = np.full(
-                len(series),
-                max(
-                    bar_widths[0],
-                    2.0
-                    * render_policy.uncertainty_bar_capsize_pt
-                    * float(self._figure.dpi)
-                    / 72.0,
-                ),
-                dtype=np.float64,
-            )
-            kernels.raster_error_envelopes(
-                kernels.readable(geometry[1].reshape(-1)),
-                kernels.readable(geometry[2].reshape(-1)),
-                kernels.readable(geometry[3].reshape(-1)),
-                kernels.readable(offsets),
-                kernels.readable(np.asarray(bar_colours, dtype=np.uint8)),
-                kernels.readable(bar_widths),
-                kernels.readable(cap_widths),
-                kernels.readable(clips),
-                scratch[0],
-                scratch[1],
-                canvas_rgba,
-            )
         kernels.raster_polylines(
-            kernels.readable(geometry[0].reshape(-1, 2)),
+            kernels.readable(geometry.reshape(-1, 2)),
             kernels.readable(offsets),
             kernels.readable(np.asarray(line_colours, dtype=np.uint8)),
             kernels.readable(line_widths),
@@ -2549,9 +2403,7 @@ class MatplotlibRenderer:
     def _raster_facet_curve_command(self, canvas: Any) -> bool:
         """Paint projected Facet Curve data without maintaining cell artists."""
 
-        command = self._artists.get("facet:curve_native")
-        if not isinstance(command, dict):
-            command = self._artists.get("curve:native")
+        command = self._artists.get("curve:prepared")
         if not isinstance(command, dict):
             return False
         canvas_rgba = np.asarray(canvas.buffer_rgba())
@@ -2571,17 +2423,8 @@ class MatplotlibRenderer:
         colours: list[np.ndarray] = []
         widths: list[float] = []
         clips: list[tuple[int, int, int, int]] = []
-        bar_x: list[np.ndarray] = []
-        bar_low: list[np.ndarray] = []
-        bar_high: list[np.ndarray] = []
-        bar_offsets = [0]
-        bar_colours: list[np.ndarray] = []
-        bar_widths: list[float] = []
-        bar_caps: list[float] = []
-        bar_clips: list[tuple[int, int, int, int]] = []
         cycle = self.style.palette.line_cycle
         line_policy = self.style.artists.curve
-        render_policy = self.style.render
         for (_key, axes, _index), cell_series in zip(
             surfaces, series_by_cell, strict=True
         ):
@@ -2616,72 +2459,6 @@ class MatplotlibRenderer:
                     )
                 )
                 clips.append(clip)
-                if item.band is None:
-                    continue
-                low, high_values = item.band
-                low = np.where(item.valid, low, np.nan)
-                high_values = np.where(item.valid, high_values, np.nan)
-                lower = axes.transData.transform(
-                    np.column_stack((item.x, low))
-                )
-                upper = axes.transData.transform(
-                    np.column_stack((item.x, high_values))
-                )
-                bar_x.append(np.asarray(lower[:, 0], dtype=np.float64))
-                first_y = float(height) - lower[:, 1]
-                second_y = float(height) - upper[:, 1]
-                bar_low.append(np.minimum(first_y, second_y))
-                bar_high.append(np.maximum(first_y, second_y))
-                bar_offsets.append(bar_offsets[-1] + item.x.size)
-                bar_rgba = np.asarray(to_rgba(colour), dtype=float)
-                bar_rgba[3] *= float(render_policy.uncertainty_bar_alpha)
-                bar_colours.append(
-                    np.clip(np.rint(bar_rgba * 255.0), 0, 255).astype(np.uint8)
-                )
-                bar_widths.append(
-                    max(
-                        1.0,
-                        float(render_policy.uncertainty_bar_linewidth)
-                        * float(self._figure.dpi)
-                        / 72.0,
-                    )
-                )
-                bar_caps.append(
-                    max(
-                        bar_widths[-1],
-                        2.0
-                        * float(render_policy.uncertainty_bar_capsize_pt)
-                        * float(self._figure.dpi)
-                        / 72.0,
-                    )
-                )
-                bar_clips.append(clip)
-        if bar_x:
-            shape = (len(bar_x), width)
-            cache = self._artists.get("facet:curve_command_bar_envelope")
-            if (
-                not isinstance(cache, tuple)
-                or cache[0].shape != shape
-                or cache[1].shape != shape
-            ):
-                cache = (
-                    np.empty(shape, dtype=np.float64),
-                    np.empty(shape, dtype=np.float64),
-                )
-                self._artists["facet:curve_command_bar_envelope"] = cache
-            kernels.raster_error_envelopes(
-                kernels.readable(np.concatenate(bar_x)),
-                kernels.readable(np.concatenate(bar_low)),
-                kernels.readable(np.concatenate(bar_high)),
-                kernels.readable(np.asarray(bar_offsets, dtype=np.int64)),
-                kernels.readable(np.asarray(bar_colours, dtype=np.uint8)),
-                kernels.readable(np.asarray(bar_widths, dtype=np.float64)),
-                kernels.readable(np.asarray(bar_caps, dtype=np.float64)),
-                kernels.readable(np.asarray(bar_clips, dtype=np.int32)),
-                cache[0],
-                cache[1],
-                canvas_rgba,
-            )
         if not vertices:
             return False
         shape = (len(vertices), width)
@@ -2789,10 +2566,10 @@ class MatplotlibRenderer:
         )
         return True
 
-    def _raster_facet_images(self, canvas: Any) -> tuple[bool, frozenset[int]]:
-        """Paint the retained Image Facet overview straight into the canvas."""
+    def _raster_prepared_images(self, canvas: Any) -> tuple[bool, frozenset[int]]:
+        """Paint every prepared Image surface straight into the canvas."""
 
-        command = self._artists.get("facet:image_native")
+        command = self._artists.get("image:prepared")
         if not isinstance(command, dict):
             return False, frozenset()
         canvas_rgba = np.asarray(canvas.buffer_rgba())
@@ -2833,7 +2610,7 @@ class MatplotlibRenderer:
         valid = np.asarray(command["valid"], dtype=np.bool_)
         if valid.shape != values.shape:
             return False, frozenset()
-        kernels.raster_facet_images(
+        kernels.raster_prepared_images(
             kernels.readable(values),
             kernels.readable(valid),
             True,
@@ -2846,215 +2623,6 @@ class MatplotlibRenderer:
             canvas_rgba,
         )
         return True, frozenset(image_ids)
-
-    def _raster_primary_image(self, canvas: Any) -> tuple[bool, frozenset[int]]:
-        """Paint the current standalone/focused Image native command."""
-
-        command = self._artists.get("image:native_command")
-        if not isinstance(command, dict):
-            return False, frozenset()
-        key, axes, _index = self.primary_surface
-        if command.get("key") != key:
-            return False, frozenset()
-        canvas_rgba = np.asarray(canvas.buffer_rgba())
-        height, width = canvas_rgba.shape[:2]
-        box = axes.bbox
-        boxes = np.asarray(
-            ((
-                max(0, int(math.floor(float(box.x0)))),
-                max(0, int(math.floor(float(height) - float(box.y1)))),
-                min(width, int(math.ceil(float(box.x1)))),
-                min(height, int(math.ceil(float(height) - float(box.y0)))),
-            ),),
-            dtype=np.int32,
-        )
-        views = np.asarray(
-            ((*map(float, axes.get_xlim()), *map(float, axes.get_ylim())),),
-            dtype=np.float64,
-        )
-        low, high = map(float, command["limits"])
-        if not high > low:
-            return False, frozenset()
-        kernels.raster_facet_images(
-            kernels.readable(np.asarray(command["values"])),
-            kernels.readable(np.asarray(command["valid"], dtype=np.bool_)),
-            True,
-            kernels.readable(boxes),
-            kernels.readable(views),
-            kernels.readable(np.asarray(command["extents"], dtype=np.float64)),
-            kernels.readable(np.asarray(command["lut"], dtype=np.uint8)),
-            np.float64(low),
-            np.float64(255.0 / (high - low)),
-            canvas_rgba,
-        )
-        image = self._artists.get(key)
-        return True, frozenset(() if image is None else (id(image),))
-
-    def _raster_facet_fit_annotations(
-        self, canvas: Any
-    ) -> tuple[bool, frozenset[int]]:
-        """Paint dynamic Facet fit labels from one cached Helvetica glyph atlas."""
-
-        if not (
-            kernels.engaged()
-            and isinstance(self.spec, FacetGridPlot)
-            and self._facet_focus_index is None
-        ):
-            return False, frozenset()
-        from matplotlib.colors import to_rgba
-        from matplotlib.font_manager import FontProperties, findfont
-        from matplotlib.text import Text
-
-        annotations = tuple(
-            artist
-            for artist in self._fit_artists
-            if isinstance(artist, Text)
-            and artist.get_visible()
-            and artist.axes is not None
-            and artist.axes.get_visible()
-        )
-        command = self._artists.get("facet:fit_native")
-        records: list[tuple[str, Any, Any, float, Any, float | None, tuple[float, float]]] = []
-        if isinstance(command, dict):
-            axes = self._axes.get("facet_cell", ())
-            parameter = command.get("parameter")
-            font_properties = FontProperties(
-                family=self.style.fonts.sans_serif,
-                weight=self.style.fonts.weight,
-            )
-            inset = self.style.render.axes_text_inset_fraction
-            for overlay in command.get("overlays", ()):
-                index = overlay.facet_index
-                if index is None or index < 0 or index >= len(axes):
-                    continue
-                text = self._fit_headline_annotation_text(overlay, parameter)
-                if text:
-                    records.append(
-                        (
-                            text,
-                            axes[index],
-                            font_properties,
-                            self.style.fonts.facet_fit_annotation_pt,
-                            self.style.palette.fit_text,
-                            None,
-                            (inset, 1.0 - inset),
-                        )
-                    )
-        else:
-            records.extend(
-                (
-                    annotation.get_text(),
-                    annotation.axes,
-                    annotation.get_fontproperties(),
-                    annotation.get_fontsize(),
-                    annotation.get_color(),
-                    annotation.get_alpha(),
-                    annotation.get_position(),
-                )
-                for annotation in annotations
-            )
-        if not records:
-            return False, frozenset()
-        canvas_rgba = np.asarray(canvas.buffer_rgba())
-        if (
-            canvas_rgba.dtype != np.uint8
-            or not canvas_rgba.flags.c_contiguous
-            or not canvas_rgba.flags.writeable
-        ):
-            return False, frozenset()
-        plain_values = []
-        for content, _axes, _font, _size, _colour, _alpha, _position in records:
-            text = content.replace("$", "")
-            for digit in "0123456789":
-                text = text.replace(f"_{digit}", digit)
-            plain_values.append(text)
-        plain = tuple(plain_values)
-        font_path = findfont(records[0][2])
-        pixel_size = max(
-            1,
-            int(round(records[0][3] * self._figure.dpi / 72.0)),
-        )
-        base_characters = tuple(chr(code) for code in range(32, 127)) + ("±",)
-        extras = tuple(
-            sorted(set("".join(plain)).difference(base_characters))
-        )
-        characters = base_characters + extras
-        signature = (font_path, pixel_size, characters)
-        cached = self._artists.get("facet:fit_glyph_atlas")
-        if not isinstance(cached, tuple) or cached[0] != signature:
-            from PIL import Image, ImageDraw, ImageFont
-
-            font = ImageFont.truetype(font_path, pixel_size)
-            boxes = [font.getbbox(character, anchor="lt") for character in characters]
-            widths = [
-                max(1, int(math.ceil(max(box[2], font.getlength(character)))))
-                for character, box in zip(characters, boxes)
-            ]
-            glyph_height = max(1, max(box[3] - box[1] for box in boxes))
-            glyph_width = max(widths)
-            atlas = np.zeros(
-                (len(characters), glyph_height, glyph_width), dtype=np.uint8
-            )
-            advances = np.empty(len(characters), dtype=np.int32)
-            for index, (character, box, advance) in enumerate(
-                zip(characters, boxes, widths)
-            ):
-                image = Image.new("L", (glyph_width, glyph_height), 0)
-                ImageDraw.Draw(image).text(
-                    (-box[0], -box[1]),
-                    character,
-                    font=font,
-                    fill=255,
-                    anchor="lt",
-                )
-                atlas[index] = np.asarray(image, dtype=np.uint8)
-                advances[index] = advance
-            cached = (
-                signature,
-                atlas,
-                advances,
-                {character: index for index, character in enumerate(characters)},
-            )
-            self._artists["facet:fit_glyph_atlas"] = cached
-        _signature, atlas, advances, character_indices = cached
-        lengths = np.asarray([len(text) for text in plain], dtype=np.int32)
-        codes = np.full((len(plain), max(lengths, default=0)), -1, dtype=np.int32)
-        positions = np.empty((len(plain), 2), dtype=np.int32)
-        clips = np.empty((len(plain), 4), dtype=np.int32)
-        colours = np.empty((len(plain), 4), dtype=np.uint8)
-        height, width = canvas_rgba.shape[:2]
-        for row, (record, text) in enumerate(zip(records, plain)):
-            _content, axes, _font, _size, colour, alpha, position = record
-            codes[row, : len(text)] = tuple(character_indices[value] for value in text)
-            anchor = axes.transAxes.transform(position)
-            positions[row] = (
-                int(round(float(anchor[0]))),
-                int(round(float(height) - float(anchor[1]))),
-            )
-            box = axes.bbox
-            clips[row] = (
-                max(0, int(math.floor(float(box.x0)))),
-                max(0, int(math.floor(float(height) - float(box.y1)))),
-                min(width, int(math.ceil(float(box.x1)))),
-                min(height, int(math.ceil(float(height) - float(box.y0)))),
-            )
-            rgba = np.asarray(to_rgba(colour), dtype=float)
-            if alpha is not None:
-                rgba[3] *= float(alpha)
-            colours[row] = np.clip(np.rint(rgba * 255.0), 0, 255).astype(
-                np.uint8
-            )
-        kernels.raster_glyph_runs(
-            kernels.readable(codes),
-            kernels.readable(lengths),
-            kernels.readable(positions),
-            kernels.readable(clips),
-            kernels.readable(atlas),
-            kernels.readable(advances),
-            kernels.readable(colours),
-            canvas_rgba,
-        )
-        return True, frozenset(id(annotation) for annotation in annotations)
 
     def _raster_facet_fit_ellipses(
         self, canvas: Any
@@ -3226,89 +2794,6 @@ class MatplotlibRenderer:
         )
         return True, frozenset(artist_ids)
 
-    def _raster_facet_fit_curves(self, canvas: Any) -> bool:
-        """Paint Curve fit polylines directly from the accepted overlays."""
-
-        command = self._artists.get("facet:fit_native")
-        if not (
-            isinstance(command, dict)
-            and isinstance(self.semantic_spec, CurvePlot)
-        ):
-            return False
-        from matplotlib.colors import to_rgba
-
-        canvas_rgba = np.asarray(canvas.buffer_rgba())
-        height, width = canvas_rgba.shape[:2]
-        axes = self._axes.get("facet_cell", ())
-        vertices: list[np.ndarray] = []
-        offsets = [0]
-        colours: list[np.ndarray] = []
-        widths: list[float] = []
-        clips: list[tuple[int, int, int, int]] = []
-        for overlay in command.get("overlays", ()):
-            index = overlay.facet_index
-            if (
-                not overlay.success
-                or index is None
-                or index < 0
-                or index >= len(axes)
-            ):
-                continue
-            axis = axes[index]
-            box = axis.bbox
-            clip = (
-                max(0, int(math.floor(float(box.x0)))),
-                max(0, int(math.floor(float(height) - float(box.y1)))),
-                min(width, int(math.ceil(float(box.x1)))),
-                min(height, int(math.ceil(float(height) - float(box.y0)))),
-            )
-            for polyline in overlay.polylines:
-                display = axis.transData.transform(
-                    np.column_stack((polyline.x, polyline.y))
-                )
-                display = np.asarray(display, dtype=np.float64)
-                display[:, 1] = float(height) - display[:, 1]
-                vertices.append(display)
-                offsets.append(offsets[-1] + display.shape[0])
-                token = self._fit_polyline_token(self.semantic_spec, polyline)
-                rgba = np.asarray(to_rgba(token.color), dtype=float)
-                rgba[3] *= float(token.alpha)
-                colours.append(
-                    np.clip(np.rint(rgba * 255.0), 0, 255).astype(np.uint8)
-                )
-                widths.append(
-                    max(
-                        1.0,
-                        float(token.linewidth) * float(self._figure.dpi) / 72.0,
-                    )
-                )
-                clips.append(clip)
-        if not vertices:
-            return False
-        shape = (len(vertices), width)
-        cache = self._artists.get("facet:fit_curve_envelope")
-        if (
-            not isinstance(cache, tuple)
-            or cache[0].shape != shape
-            or cache[1].shape != shape
-        ):
-            cache = (
-                np.empty(shape, dtype=np.float64),
-                np.empty(shape, dtype=np.float64),
-            )
-            self._artists["facet:fit_curve_envelope"] = cache
-        kernels.raster_polylines(
-            kernels.readable(np.concatenate(vertices)),
-            kernels.readable(np.asarray(offsets, dtype=np.int64)),
-            kernels.readable(np.asarray(colours, dtype=np.uint8)),
-            kernels.readable(np.asarray(widths, dtype=np.float64)),
-            kernels.readable(np.asarray(clips, dtype=np.int32)),
-            cache[0],
-            cache[1],
-            canvas_rgba,
-        )
-        return True
-
     def _chrome_meets_data(self, artist: Any, axes: Any) -> bool:
         """Whether this chrome artist shares pixels with its data region.
 
@@ -3450,24 +2935,43 @@ class MatplotlibRenderer:
             self._chrome_dirty_axes.clear()
         restore(self._background_region)
         renderer = get_renderer()
-        native_primary, native_primary_ids = (
-            self._raster_primary_image(canvas)
+        prepared_image_command = isinstance(
+            self._artists.get("image:prepared"), dict
+        )
+        native_image, native_image_ids = (
+            self._raster_prepared_images(canvas)
             if split is None
             else (False, frozenset())
         )
-        native_image, native_image_ids = (
-            self._raster_facet_images(canvas)
-            if split is None and not native_primary
-            else (False, frozenset())
+        image_fallback = bool(
+            split is None
+            and prepared_image_command
+            and not native_image
+        )
+        if image_fallback:
+            self._materialize_prepared_images()
+            dynamics = self._dynamic_artists()
+            ordered = sorted(dynamics, key=lambda entry: entry[0])
+        prepared_curve_command = isinstance(
+            self._artists.get("curve:prepared"), dict
         )
         native_curve_command = (
             self._raster_facet_curve_command(canvas)
             if split is None and not native_image
             else False
         )
+        curve_fallback = bool(
+            split is None
+            and prepared_curve_command
+            and not native_curve_command
+        )
+        if curve_fallback:
+            self._materialize_prepared_curve()
+            dynamics = self._dynamic_artists()
+            ordered = sorted(dynamics, key=lambda entry: entry[0])
         native_lines = (
             self._native_curve_lines()
-            if split is None and not native_image
+            if split is None and not native_image and not curve_fallback
             else None
         )
         from matplotlib.text import Text
@@ -3488,11 +2992,6 @@ class MatplotlibRenderer:
             if artist is not None and artist.get_visible()
         }
         used_native = False
-        if native_primary:
-            for _key, artist in ordered:
-                if id(artist) not in native_primary_ids and artist.get_visible():
-                    self._draw_dynamic_artist(artist, renderer, canvas)
-            used_native = True
         if native_image:
             boundary_ids = set(self._boundary_chrome_commands)
             for entries in self._boundary_chrome_cache.values():
@@ -3514,13 +3013,9 @@ class MatplotlibRenderer:
                     and artist.get_visible()
                 ):
                     self._draw_dynamic_artist(artist, renderer, canvas)
-            annotations_drawn, _annotation_ids = (
-                self._raster_facet_fit_annotations(canvas)
-            )
-            if not annotations_drawn:
-                for _key, artist in ordered:
-                    if id(artist) in facet_annotation_ids and artist.get_visible():
-                        self._draw_dynamic_artist(artist, renderer, canvas)
+            for _key, artist in ordered:
+                if id(artist) in facet_annotation_ids and artist.get_visible():
+                    self._draw_dynamic_artist(artist, renderer, canvas)
             used_native = True
         if native_curve_command and native_lines is None:
             for _key, artist in ordered:
@@ -3532,6 +3027,7 @@ class MatplotlibRenderer:
             bar_artists = tuple(
                 artist for group in bar_groups for artist in group
             )
+            bar_ids = {id(artist) for artist in bar_artists}
             native_ids = {
                 id(artist)
                 for artist in bar_artists + data_lines + fit_lines
@@ -3540,17 +3036,16 @@ class MatplotlibRenderer:
             for entries in self._boundary_chrome_cache.values():
                 boundary_ids.update(id(artist) for artist, _owner, _zorder in entries)
             draw_boundary_ids = boundary_ids
-            if (
-                self._raster_curve_bars(bar_groups, canvas)
-                and self._raster_curve_lines(data_lines, canvas)
-            ):
+            for _key, artist in ordered:
+                if id(artist) in bar_ids and artist.get_visible():
+                    self._draw_dynamic_artist(artist, renderer, canvas)
+            if self._raster_curve_lines(data_lines, canvas):
                 for _key, artist in ordered:
                     if (
                         id(artist) in draw_boundary_ids
                         and artist.get_visible()
                     ):
                         self._draw_dynamic_artist(artist, renderer, canvas)
-                self._raster_facet_fit_curves(canvas)
                 if self._raster_curve_lines(fit_lines, canvas):
                     for _key, artist in ordered:
                         if (
@@ -3560,16 +3055,12 @@ class MatplotlibRenderer:
                             and artist.get_visible()
                         ):
                             self._draw_dynamic_artist(artist, renderer, canvas)
-                    annotations_drawn, _annotation_ids = (
-                        self._raster_facet_fit_annotations(canvas)
-                    )
-                    if not annotations_drawn:
-                        for _key, artist in ordered:
-                            if (
-                                id(artist) in facet_annotation_ids
-                                and artist.get_visible()
-                            ):
-                                self._draw_dynamic_artist(artist, renderer, canvas)
+                    for _key, artist in ordered:
+                        if (
+                            id(artist) in facet_annotation_ids
+                            and artist.get_visible()
+                        ):
+                            self._draw_dynamic_artist(artist, renderer, canvas)
                     used_native = True
         if not used_native:
             for index, (_key, artist) in enumerate(ordered):
@@ -4088,6 +3579,20 @@ class MatplotlibRenderer:
             )
         return tuple(prepared)
 
+    @staticmethod
+    def _native_curve_scene_supported(
+        series: Sequence[_PreparedSeries],
+    ) -> bool:
+        """Whether the native stroke can paint every visible primitive."""
+
+        for item in series:
+            if item.band is not None:
+                return False
+            plotted = np.where(item.valid, item.y, np.nan)
+            if bool(np.any(_isolated_curve_mask(item.x, plotted))):
+                return False
+        return True
+
     def _ensure_lines(self, axes: Any, count: int, key: str) -> list[Any]:
         lines: list[Any] = self._artists.setdefault(key, [])
         while len(lines) < count:
@@ -4134,6 +3639,8 @@ class MatplotlibRenderer:
             and not isinstance(self.spec, FacetGridPlot)
             and self._series_hover is None
             and self._series_locked is None
+            and not self._last_fit_overlays
+            and self._native_curve_scene_supported(series)
         )
         if native_direct:
             extremes = np.array([np.inf, -np.inf, np.inf, -np.inf])
@@ -4195,7 +3702,7 @@ class MatplotlibRenderer:
                     np.asarray(labelled.x, dtype=float),
                     labels=[_literal_text(name) for name in labelled.x_labels],
                 )
-            self._artists["curve:native"] = {
+            self._artists["curve:prepared"] = {
                 "series": (series,),
                 "limits": (tuple(axes.get_xlim()), tuple(axes.get_ylim())),
                 "state": state,
@@ -4210,7 +3717,7 @@ class MatplotlibRenderer:
                     artist.set_visible(False)
             self._series_hit_cache.clear()
             return
-        self._artists.pop("curve:native", None)
+        self._artists.pop("curve:prepared", None)
         self._mutate_series_artists(
             axes,
             series,
@@ -4464,11 +3971,27 @@ class MatplotlibRenderer:
             )
         self._apply_series_focus(id(axes))
 
-    def _materialize_native_curve(self) -> None:
-        """Build current standalone Curve artists only when interaction needs them."""
+    def _materialize_prepared_curve(self) -> None:
+        """Build public Curve artists from the current prepared native scene."""
 
-        command = self._artists.pop("curve:native", None)
+        command = self._artists.pop("curve:prepared", None)
         if not isinstance(command, dict):
+            return
+        cells = command.get("cells")
+        options = command.get("options")
+        state = command.get("state")
+        if cells is not None and options is not None and state is not None:
+            handler = handler_for(self.semantic_spec)
+            for key, axis, index in self.painted_surfaces:
+                cell = cells[index]
+                handler.render(
+                    self,
+                    getattr(cell, "payload", cell),
+                    state,
+                    axes=axis,
+                    key=key,
+                    **options[index],
+                )
             return
         series_by_cell = tuple(command.get("series", ()))
         if len(series_by_cell) != 1:
@@ -4492,9 +4015,32 @@ class MatplotlibRenderer:
             for artist in artists:
                 artist.set_visible(True)
 
+    def _materialize_prepared_images(self) -> None:
+        """Build public Image artists from a prepared Facet scene."""
+
+        command = self._artists.pop("image:prepared", None)
+        if not isinstance(command, dict):
+            return
+        cells = command.get("cells")
+        options = command.get("options")
+        state = command.get("state")
+        if cells is None or options is None or state is None:
+            return
+        handler = handler_for(self.semantic_spec)
+        for key, axis, index in self.painted_surfaces:
+            cell = cells[index]
+            handler.render(
+                self,
+                getattr(cell, "payload", cell),
+                state,
+                axes=axis,
+                key=key,
+                **options[index],
+            )
+
     def _series_hit(self, axes: Any | None, px: float, py: float, radius: float
                     ) -> tuple[int, object, str, float, float] | None:
-        self._materialize_native_curve()
+        self._materialize_prepared_curve()
         if axes is None or not axes.get_visible():
             return None
         point = np.asarray((px, py), dtype=float)
@@ -4760,7 +4306,7 @@ class MatplotlibRenderer:
         guard written against it would never fire.
         """
 
-        self._materialize_native_curve()
+        self._materialize_prepared_curve()
         return axes is not None and axes.get_visible() and (
             self._series_focus_allowed(id(axes))
         )
@@ -7061,13 +6607,6 @@ class MatplotlibRenderer:
                 and self._facet_focus_index is None
             )
         )
-        native_signature = (
-            key,
-            state.revision,
-            tuple(map(float, extent)),
-            self._requested_view_limits,
-            coordinate_aspect,
-        )
         image, cmap = self._update_image_artist(
             axes,
             z,
@@ -7088,7 +6627,7 @@ class MatplotlibRenderer:
         )
         if native_primary:
             cmap_name, cmap = self._resolved_image_colormap(state)
-            self._artists["image:native_command"] = {
+            self._artists["image:prepared"] = {
                 "key": key,
                 "values": z[np.newaxis, ...],
                 "valid": valid[np.newaxis, ...],
@@ -7096,10 +6635,8 @@ class MatplotlibRenderer:
                 "limits": (float(vmin), float(vmax)),
                 "lut": self._image_color_lut(cmap_name, cmap),
             }
-            self._artists["image:native_signature"] = native_signature
         else:
-            self._artists.pop("image:native_command", None)
-            self._artists.pop("image:native_signature", None)
+            self._artists.pop("image:prepared", None)
         if paint_labels:
             if axes.get_xlabel() != x_label:
                 axes.set_xlabel(x_label)
@@ -7796,7 +7333,7 @@ class MatplotlibRenderer:
         handler = handler_for(semantic)
         focused = self._facet_focus_index is not None
         if not isinstance(semantic, CurvePlot):
-            self._artists.pop("facet:curve_native", None)
+            self._artists.pop("curve:prepared", None)
         # Facet focus changes the physical cell box.  Establish the complete
         # frame geometry before an image cell chooses its display raster.
         self._position_facet_axes_for_frame(axes)
@@ -7843,6 +7380,15 @@ class MatplotlibRenderer:
                     if bool(np.any(item.valid)):
                         x_groups.append(item.x[item.valid])
                         y_groups.append(item.y[item.valid])
+                        if item.band is not None:
+                            low = np.asarray(item.band[0], dtype=float)
+                            high = np.asarray(item.band[1], dtype=float)
+                            low_valid = item.valid & np.isfinite(low)
+                            high_valid = item.valid & np.isfinite(high)
+                            if bool(np.any(low_valid)):
+                                y_groups.append(low[low_valid])
+                            if bool(np.any(high_valid)):
+                                y_groups.append(high[high_valid])
             if x_groups:
                 x_target = _curve_x_limits(np.concatenate(x_groups))
                 y_range = _data_limits(np.concatenate(y_groups))
@@ -7862,13 +7408,17 @@ class MatplotlibRenderer:
             if (
                 not focused
                 and kernels.engaged()
+                and all(
+                    self._native_curve_scene_supported(series)
+                    for series in curve_series
+                )
             ):
-                self._artists["facet:curve_native"] = {
+                self._artists["curve:prepared"] = {
                     "series": curve_series,
                     "limits": curve_limits,
                 }
             else:
-                self._artists.pop("facet:curve_native", None)
+                self._artists.pop("curve:prepared", None)
         elif isinstance(semantic, HistogramPlot):
             histogram_arrays = tuple(
                 self._histogram_arrays(getattr(cell, "payload", cell), state)
@@ -7952,7 +7502,7 @@ class MatplotlibRenderer:
             cell_options = tuple({"color_limits": image_limits} for _cell in cells)
             if not focused and kernels.engaged() and native_image_values:
                 cmap_name, cmap = self._resolved_image_colormap(state)
-                self._artists["facet:image_native"] = {
+                self._artists["image:prepared"] = {
                     "values": np.stack(native_image_values),
                     "valid": np.stack(native_image_valid),
                     "extents": np.asarray(native_image_extents, dtype=np.float64),
@@ -7962,8 +7512,8 @@ class MatplotlibRenderer:
                     "view_limits": self._requested_view_limits,
                 }
             else:
-                self._artists.pop("facet:image_native", None)
-                self._artists.pop("facet:image_native_signature", None)
+                self._artists.pop("image:prepared", None)
+                self._artists.pop("image:prepared_signature", None)
 
         cell_options = tuple(
             {**options, "paint_labels": False} for options in cell_options
@@ -7977,8 +7527,20 @@ class MatplotlibRenderer:
         # REMEMBER to delegate -- and the ones that forgot (colour-limit
         # dragging, square cells, the point overlay, the crosshair value rail)
         # were user-visible bugs.
-        native_image = self._artists.get("facet:image_native")
-        native_curve = self._artists.get("facet:curve_native")
+        native_image = self._artists.get("image:prepared")
+        if isinstance(native_image, dict):
+            native_image.update(
+                cells=cells,
+                options=cell_options,
+                state=state,
+            )
+        native_curve = self._artists.get("curve:prepared")
+        if isinstance(native_curve, dict):
+            native_curve.update(
+                cells=cells,
+                options=cell_options,
+                state=state,
+            )
         native_signature = (
             None
             if not isinstance(native_image, dict)
@@ -7990,7 +7552,7 @@ class MatplotlibRenderer:
         )
         prepare_native_image = (
             native_signature is not None
-            and self._artists.get("facet:image_native_signature")
+            and self._artists.get("image:prepared_signature")
             != native_signature
         )
         for key, axis, index in self.painted_surfaces:
@@ -8030,7 +7592,7 @@ class MatplotlibRenderer:
                     axis.set_ylabel("")
             visible_axes.append((index, axis))
         if native_signature is not None:
-            self._artists["facet:image_native_signature"] = native_signature
+            self._artists["image:prepared_signature"] = native_signature
         typography = self.plan.facet_typography
         rows, columns = self.plan.facet_shape or (1, max(len(cells), 1))
         for index, axis in visible_axes:
@@ -8624,7 +8186,7 @@ class MatplotlibRenderer:
             return
         with style_context(self.style):
             limits = (float(selected[0]), float(selected[1]))
-            native_command = self._artists.get("image:native_command")
+            native_command = self._artists.get("image:prepared")
             if (
                 isinstance(native_command, dict)
                 and native_command.get("key") == key
@@ -9023,6 +8585,7 @@ class MatplotlibRenderer:
         if not active:
             self._restore_fit_source_lines()
             return
+        self._materialize_prepared_curve()
         if not isinstance(self.semantic_spec, (CurvePlot, RollingPlot)):
             self._restore_fit_source_lines()
             return
@@ -9388,12 +8951,15 @@ class MatplotlibRenderer:
         facet_parameter: str | None = None,
     ) -> None:
         if overview:
+            self._update_facet_fit_overview(
+                overlays,
+                model_id,
+                facet_parameter,
+            )
             if (
                 kernels.engaged()
                 and isinstance(self.semantic_spec, (CurvePlot, ImagePlot))
             ):
-                if self._fit_artists:
-                    self._clear_fit_topology()
                 self._artists["facet:fit_native"] = {
                     "overlays": overlays,
                     "model_id": model_id,
@@ -9401,11 +8967,6 @@ class MatplotlibRenderer:
                 }
                 return
             self._artists.pop("facet:fit_native", None)
-            self._update_facet_fit_overview(
-                overlays,
-                model_id,
-                facet_parameter,
-            )
             return
         self._artists.pop("facet:fit_native", None)
         self._update_single_fit(overlays[0] if overlays else None, model_id)

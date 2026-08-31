@@ -56,6 +56,11 @@ def test_facet_live_fit_paints_every_cell_and_focus_keeps_annotation() -> None:
         for index, axis in enumerate(session._renderer.axes["facet_cell"]):
             assert "headline=" not in axis.get_title()
             assert result.overlays[index].facet_index == index
+            assert axis.texts and "$x_0$" in axis.texts[0].get_text()
+
+        session.set_parameter("facet_fit_parameter", "sigma")
+        for axis in session._renderer.axes["facet_cell"]:
+            assert axis.texts and r"$\sigma$" in axis.texts[0].get_text()
 
         session.focus_facet(0)
         focused = session._renderer.axes["facet_cell"][0]

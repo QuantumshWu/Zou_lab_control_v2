@@ -769,102 +769,8 @@ def raster_polylines(vertices, offsets, colours, widths, clips, low, high, out):
                 out[row, column, 3] = np.uint8(255)
 
 
-@njit(cache=True, nogil=True)
-def raster_error_envelopes(
-    x,
-    y_low,
-    y_high,
-    offsets,
-    colours,
-    widths,
-    cap_widths,
-    clips,
-    low,
-    high,
-    out,
-):
-    """Aggregate dense error bars per display column and paint their envelope."""
-
-    height, width = out.shape[:2]
-    for group in range(offsets.size - 1):
-        clip_left = max(0, clips[group, 0])
-        clip_top = max(0, clips[group, 1])
-        clip_right = min(width, clips[group, 2])
-        clip_bottom = min(height, clips[group, 3])
-        if clip_right <= clip_left or clip_bottom <= clip_top:
-            continue
-        for column in range(clip_left, clip_right):
-            low[group, column] = np.inf
-            high[group, column] = -np.inf
-        for point in range(offsets[group], offsets[group + 1]):
-            if not (
-                np.isfinite(x[point])
-                and np.isfinite(y_low[point])
-                and np.isfinite(y_high[point])
-            ):
-                continue
-            column = int(np.floor(x[point]))
-            if clip_left <= column < clip_right:
-                low[group, column] = min(low[group, column], y_low[point])
-                high[group, column] = max(high[group, column], y_high[point])
-
-        radius = max(np.float64(0.5), np.float64(widths[group]) * 0.5)
-        stem_reach = int(np.ceil(radius + np.float64(0.5)))
-        cap_reach = max(
-            stem_reach,
-            int(np.ceil(np.float64(cap_widths[group]) * np.float64(0.5))),
-        )
-        alpha = np.float64(colours[group, 3]) / np.float64(255.0)
-        inverse = np.float64(1.0) - alpha
-        for column in range(clip_left, clip_right):
-            stem_low = np.inf
-            stem_high = -np.inf
-            cap_lows = np.inf
-            cap_highs = -np.inf
-            for source_column in range(
-                max(clip_left, column - cap_reach),
-                min(clip_right, column + cap_reach + 1),
-            ):
-                if not np.isfinite(low[group, source_column]):
-                    continue
-                distance = abs(source_column - column)
-                if distance <= stem_reach:
-                    stem_low = min(stem_low, low[group, source_column])
-                    stem_high = max(stem_high, high[group, source_column])
-                if distance <= cap_reach:
-                    cap_lows = min(cap_lows, low[group, source_column])
-                    cap_highs = max(cap_highs, high[group, source_column])
-            if np.isfinite(stem_low):
-                first = max(clip_top, int(np.floor(stem_low - radius)))
-                last = min(clip_bottom, int(np.ceil(stem_high + radius)))
-                for row in range(first, last):
-                    for channel in range(3):
-                        value = (
-                            np.float64(colours[group, channel]) * alpha
-                            + np.float64(out[row, column, channel]) * inverse
-                        )
-                        out[row, column, channel] = np.uint8(
-                            min(np.float64(255.0), np.floor(value + 0.5))
-                        )
-                    out[row, column, 3] = np.uint8(255)
-            if np.isfinite(cap_lows):
-                for cap_y in (cap_lows, cap_highs):
-                    first = max(clip_top, int(np.floor(cap_y - radius)))
-                    last = min(clip_bottom, int(np.ceil(cap_y + radius)))
-                    for row in range(first, last):
-                        for channel in range(3):
-                            value = (
-                                np.float64(colours[group, channel]) * alpha
-                                + np.float64(out[row, column, channel]) * inverse
-                            )
-                            out[row, column, channel] = np.uint8(
-                                min(np.float64(255.0), np.floor(value + 0.5))
-                            )
-                        out[row, column, 3] = np.uint8(255)
-
-
 @njit(cache=True, parallel=True, nogil=True)
-def raster_facet_images(
+def raster_prepared_images(
     values,
     valid,
     use_valid,
@@ -876,7 +782,7 @@ def raster_facet_images(
     scale,
     out,
 ):
-    """Map a batch of image cells directly into their final canvas boxes."""
+    """Map prepared Image surfaces directly into their final canvas boxes."""
 
     cells, source_rows, source_columns = values.shape
     height, width = out.shape[:2]
@@ -934,65 +840,6 @@ def raster_facet_images(
             out[row, column, 1] = lut[code, 1]
             out[row, column, 2] = lut[code, 2]
             out[row, column, 3] = lut[code, 3]
-
-
-@njit(cache=True, nogil=True)
-def raster_glyph_runs(
-    codes,
-    lengths,
-    positions,
-    clips,
-    atlas,
-    advances,
-    colours,
-    out,
-):
-    """Composite clipped cached glyph masks for dynamic Facet annotations."""
-
-    height, width = out.shape[:2]
-    glyph_height = atlas.shape[1]
-    glyph_width = atlas.shape[2]
-    for run in range(codes.shape[0]):
-        cursor = positions[run, 0]
-        top = positions[run, 1]
-        clip_left = max(0, clips[run, 0])
-        clip_top = max(0, clips[run, 1])
-        clip_right = min(width, clips[run, 2])
-        clip_bottom = min(height, clips[run, 3])
-        for index in range(lengths[run]):
-            glyph = codes[run, index]
-            if glyph < 0 or glyph >= atlas.shape[0]:
-                continue
-            if cursor >= clip_right:
-                break
-            for row in range(glyph_height):
-                target_row = top + row
-                if target_row < clip_top or target_row >= clip_bottom:
-                    continue
-                for column in range(glyph_width):
-                    target_column = cursor + column
-                    if target_column < clip_left or target_column >= clip_right:
-                        continue
-                    coverage = atlas[glyph, row, column]
-                    if coverage == 0:
-                        continue
-                    alpha = (
-                        np.float64(coverage)
-                        * np.float64(colours[run, 3])
-                        / np.float64(65025.0)
-                    )
-                    inverse = np.float64(1.0) - alpha
-                    for channel in range(3):
-                        value = (
-                            np.float64(colours[run, channel]) * alpha
-                            + np.float64(out[target_row, target_column, channel])
-                            * inverse
-                        )
-                        out[target_row, target_column, channel] = np.uint8(
-                            min(np.float64(255.0), np.floor(value + 0.5))
-                        )
-                    out[target_row, target_column, 3] = np.uint8(255)
-            cursor += advances[glyph]
 
 
 @njit(cache=True, parallel=True, nogil=True)
@@ -1075,17 +922,11 @@ def transform_curve_batch(
     x,
     y,
     valid,
-    band_low,
-    band_high,
-    use_band,
     affine,
     canvas_height,
     vertices,
-    bar_x,
-    bar_low,
-    bar_high,
 ):
-    """Transform grouped Curve data and uncertainty bounds in one native pass."""
+    """Transform grouped Curve data in one native pass."""
 
     a, b, c, d, e, f = affine
     for series in prange(y.shape[0]):
@@ -1093,24 +934,9 @@ def transform_curve_batch(
             if not valid[series, point]:
                 vertices[series, point, 0] = np.nan
                 vertices[series, point, 1] = np.nan
-                bar_x[series, point] = np.nan
-                bar_low[series, point] = np.nan
-                bar_high[series, point] = np.nan
                 continue
             xv = x[point]
             yv = y[series, point]
             vertices[series, point, 0] = a * xv + c * yv + e
             vertices[series, point, 1] = canvas_height - (b * xv + d * yv + f)
-            if use_band:
-                lo = band_low[series, point]
-                hi = band_high[series, point]
-                bar_x[series, point] = a * xv + c * lo + e
-                first = canvas_height - (b * xv + d * lo + f)
-                second = canvas_height - (b * xv + d * hi + f)
-                bar_low[series, point] = min(first, second)
-                bar_high[series, point] = max(first, second)
-            else:
-                bar_x[series, point] = np.nan
-                bar_low[series, point] = np.nan
-                bar_high[series, point] = np.nan
 

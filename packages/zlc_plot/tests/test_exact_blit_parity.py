@@ -139,7 +139,7 @@ def test_native_curve_stays_within_the_full_pixel_delta_budget(ratio) -> None:
     try:
         session.set_size("4x4")
         native = np.array(session.rgba(), copy=True)
-        session._renderer._materialize_native_curve()
+        session._renderer._materialize_prepared_curve()
         session._renderer._composed_generation = -1
         artist = np.array(session.rgba(), copy=True)
     finally:
