@@ -60,16 +60,16 @@ class _ManagerView:
         self.device_open_requested = _Signal()
         self.device_close_requested = _Signal()
         self.device_remote_toggled = _Signal()
-        self.server_log_requested = _Signal()
+        self.device_log_requested = _Signal()
         self.choices: tuple = ()
-        self.server_log_opened: list = []
+        self.device_logs_opened: list = []
         self.devices: tuple = ()
         self.forms: dict = {}
         self.values: dict = {}
         self.status: list[tuple[str, str]] = []
 
-    def open_server_log(self, snapshot) -> None:
-        self.server_log_opened.append(snapshot)
+    def open_device_log(self, instance_id, snapshot) -> None:
+        self.device_logs_opened.append((str(instance_id), snapshot))
 
     def set_discovery_enabled(self, enabled, reason="") -> None:
         self.discovery_enabled = (bool(enabled), str(reason))
@@ -1174,35 +1174,142 @@ def test_a_self_serving_type_is_published_as_its_client_shape(tmp_path) -> None:
         manager.close()
 
 
-def test_the_server_log_tail_collects_every_serving_logger(tmp_path) -> None:
-    """One window shows what the .bat consoles used to scroll.
+def test_each_published_device_reads_only_its_own_log(tmp_path) -> None:
+    """The log is the published device's own console, not a shared one.
 
-    The pulse server, the SLM server and the fabric all narrate on their
-    package loggers; the process-wide buffer collects them, and the Server
-    log button hands the view that buffer's snapshot.
+    An RF source published on the fabric shows the fabric lines that name
+    it -- and nothing from the pulse server, the SLM, or OTHER published
+    devices.  A device that is not published has no log to offer, because
+    nobody else can be on its knobs.
     """
 
     import logging
 
-    from zlc_workbench.device_manager import _server_log_buffer
+    from zlc_atom.devices.rf.vaunix_lms import VaunixLmsConfig
+    from zlc_atom.devices.simulation.rf import virtual_rf_source
+    from zlc_atom.install import discover_device_catalog
 
-    buffer = _server_log_buffer()
-    assert _server_log_buffer() is buffer, "one capture point per process"
-    before, _lines = buffer.snapshot()
-    logging.getLogger("zlc_pulse.remote").info("ZLC TEST-EVENT alpha")
-    logging.getLogger("zlc_atom.devices.slm.device").info("SLM TEST-EVENT beta")
-    logging.getLogger("zlc_atom.devices.remote.fabric").info("FABRIC TEST-EVENT gamma")
-    total, lines = buffer.snapshot()
-    assert total == before + 3
-    assert lines[-3].endswith("ZLC TEST-EVENT alpha")
-    assert lines[-2].endswith("SLM TEST-EVENT beta")
-    assert lines[-1].endswith("FABRIC TEST-EVENT gamma")
-
+    rf_type = next(
+        item
+        for item in discover_device_catalog().available
+        if item.type_id == "rf.virtual"
+    )
+    initial = InstallationConfig(
+        (
+            DeviceInstanceConfig(
+                instance_id="rf",
+                role="detuning",
+                type_id=rf_type.type_id,
+                parameters=rf_type.authoring_schema.project_values({}),
+            ),
+        )
+    )
+    source = virtual_rf_source(VaunixLmsConfig(serial=1001))
+    session = SimpleNamespace(
+        installation=SimpleNamespace(
+            devices={"rf": SimpleNamespace(device=source)}, failures={}
+        )
+    )
     view = _ManagerView()
-    manager = DeviceManagerPresenter(view, tmp_path / "apparatus.json")
+    manager = DeviceManagerPresenter(
+        view,
+        tmp_path / "apparatus.json",
+        initial_config=initial,
+        initialize_session=lambda _candidate: session,
+    )
+    assert manager.toggle_lifecycle() is True
     try:
-        view.server_log_requested.emit()
-        (snapshot,) = view.server_log_opened
-        assert snapshot()[0] == total
+        assert manager.show_device_log("rf") is False, (
+            "an unpublished device has no log"
+        )
+        assert "Remote first" in view.status[-1][1]
+
+        assert manager.toggle_remote("rf") is True
+        logging.getLogger("zlc_pulse.remote").info("ZLC NOISE for the board")
+        logging.getLogger("zlc_atom.devices.remote.fabric").info(
+            "FABRIC TUNE device=rf field=frequency_hz value=1.0"
+        )
+        logging.getLogger("zlc_atom.devices.remote.fabric").info(
+            "FABRIC TUNE device=other field=power_dbm value=2.0"
+        )
+        logging.getLogger("zlc_atom.devices.remote.fabric").info(
+            "FABRIC WITHDRAW device=rf"
+        )
+        assert manager.show_device_log("rf") is True
+        ((key, snapshot),) = view.device_logs_opened
+        assert key == "rf"
+        _total, lines = snapshot()
+        tails = [line.split("] ", 1)[1] for line in lines]
+        assert "FABRIC TUNE device=rf field=frequency_hz value=1.0" in tails
+        assert "FABRIC WITHDRAW device=rf" in tails
+        assert not any("device=other" in line for line in tails), (
+            "another device's lines must not appear"
+        )
+        assert not any("ZLC NOISE" in line for line in tails), (
+            "the pulse server is not this device"
+        )
     finally:
+        if manager._announcer is not None:
+            manager._announcer.close()
+        manager.close()
+
+
+def test_a_local_server_device_s_log_includes_its_declared_channels(tmp_path) -> None:
+    """sequencer.local's log shows the pulse server's own narration too.
+
+    The type declares log_channels=("zlc_pulse.remote",): its in-process
+    server's lines belong to it, alongside the fabric lines naming it.
+    """
+
+    import logging
+
+    from zlc_atom.install import discover_device_catalog
+
+    local_type = next(
+        item
+        for item in discover_device_catalog().available
+        if item.type_id == "sequencer.local"
+    )
+    assert local_type.log_channels == ("zlc_pulse.remote",)
+    initial = InstallationConfig(
+        (
+            DeviceInstanceConfig(
+                instance_id="board",
+                role="sequencer",
+                type_id=local_type.type_id,
+                parameters=local_type.authoring_schema.project_values(
+                    {"port": 18899}
+                ),
+            ),
+        )
+    )
+    session = SimpleNamespace(
+        installation=SimpleNamespace(
+            devices={"board": SimpleNamespace(device=object())}, failures={}
+        )
+    )
+    view = _ManagerView()
+    manager = DeviceManagerPresenter(
+        view,
+        tmp_path / "apparatus.json",
+        initial_config=initial,
+        initialize_session=lambda _candidate: session,
+    )
+    assert manager.toggle_lifecycle() is True
+    try:
+        assert manager.toggle_remote("board") is True
+        logging.getLogger("zlc_pulse.remote").info("ZLC FIRE cycles=3")
+        logging.getLogger("zlc_atom.devices.slm.device").info("SLM APPLY ok=True")
+        assert manager.show_device_log("board") is True
+        ((key, snapshot),) = view.device_logs_opened
+        assert key == "board"
+        _total, lines = snapshot()
+        tails = [line.split("] ", 1)[1] for line in lines]
+        assert "ZLC FIRE cycles=3" in tails
+        assert not any(line.startswith("SLM ") for line in tails), (
+            "the SLM's narration is not the board's"
+        )
+    finally:
+        if manager._announcer is not None:
+            manager._announcer.close()
         manager.close()

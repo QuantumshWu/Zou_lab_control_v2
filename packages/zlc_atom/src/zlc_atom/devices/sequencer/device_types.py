@@ -154,6 +154,7 @@ DEVICE_TYPES = (
         factory=_local_factory,
         control_factory=open_sequencer_control,
         announce=_announce_local,
+        log_channels=("zlc_pulse.remote",),
     ),
 )
 

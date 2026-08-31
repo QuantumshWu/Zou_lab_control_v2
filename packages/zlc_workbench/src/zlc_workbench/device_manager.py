@@ -48,12 +48,12 @@ __all__ = ["DeviceManagerPresenter"]
 
 
 class _ServerLogBuffer(logging.Handler):
-    """Bounded, thread-safe tail of every server this process runs.
+    """Bounded, thread-safe capture of every server this process runs.
 
-    The pulse server, the SLM server and the fabric announcer all narrate on
-    their package loggers; this single process-wide handler is where a bench
-    that serves its own hardware collects that story, so the machine's
-    operator can watch it in a window the way the old .bat console allowed.
+    The pulse server, the SLM server and the fabric announcer all narrate
+    on their package loggers; this single process-wide handler records who
+    said each line (the logger name) so a per-device window can show ONE
+    published device's story and nothing else's.
     """
 
     #: Every in-process server narrates under one of these loggers.
@@ -61,21 +61,21 @@ class _ServerLogBuffer(logging.Handler):
 
     def __init__(self) -> None:
         super().__init__(level=logging.INFO)
-        self._lines: deque[str] = deque(maxlen=4000)
+        self._entries: deque[tuple[str, str]] = deque(maxlen=4000)
         self._total = 0
 
     def emit(self, record: logging.LogRecord) -> None:
         stamp = time.strftime("%H:%M:%S", time.localtime(record.created))
         line = f"[{stamp}] {record.getMessage()}"
         with self.lock:
-            self._lines.append(line)
+            self._entries.append((record.name, line))
             self._total += 1
 
-    def snapshot(self) -> tuple[int, tuple[str, ...]]:
-        """The running line count and the retained tail, atomically."""
+    def snapshot(self) -> tuple[int, tuple[tuple[str, str], ...]]:
+        """The running count and the retained (logger, line) tail, atomically."""
 
         with self.lock:
-            return self._total, tuple(self._lines)
+            return self._total, tuple(self._entries)
 
 
 _SERVER_LOG: _ServerLogBuffer | None = None
@@ -228,7 +228,7 @@ class DeviceManagerPresenter:
         self.view.device_open_requested.connect(self.open_device)
         self.view.device_remote_toggled.connect(self.toggle_remote)
         self.view.device_close_requested.connect(self.close_device)
-        self.view.server_log_requested.connect(self.show_server_log)
+        self.view.device_log_requested.connect(self.show_device_log)
         # What this machine cannot offer is named too, with the reason: a
         # family that will not import used to be simply absent, which reads
         # exactly like a family that does not exist.
@@ -619,10 +619,46 @@ class DeviceManagerPresenter:
             return False
         return True
 
-    def show_server_log(self) -> bool:
-        """Open the live tail of every server this bench process runs."""
+    def show_device_log(self, instance_id: str) -> bool:
+        """Open the live log of ONE published device.
 
-        self.view.open_server_log(self._server_log.snapshot)
+        The log exists to watch what remote clients are doing to hardware
+        this machine serves, so it is offered per device and only while
+        the device is published.  What counts as this device's lines: the
+        logger prefixes its type declares (its own in-process server), plus
+        the fabric's lines that name this instance.
+        """
+
+        key = str(instance_id)
+        if key not in self._remoted:
+            self._report(
+                f"{key}: publish it with Remote first -- its log narrates "
+                "what remote clients do",
+                severity="warning",
+            )
+            return False
+        config = next(
+            (item for item in self.devices if item.instance_id == key), None
+        )
+        descriptor = None if config is None else self.types.get(config.type_id)
+        channels = tuple(getattr(descriptor, "log_channels", ()) or ())
+        buffer = self._server_log
+        fabric_token = f"device={key}"
+
+        def snapshot() -> tuple[int, tuple[str, ...]]:
+            total, entries = buffer.snapshot()
+            lines = tuple(
+                line
+                for name, line in entries
+                if name.startswith(channels)
+                or (
+                    name.startswith("zlc_atom.devices.remote.fabric")
+                    and (f"{fabric_token} " in line or line.endswith(fabric_token))
+                )
+            )
+            return total, lines
+
+        self.view.open_device_log(key, snapshot)
         return True
 
     def toggle_remote(self, instance_id: str) -> bool:

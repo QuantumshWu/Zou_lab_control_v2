@@ -63,8 +63,8 @@ bin\build_and_program.bat      build if needed, then program volatile FPGA;
 
 The machine a board or SLM head is plugged into serves it from the bench
 itself: install `sequencer.local` / `slm.hamamatsu_x15213_local` in the Device
-Manager and Init starts the server in-process (the Server log window shows
-its narration). The headless `pulse_server` / `slm_server` commands remain
+Manager and Init starts the server in-process; once published with Remote,
+the device card's Log button tails that device's own narration. The headless `pulse_server` / `slm_server` commands remain
 for a machine without a bench window.
 
 Run experiment windows from the folder owning `pulses\`, `data\`, and

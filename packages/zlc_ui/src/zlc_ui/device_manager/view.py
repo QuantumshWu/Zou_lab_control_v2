@@ -123,6 +123,7 @@ class _LiveDeviceCard(FluentFrame):
     device_open_requested = QtCore.pyqtSignal(str)
     device_close_requested = QtCore.pyqtSignal(str)
     device_remote_toggled = QtCore.pyqtSignal(str)
+    device_log_requested = QtCore.pyqtSignal(str)
 
     def __init__(self, instance_id: str, parent=None) -> None:
         super().__init__(parent, bordered=True)
@@ -139,17 +140,26 @@ class _LiveDeviceCard(FluentFrame):
         #: fabric, so the OTHER machine's "Scan hardware" finds it with no
         #: address typed anywhere.  A second click withdraws it.
         self.remote_button = FluentButton("Remote", color=GREY)
+        #: The published device's own console: what remote clients are doing
+        #: to hardware THIS machine serves.  It exists only while published,
+        #: because that is the only time anyone else can be on the knobs.
+        self.log_button = FluentButton("Log", color=GREY)
+        self.log_button.setVisible(False)
         self.close_button = FluentButton("Close", color=ORANGE)
         outer.addWidget(self.role_label)
         outer.addWidget(self.detail_label, 1)
         outer.addWidget(self.control_button)
         outer.addWidget(self.remote_button)
+        outer.addWidget(self.log_button)
         outer.addWidget(self.close_button)
         self.control_button.clicked.connect(
             lambda: self.device_open_requested.emit(self.instance_id)
         )
         self.remote_button.clicked.connect(
             lambda: self.device_remote_toggled.emit(self.instance_id)
+        )
+        self.log_button.clicked.connect(
+            lambda: self.device_log_requested.emit(self.instance_id)
         )
         self.close_button.clicked.connect(
             lambda: self.device_close_requested.emit(self.instance_id)
@@ -162,6 +172,7 @@ class _LiveDeviceCard(FluentFrame):
         self.detail_label.setText(f"{type_id} · {self.instance_id}")
         self.remote_button.setText("Remoted" if remote else "Remote")
         self.remote_button.set_color(ACCENT if remote else GREY)
+        self.log_button.setVisible(bool(remote))
         self.setToolTip(self.instance_id)
 
 
@@ -423,8 +434,8 @@ class DeviceManagerView(QtWidgets.QWidget):
     device_close_requested = QtCore.pyqtSignal(str)
     #: Toggle publishing one loaded device on the bench fabric.
     device_remote_toggled = QtCore.pyqtSignal(str)
-    #: Open the live tail of every server this bench process runs.
-    server_log_requested = QtCore.pyqtSignal()
+    #: Open the live log of ONE published device (its server narration).
+    device_log_requested = QtCore.pyqtSignal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -518,15 +529,6 @@ class DeviceManagerView(QtWidgets.QWidget):
         self.loaded_empty = muted_note_label("No active installation")
         self.loaded_empty.setWordWrap(True)
         self.loaded_layout.addWidget(self.loaded_empty)
-        log_row = QtWidgets.QHBoxLayout()
-        log_row.addStretch(1)
-        self.server_log_button = FluentButton("Server log", color=GREY)
-        self.server_log_button.setToolTip(
-            "Watch every server this machine runs -- the pulse board, the "
-            "SLM, the bench fabric -- narrate in one live window."
-        )
-        log_row.addWidget(self.server_log_button)
-        self.loaded_layout.addLayout(log_row)
         right.addWidget(self.loaded_group)
         self.runtime_note = muted_note_label(
             "Control opens each loaded device in its own window; this window "
@@ -557,7 +559,6 @@ class DeviceManagerView(QtWidgets.QWidget):
         self.status_strip = StatusStrip()
         page.addWidget(self.status_strip)
         self.discover_button.clicked.connect(self.discovery_requested.emit)
-        self.server_log_button.clicked.connect(self.server_log_requested.emit)
         self.save_button.clicked.connect(self.save_requested.emit)
         self.new_combo.activated[int].connect(self._template_chosen)
         self.load_button.clicked.connect(self.load_requested.emit)
@@ -690,6 +691,7 @@ class DeviceManagerView(QtWidgets.QWidget):
                 card.device_open_requested.connect(self.device_open_requested)
                 card.device_close_requested.connect(self.device_close_requested)
                 card.device_remote_toggled.connect(self.device_remote_toggled)
+                card.device_log_requested.connect(self.device_log_requested)
                 self._loaded_cards[instance_id] = card
                 self.loaded_layout.insertWidget(index, card)
             card.set_record(
@@ -699,10 +701,14 @@ class DeviceManagerView(QtWidgets.QWidget):
             )
         self.loaded_empty.setVisible(not devices)
 
-    def open_server_log(self, snapshot) -> None:
-        """Open (or re-front) the live server-log window for this bench."""
+    def open_device_log(self, instance_id: str, snapshot) -> None:
+        """Open (or re-front) the live log window of ONE published device."""
 
-        window = getattr(self, "_server_log_window", None)
+        key = str(instance_id)
+        windows = getattr(self, "_device_log_windows", None)
+        if windows is None:
+            windows = self._device_log_windows = {}
+        window = windows.get(key)
         if window is not None and window.isVisible():
             window.showNormal()
             window.raise_()
@@ -710,9 +716,9 @@ class DeviceManagerView(QtWidgets.QWidget):
             return
         from zlc_ui.fluent import open_fluent_window
 
-        self._server_log_window = open_fluent_window(
+        windows[key] = open_fluent_window(
             lambda: _ServerLogView(snapshot),
-            title="Server log@Zou lab",
+            title=f"{key} log@Zou lab",
             owner=self,
             window_ratio=0.45,
         )
@@ -728,6 +734,7 @@ class DeviceManagerView(QtWidgets.QWidget):
             card.remote_button.set_color(
                 ACCENT if instance_id in self._remoted else GREY
             )
+            card.log_button.setVisible(instance_id in self._remoted)
 
     def set_discovery_enabled(
         self,

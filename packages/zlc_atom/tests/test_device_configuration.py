@@ -301,3 +301,9 @@ def test_local_types_announce_the_client_shape_a_peer_installs() -> None:
     # Plain clients and tunables are announced as themselves.
     assert items["sequencer.hardware"].announce is None
     assert items["rf.virtual"].announce is None
+    # And each local server names the logger its narration lives under.
+    assert items["sequencer.local"].log_channels == ("zlc_pulse.remote",)
+    assert items["slm.hamamatsu_x15213_local"].log_channels == (
+        "zlc_atom.devices.slm",
+    )
+    assert items["rf.virtual"].log_channels == ()

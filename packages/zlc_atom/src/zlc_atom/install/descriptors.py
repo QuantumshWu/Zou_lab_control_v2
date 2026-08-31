@@ -73,6 +73,12 @@ class DeviceTypeDescriptor:
     #: sides knows that mapping.  None means the device is announced as
     #: itself, which is right for plain endpoint clients and tunables.
     announce: Callable[[Mapping[str, Any]], tuple[str, dict[str, Any]]] | None = None
+    #: Logger-name prefixes under which THIS type's in-process server
+    #: narrates (the local pulse board logs under "zlc_pulse.remote", the
+    #: local SLM under "zlc_atom.devices.slm").  A bench uses them to show
+    #: one published device's own log; the fabric's per-device lines are
+    #: matched by instance id instead, so plain tunables leave this empty.
+    log_channels: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.type_id or not self.domain:
@@ -98,6 +104,10 @@ class DeviceTypeDescriptor:
             raise TypeError("device type control_factory must be callable or None")
         if self.announce is not None and not callable(self.announce):
             raise TypeError("device type announce must be callable or None")
+        log_channels = tuple(self.log_channels)
+        if any(not isinstance(name, str) or not name for name in log_channels):
+            raise TypeError("device type log_channels must be non-empty strings")
+        object.__setattr__(self, "log_channels", log_channels)
         object.__setattr__(self, "capabilities", capabilities)
         object.__setattr__(self, "dependencies", dependencies)
 

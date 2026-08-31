@@ -1284,6 +1284,7 @@ DEVICE_TYPES = (
         factory=_local_factory,
         control_factory=open_slm_control,
         announce=_announce_local,
+        log_channels=("zlc_atom.devices.slm",),
     ),
 )
 
