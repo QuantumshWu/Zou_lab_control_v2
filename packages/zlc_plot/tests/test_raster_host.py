@@ -18,6 +18,7 @@ from zlc_plot import (
     PlotLabels,
     PlotSession,
     Reduction,
+    RollingPlot,
     SelectorKind,
     parameter_controls,
 )
@@ -1291,6 +1292,63 @@ def test_locked_curve_wheel_steps_canonical_series_without_zoom() -> None:
         assert renderer._series_locked is None
         event("scroll", 2.0, 3.0, step=1.0)
         assert tuple(axes.get_xlim()) != original_xlim
+    finally:
+        session.close()
+
+
+def test_locked_rolling_wheel_steps_group_series_without_zoom() -> None:
+    repeats = 8
+    sites = 3
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=repeats),
+        PointTable.from_columns({"sample": (0.0,)}),
+        data_axes=(Axis.create("site", size=sites),),
+        dtype=np.float64,
+        generation="rolling-series-wheel",
+    )
+    values = (
+        np.arange(repeats, dtype=float)[:, None, None]
+        + 10.0 * np.arange(sites, dtype=float)[None, None, :]
+    )
+    session = PlotSession(
+        DatasetSnapshot(schema, values, 0),
+        RollingPlot(group=AxisRef.data("site")),
+    )
+    try:
+        renderer = session._renderer
+        axes = renderer.primary_axes
+        width, height = canvas_physical_size(renderer.figure.canvas)
+
+        def event(action, x, y, *, button=None, step=0.0):
+            px, py = axes.transData.transform((x, y))
+            transform = next(
+                item for item in session._raster_axes_snapshot()
+                if item.role == "history"
+            )
+            return session._raster_pointer_event(
+                action,
+                px / width,
+                1.0 - py / height,
+                button=button,
+                step=step,
+                axes_snapshot=transform,
+            )
+
+        event("press", -4.0, 13.0, button=1)
+        event("release", -4.0, 13.0, button=1)
+        assert "site=1" in renderer._series_locked[2]
+        original_limits = (
+            tuple(axes.get_xlim()),
+            tuple(axes.get_ylim()),
+        )
+
+        changed = event("scroll", -4.0, 13.0, step=-1.0)
+        assert changed.publish_front
+        assert "site=2" in renderer._series_locked[2]
+        assert (
+            tuple(axes.get_xlim()),
+            tuple(axes.get_ylim()),
+        ) == original_limits
     finally:
         session.close()
 

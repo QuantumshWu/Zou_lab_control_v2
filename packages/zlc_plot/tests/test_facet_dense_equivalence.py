@@ -153,8 +153,10 @@ _EDGES = tuple(float(edge) for edge in np.linspace(0.0, 4000.0, 7))
 )
 def test_dense_facet_equals_the_generic_path(spec, bins) -> None:
     view = DataView(_scan_of_frames())
-    dense = view._dense_facet(spec, bins)
-    assert dense is not None, "the dense path must actually engage here"
+    dense = view._factored_facet(spec, False)
+    if dense is None and isinstance(spec.cell, HistogramPlot):
+        dense = view._dense_histogram_facet(spec, bins)
+    assert dense is not None, "a tensor/factored path must actually engage here"
     generic = view._facet_from_positions(spec, bins, view._all_positions())
     _assert_facets_equal(dense, generic)
 
@@ -169,25 +171,12 @@ def test_dense_facet_equals_the_generic_path(spec, bins) -> None:
 def test_facet_projection_takes_the_dense_tensor_path(
     monkeypatch, spec, bins
 ) -> None:
-    """facet() itself must route these cells densely, not just allow it."""
+    """facet() must use a tensor/factored owner, not materialize positions."""
 
     view = DataView(_scan_of_frames())
-    routed = {}
-    original = DataView._dense_facet
 
-    def forbidden(_self):
-        raise AssertionError("dense facet allocated generic element positions")
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("facet allocated generic element positions")
 
     monkeypatch.setattr(DataView, "_all_positions", forbidden)
-
-    def spying(self, *args, **kwargs):
-        result = original(self, *args, **kwargs)
-        routed["dense"] = result is not None
-        return result
-
-    DataView._dense_facet = spying
-    try:
-        view.facet(spec, bins=bins)
-    finally:
-        DataView._dense_facet = original
-    assert routed.get("dense") is True
+    view.facet(spec, bins=bins)

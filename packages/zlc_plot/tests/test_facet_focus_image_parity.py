@@ -444,11 +444,7 @@ def test_overview_destroys_the_focused_chrome_again() -> None:
             key.startswith("facet:1:colorbar")
             for key in session._renderer._artists
         )
-        returned = session.rgba()
-        assert returned.shape == before.shape
-        assert float(np.mean(np.abs(
-            returned.astype(np.int16) - before.astype(np.int16)
-        ))) < 0.5
+        np.testing.assert_array_equal(session.rgba(), before)
     finally:
         session.close()
 
@@ -486,10 +482,7 @@ def test_direct_focus_switch_leaves_no_chrome_ghost() -> None:
             reference = np.frombuffer(raw, dtype=np.uint8).reshape(
                 height, width, 4
             )
-            difference = np.abs(
-                composed.astype(np.int16) - reference.astype(np.int16)
-            )
-            assert int(np.max(difference)) <= 2
+            np.testing.assert_array_equal(composed, reference)
     finally:
         session.close()
 

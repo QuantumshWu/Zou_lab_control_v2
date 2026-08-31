@@ -1754,54 +1754,17 @@ def fit_regular_separable_images(
         return current, raw_rss, status, context, summary, final_information
 
     active = {cell: item[2] for cell, item in enumerate(prepared) if item is not None}
+    proxy_solved = solve_stage(active, None, refinement=False)
     batch_refinement = len(active) > 1
-    proxy_solved: dict[int, tuple[np.ndarray, float, int, bool]] = (
-        {} if batch_refinement else solve_stage(active, None, refinement=False)
+    full_solved = (
+        solve_stage(
+            {cell: prepared[cell][0] for cell in active},  # type: ignore[index]
+            {cell: proxy_solved[cell][0] for cell in active},
+            refinement=True,
+        )
+        if batch_refinement
+        else {}
     )
-    full_solved: dict[int, tuple[np.ndarray, float, int, bool]] = {}
-    if batch_refinement:
-        full_items = {
-            cell: prepared[cell][0] for cell in active  # type: ignore[index]
-        }
-        warm_full: dict[int, np.ndarray] = {}
-        for cell, data in full_items.items():
-            try:
-                seed = direct_seed(warm_starts[cell], data)
-            except Exception:
-                seed = None
-            if seed is not None:
-                warm_full[cell] = seed
-        if len(warm_full) == len(full_items):
-            full_solved = solve_stage(
-                full_items,
-                warm_full,
-                refinement=True,
-            )
-            retry = {
-                cell: full_items[cell]
-                for cell, answer in full_solved.items()
-                if not answer[3] or not np.all(np.isfinite(answer[0]))
-            }
-            if retry:
-                proxy_retry = solve_stage(
-                    {cell: active[cell] for cell in retry},
-                    None,
-                    refinement=False,
-                )
-                full_solved.update(
-                    solve_stage(
-                        retry,
-                        {cell: proxy_retry[cell][0] for cell in retry},
-                        refinement=True,
-                    )
-                )
-        else:
-            proxy_solved = solve_stage(active, None, refinement=False)
-            full_solved = solve_stage(
-                full_items,
-                {cell: proxy_solved[cell][0] for cell in active},
-                refinement=True,
-            )
     check()
 
     for cell, item in enumerate(prepared):

@@ -30,7 +30,6 @@ def _snapshot(repeats: int, revision: int, scale: float) -> DatasetSnapshot:
 
 
 def _bands(session: PlotSession) -> list[PolyCollection]:
-    session._renderer._materialize_native_curve()
     return [
         artist
         for axes in session._renderer.figure.axes
@@ -127,7 +126,6 @@ def test_focus_dims_the_other_series_bars_with_their_lines() -> None:
         renderer = session._renderer
         renderer.draw()
         axes = renderer.figure.axes[0]
-        renderer._materialize_native_curve()
         bars = renderer._series_bars[id(axes)]
         assert len(bars) == 2  # one group per series
         token = DEFAULTS.style.render.uncertainty_bar_alpha
@@ -171,7 +169,6 @@ def test_error_bars_live_in_the_dynamic_layer_with_their_lines() -> None:
     try:
         renderer = session._renderer
         renderer.draw()
-        renderer._materialize_native_curve()
         dynamic = {id(artist) for _key, artist in renderer._dynamic_artists()}
         bars = [
             artist

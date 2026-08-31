@@ -963,6 +963,158 @@ class DataView:
             x, positions, groups, aggregation, uncertainty
         )
 
+    def _dense_tensor_projection(
+        self,
+        refs: tuple[AxisRef, ...],
+        aggregation: Reduction,
+        *,
+        uncertainty: bool = False,
+    ) -> tuple[
+        tuple["_Domain", ...],
+        NDArray[Any],
+        NDArray[np.int64],
+        NDArray[np.float64] | None,
+        NDArray[np.bool_],
+    ] | None:
+        """Reduce one regular tensor once while retaining ``refs`` in order.
+
+        This is the dense numeric owner shared by standalone and Facet
+        Curve/Image projections.  A retained axis must map one-to-one to a
+        physical tensor dimension; scan coordinates that share the point-row
+        dimension stay with ``_factored_planes``.  The caller only repackages
+        the returned planes into its public plot payload.
+        """
+
+        if not refs:
+            return None
+        try:
+            domains, codes, dimensions = self._axis_projection(refs)
+        except AxisResolutionError:
+            return None
+        shape = self._samples.value.canonical.shape
+        if len(set(dimensions)) != len(dimensions):
+            return None
+        orders: list[NDArray[np.int64] | None] = []
+        kept_sizes: list[int] = []
+        for domain, axis_codes, dimension in zip(domains, codes, dimensions):
+            size = int(shape[dimension])
+            selected = np.asarray(axis_codes, dtype=np.int64)
+            if (
+                int(domain.size) != size
+                or selected.shape != (size,)
+                or bool(np.any(selected < 0))
+                or bool(np.any(selected >= size))
+                or not np.all(_finite_coordinate(np.asarray(domain.canonical)))
+            ):
+                return None
+            kept_sizes.append(size)
+            natural = np.arange(size, dtype=np.int64)
+            if np.array_equal(selected, natural):
+                orders.append(None)
+            else:
+                if not bool(np.all(np.bincount(selected, minlength=size) == 1)):
+                    return None
+                orders.append(_inverse_code_order(selected))
+
+        destinations = tuple(
+            range(len(shape) - len(dimensions), len(shape))
+        )
+
+        def laid_out(array: NDArray[Any]) -> NDArray[Any]:
+            moved = np.moveaxis(array, dimensions, destinations).reshape(
+                (-1, *kept_sizes), order="C"
+            )
+            return moved if moved.flags.c_contiguous else np.ascontiguousarray(moved)
+
+        moved = laid_out(self._samples.value.canonical)
+        source_usable = self._samples.valid_mask
+        moved_usable = (
+            np.broadcast_to(np.asarray(True, dtype=np.bool_), moved.shape)
+            if _stride_zero_all_true(source_usable)
+            else laid_out(source_usable)
+        )
+        identity = _leading_identity(moved, moved_usable)
+        if identity is None:
+            values, counts = _masked_leading_reduce(
+                moved, moved_usable, aggregation
+            )
+            valid_plane = (counts > 0) & np.isfinite(values)
+        else:
+            values, valid = identity
+            valid_plane = np.asarray(valid, dtype=np.bool_)
+            counts = (
+                np.broadcast_to(np.asarray(1, dtype=np.int64), values.shape)
+                if _stride_zero_all_true(valid)
+                else np.asarray(valid, dtype=np.int64)
+            )
+        values = np.asarray(values)
+        counts = np.asarray(counts, dtype=np.int64)
+
+        sem = None
+        if uncertainty:
+            if aggregation is not Reduction.MEAN:
+                return None
+            moved_sigma = (
+                None
+                if self._samples.sigma is None
+                else laid_out(self._samples.sigma)
+            )
+            if identity is not None and moved_sigma is None:
+                sem = np.broadcast_to(
+                    np.asarray(np.nan, dtype=np.float64), values.shape
+                )
+            else:
+                marks = (
+                    None
+                    if _stride_zero_all_true(moved_usable)
+                    else moved_usable
+                )
+
+                def mean_of_squares(plane: Any, offset: float) -> Any:
+                    array = np.asarray(plane)
+                    from . import _raster_kernels as kernels
+
+                    sums = kernels.masked_centred_square_sums(
+                        array.reshape(array.shape[0], -1, 1),
+                        offset,
+                        (
+                            None
+                            if marks is None
+                            else marks.reshape(array.shape[0], -1, 1)
+                        ),
+                    )
+                    if sums is None:
+                        reduced, _ = _masked_leading_reduce(
+                            np.square(np.asarray(array, dtype=np.float64) - offset),
+                            moved_usable,
+                            Reduction.MEAN,
+                        )
+                        return reduced
+                    with np.errstate(invalid="ignore", divide="ignore"):
+                        return np.where(
+                            counts > 0,
+                            sums.reshape(values.shape) / counts,
+                            np.nan,
+                        )
+
+                sem = _sem_of_mean(
+                    np.asarray(values, dtype=np.float64),
+                    counts,
+                    moved,
+                    moved_sigma,
+                    mean_of_squares,
+                )
+
+        for axis, order in enumerate(orders):
+            if order is None:
+                continue
+            values = np.take(values, order, axis=axis)
+            counts = np.take(counts, order, axis=axis)
+            valid_plane = np.take(valid_plane, order, axis=axis)
+            if sem is not None:
+                sem = np.take(sem, order, axis=axis)
+        return domains, values, counts, sem, valid_plane
+
     def _dense_data_curve(
         self,
         x: AxisRef,
@@ -979,207 +1131,45 @@ class DataView:
         coordinates keep the generic algorithm.
         """
 
-        tensor_domains = (AxisDomain.REPEAT, AxisDomain.DATA)
-        if x.domain not in tensor_domains or any(
-            group.domain not in tensor_domains for group in groups
-        ):
-            return None
-        try:
-            x_resolved = self._resolve(x)
-            group_resolved = tuple(self._resolve(group) for group in groups)
-        except AxisResolutionError:
-            # Let the normal resolver produce the public missing-axis error.
-            return None
-        x_canonical = np.asarray(x_resolved.domain_canonical)
-        if not np.all(_finite_coordinate(x_canonical)):
-            return None
-        if x_canonical.size > 1 and not np.all(np.diff(x_canonical) > 0):
-            # The generic path aggregates over SORTED unique coordinates;
-            # only a strictly increasing declared domain is bit-identical.
-            return None
-
-        dimensions = [int(x_resolved.dimension)]
-        group_domains = []
-        group_orders = []
-        shape = self._samples.value.canonical.shape
-        for group, resolved in zip(groups, group_resolved):
-            dimension = int(resolved.dimension)
-            if dimension in dimensions:
-                return None
-            dimensions.append(dimension)
-            stride = 1
-            for size in shape[dimension + 1:]:
-                stride *= int(size)
-            representatives = np.arange(shape[dimension], dtype=np.int64) * stride
-            domain = self._domain(group, representatives)
-            codes = np.asarray(domain.codes, dtype=np.int64)
-            if (
-                domain.canonical.size != shape[dimension]
-                or codes.shape != (shape[dimension],)
-                or bool((codes < 0).any())
-                or np.unique(codes).size != codes.size
-            ):
-                return None
-            order = _inverse_code_order(codes)
-            group_domains.append(domain)
-            group_orders.append(order)
-
-        return self._dense_curve_data(
-            x,
-            x_resolved,
-            self._samples.value.canonical,
-            self._samples.valid_mask,
-            aggregation,
-            uncertainty,
-            self._samples.sigma,
-            groups=groups,
-            group_domains=tuple(group_domains),
-            group_dimensions=tuple(dimensions[1:]),
-            group_orders=tuple(group_orders),
+        projected = self._dense_tensor_projection(
+            (x, *groups), aggregation, uncertainty=uncertainty
         )
-
-    def _dense_curve_data(
-        self,
-        x: AxisRef,
-        x_resolved: "_ProjectedAxis",
-        values: NDArray[Any],
-        usable: NDArray[np.bool_],
-        aggregation: Reduction,
-        uncertainty: bool = False,
-        sigma: NDArray[Any] | None = None,
-        *,
-        groups: tuple[AxisRef, ...] = (),
-        group_domains: tuple = (),
-        group_dimensions: tuple[int, ...] = (),
-        group_orders: tuple[NDArray[np.int64] | None, ...] = (),
-    ) -> CurveData:
-        """One dense curve out of one (possibly row-sliced) value tensor."""
-
-        x_canonical = np.asarray(x_resolved.domain_canonical)
-        nx = int(x_canonical.size)
-
+        if projected is None:
+            return None
+        domains, values, counts, sem, valid = projected
+        x_domain, group_domains = domains[0], domains[1:]
+        x_resolved = self._resolve(x)
+        nx = int(x_domain.size)
         group_sizes = tuple(int(domain.size) for domain in group_domains)
         combinations = math.prod(group_sizes) if group_sizes else 1
-
-        def laid_out(array: NDArray[Any]) -> NDArray[Any]:
-            kept = (int(x_resolved.dimension), *group_dimensions)
-            destinations = tuple(range(np.ndim(array) - len(kept), np.ndim(array)))
-            moved = np.moveaxis(array, kept, destinations)
-            return np.reshape(moved, (-1, nx, combinations), order="C")
-
-        def code_ordered(array: NDArray[Any]) -> NDArray[Any]:
-            result = np.asarray(array).reshape((nx, *group_sizes))
-            for position, order in enumerate(group_orders):
-                if order is not None:
-                    result = np.take(result, order, axis=1 + position)
-            return result.reshape(nx, combinations)
-
-        moved = laid_out(values)
-        moved_usable = laid_out(usable)
-        identity = _leading_identity(moved, moved_usable)
-        if identity is not None:
-            # Nothing is pooled: every kept (x, group...) bucket owns exactly
-            # one physical sample.  All five Reduction choices are therefore
-            # the identity.  The general reducer still scanned validity and
-            # materialised an int64 count plane, then the identity group order
-            # copied both full planes once more.
-            y, valid_plane = identity
-            counts = (
-                np.broadcast_to(np.asarray(1, dtype=np.int64), y.shape)
-                if _stride_zero_all_true(valid_plane)
-                else valid_plane.astype(np.int64)
-            )
-        else:
-            y, counts = _masked_leading_reduce(moved, moved_usable, aggregation)
-            valid_plane = None
-        y = code_ordered(np.asarray(y, dtype=np.float64))
-        counts = code_ordered(counts)
-        if valid_plane is not None:
-            valid_plane = code_ordered(valid_plane)
-        sem = None
-        if uncertainty:
-            if identity is not None and sigma is None:
-                # One sample cannot state a scatter.  With no sample-owned
-                # sigma the exact answer is NaN in every identity bucket;
-                # reducing values and their squares over two million
-                # singleton buckets only rediscovers that invariant.
-                sem = np.broadcast_to(
-                    np.asarray(np.nan, dtype=np.float64), y.shape
-                )
-            else:
-                # The SEM is the SAME reduction run over the squares: no second
-                # kernel, no binomial special case -- for a boolean column the
-                # sample spread sqrt(p(1-p)) IS the binomial spread.
-                def mean_of_squares(plane: Any, offset: float) -> Any:
-                    array = np.asarray(plane)
-                    marks = (
-                        None
-                        if _stride_zero_all_true(moved_usable)
-                        else moved_usable
-                    )
-                    if array.ndim == 3 and array.flags.c_contiguous:
-                        from . import _raster_kernels as kernels
-
-                        flat = array.reshape(array.shape[0], -1, 1)
-                        flat_marks = (
-                            None
-                            if marks is None
-                            else np.asarray(marks).reshape(flat.shape)
-                        )
-                        square_sums = kernels.masked_centred_square_sums(
-                            flat,
-                            offset,
-                            flat_marks,
-                        )
-                        if square_sums is not None:
-                            ordered = code_ordered(
-                                square_sums.reshape(nx, combinations)
-                            )
-                            with np.errstate(invalid="ignore", divide="ignore"):
-                                return np.where(
-                                    counts > 0,
-                                    ordered / counts,
-                                    np.nan,
-                                )
-                    reduced, _ = _masked_leading_reduce(
-                        np.square(
-                            np.asarray(array, dtype=np.float64) - offset
-                        ),
-                        moved_usable,
-                        Reduction.MEAN,
-                    )
-                    return code_ordered(reduced)
-
-                sem = _sem_of_mean(
-                    y,
-                    counts,
-                    moved,
-                    None if sigma is None else laid_out(sigma),
-                    mean_of_squares,
-                )
-        x_quantity = QuantityArray(
-            x_canonical,
-            np.asarray(x_resolved.domain_display),
-            x_resolved.coordinate.canonical_unit,
-            x_resolved.coordinate.display_unit,
-            x_resolved.coordinate.label,
-        )
-        series = self._series_from_columns(
-            x_quantity,
-            _axis_coordinate_labels(x_resolved, x_canonical),
-            tuple(group_domains),
-            group_sizes,
-            y,
-            counts,
-            sem,
-            valid_plane=valid_plane,
-        )
+        x_canonical = np.asarray(x_domain.canonical)
         return CurveData(
             revision=self._samples.revision,
             generation=self._samples.generation,
             x_ref=x,
             group_by=groups,
-            series=series,
+            series=self._series_from_columns(
+                QuantityArray(
+                    x_canonical,
+                    np.asarray(x_domain.display),
+                    x_resolved.coordinate.canonical_unit,
+                    x_resolved.coordinate.display_unit,
+                    x_resolved.coordinate.label,
+                ),
+                _axis_coordinate_labels(x_resolved, x_canonical),
+                group_domains,
+                group_sizes,
+                np.asarray(values, dtype=np.float64).reshape(nx, combinations),
+                np.asarray(counts, dtype=np.int64).reshape(nx, combinations),
+                (
+                    None
+                    if sem is None
+                    else np.asarray(sem, dtype=np.float64).reshape(nx, combinations)
+                ),
+                valid_plane=np.asarray(valid, dtype=np.bool_).reshape(
+                    nx, combinations
+                ),
+            ),
         )
 
     def _curve_from_axes(
@@ -1383,6 +1373,123 @@ class DataView:
             series=series,
         )
 
+    def _dense_tensor_facet(
+        self,
+        spec: FacetGridPlot,
+        uncertainty: bool,
+    ) -> FacetData | None:
+        """Package one retained-axis tensor reduction as every Facet cell."""
+
+        cell = spec.cell
+        if isinstance(cell, CurvePlot):
+            groups = () if cell.group is None else (cell.group,)
+            projected = self._dense_tensor_projection(
+                (spec.facet, cell.x, *groups),
+                cell.reduction,
+                uncertainty=uncertainty,
+            )
+            if projected is None:
+                return None
+            domains, values, counts, sem, valid = projected
+            facet_domain, x_domain, group_domains = (
+                domains[0],
+                domains[1],
+                domains[2:],
+            )
+            facet_size = int(facet_domain.size)
+            nx = int(x_domain.size)
+            group_sizes = tuple(int(domain.size) for domain in group_domains)
+            combinations = math.prod(group_sizes) if group_sizes else 1
+            values = np.asarray(values, dtype=np.float64).reshape(
+                facet_size, nx, combinations
+            )
+            counts = np.asarray(counts, dtype=np.int64).reshape(
+                facet_size, nx, combinations
+            )
+            if sem is not None:
+                sem = np.asarray(sem, dtype=np.float64).reshape(
+                    facet_size, nx, combinations
+                )
+            valid = np.asarray(valid, dtype=np.bool_).reshape(
+                facet_size, nx, combinations
+            )
+            x_resolved = self._resolve(cell.x)
+            x_canonical = np.asarray(x_domain.canonical)
+            x_quantity = QuantityArray(
+                x_canonical,
+                np.asarray(x_domain.display),
+                x_resolved.coordinate.canonical_unit,
+                x_resolved.coordinate.display_unit,
+                x_resolved.coordinate.label,
+            )
+            x_labels = _axis_coordinate_labels(x_resolved, x_canonical)
+            payloads = tuple(
+                CurveData(
+                    revision=self._samples.revision,
+                    generation=self._samples.generation,
+                    x_ref=cell.x,
+                    group_by=groups,
+                    series=self._series_from_columns(
+                        x_quantity,
+                        x_labels,
+                        group_domains,
+                        group_sizes,
+                        values[index],
+                        counts[index],
+                        None if sem is None else sem[index],
+                        valid_plane=valid[index],
+                    ),
+                )
+                for index in range(facet_size)
+            )
+        elif isinstance(cell, ImagePlot):
+            projected = self._dense_tensor_projection(
+                (spec.facet, cell.y, cell.x), cell.reduction
+            )
+            if projected is None:
+                return None
+            domains, values, counts, _sem, valid = projected
+            facet_domain, y_domain, x_domain = domains
+            facet_size = int(facet_domain.size)
+            ny, nx = int(y_domain.size), int(x_domain.size)
+            values = np.asarray(values).reshape(facet_size, ny, nx)
+            counts = np.asarray(counts, dtype=np.int64).reshape(
+                facet_size, ny, nx
+            )
+            valid = np.asarray(valid, dtype=np.bool_).reshape(
+                facet_size, ny, nx
+            )
+            payloads = tuple(
+                self._image_from_planes(
+                    cell.x,
+                    cell.y,
+                    x_domain,
+                    y_domain,
+                    values[index],
+                    counts[index],
+                    valid=valid[index],
+                )
+                for index in range(facet_size)
+            )
+        else:
+            return None
+
+        return FacetData(
+            revision=self._samples.revision,
+            generation=self._samples.generation,
+            spec=spec,
+            cells=tuple(
+                FacetCell(
+                    facet_index=index,
+                    facet_value_canonical=value.canonical,
+                    facet_value_display=value.display,
+                    label=value.label,
+                    payload=payloads[index],
+                )
+                for index, value in enumerate(facet_domain.values)
+            ),
+        )
+
     def _factored_facet(
         self,
         spec: FacetGridPlot,
@@ -1402,26 +1509,14 @@ class DataView:
         """
 
         cell = spec.cell
-        row_domains = (AxisDomain.POINT_COORDINATE, AxisDomain.POINT_DIMENSION)
+        dense = self._dense_tensor_facet(spec, uncertainty)
+        if dense is not None:
+            return dense
         if isinstance(cell, ImagePlot):
             return self._factored_facet_images(spec, cell)
         if not isinstance(cell, CurvePlot):
             return None
         cell_groups = () if cell.group is None else (cell.group,)
-        if (
-            spec.facet.domain in (AxisDomain.REPEAT, AxisDomain.DATA)
-            and cell.x.domain in (AxisDomain.REPEAT, AxisDomain.DATA)
-        ):
-            combined = self._dense_data_curve(
-                cell.x,
-                (spec.facet, *cell_groups),
-                cell.reduction,
-                uncertainty,
-            )
-            if combined is not None:
-                return self._curve_groups_to_facets(
-                    spec, cell, cell_groups, combined
-                )
         row_facet = spec.facet.domain in (
             AxisDomain.POINT_COORDINATE,
             AxisDomain.POINT_DIMENSION,
@@ -1433,7 +1528,11 @@ class DataView:
                 cell.reduction,
                 uncertainty,
             )
-        elif spec.facet.domain in (AxisDomain.DATA, AxisDomain.REPEAT):
+        elif spec.facet.domain in (
+            AxisDomain.DATA,
+            AxisDomain.REPEAT,
+            AxisDomain.POINT_ROW,
+        ):
             planes = self._factored_planes(
                 (cell.x,),
                 (spec.facet, *cell_groups),
@@ -1622,7 +1721,11 @@ class DataView:
             planes = self._factored_planes(
                 (spec.facet, cell.y, cell.x), (), cell.reduction, False
             )
-        elif spec.facet.domain in (AxisDomain.DATA, AxisDomain.REPEAT):
+        elif spec.facet.domain in (
+            AxisDomain.DATA,
+            AxisDomain.REPEAT,
+            AxisDomain.POINT_ROW,
+        ):
             planes = self._factored_planes(
                 (cell.y, cell.x), (spec.facet,), cell.reduction, False
             )
@@ -2300,116 +2403,19 @@ class DataView:
         every flattened sample by its two declared data-axis indices.
         """
 
-        tensor_domains = (AxisDomain.REPEAT, AxisDomain.DATA)
-        if x.domain not in tensor_domains or y.domain not in tensor_domains:
+        projected = self._dense_tensor_projection((y, x), aggregation)
+        if projected is None:
             return None
-        # From the resolver, which is the one thing that decides what an axis
-        # reference means.  This used to build its own map keyed on the axis
-        # NAME, while the resolver accepts a name OR a full axis id -- so
-        # naming an axis the precise way dropped silently off this dense path
-        # into the generic per-pixel aggregator: measured 830 ms against 30 ms
-        # on one 640x480 frame, and it grows with the pixel count.
-        try:
-            x_resolved = self._resolve(x)
-            y_resolved = self._resolve(y)
-        except AxisResolutionError:
-            # Let the normal resolver produce the public missing-axis error.
-            return None
-        x_dimension = x_resolved.dimension
-        y_dimension = y_resolved.dimension
-        x_canonical = np.asarray(x_resolved.domain_canonical)
-        y_canonical = np.asarray(y_resolved.domain_canonical)
-        if not (
-            np.all(_finite_coordinate(x_canonical))
-            and np.all(_finite_coordinate(y_canonical))
-        ):
-            # The generic path omits non-finite declared coordinates from its
-            # domains.  Keep that uncommon policy in one implementation.
-            return None
-
-        return self._dense_image_data(
+        domains, values, counts, _sem, valid = projected
+        y_domain, x_domain = domains
+        return self._image_from_planes(
             x,
             y,
-            x_resolved,
-            y_resolved,
-            self._samples.value.canonical,
-            self._samples.valid_mask,
-            aggregation,
-        )
-
-    def _dense_image_data(
-        self,
-        x: AxisRef,
-        y: AxisRef,
-        x_resolved: "_ProjectedAxis",
-        y_resolved: "_ProjectedAxis",
-        values: NDArray[Any],
-        usable: NDArray[np.bool_],
-        aggregation: Reduction,
-    ) -> ImageData:
-        """One dense image out of one (possibly row-sliced) value tensor."""
-
-        x_canonical = np.asarray(x_resolved.domain_canonical)
-        y_canonical = np.asarray(y_resolved.domain_canonical)
-        ny, nx = int(y_canonical.size), int(x_canonical.size)
-        moved = np.reshape(
-            np.moveaxis(
-                values,
-                (y_resolved.dimension, x_resolved.dimension),
-                (-2, -1),
-            ),
-            (-1, ny, nx),
-            order="C",
-        )
-        moved_usable = np.reshape(
-            np.moveaxis(
-                usable,
-                (y_resolved.dimension, x_resolved.dimension),
-                (-2, -1),
-            ),
-            (-1, ny, nx),
-            order="C",
-        )
-        identity = _leading_identity(moved, moved_usable)
-        if identity is not None:
-            z, valid = identity
-        else:
-            z, counts = _masked_leading_reduce(moved, moved_usable, aggregation)
-            valid = (counts > 0) & np.isfinite(z)
-        # Reductions may promote their result; the singleton camera path keeps
-        # the producer's native dtype and immutable storage.
-        z = np.asarray(z)
-        z_display = self._samples.value.canonical_unit.convert_value_to(
-            z, self._samples.value.display_unit
-        )
-        z.setflags(write=False)
-        return ImageData(
-            revision=self._samples.revision,
-            generation=self._samples.generation,
-            x_ref=x,
-            y_ref=y,
-            x=QuantityArray(
-                x_canonical,
-                np.asarray(x_resolved.domain_display),
-                x_resolved.coordinate.canonical_unit,
-                x_resolved.coordinate.display_unit,
-                x_resolved.coordinate.label,
-            ),
-            y=QuantityArray(
-                y_canonical,
-                np.asarray(y_resolved.domain_display),
-                y_resolved.coordinate.canonical_unit,
-                y_resolved.coordinate.display_unit,
-                y_resolved.coordinate.label,
-            ),
-            z=QuantityArray(
-                z,
-                z_display,
-                self._samples.value.canonical_unit,
-                self._samples.value.display_unit,
-                self._samples.value.label,
-            ),
-            valid=valid,
+            x_domain,
+            y_domain,
+            np.asarray(values),
+            np.asarray(counts, dtype=np.int64),
+            valid=np.asarray(valid, dtype=np.bool_),
         )
 
     def _factored_image(
@@ -2448,6 +2454,7 @@ class DataView:
         z: NDArray[np.float64],
         counts: NDArray[np.int64],
         *,
+        valid: NDArray[np.bool_] | None = None,
         used_y: NDArray[np.bool_] | None = None,
         used_x: NDArray[np.bool_] | None = None,
     ) -> ImageData:
@@ -2468,13 +2475,23 @@ class DataView:
             x_display = x_display[used_x]
             z = z[:, used_x]
             counts = counts[:, used_x]
+            if valid is not None:
+                valid = valid[:, used_x]
         if used_y is not None and not bool(used_y.all()):
             y_canonical = y_canonical[used_y]
             y_display = y_display[used_y]
             z = z[used_y]
             counts = counts[used_y]
+            if valid is not None:
+                valid = valid[used_y]
         z = np.ascontiguousarray(z)
-        counts = np.ascontiguousarray(counts)
+        valid = (
+            (counts > 0) & np.isfinite(z)
+            if valid is None
+            else np.asarray(valid, dtype=np.bool_)
+        )
+        if valid.flags.writeable:
+            valid.setflags(write=False)
         z_display = self._samples.value.canonical_unit.convert_value_to(
             z, self._samples.value.display_unit
         )
@@ -2507,7 +2524,7 @@ class DataView:
                 self._samples.value.display_unit,
                 self._samples.value.label,
             ),
-            valid=(counts > 0) & np.isfinite(z),
+            valid=valid,
         )
 
     def _axis_projection(
@@ -3880,12 +3897,20 @@ class DataView:
             and (self.has_primary_index or int(window) > 1)
             else None
         )
-        dense = self._dense_facet(spec, shared_bins, uncertainty, validity=validity)
-        if dense is not None:
-            return dense
         factored = self._factored_facet(spec, uncertainty)
         if factored is not None:
             return factored
+        dense = (
+            self._dense_histogram_facet(
+                spec,
+                shared_bins,
+                validity=validity,
+            )
+            if isinstance(cell, HistogramPlot)
+            else None
+        )
+        if dense is not None:
+            return dense
         return self._facet_from_positions(
             spec,
             shared_bins,
@@ -3947,26 +3972,19 @@ class DataView:
             cells=tuple(cells),
         )
 
-    def _dense_facet(
+    def _dense_histogram_facet(
         self,
         spec: FacetGridPlot,
         shared_bins: int | Sequence[float] | None,
-        uncertainty: bool = False,
         *,
         validity: NDArray[np.bool_] | None = None,
     ) -> FacetData | None:
-        """Row-sliced twin of the dense projections, one cell at a time.
-
-        A facet over a tensor dimension selects slices of the same dense
-        block, and slicing preserves the regularity the cell projection
-        relies on. Repeat/point facets shorten those axes; a Histogram over
-        a DATA facet bins a view of each data-axis slice. No case needs
-        (position, value) pairs, code sorting, or per-sample grouping.
-        Curve/Image DATA facets keep their one-pass factored paths.
-        """
+        """Bin every regular tensor Facet cell without sorting samples."""
 
         facet = spec.facet
         cell = spec.cell
+        if not isinstance(cell, HistogramPlot):
+            return None
         values = self._samples.value.canonical
         valid_mask = self._samples.valid_mask if validity is None else validity
         if facet.domain is AxisDomain.REPEAT:
@@ -3977,49 +3995,12 @@ class DataView:
             AxisDomain.POINT_DIMENSION,
         ):
             slice_axis = 1
-        elif (
-            facet.domain is AxisDomain.DATA
-            and isinstance(cell, HistogramPlot)
-        ):
+        elif facet.domain is AxisDomain.DATA:
             try:
                 slice_axis = int(self._resolve(facet).dimension)
             except AxisResolutionError:
                 return None
         else:
-            return None
-
-        x_resolved = y_resolved = None
-        if isinstance(cell, CurvePlot):
-            # The same qualifying guards as _dense_data_curve, so a cell
-            # this path draws and the one the single kind draws agree.
-            if cell.group is not None or cell.x.domain is not AxisDomain.DATA:
-                return None
-            try:
-                x_resolved = self._resolve(cell.x)
-            except AxisResolutionError:
-                return None
-            x_domain = np.asarray(x_resolved.domain_canonical)
-            if not np.all(_finite_coordinate(x_domain)):
-                return None
-            if x_domain.size > 1 and not np.all(np.diff(x_domain) > 0):
-                return None
-        elif isinstance(cell, ImagePlot):
-            if (
-                cell.x.domain is not AxisDomain.DATA
-                or cell.y.domain is not AxisDomain.DATA
-            ):
-                return None
-            try:
-                x_resolved = self._resolve(cell.x)
-                y_resolved = self._resolve(cell.y)
-            except AxisResolutionError:
-                return None
-            if not (
-                np.all(_finite_coordinate(np.asarray(x_resolved.domain_canonical)))
-                and np.all(_finite_coordinate(np.asarray(y_resolved.domain_canonical)))
-            ):
-                return None
-        elif not isinstance(cell, HistogramPlot):
             return None
 
         # One representative element per candidate slice puts the existing
@@ -4035,48 +4016,20 @@ class DataView:
         domain = self._domain(facet, representatives)
         if not domain.values:
             return None
-        if isinstance(cell, CurvePlot):
-            assert x_resolved is not None
-            batch_curve = self._dense_curve_facet_payloads(
-                cell,
-                x_resolved,
+        assert shared_bins is not None
+        batch_edges = self._canonical_histogram_bins(shared_bins)
+        batch_counts = (
+            None
+            if isinstance(batch_edges, int)
+            else _facet_kernel_counts(
                 values,
                 valid_mask,
-                slice_axis,
                 np.asarray(domain.codes, dtype=np.int64),
-                uncertainty,
+                slice_axis,
+                len(domain.values),
+                batch_edges,
             )
-            if batch_curve is not None:
-                return FacetData(
-                    revision=self._samples.revision,
-                    generation=self._samples.generation,
-                    spec=spec,
-                    cells=tuple(
-                        FacetCell(
-                            facet_index=index,
-                            facet_value_canonical=value.canonical,
-                            facet_value_display=value.display,
-                            label=value.label,
-                            payload=batch_curve[index],
-                        )
-                        for index, value in enumerate(domain.values)
-                    ),
-                )
-        batch_edges = None
-        batch_counts = None
-        if isinstance(cell, HistogramPlot):
-            assert shared_bins is not None
-            canonical_bins = self._canonical_histogram_bins(shared_bins)
-            if not isinstance(canonical_bins, int):
-                batch_edges = canonical_bins
-                batch_counts = _facet_kernel_counts(
-                    values,
-                    valid_mask,
-                    np.asarray(domain.codes, dtype=np.int64),
-                    slice_axis,
-                    len(domain.values),
-                    batch_edges,
-                )
+        )
 
         cells: list[FacetCell] = []
         for facet_index, facet_value in enumerate(domain.values):
@@ -4110,39 +4063,17 @@ class DataView:
 
             cell_values = sliced(values)
             cell_valid = sliced(valid_mask)
-            if isinstance(cell, CurvePlot):
-                payload: FacetPayload = self._dense_curve_data(
-                    cell.x,
-                    x_resolved,
+            payload = (
+                self._histogram_from_counts(
+                    batch_edges, batch_counts[facet_index]
+                )
+                if batch_counts is not None and not isinstance(batch_edges, int)
+                else self._histogram_from_values(
+                    shared_bins,
                     cell_values,
-                    cell_valid,
-                    cell.reduction,
-                    uncertainty,
-                    sliced(self._samples.sigma),
+                    valid=cell_valid,
                 )
-            elif isinstance(cell, ImagePlot):
-                payload = self._dense_image_data(
-                    cell.x,
-                    cell.y,
-                    x_resolved,
-                    y_resolved,
-                    cell_values,
-                    cell_valid,
-                    cell.reduction,
-                )
-            else:
-                assert shared_bins is not None
-                payload = (
-                    self._histogram_from_counts(
-                        batch_edges, batch_counts[facet_index]
-                    )
-                    if batch_counts is not None and batch_edges is not None
-                    else self._histogram_from_values(
-                        shared_bins,
-                        cell_values,
-                        valid=cell_valid,
-                    )
-                )
+            )
             cells.append(
                 FacetCell(
                     facet_index=facet_index,
@@ -4157,145 +4088,6 @@ class DataView:
             generation=self._samples.generation,
             spec=spec,
             cells=tuple(cells),
-        )
-
-    def _dense_curve_facet_payloads(
-        self,
-        cell: CurvePlot,
-        x_resolved: "_ProjectedAxis",
-        values: NDArray[Any],
-        usable: NDArray[np.bool_],
-        facet_dimension: int,
-        facet_codes: NDArray[np.int64],
-        uncertainty: bool,
-    ) -> tuple[CurveData, ...] | None:
-        """Reduce every one-to-one tensor Facet Curve in one numeric pass."""
-
-        facet_size = int(values.shape[facet_dimension])
-        x_dimension = int(x_resolved.dimension)
-        x_canonical = np.asarray(x_resolved.domain_canonical)
-        nx = int(x_canonical.size)
-        if (
-            x_dimension == facet_dimension
-            or facet_codes.shape != (facet_size,)
-            or bool(np.any(facet_codes < 0))
-            or np.unique(facet_codes).size != facet_size
-            or int(np.max(facet_codes)) + 1 != facet_size
-        ):
-            return None
-
-        moved = np.moveaxis(
-            values,
-            (facet_dimension, x_dimension),
-            (-2, -1),
-        ).reshape(-1, facet_size, nx)
-        moved_usable = np.moveaxis(
-            usable,
-            (facet_dimension, x_dimension),
-            (-2, -1),
-        ).reshape(moved.shape)
-        if not moved.flags.c_contiguous:
-            moved = np.ascontiguousarray(moved)
-        if not moved_usable.flags.c_contiguous:
-            moved_usable = np.ascontiguousarray(moved_usable)
-        y, counts = _masked_leading_reduce(
-            moved, moved_usable, cell.reduction
-        )
-        y = np.asarray(y, dtype=np.float64)
-        counts = np.broadcast_to(np.asarray(counts, dtype=np.int64), y.shape)
-        sem = None
-        if uncertainty:
-            moved_sigma = None
-            if self._samples.sigma is not None:
-                moved_sigma = np.moveaxis(
-                    self._samples.sigma,
-                    (facet_dimension, x_dimension),
-                    (-2, -1),
-                ).reshape(moved.shape)
-                if not moved_sigma.flags.c_contiguous:
-                    moved_sigma = np.ascontiguousarray(moved_sigma)
-
-            def mean_of_squares(plane: Any, offset: float) -> Any:
-                array = np.asarray(plane)
-                marks = (
-                    None
-                    if _stride_zero_all_true(moved_usable)
-                    else moved_usable
-                )
-                from . import _raster_kernels as kernels
-
-                sums = kernels.masked_centred_square_sums(
-                    array.reshape(array.shape[0], -1, 1),
-                    offset,
-                    None if marks is None else marks.reshape(array.shape[0], -1, 1),
-                )
-                if sums is None:
-                    reduced, _ = _masked_leading_reduce(
-                        np.square(np.asarray(array, dtype=np.float64) - offset),
-                        moved_usable,
-                        Reduction.MEAN,
-                    )
-                    return reduced
-                with np.errstate(invalid="ignore", divide="ignore"):
-                    return np.where(
-                        counts > 0,
-                        sums.reshape(facet_size, nx) / counts,
-                        np.nan,
-                    )
-
-            sem = _sem_of_mean(
-                y, counts, moved, moved_sigma, mean_of_squares
-            )
-
-        order = _inverse_code_order(facet_codes)
-        if order is not None:
-            y = np.take(y, order, axis=0)
-            counts = np.take(counts, order, axis=0)
-            if sem is not None:
-                sem = np.take(sem, order, axis=0)
-        valid = (counts > 0) & np.isfinite(y)
-        value = self._samples.value
-        y_display = value.canonical_unit.convert_value_to(
-            y, value.display_unit
-        )
-        x_quantity = QuantityArray(
-            x_canonical,
-            np.asarray(x_resolved.domain_display),
-            x_resolved.coordinate.canonical_unit,
-            x_resolved.coordinate.display_unit,
-            x_resolved.coordinate.label,
-        )
-        x_labels = _axis_coordinate_labels(x_resolved, x_canonical)
-        for array in (y, counts, valid, y_display):
-            if array.flags.writeable:
-                array.setflags(write=False)
-        if sem is not None and sem.flags.writeable:
-            sem.setflags(write=False)
-        return tuple(
-            CurveData(
-                revision=self._samples.revision,
-                generation=self._samples.generation,
-                x_ref=cell.x,
-                group_by=(),
-                series=(
-                    CurveSeries(
-                        x=x_quantity,
-                        x_labels=x_labels,
-                        y=QuantityArray(
-                            y[index],
-                            y_display[index],
-                            value.canonical_unit,
-                            value.display_unit,
-                            value.label,
-                        ),
-                        valid=valid[index],
-                        counts=counts[index],
-                        sem=None if sem is None else sem[index],
-                        label=value.label,
-                    ),
-                ),
-            )
-            for index in range(facet_size)
         )
 
     def _all_positions(self) -> NDArray[np.int64]:

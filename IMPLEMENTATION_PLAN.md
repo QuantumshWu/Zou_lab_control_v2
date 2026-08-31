@@ -47,7 +47,7 @@
   2.04M MEAN compute为204.124→9.719 ms，真实Windows Rolling Host中位为
   264.37→58.85 ms、P90为286.34→66.89 ms；70组reduction/validity/group矩阵满足
   既有浮点数值等价与结构精确contract，聚焦回归63项通过。
-- 可独立删除的极限Facet/Fit cut：Curve Facet的mean/SEM按`facet×x`一次归约，Image/Curve/uncertainty/fit line/ellipse/annotation直接生成最终RGBA；overview不维护逐cell动态artist，focused及line interaction按需回到原公共artist路径。RegularImage完整warm batch直接full refine并对失败cell cold fallback；Board先stage active-fit surface。真实DPR3、2×2、MOT 40×约500 ROI、40-shot四panel长窗：Curve-Fit critical path中位/P90/best `67.78/71.44/59.47 ms`，Image-Fit `80.16/84.82/70.38 ms`；实际显示仍受0.1 s exposure与100 ms cadence限制，不把处理能力冒充source fps。warmer为`62 kernels / 76 signatures`，聚焦Plot `30 passed`、Runtime/Workbench presentation `51 passed`、RegularImage fit `11 passed`。
+- Facet/Single规则tensor投影已收敛到同一retained-axis reduction：一次保留`facet/x/y/group`真实tensor axes、一次归约其它轴，Curve/Image只包装不同payload；Histogram继续共用其批量分箱terminal。像素A/B证明近似native Curve/Image/Fit/SEM无法同时保持0差异与净收益，相关glyph、stroke、image、ellipse、transform kernel及warm signatures已全部删除；所有动态像素回到唯一Matplotlib/Agg owner。RegularImage即使有完整warm seed也保留cold proxy竞争；Board的active-fit staging保持不变。相对`7dce795`的parent，在同一SimulationWorld MOT、DPR3、2×2、12次steady更新下：Facet Curve projection `2.53→1.43 ms`、Curve-Fit `3.57→2.42 ms`、Rolling-style Curve/SEM `4.69→2.94 ms`，对应总耗时`32.37→30.88`、`59.29→57.00`、`36.38→34.39 ms`；八个Image/Curve/Histogram/Fit/SEM场景的最终RGBA均为`0`个不同像素、最大通道差`0`，warmer收敛为`56 kernels / 64 signatures`。
 - Panel Edit/Setting性能cut在同一真实Windows Camera Facet链上完成：Direct Producer不再嵌套
   LogicEditor而只打开已有Logic tab；Qt owner在Host首次render前传入screen DPR；正常已settle
   Edit首开`update_projection 3→1`、`refresh_panel_editor 3→0`、Form reconcile `19→4`、
@@ -133,7 +133,7 @@
 - Feedback Monitor固定自动打开四张图：canonical Camera Measurement逐帧publication经mean reduction得到的带编号site map实时图、observable
   uniformity、site signal evolution和Target share evolution；phase保留为信号和最终Figure但不自动开panel。
 - Feedback每site只在完整shot batch上做受约束双高斯与full-data ΔBIC判定。winning probe effective share由`probe_combined`直接采用，普通gain/max-change不再缩小它；其余double共同补偿总功率并保留内部相对修正。direct-adopted site仍single或补偿后原double变single时，才从新baseline re-probe这些矛盾site；两侧无double且baseline未变不重复。formal-double gain从authored `feedback_gain`起步，连续两次显著改善乘1.25、显著变差乘0.5、不确定性内保持；diagnostic probe/single不参与adaptive。`probe_combined`计入`maximum feedback updates`，diagnostic candidates不计。
-- Grouped Curve hover与lock已分离：hover仅轻微加粗，lock才压暗其它lines；无框标签固定axes右上角，lock加`* `并接管滚轮逐series移动。standalone/Facet Curve的孤立valid点使用同一Line2D的短横线glyph并共享hover/lock；invalid仍断线，Rolling不改变。
+- Grouped Curve与Grouped Rolling共用hover/lock/wheel contract：hover仅轻微加粗，lock才压暗其它lines；无框标签固定axes右上角，lock加`* `并接管滚轮逐series移动。standalone/Facet Curve的孤立valid点使用同一Line2D短横线glyph；invalid仍断线。
 - ImagePlot与FacetGrid image cell不再暴露interpolation参数；schema/style/Panel Setting/Edit均删除该字段，renderer唯一固定值为`nearest`。
 - Feedback failure记录last complete candidate与rollback receipt；Stop只从完整测量candidate
   选择结果，未测phase不得成为final。

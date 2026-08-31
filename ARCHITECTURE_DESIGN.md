@@ -167,9 +167,9 @@ Node new chunk
   focused cell；相同shape但不同axis roles绝不共享数值范围。Live configure接受的新viewport
   必须写回此identity，Frozen/Edit/Viewer只能重放仍匹配的范围。
 - ImagePlot及FacetGrid的image cell统一使用`nearest`像素呈现；interpolation不是Parameter、PanelState、Figure recipe或UI字段，任何Logic/Task不得另行设置。
-- Facet overview及无hover/lock的steady Curve可以从同一accepted payload、style token与axes transform直接生成native RGBA；它不是第二份科学状态。focused cell仍走公共kind renderer，standalone Curve在首次line interaction时从当前accepted series物化既有artist，随后hover/lock/滚轮继续由原interaction owner处理。
+- Single与Facet的规则tensor数据都先由同一个retained-axis projection一次归约，再只把结果包装成各自payload；不得为某个plot kind另建Facet数值kernel。Curve、Rolling、Histogram、Fit及SEM的动态像素继续由同一个Matplotlib/Agg style与artist owner绘制；不得维护一条近似native raster造成第二份抗锯齿、clip、z-order或alpha真相。
 - 同一shot的Surface仍原子accept；staging只把active-fit surface排在display-only sibling之前，使更深依赖链先启动，不改变panel cadence、cohort membership或accept顺序。
-- RegularImage live batch在完整warm seed可用时直接做full refinement；任一cell失败或无warm seed时仍走cold proxy并只重试必要cell。warm不能成为不可恢复的authority。
+- RegularImage live batch即使具有完整warm seed也必须保留cold proxy竞争，再以选出的seed做full refinement；warm不能跳过cold证据、成为不可恢复的authority。
 - Title/layout等非plot变化不得re-fit。
 - 删除重复configure/clear/replay与多front handoff。
 - Qt owner必须在RasterPlotHost第一次render前把当前screen DPR以plain scalar交给Plot；不得先按默认DPR生成front，再在Widget挂载后为同一data/state重画一次。Form consumer在FormSpec结构和实际Widget值均已匹配时只接受新metadata，不得reconcile；keyed runtime choice domain真实变化仍强制刷新。
@@ -186,7 +186,7 @@ Node new chunk
 - ROI/binning坐标只由一个transform owner处理。
 - Selector Off时plot不消费任何pointer gesture：不画selector、不zoom/pan，也不响应双击facet focus；普通滚轮继续滚外层board。
 - Selector On时，FacetGrid overview只响应双击进入cell，不得在overview开始area selector；进入具体cell后，selector才按该cell的canonical projection工作。
-- Curve的invalid位置切断line且绝不跨洞连接；standalone Curve与FacetGrid Curve cell中，每段仅一个valid点时用同series颜色/alpha/linewidth的短横线glyph显示，不建立scatter或第二series，Rolling行为不变。Grouped Curve hover只轻微加粗命中的line/孤点glyph，其他lines保持正常alpha；click lock才加粗并压暗其余lines。Series文字固定在对应axes内部右上角、无背景框，locked文字以`* `开头；locked时滚轮按Group axis顺序切换line，未锁定时滚轮仍缩放viewport。
+- Curve的invalid位置切断line且绝不跨洞连接；standalone Curve与FacetGrid Curve cell中，每段仅一个valid点时用同series颜色/alpha/linewidth的短横线glyph显示，不建立scatter或第二series。Grouped Curve与Grouped Rolling共用series interaction：hover只轻微加粗命中的line/孤点glyph，其他lines保持正常alpha；click lock才加粗并压暗其余lines。Series文字固定在对应axes内部右上角、无背景框，locked文字以`* `开头；locked时滚轮按Group axis顺序切换line，未锁定时滚轮仍缩放viewport。
 
 ## 6. UI与Lifecycle
 

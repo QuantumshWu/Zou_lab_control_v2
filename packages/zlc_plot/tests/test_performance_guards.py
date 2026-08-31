@@ -254,12 +254,35 @@ def test_large_contiguous_facet_cells_are_views_with_bounded_peak(
     )
     shares: list[bool] = []
     histogram_inputs: list[tuple[bool, bool]] = []
-    original = DataView._dense_image_data
+    original = DataView._image_from_planes
     original_histogram = data_view_module._facet_kernel_counts
 
-    def observed(self, _x, _y, _xr, _yr, values, usable, aggregation):
+    def observed(
+        self,
+        x,
+        y,
+        x_domain,
+        y_domain,
+        values,
+        counts,
+        *,
+        valid=None,
+        used_y=None,
+        used_x=None,
+    ):
         shares.append(np.shares_memory(values, snapshot.block.values))
-        return original(self, _x, _y, _xr, _yr, values, usable, aggregation)
+        return original(
+            self,
+            x,
+            y,
+            x_domain,
+            y_domain,
+            values,
+            counts,
+            valid=valid,
+            used_y=used_y,
+            used_x=used_x,
+        )
 
     def observed_histogram(values, valid, *args, **kwargs):
         histogram_inputs.append(
@@ -267,7 +290,7 @@ def test_large_contiguous_facet_cells_are_views_with_bounded_peak(
         )
         return original_histogram(values, valid, *args, **kwargs)
 
-    monkeypatch.setattr(DataView, "_dense_image_data", observed)
+    monkeypatch.setattr(DataView, "_image_from_planes", observed)
     monkeypatch.setattr(
         data_view_module, "_facet_kernel_counts", observed_histogram
     )
