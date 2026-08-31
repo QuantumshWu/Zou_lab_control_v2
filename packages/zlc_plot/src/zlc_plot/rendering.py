@@ -1301,6 +1301,7 @@ class MatplotlibRenderer:
         self._fit_axis: Any | None = None
         self._fit_family: str | None = None
         self._fit_model_id: str | None = None
+        self._fit_mathtext_masks: dict[tuple[object, ...], np.ndarray] = {}
         self._data_revision: int | None = None
         #: Cached Agg chrome region (everything except renderer-owned dynamic
         #: artists) and the canvas signature it was captured for.  Payload-only
@@ -2377,16 +2378,9 @@ class MatplotlibRenderer:
     ) -> bool:
         """Transform and paint one grouped Curve in batched native passes."""
 
-        if not series:
+        if not self._grouped_curve_command_supported(series):
             return False
         points = int(series[0].x.size)
-        if points < 2 or any(
-            item.x.shape != (points,)
-            or item.y.shape != (points,)
-            or not np.array_equal(item.x, series[0].x)
-            for item in series
-        ):
-            return False
         canvas_rgba = np.asarray(canvas.buffer_rgba())
         height, width = canvas_rgba.shape[:2]
         y = np.stack([item.y for item in series])
@@ -2463,6 +2457,202 @@ class MatplotlibRenderer:
         )
         return True
 
+    @staticmethod
+    def _grouped_curve_command_supported(
+        series: Sequence[_PreparedSeries],
+    ) -> bool:
+        if not series:
+            return False
+        points = int(series[0].x.size)
+        return points >= 2 and all(
+            item.x.shape == (points,)
+            and item.y.shape == (points,)
+            and np.array_equal(item.x, series[0].x)
+            for item in series
+        )
+
+    def _raster_prepared_error_bars(
+        self,
+        surfaces: Sequence[tuple[str, Any, int | None]],
+        series_by_cell: Sequence[Sequence[_PreparedSeries]],
+        canvas: Any,
+    ) -> bool:
+        """Raster SEM directly from the shared prepared Curve scene."""
+
+        canvas_rgba = np.asarray(canvas.buffer_rgba())
+        if (
+            canvas_rgba.dtype != np.uint8
+            or canvas_rgba.ndim != 3
+            or canvas_rgba.shape[2] != 4
+            or not canvas_rgba.flags.c_contiguous
+            or not canvas_rgba.flags.writeable
+        ):
+            return False
+        height, width = canvas_rgba.shape[:2]
+        from matplotlib.colors import to_rgba
+
+        xs: list[np.ndarray] = []
+        lows: list[np.ndarray] = []
+        highs: list[np.ndarray] = []
+        offsets = [0]
+        colours: list[np.ndarray] = []
+        widths: list[float] = []
+        cap_widths: list[float] = []
+        clips: list[tuple[int, int, int, int]] = []
+        lane_offsets = [0]
+        cycle = self.style.palette.line_cycle
+        policy = self.style.render
+        bar_width = max(
+            1.0,
+            float(policy.uncertainty_bar_linewidth)
+            * float(self._figure.dpi)
+            / 72.0,
+        )
+        cap_width = max(
+            0.0,
+            2.0
+            * float(policy.uncertainty_bar_capsize_pt)
+            * float(self._figure.dpi)
+            / 72.0,
+        )
+
+        def append_group(
+            item: _PreparedSeries,
+            group_x: np.ndarray,
+            low_y: np.ndarray,
+            high_y: np.ndarray,
+            clip: tuple[int, int, int, int],
+        ) -> None:
+            xs.append(np.ascontiguousarray(group_x))
+            lows.append(np.ascontiguousarray(np.minimum(low_y, high_y)))
+            highs.append(np.ascontiguousarray(np.maximum(low_y, high_y)))
+            offsets.append(offsets[-1] + group_x.size)
+            rgba = np.asarray(
+                to_rgba(cycle[_series_slot(item.identity, len(cycle))]),
+                dtype=float,
+            )
+            rgba[3] *= float(policy.uncertainty_bar_alpha)
+            colours.append(
+                np.clip(np.rint(rgba * 255.0), 0, 255).astype(np.uint8)
+            )
+            widths.append(bar_width)
+            cap_widths.append(cap_width)
+            clips.append(clip)
+
+        for (_key, axes, _index), cell_series in zip(
+            surfaces, series_by_cell, strict=True
+        ):
+            lane_start = len(xs)
+            box = axes.bbox
+            clip = (
+                max(0, int(math.floor(float(box.x0)))),
+                max(0, int(math.floor(float(height) - float(box.y1)))),
+                min(width, int(math.ceil(float(box.x1)))),
+                min(height, int(math.ceil(float(height) - float(box.y0)))),
+            )
+            band_items = tuple(item for item in cell_series if item.band is not None)
+            batched = bool(
+                len(band_items) > 1
+                and axes.transData.is_affine
+                and all(
+                    item.x.shape == band_items[0].x.shape
+                    and np.array_equal(item.x, band_items[0].x)
+                    for item in band_items[1:]
+                )
+            )
+            if batched:
+                low = np.stack([item.band[0] for item in band_items])
+                high = np.stack([item.band[1] for item in band_items])
+                valid = np.stack([item.valid for item in band_items])
+                valid &= np.isfinite(low)
+                valid &= np.isfinite(high)
+                valid &= high > low
+                shape = low.shape + (2,)
+                geometry = self._artists.get("curve:grouped_band_geometry")
+                if (
+                    len(surfaces) != 1
+                    or not isinstance(geometry, tuple)
+                    or len(geometry) != 2
+                    or geometry[0].shape != shape
+                    or geometry[1].shape != shape
+                ):
+                    geometry = (
+                        np.empty(shape, dtype=np.float64),
+                        np.empty(shape, dtype=np.float64),
+                    )
+                    if len(surfaces) == 1:
+                        self._artists["curve:grouped_band_geometry"] = geometry
+                affine = np.asarray(
+                    axes.transData.get_affine().to_values(), dtype=np.float64
+                )
+                x = kernels.readable(
+                    np.asarray(band_items[0].x, dtype=np.float64)
+                )
+                for values, output in zip((low, high), geometry, strict=True):
+                    kernels.transform_curve_batch(
+                        x,
+                        kernels.readable(values),
+                        kernels.readable(valid),
+                        kernels.readable(affine),
+                        np.float64(height),
+                        output,
+                    )
+                low_y = geometry[0][..., 1]
+                high_y = geometry[1][..., 1]
+                for row, item in enumerate(band_items):
+                    if bool(np.any(valid[row])):
+                        append_group(
+                            item,
+                            geometry[0][row, :, 0],
+                            low_y[row],
+                            high_y[row],
+                            clip,
+                        )
+            else:
+                for item in band_items:
+                    low, high = item.band
+                    usable = (
+                        item.valid
+                        & np.isfinite(low)
+                        & np.isfinite(high)
+                        & (high > low)
+                    )
+                    if not bool(np.any(usable)):
+                        continue
+                    x = item.x[usable]
+                    low_points = axes.transData.transform(
+                        np.column_stack((x, low[usable]))
+                    )
+                    high_points = axes.transData.transform(
+                        np.column_stack((x, high[usable]))
+                    )
+                    append_group(
+                        item,
+                        np.asarray(low_points[:, 0], dtype=np.float64),
+                        float(height)
+                        - np.asarray(low_points[:, 1], dtype=np.float64),
+                        float(height)
+                        - np.asarray(high_points[:, 1], dtype=np.float64),
+                        clip,
+                    )
+            if len(xs) != lane_start:
+                lane_offsets.append(len(xs))
+        if not xs:
+            return True
+        kernels.raster_error_bars(
+            kernels.readable(np.concatenate(xs)),
+            kernels.readable(np.concatenate(lows)),
+            kernels.readable(np.concatenate(highs)),
+            kernels.readable(np.asarray(offsets, dtype=np.int64)),
+            kernels.readable(np.asarray(colours, dtype=np.uint8)),
+            kernels.readable(np.asarray(widths, dtype=np.float64)),
+            kernels.readable(np.asarray(cap_widths, dtype=np.float64)),
+            kernels.readable(np.asarray(clips, dtype=np.int32)),
+            kernels.readable(np.asarray(lane_offsets, dtype=np.int64)),
+            canvas_rgba,
+        )
+        return True
+
     def _raster_facet_curve_command(self, canvas: Any) -> bool:
         """Paint projected Facet Curve data without maintaining cell artists."""
 
@@ -2474,6 +2664,8 @@ class MatplotlibRenderer:
         surfaces = self.painted_surfaces
         series_by_cell = tuple(command.get("series", ()))
         if len(surfaces) != len(series_by_cell):
+            return False
+        if not self._raster_prepared_error_bars(surfaces, series_by_cell, canvas):
             return False
         if len(surfaces) == 1 and self._raster_grouped_curve_command(
             tuple(series_by_cell[0]), surfaces[0][1], canvas
@@ -2984,6 +3176,197 @@ class MatplotlibRenderer:
         )
         return True, frozenset(artist_ids)
 
+    def _raster_facet_fit_annotations(self, canvas: Any) -> bool:
+        """Paint overview labels from Matplotlib's own final MathText masks.
+
+        The Text artists remain the formatting, font, colour, position and
+        clipping authority.  Their live numeric suffix makes forty separate
+        MathText parses miss Matplotlib's small cache every revision, though;
+        parse the same forty authoritative strings as one spaced run, split
+        only the resulting alpha mask, and cache each final mask for rounded
+        values that recur.  No formula is simplified and no second glyph
+        grammar exists here.
+        """
+
+        if not (
+            kernels.engaged()
+            and isinstance(self.spec, FacetGridPlot)
+            and self._facet_focus_index is None
+        ):
+            return False
+        from matplotlib.colors import to_rgba
+        from matplotlib.text import Text
+
+        annotations = tuple(
+            artist
+            for artist in self._fit_artists
+            if isinstance(artist, Text)
+            and artist.get_visible()
+            and artist.axes is not None
+            and artist.axes.get_visible()
+            and "\n" not in artist.get_text()
+            and float(artist.get_rotation()) == 0.0
+            and artist.get_horizontalalignment() == "left"
+            and artist.get_verticalalignment() == "top"
+            and not artist.get_path_effects()
+            and not artist.get_usetex()
+        )
+        if not annotations:
+            return False
+        canvas_rgba = np.asarray(canvas.buffer_rgba())
+        if (
+            canvas_rgba.dtype != np.uint8
+            or canvas_rgba.ndim != 3
+            or canvas_rgba.shape[2] != 4
+            or not canvas_rgba.flags.c_contiguous
+            or not canvas_rgba.flags.writeable
+        ):
+            return False
+
+        renderer = canvas.get_renderer()
+        parser = getattr(renderer, "mathtext_parser", None)
+        if parser is None:
+            return False
+        first = annotations[0]
+        font = first.get_fontproperties()
+        antialiased = bool(first.get_antialiased())
+        if any(
+            artist.get_fontproperties() != font
+            or bool(artist.get_antialiased()) != antialiased
+            for artist in annotations[1:]
+        ):
+            return False
+        font_key = font.get_fontconfig_pattern()
+        dpi = float(self._figure.dpi)
+        cached = self._fit_mathtext_masks
+        contents = tuple(artist.get_text() for artist in annotations)
+        keys = tuple((content, font_key, dpi, antialiased) for content in contents)
+        missing = tuple(
+            (key, content) for key, content in zip(keys, contents) if key not in cached
+        )
+        if missing:
+            missing_keys, missing_text = zip(*missing, strict=True)
+            separator = " " * 16
+            joined = separator.join(missing_text)
+            try:
+                with _MATHTEXT_DRAW_LOCK:
+                    parsed = parser.parse(
+                        joined,
+                        dpi,
+                        font,
+                        antialiased=antialiased,
+                    )
+                mask = np.asarray(parsed.image, dtype=np.uint8)
+                column_ink = np.any(mask != 0, axis=0)
+                zero = ~column_ink
+                transitions = np.diff(
+                    np.concatenate(
+                        (
+                            np.asarray((False,), dtype=bool),
+                            zero,
+                            np.asarray((False,), dtype=bool),
+                        )
+                    ).astype(np.int8)
+                )
+                starts = np.flatnonzero(transitions == 1)
+                stops = np.flatnonzero(transitions == -1)
+                internal = [
+                    (int(start), int(stop))
+                    for start, stop in zip(starts, stops, strict=True)
+                    if start > 0 and stop < mask.shape[1]
+                ]
+                separator_count = len(missing_text) - 1
+                if len(internal) < separator_count:
+                    raise ValueError("MathText run has no separable label gaps")
+                separators = sorted(
+                    sorted(
+                        internal,
+                        key=lambda pair: pair[1] - pair[0],
+                        reverse=True,
+                    )[:separator_count]
+                )
+                boundaries = [0]
+                boundaries.extend((start + stop) // 2 for start, stop in separators)
+                boundaries.append(mask.shape[1])
+                if len(boundaries) != len(missing_text) + 1:
+                    raise ValueError("MathText label count does not match its run")
+                for key, left, right in zip(
+                    missing_keys,
+                    boundaries[:-1],
+                    boundaries[1:],
+                    strict=True,
+                ):
+                    occupied = np.flatnonzero(column_ink[left:right])
+                    if not occupied.size:
+                        raise ValueError("MathText label has no visible pixels")
+                    crop_left = left + int(occupied[0])
+                    crop_right = left + int(occupied[-1]) + 1
+                    image = np.array(
+                        mask[:, crop_left:crop_right],
+                        dtype=np.uint8,
+                        order="C",
+                        copy=True,
+                    )
+                    image.setflags(write=False)
+                    cached[key] = image
+            except Exception:
+                # A draw refusal must retain the exact Text path rather than
+                # publish a frame missing only some cell labels.
+                for key in missing_keys:
+                    cached.pop(key, None)
+                return False
+            while len(cached) > 512:
+                cached.pop(next(iter(cached)))
+
+        height, width = canvas_rgba.shape[:2]
+        for artist, key in zip(annotations, keys, strict=True):
+            mask = cached.get(key)
+            if not isinstance(mask, np.ndarray):
+                return False
+            anchor = artist.get_transform().transform(artist.get_position())
+            x0 = int(round(float(anchor[0])))
+            y0 = int(round(float(height) - float(anchor[1]))) + 1
+            box = artist.axes.bbox
+            clip_left = max(0, int(math.floor(float(box.x0))))
+            clip_top = max(0, int(math.floor(float(height) - float(box.y1))))
+            clip_right = min(width, int(math.ceil(float(box.x1))))
+            clip_bottom = min(height, int(math.ceil(float(height) - float(box.y0))))
+            left = max(x0, clip_left)
+            top = max(y0, clip_top)
+            right = min(x0 + mask.shape[1], clip_right)
+            bottom = min(y0 + mask.shape[0], clip_bottom)
+            if right <= left or bottom <= top:
+                continue
+            coverage = mask[
+                top - y0 : bottom - y0,
+                left - x0 : right - x0,
+            ].astype(np.float64)
+            rgba = np.asarray(to_rgba(artist.get_color()), dtype=np.float64)
+            alpha = artist.get_alpha()
+            if alpha is not None:
+                rgba[3] *= float(alpha)
+            coverage *= rgba[3] / 255.0
+            target = canvas_rgba[top:bottom, left:right]
+            inverse = 1.0 - coverage
+            for channel in range(3):
+                target[..., channel] = np.clip(
+                    np.rint(
+                        rgba[channel] * 255.0 * coverage
+                        + target[..., channel].astype(np.float64) * inverse
+                    ),
+                    0,
+                    255,
+                ).astype(np.uint8)
+            target[..., 3] = np.clip(
+                np.rint(
+                    255.0 * coverage
+                    + target[..., 3].astype(np.float64) * inverse
+                ),
+                0,
+                255,
+            ).astype(np.uint8)
+        return True
+
     def _chrome_meets_data(self, artist: Any, axes: Any) -> bool:
         """Whether this chrome artist shares pixels with its data region.
 
@@ -3203,13 +3586,13 @@ class MatplotlibRenderer:
                     and artist.get_visible()
                 ):
                     self._draw_dynamic_artist(artist, renderer, canvas)
-            for _key, artist in ordered:
-                if id(artist) in facet_annotation_ids and artist.get_visible():
-                    self._draw_dynamic_artist(artist, renderer, canvas)
             used_native = True
         if native_curve_command and native_lines is None:
             for _key, artist in ordered:
-                if artist.get_visible():
+                if (
+                    id(artist) not in facet_annotation_ids
+                    and artist.get_visible()
+                ):
                     self._draw_dynamic_artist(artist, renderer, canvas)
             used_native = True
         if native_lines is not None:
@@ -3247,13 +3630,16 @@ class MatplotlibRenderer:
                             and artist.get_visible()
                         ):
                             self._draw_dynamic_artist(artist, renderer, canvas)
-                    for _key, artist in ordered:
-                        if (
-                            id(artist) in facet_annotation_ids
-                            and artist.get_visible()
-                        ):
-                            self._draw_dynamic_artist(artist, renderer, canvas)
                     used_native = True
+        if used_native and facet_annotation_ids:
+            annotations_drawn = self._raster_facet_fit_annotations(canvas)
+            if not annotations_drawn:
+                for _key, artist in ordered:
+                    if (
+                        id(artist) in facet_annotation_ids
+                        and artist.get_visible()
+                    ):
+                        self._draw_dynamic_artist(artist, renderer, canvas)
         if not used_native:
             for index, (_key, artist) in enumerate(ordered):
                 if index == split:
@@ -3777,9 +4163,9 @@ class MatplotlibRenderer:
     ) -> bool:
         """Whether the native stroke can paint every visible primitive."""
 
+        if not series:
+            return False
         for item in series:
-            if item.band is not None:
-                return False
             plotted = np.where(item.valid, item.y, np.nan)
             if bool(np.any(_isolated_curve_mask(item.x, plotted))):
                 return False
@@ -8662,10 +9048,10 @@ class MatplotlibRenderer:
     def _fit_annotation_text(self, overlay: FitOverlay) -> str:
         lines: list[str] = []
         if overlay.formula:
-            lines.append(overlay.formula)
+            lines.append(_drawable_text(overlay.formula))
         for parameter in overlay.parameter_display:
             lines.append(self._fit_parameter_line(parameter))
-        return _drawable_text("\n".join(lines))
+        return "\n".join(lines)
 
     @staticmethod
     def _fit_parameter_line(parameter: Any) -> str:
@@ -8674,10 +9060,15 @@ class MatplotlibRenderer:
             if parameter.standard_error is None
             else _compact_engineering(parameter.standard_error)
         )
-        # The label is the catalogue's own mathtext; the unit is not.
+        # The label is the catalogue's own mathtext; validate that stable
+        # fragment once, not the whole value-bearing line on every fit
+        # revision.  Numeric values and units cannot alter the math grammar,
+        # while validating the complete line made the cache key include the
+        # live fit result and laid out MathText once here and again at draw.
+        label = _drawable_text(parameter.label)
         unit = f" {_literal_text(parameter.unit)}" if parameter.unit else ""
         return (
-            f"{parameter.label} = {_fit_parameter_value_text(parameter)} "
+            f"{label} = {_fit_parameter_value_text(parameter)} "
             f"± {uncertainty}{unit}"
         )
 
@@ -8696,11 +9087,7 @@ class MatplotlibRenderer:
                 ),
                 parameter,
             )
-        return (
-            ""
-            if parameter is None
-            else _drawable_text(self._fit_parameter_line(parameter))
-        )
+        return "" if parameter is None else self._fit_parameter_line(parameter)
 
     def _restore_fit_source_lines(self) -> None:
         for line, was_visible in self._fit_hidden_source_lines:

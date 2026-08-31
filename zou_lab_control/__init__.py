@@ -27,11 +27,11 @@ _LAYERS = (
 )
 
 
-def _quiet_idle_worker_threads() -> None:
-    """Let the parallel pool SLEEP between kernels instead of spinning.
+def _configure_compiled_worker_threads() -> None:
+    """Bound the shared native pool and let it sleep between kernels.
 
-    Every compiled kernel in this product is ``parallel=True``, and numba
-    runs them on OpenMP.  Its worker threads busy-wait after each parallel
+    Parallel compiled kernels in this product run on Numba's OpenMP pool.
+    Its worker threads busy-wait after each parallel
     region rather than sleeping, so once the first kernel has run the pool
     keeps burning cores for as long as the process lives.  Measured on this
     machine: arming the camera took the console from 5 per cent of one core
@@ -45,16 +45,27 @@ def _quiet_idle_worker_threads() -> None:
     10.94 ms minimum to 10.36, because the work gets a machine that is not
     already busy spinning.
 
-    Set here because the environment must be in place before the OpenMP
-    runtime initializes, and this bootstrap is what every entry point
-    imports first.  ``setdefault`` so an operator who sets it explicitly
-    keeps their choice.
+    A panel is already one independent worker.  Letting every small native
+    region request every logical CPU made four same-shot panels compete for
+    the same OpenMP pool: on the 16-logical-core reference machine the real
+    four-panel critical path was 85.77/92.93/99.64 ms at four workers but
+    105.52/115.72/116.60 ms at eight.  Single-panel camera, batched fits and
+    dense 3D were no slower at four; these kernels saturate memory bandwidth
+    or expose too few independent lanes before they can use a larger pool.
+
+    Set both policies here because the environment must be in place before
+    Numba/OpenMP initializes, and this bootstrap is what every entry point
+    imports first.  ``setdefault`` preserves an operator's explicit choice.
     """
 
+    os.environ.setdefault(
+        "NUMBA_NUM_THREADS",
+        str(max(1, min(4, os.cpu_count() or 1))),
+    )
     os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
 
 
-_quiet_idle_worker_threads()
+_configure_compiled_worker_threads()
 
 
 def _activate_checkout() -> None:
