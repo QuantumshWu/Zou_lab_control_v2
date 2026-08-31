@@ -72,7 +72,7 @@ pulse_editor = "zlc_workbench.apps.pulse_editor:main"
 pulse_server = "zlc_pulse.remote:_main"
 slm_server = "zlc_atom.devices.slm.device_types:main"
 task_console = "zlc_workbench.apps.task_console:main"
-warm_numba = "zlc_plot._height3d_scanline:main"
+warm_numba = "zlc_plot._kernel_warm:main"
 
 [project.entry-points."zou_lab_control.evidence"]
 software = "zou_lab_control.__main__:evidence"
@@ -154,6 +154,7 @@ zlc_pulse = ["py.typed"]
 # default mode derives a module name from the basename alone.  See conftest.py
 # for why renaming them would have been the worse trade.
 addopts = "--import-mode=importlib"
+markers = ["gui: requires an offscreen Qt backend"]
 # Every layer's suite, from the top.  A change that crosses two layers is
 # checked by both in one run, which is the whole point of merging them.
 testpaths = ["packages"]

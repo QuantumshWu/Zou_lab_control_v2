@@ -14,6 +14,7 @@ session below it does not know a window exists.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import CancelledError
 from dataclasses import dataclass, field, replace
 from functools import wraps
 from weakref import ref
@@ -1137,16 +1138,22 @@ class ConsolePresenter:
             publication,
         )
         event_records = ((publication, event_record),)
+        projection = self._panel_projection(
+            binding,
+            selected,
+            subject=snapshot,
+        )
+        if projection is None or not projection.drawable:
+            # An authored vacancy is a stable panel state.  The last complete
+            # front remains visible, while subsequent publications are not
+            # handed to the old drawable host; accepting that host's old
+            # description would otherwise normalize the operator's vacant
+            # fate straight back to the default role.
+            raise CancelledError()
         # The SEMANTIC surface, not the outer kind: a FacetGrid of image cells
         # paints images, and the overlay is a fact of the image.  A grid over
         # curve cells has nowhere to put a ring.
-        resolved = (
-            self._panel_accepted_spec(binding)
-            if state is None
-            else None
-        ) or self._panel_resolved_spec(
-            binding, selected, subject=snapshot
-        )
+        resolved = projection.spec
         if resolved is None or not paints_image_surface(resolved):
             return snapshot, event_records
         if selected.overlay_signal:
@@ -1419,7 +1426,11 @@ class ConsolePresenter:
         # None twice over, and they mean different things: no projection at
         # all (this Dataset offers no such plot), or a projection whose
         # authored table leaves a required role vacant.  Neither draws.
-        return None if projection is None else projection.spec
+        return (
+            None
+            if projection is None or not projection.drawable
+            else projection.spec
+        )
 
     @staticmethod
     def _panel_accepted_display(
