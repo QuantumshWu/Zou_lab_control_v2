@@ -3326,3 +3326,48 @@ def test_choosing_hold_puts_the_dac_back_to_holding(presenter, sequence) -> None
         "holding is the absence of a step, not a step that says 'hold'"
     )
     assert presenter.view.warnings == [], presenter.view.warnings
+
+
+def test_a_dead_server_connection_never_holds_the_window_hostage(sequence) -> None:
+    """close(present=False) succeeds when the server is already gone.
+
+    The pulse server's own law drives AUTO-SAFE the moment a client
+    disconnects (and on its own shutdown), so a client with no channel has
+    no safety obligation left -- and no right to refuse its close.  Only a
+    CONNECTED board that refuses SAFE may still block, because then the
+    outputs really are live and reachable.
+    """
+
+    view = _EditorView()
+    board = _Sequencer()
+    presenter = PulseEditorPresenter(view, sequence, sequencer=board)
+    view.fire_requested.emit()
+    assert presenter._drive_lease is not None, "the editor holds the drive"
+
+    def gone(*_args, **_kwargs):
+        raise ConnectionError(
+            "the connection to the pulse server ended; if another editor "
+            "has connected since, that one now holds the board"
+        )
+
+    board.safe = gone
+    board.snapshot = gone
+    presenter.close(present=False)
+    assert presenter._drive_lease is None
+
+    # A CONNECTED refusal still blocks -- that guard is load-bearing.
+    view2 = _EditorView()
+    board2 = _Sequencer()
+    presenter2 = PulseEditorPresenter(view2, sequence, sequencer=board2)
+    view2.fire_requested.emit()
+
+    def refused(*_args, **_kwargs):
+        raise RuntimeError("SAFE readback was not stable")
+
+    board2.safe = refused
+    try:
+        presenter2.close(present=False)
+    except RuntimeError as error:
+        assert "did not go safe" in str(error)
+    else:
+        raise AssertionError("a connected SAFE refusal must still block close")

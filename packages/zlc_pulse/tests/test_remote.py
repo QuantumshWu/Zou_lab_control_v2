@@ -1077,3 +1077,13 @@ def test_local_pulse_service_serves_a_supplied_streamer_and_narrates(caplog) -> 
             streamer.safe()
     finally:
         streamer.close()
+
+
+def test_a_client_with_no_channel_speaks_connection_error() -> None:
+    """"Not open" and "died mid-call" are the same fact and wear one type,
+    so a caller (the pulse editor's close) classifies a lost connection
+    without parsing message text."""
+
+    client = RemotePulseStreamer("127.0.0.1", 65280)
+    with pytest.raises(ConnectionError, match="not open"):
+        client.safe()

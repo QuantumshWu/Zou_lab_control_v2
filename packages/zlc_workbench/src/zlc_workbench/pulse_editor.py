@@ -2210,6 +2210,19 @@ class PulseEditorPresenter:
             safe = getattr(self.sequencer, "safe", None)
             if callable(safe):
                 safe()
+        except ConnectionError as error:
+            # The connection is already gone, and with it both this editor's
+            # command lease and its safety obligation: the pulse server's own
+            # law drives AUTO-SAFE the moment a client disconnects, and on
+            # its own shutdown.  There is nothing left HERE to make safe --
+            # refusing to close would hold the window hostage to a board it
+            # has no channel to.
+            self._release_drive()
+            self._warn(
+                "the pulse server connection has already ended; the server "
+                f"drives the board safe on disconnect ({error})"
+            )
+            return True
         except Exception as error:
             if not present:
                 raise RuntimeError(f"the board did not go safe: {error}") from error

@@ -160,6 +160,14 @@ def _project_field(field: AuthoringField) -> FormFieldProps:
         label=field.label,
         default=display_value(field.default),
         required=bool(field.required),
+        # A defaultless numeric STARTS vacant in a draft, required or not:
+        # the widget must be able to hold that vacancy, because completeness
+        # is Init's law, not the editor's.  (Text kinds hold "" natively.)
+        allow_blank=(
+            True
+            if field.default is None and kind in ("int", "float", "number")
+            else None
+        ),
         minimum=field.minimum,
         maximum=field.maximum,
         choices=tuple(

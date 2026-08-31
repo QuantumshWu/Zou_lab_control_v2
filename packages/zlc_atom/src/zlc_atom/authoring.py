@@ -69,6 +69,20 @@ class AuthoringField:
             )
         if self.minimum is not None and self.maximum is not None and self.minimum > self.maximum:
             raise ValueError("authoring field minimum exceeds maximum")
+        # A default that violates the field's own window poisons every draft
+        # built from it (a "no value yet" encoded as an out-of-range number).
+        # Vacancy is None; a numeric default must obey the declared bounds.
+        if isinstance(self.default, (int, float)) and not isinstance(self.default, bool):
+            if self.minimum is not None and self.default < self.minimum:
+                raise ValueError(
+                    f"authoring field {self.name!r} default {self.default!r} "
+                    "is below its own minimum; a vacancy is None, not a number"
+                )
+            if self.maximum is not None and self.default > self.maximum:
+                raise ValueError(
+                    f"authoring field {self.name!r} default {self.default!r} "
+                    "is above its own maximum; a vacancy is None, not a number"
+                )
         choices = tuple(self.choices)
         if any(not isinstance(choice, AuthoringChoice) for choice in choices):
             raise TypeError("authoring field choices must contain AuthoringChoice values")
@@ -173,6 +187,10 @@ class AuthoringSchema:
         complete = True
         for field in self.fields:
             value = _project_value(field, supplied.get(field.name, field.default))
+            if value is None and str(field.value_type) in ("str", "text", "folder"):
+                # One vacancy spelling per type family: an absent text is the
+                # empty string everywhere (form widgets hold "" natively).
+                value = ""
             vacant = value is None or (
                 isinstance(value, str) and field.required and not value.strip()
             )

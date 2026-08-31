@@ -1368,7 +1368,10 @@ class RemotePulseStreamer:
 
     def _call_locked(self, method: str, params: Mapping[str, Any]) -> Any:
         if self._socket is None:
-            raise RuntimeError("remote PulseStreamer is not open")
+            # The same fact as a send that dies mid-call -- no channel to the
+            # board -- so it wears the same type; callers classify a lost
+            # connection without parsing message text.
+            raise ConnectionError("remote PulseStreamer is not open")
         self._request_id += 1
         request = {
             "id": self._request_id,

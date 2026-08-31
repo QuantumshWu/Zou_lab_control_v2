@@ -1399,5 +1399,12 @@ def test_adding_a_type_whose_required_field_has_no_default_is_a_draft(tmp_path) 
         # And the draft survives the type flip too (same latent bomb).
         camera_role = manager.add_device("camera.virtual")
         assert manager.set_type(camera_role, "rf.rigol_dg4000") is True
+        # The Lab Brick's serial has no sensible default: the draft holds a
+        # VACANCY (None), never a magic below-minimum number.
+        assert manager.set_type(camera_role, "rf.vaunix_lms") is True
+        flipped = next(
+            item for item in manager.devices if item.role == camera_role
+        )
+        assert flipped.parameters["serial"] is None
     finally:
         manager.close()

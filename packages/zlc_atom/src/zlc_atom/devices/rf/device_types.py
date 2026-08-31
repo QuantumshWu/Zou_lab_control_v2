@@ -60,7 +60,11 @@ RIGOL_DG4000_SCHEMA = AuthoringSchema(
 
 VAUNIX_LMS_SCHEMA = AuthoringSchema(
     (
-        AuthoringField("serial", "int", "Serial number", 0, required=True, minimum=1),
+        # No serial yet is a VACANCY, not the number zero: a default that
+        # violates its own minimum poisons every draft projection.
+        AuthoringField(
+            "serial", "int", "Serial number", None, required=True, minimum=1
+        ),
         AuthoringField(
             "dll_path", "str", "Vaunix DLL path", "vnx_fmsynth.dll"
         ),

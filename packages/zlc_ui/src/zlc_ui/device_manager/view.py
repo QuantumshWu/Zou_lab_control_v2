@@ -827,7 +827,9 @@ class DeviceManagerView(QtWidgets.QWidget):
         card = self._cards.get(str(instance_id))
         if card is None or card.form is None:
             return ()
-        return tuple(card.form.read_all().items())
+        # The card edits a DRAFT: an empty required box is a vacancy to
+        # keep, not a reason to refuse the boxes that are filled.
+        return tuple(card.form.read_draft().items())
 
     def show_status(self, text: str, severity: str) -> None:
         self.status_strip.show_status(text, severity)

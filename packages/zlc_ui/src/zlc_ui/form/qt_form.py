@@ -268,7 +268,11 @@ class _IntHandler(_StaticHandler):
         else:
             widget = FluentLineEdit()
             widget.setMinimumWidth(scaled_px(120, minimum=96))
-            widget.setPlaceholderText("(optional)" if field.blank_allowed else "")
+            widget.setPlaceholderText(
+                ("(required)" if field.required else "(optional)")
+                if field.blank_allowed
+                else ""
+            )
             widget.set_numeric_validator(
                 "int",
                 bottom=field.minimum,
@@ -338,7 +342,11 @@ class _NumberHandler(_StaticHandler):
         del context
         widget = FluentLineEdit()
         widget.setMinimumWidth(scaled_px(120, minimum=96))
-        widget.setPlaceholderText("(optional)" if field.blank_allowed else "")
+        widget.setPlaceholderText(
+            ("(required)" if field.required else "(optional)")
+            if field.blank_allowed
+            else ""
+        )
         widget.set_numeric_validator(
             "float",
             bottom=field.minimum,
@@ -464,7 +472,11 @@ class _FloatHandler(_StaticHandler):
         else:
             widget = FluentLineEdit()
             widget.setMinimumWidth(scaled_px(120, minimum=96))
-            widget.setPlaceholderText("(optional)" if field.blank_allowed else "")
+            widget.setPlaceholderText(
+                ("(required)" if field.required else "(optional)")
+                if field.blank_allowed
+                else ""
+            )
             widget.set_numeric_validator(
                 "float",
                 bottom=field.minimum,
@@ -872,7 +884,11 @@ def _reconfigure_widget(
         if field.kind == "text":
             widget.setPlaceholderText(field.description[:48])
         elif field.kind in {"int", "float", "number"}:
-            widget.setPlaceholderText("(optional)" if field.blank_allowed else "")
+            widget.setPlaceholderText(
+                ("(required)" if field.required else "(optional)")
+                if field.blank_allowed
+                else ""
+            )
     elif isinstance(widget, FluentSpinBox):
         _IntHandler._configure_spin(field, widget)
     elif isinstance(widget, _LosslessFloatSpinBox):
@@ -1105,6 +1121,30 @@ class FluentParameterForm(QtWidgets.QWidget):
 
     def read_all(self) -> dict[str, object]:
         return {field.key: self.read_value(field.key) for field in self._spec.fields}
+
+    def read_draft(self) -> dict[str, object]:
+        """Every box as it stands, vacancies included.
+
+        A draft read answers "what has the operator written", not "hand me a
+        complete record": a required box still empty reads as a vacancy
+        (None) instead of refusing, so filling the OTHER boxes still
+        commits.  What IS written is validated exactly as strictly as ever
+        -- a typed value that does not parse or breaks its bounds refuses
+        here, not later.  Completeness stays the build step's law.
+        """
+
+        values: dict[str, object] = {}
+        for field in self._spec.fields:
+            handler, widget = self._handlers[field.key], self._widgets[field.key]
+            automatic = self._auto_switches.get(field.key)
+            if automatic is not None and automatic.isChecked():
+                values[field.key] = None
+                continue
+            if handler.is_empty(field, widget):
+                values[field.key] = None
+                continue
+            values[field.key] = self.read_value(field.key)
+        return values
 
     def populate(self, values: Mapping[str, object]) -> None:
         """Atomically populate every exact key without emitting edit signals.

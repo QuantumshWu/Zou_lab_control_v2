@@ -328,3 +328,21 @@ def test_a_draft_projects_without_completeness_and_init_still_refuses() -> None:
         RIGOL_DG4000_SCHEMA.project_values({})
     with pytest.raises(ValueError, match="below its minimum"):
         RIGOL_DG4000_SCHEMA.draft_values({"frequency_low_hz": -1.0})
+
+
+def test_a_field_default_must_obey_its_own_bounds() -> None:
+    """A vacancy is None, not an out-of-range number.
+
+    The Lab Brick serial once defaulted to 0 under minimum=1, so every
+    draft projection of the type was born refused; the declaration layer
+    now refuses the CONTRADICTION instead, at import time.
+    """
+
+    import pytest
+
+    from zlc_atom.authoring import AuthoringField
+
+    with pytest.raises(ValueError, match="below its own minimum"):
+        AuthoringField("serial", "int", "Serial", 0, minimum=1)
+    vacant = AuthoringField("serial", "int", "Serial", None, required=True, minimum=1)
+    assert vacant.default is None
