@@ -375,7 +375,9 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
         assert trimmed_record["device_settings"]["camera"]["epoch_ranges"] == (
             (5, 5),
         )
-        with pytest.raises(ValueError, match="precedes retained"):
+        from zlc_runtime import RetainedPublicationExpired
+
+        with pytest.raises(RetainedPublicationExpired, match="precedes retained"):
             plane.current_dataset("indexed-derived/value", second_derived)
         small_history.close()
         released = plane.current_dataset("indexed-derived/value")
