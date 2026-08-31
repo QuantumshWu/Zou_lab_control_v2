@@ -60,20 +60,22 @@ class RigolDg4000Config:
     Bounds are AUTHORED, not probed: the add-axis form has to offer a
     finite range before anything is open, and the bench's own safe window
     is usually narrower than the instrument's -- a DG4162 goes to 160 MHz,
-    an AOM driver should not.
+    an AOM driver should not.  The channel count is a fact about the
+    SERIES -- every DG4000 has two -- so it is not authored at all: one
+    instrument is one installed instance, its channels are its own knobs.
     """
 
     resource: str
-    channel: int = 1
     frequency_low_hz: float = 1e3
     frequency_high_hz: float = 160e6
     power_low_dbm: float = -30.0
     power_high_dbm: float = 10.0
     timeout_seconds: float = 5.0
 
-    def __post_init__(self) -> None:
-        if self.channel not in (1, 2):
-            raise ValueError("DG4000 channel must be 1 or 2")
+
+#: ch1 -> :SOURce1/:OUTPut1.  The channel NAMES are field-name prefixes
+#: (ch1_frequency_hz), the numbers are SCPI's.
+_CHANNELS = ("ch1", "ch2")
 
 
 class RigolDg4000RfSource(RfSourceBase):
@@ -85,41 +87,50 @@ class RigolDg4000RfSource(RfSourceBase):
         identity = self._link.query("*IDN?").strip()
         if not identity:
             raise RuntimeError("the instrument answered *IDN? with nothing")
-        channel = int(config.channel)
-        self._source = f":SOURce{channel}"
-        self._output = f":OUTPut{channel}"
-        # Pin the amplitude unit once: every later write and read of power
-        # means dBm, whatever the front panel was left showing.
-        self._link.write(f"{self._source}:VOLTage:UNIT DBM")
+        # Pin the amplitude unit once, per channel: every later write and
+        # read of power means dBm, whatever the front panel was showing.
+        for channel in _CHANNELS:
+            self._link.write(f"{self._source(channel)}:VOLTage:UNIT DBM")
         super().__init__(
-            identity=f"{identity}#ch{channel}",
+            identity=identity,
+            channels=_CHANNELS,
             frequency_low_hz=config.frequency_low_hz,
             frequency_high_hz=config.frequency_high_hz,
             power_low_dbm=config.power_low_dbm,
             power_high_dbm=config.power_high_dbm,
         )
 
+    @staticmethod
+    def _source(channel: str) -> str:
+        return f":SOURce{channel[2:]}"
+
+    @staticmethod
+    def _output(channel: str) -> str:
+        return f":OUTPut{channel[2:]}"
+
     # ------------------------------------------------------- transport verbs
-    def _write_frequency(self, value_hz: float) -> float:
-        self._link.write(f"{self._source}:FREQuency {value_hz:.6f}")
-        return self._read_frequency()
+    def _write_frequency(self, channel: str, value_hz: float) -> float:
+        self._link.write(f"{self._source(channel)}:FREQuency {value_hz:.6f}")
+        return self._read_frequency(channel)
 
-    def _write_power(self, value_dbm: float) -> float:
-        self._link.write(f"{self._source}:VOLTage {value_dbm:.4f}")
-        return self._read_power()
+    def _write_power(self, channel: str, value_dbm: float) -> float:
+        self._link.write(f"{self._source(channel)}:VOLTage {value_dbm:.4f}")
+        return self._read_power(channel)
 
-    def _write_output(self, enabled: bool) -> bool:
-        self._link.write(f"{self._output} {'ON' if enabled else 'OFF'}")
-        return self._read_output()
+    def _write_output(self, channel: str, enabled: bool) -> bool:
+        self._link.write(
+            f"{self._output(channel)} {'ON' if enabled else 'OFF'}"
+        )
+        return self._read_output(channel)
 
-    def _read_frequency(self) -> float:
-        return float(self._link.query(f"{self._source}:FREQuency?"))
+    def _read_frequency(self, channel: str) -> float:
+        return float(self._link.query(f"{self._source(channel)}:FREQuency?"))
 
-    def _read_power(self) -> float:
-        return float(self._link.query(f"{self._source}:VOLTage?"))
+    def _read_power(self, channel: str) -> float:
+        return float(self._link.query(f"{self._source(channel)}:VOLTage?"))
 
-    def _read_output(self) -> bool:
-        answer = self._link.query(f"{self._output}?").strip().upper()
+    def _read_output(self, channel: str) -> bool:
+        answer = self._link.query(f"{self._output(channel)}?").strip().upper()
         return answer in ("ON", "1")
 
     def close(self) -> None:

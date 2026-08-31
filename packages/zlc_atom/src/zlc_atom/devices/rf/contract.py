@@ -1,12 +1,20 @@
 """The device-independent RF source surface every implementation answers.
 
-An RF source is, to this system, its TUNABLE SURFACE: a frequency, a power,
-and an output switch, each read and written through the same duck-typed
-quartet every tunable device speaks (``tunable_fields`` / ``tune`` /
-``tunable_values`` / ``settings_provenance``).  A scan axis, the generic
-control panel and the device-axis executor all consume exactly that quartet,
-so the capability Protocol IS the quartet -- there is no second, RF-only
-vocabulary for a consumer to learn.
+An RF source is, to this system, its TUNABLE SURFACE: per output channel a
+frequency, a power and an output switch, each read and written through the
+same duck-typed quartet every tunable device speaks (``tunable_fields`` /
+``tune`` / ``tunable_values`` / ``settings_provenance``).  A scan axis, the
+generic control panel and the device-axis executor all consume exactly that
+quartet, so the capability Protocol IS the quartet -- there is no second,
+RF-only vocabulary for a consumer to learn.
+
+CHANNELS ARE THE DEVICE'S OWN STRUCTURE.  One instrument is one installed
+instance whatever its channel count -- a two-channel generator is not two
+devices to manage, it is one device with six knobs.  A single-channel
+source keeps the bare field names (``frequency_hz``); a multi-channel one
+prefixes them with its own channel names (``ch1_frequency_hz``), so the
+add-axis combo and the control panel show every knob of the one instrument
+under its one card.
 
 What varies between instruments is the transport underneath (SCPI text over
 VISA for a bench generator, a vendor DLL for a Lab Brick) and the value grid
@@ -73,19 +81,27 @@ def snap_to_grid(value: float, step: float, *, name: str, unit: str) -> float:
     return quantized
 
 
-class RfSourceBase:
-    """The shared half of every RF driver: fields, bounds, epochs, locking.
+def channel_field(channel: str, field: str) -> str:
+    """The one spelling of a channel's field name, shared with consumers."""
 
-    A concrete driver supplies the transport verbs (``_write_frequency`` and
-    friends), each of which performs the hardware write AND returns the
-    instrument's own read-back.  Everything the consumers see -- the tunable
-    quartet -- lives here once.
+    return f"{channel}_{field}" if channel else field
+
+
+class RfSourceBase:
+    """The shared half of every RF driver: channels, bounds, epochs, locking.
+
+    A concrete driver names its channels ("" for the single-channel case,
+    ``("ch1", "ch2")`` for a two-channel generator) and supplies the
+    transport verbs, each taking the channel and returning the instrument's
+    own read-back.  Everything the consumers see -- the tunable quartet --
+    lives here once.
     """
 
     def __init__(
         self,
         *,
         identity: str,
+        channels: tuple[str, ...] = ("",),
         frequency_low_hz: float,
         frequency_high_hz: float,
         power_low_dbm: float,
@@ -103,115 +119,153 @@ class RfSourceBase:
             and power_low_dbm < power_high_dbm
         ):
             raise ValueError("power bounds must be finite and ordered")
+        names = tuple(str(channel) for channel in channels)
+        if not names or len(set(names)) != len(names):
+            raise ValueError("rf channels must be non-empty and unique")
+        if len(names) > 1 and any(not name for name in names):
+            raise ValueError("a multi-channel source names every channel")
         self._identity = str(identity)
+        self._channels = names
         self._frequency_bounds = (float(frequency_low_hz), float(frequency_high_hz))
         self._power_bounds = (float(power_low_dbm), float(power_high_dbm))
         self._condition = threading.Condition()
         self._settings_epoch = 0
+        #: field name -> (channel, kind); the ONE table tune() resolves by,
+        #: so a field's spelling cannot drift from its routing.
+        self._routing: dict[str, tuple[str, str]] = {}
+        for channel in names:
+            for kind in (FREQUENCY_FIELD, POWER_FIELD, OUTPUT_FIELD):
+                self._routing[channel_field(channel, kind)] = (channel, kind)
         # OPENING BRINGS THE KNOBS INTO THE BENCH'S WINDOW.  The authored
         # bounds are bench policy for what a scan may command, and
         # TunableField refuses to describe a current value that stands
         # outside them -- rightly, a form cannot offer a range the truth is
         # not in.  A fresh instrument idles wherever it likes (a Lab Brick
         # register at 0 Hz, a bench generator at its power-on default), so
-        # the open drives any out-of-window knob to the nearest bound, the
-        # same move the Rigol driver makes pinning its amplitude unit.  The
-        # OUTPUT switch is never touched: policy may move a silent knob,
-        # never un-silence one.
-        frequency = float(self._read_frequency())
-        if not (self._frequency_bounds[0] <= frequency <= self._frequency_bounds[1]):
-            self._write_frequency(
-                min(max(frequency, self._frequency_bounds[0]), self._frequency_bounds[1])
-            )
-        power = float(self._read_power())
-        if not (self._power_bounds[0] <= power <= self._power_bounds[1]):
-            self._write_power(
-                min(max(power, self._power_bounds[0]), self._power_bounds[1])
-            )
+        # the open drives any out-of-window knob to the nearest bound, per
+        # channel.  The OUTPUT switches are never touched: policy may move
+        # a silent knob, never un-silence one.
+        for channel in names:
+            frequency = float(self._read_frequency(channel))
+            if not (
+                self._frequency_bounds[0]
+                <= frequency
+                <= self._frequency_bounds[1]
+            ):
+                self._write_frequency(
+                    channel,
+                    min(
+                        max(frequency, self._frequency_bounds[0]),
+                        self._frequency_bounds[1],
+                    ),
+                )
+            power = float(self._read_power(channel))
+            if not (self._power_bounds[0] <= power <= self._power_bounds[1]):
+                self._write_power(
+                    channel,
+                    min(max(power, self._power_bounds[0]), self._power_bounds[1]),
+                )
 
     # ------------------------------------------------------- transport verbs
-    def _write_frequency(self, value_hz: float) -> float:
+    def _write_frequency(self, channel: str, value_hz: float) -> float:
         raise NotImplementedError
 
-    def _write_power(self, value_dbm: float) -> float:
+    def _write_power(self, channel: str, value_dbm: float) -> float:
         raise NotImplementedError
 
-    def _write_output(self, enabled: bool) -> bool:
+    def _write_output(self, channel: str, enabled: bool) -> bool:
         raise NotImplementedError
 
-    def _read_frequency(self) -> float:
+    def _read_frequency(self, channel: str) -> float:
         raise NotImplementedError
 
-    def _read_power(self) -> float:
+    def _read_power(self, channel: str) -> float:
         raise NotImplementedError
 
-    def _read_output(self) -> bool:
+    def _read_output(self, channel: str) -> bool:
         raise NotImplementedError
 
     def close(self) -> None:
         raise NotImplementedError
 
     # -------------------------------------------------------------- contract
+    def _channel_label(self, channel: str) -> str:
+        return f"{channel.upper()} · " if channel else ""
+
     def tunable_fields(self) -> tuple[TunableField, ...]:
         frequency_low, frequency_high = self._frequency_bounds
         power_low, power_high = self._power_bounds
+        fields: list[TunableField] = []
         with self._condition:
-            frequency = float(self._read_frequency())
-            power = float(self._read_power())
-            output = bool(self._read_output())
-        return (
-            TunableField(
-                metadata=AuthoringField(
-                    FREQUENCY_FIELD,
-                    "float",
-                    "Frequency (Hz)",
-                    frequency_low,
-                    minimum=frequency_low,
-                    maximum=frequency_high,
-                    unit="Hz",
-                ),
-                current=frequency,
-                live_write=True,
-                dependency_group=(FREQUENCY_FIELD,),
-            ),
-            TunableField(
-                metadata=AuthoringField(
-                    POWER_FIELD,
-                    "float",
-                    "Power (dBm)",
-                    power_low,
-                    minimum=power_low,
-                    maximum=power_high,
-                    unit="dBm",
-                ),
-                current=power,
-                live_write=True,
-                dependency_group=(POWER_FIELD,),
-            ),
-            # No bounds on purpose: a bool is a switch, not a scan axis, and
-            # scan_ports_for_devices admits only bounded fields -- so the
-            # output toggle appears on the control panel and never in the
-            # add-axis combo.
-            TunableField(
-                metadata=AuthoringField(
-                    OUTPUT_FIELD,
-                    "bool",
-                    "Output enabled",
-                    False,
-                ),
-                current=output,
-                live_write=True,
-                dependency_group=(OUTPUT_FIELD,),
-            ),
-        )
+            for channel in self._channels:
+                label = self._channel_label(channel)
+                fields.append(
+                    TunableField(
+                        metadata=AuthoringField(
+                            channel_field(channel, FREQUENCY_FIELD),
+                            "float",
+                            f"{label}Frequency (Hz)",
+                            frequency_low,
+                            minimum=frequency_low,
+                            maximum=frequency_high,
+                            unit="Hz",
+                        ),
+                        current=float(self._read_frequency(channel)),
+                        live_write=True,
+                        dependency_group=(
+                            channel_field(channel, FREQUENCY_FIELD),
+                        ),
+                    )
+                )
+                fields.append(
+                    TunableField(
+                        metadata=AuthoringField(
+                            channel_field(channel, POWER_FIELD),
+                            "float",
+                            f"{label}Power (dBm)",
+                            power_low,
+                            minimum=power_low,
+                            maximum=power_high,
+                            unit="dBm",
+                        ),
+                        current=float(self._read_power(channel)),
+                        live_write=True,
+                        dependency_group=(channel_field(channel, POWER_FIELD),),
+                    )
+                )
+                # No bounds on purpose: a bool is a switch, not a scan axis,
+                # and scan_ports_for_devices admits only bounded fields -- so
+                # the output toggles appear on the control panel and never in
+                # the add-axis combo.
+                fields.append(
+                    TunableField(
+                        metadata=AuthoringField(
+                            channel_field(channel, OUTPUT_FIELD),
+                            "bool",
+                            f"{label}Output enabled",
+                            False,
+                        ),
+                        current=bool(self._read_output(channel)),
+                        live_write=True,
+                        dependency_group=(channel_field(channel, OUTPUT_FIELD),),
+                    )
+                )
+        return tuple(fields)
 
     def tunable_values(self) -> dict[str, Any]:
         with self._condition:
-            return {
-                FREQUENCY_FIELD: float(self._read_frequency()),
-                POWER_FIELD: float(self._read_power()),
-                OUTPUT_FIELD: bool(self._read_output()),
-            }
+            values: dict[str, Any] = {}
+            for channel in self._channels:
+                values[channel_field(channel, FREQUENCY_FIELD)] = float(
+                    self._read_frequency(channel)
+                )
+                values[channel_field(channel, POWER_FIELD)] = float(
+                    self._read_power(channel)
+                )
+                values[channel_field(channel, OUTPUT_FIELD)] = bool(
+                    self._read_output(channel)
+                )
+            return values
 
     def settings_provenance(self) -> dict[str, object]:
         with self._condition:
@@ -222,33 +276,35 @@ class RfSourceBase:
 
     def tune(self, name: str, value: Any) -> Any:
         selected = str(name)
+        routed = self._routing.get(selected)
+        if routed is None:
+            offered = ", ".join(sorted(self._routing))
+            raise ValueError(
+                f"this RF source has no tunable field {selected!r}; it "
+                f"offers {offered}"
+            )
+        channel, kind = routed
         with self._condition:
-            if selected == FREQUENCY_FIELD:
+            if kind == FREQUENCY_FIELD:
                 requested = float(value)
                 low, high = self._frequency_bounds
                 if not (low <= requested <= high):
                     raise ValueError(
-                        f"{FREQUENCY_FIELD} must lie in [{low:g}, {high:g}] Hz"
+                        f"{selected} must lie in [{low:g}, {high:g}] Hz"
                     )
-                effective = float(self._write_frequency(requested))
-            elif selected == POWER_FIELD:
+                effective = float(self._write_frequency(channel, requested))
+            elif kind == POWER_FIELD:
                 requested = float(value)
                 low, high = self._power_bounds
                 if not (low <= requested <= high):
                     raise ValueError(
-                        f"{POWER_FIELD} must lie in [{low:g}, {high:g}] dBm"
+                        f"{selected} must lie in [{low:g}, {high:g}] dBm"
                     )
-                effective = float(self._write_power(requested))
-            elif selected == OUTPUT_FIELD:
-                if type(value) is not bool:
-                    raise TypeError(f"{OUTPUT_FIELD} takes a bool")
-                effective = bool(self._write_output(value))
+                effective = float(self._write_power(channel, requested))
             else:
-                raise ValueError(
-                    f"this RF source has no tunable field {selected!r}; it "
-                    f"offers {FREQUENCY_FIELD!r}, {POWER_FIELD!r} and "
-                    f"{OUTPUT_FIELD!r}"
-                )
+                if type(value) is not bool:
+                    raise TypeError(f"{selected} takes a bool")
+                effective = bool(self._write_output(channel, value))
             self._settings_epoch += 1
             self._condition.notify_all()
             return effective
@@ -260,5 +316,6 @@ __all__ = [
     "POWER_FIELD",
     "RfSource",
     "RfSourceBase",
+    "channel_field",
     "snap_to_grid",
 ]

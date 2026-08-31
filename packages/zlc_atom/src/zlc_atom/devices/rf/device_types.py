@@ -25,7 +25,6 @@ RIGOL_DG4000_SCHEMA = AuthoringSchema(
             "",
             required=True,
         ),
-        AuthoringField("channel", "int", "Channel", 1, minimum=1, maximum=2),
         AuthoringField(
             "frequency_low_hz",
             "float",
@@ -95,7 +94,6 @@ def _rigol_factory(context, key: str, values: dict) -> InstalledLeaf:
     authored = RIGOL_DG4000_SCHEMA.project_values(values)
     config = RigolDg4000Config(
         resource=str(authored["resource"]),
-        channel=int(authored["channel"]),
         frequency_low_hz=float(authored["frequency_low_hz"]),
         frequency_high_hz=float(authored["frequency_high_hz"]),
         power_low_dbm=float(authored["power_low_dbm"]),
@@ -107,7 +105,7 @@ def _rigol_factory(context, key: str, values: dict) -> InstalledLeaf:
         context,
         key,
         source,
-        f"rigol-dg4000:{config.resource}#ch{config.channel}",
+        f"rigol-dg4000:{config.resource}",
         "rf.rigol_dg4000",
     )
 

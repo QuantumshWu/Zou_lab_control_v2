@@ -21,33 +21,47 @@ from zlc_atom.devices.simulation.rf import InMemoryLmsLibrary, virtual_rf_source
 
 
 class _ScpiInstrument:
-    """A DG4000's worth of SCPI, answered from a register dict."""
+    """A DG4000's worth of SCPI, answered from per-channel register dicts."""
 
     def __init__(self) -> None:
-        self.registers = {"FREQ": 1000.0, "VOLT": -30.0, "OUT": "OFF"}
+        self.registers = {
+            channel: {"FREQ": 1000.0, "VOLT": -30.0, "OUT": "OFF"}
+            for channel in ("1", "2")
+        }
         self.log: list[str] = []
+
+    @staticmethod
+    def _channel(command: str) -> str:
+        upper = command.upper()
+        for token in (":SOURCE", ":OUTPUT"):
+            at = upper.find(token)
+            if at >= 0:
+                return upper[at + len(token)]
+        raise AssertionError(f"no channel in {command!r}")
 
     def write(self, command: str) -> None:
         self.log.append(command)
         upper = command.upper()
+        registers = self.registers[self._channel(command)]
         if ":FREQUENCY " in upper:
-            self.registers["FREQ"] = float(command.split()[-1])
+            registers["FREQ"] = float(command.split()[-1])
         elif ":VOLTAGE " in upper and ":UNIT" not in upper:
-            self.registers["VOLT"] = float(command.split()[-1])
+            registers["VOLT"] = float(command.split()[-1])
         elif upper.startswith(":OUTPUT"):
-            self.registers["OUT"] = command.split()[-1].upper()
+            registers["OUT"] = command.split()[-1].upper()
 
     def query(self, command: str) -> str:
         self.log.append(command)
         upper = command.upper()
         if upper == "*IDN?":
             return "RIGOL TECHNOLOGIES,DG4162,DG4E0000000001,00.01.12"
+        registers = self.registers[self._channel(command)]
         if ":FREQUENCY?" in upper:
-            return f"{self.registers['FREQ']:.6E}"
+            return f"{registers['FREQ']:.6E}"
         if ":VOLTAGE?" in upper:
-            return f"{self.registers['VOLT']:.4E}"
+            return f"{registers['VOLT']:.4E}"
         if upper.startswith(":OUTPUT"):
-            return self.registers["OUT"]
+            return registers["OUT"]
         raise AssertionError(f"unexpected query {command!r}")
 
     def close(self) -> None:
@@ -60,40 +74,63 @@ def _rigol(**overrides) -> tuple[RigolDg4000RfSource, _ScpiInstrument]:
     return RigolDg4000RfSource(config, link=instrument), instrument
 
 
-def test_the_rigol_pins_dbm_once_and_returns_what_it_read_back() -> None:
+def test_one_instrument_is_one_instance_with_every_channel_s_knobs() -> None:
+    """Channels are the device's own structure, never the operator's to manage.
+
+    One DG4162 is one card offering six knobs -- ch1/ch2 each with
+    frequency, power and output -- and tuning one channel must not move the
+    other.  DBM is pinned on BOTH channels at open.
+    """
+
     source, instrument = _rigol()
     assert ":SOURce1:VOLTage:UNIT DBM" in instrument.log
+    assert ":SOURce2:VOLTage:UNIT DBM" in instrument.log
 
-    effective = source.tune(FREQUENCY_FIELD, 80e6)
-    assert effective == 80e6
-    assert instrument.registers["FREQ"] == 80e6
-    assert source.tune(POWER_FIELD, -3.0) == -3.0
-    assert source.tune(OUTPUT_FIELD, True) is True
-    assert source.tunable_values() == {
-        FREQUENCY_FIELD: 80e6,
-        POWER_FIELD: -3.0,
-        OUTPUT_FIELD: True,
-    }
+    names = [field.metadata.name for field in source.tunable_fields()]
+    assert names == [
+        "ch1_frequency_hz",
+        "ch1_power_dbm",
+        "ch1_output_enabled",
+        "ch2_frequency_hz",
+        "ch2_power_dbm",
+        "ch2_output_enabled",
+    ]
+
+    assert source.tune("ch1_frequency_hz", 80e6) == 80e6
+    assert source.tune("ch2_frequency_hz", 5e6) == 5e6
+    assert instrument.registers["1"]["FREQ"] == 80e6
+    assert instrument.registers["2"]["FREQ"] == 5e6
+    assert source.tune("ch2_output_enabled", True) is True
+    assert instrument.registers["1"]["OUT"] == "OFF", (
+        "tuning one channel must not move the other"
+    )
+    values = source.tunable_values()
+    assert values["ch1_frequency_hz"] == 80e6
+    assert values["ch2_frequency_hz"] == 5e6
+    assert values["ch2_output_enabled"] is True
 
 
 def test_bounds_are_bench_policy_and_refuse_before_writing() -> None:
     source, instrument = _rigol(frequency_high_hz=1e6)
-    written = dict(instrument.registers)
-    with pytest.raises(ValueError, match="frequency_hz must lie in"):
-        source.tune(FREQUENCY_FIELD, 2e6)
-    with pytest.raises(ValueError, match="power_dbm must lie in"):
-        source.tune(POWER_FIELD, 99.0)
-    with pytest.raises(TypeError, match="output_enabled takes a bool"):
-        source.tune(OUTPUT_FIELD, 1)
+    written = {
+        channel: dict(registers)
+        for channel, registers in instrument.registers.items()
+    }
+    with pytest.raises(ValueError, match="ch2_frequency_hz must lie in"):
+        source.tune("ch2_frequency_hz", 2e6)
+    with pytest.raises(ValueError, match="ch1_power_dbm must lie in"):
+        source.tune("ch1_power_dbm", 99.0)
+    with pytest.raises(TypeError, match="ch1_output_enabled takes a bool"):
+        source.tune("ch1_output_enabled", 1)
     with pytest.raises(ValueError, match="no tunable field"):
-        source.tune("phase_deg", 0.0)
+        source.tune("frequency_hz", 1e5)
     assert instrument.registers == written, "a refusal must not touch hardware"
 
 
 def test_every_accepted_tune_advances_the_settings_epoch() -> None:
     source, _instrument = _rigol()
     first = source.settings_provenance()
-    source.tune(FREQUENCY_FIELD, 10e6)
+    source.tune("ch1_frequency_hz", 10e6)
     second = source.settings_provenance()
     assert second["settings_epoch"] == first["settings_epoch"] + 1
     assert second["device_session_id"] == first["device_session_id"]
@@ -103,14 +140,16 @@ def test_every_accepted_tune_advances_the_settings_epoch() -> None:
 def test_the_scan_facing_fields_carry_bounds_and_units() -> None:
     source, _instrument = _rigol()
     by_name = {field.metadata.name: field for field in source.tunable_fields()}
-    frequency = by_name[FREQUENCY_FIELD].metadata
-    assert (frequency.minimum, frequency.maximum) == (1e3, 160e6)
-    assert frequency.unit == "Hz"
-    assert by_name[POWER_FIELD].metadata.unit == "dBm"
-    # The output switch is a control, not an axis: unbounded on purpose, so
-    # scan_ports_for_devices never offers it.
-    output = by_name[OUTPUT_FIELD].metadata
-    assert output.minimum is None and output.maximum is None
+    for channel in ("ch1", "ch2"):
+        frequency = by_name[f"{channel}_frequency_hz"].metadata
+        assert (frequency.minimum, frequency.maximum) == (1e3, 160e6)
+        assert frequency.unit == "Hz"
+        assert frequency.label.startswith(channel.upper())
+        assert by_name[f"{channel}_power_dbm"].metadata.unit == "dBm"
+        # The output switch is a control, not an axis: unbounded on purpose,
+        # so scan_ports_for_devices never offers it.
+        output = by_name[f"{channel}_output_enabled"].metadata
+        assert output.minimum is None and output.maximum is None
     for field in by_name.values():
         assert field.live_write
         assert field.dependency_group == (field.metadata.name,)

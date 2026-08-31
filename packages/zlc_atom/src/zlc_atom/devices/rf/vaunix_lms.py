@@ -142,33 +142,38 @@ class VaunixLmsRfSource(RfSourceBase):
         )
 
     # ------------------------------------------------------- transport verbs
-    def _write_frequency(self, value_hz: float) -> float:
+    # A Lab Brick has one output, so the channel is always the bare "".
+    def _write_frequency(self, channel: str, value_hz: float) -> float:
         snap_to_grid(
             value_hz, FREQUENCY_UNIT_HZ, name="frequency_hz", unit="Hz"
         )
         self._library.set_frequency(
             self._handle, round(value_hz / FREQUENCY_UNIT_HZ)
         )
-        return self._read_frequency()
+        return self._read_frequency(channel)
 
-    def _write_power(self, value_dbm: float) -> float:
+    def _write_power(self, channel: str, value_dbm: float) -> float:
         snap_to_grid(value_dbm, POWER_UNIT_DBM, name="power_dbm", unit="dBm")
         self._library.set_power(
             self._handle, round(value_dbm / POWER_UNIT_DBM)
         )
-        return self._read_power()
+        return self._read_power(channel)
 
-    def _write_output(self, enabled: bool) -> bool:
+    def _write_output(self, channel: str, enabled: bool) -> bool:
+        del channel
         self._library.set_rf_on(self._handle, enabled)
-        return self._read_output()
+        return self._read_output("")
 
-    def _read_frequency(self) -> float:
+    def _read_frequency(self, channel: str) -> float:
+        del channel
         return float(self._library.get_frequency(self._handle)) * FREQUENCY_UNIT_HZ
 
-    def _read_power(self) -> float:
+    def _read_power(self, channel: str) -> float:
+        del channel
         return float(self._library.get_power(self._handle)) * POWER_UNIT_DBM
 
-    def _read_output(self) -> bool:
+    def _read_output(self, channel: str) -> bool:
+        del channel
         return bool(self._library.get_rf_on(self._handle))
 
     def close(self) -> None:
