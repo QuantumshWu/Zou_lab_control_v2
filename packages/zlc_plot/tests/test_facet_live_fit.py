@@ -51,27 +51,9 @@ def test_facet_live_fit_paints_every_cell_and_focus_keeps_annotation() -> None:
         assert len(result.overlays) == 2
         assert all(overlay.polylines for overlay in result.overlays)
 
+        native = session._renderer._artists["facet:fit_native"]
+        assert tuple(native["overlays"]) == result.overlays
         for index, axis in enumerate(session._renderer.axes["facet_cell"]):
-            assert any(
-                artist.axes is axis
-                for artist in session._renderer._fit_artists
-            )
-            assert len(axis.texts) == 1
-            text = axis.texts[0].get_text()
-            assert "$x_0$" in text
-            assert "±" in text
-            assert "\n" not in text
-            assert "$f(" not in text
-            inset = session._defaults.style.render.axes_text_inset_fraction
-            assert axis.texts[0].get_position() == (inset, 1.0 - inset)
-            assert (
-                axis.texts[0].get_fontsize()
-                == session._defaults.style.fonts.facet_fit_annotation_pt
-            )
-            assert (
-                axis.texts[0].get_zorder()
-                == session._defaults.style.artists.fit_annotation_zorder
-            )
             assert "headline=" not in axis.get_title()
             assert result.overlays[index].facet_index == index
 
@@ -157,8 +139,8 @@ def test_facet_live_fit_pairs_the_whole_batch_with_its_data_frame() -> None:
         release_surface = session.subscribe_surface(
             lambda: surfaces.append(session.data_revision)
         )
-        original_artists = tuple(session._renderer._fit_artists)
-        assert original_artists
+        original_native = session._renderer._artists["facet:fit_native"]
+        assert tuple(original_native["overlays"])
         prepared = session.prepare_live_frame(
             _facet_snapshot(revision=1, scale=1.1)
         ).result(timeout=10.0)
@@ -173,9 +155,10 @@ def test_facet_live_fit_pairs_the_whole_batch_with_its_data_frame() -> None:
         assert accepted.source_revision == 1
         assert len(accepted.overlays) == 2
         assert all(overlay.polylines for overlay in accepted.overlays)
-        # The pair repainted the whole batch inside the one commit: every
-        # cell carries exactly its revision-1 overlay artists.
-        assert session._renderer._fit_artists
+        # The pair repainted the whole native batch inside the one commit.
+        assert tuple(
+            session._renderer._artists["facet:fit_native"]["overlays"]
+        ) == accepted.overlays
         assert session.fit_status == "current"
         assert surfaces == [1], "facet data+fit pair rendered more than once"
 

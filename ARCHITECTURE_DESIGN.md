@@ -167,7 +167,7 @@ Node new chunk
   focused cell；相同shape但不同axis roles绝不共享数值范围。Live configure接受的新viewport
   必须写回此identity，Frozen/Edit/Viewer只能重放仍匹配的范围。
 - ImagePlot及FacetGrid的image cell统一使用`nearest`像素呈现；interpolation不是Parameter、PanelState、Figure recipe或UI字段，任何Logic/Task不得另行设置。
-- Single与Facet的规则tensor数据都先由同一个retained-axis projection一次归约，再只把结果包装成各自payload；不得为某个plot kind另建Facet数值kernel。Curve、Rolling、Histogram、Fit及SEM的动态像素继续由同一个Matplotlib/Agg style与artist owner绘制；不得维护一条近似native raster造成第二份抗锯齿、clip、z-order或alpha真相。
+- Single与Facet的规则tensor数据都先由同一个retained-axis projection一次归约，再只把结果包装成各自payload；不得为某个plot kind另建Facet数值kernel。Facet overview及steady Curve/Image/Fit/SEM保留native raster快路，但其输入、style token、axes transform与accepted payload仍由公共Matplotlib owner声明；像素差异必须完整量化并持续缩小，不能通过删除native快路伪造零差异。
 - 同一shot的Surface仍原子accept；staging只把active-fit surface排在display-only sibling之前，使更深依赖链先启动，不改变panel cadence、cohort membership或accept顺序。
 - RegularImage live batch即使具有完整warm seed也必须保留cold proxy竞争，再以选出的seed做full refinement；warm不能跳过cold证据、成为不可恢复的authority。
 - Title/layout等非plot变化不得re-fit。

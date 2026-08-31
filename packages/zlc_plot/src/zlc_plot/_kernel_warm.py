@@ -329,6 +329,7 @@ def representative_work(*, include_compiled_fit: bool = True) -> None:
         _fit_compiled,
         _fit_radial,
         _height3d_scanline,
+        _raster_kernels,
     )
 
     image = ImagePlot(AxisRef.data("x"), AxisRef.data("y"))
@@ -380,6 +381,39 @@ def representative_work(*, include_compiled_fit: bool = True) -> None:
         _mixed_snapshot(repeats=8, points=1024, sites=8, holes=True),
         CurvePlot(AxisRef.data("site")),
         {"uncertainty": False},
+    )
+
+    # Fit overview glyphs and ellipse rings are born only after an async fit
+    # result lands.  Their inputs below are the exact production dtypes; the
+    # ordinary Image/Curve renders above already warm every other direct-front
+    # kernel through the public PlotSession path.
+    front = np.full((32, 32, 4), 255, dtype=np.uint8)
+    _raster_kernels.raster_glyph_runs(
+        _raster_kernels.readable(np.asarray(((0, 1),), dtype=np.int32)),
+        _raster_kernels.readable(np.asarray((2,), dtype=np.int32)),
+        _raster_kernels.readable(np.asarray(((2, 2),), dtype=np.int32)),
+        _raster_kernels.readable(np.asarray(((0, 0, 32, 32),), dtype=np.int32)),
+        _raster_kernels.readable(np.full((2, 5, 4), 180, dtype=np.uint8)),
+        _raster_kernels.readable(np.asarray((4, 4), dtype=np.int32)),
+        _raster_kernels.readable(np.asarray(((0, 0, 255, 255),), dtype=np.uint8)),
+        front,
+    )
+    _raster_kernels.raster_fit_ellipses(
+        _raster_kernels.readable(
+            np.asarray(((16.0, 16.0, 6.0, 4.0),), dtype=np.float64)
+        ),
+        _raster_kernels.readable(
+            np.asarray(((255, 128, 0, 180),), dtype=np.uint8)
+        ),
+        _raster_kernels.readable(np.asarray((2.0,), dtype=np.float64)),
+        _raster_kernels.readable(
+            np.asarray(((255, 128, 0, 255),), dtype=np.uint8)
+        ),
+        _raster_kernels.readable(np.asarray((2.0,), dtype=np.float64)),
+        _raster_kernels.readable(
+            np.asarray(((0, 0, 32, 32),), dtype=np.int32)
+        ),
+        front,
     )
 
     # The scan-line renderer's own five.  Its bare render reaches three of

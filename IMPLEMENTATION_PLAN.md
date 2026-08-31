@@ -47,7 +47,7 @@
   2.04M MEAN compute为204.124→9.719 ms，真实Windows Rolling Host中位为
   264.37→58.85 ms、P90为286.34→66.89 ms；70组reduction/validity/group矩阵满足
   既有浮点数值等价与结构精确contract，聚焦回归63项通过。
-- Facet/Single规则tensor投影已收敛到同一retained-axis reduction：一次保留`facet/x/y/group`真实tensor axes、一次归约其它轴，Curve/Image只包装不同payload；Histogram继续共用其批量分箱terminal。像素A/B证明近似native Curve/Image/Fit/SEM无法同时保持0差异与净收益，相关glyph、stroke、image、ellipse、transform kernel及warm signatures已全部删除；所有动态像素回到唯一Matplotlib/Agg owner。RegularImage即使有完整warm seed也保留cold proxy竞争；Board的active-fit staging保持不变。相对`7dce795`的parent，在同一SimulationWorld MOT、DPR3、2×2、12次steady更新下：Facet Curve projection `2.53→1.43 ms`、Curve-Fit `3.57→2.42 ms`、Rolling-style Curve/SEM `4.69→2.94 ms`，对应总耗时`32.37→30.88`、`59.29→57.00`、`36.38→34.39 ms`；八个Image/Curve/Histogram/Fit/SEM场景的最终RGBA均为`0`个不同像素、最大通道差`0`，warmer收敛为`56 kernels / 64 signatures`。
+- Facet/Single规则tensor投影已收敛到同一retained-axis reduction：一次保留`facet/x/y/group`真实tensor axes、一次归约其它轴，Curve/Image只包装不同payload；Histogram继续共用其批量分箱terminal。Curve/Image/Fit/SEM的native raster快路保留，并继续以完整差异像素而非阈值子集评价其Agg接近度；不得通过回退Agg把差异人为归零。RegularImage即使有完整warm seed也保留cold proxy竞争；Board的active-fit staging保持不变。
 - Panel Edit/Setting性能cut在同一真实Windows Camera Facet链上完成：Direct Producer不再嵌套
   LogicEditor而只打开已有Logic tab；Qt owner在Host首次render前传入screen DPR；正常已settle
   Edit首开`update_projection 3→1`、`refresh_panel_editor 3→0`、Form reconcile `19→4`、

@@ -663,3 +663,454 @@ def masked_finite_extrema(values: Any, valid: Any) -> tuple[int, float, float] |
     out = np.empty((threads + 1, 3), dtype=np.float64)
     finite_extrema(flat, mask, use_valid, out)
     return int(out[threads, 0]), float(out[threads, 1]), float(out[threads, 2])
+
+
+# -------------------------------------------------------------- polylines
+@njit(cache=True, nogil=True)
+def raster_polylines(vertices, offsets, colours, widths, clips, low, high, out):
+    """Stroke monotonic display curves as one antialiased column envelope."""
+
+    height, width = out.shape[:2]
+    for line in range(offsets.size - 1):
+        start = offsets[line]
+        stop = offsets[line + 1]
+        if stop - start < 2:
+            continue
+        clip_left = max(0, clips[line, 0])
+        clip_top = max(0, clips[line, 1])
+        clip_right = min(width, clips[line, 2])
+        clip_bottom = min(height, clips[line, 3])
+        if clip_right <= clip_left or clip_bottom <= clip_top:
+            continue
+        for column in range(clip_left, clip_right):
+            low[line, column] = np.inf
+            high[line, column] = -np.inf
+
+        for point in range(start, stop - 1):
+            x0 = vertices[point, 0]
+            y0 = vertices[point, 1]
+            x1 = vertices[point + 1, 0]
+            y1 = vertices[point + 1, 1]
+            if not (
+                np.isfinite(x0)
+                and np.isfinite(y0)
+                and np.isfinite(x1)
+                and np.isfinite(y1)
+            ):
+                continue
+            dx = x1 - x0
+            if abs(dx) < np.float64(1.0e-12):
+                column = int(np.floor(np.float64(0.5) * (x0 + x1)))
+                if clip_left <= column < clip_right:
+                    low[line, column] = min(low[line, column], y0, y1)
+                    high[line, column] = max(high[line, column], y0, y1)
+                continue
+            first = max(clip_left, int(np.floor(min(x0, x1))))
+            last = min(clip_right, int(np.ceil(max(x0, x1))) + 1)
+            for column in range(first, last):
+                px = np.float64(column) + np.float64(0.5)
+                along = (px - x0) / dx
+                if along < 0.0 or along > 1.0:
+                    continue
+                y = y0 + along * (y1 - y0)
+                low[line, column] = min(low[line, column], y)
+                high[line, column] = max(high[line, column], y)
+
+        radius = max(np.float64(0.5), np.float64(widths[line]) * 0.5)
+        reach = int(np.ceil(radius + np.float64(0.5)))
+        alpha_code = np.float64(colours[line, 3]) / np.float64(255.0)
+        for column in range(clip_left, clip_right):
+            envelope_low = np.inf
+            envelope_high = -np.inf
+            for source_column in range(
+                max(clip_left, column - reach),
+                min(clip_right, column + reach + 1),
+            ):
+                if not np.isfinite(low[line, source_column]):
+                    continue
+                distance = abs(source_column - column)
+                squared = (
+                    (radius + np.float64(0.5))
+                    * (radius + np.float64(0.5))
+                    - np.float64(distance * distance)
+                )
+                if squared <= 0.0:
+                    continue
+                vertical = np.sqrt(squared)
+                envelope_low = min(
+                    envelope_low, low[line, source_column] - vertical
+                )
+                envelope_high = max(
+                    envelope_high, high[line, source_column] + vertical
+                )
+            if not np.isfinite(envelope_low):
+                continue
+            first_row = max(clip_top, int(np.floor(envelope_low - 0.5)))
+            last_row = min(clip_bottom, int(np.ceil(envelope_high + 0.5)))
+            for row in range(first_row, last_row):
+                py = np.float64(row) + np.float64(0.5)
+                amount = min(
+                    np.float64(1.0),
+                    py - envelope_low + np.float64(0.5),
+                    envelope_high - py + np.float64(0.5),
+                )
+                if amount <= 0.0:
+                    continue
+                alpha = alpha_code * amount
+                inverse = np.float64(1.0) - alpha
+                for channel in range(3):
+                    value = (
+                        np.float64(colours[line, channel]) * alpha
+                        + np.float64(out[row, column, channel]) * inverse
+                    )
+                    out[row, column, channel] = np.uint8(
+                        min(np.float64(255.0), np.floor(value + np.float64(0.5)))
+                    )
+                out[row, column, 3] = np.uint8(255)
+
+
+@njit(cache=True, nogil=True)
+def raster_error_envelopes(
+    x,
+    y_low,
+    y_high,
+    offsets,
+    colours,
+    widths,
+    cap_widths,
+    clips,
+    low,
+    high,
+    out,
+):
+    """Aggregate dense error bars per display column and paint their envelope."""
+
+    height, width = out.shape[:2]
+    for group in range(offsets.size - 1):
+        clip_left = max(0, clips[group, 0])
+        clip_top = max(0, clips[group, 1])
+        clip_right = min(width, clips[group, 2])
+        clip_bottom = min(height, clips[group, 3])
+        if clip_right <= clip_left or clip_bottom <= clip_top:
+            continue
+        for column in range(clip_left, clip_right):
+            low[group, column] = np.inf
+            high[group, column] = -np.inf
+        for point in range(offsets[group], offsets[group + 1]):
+            if not (
+                np.isfinite(x[point])
+                and np.isfinite(y_low[point])
+                and np.isfinite(y_high[point])
+            ):
+                continue
+            column = int(np.floor(x[point]))
+            if clip_left <= column < clip_right:
+                low[group, column] = min(low[group, column], y_low[point])
+                high[group, column] = max(high[group, column], y_high[point])
+
+        radius = max(np.float64(0.5), np.float64(widths[group]) * 0.5)
+        stem_reach = int(np.ceil(radius + np.float64(0.5)))
+        cap_reach = max(
+            stem_reach,
+            int(np.ceil(np.float64(cap_widths[group]) * np.float64(0.5))),
+        )
+        alpha = np.float64(colours[group, 3]) / np.float64(255.0)
+        inverse = np.float64(1.0) - alpha
+        for column in range(clip_left, clip_right):
+            stem_low = np.inf
+            stem_high = -np.inf
+            cap_lows = np.inf
+            cap_highs = -np.inf
+            for source_column in range(
+                max(clip_left, column - cap_reach),
+                min(clip_right, column + cap_reach + 1),
+            ):
+                if not np.isfinite(low[group, source_column]):
+                    continue
+                distance = abs(source_column - column)
+                if distance <= stem_reach:
+                    stem_low = min(stem_low, low[group, source_column])
+                    stem_high = max(stem_high, high[group, source_column])
+                if distance <= cap_reach:
+                    cap_lows = min(cap_lows, low[group, source_column])
+                    cap_highs = max(cap_highs, high[group, source_column])
+            if np.isfinite(stem_low):
+                first = max(clip_top, int(np.floor(stem_low - radius)))
+                last = min(clip_bottom, int(np.ceil(stem_high + radius)))
+                for row in range(first, last):
+                    for channel in range(3):
+                        value = (
+                            np.float64(colours[group, channel]) * alpha
+                            + np.float64(out[row, column, channel]) * inverse
+                        )
+                        out[row, column, channel] = np.uint8(
+                            min(np.float64(255.0), np.floor(value + 0.5))
+                        )
+                    out[row, column, 3] = np.uint8(255)
+            if np.isfinite(cap_lows):
+                for cap_y in (cap_lows, cap_highs):
+                    first = max(clip_top, int(np.floor(cap_y - radius)))
+                    last = min(clip_bottom, int(np.ceil(cap_y + radius)))
+                    for row in range(first, last):
+                        for channel in range(3):
+                            value = (
+                                np.float64(colours[group, channel]) * alpha
+                                + np.float64(out[row, column, channel]) * inverse
+                            )
+                            out[row, column, channel] = np.uint8(
+                                min(np.float64(255.0), np.floor(value + 0.5))
+                            )
+                        out[row, column, 3] = np.uint8(255)
+
+
+@njit(cache=True, parallel=True, nogil=True)
+def raster_facet_images(
+    values,
+    valid,
+    use_valid,
+    boxes,
+    views,
+    extents,
+    lut,
+    vmin,
+    scale,
+    out,
+):
+    """Map a batch of image cells directly into their final canvas boxes."""
+
+    cells, source_rows, source_columns = values.shape
+    height, width = out.shape[:2]
+    for work in prange(cells * height):
+        cell = work // height
+        row = work - cell * height
+        left = max(0, boxes[cell, 0])
+        top = max(0, boxes[cell, 1])
+        right = min(width, boxes[cell, 2])
+        bottom = min(height, boxes[cell, 3])
+        if right <= left or bottom <= top or row < top or row >= bottom:
+            continue
+        x0 = views[cell, 0]
+        x1 = views[cell, 1]
+        y0 = views[cell, 2]
+        y1 = views[cell, 3]
+        source_left = extents[cell, 0]
+        source_right = extents[cell, 1]
+        source_bottom = extents[cell, 2]
+        source_top = extents[cell, 3]
+        box_width = right - left
+        box_height = bottom - top
+        y_fraction = (np.float64(row - top) + 0.5) / box_height
+        y_value = y1 + y_fraction * (y0 - y1)
+        y_denominator = source_top - source_bottom
+        if y_denominator == 0.0:
+            continue
+        source_y = (source_top - y_value) / y_denominator * source_rows
+        source_row = int(np.floor(source_y))
+        if source_row < 0 or source_row >= source_rows:
+            continue
+        for column in range(left, right):
+            x_fraction = (np.float64(column - left) + 0.5) / box_width
+            x_value = x0 + x_fraction * (x1 - x0)
+            x_denominator = source_right - source_left
+            if x_denominator == 0.0:
+                continue
+            source_x = (
+                (x_value - source_left) / x_denominator * source_columns
+            )
+            source_column = int(np.floor(source_x))
+            if source_column < 0 or source_column >= source_columns:
+                continue
+            if use_valid and not valid[cell, source_row, source_column]:
+                continue
+            scaled = (
+                np.float64(values[cell, source_row, source_column]) - vmin
+            ) * scale
+            if scaled < 0.0:
+                scaled = 0.0
+            elif scaled > 255.0:
+                scaled = 255.0
+            code = np.uint8(scaled)
+            out[row, column, 0] = lut[code, 0]
+            out[row, column, 1] = lut[code, 1]
+            out[row, column, 2] = lut[code, 2]
+            out[row, column, 3] = lut[code, 3]
+
+
+@njit(cache=True, nogil=True)
+def raster_glyph_runs(
+    codes,
+    lengths,
+    positions,
+    clips,
+    atlas,
+    advances,
+    colours,
+    out,
+):
+    """Composite clipped cached glyph masks for dynamic Facet annotations."""
+
+    height, width = out.shape[:2]
+    glyph_height = atlas.shape[1]
+    glyph_width = atlas.shape[2]
+    for run in range(codes.shape[0]):
+        cursor = positions[run, 0]
+        top = positions[run, 1]
+        clip_left = max(0, clips[run, 0])
+        clip_top = max(0, clips[run, 1])
+        clip_right = min(width, clips[run, 2])
+        clip_bottom = min(height, clips[run, 3])
+        for index in range(lengths[run]):
+            glyph = codes[run, index]
+            if glyph < 0 or glyph >= atlas.shape[0]:
+                continue
+            if cursor >= clip_right:
+                break
+            for row in range(glyph_height):
+                target_row = top + row
+                if target_row < clip_top or target_row >= clip_bottom:
+                    continue
+                for column in range(glyph_width):
+                    target_column = cursor + column
+                    if target_column < clip_left or target_column >= clip_right:
+                        continue
+                    coverage = atlas[glyph, row, column]
+                    if coverage == 0:
+                        continue
+                    alpha = (
+                        np.float64(coverage)
+                        * np.float64(colours[run, 3])
+                        / np.float64(65025.0)
+                    )
+                    inverse = np.float64(1.0) - alpha
+                    for channel in range(3):
+                        value = (
+                            np.float64(colours[run, channel]) * alpha
+                            + np.float64(out[target_row, target_column, channel])
+                            * inverse
+                        )
+                        out[target_row, target_column, channel] = np.uint8(
+                            min(np.float64(255.0), np.floor(value + 0.5))
+                        )
+                    out[target_row, target_column, 3] = np.uint8(255)
+            cursor += advances[glyph]
+
+
+@njit(cache=True, parallel=True, nogil=True)
+def raster_fit_ellipses(
+    geometry,
+    ring_colours,
+    ring_widths,
+    center_colours,
+    center_radii,
+    clips,
+    out,
+):
+    """Paint independent axis-aligned fit rings and center markers."""
+
+    height, width = out.shape[:2]
+    for item in prange(geometry.shape[0]):
+        center_x = geometry[item, 0]
+        center_y = geometry[item, 1]
+        radius_x = max(np.float64(0.5), geometry[item, 2])
+        radius_y = max(np.float64(0.5), geometry[item, 3])
+        ring_radius = max(np.float64(0.5), ring_widths[item] * 0.5)
+        center_radius = max(np.float64(0.5), center_radii[item])
+        reach_x = radius_x + ring_radius + 1.0
+        reach_y = radius_y + ring_radius + 1.0
+        left = max(clips[item, 0], int(np.floor(center_x - reach_x)))
+        right = min(clips[item, 2], int(np.ceil(center_x + reach_x)))
+        top = max(clips[item, 1], int(np.floor(center_y - reach_y)))
+        bottom = min(clips[item, 3], int(np.ceil(center_y + reach_y)))
+        scale = min(radius_x, radius_y)
+        for row in range(top, bottom):
+            py = np.float64(row) + 0.5
+            for column in range(left, right):
+                px = np.float64(column) + 0.5
+                dx = px - center_x
+                dy = py - center_y
+                normalized = np.sqrt(
+                    (dx / radius_x) * (dx / radius_x)
+                    + (dy / radius_y) * (dy / radius_y)
+                )
+                distance = abs(normalized - 1.0) * scale
+                amount = min(1.0, ring_radius + 0.5 - distance)
+                if amount > 0.0:
+                    alpha = (
+                        np.float64(ring_colours[item, 3])
+                        / np.float64(255.0)
+                        * amount
+                    )
+                    inverse = 1.0 - alpha
+                    for channel in range(3):
+                        value = (
+                            np.float64(ring_colours[item, channel]) * alpha
+                            + np.float64(out[row, column, channel]) * inverse
+                        )
+                        out[row, column, channel] = np.uint8(
+                            min(255.0, np.floor(value + 0.5))
+                        )
+                    out[row, column, 3] = np.uint8(255)
+                center_distance = np.sqrt(dx * dx + dy * dy)
+                center_amount = min(1.0, center_radius + 0.5 - center_distance)
+                if center_amount > 0.0:
+                    alpha = (
+                        np.float64(center_colours[item, 3])
+                        / np.float64(255.0)
+                        * center_amount
+                    )
+                    inverse = 1.0 - alpha
+                    for channel in range(3):
+                        value = (
+                            np.float64(center_colours[item, channel]) * alpha
+                            + np.float64(out[row, column, channel]) * inverse
+                        )
+                        out[row, column, channel] = np.uint8(
+                            min(255.0, np.floor(value + 0.5))
+                        )
+                    out[row, column, 3] = np.uint8(255)
+
+
+@njit(cache=True, parallel=True, nogil=True)
+def transform_curve_batch(
+    x,
+    y,
+    valid,
+    band_low,
+    band_high,
+    use_band,
+    affine,
+    canvas_height,
+    vertices,
+    bar_x,
+    bar_low,
+    bar_high,
+):
+    """Transform grouped Curve data and uncertainty bounds in one native pass."""
+
+    a, b, c, d, e, f = affine
+    for series in prange(y.shape[0]):
+        for point in range(y.shape[1]):
+            if not valid[series, point]:
+                vertices[series, point, 0] = np.nan
+                vertices[series, point, 1] = np.nan
+                bar_x[series, point] = np.nan
+                bar_low[series, point] = np.nan
+                bar_high[series, point] = np.nan
+                continue
+            xv = x[point]
+            yv = y[series, point]
+            vertices[series, point, 0] = a * xv + c * yv + e
+            vertices[series, point, 1] = canvas_height - (b * xv + d * yv + f)
+            if use_band:
+                lo = band_low[series, point]
+                hi = band_high[series, point]
+                bar_x[series, point] = a * xv + c * lo + e
+                first = canvas_height - (b * xv + d * lo + f)
+                second = canvas_height - (b * xv + d * hi + f)
+                bar_low[series, point] = min(first, second)
+                bar_high[series, point] = max(first, second)
+            else:
+                bar_x[series, point] = np.nan
+                bar_low[series, point] = np.nan
+                bar_high[series, point] = np.nan
+
