@@ -129,13 +129,18 @@ def _running_server(adapter: SlmAdapter):
 
 
 def test_real_slm_descriptor_matches_the_pulse_server_endpoint_model() -> None:
-    assert len(DEVICE_TYPES) == 1
-    descriptor = DEVICE_TYPES[0]
-    assert descriptor.type_id == "slm.hamamatsu_x15213"
-    assert descriptor.domain == "slm"
-    assert descriptor.capabilities == ("slm.phase",)
+    assert [item.type_id for item in DEVICE_TYPES] == [
+        "slm.hamamatsu_x15213",
+        "slm.hamamatsu_x15213_local",
+    ]
+    descriptor, local = DEVICE_TYPES
+    assert descriptor.domain == local.domain == "slm"
+    assert descriptor.capabilities == local.capabilities == ("slm.phase",)
     assert descriptor.discover is None
     assert descriptor.control_factory is not None
+    # The local head serves the identical protocol, so the identical
+    # control surface drives it -- through its own loopback client.
+    assert local.control_factory is descriptor.control_factory
     assert HAMAMATSU_X15213_SCHEMA.field_names == ("host", "port")
     assert HAMAMATSU_X15213_SCHEMA.project_values({}) == {
         "host": "127.0.0.1",
@@ -894,11 +899,12 @@ def test_remote_packet_grammar_rejects_partial_duplicate_and_nonfinite_input(
         receiver.close()
 
 
-def test_slm_server_launcher_uses_the_product_entry() -> None:
-    root = Path(__file__).resolve().parents[3]
-    launcher = (root / "bin" / "slm_server.bat").read_text(encoding="utf-8")
-    assert 'set "ZLC_COMMAND=slm_server"' in launcher
-    assert 'call "%~dp0_launch.bat" %*' in launcher
+def test_slm_server_command_is_the_product_entry() -> None:
+    """The headless escape hatch stays installed; its .bat wrapper is gone.
+
+    A bench normally serves its head in-process (slm.hamamatsu_x15213_local);
+    this command is for a machine without a bench window.
+    """
 
     from zou_lab_control import entry_specs
 
@@ -1010,3 +1016,22 @@ def test_slm_server_cli_validates_before_hardware_and_closes_after_bind_failure(
     with pytest.raises(OSError, match="bind failed"):
         module.main(["--host", "127.0.0.1", "--port", "18862"])
     assert adapter.closed == 1
+
+
+def test_the_local_slm_type_authors_the_server_knobs_plus_a_port() -> None:
+    """slm.hamamatsu_x15213_local is the server's own form with one addition.
+
+    Its authoring schema is the SERVER schema (transport, profile,
+    wavelength, correction, flips) plus the port to serve on -- the same
+    facts the CLI takes -- so initializing the device is starting the
+    server, with nothing retyped.
+    """
+
+    from zlc_atom.devices.slm.device_types import (
+        X15213_LOCAL_SCHEMA,
+        X15213_SERVER_SCHEMA,
+    )
+
+    server_names = [field.name for field in X15213_SERVER_SCHEMA.fields]
+    local_names = [field.name for field in X15213_LOCAL_SCHEMA.fields]
+    assert local_names == server_names + ["port"]

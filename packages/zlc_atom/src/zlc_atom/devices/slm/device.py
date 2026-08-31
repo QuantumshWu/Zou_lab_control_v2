@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import socket
 import socketserver
 import struct
@@ -14,6 +15,10 @@ import numpy as np
 if TYPE_CHECKING:
     from zlc_atom.install.descriptors import InstalledLeaf
 
+
+#: The server's narration channel: the machine that owns the SLM shows these
+#: records in its bench window, where a dedicated console used to scroll.
+_LOG = logging.getLogger(__name__)
 
 _TWO_PI = 2.0 * np.pi
 _MAX_WRAPPED_PHASE = np.nextafter(np.float32(_TWO_PI), np.float32(0.0))
@@ -220,11 +225,16 @@ def _open_slm_server(slm: SlmAdapter, host: str, port: int) -> socketserver.TCPS
         }
         return {"version": _REMOTE_VERSION, "ok": ok, "error": error, "state": state}, payload
 
-    def handle(connection: socket.socket, _address, _server) -> None:
+    def handle(connection: socket.socket, address, _server) -> None:
         connection.settimeout(_SERVER_SOCKET_TIMEOUT)
+        client = f"{address[0]}:{address[1]}" if address else "?"
         try:
             request, payload = _recv_packet(connection)
-        except Exception:
+        except Exception as error:
+            _LOG.info(
+                "SLM RECEIVE FAILED client=%s error=%s: %s",
+                client, type(error).__name__, error,
+            )
             return
         fields = set(request)
         if (
@@ -271,12 +281,26 @@ def _open_slm_server(slm: SlmAdapter, host: str, port: int) -> socketserver.TCPS
                 )
             else:
                 reply = response(True, None, include_phase=False)
+        metadata = reply[0]
+        _LOG.info(
+            "SLM %s client=%s ok=%s%s command_revision=%s",
+            str(request.get("method", "?")).upper(),
+            client,
+            metadata["ok"],
+            "" if metadata["error"] is None else f" error={metadata['error']!r}",
+            metadata["state"]["command_revision"],
+        )
         try:
             _send_packet(connection, *reply)
         except OSError:
             pass
 
-    return socketserver.TCPServer((bind_host, port), handle)
+    server = socketserver.TCPServer((bind_host, port), handle)
+    _LOG.info(
+        "SLM SERVER LISTENING endpoint=%s:%d device=%s",
+        bind_host, int(server.server_address[1]), slm.identity,
+    )
+    return server
 
 
 def _rpc_call(

@@ -236,3 +236,68 @@ def test_both_ends_of_the_spectrum_are_named_and_mixing_needs_no_mode() -> None:
         {"key": "sequencer", "type_id": "sequencer.hardware", "config": {"host": "127.0.0.1"}},
     )
     assert len(mixed) == 2
+
+
+def test_a_local_sequencer_serves_its_own_board_and_dials_loopback() -> None:
+    """sequencer.local IS the old server .bat, owned by the installation.
+
+    The factory opens the deployed board (the memory backend here -- the
+    same resolve/build/open path with no hardware), serves it in-process,
+    and the bench's own leaf is the SAME loopback client any peer would
+    be, so the server is the board's one owner.  Closing the leaf takes
+    the server down with it.
+    """
+
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free_port = probe.getsockname()[1]
+
+    dialled: list[tuple] = []
+
+    def dial(host, port, **kwargs):
+        from zlc_pulse import connect
+
+        dialled.append((host, port))
+        return connect(host, port, **kwargs)
+
+    installation = create_installation(
+        (
+            {"key": "sequencer", "type_id": "sequencer.local",
+             "config": {"backend": "memory", "port": free_port}},
+        ),
+        connect_pulse=dial,
+    )
+    try:
+        assert installation.failures == {}
+        assert dialled == [("127.0.0.1", free_port)]
+        leaf = installation.devices["sequencer"]
+        assert leaf.type_id == "sequencer.local"
+        assert leaf.device.safe().stable
+    finally:
+        installation.close()
+    # The leaf's closer stops the in-process server, not just the client.
+    import pytest
+
+    with pytest.raises(OSError):
+        socket.create_connection(("127.0.0.1", free_port), timeout=0.5)
+
+
+def test_local_types_announce_the_client_shape_a_peer_installs() -> None:
+    """A self-serving type is published as the CLIENT type plus endpoint."""
+
+    from zlc_atom.install import discover_device_catalog
+
+    items = {
+        item.type_id: item for item in discover_device_catalog().available
+    }
+    assert items["sequencer.local"].announce({"backend": "auto", "port": 18861}) == (
+        "sequencer.hardware", {"host": "127.0.0.1", "port": 18861}
+    )
+    assert items["slm.hamamatsu_x15213_local"].announce({"port": 18862}) == (
+        "slm.hamamatsu_x15213", {"host": "127.0.0.1", "port": 18862}
+    )
+    # Plain clients and tunables are announced as themselves.
+    assert items["sequencer.hardware"].announce is None
+    assert items["rf.virtual"].announce is None

@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import ctypes
 from ctypes import wintypes
+from dataclasses import replace
 import json
+import logging
 import os
 from pathlib import Path
 from queue import Empty, Queue
@@ -1197,6 +1199,74 @@ def _factory(context, key: str, values: Mapping[str, object]) -> InstalledLeaf:
     return bind_slm(context, key, adapter, _TYPE_ID)
 
 
+_LOG = logging.getLogger(__name__)
+
+#: The machine the SLM head is plugged into serves it FROM the bench process:
+#: initialize the device and the server is up -- no .bat, no second console.
+#: The bench's own leaf dials the same loopback endpoint every remote client
+#: would, so the hardware adapter has exactly one owner: the server.
+X15213_LOCAL_SCHEMA = AuthoringSchema(
+    X15213_SERVER_SCHEMA.fields
+    + (
+        AuthoringField(
+            "port", "int", "Serve on port", 18862, minimum=1, maximum=65535
+        ),
+    ),
+)
+
+
+def _local_factory(context, key: str, values: Mapping[str, object]) -> InstalledLeaf:
+    """Open the plugged-in head, serve it, and join as the loopback client."""
+
+    authored = X15213_LOCAL_SCHEMA.project_values(values)
+    adapter = X15213Adapter(
+        X15213_SERVER_SCHEMA.project_values(
+            {field.name: authored[field.name] for field in X15213_SERVER_SCHEMA.fields}
+        )
+    )
+    try:
+        server = _open_slm_server(adapter, "0.0.0.0", int(authored["port"]))
+    except BaseException:
+        adapter.close()
+        raise
+    port = int(server.server_address[1])
+    thread = Thread(
+        target=server.serve_forever,
+        kwargs={"poll_interval": 0.1},
+        name=f"slm-server:{port}",
+        daemon=True,
+    )
+    thread.start()
+
+    def _stop_server() -> None:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5.0)
+        adapter.close()
+        _LOG.info("SLM SERVER CLOSED device=%s", adapter.identity)
+
+    try:
+        client = _RemoteSlmAdapter("127.0.0.1", port, _REMOTE_TIMEOUT_SECONDS)
+        leaf = bind_slm(context, key, client, "slm.hamamatsu_x15213_local")
+    except BaseException:
+        _stop_server()
+        raise
+
+    def _close(client=client) -> None:
+        try:
+            client.close()
+        finally:
+            _stop_server()
+
+    return replace(leaf, closer=_close)
+
+
+def _announce_local(parameters: Mapping[str, object]) -> tuple[str, dict]:
+    """A peer reaches this head as an ordinary network SLM client."""
+
+    return _TYPE_ID, {"host": "127.0.0.1", "port": int(parameters["port"])}
+
+
 DEVICE_TYPES = (
     DeviceTypeDescriptor(
         _TYPE_ID,
@@ -1205,6 +1275,15 @@ DEVICE_TYPES = (
         ("slm.phase",),
         factory=_factory,
         control_factory=open_slm_control,
+    ),
+    DeviceTypeDescriptor(
+        "slm.hamamatsu_x15213_local",
+        "slm",
+        X15213_LOCAL_SCHEMA,
+        ("slm.phase",),
+        factory=_local_factory,
+        control_factory=open_slm_control,
+        announce=_announce_local,
     ),
 )
 
@@ -1282,6 +1361,15 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    # Headless CLI: the same narration an embedding bench window shows goes
+    # to this console, so the two ways of serving read identically.
+    console = logging.StreamHandler()
+    console.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", "%H:%M:%S"))
+    logger = logging.getLogger("zlc_atom.devices.slm")
+    logger.addHandler(console)
+    if logger.getEffectiveLevel() > logging.INFO:
+        logger.setLevel(logging.INFO)
+
     adapter = X15213Adapter(authored)
     try:
         with _open_slm_server(adapter, arguments.host, arguments.port) as server:
@@ -1304,6 +1392,7 @@ def main(argv: list[str] | None = None) -> int:
 __all__ = [
     "DEVICE_TYPES",
     "HAMAMATSU_X15213_SCHEMA",
+    "X15213_LOCAL_SCHEMA",
     "X15213_SERVER_SCHEMA",
     "X15213Adapter",
 ]

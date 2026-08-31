@@ -65,6 +65,14 @@ class DeviceTypeDescriptor:
     world_config: Callable[[Mapping[str, Any]], object] | None = None
     discover: Callable[[], tuple[DeviceInstanceConfig, ...]] | None = None
     control_factory: Callable[..., object] | None = None
+    #: How a peer bench should author THIS device when it is published on the
+    #: fabric: authored parameters -> (peer type_id, peer parameters).  A type
+    #: that serves its own protocol (a local pulse board, a local SLM) is not
+    #: reachable under its own type_id -- the peer installs the CLIENT type
+    #: against this machine's endpoint, and only the family that defines both
+    #: sides knows that mapping.  None means the device is announced as
+    #: itself, which is right for plain endpoint clients and tunables.
+    announce: Callable[[Mapping[str, Any]], tuple[str, dict[str, Any]]] | None = None
 
     def __post_init__(self) -> None:
         if not self.type_id or not self.domain:
@@ -88,6 +96,8 @@ class DeviceTypeDescriptor:
             raise TypeError("device type discover must be callable or None")
         if self.control_factory is not None and not callable(self.control_factory):
             raise TypeError("device type control_factory must be callable or None")
+        if self.announce is not None and not callable(self.announce):
+            raise TypeError("device type announce must be callable or None")
         object.__setattr__(self, "capabilities", capabilities)
         object.__setattr__(self, "dependencies", dependencies)
 

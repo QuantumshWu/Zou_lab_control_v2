@@ -61,8 +61,10 @@ def test_device_discovery_is_the_leaf_manifest() -> None:
         "rf.vaunix_lms",
         "rf.virtual",
         "sequencer.hardware",
+        "sequencer.local",
         "sequencer.virtual",
         "slm.hamamatsu_x15213",
+        "slm.hamamatsu_x15213_local",
         "slm.virtual",
     )
     # "rf" left this tombstone in 2026-08: the OLD rf family was purged and

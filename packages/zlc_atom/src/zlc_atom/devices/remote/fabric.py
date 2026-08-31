@@ -31,6 +31,7 @@ TCP port; everything else is TCP.
 from __future__ import annotations
 
 import json
+import logging
 import socket
 import socketserver
 import struct
@@ -120,6 +121,11 @@ class PublishedDevice:
         }
 
 
+#: The fabric's narration channel, shown by the bench window that owns
+#: the announcer so the serving machine can watch its published devices.
+_LOG = logging.getLogger(__name__)
+
+
 class DeviceAnnouncer:
     """PC2's half: answer the broadcast, list the published, serve the tunes."""
 
@@ -176,10 +182,18 @@ class DeviceAnnouncer:
     def publish(self, device: PublishedDevice) -> None:
         with self._registry_lock:
             self._published[device.instance_id] = device
+        _LOG.info(
+            "FABRIC PUBLISH device=%s type=%s plane=%s",
+            device.instance_id,
+            device.type_id,
+            "tunable" if device.tunable is not None else "own protocol",
+        )
 
     def withdraw(self, instance_id: str) -> None:
         with self._registry_lock:
-            self._published.pop(str(instance_id), None)
+            known = self._published.pop(str(instance_id), None)
+        if known is not None:
+            _LOG.info("FABRIC WITHDRAW device=%s", instance_id)
 
     def published_ids(self) -> tuple[str, ...]:
         with self._registry_lock:
@@ -260,8 +274,19 @@ class DeviceAnnouncer:
         if method == "tune":
             name = str(request.get("name", ""))
             value = request.get("value")
-            with device.lock:
-                effective = device.tunable.tune(name, value)
+            try:
+                with device.lock:
+                    effective = device.tunable.tune(name, value)
+            except Exception as error:
+                _LOG.info(
+                    "FABRIC TUNE REFUSED device=%s field=%s value=%r error=%s: %s",
+                    device.instance_id, name, value, type(error).__name__, error,
+                )
+                raise
+            _LOG.info(
+                "FABRIC TUNE device=%s field=%s value=%r effective=%r",
+                device.instance_id, name, value, effective,
+            )
             return {"effective": effective}
         if method == "values":
             with device.lock:
