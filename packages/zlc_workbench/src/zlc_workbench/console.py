@@ -5216,10 +5216,26 @@ class ConsolePresenter:
         elif synchronized is not _UNCHANGED:
             assert selection is not None
             if bridge is not None:
-                bridge.commit_selection(
-                    selection,
-                    source_publication=publication,
+                frozen_parent_expired = bool(
+                    expected_snapshot is not None
+                    and not self.session.signal_plane.retains(
+                        binding.state.signal,
+                        publication,
+                    )
                 )
+                if frozen_parent_expired:
+                    # Edit still owns the exact snapshot used below for its
+                    # selector/producer mapping, but SelectionBridge is a
+                    # Runtime publication derivation and may consume only a
+                    # parent the plane still retains.  Retire its previous
+                    # answer instead of asking it to rematerialize an evicted
+                    # history publication or leaving a stale ROI signal up.
+                    bridge.clear_selection()
+                else:
+                    bridge.commit_selection(
+                        selection,
+                        source_publication=publication,
+                    )
         if synchronized is _UNCHANGED or self._task_science_locked(binding):
             return
         self._route_exact_panel_selection(

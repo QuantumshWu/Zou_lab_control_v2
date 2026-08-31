@@ -2864,6 +2864,7 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
     assert presenter.logic[first_id].draft.values == first_current
     assert presenter.logic[second_id].draft.values != second_before
 
+
     area_draft = dict(presenter.logic[second_id].draft.values)
     _zoom_in(second_editor_host)
     presenter.beat()
@@ -2896,6 +2897,50 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
     editor_viewport = second_editor_host.describe_display().result().value.viewport
     live_viewport = panel.host.describe_display().result().value.viewport
     assert editor_viewport is not None and live_viewport == editor_viewport
+
+
+def test_panel_editor_selection_survives_an_expired_history_parent(
+    presenter,
+    session,
+    monkeypatch,
+) -> None:
+    """Frozen analysis remains valid after Runtime evicts its publication."""
+
+    node_id = presenter.add_logic(
+        "camera_measurement",
+        node_id="expired-editor-camera",
+        open_editor=False,
+    )
+    node, snapshot = _one_shot(session, producer=node_id)
+    panel = presenter.add_panel(node.signal_key("frames"), snapshot, kind="image")
+    _settle_panel_hosts(presenter, lambda: panel.host is not None)
+    assert presenter.edit_panel(panel.panel_id)
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.editor_host is not None
+        and panel.frozen_data is not None
+        and panel.bridge is not None,
+    )
+    frozen = panel.frozen_data
+    assert frozen is not None and frozen.publication is not None
+    draft_before = dict(presenter.logic[node_id].draft.values)
+    retained = session.signal_plane.retains
+
+    def expires_selected(signal, publication=None):
+        if publication is frozen.publication:
+            return False
+        return retained(signal, publication)
+
+    monkeypatch.setattr(session.signal_plane, "retains", expires_selected)
+    _commit_area(panel.editor_host)
+    presenter.beat()
+
+    assert panel.state.selector
+    assert presenter.logic[node_id].draft.values != draft_before
+    assert panel.bridge.last_error is None
+    assert session.signal_plane.freeze().value(
+        f"@logic/{panel.panel_id}/roi_frame"
+    ) is None
 
 
 def test_pointing_a_panel_at_a_signal_that_never_published_is_refused(

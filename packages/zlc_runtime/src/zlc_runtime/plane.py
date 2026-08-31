@@ -2510,9 +2510,22 @@ class SignalDataPlane:
                 return False
             if publication is None:
                 return True
-            return (
+            belongs = (
                 publication.event_ref.stream_id.value == state.owner_id
                 and publication.event_ref.generation == state.generation
+            )
+            if not belongs:
+                return False
+            value = publication.value(name)
+            if value is None:
+                return False
+            history = state.indexed_history.get(name)
+            if history is None:
+                return True
+            primary_index = value.primary_index
+            return (
+                primary_index is not None
+                and primary_index >= history[1]
             )
 
     def latest_publication(self, signal_name: str) -> SignalPublication | None:
