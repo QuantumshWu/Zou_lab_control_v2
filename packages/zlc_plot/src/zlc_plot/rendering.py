@@ -3568,6 +3568,39 @@ class MatplotlibRenderer:
             for artist in (slots.get("center"), slots.get("ring"))
             if artist is not None and artist.get_visible()
         }
+        color_overlay: tuple[tuple[tuple[int, float, int], Any], ...] = ()
+        color_overlay_ids: set[int] = set()
+        if (
+            native_image
+            and self._selector_gesture_kind is SelectorSceneKind.COLOR_LIMITS
+            and callable(capture)
+        ):
+            image = self._active_image_artist()
+            color_artists = tuple(
+                self._selector_artists.get(SelectorSceneKind.COLOR_LIMITS, ())
+            )
+            if image is not None and image.axes is not None and color_artists:
+                image_axis = image.axes
+                boundary_ids = {
+                    id(artist)
+                    for artist, _owner, _zorder in self._boundary_chrome_cache.get(
+                        id(image_axis), ()
+                    )
+                }
+                color_ids = {id(artist) for artist in color_artists}
+                color_overlay = tuple(
+                    entry
+                    for entry in ordered
+                    if id(entry[1]) in color_ids
+                    or (
+                        entry[1] is not image
+                        and (
+                            getattr(entry[1], "axes", None) is image_axis
+                            or id(entry[1]) in boundary_ids
+                        )
+                    )
+                )
+                color_overlay_ids = {id(artist) for _key, artist in color_overlay}
         used_native = False
         if native_image:
             boundary_ids = set(self._boundary_chrome_commands)
@@ -3577,6 +3610,7 @@ class MatplotlibRenderer:
             for _key, artist in ordered:
                 if (
                     id(artist) in draw_boundary_ids
+                    and id(artist) not in color_overlay_ids
                     and artist.get_visible()
                 ):
                     self._draw_dynamic_artist(artist, renderer, canvas)
@@ -3586,6 +3620,7 @@ class MatplotlibRenderer:
                     id(artist) not in native_image_ids
                     and id(artist) not in facet_annotation_ids
                     and id(artist) not in boundary_ids
+                    and id(artist) not in color_overlay_ids
                     and (not ellipses_drawn or id(artist) not in facet_ellipse_ids)
                     and artist.get_visible()
                 ):
@@ -3644,6 +3679,13 @@ class MatplotlibRenderer:
                         and artist.get_visible()
                     ):
                         self._draw_dynamic_artist(artist, renderer, canvas)
+        if used_native and color_overlay:
+            self._gesture_region = capture(self._figure.bbox)
+            self._gesture_overlay = color_overlay
+            self._gesture_selector_ids = selector_ids
+            for _key, artist in color_overlay:
+                if artist.get_visible():
+                    self._draw_dynamic_artist(artist, renderer, canvas)
         if not used_native:
             for index, (_key, artist) in enumerate(ordered):
                 if index == split:
@@ -3652,7 +3694,7 @@ class MatplotlibRenderer:
                     self._gesture_selector_ids = selector_ids
                 if artist.get_visible():
                     self._draw_dynamic_artist(artist, renderer, canvas)
-        if split is None:
+        if split is None and not color_overlay:
             self._forget_gesture_region()
         self._raster_generation += 1
         self._composed_generation = self._raster_generation
@@ -3711,6 +3753,38 @@ class MatplotlibRenderer:
         self._raster_generation += 1
         self._composed_generation = self._raster_generation
         return True
+
+    def _paint_color_limit_preview(self) -> bool:
+        """Recolour one prepared image over the captured unchanged scene."""
+
+        canvas = self._figure.canvas
+        restore = getattr(canvas, "restore_region", None)
+        get_renderer = getattr(canvas, "get_renderer", None)
+        if (
+            self._gesture_region is None
+            or self._selector_gesture_kind is not SelectorSceneKind.COLOR_LIMITS
+            or not callable(restore)
+            or not callable(get_renderer)
+            or self._gesture_selector_ids != self._selector_artist_ids()
+        ):
+            return False
+        restore(self._gesture_region)
+        native, _image_ids = self._raster_prepared_images(canvas)
+        if not native:
+            return False
+        renderer = get_renderer()
+        for _key, artist in self._gesture_overlay:
+            if artist.get_visible():
+                self._draw_dynamic_artist(artist, renderer, canvas)
+        self._raster_generation += 1
+        self._composed_generation = self._raster_generation
+        return True
+
+    def _capture_color_limit_background(self) -> bool:
+        """Do one ordinary compose, which captures its clim partition."""
+
+        self._compose_frame(chrome_stable=True)
+        return self._gesture_region is not None
 
     @staticmethod
     def _install_image_front(image: Any, front: Any) -> None:
@@ -3905,7 +3979,8 @@ class MatplotlibRenderer:
             # entering the selector-only split, which disables native image
             # drawing and changes both the image and colorbar stacking even
             # when the candidate limits are unchanged.
-            self._compose_frame(chrome_stable=True)
+            if not self._capture_color_limit_background():
+                self._compose_frame(chrome_stable=True)
         return True
 
     def preview_selector(self, state: SelectorState) -> bool:
@@ -3937,7 +4012,10 @@ class MatplotlibRenderer:
         with style_context(self.style):
             self.preview_color_limits(candidate.value.low, candidate.value.high)
             self._update_selectors(self._last_selectors)
-            self._compose_frame(chrome_stable=True)
+            if not self._paint_color_limit_preview() and not (
+                self._capture_color_limit_background()
+            ):
+                self._compose_frame(chrome_stable=True)
         return True
 
     def _update_plot(self, payload: Any, state: DisplayState) -> None:

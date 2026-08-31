@@ -35,6 +35,7 @@ from .common import (
     Pointer,
     Presented,
     ROOT,
+    axis_by_role,
     pump,
     pump_until,
     stats,
@@ -1167,16 +1168,33 @@ class ConsoleBench:
         pointer.post = True
         if motion == "auto":
             motion = "orbit" if kind == "height_bars" else "pan"
-        if motion not in {"orbit", "pan", "area"}:
-            raise ValueError("gesture motion must be orbit, pan or area")
+        if motion not in {"orbit", "pan", "area", "clim"}:
+            raise ValueError("gesture motion must be orbit, pan, area or clim")
         # The operator's gesture is the middle button: on height bars it
         # turns the camera, on everything else it pans the view.  The left
         # button draws an area, which is a different complaint.
         button = (
             QtCore.Qt.LeftButton
-            if motion == "area"
+            if motion in {"area", "clim"}
             else QtCore.Qt.MiddleButton
         )
+
+        def color_limit_front():
+            front = getattr(widget, "presented_front", None)
+            transform = None if front is None else axis_by_role(front, "distribution")
+            limits = None if front is None else front.interaction.color_limits
+            if transform is None or limits is None:
+                raise guards.HarnessError("image surface has no color-limit rail")
+            return transform, limits
+
+        def color_limit_point(transform, value: float) -> list[float]:
+            left, top, right, bottom = transform.bounds
+            low, high = transform.y_limits
+            fraction = (float(value) - high) / (low - high)
+            return [
+                left + 0.5 * (right - left),
+                top + fraction * (bottom - top),
+            ]
 
         def owned():
             if motion == "orbit":
@@ -1191,6 +1209,9 @@ class ConsoleBench:
                     float(value.x.low), float(value.x.high),
                     float(value.y.low), float(value.y.high),
                 )
+            if motion == "clim":
+                _transform, value = color_limit_front()
+                return (float(value.low), float(value.high))
             return guards.committed_region(panel)
 
         home = None
@@ -1318,7 +1339,12 @@ class ConsoleBench:
                     # NOT pumped to quiescence first.  A press that only
                     # ever arrives on an idle machine is a press that never
                     # waits for anything.
-                    at = [0.5, 0.5]
+                    if motion == "clim":
+                        color_transform, color_limits = color_limit_front()
+                        at = color_limit_point(color_transform, color_limits.high)
+                    else:
+                        color_transform = color_limits = None
+                        at = [0.5, 0.5]
                     trial_state["press_at"] = time.perf_counter()
                     pointer.press(at[0], at[1], button=button)
                     pump(
@@ -1326,9 +1352,18 @@ class ConsoleBench:
                         self._REACTION_MS[trial % len(self._REACTION_MS)] / 1e3,
                     )
                     for step in range(moves):
-                        dx, dy = self._WALK[step % len(self._WALK)]
-                        at[0] += dx
-                        at[1] += dy
+                        if motion == "clim":
+                            assert color_transform is not None
+                            assert color_limits is not None
+                            fraction = 0.01 + 0.002 * (step % 10)
+                            at = color_limit_point(
+                                color_transform,
+                                color_limits.high - color_limits.span * fraction,
+                            )
+                        else:
+                            dx, dy = self._WALK[step % len(self._WALK)]
+                            at[0] += dx
+                            at[1] += dy
                         if trial_state["first_move_at"] is None:
                             trial_state["first_move_at"] = time.perf_counter()
                         pointer.move(at[0], at[1])
@@ -1351,6 +1386,7 @@ class ConsoleBench:
                 "orbit": "the camera",
                 "pan": "the view limits",
                 "area": "the committed region",
+                "clim": "the color limits",
             }[motion],
         )
         first = stats(first_moves)
@@ -1577,10 +1613,10 @@ def main() -> None:
     parser.add_argument("--seconds", type=float, default=8.0)
     parser.add_argument("--gesture", action="store_true")
     parser.add_argument("--motion", default="auto",
-                        choices=("auto", "pan", "area", "orbit"),
+                        choices=("auto", "pan", "area", "orbit", "clim"),
                         help="which hand to drive: the middle-button view "
                              "pan (default for every 2-D kind), the orbit "
-                             "on height bars, or the left-button area")
+                             "on height bars, the left-button area, or clim")
     parser.add_argument("--edits", action="store_true",
                         help="time the small Setting-form edits (title, bins, "
                              "clim) that an operator makes mid-run")

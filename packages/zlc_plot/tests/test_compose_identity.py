@@ -153,14 +153,28 @@ def test_color_limit_preview_composes_without_touching_chrome() -> None:
                 ColorLimitCandidate(NumericRange(20.0, 150.0))
             )
         np.testing.assert_array_equal(pixels_of(colorbar_axis), colorbar_before)
+        preview_pixels = np.array(
+            renderer.figure.canvas.buffer_rgba(), copy=True
+        )
+        renderer._forget_gesture_region()
+        with style_context(renderer.style):
+            renderer._compose_frame(chrome_stable=True)
+        np.testing.assert_array_equal(
+            renderer.figure.canvas.buffer_rgba(), preview_pixels
+        )
         session.update_data(_snapshot(schema, size, 200.0, 3, seed=11))
+        np.testing.assert_array_equal(pixels_of(colorbar_axis), colorbar_before)
+        with renderer.raster_transaction():
+            renderer.preview_color_limit_candidate(
+                ColorLimitCandidate(NumericRange(20.0, 145.0))
+            )
         np.testing.assert_array_equal(pixels_of(colorbar_axis), colorbar_before)
         # The preview repainted pixels without invalidating the chrome
         # background: no colorbar label rewrite, no full recapture.
         assert not renderer._chrome_dirty_axes
         assert renderer._background_signature == before
         image = renderer._artists["image"]
-        assert tuple(map(float, image.get_clim())) == (20.0, 150.0)
+        assert tuple(map(float, image.get_clim())) == (20.0, 145.0)
         preview_front = renderer._artists["image:applied_front"]
         assert preview_front.shape == before_front.shape
         background = renderer._axes_background_rgba(image.axes)
@@ -170,8 +184,8 @@ def test_color_limit_preview_composes_without_touching_chrome() -> None:
         assert np.all(preview_front[:, :column] == background)
         assert np.all(preview_front[:, column_stop:] == background)
         renderer.end_selector_gesture()
-        session.set_color_limits(20.0, 150.0, fixed=True)
-        assert renderer._artists["image:colorbar_state"][1] == (20.0, 150.0)
+        session.set_color_limits(20.0, 145.0, fixed=True)
+        assert renderer._artists["image:colorbar_state"][1] == (20.0, 145.0)
         assert renderer._artists["image:colorbar"].outline.get_visible()
     finally:
         session.close()
