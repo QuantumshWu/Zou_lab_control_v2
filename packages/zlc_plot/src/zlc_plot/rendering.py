@@ -3478,7 +3478,11 @@ class MatplotlibRenderer:
             return
         selector_ids = self._selector_artist_ids()
         split = None
-        if self._selector_gesture_kind is not None and selector_ids:
+        if (
+            self._selector_gesture_kind is not None
+            and self._selector_gesture_kind is not SelectorSceneKind.COLOR_LIMITS
+            and selector_ids
+        ):
             split = next(
                 (
                     index
@@ -3896,17 +3900,11 @@ class MatplotlibRenderer:
         self._color_limit_candidate = candidate
         with style_context(self.style):
             self._update_selectors(self._last_selectors)
-            # The overlay fast path is not tried here: a region is captured
-            # DURING a compose that has a gesture split, and the previous
-            # gesture's compose forgot it when its split went away, so at the
-            # start of a gesture there is never one to restore.  Asking
-            # anyway read like an optimisation and hid where one would
-            # actually pay -- every move of a colour-limit drag, which
-            # composes in full.  That cannot simply be switched on:
-            # _gesture_ordering takes its owner from the first selector
-            # artist at or after the split, which on an image panel is an
-            # image-axes selector and not the rail being dragged, so the
-            # rail's guides would be baked into the capture and freeze.
+            # A colour-limit gesture changes the DATA pixels.  It therefore
+            # stays on the ordinary prepared-image compose path instead of
+            # entering the selector-only split, which disables native image
+            # drawing and changes both the image and colorbar stacking even
+            # when the candidate limits are unchanged.
             self._compose_frame(chrome_stable=True)
         return True
 
@@ -7365,6 +7363,17 @@ class MatplotlibRenderer:
             )
             state_key = f"{key}:colorbar_state"
             previous_colorbar_state = self._artists.get(state_key)
+            if (
+                self._color_limit_candidate is not None
+                and previous_colorbar_state is not None
+            ):
+                # Candidate limits recolour the image and move the selector
+                # handles immediately, but they are not committed display
+                # state.  A live frame arriving mid-drag must therefore keep
+                # the same colorbar pixels until release instead of letting a
+                # camera revision rewrite its norm/ticks/outline underneath
+                # the pointer preview.
+                colorbar_state = previous_colorbar_state
             if colorbar_state != previous_colorbar_state:
                 if mappable is not None:
                     if (
