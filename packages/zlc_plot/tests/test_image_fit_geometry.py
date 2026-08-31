@@ -104,11 +104,13 @@ def test_image_fit_ring_uses_the_occupied_point_ring_style(faceted: bool) -> Non
         glyph = accepted.overlays[0].ellipse_glyph
         assert glyph is not None
         renderer = session._renderer
-        slots = (
-            renderer._facet_fit_topologies[0][3]
-            if faceted
-            else renderer._fit_slots
-        )
+        if faceted:
+            native = renderer._artists.get("facet:fit_native")
+            assert isinstance(native, dict)
+            assert tuple(native["overlays"]) == accepted.overlays
+            assert renderer.style.artists.point_occupied.linewidth > 0.0
+            return
+        slots = renderer._fit_slots
         ring = slots["ring"]
         center = slots["center"]
         annotation = slots["annotation"]

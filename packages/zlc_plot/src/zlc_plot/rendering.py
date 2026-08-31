@@ -1992,6 +1992,7 @@ class MatplotlibRenderer:
                 self._chrome_churn = 0
                 self._compose_frame(chrome_stable=False)
                 self._chrome_dirty_axes.clear()
+                self._forget_gesture_region()
                 return
             self._native_draw(self._figure.canvas)
             self._chrome_dirty_axes.clear()
@@ -3383,19 +3384,10 @@ class MatplotlibRenderer:
         if not (callable(restore) and callable(capture) and callable(get_renderer)):
             self.draw()
             return
-        bake_facet_boundary = (
-            isinstance(self.spec, FacetGridPlot)
-            and self._facet_focus_index is None
-            and (
-                isinstance(self._artists.get("facet:curve_native"), dict)
-                or isinstance(self._artists.get("facet:image_native"), dict)
-            )
-        )
         signature = (
             id(canvas),
             int(round(float(self._figure.bbox.width))),
             int(round(float(self._figure.bbox.height))),
-            bake_facet_boundary,
         )
         # Two different questions.  "Did the chrome change?" decides whether a
         # cached background could EVER be reused; "is one in hand?" decides
@@ -3426,11 +3418,6 @@ class MatplotlibRenderer:
             self._boundary_chrome_commands.clear()
         dynamics = self._dynamic_artists()
         ordered = sorted(dynamics, key=lambda entry: entry[0])
-        facet_boundary_ids = {
-            id(artist)
-            for entries in self._boundary_chrome_cache.values()
-            for artist, _owner, _zorder in entries
-        }
         # Where the gesture's own artists begin, in the one z-order a full
         # draw uses.  The frame below that point is captured on the way past,
         # so a pointer move repaints only the tail.  Splitting the SEQUENCE
@@ -3482,11 +3469,7 @@ class MatplotlibRenderer:
             ]
             try:
                 for artist, _visible in visibility:
-                    if not (
-                        bake_facet_boundary
-                        and id(artist) in facet_boundary_ids
-                    ):
-                        artist.set_visible(False)
+                    artist.set_visible(False)
                 self._native_draw(canvas)
             finally:
                 for artist, visible in visibility:
@@ -3543,9 +3526,7 @@ class MatplotlibRenderer:
             boundary_ids = set(self._boundary_chrome_commands)
             for entries in self._boundary_chrome_cache.values():
                 boundary_ids.update(id(artist) for artist, _owner, _zorder in entries)
-            draw_boundary_ids = (
-                set() if bake_facet_boundary else boundary_ids
-            )
+            draw_boundary_ids = boundary_ids
             for _key, artist in ordered:
                 if (
                     id(artist) in draw_boundary_ids
@@ -3587,9 +3568,7 @@ class MatplotlibRenderer:
             boundary_ids = set(self._boundary_chrome_commands)
             for entries in self._boundary_chrome_cache.values():
                 boundary_ids.update(id(artist) for artist, _owner, _zorder in entries)
-            draw_boundary_ids = (
-                set() if bake_facet_boundary else boundary_ids
-            )
+            draw_boundary_ids = boundary_ids
             if (
                 self._raster_curve_bars(bar_groups, canvas)
                 and self._raster_curve_lines(data_lines, canvas)
@@ -4197,9 +4176,15 @@ class MatplotlibRenderer:
                     extremes[1],
                     float(np.max(item.x, where=item.valid, initial=-np.inf)),
                 )
-                low_values, high_values = (
-                    (item.y, item.y) if item.band is None else item.band
-                )
+                if item.band is None:
+                    low_values = high_values = item.y
+                else:
+                    low_values = np.where(
+                        np.isfinite(item.band[0]), item.band[0], item.y
+                    )
+                    high_values = np.where(
+                        np.isfinite(item.band[1]), item.band[1], item.y
+                    )
                 extremes[2] = min(
                     extremes[2],
                     float(np.min(low_values, where=item.valid, initial=np.inf)),
@@ -4803,6 +4788,7 @@ class MatplotlibRenderer:
         guard written against it would never fire.
         """
 
+        self._materialize_native_curve()
         return axes is not None and axes.get_visible() and (
             self._series_focus_allowed(id(axes))
         )
@@ -7121,39 +7107,25 @@ class MatplotlibRenderer:
             self._requested_view_limits,
             coordinate_aspect,
         )
-        image = self._artists.get(key)
-        native_ready = (
-            native_primary
-            and image is not None
-            and self._artists.get("image:native_signature") == native_signature
+        image, cmap = self._update_image_artist(
+            axes,
+            z,
+            valid,
+            extent,
+            state,
+            key,
+            (vmin, vmax),
+            square_view=coordinate_aspect is not None,
+            coordinate_aspect=coordinate_aspect,
+            valid_identity=(
+                None
+                if source_valid is None
+                else (
+                    id(source_valid),
+                    np.shape(source_valid),
+                )
+            ),
         )
-        if native_ready:
-            _cmap_name, cmap = self._resolved_image_colormap(state)
-            image.set_clim(vmin, vmax)
-            self._artists[f"{key}:mapping_state"] = (
-                str(state["colormap"]),
-                (float(vmin), float(vmax)),
-            )
-        else:
-            image, cmap = self._update_image_artist(
-                axes,
-                z,
-                valid,
-                extent,
-                state,
-                key,
-                (vmin, vmax),
-                square_view=coordinate_aspect is not None,
-                coordinate_aspect=coordinate_aspect,
-                valid_identity=(
-                    None
-                    if source_valid is None
-                    else (
-                        id(source_valid),
-                        np.shape(source_valid),
-                    )
-                ),
-            )
         if native_primary:
             cmap_name, cmap = self._resolved_image_colormap(state)
             self._artists["image:native_command"] = {

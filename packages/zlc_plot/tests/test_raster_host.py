@@ -1072,6 +1072,7 @@ def test_dense_curve_hands_display_resolution_polyline_to_the_artist() -> None:
             DatasetSnapshot(schema, values + 0.001, revision=1)
         ).result(timeout=60)
         renderer = host._session._renderer
+        renderer._materialize_native_curve()
         lines = next(
             (
                 value
@@ -1119,6 +1120,7 @@ def test_curve_series_inspector_is_stable_sticky_and_redraw_bounded(
                 button=button, key=key, axes_snapshot=transform,
             )
 
+        renderer._materialize_native_curve()
         lines = renderer._artists["curve"]
         colors = {line.get_label(): line.get_color() for line in lines}
         generation = renderer.raster_generation
@@ -1194,6 +1196,7 @@ def test_curve_series_inspector_is_stable_sticky_and_redraw_bounded(
                 validity=validity,
             )
         )
+        renderer._materialize_native_curve()
         isolated = next(line for line in lines if "site=17" in line.get_label())
         connected = next(line for line in lines if "site=23" in line.get_label())
         assert isolated.get_marker() == "_"
@@ -1225,6 +1228,7 @@ def test_curve_series_picker_never_uses_raw_dense_line_on_deep_zoom() -> None:
     try:
         renderer = session._renderer
         axes = renderer.primary_axes
+        renderer._materialize_native_curve()
         line = renderer._series_lines[id(axes)][0][0]
         renderer._set_xlim(axes, 0.5, 0.5005)
         assert np.asarray(line.get_xdata()).size == count
@@ -1641,6 +1645,7 @@ def test_one_series_is_not_a_choice() -> None:
     try:
         renderer = session._renderer
         axes = renderer.primary_axes
+        renderer._materialize_native_curve()
         assert len(renderer._series_lines[id(axes)]) == 1
         px, py = axes.transData.transform((0.5, float(np.sin(0.5))))
 
@@ -1686,21 +1691,12 @@ def test_a_grid_overview_does_not_choose_series() -> None:
     try:
         renderer = session._renderer
         assert renderer._facet_focus_index is None, "this test needs the overview"
-        painted = [
-            (axis, entries)
-            for axis, entries in (
-                (axis, renderer._series_lines.get(id(axis), ()))
-                for _key, axis, _index in renderer.painted_surfaces
-            )
-            if len(entries) > 1
-        ]
-        assert painted, "the overview must actually paint multi-series cells"
-        axes, entries = painted[0]
-        line = entries[0][0]
-        x = np.asarray(line.get_xdata(), dtype=float)
-        y = np.asarray(line.get_ydata(), dtype=float)
-        finite = np.flatnonzero(np.isfinite(x) & np.isfinite(y))
-        px, py = axes.transData.transform((x[finite[0]], y[finite[0]]))
+        command = renderer._artists.get("facet:curve_native")
+        assert isinstance(command, dict)
+        assert all(len(cell_series) > 1 for cell_series in command["series"])
+        _key, axes, _index = renderer.painted_surfaces[0]
+        px = float(axes.bbox.x0 + axes.bbox.width / 2.0)
+        py = float(axes.bbox.y0 + axes.bbox.height / 2.0)
 
         assert renderer.series_focus(
             "move", axes, px, py, hit_radius=10.0
