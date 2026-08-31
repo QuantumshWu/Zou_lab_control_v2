@@ -108,6 +108,26 @@ class RfSourceBase:
         self._power_bounds = (float(power_low_dbm), float(power_high_dbm))
         self._condition = threading.Condition()
         self._settings_epoch = 0
+        # OPENING BRINGS THE KNOBS INTO THE BENCH'S WINDOW.  The authored
+        # bounds are bench policy for what a scan may command, and
+        # TunableField refuses to describe a current value that stands
+        # outside them -- rightly, a form cannot offer a range the truth is
+        # not in.  A fresh instrument idles wherever it likes (a Lab Brick
+        # register at 0 Hz, a bench generator at its power-on default), so
+        # the open drives any out-of-window knob to the nearest bound, the
+        # same move the Rigol driver makes pinning its amplitude unit.  The
+        # OUTPUT switch is never touched: policy may move a silent knob,
+        # never un-silence one.
+        frequency = float(self._read_frequency())
+        if not (self._frequency_bounds[0] <= frequency <= self._frequency_bounds[1]):
+            self._write_frequency(
+                min(max(frequency, self._frequency_bounds[0]), self._frequency_bounds[1])
+            )
+        power = float(self._read_power())
+        if not (self._power_bounds[0] <= power <= self._power_bounds[1]):
+            self._write_power(
+                min(max(power, self._power_bounds[0]), self._power_bounds[1])
+            )
 
     # ------------------------------------------------------- transport verbs
     def _write_frequency(self, value_hz: float) -> float:

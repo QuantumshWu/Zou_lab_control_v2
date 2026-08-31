@@ -28,15 +28,17 @@ from zlc_atom.nodes._framework.descriptor import (
 from zlc_atom.nodes.scan import (
     watched_signal_source,
     SCAN_PLAN_SELECTIONS,
-    DEVICE_PARAM_FAMILY,
+    MANUAL_PARAM_FAMILY,
     SCAN_OUTPUT,
     SCAN_PULSE_CONTRACT,
     SEAMLESS_PULSE_RESOURCE,
     SeamlessScanMeasurement,
+    ScanPlan,
     bind_plan,
     hardware_scan_ports_for,
     plan_from_authored,
-    split_manual_axes,
+    scan_ports_for_devices,
+    split_outer_axes,
 )
 
 
@@ -100,6 +102,7 @@ def _build(
     source_signal: str,
     pulse_resource: ResolvedWorkspaceResource,
     plan: object,
+    tunable_devices: object = None,
     repeats: int = 1,
     shots_per_point: int = 1,
     settle_seconds: float = DEFAULT_SETTLE_SECONDS,
@@ -112,21 +115,23 @@ def _build(
         raise TypeError("pulse_resource must be a resolved scan template")
     sequence = pulse_resource.value
     parsed = plan_from_authored(plan)
-    # An operator's axis binds to no port at all: the run stops and asks for
-    # it.  What is left under it is the table the board plays, and that is
-    # what has to answer for every slot.
-    _manual, board_plan = split_manual_axes(parsed)
-    # A device knob is moved by a host call between cycles, which is exactly
-    # what a single fired table does not have.  Refused here, where the plan
-    # meets the bench, and named to the node that can run it.
-    for axis in board_plan.axes:
-        if axis.port.startswith(DEVICE_PARAM_FAMILY):
-            raise ValueError(
-                f"the board cannot advance {axis.port!r} between the cycles of "
-                "one fired scan table; a device port is moved by the host, so "
-                "this plan belongs to the stepped_scan node"
-            )
-    ports = bind_plan(board_plan, hardware_scan_ports_for(sequence))
+    # An operator's axis binds to no port at all: the run stops and asks
+    # for it.  A device axis binds to an installed knob the HOST moves
+    # between fires.  Everything left under them is the table the board
+    # plays -- split_outer_axes owns the ordering law and its refusals.
+    split_outer_axes(parsed)
+    bindable = tuple(
+        axis
+        for axis in parsed.axes
+        if not axis.port.startswith(MANUAL_PARAM_FAMILY)
+    )
+    ports = bind_plan(
+        ScanPlan(bindable),
+        (
+            *hardware_scan_ports_for(sequence),
+            *scan_ports_for_devices(tunable_devices),
+        ),
+    ) if bindable else ()
 
     return SeamlessScanMeasurement(
         sequencer=sequencer,
@@ -135,6 +140,7 @@ def _build(
         sequence=sequence,
         plan=parsed,
         ports=ports,
+        tunables=tunable_devices,
         repeats=int(repeats),
         shots_per_point=int(shots_per_point),
         settle_seconds=float(settle_seconds),
@@ -144,11 +150,12 @@ def _build(
 def _editor_factory(parent=None):
     from zlc_atom.nodes.scan.editor import scan_plan_editor_factory
 
-    # No device ports, and the axes are the template's own hardware slots:
-    # the board plays exactly what the template scans.  Manual axes are
-    # offered here because this node can stop between fires to ask for one.
+    # The board axes are the template's own hardware slots: the board plays
+    # exactly what the template scans.  Manual AND device axes are offered
+    # because this node can stop between fires -- for a hand on a
+    # thumbscrew or a tune() call on an installed device alike.
     return scan_plan_editor_factory(
-        parent, device_ports=False, hardware_slots=True, manual_axes=True
+        parent, device_ports=True, hardware_slots=True, manual_axes=True
     )
 
 

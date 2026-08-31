@@ -123,6 +123,7 @@ assert calls == [{
 def test_capability_tokens_have_machine_visible_types() -> None:
     assert set(CAPABILITY_TYPES) == {
         "camera.adapter",
+        "rf.source",
         "sequencer.streamer",
         "slm.phase",
     }

@@ -51,7 +51,7 @@ from zlc_atom.nodes.scan import (
     manual_axis,
     scan_ports_for,
     slots_from_plan,
-    split_manual_axes,
+    split_outer_axes,
 )
 from zlc_atom.nodes.seamless_scan import SEAMLESS_SCAN_SCHEMA
 
@@ -183,32 +183,36 @@ def _scripted_run(
         installation.close()
 
 
-def test_a_device_axis_is_refused_and_the_refusal_names_the_stepped_node() -> None:
-    """The board cannot make a host call between two cycles of one table."""
+def test_a_device_axis_below_a_board_axis_is_refused_by_name() -> None:
+    """The host moves a device knob BETWEEN fires, never inside one.
 
-    descriptors = {value.api_name: value for value in discover_logic_nodes()}
+    The seamless node used to refuse every device axis outright, pointing
+    at the stepped executor; a device axis is now an outer loop of this
+    node -- the run pauses, the knob is tuned and read back, the next
+    segment fires.  What stays refused is the impossible nesting: a device
+    axis underneath the board's own table.
+    """
+
     plan = ScanPlan(
         (
+            ScanAxis(BIAS_X_PORT, (-256.0, 256.0)),
             ScanAxis(
-                DEVICE_PARAM_FAMILY + "mot_camera:exposure_seconds", (0.02, 0.08)
+                DEVICE_PARAM_FAMILY + "rf:frequency_hz", (1e9, 2e9)
             ),
         )
     )
-    plane = SignalDataPlane()
-    try:
-        with pytest.raises(ValueError, match="stepped_scan") as refusal:
-            descriptors["seamless_scan"].instantiate(
-                sequencer=None,
-                signal_plane=plane,
-                source_signal="@logic/monitor/frames",
-                pulse_resource=_pulse_resource(
-                    TEMPLATE_NAME, _template_sequence()
-                ),
-                plan=plan.to_tree(),
-            )
-        assert "mot_camera:exposure_seconds" in str(refusal.value)
-    finally:
-        plane.close()
+    with pytest.raises(ValueError) as refusal:
+        split_outer_axes(plan)
+    assert "rf.frequency_hz" in str(refusal.value)
+    assert "above the board axes" in str(refusal.value)
+
+
+def test_a_plan_of_device_axes_alone_has_no_table_to_play() -> None:
+    plan = ScanPlan(
+        (ScanAxis(DEVICE_PARAM_FAMILY + "rf:frequency_hz", (1e9, 2e9)),)
+    )
+    with pytest.raises(ValueError, match="no table to play"):
+        split_outer_axes(plan)
 
 
 def test_the_seamless_node_asks_nothing_about_gating_or_advance() -> None:
@@ -929,14 +933,201 @@ def test_a_manual_axis_nested_inside_the_table_is_refused_by_name() -> None:
         (ScanAxis(BIAS_X_PORT, (-256.0, 256.0)), manual_axis("power", (1.0, 2.0)))
     )
     with pytest.raises(ValueError) as refusal:
-        split_manual_axes(plan)
+        split_outer_axes(plan)
     assert "'power'" in str(refusal.value)
-    assert "outside every axis a machine advances" in str(refusal.value)
+    assert "above the board axes" in str(refusal.value)
 
 
 def test_a_plan_of_manual_axes_alone_has_no_table_to_play() -> None:
     """The seamless node exists to play a board table; a hand is not one."""
 
     with pytest.raises(ValueError) as refusal:
-        split_manual_axes(ScanPlan((manual_axis("power", (1.0, 2.0)),)))
+        split_outer_axes(ScanPlan((manual_axis("power", (1.0, 2.0)),)))
     assert "no table to play" in str(refusal.value)
+
+
+def _device_run(
+    *,
+    frequencies: tuple[float, ...],
+    values: tuple[float, ...],
+    repeats: int = 1,
+    tunables=None,
+):
+    """Walk a plan whose outer axis is an installed device knob.
+
+    The device is the REAL Vaunix driver over its in-memory library --
+    the same code path the hardware brick runs -- unless a test hands in
+    its own tunables to stage a refusal.
+    """
+
+    from zlc_atom.devices.rf.vaunix_lms import VaunixLmsConfig
+    from zlc_atom.devices.simulation.rf import virtual_rf_source
+
+    installation = create_installation("virtual")
+    plane = SignalDataPlane()
+    descriptors = {value.api_name: value for value in discover_logic_nodes()}
+    bench = None
+    host = None
+    if tunables is None:
+        tunables = {"rf": virtual_rf_source(VaunixLmsConfig(serial=1001))}
+    try:
+        bench = ScriptedScanBench(
+            installation.device("sequencer"),
+            plane,
+            publications_per_fire=len(values),
+        )
+        bench.publish(SCRIPTED_SEED_VALUE)
+        plan = ScanPlan(
+            (
+                ScanAxis(
+                    DEVICE_PARAM_FAMILY + "rf:frequency_hz", frequencies
+                ),
+                ScanAxis(BIAS_X_PORT, values),
+            )
+        )
+        node = descriptors["seamless_scan"].instantiate(
+            sequencer=bench,
+            signal_plane=plane,
+            source_signal=bench.signal_name,
+            pulse_resource=_pulse_resource(TEMPLATE_NAME, _template_sequence()),
+            plan=plan.to_tree(),
+            tunable_devices=tunables,
+            repeats=repeats,
+            shots_per_point=1,
+            settle_seconds=0.0,
+        )
+        host = _scan_host(node, plane)
+        host.start()
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline and not host.observation.terminal:
+            host.poll()
+            assert host.operator_request is None, (
+                "a device axis is moved by a call, never by a question"
+            )
+            time.sleep(0.002)
+        observation = host.poll()
+        assert observation.terminal, observation
+        if observation.phase != "done":
+            raise RuntimeError(str(observation.error))
+        value = plane.current_dataset(host.signal_key(SCAN_OUTPUT.name))
+        record = dict(node.last_run_record or {})
+        claims = node.resolved_device_claims()
+        return value, record, bench, tunables["rf"], claims
+    finally:
+        if host is not None:
+            host.shutdown()
+        if bench is not None:
+            bench.close()
+        plane.close()
+        installation.close()
+
+
+def test_a_device_axis_is_the_outer_loop_and_the_device_is_verified() -> None:
+    """Three frequencies over two bias points: three fires, no questions.
+
+    The dataset's frequency coordinate is the axis the plan authored --
+    outermost, advancing slowest, in HERTZ -- and the run record carries
+    the device's identity and its final settings, because a coordinate
+    without provenance is a number nobody can trust next month.
+    """
+
+    frequencies = (1_000_000_000.0, 1_500_000_000.0, 2_000_000_000.0)
+    value, record, bench, source, claims = _device_run(
+        frequencies=frequencies,
+        values=(-256.0, 256.0),
+    )
+
+    assert bench.fired_cycles == [2, 2, 2], (
+        "one fire per device point, each playing the whole inner table"
+    )
+
+    schema = value.block.schema
+    frequency = next(
+        column
+        for column in schema.point_table.columns
+        if column.name == "rf.frequency_hz"
+    )
+    assert frequency.values == pytest.approx(
+        (1e9, 1e9, 1.5e9, 1.5e9, 2e9, 2e9)
+    )
+    assert frequency.unit == "Hz", "a device axis publishes its knob's unit"
+
+    # The instrument itself ends on the last coordinate -- tune() really ran.
+    assert source.tunable_values()["frequency_hz"] == pytest.approx(2e9)
+
+    assert record["named_devices"]["tunable:rf"] == "rf"
+    # The snapshot is the device's state at run START: the swept field's
+    # truth lives in the axis values above, and what provenance needs
+    # beyond it is the UNSWEPT context -- the power and output the whole
+    # scan ran at -- plus the identity and epoch to match it to a session.
+    snapshot = record["device_snapshots"]["tunable:rf"]
+    assert set(snapshot["settings"]) == {
+        "frequency_hz",
+        "power_dbm",
+        "output_enabled",
+    }
+    assert snapshot["device_session_id"] == "vaunix-lms:1001"
+    assert "settings_epoch" in snapshot
+
+    # The console converts these into runtime claims, so a control-panel
+    # tune of the swept field is blocked while the scan owns it.
+    (claim,) = claims
+    assert claim.device_key == "rf"
+    assert claim.device is source
+    assert claim.protected_fields == ("frequency_hz",)
+
+
+def test_an_off_grid_device_value_fails_the_run_with_the_grid_named() -> None:
+    """The brick holds 10 Hz units; a coordinate between them is refused.
+
+    Refused at APPLY, before the segment fires -- the dataset must never
+    contain a frequency the hardware did not actually stand at.
+    """
+
+    with pytest.raises(RuntimeError, match="10.*Hz grid"):
+        _device_run(
+            frequencies=(1_000_000_005.0,),
+            values=(-256.0,),
+        )
+
+
+def test_a_device_that_answers_differently_fails_the_run() -> None:
+    """tune() returns the read-back, and any difference is a refusal."""
+
+    class _DriftingKnob:
+        def tunable_fields(self):
+            from zlc_atom.authoring import AuthoringField, TunableField
+
+            return (
+                TunableField(
+                    metadata=AuthoringField(
+                        "frequency_hz",
+                        "float",
+                        "Frequency (Hz)",
+                        0.0,
+                        minimum=0.0,
+                        maximum=1e10,
+                        unit="Hz",
+                    ),
+                    current=0.0,
+                    live_write=True,
+                    dependency_group=("frequency_hz",),
+                ),
+            )
+
+        def tune(self, name, value):
+            del name
+            return float(value) + 7.0
+
+        def tunable_values(self):
+            return {"frequency_hz": 0.0}
+
+        def settings_provenance(self):
+            return {"device_session_id": "drift", "settings_epoch": 0}
+
+    with pytest.raises(RuntimeError, match="applied"):
+        _device_run(
+            frequencies=(1e9,),
+            values=(-256.0,),
+            tunables={"rf": _DriftingKnob()},
+        )

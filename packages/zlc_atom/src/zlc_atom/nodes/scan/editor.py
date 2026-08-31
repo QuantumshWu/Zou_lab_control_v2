@@ -48,6 +48,7 @@ from .plan import (
     manual_axis,
     manual_axis_name,
     scan_ports_for,
+    DEVICE_PARAM_FAMILY,
     scan_ports_for_devices,
 )
 
@@ -451,9 +452,23 @@ class ScanPlanEditor(QtWidgets.QWidget):
             )
             return
         shape = " × ".join(str(n) for n in plan.shape)
+        # The ordering law lives in split_outer_axes; saying its refusal HERE
+        # is what lets the operator fix the order while the rows are still in
+        # front of them, instead of at Start.  Nothing is silently reordered.
+        try:
+            from .plan import split_outer_axes
+
+            split_outer_axes(plan)
+        except ValueError as refusal:
+            self.summary.setText(str(refusal))
+            return
         manual = tuple(
             axis for axis in plan.axes
             if axis.port.startswith(MANUAL_PARAM_FAMILY)
+        )
+        device = tuple(
+            axis for axis in plan.axes
+            if axis.port.startswith(DEVICE_PARAM_FAMILY)
         )
         stops = 1
         for axis in manual:
@@ -466,10 +481,21 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 "stops at each one and waits for you to set it."
             )
         )
+        by_call = 1
+        for axis in device:
+            by_call *= len(axis.values)
+        by_device = (
+            ""
+            if not device
+            else (
+                f"  {by_call} device settings are applied and read back "
+                "between fires."
+            )
+        )
         self.summary.setText(
             f"{len(plan.axes)} axis(es), {shape} = {plan.point_count} points, "
             "outermost first; each point resolves the template, plays it, and "
-            f"captures one measurement.{by_hand}"
+            f"captures one measurement.{by_hand}{by_device}"
         )
 
 

@@ -51,6 +51,7 @@ other about what a played point means.
 from __future__ import annotations
 
 import itertools
+import math
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
@@ -67,11 +68,13 @@ from zlc_pulse import (
 from zlc_atom.devices.sequencer import sequencer_archive_snapshot
 from .dataset import SCAN_OUTPUT, ScanDatasetWriter
 from .plan import (
+    DEVICE_PARAM_FAMILY,
+    MANUAL_PARAM_FAMILY,
     PULSE_PARAM_FAMILY,
     ScanPlan,
     ScanPort,
-    manual_axis_name,
-    split_manual_axes,
+    port_label,
+    split_outer_axes,
 )
 from .source import check_cancelled, wait_for_board
 
@@ -92,6 +95,7 @@ class SeamlessScanMeasurement:
         sequence: PulseSequence,
         plan: ScanPlan,
         ports: tuple[ScanPort, ...],
+        tunables: Mapping[str, object] | None = None,
         repeats: int,
         shots_per_point: int,
         settle_seconds: float,
@@ -104,15 +108,48 @@ class SeamlessScanMeasurement:
         self.source = source
         self.sequence = sequence
         self.plan = plan
-        #: The operator's axes and the board's, split once: who moves an
-        #: axis decides where its loop lives, and that never changes for
-        #: the life of one measurement.
-        self.manual_axes, self.board_plan = split_manual_axes(plan)
-        self.ports = ports
-        if len(ports) != len(self.board_plan.axes):
+        #: The host's axes and the board's, split once: who moves an axis
+        #: decides where its loop lives, and that never changes for the
+        #: life of one measurement.  Manual and device axes are both
+        #: host-advanced -- the run pauses between fires either way; what
+        #: differs is only whether a hand or a ``tune()`` call moves the
+        #: knob.
+        self.outer_axes, self.board_plan = split_outer_axes(plan)
+        self.tunables = dict(tunables or {})
+        bound = tuple(ports)
+        self.ports = bound
+        if len(bound) != sum(
+            1
+            for axis in plan.axes
+            if not axis.port.startswith(MANUAL_PARAM_FAMILY)
+        ):
             raise ValueError(
-                "one bound port per board axis; manual axes bind to nobody"
+                "one bound port per device and board axis; manual axes bind "
+                "to nobody"
             )
+        by_port = {port.port: port for port in bound}
+        self.outer_ports = tuple(
+            None
+            if axis.port.startswith(MANUAL_PARAM_FAMILY)
+            else by_port[axis.port]
+            for axis in self.outer_axes
+        )
+        self.board_ports = tuple(
+            by_port[axis.port] for axis in self.board_plan.axes
+        )
+        for axis in self.outer_axes:
+            if not axis.port.startswith(DEVICE_PARAM_FAMILY):
+                continue
+            key, separator, field = axis.port[
+                len(DEVICE_PARAM_FAMILY):
+            ].partition(":")
+            if not separator or not field:
+                raise ValueError(f"{axis.port!r} names no device field")
+            if key not in self.tunables:
+                raise ValueError(
+                    f"device axis {axis.port!r} has no installed device "
+                    f"{key!r} behind it"
+                )
         self.repeats = int(repeats)
         if self.repeats < 1:
             raise ValueError("repeats must be at least 1")
@@ -140,7 +177,7 @@ class SeamlessScanMeasurement:
 
         slot_ids = tuple(slot.slot_id for slot in self.sequence.slots)
         planned = tuple(
-            port.port[len(PULSE_PARAM_FAMILY):] for port in self.ports
+            port.port[len(PULSE_PARAM_FAMILY):] for port in self.board_ports
         )
         missing = tuple(
             slot_id for slot_id in slot_ids if slot_id not in set(planned)
@@ -213,7 +250,7 @@ class SeamlessScanMeasurement:
         """Board rows re-ordered from axis order into the table's slot order."""
 
         planned = tuple(
-            port.port[len(PULSE_PARAM_FAMILY):] for port in self.ports
+            port.port[len(PULSE_PARAM_FAMILY):] for port in self.board_ports
         )
         order = tuple(planned.index(column.name) for column in columns)
         return tuple(
@@ -228,13 +265,81 @@ class SeamlessScanMeasurement:
         """Return quantized slot rows to the plan's authored axis order."""
 
         planned = tuple(
-            port.port[len(PULSE_PARAM_FAMILY):] for port in self.ports
+            port.port[len(PULSE_PARAM_FAMILY):] for port in self.board_ports
         )
         slot_names = tuple(column.name for column in columns)
         order = tuple(slot_names.index(name) for name in planned)
         return tuple(
             tuple(float(row[index]) for index in order) for row in rows
         )
+
+    def resolved_device_claims(self):
+        """Fields this plan will tune, resolved before its host can start.
+
+        The console converts these into runtime device claims, so a
+        control-panel tune of the same field is blocked while the scan
+        owns it -- the same protection the stepped executor carried.
+        """
+
+        from zlc_atom.nodes._framework.descriptor import ResolvedDeviceClaim
+
+        selected: dict[str, list[str]] = {}
+        for axis in self.outer_axes:
+            if not axis.port.startswith(DEVICE_PARAM_FAMILY):
+                continue
+            key, _separator, field = axis.port[
+                len(DEVICE_PARAM_FAMILY):
+            ].partition(":")
+            selected.setdefault(key, []).append(field)
+        return tuple(
+            ResolvedDeviceClaim(key, self.tunables[key], tuple(fields))
+            for key, fields in selected.items()
+        )
+
+    def _apply_device_setting(
+        self,
+        context: object,
+        *,
+        changed: Sequence[tuple[str, float, int, int]],
+    ) -> None:
+        """Move the installed knobs this row names, and verify each one.
+
+        The stepped executor's law, verbatim: ``tune`` returns the
+        instrument's own read-back, and anything other than exactly the
+        scan coordinate is a refusal -- a dataset column may only say what
+        the hardware actually did.  The board is already SAFE here (the
+        segment loop runs between fires), and the per-fire settle that
+        follows covers the device's own settling too.
+        """
+
+        for port, value, index, points in changed:
+            key, _separator, field = port[
+                len(DEVICE_PARAM_FAMILY):
+            ].partition(":")
+            device = self.tunables[key]
+            context.report_progress(
+                f"Setting {port_label(port)} ({index + 1}/{points})"
+            )
+            effective = device.tune(field, value)
+            if isinstance(effective, bool):
+                raise TypeError(
+                    "device tune must return its effective numeric value"
+                )
+            try:
+                actual = float(effective)
+            except (TypeError, ValueError) as error:
+                raise TypeError(
+                    "device tune must return its effective numeric value"
+                ) from error
+            if not math.isfinite(actual):
+                raise ValueError(
+                    "device tune returned a non-finite effective value"
+                )
+            if actual != value:
+                raise RuntimeError(
+                    f"device field {field!r} applied {actual!r}, not the "
+                    f"scan coordinate {value!r}"
+                )
 
     def _ask_for_setting(
         self,
@@ -244,13 +349,16 @@ class SeamlessScanMeasurement:
     ) -> None:
         """Stop for the hand, and only for what the hand has to move."""
 
+        if not changed:
+            return
         ask = getattr(context, "request_operator_input", None)
         if not callable(ask):
             raise RuntimeError(
                 "a manual axis stops the run to ask the operator to move a "
                 "knob, and this host offers no way to ask"
             )
-        for name, value, index, points in changed:
+        for port, value, index, points in changed:
+            name = port_label(port)
             context.report_progress(f"Waiting for {name}")
             ask(
                 MANUAL_AXIS_REQUEST,
@@ -397,17 +505,20 @@ class SeamlessScanMeasurement:
             effective_slot_rows,
             columns,
         )
-        manual_rows = tuple(
-            itertools.product(*(axis.values for axis in self.manual_axes))
+        outer_rows = tuple(
+            itertools.product(*(axis.values for axis in self.outer_axes))
         )
         effective_rows = tuple(
-            tuple(manual_row) + tuple(inner_row)
-            for manual_row in manual_rows
+            tuple(outer_row) + tuple(inner_row)
+            for outer_row in outer_rows
             for inner_row in effective_inner
         )
         axes = tuple(
-            [(manual_axis_name(axis.port), "") for axis in self.manual_axes]
-            + [(port.label, port.unit) for port in self.ports]
+            [
+                (port_label(axis.port), "" if port is None else port.unit)
+                for axis, port in zip(self.outer_axes, self.outer_ports)
+            ]
+            + [(port.label, port.unit) for port in self.board_ports]
         )
         run_record = self.run_record(
             effective_rows=effective_rows,
@@ -435,7 +546,7 @@ class SeamlessScanMeasurement:
             on_point=on_point,
             progress_total=self.repeats * len(effective_rows),
         )
-        if not self.manual_axes:
+        if not self.outer_axes:
             self._play_table(
                 context,
                 sweeps=self.repeats,
@@ -448,22 +559,38 @@ class SeamlessScanMeasurement:
             standing: tuple[float, ...] | None = None
             done = 0
             for sweep in range(self.repeats):
-                for index, manual_row in enumerate(manual_rows):
+                for index, outer_row in enumerate(outer_rows):
+                    changed = tuple(
+                        (
+                            axis.port,
+                            outer_row[position],
+                            index,
+                            len(outer_rows),
+                        )
+                        for position, axis in enumerate(self.outer_axes)
+                        if standing is None
+                        or standing[position] != outer_row[position]
+                    )
+                    # The hand first, then the machine: an operator asked
+                    # to turn a thumbscrew should not find the bench half
+                    # reconfigured under them while the dialog is open.
                     self._ask_for_setting(
                         context,
                         changed=tuple(
-                            (
-                                manual_axis_name(axis.port),
-                                manual_row[position],
-                                index,
-                                len(manual_rows),
-                            )
-                            for position, axis in enumerate(self.manual_axes)
-                            if standing is None
-                            or standing[position] != manual_row[position]
+                            entry
+                            for entry in changed
+                            if entry[0].startswith(MANUAL_PARAM_FAMILY)
                         ),
                     )
-                    standing = manual_row
+                    self._apply_device_setting(
+                        context,
+                        changed=tuple(
+                            entry
+                            for entry in changed
+                            if entry[0].startswith(DEVICE_PARAM_FAMILY)
+                        ),
+                    )
+                    standing = outer_row
                     self._play_table(
                         context,
                         sweeps=1,
@@ -508,6 +635,10 @@ class SeamlessScanMeasurement:
         if not isinstance(raw_named, Mapping):
             raise TypeError("scan source named_devices must be a mapping")
         named_devices = {"sequencer": self.sequencer_key}
+        for axis in self.outer_axes:
+            if axis.port.startswith(DEVICE_PARAM_FAMILY):
+                key = axis.port[len(DEVICE_PARAM_FAMILY):].partition(":")[0]
+                named_devices[f"tunable:{key}"] = key
         for role, device_key in raw_named.items():
             if not isinstance(role, str) or not isinstance(device_key, str):
                 raise TypeError("scan source device roles and keys must be text")
@@ -519,7 +650,20 @@ class SeamlessScanMeasurement:
             **source_record,
             "named_devices": named_devices,
             "device_snapshots": {
-                "sequencer": sequencer_archive_snapshot(description=board)
+                "sequencer": sequencer_archive_snapshot(description=board),
+                **{
+                    f"tunable:{key}": {
+                        "settings": dict(device.tunable_values()),
+                        **dict(device.settings_provenance()),
+                    }
+                    for key, device in sorted(self.tunables.items())
+                    if any(
+                        axis.port.startswith(
+                            f"{DEVICE_PARAM_FAMILY}{key}:"
+                        )
+                        for axis in self.outer_axes
+                    )
+                },
             },
             "pulse": self.sequence.name,
             "plan": {"axes": axes},

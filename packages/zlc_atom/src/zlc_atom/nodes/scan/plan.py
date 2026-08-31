@@ -108,7 +108,29 @@ def port_label(port: str) -> str:
         return text[len(PULSE_PARAM_FAMILY):]
     if text.startswith(DEVICE_PARAM_FAMILY):
         return text[len(DEVICE_PARAM_FAMILY):].replace(":", ".")
+    if text.startswith(MANUAL_PARAM_FAMILY):
+        # The one definition, here with the others: labels for manual axes
+        # used to be produced at a call site instead, so axis naming had two
+        # owners that could drift.
+        return manual_axis_name(text)
     raise ValueError(f"{port!r} belongs to no known port family")
+
+
+def host_advanced_port(port: str) -> bool:
+    """Whether the HOST advances this port between fires of the board.
+
+    Two families qualify, for one structural reason: the board plays its
+    whole table from a single load, and neither a hand on a thumbscrew nor
+    a ``tune()`` call on an installed device can reach inside that.  Both
+    therefore stand outside every board-advanced axis, walked between
+    segments -- the run pauses, the knob moves (by hand or by call), the
+    next segment fires.
+    """
+
+    text = str(port)
+    return text.startswith(MANUAL_PARAM_FAMILY) or text.startswith(
+        DEVICE_PARAM_FAMILY
+    )
 
 
 def scan_axis_id(label: str) -> str:
@@ -312,42 +334,40 @@ def manual_axis(name: str, values: Sequence[float]) -> ScanAxis:
     return ScanAxis(MANUAL_PARAM_FAMILY + label, tuple(values))
 
 
-def split_manual_axes(plan: ScanPlan) -> tuple[tuple[ScanAxis, ...], ScanPlan]:
-    """The operator's axes, and the plan a machine can play underneath.
+def split_outer_axes(plan: ScanPlan) -> tuple[tuple[ScanAxis, ...], ScanPlan]:
+    """The host-advanced axes, and the plan the board plays underneath.
 
-    A manual axis is walked by hand BETWEEN runs of the inner plan, so it
-    is outside everything a machine advances -- not a preference, a fact
-    about who moves what: the inner plan plays from one load, and a hand
-    cannot reach into it.  A plan that nests one the other way round is
-    refused here, by name, rather than silently reordered into something
-    the operator did not author.
+    A manual axis is walked by hand and a device axis by a ``tune()`` call,
+    both BETWEEN plays of the inner plan -- not a preference, a fact about
+    who moves what: the inner plan plays from one load, and neither a hand
+    nor a host call can reach inside it.  A plan that nests one the other
+    way round is refused here, by name, rather than silently reordered into
+    something the operator did not author.
     """
 
     axes = plan.axes
-    manual = tuple(
-        axis for axis in axes if axis.port.startswith(MANUAL_PARAM_FAMILY)
-    )
-    if not manual:
+    outer = tuple(axis for axis in axes if host_advanced_port(axis.port))
+    if not outer:
         return (), plan
-    if axes[: len(manual)] != manual:
+    if axes[: len(outer)] != outer:
         inside = tuple(
-            manual_axis_name(axis.port)
-            for axis in axes[len(manual):]
-            if axis.port.startswith(MANUAL_PARAM_FAMILY)
+            port_label(axis.port)
+            for axis in axes[len(outer):]
+            if host_advanced_port(axis.port)
         )
         raise ValueError(
-            "an operator walks a manual axis between plays of the inner "
-            "plan, so it stands outside every axis a machine advances; "
-            f"move {', '.join(repr(name) for name in inside)} above the "
-            "machine axes"
+            "the host walks a manual or device axis between plays of the "
+            "inner plan, so it stands outside every axis the board "
+            f"advances; move {', '.join(repr(name) for name in inside)} "
+            "above the board axes"
         )
-    board = axes[len(manual):]
+    board = axes[len(outer):]
     if not board:
         raise ValueError(
             "a seamless scan plays a table the board advances; a plan of "
-            "manual axes alone has no table to play"
+            "manual and device axes alone has no table to play"
         )
-    return manual, ScanPlan(board)
+    return outer, ScanPlan(board)
 
 
 def bind_plan(
