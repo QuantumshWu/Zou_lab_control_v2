@@ -1179,7 +1179,7 @@ def test_a_blank_panel_can_be_wired_after_a_signal_publishes(
     presenter._panel_presented(binding, surface)
     assert binding.frozen_data is not None
     assert binding.frozen_data.target is surface.target
-    assert binding.frozen_stale
+    assert binding.frozen_configuration_incompatible
 
 
 def test_arming_a_fit_from_setting_reaches_the_panels_pixels(
@@ -1298,7 +1298,7 @@ def test_a_saved_figure_contains_the_fit_it_was_saved_with(
         presenter,
         lambda: bool(binding.parameter_surface.get("fit"))
         and binding.editor_host is not None
-        and not binding.frozen_stale,
+        and not binding.frozen_configuration_incompatible,
     )
     fit_model = next(
         value for _label, value in binding.parameter_surface["fit"][0]["choices"]
@@ -1316,7 +1316,7 @@ def test_a_saved_figure_contains_the_fit_it_was_saved_with(
         presenter,
         lambda: binding.configuration is None
         and binding.editor_configuration is None
-        and not binding.frozen_stale,
+        and not binding.frozen_configuration_incompatible,
     )
     fitted = tmp_path / "fitted.png"
     assert presenter.save_panel_figure(binding.panel_id, str(fitted)) is True
@@ -1767,6 +1767,9 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
     accepted = main.host._session._accepted_fit
     assert accepted is not None and accepted.selection is not None
     assert accepted.selection.selector_kind is SelectorKind.AREA
+    # The Image display frame and its cells are square.  A centred 20% x 20%
+    # selector therefore covers the same whole-cell span on both axes even
+    # though the 96x128 source footprint is letterboxed in that frame.
     assert accepted.selection.sample_count == 26 * 26
     rolling = presenter.add_panel(
         fit_signal,
@@ -1907,8 +1910,9 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
     )
     assert _accepted(rolling.port, "publication") is shown_before_edit
     assert rolling.frozen_data is frozen_before_edit
-    assert rolling.port.presentation_current, (
-        "the old accepted surface remains current until configure accepts"
+    assert not rolling.port.presentation_current, (
+        "the old complete surface stays visible, but a changed representation "
+        "is display debt until its replacement is accepted"
     )
     _settle_panel_hosts(
         presenter,
@@ -1932,7 +1936,6 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
             and rolling_offsets() == retained_offsets
         ),
     )
-    from zlc_data import LATEST_COORDINATE
     from zlc_plot import AxisRef
     from zlc_plot.semantics import fate_field_name, scope_fate
 
@@ -1941,7 +1944,9 @@ def test_camera_area_fit_owner_wake_and_failed_revision_reach_rolling_gap(
     )
     assert presenter.update_panel_state(
         rolling.panel_id,
-        {"semantic": {primary_fate: scope_fate(LATEST_COORDINATE)}},
+        # History exposes ordinary relative coordinates.  Zero is the latest
+        # retained event; Plot no longer needs a history-only Latest sentinel.
+        {"semantic": {primary_fate: scope_fate(0)}},
     )
     _settle_panel_hosts(
         presenter,
@@ -2825,7 +2830,10 @@ def test_panel_editor_selection_uses_only_its_current_frozen_publication(
     assert presenter.update_panel_state(
         panel.panel_id, {"signal": second_node.signal_key("frames")}
     )
-    assert panel.frozen_stale and panel.editor_host is first_editor_host
+    assert (
+        panel.frozen_configuration_incompatible
+        and panel.editor_host is first_editor_host
+    )
     _commit_area(first_editor_host)
     presenter.beat()
     assert presenter.logic[first_id].draft.values == first_current
@@ -3446,6 +3454,7 @@ def test_panel_edit_projects_the_direct_producer_link_and_ages(
     assert presenter.view.panel_editor_update_count.get(panel.panel_id, 0) == 0
     assert projection["producer_node_id"] == node_id
     assert projection["stale"] is False
+    assert projection["data_advanced"] is False
 
     previous = panel.frozen_data
     assert previous is not None
@@ -3469,9 +3478,11 @@ def test_panel_edit_projects_the_direct_producer_link_and_ages(
     _settle_panel_hosts(
         presenter,
         lambda: panel.frozen_data is not previous
-        and presenter.view.panel_editors[panel.panel_id]["stale"] is False,
+        and presenter.view.panel_editors[panel.panel_id]["stale"] is False
+        and presenter.view.panel_editors[panel.panel_id]["data_advanced"] is False,
     )
     assert presenter.view.panel_editors[panel.panel_id]["stale"] is False
+    assert presenter.view.panel_editors[panel.panel_id]["data_advanced"] is False
 
     presenter.view.logic_edit_requested.emit(node_id)
     assert presenter.view.focused_logic_editor == node_id
@@ -4545,7 +4556,10 @@ def test_a_panel_that_crossed_vocabularies_still_configures_and_saves(
         lambda: binding.configuration is None and binding.host is not None,
     )
     assert presenter.refresh_panel_snapshot(binding.panel_id)
-    _settle_panel_hosts(presenter, lambda: not binding.frozen_stale)
+    _settle_panel_hosts(
+        presenter,
+        lambda: not binding.frozen_configuration_incompatible,
+    )
     assert presenter.save_panel_figure(
         binding.panel_id, str(tmp_path / "crossed")
     ) is True, presenter.view.status
@@ -5413,7 +5427,7 @@ def test_display_state_synchronizes_both_panel_surfaces(
         {"color_min": 10.0, "color_max": 200.0}
     ).result(timeout=10)
     assert beat(lambda: live_display().get("color_max") == 200.0)
-    assert panel.frozen_stale is False
+    assert panel.frozen_configuration_incompatible is False
 
     panel.editor_host.set_parameters({"camera_azimuth": 200.0}).result(
         timeout=10

@@ -134,9 +134,10 @@ def test_shot_index_presents_as_shots_not_as_a_point_geometry() -> None:
     assert labels[row.value] == "(shot axis)"
 
 
-def test_frozen_stale_sees_same_run_coverage_growth(monkeypatch) -> None:
-    """A seamless scan grows inside ONE run; a picture frozen at partial
-    coverage is stale the moment the live card has written more cells."""
+def test_frozen_data_advanced_is_not_configuration_incompatibility(
+    monkeypatch,
+) -> None:
+    """A growing live scan does not invalidate an exact frozen Edit target."""
 
     from types import SimpleNamespace
 
@@ -165,12 +166,15 @@ def test_frozen_stale_sees_same_run_coverage_growth(monkeypatch) -> None:
         "accepted_surface",
         property(lambda self: SimpleNamespace(publication=shown["value"])),
     )
-    assert binding.frozen_stale is False
+    assert binding.frozen_configuration_incompatible is False
+    assert binding.frozen_data_advanced is False
     shown["value"] = publication(16)
-    assert binding.frozen_stale is True
-    # a later RUN stays stale regardless of coverage
+    assert binding.frozen_configuration_incompatible is False
+    assert binding.frozen_data_advanced is True
+    # A later RUN is also data advancement, not configuration corruption.
     shown["value"] = SimpleNamespace(
         event_ref=SimpleNamespace(generation="run-2"),
         coverage=DatasetCoverage(1, 16),
     )
-    assert binding.frozen_stale is True
+    assert binding.frozen_configuration_incompatible is False
+    assert binding.frozen_data_advanced is True

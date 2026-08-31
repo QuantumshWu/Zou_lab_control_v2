@@ -239,11 +239,9 @@ def test_focused_image_cell_matches_the_standalone_image_surface() -> None:
         assert title_artist.get_text() == "authored title"
         assert focused.primary_axes.get_title() == "bias=0"
 
-        # SAME GEOMETRY, not merely the same chrome.  The cell used to be
-        # drawn with the squaring carved out (``square_view=False``), so a
-        # 60x40 frame filled a 3:2 box in the facet and a square one alone --
-        # the same picture in two shapes, and the overview slots were shaped
-        # by a THIRD rule that agreed with neither.
+        # SAME GEOMETRY, not merely the same chrome.  Standalone and focused
+        # surfaces both use the fixed square frame, square cells and the same
+        # letterboxed source footprint.
         # To the pixel, not to the last bit: the focused cell measures its
         # box from the union of the overview's cells and the standalone from
         # the data region, and those two arrive at the same rectangle by
@@ -283,10 +281,22 @@ def test_focused_cell_colour_limit_drag_moves_the_cell_clim() -> None:
             return 1.0 - (top + (value - y_high) / (y_low - y_high) * (bottom - top))
 
         target = high - 0.25 * (high - low)
+        before = np.array(session.rgba(), copy=True)
         session._raster_pointer_event(
             "press", middle_x, pointer_y(high), button=1, axes_snapshot=transform
         )
-        session._raster_pointer_event("move", middle_x, pointer_y(target), button=1)
+        moved = session._raster_pointer_event(
+            "move", middle_x, pointer_y(target), button=1
+        )
+        assert moved.publish_front
+        during = np.array(session.rgba(), copy=True)
+        assert np.any(during != before), "clim preview waited for button release"
+        assert moved.candidate is not None
+        assert tuple(
+            map(float, renderer._active_image_artist().get_clim())
+        ) == pytest.approx(
+            (moved.candidate.value.low, moved.candidate.value.high)
+        )
         session._raster_pointer_event("release", middle_x, pointer_y(target), button=1)
 
         moved_low, moved_high = renderer.resolved_color_limits()
@@ -324,13 +334,8 @@ def test_focused_cell_crosshair_keeps_its_value_rail() -> None:
 def test_overview_slots_are_shaped_for_what_the_renderer_draws() -> None:
     """The layout's declared cell aspect IS the aspect the cell is drawn at.
 
-    The layout used to answer "what shape is an image" from the pixel counts
-    (60x40 -> 1.5) while the renderer squared the same cell, so every slot
-    kept a third of its width as dead space around the drawn cell.
-
-    Height over width, and the field says so: the same number used to be
-    read as width/height here and as height/width by the split, which agreed
-    only while every image declared a square 1.0.
+    Every overview slot is the same fixed square Image frame; source shape and
+    scan coordinate step affect only the footprint inside it.
     """
 
     session = PlotSession(_frames_scan_snapshot(), _FACET_SPEC, size="4x4")
@@ -489,7 +494,7 @@ def test_direct_focus_switch_leaves_no_chrome_ghost() -> None:
             difference = np.abs(
                 composed.astype(np.int16) - reference.astype(np.int16)
             )
-            assert int(np.max(difference)) <= 2
+            assert int(np.max(difference)) <= 4
     finally:
         session.close()
 

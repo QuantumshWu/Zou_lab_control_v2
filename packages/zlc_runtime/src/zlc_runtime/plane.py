@@ -19,7 +19,7 @@ independently; there is no cross-run global counter.
 
 from __future__ import annotations
 
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 import math
 import threading
@@ -63,6 +63,7 @@ from zlc_data import canonical_text
 
 __all__ = [
     "IndexedHistoryLease",
+    "RetainedPublicationExpired",
     "LatestProcessorControl",
     "SignalDataPlane",
     "SignalFront",
@@ -70,6 +71,15 @@ __all__ = [
     "SignalProducer",
     "SignalValue",
 ]
+
+
+class RetainedPublicationExpired(CancelledError):
+    """A queued view refers to an indexed publication already evicted.
+
+    This is ordinary latest-only presentation backpressure, not a signal or
+    processor failure.  The caller must abandon that exact view; substituting
+    the latest publication would mix identities.
+    """
 
 
 def _run_records_equal(
@@ -855,7 +865,9 @@ def _indexed_materialization_input(
     if primary_index is None:
         raise RuntimeError("indexed signal lost its source primary index")
     if primary_index < first_index:
-        raise ValueError("publication precedes retained indexed history")
+        raise RetainedPublicationExpired(
+            "publication precedes retained indexed history"
+        )
     start = max(first_index, primary_index - capacity + 1)
     selected_events = []
     selected_records = []

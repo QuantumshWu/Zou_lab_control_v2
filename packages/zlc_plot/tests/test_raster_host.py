@@ -8,7 +8,13 @@ import time
 import numpy as np
 import pytest
 
-from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+from data_factory import (
+    Axis,
+    DatasetSchema,
+    DatasetSnapshot,
+    PointTable,
+    PointTopology,
+)
 from test_facet_live_fit import _facet_snapshot, _spec as facet_spec
 from zlc_plot import (
     AxisRef,
@@ -333,6 +339,96 @@ def test_host_facet_live_fit_promotes_one_batch_front_and_future() -> None:
         assert host.front is operation.front
     finally:
         host.close(timeout=10)
+
+
+def test_fit_switches_a_native_curve_to_source_scatter_without_a_pointer() -> None:
+    snapshots = _fit_curve_series("native-fit-source-scatter", offset=0.1)
+    session = PlotSession(
+        snapshots(0, 0.2),
+        CurvePlot(AxisRef.point("x")),
+        parameters={"uncertainty": False},
+    )
+    try:
+        assert isinstance(session._renderer._artists.get("curve:prepared"), dict)
+        result = session.fit("gaussian_offset", live=True)
+        assert result.success
+        scatter = session._renderer._fit_source_scatter
+        assert scatter is not None and scatter.get_visible()
+        assert np.asarray(scatter.get_offsets()).shape[0] == 81
+        assert not any(
+            line.get_visible()
+            for line, _identity, _label in session._renderer._series_lines[
+                id(session._renderer.primary_axes)
+            ]
+        )
+    finally:
+        session.close()
+
+
+def test_partial_grouped_scan_keeps_lines_and_isolated_points_visible() -> None:
+    short = Axis.create("short", values=np.linspace(0.0, 1.0, 8))
+    long = Axis.create("long", values=(10.0, 20.0, 30.0))
+    point_table = PointTable.from_columns(
+        {
+            "short": np.tile(short.coordinates, 3),
+            "long": np.repeat(long.coordinates, 8),
+        }
+    )
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=2),
+        point_table,
+        point_topology=PointTopology.from_cartesian(
+            (long, short), point_table=point_table
+        ),
+        dtype=np.float64,
+        generation="partial-grouped-scan",
+    )
+    x = np.tile(np.asarray(short.coordinates), 3)
+    values = np.stack((np.sin(x), np.sin(x) + 0.05))
+    valid = np.zeros(values.shape, dtype=bool)
+    valid[:, :8] = True
+    valid[:, 8] = True
+    session = PlotSession(
+        DatasetSnapshot(schema, values, 0, validity=valid),
+        CurvePlot(
+            AxisRef.point_dimension("short"),
+            group=AxisRef.point_dimension("long"),
+        ),
+    )
+    try:
+        renderer = session._renderer
+        assert "curve:prepared" not in renderer._artists
+        entries = renderer._series_lines[id(renderer.primary_axes)]
+        assert any(line.get_visible() for line, _identity, _label in entries)
+        isolated = next(
+            line for line, _identity, label in entries if "long=20" in label
+        )
+        assert isolated.get_marker() == "_"
+        assert np.asarray(isolated.get_markevery()).size == 1
+    finally:
+        session.close()
+
+
+def test_native_curve_refusal_materializes_the_complete_public_scene(
+    monkeypatch,
+) -> None:
+    snapshots = _fit_curve_series("native-curve-fallback")
+    session = PlotSession(
+        snapshots(0),
+        CurvePlot(AxisRef.point("x")),
+        parameters={"uncertainty": False},
+    )
+    try:
+        renderer = session._renderer
+        assert isinstance(renderer._artists.get("curve:prepared"), dict)
+        monkeypatch.setattr(renderer, "_raster_facet_curve_command", lambda _canvas: False)
+        renderer._composed_generation = -1
+        frame = renderer.rgba()
+        assert frame.size > 0 and "curve:prepared" not in renderer._artists
+        entries = renderer._series_lines[id(renderer.primary_axes)]
+        assert entries and all(line.get_visible() for line, _identity, _label in entries)
+    finally:
+        session.close()
 
 
 def test_live_fit_keeps_only_the_latest_successor_while_active(
@@ -1072,7 +1168,7 @@ def test_dense_curve_hands_display_resolution_polyline_to_the_artist() -> None:
             DatasetSnapshot(schema, values + 0.001, revision=1)
         ).result(timeout=60)
         renderer = host._session._renderer
-        renderer._materialize_native_curve()
+        renderer._materialize_prepared_curve()
         lines = next(
             (
                 value
@@ -1120,7 +1216,7 @@ def test_curve_series_inspector_is_stable_sticky_and_redraw_bounded(
                 button=button, key=key, axes_snapshot=transform,
             )
 
-        renderer._materialize_native_curve()
+        renderer._materialize_prepared_curve()
         lines = renderer._artists["curve"]
         colors = {line.get_label(): line.get_color() for line in lines}
         generation = renderer.raster_generation
@@ -1196,7 +1292,7 @@ def test_curve_series_inspector_is_stable_sticky_and_redraw_bounded(
                 validity=validity,
             )
         )
-        renderer._materialize_native_curve()
+        renderer._materialize_prepared_curve()
         isolated = next(line for line in lines if "site=17" in line.get_label())
         connected = next(line for line in lines if "site=23" in line.get_label())
         assert isolated.get_marker() == "_"
@@ -1228,7 +1324,7 @@ def test_curve_series_picker_never_uses_raw_dense_line_on_deep_zoom() -> None:
     try:
         renderer = session._renderer
         axes = renderer.primary_axes
-        renderer._materialize_native_curve()
+        renderer._materialize_prepared_curve()
         line = renderer._series_lines[id(axes)][0][0]
         renderer._set_xlim(axes, 0.5, 0.5005)
         assert np.asarray(line.get_xdata()).size == count
@@ -1645,7 +1741,7 @@ def test_one_series_is_not_a_choice() -> None:
     try:
         renderer = session._renderer
         axes = renderer.primary_axes
-        renderer._materialize_native_curve()
+        renderer._materialize_prepared_curve()
         assert len(renderer._series_lines[id(axes)]) == 1
         px, py = axes.transData.transform((0.5, float(np.sin(0.5))))
 
@@ -1691,9 +1787,16 @@ def test_a_grid_overview_does_not_choose_series() -> None:
     try:
         renderer = session._renderer
         assert renderer._facet_focus_index is None, "this test needs the overview"
-        command = renderer._artists.get("facet:curve_native")
-        assert isinstance(command, dict)
-        assert all(len(cell_series) > 1 for cell_series in command["series"])
+        # Series interaction belongs to the prepared cell scene, not to one
+        # particular consumer.  With SEM the scene is materialized as public
+        # Line2D/error-bar artists; without SEM the same scene may stay in the
+        # native command until an interaction needs it.  Either way every
+        # overview cell carries the two real series this guard must refuse.
+        renderer._materialize_prepared_curve()
+        assert all(
+            len(renderer._series_lines.get(id(axis), ())) > 1
+            for _key, axis, _index in renderer.painted_surfaces
+        )
         _key, axes, _index = renderer.painted_surfaces[0]
         px = float(axes.bbox.x0 + axes.bbox.width / 2.0)
         py = float(axes.bbox.y0 + axes.bbox.height / 2.0)

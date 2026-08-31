@@ -14,6 +14,7 @@ session below it does not know a window exists.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import CancelledError
 from dataclasses import dataclass, field, replace
 from functools import wraps
 from weakref import ref
@@ -332,20 +333,8 @@ class PanelBinding:
         return None if surface is None else surface.description
 
     @property
-    def frozen_stale(self) -> bool:
-        """Whether Edit's frozen picture still describes what the bench holds.
-
-        A comparison between two moments this binding already holds: what
-        Edit froze, and what the card is showing.  Another signal, or the
-        same signal from a later RUN, means the frozen fit was solved against
-        data the bench no longer has.
-
-        As a stored boolean it needed a writer everywhere either moment could
-        change and a rollback in the one place that could fail -- and it was
-        still missed at the one that mattered, which is how the Edit tab sat
-        on the previous run's picture with nothing saying so.  Derived, it
-        cannot be forgotten.
-        """
+    def frozen_configuration_incompatible(self) -> bool:
+        """Whether current authored configuration no longer fits Edit."""
 
         frozen = self.frozen_data
         if frozen is None:
@@ -365,6 +354,15 @@ class PanelBinding:
             for name in fields
         ):
             return True
+        return False
+
+    @property
+    def frozen_data_advanced(self) -> bool:
+        """Whether Live has advanced beyond Edit's exact frozen picture."""
+
+        frozen = self.frozen_data
+        if frozen is None:
+            return False
         # ``display_publication`` is what this card is showing: the publication
         # its host was built from, and thereafter every one presented on it.
         # Asking the port instead reads one beat behind -- at the moment a new
@@ -1141,16 +1139,22 @@ class ConsolePresenter:
             publication,
         )
         event_records = ((publication, event_record),)
+        projection = self._panel_projection(
+            binding,
+            selected,
+            subject=snapshot,
+        )
+        if projection is None or not projection.drawable:
+            # An authored vacancy is a stable panel state.  The last complete
+            # front remains visible, while subsequent publications are not
+            # handed to the old drawable host; accepting that host's old
+            # description would otherwise normalize the operator's vacant
+            # fate straight back to the default role.
+            raise CancelledError()
         # The SEMANTIC surface, not the outer kind: a FacetGrid of image cells
         # paints images, and the overlay is a fact of the image.  A grid over
         # curve cells has nowhere to put a ring.
-        resolved = (
-            self._panel_accepted_spec(binding)
-            if state is None
-            else None
-        ) or self._panel_resolved_spec(
-            binding, selected, subject=snapshot
-        )
+        resolved = projection.spec
         if resolved is None or not paints_image_surface(resolved):
             return snapshot, event_records
         if selected.overlay_signal:
@@ -1423,7 +1427,11 @@ class ConsolePresenter:
         # None twice over, and they mean different things: no projection at
         # all (this Dataset offers no such plot), or a projection whose
         # authored table leaves a required role vacant.  Neither draws.
-        return None if projection is None else projection.spec
+        return (
+            None
+            if projection is None or not projection.drawable
+            else projection.spec
+        )
 
     @staticmethod
     def _panel_accepted_display(
@@ -3411,7 +3419,8 @@ class ConsolePresenter:
             "frozen_signal": None if frozen is None else frozen.signal,
             "frozen_publication": None if frozen is None else frozen.publication,
             "frozen_snapshot": None if frozen is None else frozen.snapshot,
-            "stale": bool(binding.frozen_stale),
+            "stale": bool(binding.frozen_configuration_incompatible),
+            "data_advanced": bool(binding.frozen_data_advanced),
             "producer_node_id": producer_node_id,
             "save_directory": str(self.session.day_folder()),
         }
@@ -3882,7 +3891,10 @@ class ConsolePresenter:
                 severity="warning",
             )
             return False
-        if binding.frozen_stale or frozen.signal != binding.state.signal:
+        if (
+            binding.frozen_configuration_incompatible
+            or frozen.signal != binding.state.signal
+        ):
             self._report(
                 f"{panel_id} frozen surface is stale; Refresh it before Save",
                 severity="warning",
@@ -4660,7 +4672,10 @@ class ConsolePresenter:
         binding = self.panels.get(str(panel_id))
         if binding is None:
             return
-        if source is binding.editor_host and binding.frozen_stale:
+        if (
+            source is binding.editor_host
+            and binding.frozen_configuration_incompatible
+        ):
             return
         values = getattr(state, "values", None)
         if values is None:
@@ -4708,8 +4723,9 @@ class ConsolePresenter:
             # The sync moves BOTH surfaces and the record together: the
             # frozen picture still shows the same data under the same
             # (now-updated) configuration, so the freeze's target follows.
-            # Leaving it behind flipped frozen_stale on the first synced
-            # value and gated the very channel keeping the surfaces equal.
+            # Leaving it behind made the frozen configuration incompatible
+            # on the first synced value and gated the channel keeping the
+            # surfaces equal.
             binding.frozen_data = replace(
                 frozen, target=replace(frozen.target, display=merged)
             )
@@ -4717,7 +4733,10 @@ class ConsolePresenter:
             if (
                 host is None
                 or host is source
-                or (host is binding.editor_host and binding.frozen_stale)
+                or (
+                    host is binding.editor_host
+                    and binding.frozen_configuration_incompatible
+                )
             ):
                 continue
             target_key = getattr(host, "host_id", None) or id(host)
@@ -4784,7 +4803,10 @@ class ConsolePresenter:
             if (
                 host is None
                 or host is source
-                or (host is binding.editor_host and binding.frozen_stale)
+                or (
+                    host is binding.editor_host
+                    and binding.frozen_configuration_incompatible
+                )
             ):
                 continue
             if document:
@@ -4838,7 +4860,7 @@ class ConsolePresenter:
             and binding.frozen_data is not None
             and binding.frozen_data.publication is frozen.publication
             and binding.frozen_data.snapshot.ref == frozen.snapshot.ref
-            and not binding.frozen_stale
+            and not binding.frozen_configuration_incompatible
         ):
             publication = frozen.publication
             plot_input = frozen.plot_input
@@ -4920,7 +4942,10 @@ class ConsolePresenter:
             if (
                 host is None
                 or host is source
-                or (host is binding.editor_host and binding.frozen_stale)
+                or (
+                    host is binding.editor_host
+                    and binding.frozen_configuration_incompatible
+                )
             ):
                 continue
             other = self._panel_accepted_display(binding, host)
@@ -5082,7 +5107,11 @@ class ConsolePresenter:
             return
         self._synchronize_panel_interaction(
             binding,
-            None if binding.frozen_stale else binding.editor_host,
+            (
+                None
+                if binding.frozen_configuration_incompatible
+                else binding.editor_host
+            ),
             _UNCHANGED,
             observation.display,
         )
@@ -5136,7 +5165,8 @@ class ConsolePresenter:
             binding.editor_host if source is binding.host else binding.host
         )
         if other is not None and not (
-            other is binding.editor_host and binding.frozen_stale
+            other is binding.editor_host
+            and binding.frozen_configuration_incompatible
         ):
             operation = other.configure(facet_focus=focus)
             self._track_panel_configuration(binding, other, operation)

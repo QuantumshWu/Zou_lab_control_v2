@@ -154,6 +154,7 @@ zlc_pulse = ["py.typed"]
 # default mode derives a module name from the basename alone.  See conftest.py
 # for why renaming them would have been the worse trade.
 addopts = "--import-mode=importlib"
+markers = ["gui: requires an offscreen Qt backend"]
 # Every layer's suite, from the top.  A change that crosses two layers is
 # checked by both in one run, which is the whole point of merging them.
 testpaths = ["packages"]

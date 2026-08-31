@@ -946,6 +946,54 @@ def test_a_cancelled_render_is_never_remembered_as_a_panel_error(
     assert isinstance(port.last_error, RuntimeError)
 
 
+def test_an_evicted_history_publication_keeps_the_last_panel_surface(
+    live_bench,
+) -> None:
+    """History backpressure cancels one queued render without degrading UI."""
+
+    from zlc_runtime import RetainedPublicationExpired
+
+    plane, node, _sequencer, _monitor = live_bench
+    signal = node.signal_key("frames")
+    front = plane.freeze()
+    value = front.value(signal)
+    publication = front.publication(signal)
+    assert value is not None and publication is not None
+    calls = 0
+
+    def project(plot_value, selected, _front, _target):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise RetainedPublicationExpired(
+                "publication precedes retained indexed history"
+            )
+        return plot_value.snapshot, ((selected, plot_value.event_record),)
+
+    host = SimpleNamespace(host_id=object())
+    port = PlotPanelPort(
+        "panel-1",
+        signal,
+        display_interval_ms=100,
+        project_input=project,
+        submit_projection=_submit_now,
+        replace_host=_initial_then(host),
+    )
+    _mount(port, value, publication, front)
+    accepted = port.accepted_surface()
+    next_value, next_publication = _advanced(value, publication, signal)
+    update = port.prepare(next_value, next_publication, front)
+    assert update is not None and update.future.cancelled()
+    port.reject(
+        update,
+        RetainedPublicationExpired(
+            "publication precedes retained indexed history"
+        ),
+    )
+    assert port.last_error is None
+    assert port.accepted_surface() is accepted
+
+
 def test_same_snapshot_terminal_reanchors_pending_and_presented_identity(
     live_bench,
 ) -> None:

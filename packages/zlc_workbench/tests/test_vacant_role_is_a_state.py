@@ -123,9 +123,21 @@ def test_vacating_a_required_role_keeps_the_fate_and_the_console(workspace) -> N
         assert settle(lambda: _fate_rows(binding)[x_holder] == "x")
     finally:
         if presenter is not None:
-            presenter.close()
+            # build_console is the composition seam below create_window, so
+            # this test does not receive the production window's close guard.
+            # Honour that same non-blocking lifecycle explicitly: one call
+            # only starts plot-host retirement; destroying the Qt window and
+            # session immediately afterwards leaves native widgets racing the
+            # next GUI test and can terminate the process with access violation.
+            deadline = time.monotonic() + 20.0
+            while not presenter.close() and time.monotonic() < deadline:
+                presenter.beat()
+                application.processEvents()
+                time.sleep(0.005)
+            assert presenter.close(), "TaskConsole did not finish closing"
         if view is not None:
             view.close()
+            application.processEvents()
         session.close()
 
 
