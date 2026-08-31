@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+import os
 import threading
 import time
 
@@ -433,6 +434,7 @@ def run(*, seconds: float, baseline_seconds: float, panel3: str) -> dict:
             "panel_size": "2x2",
             "panel3": panel3,
             "fit": fit_model,
+            "numba_threads": int(os.environ.get("NUMBA_NUM_THREADS", "0") or 0),
         },
     }
     with bench:
