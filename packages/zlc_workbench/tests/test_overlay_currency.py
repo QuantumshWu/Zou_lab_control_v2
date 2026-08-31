@@ -285,3 +285,71 @@ def test_a_render_projected_under_a_revoked_setting_never_lands(
     assert not hasattr(host.inputs[-1], "overlay"), (
         "the frame after the decision still carried the overlay"
     )
+
+
+def test_a_missing_companion_is_a_named_condition_not_a_frozen_panel(
+    panels,
+) -> None:
+    """A base frame without its overlay is honest -- and says so.
+
+    The port used to raise for a companion absent from the front, and
+    ``report_waiting`` was ``del missing_signal``: a camera panel whose
+    occupancy had not yet published in its generation froze outright, with
+    nothing on the card to say why.  The companion is now excused -- the
+    frame stages without it, the condition is named -- and the first full
+    shot clears the condition.
+    """
+
+    pytest.importorskip("zlc_plot")
+    picture = _publication("camera", "run-1", 1, SIGNAL)
+    bare_front = SignalFront(
+        {SIGNAL: picture.value(SIGNAL)}, {SIGNAL: picture}
+    )
+    host = _RevisionHost(0)
+    deferred = _Deferred()
+
+    def project(primary, publication, exact_front, target):
+        records = ((publication, primary.event_record),)
+        annotation = exact_front.publication(COMPANION)
+        if annotation is None:
+            # The console's own rule: no annotation for this shot, no
+            # overlay -- the picture is the snapshot alone.
+            return primary.snapshot, records
+        from zlc_plot.primitives import ImageFrame, ImagePointOverlay
+
+        return (
+            ImageFrame(
+                primary.snapshot,
+                ImagePointOverlay.empty(annotation.event_ref.sequence),
+            ),
+            (*records, (annotation, primary.event_record)),
+        )
+
+    port = PlotPanelPort(
+        "panel",
+        SIGNAL,
+        initial_target=SimpleNamespace(overlay_signal=COMPANION),
+        display_interval_ms=100,
+        submit_projection=deferred,
+        replace_host=_mounts(host),
+        companion_signals=lambda _target: (COMPANION,),
+        project_input=project,
+    )
+    panels.append((port, deferred))
+
+    update = port.prepare(picture.value(SIGNAL), picture, bare_front)
+    assert update is not None, "the base frame must stage without its overlay"
+    assert update.front_refs == (picture.event_ref,)
+    port.report_waiting(COMPANION)
+    assert COMPANION in port.waiting_condition
+    deferred.run()
+    assert port.accept(update, update.future.result(timeout=0))
+    # A partial presentation keeps the condition standing on the card.
+    assert port.waiting_condition
+
+    value2, publication2, full_front = _shot(2, 202)
+    complete = port.prepare(value2, publication2, full_front)
+    assert complete is not None
+    deferred.run()
+    assert port.accept(complete, complete.future.result(timeout=0))
+    assert port.waiting_condition == ""

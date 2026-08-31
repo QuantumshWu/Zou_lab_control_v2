@@ -43,10 +43,19 @@ class AuthoringField:
     #: and disappears as another is touched is a moving target, and an
     #: operator cannot see what a setting would offer before choosing it.
     enabled_when: tuple[str, tuple[Any, ...]] | None = None
+    #: The unit this field's value is expressed in, or None for a bare
+    #: number.  Declared by the field's owner because it is a fact about the
+    #: KNOB -- an RF frequency is hertz whoever reads it -- and a scan axis
+    #: built over the field publishes this unit into its dataset column.
+    unit: str | None = None
 
     def __post_init__(self) -> None:
         if not self.name or not self.value_type or not self.label:
             raise ValueError("authoring fields require name, value_type, and label")
+        if self.unit is not None and (
+            not isinstance(self.unit, str) or not self.unit.strip()
+        ):
+            raise ValueError("authoring field unit must be non-empty text or None")
         if self.enabled_when is not None:
             controller, values = self.enabled_when
             if not str(controller).strip():

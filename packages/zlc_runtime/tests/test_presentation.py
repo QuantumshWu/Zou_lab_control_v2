@@ -135,6 +135,9 @@ class _Port:
             tuple(
                 front.publication(name).event_ref
                 for name in self.front_signals
+                # Mirrors the real port: a companion absent from the front
+                # is excused, never a veto.
+                if front.publication(name) is not None
             ),
             future,
         )
@@ -881,3 +884,22 @@ def test_a_paused_display_still_freezes_the_plane_and_advances_the_clock() -> No
             staged = len(port.updates)
             break
     assert staged, "a resumed board must stage on its own next boundary"
+
+
+def test_a_missing_companion_is_reported_and_the_base_still_stages() -> None:
+    """A base frame without its overlay is honest; a held one is a stuck bench.
+
+    The companion veto in ``_front_refs`` plus a ``report_waiting`` that the
+    panel port implemented as a no-op meant an overlay that had not yet
+    published froze its base panel outright, with nothing on the card to say
+    why.  The companion is now excused -- and named, so the frame with no
+    rings is a labelled condition rather than a mystery.
+    """
+
+    front = _front("camera/frame")
+    arbiter = SurfaceBatchArbiter(_Sink())
+    port = _Port("camera", "camera/frame", companions=("occ/sites",))
+
+    assert arbiter.enqueue_group((port,), front)
+    assert port.waiting == ["occ/sites"]
+    assert len(port.futures) == 1

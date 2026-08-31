@@ -1079,3 +1079,62 @@ def test_a_run_record_is_written_once_when_the_run_is_over(tmp_path) -> None:
     run.mark_failed(RuntimeError("after the fact"))
     assert record.stat().st_mtime_ns == written_at
     assert json.loads(record.read_text(encoding="utf-8"))["error"] is None
+
+
+def test_a_schema_advance_ends_a_processor_cancelled_not_failed() -> None:
+    """GenerationSchemaAdvanced says so itself: NOT a fault.
+
+    An output that changes shape needs a new generation -- a derivation
+    whose point table grows one row per shot while a window fills, or a
+    pulse restart that changes the frame shape.  Landing it as ``failed``
+    made the console clear ``following`` for good, so the restart that
+    would have granted that new generation never came: occupancy vanished
+    from the overlay combobox permanently.  CANCELLED is the phase an
+    automatic re-follow restarts from, and this exception is a re-follow
+    request by its own definition.
+    """
+
+    from zlc_runtime.plane import GenerationSchemaAdvanced
+
+    source_declaration = DatasetOutputDeclaration("frame", "test.frame")
+    derived_declaration = DatasetOutputDeclaration("derived", "test.derived")
+    source = _Source("advancing-source", source_declaration)
+    plane = SignalDataPlane()
+    plane.begin_generation(source)
+
+    class Processor:
+        def evaluate(self, value: SignalValue):
+            raise GenerationSchemaAdvanced(
+                "signal publication schema changed inside one generation"
+            )
+
+    wake = Event()
+    host = _host(
+        Processor(),
+        plane,
+        wake,
+        instance_id="advancing-processor",
+        kind="processor",
+        outputs=(derived_declaration,),
+        source=source.signal_key("frame"),
+        delivery="exact",
+    )
+    try:
+        host.start()
+        plane.commit_live(
+            source,
+            {
+                "frame": _finite_output(
+                    source_declaration,
+                    value=4.0,
+                    total=3,
+                    origin=0,
+                    written=1,
+                )
+            },
+        )
+        observation = _wait(host, wake)
+        assert observation.phase == "cancelled", observation
+    finally:
+        host.shutdown()
+        plane.close()

@@ -181,9 +181,9 @@ def scan_ports_for_devices(tunables: Mapping | None) -> tuple[ScanPort, ...]:
     A device volunteers through ``tunable_fields()``.  A scan exposes only a
     bounded, live-writable field whose dependency group is that field alone:
     this executor advances one scalar port at a time and cannot pretend a
-    coupled hardware transaction is atomic.  Metadata carries no unit
-    vocabulary, so the port's unit is empty and its label names the device
-    and the knob.
+    coupled hardware transaction is atomic.  The port's unit is the field's
+    own declared unit -- an RF frequency axis publishes hertz -- and its
+    label names the device and the knob.
     """
 
     ports: list[ScanPort] = []
@@ -205,7 +205,7 @@ def scan_ports_for_devices(tunables: Mapping | None) -> tuple[ScanPort, ...]:
                 ScanPort(
                     port,
                     port_label(port),
-                    "",
+                    field.unit or "",
                     float(field.minimum),
                     float(field.maximum),
                 )

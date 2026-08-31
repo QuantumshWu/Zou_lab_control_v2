@@ -15,7 +15,12 @@ from .dataset_output import (
     LiveDatasetOutput,
 )
 from .owner_mailbox import RunOwnerMailbox
-from .plane import SignalDataPlane, SignalPublication, SignalValue
+from .plane import (
+    GenerationSchemaAdvanced,
+    SignalDataPlane,
+    SignalPublication,
+    SignalValue,
+)
 from .streams import FollowTap, SourceFailed, SourceGenerationEnded, StreamEndedEarly
 from .task_run import TaskArtifact, TaskRun
 
@@ -1171,7 +1176,18 @@ class NodeHost:
         if (
             isinstance(
                 error,
-                (_StartSuppressed, SourceGenerationEnded, SourceFailed),
+                (
+                    _StartSuppressed,
+                    SourceGenerationEnded,
+                    SourceFailed,
+                    # Its own docstring: an output changed shape, so it
+                    # needs a NEW GENERATION -- not a fault.  Landing it
+                    # as failed cleared ``following`` for good, so the
+                    # restart that would have granted that generation
+                    # never came: a pulse restart that changed the frame
+                    # shape killed its occupancy overlay permanently.
+                    GenerationSchemaAdvanced,
+                ),
             )
             or self.cancel_requested
         ):
@@ -1318,7 +1334,18 @@ class NodeHost:
         if (
             isinstance(
                 error,
-                (_StartSuppressed, SourceGenerationEnded, SourceFailed),
+                (
+                    _StartSuppressed,
+                    SourceGenerationEnded,
+                    SourceFailed,
+                    # Its own docstring: an output changed shape, so it
+                    # needs a NEW GENERATION -- not a fault.  Landing it
+                    # as failed cleared ``following`` for good, so the
+                    # restart that would have granted that generation
+                    # never came: a pulse restart that changed the frame
+                    # shape killed its occupancy overlay permanently.
+                    GenerationSchemaAdvanced,
+                ),
             )
             or self.cancel_requested
         ):

@@ -175,6 +175,11 @@ class PlotPanelPort:
         #: on the card, because a panel that quietly stopped drawing looks
         #: exactly like a panel whose data stopped arriving.
         self.last_error: BaseException | None = None
+        #: The signal this panel is presenting WITHOUT, named -- an overlay
+        #: whose producer has not published.  Read on the beat as a standing
+        #: card condition, because a frame with no rings and no explanation
+        #: is indistinguishable from a defect.
+        self.waiting_condition: str = ""
 
     # ------------------------------------------------------------- identity
 
@@ -396,7 +401,13 @@ class PlotPanelPort:
         for name in companions:
             companion = publication_for(name)
             if companion is None:
-                raise LookupError(f"front lacks panel signal {name!r}")
+                # EXCUSED, not a veto -- the same rule the arbiter's
+                # _front_refs applies.  Raising here made an overlay that
+                # had not yet published in its generation freeze the base
+                # panel outright; a base frame shown without its overlay is
+                # honest, and the overlay joins atomically through the
+                # coherent front with its first commit.
+                continue
             refs.append(companion.event_ref)
         return tuple(refs)
 
@@ -912,6 +923,12 @@ class PlotPanelPort:
 
         if target_host is None:
             return False
+        # A presented update that carries every declared signal ends the
+        # waiting condition; a partial one (base without its overlay) keeps
+        # it standing, which is exactly what the card should say.
+        if len(update.front_refs) >= len(self.front_signals):
+            with self._state_lock:
+                self.waiting_condition = ""
         presented, present_error = self._put_on_screen(target_host, operation)
         if not presented:
             if replacement is not None:
@@ -1141,6 +1158,16 @@ class PlotPanelPort:
                 self._close_staged_host(prepared.replacement_host)
 
     def report_waiting(self, missing_signal: str) -> None:
-        """The signal this panel wants has not arrived on this tick."""
+        """The signal this panel is presenting without, or held back for.
 
-        del missing_signal
+        This used to be ``del missing_signal`` -- a panel frozen behind a
+        companion that would never publish showed NOTHING: no error, no
+        waiting, an operator staring at a stale frame with no way to learn
+        why.  The name is now a standing condition on the card, cleared the
+        moment an update carrying every declared signal is presented.
+        """
+
+        with self._state_lock:
+            self.waiting_condition = (
+                f"waiting for {missing_signal!r} to publish"
+            )

@@ -163,13 +163,47 @@ def build_front(
     )
     for component in components:
         requested_component = requested.intersection(component)
+        # DECLARED IS NOT SPEAKING.  A processor reserved against an armed
+        # source carries its output names before it has published anything
+        # in this generation -- deliberately, so the name exists the moment
+        # the source does.  But a name that has never spoken IN THIS
+        # GENERATION cannot anchor a shot, and counting it as a leaf made
+        # the whole component incoherent: the fallback then popped the BASE
+        # signal too whenever its generation had changed, so a camera panel
+        # with an occupancy overlay froze, silently and indefinitely, the
+        # moment a pulse restart re-reserved the overlay before its first
+        # shot of the new generation.
+        #
+        # "This generation" is the whole distinction.  A processor between
+        # two shots of ONE generation -- current publication None, but the
+        # previous front carrying its last one -- is COMPUTING, and holding
+        # the component on that last shot until it commits is exactly the
+        # atomicity this front exists for.  Only a name with no current
+        # publication and no same-generation history is excused; it joins
+        # the component atomically with its first commit.
+        def _speaks(name: str) -> bool:
+            if name in latest:
+                return True
+            previous = previous_publications.get(name)
+            if previous is None:
+                return False
+            state = _state_for_signal(states, name)
+            return (
+                state is not None
+                and getattr(state, "owner_id")
+                == previous.event_ref.stream_id.value
+                and getattr(state, "generation")
+                == previous.event_ref.generation
+            )
+
+        speaking = {name for name in requested_component if _speaks(name)}
         leaves = tuple(
             name
-            for name in sorted(requested_component)
+            for name in sorted(speaking)
             if not any(
                 other != name
                 and _name_is_ancestor(name, other, source_by_output)
-                for other in requested_component
+                for other in speaking
             )
         )
         leaf_publications = tuple(latest.get(name) for name in leaves)
@@ -199,7 +233,7 @@ def build_front(
                     ancestry[name] = candidate
                 if not coherent:
                     break
-        if coherent and any(name not in ancestry for name in requested_component):
+        if coherent and any(name not in ancestry for name in speaking):
             coherent = False
 
         if coherent:

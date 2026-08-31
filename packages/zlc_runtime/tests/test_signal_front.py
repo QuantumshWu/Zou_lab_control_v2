@@ -325,3 +325,54 @@ def test_plane_front_keeps_weak_parent_payload_alive() -> None:
         if roi_tap is not None:
             roi_tap.close()
         plane.close()
+
+
+def test_a_companion_that_never_spoke_in_its_generation_is_excused() -> None:
+    """After a restart, frames flow without the overlay -- never neither.
+
+    A processor re-reserved under a new generation carries its output name
+    before its first commit.  Counting that silent name as a leaf made the
+    whole component incoherent, and the fallback then popped the BASE too
+    (its generation had changed): a camera panel with an occupancy overlay
+    froze, silently and indefinitely, the moment a pulse restart re-reserved
+    the overlay before its first new-generation shot.
+
+    The distinction is per generation: a processor between two shots of ONE
+    generation (current publication None, previous front carrying its last)
+    is COMPUTING, and the hold-together contract above still stands -- the
+    transitive-fallback test pins that half.
+    """
+
+    root = _publication("camera", "g1", 1, "camera/frame")
+    occupancy = _publication("occ", "g2", 1, "occ/sites", (root,))
+    parents = {root: (), occupancy: (root,)}
+    states = [
+        _state("camera", "g1", "producer", ("camera/frame",), root),
+        _state("occ", "g2", "processor", ("occ/sites",), occupancy, "camera/frame"),
+    ]
+    first = build_front(
+        states, {"camera/frame", "occ/sites"}, None, parents.__getitem__
+    )
+    assert first.names() == ("camera/frame", "occ/sites")
+
+    root2 = _publication("camera", "g3", 1, "camera/frame")
+    parents[root2] = ()
+    restarted = [
+        _state("camera", "g3", "producer", ("camera/frame",), root2),
+        _state("occ", "g4", "processor", ("occ/sites",), None, "camera/frame"),
+    ]
+    resumed = build_front(
+        restarted, {"camera/frame", "occ/sites"}, first, parents.__getitem__
+    )
+    # The new frame is on screen; the old generation's rings are not.
+    assert resumed.publication("camera/frame") is root2
+    assert resumed.publication("occ/sites") is None
+
+    # And the first new-generation commit joins atomically.
+    occupancy2 = _publication("occ", "g4", 1, "occ/sites", (root2,))
+    parents[occupancy2] = (root2,)
+    restarted[1].publication = occupancy2
+    joined = build_front(
+        restarted, {"camera/frame", "occ/sites"}, resumed, parents.__getitem__
+    )
+    assert joined.publication("occ/sites") is occupancy2

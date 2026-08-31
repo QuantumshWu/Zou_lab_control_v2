@@ -497,6 +497,7 @@ class ConsolePresenter:
         # What every card's picker was last told, so it is only rebuilt when
         # the offer really changed.
         self._offered_groups: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = ()
+        self._offered_overlays: tuple = ()
         self._shown_panel_publishers: tuple[
             tuple[str, tuple[tuple[str, str, str], ...]], ...
         ] = ()
@@ -2092,10 +2093,34 @@ class ConsolePresenter:
             self.view.set_panel_publishers(panel_publishers)
 
         groups = self.signal_groups()
-        if groups == self._offered_groups:
+        # THE KEY MUST WATCH WHAT ELIGIBILITY WATCHES.  Overlay choices
+        # depend on publications and generation families, and none of that
+        # is visible in the name/label/producer groups -- so after a stop
+        # and restart the groups settled back to equal while occupancy's
+        # eligibility flipped, and the one refresh that would have offered
+        # it never ran: the overlay combobox stayed empty for good.
+        front = self.session.signal_plane.freeze()
+        overlay_offers = tuple(
+            (
+                panel_id,
+                self.overlay_signal_groups(
+                    binding.state.signal,
+                    (
+                        front.publication(binding.state.signal)
+                        if binding.state.signal
+                        else None
+                    ),
+                ),
+            )
+            for panel_id, binding in self.panels.items()
+        )
+        if (
+            groups == self._offered_groups
+            and overlay_offers == self._offered_overlays
+        ):
             return
         self._offered_groups = groups
-        front = self.session.signal_plane.freeze()
+        self._offered_overlays = overlay_offers
         for panel_id in self.view.panel_ids():
             binding = self.panels.get(panel_id)
             self.view.set_panel_signal_choices(
@@ -2510,9 +2535,15 @@ class ConsolePresenter:
             and candidate.overlay_signal != current.overlay_signal
         ):
             front = candidate_front or self.session.signal_plane.freeze()
+            # THE SAME PUBLICATION THE OFFER JUDGED.  The offer computes
+            # eligibility from the plane's front; judging admission from
+            # what is on screen instead meant a panel showing an older
+            # generation refused the very entry its own combobox had just
+            # offered.  The screen falls back only when the front has
+            # nothing to say.
             publication = (
-                binding.display_publication
-                or front.publication(candidate.signal)
+                front.publication(candidate.signal)
+                or binding.display_publication
             )
             offered = {
                 name
@@ -4367,6 +4398,7 @@ class ConsolePresenter:
         self.logic.clear()
         self._panel_serial = candidate.panel_serial
         self._offered_groups = ()
+        self._offered_overlays = ()
         self._shown_console_summary = None
 
         for binding in candidate.logic:
@@ -5491,6 +5523,7 @@ class ConsolePresenter:
                 or binding.unapplied_display
                 or refused
                 or str(getattr(binding.bridge, "last_condition", "") or "")
+                or str(getattr(binding.port, "waiting_condition", "") or "")
             )
             if error is None and standing:
                 # An authored table that cannot draw is a CONDITION of this
