@@ -146,6 +146,10 @@ class DeviceManagerPresenter:
         self._on_shutdown = on_shutdown
         self._on_device_open = on_device_open
         self._active_session: object | None = None
+        #: The bench fabric, started on the first publish and owned
+        #: here for the process's life; the set names what is out.
+        self._announcer = None
+        self._remoted: set[str] = set()
         self._active_config: InstallationConfig | None = None
         self._refresh_pending = False
         self._confirm_overwrite = confirm_overwrite
@@ -169,6 +173,7 @@ class DeviceManagerPresenter:
         self.view.cancel_requested.connect(self.cancel)
         self.view.lifecycle_requested.connect(self.toggle_lifecycle)
         self.view.device_open_requested.connect(self.open_device)
+        self.view.device_remote_toggled.connect(self.toggle_remote)
         self.view.device_close_requested.connect(self.close_device)
         # What this machine cannot offer is named too, with the reason: a
         # family that will not import used to be simply absent, which reads
@@ -549,6 +554,95 @@ class DeviceManagerPresenter:
         except Exception as error:
             self._report(f"{key}: {error}", severity="error")
             return False
+        return True
+
+    def toggle_remote(self, instance_id: str) -> bool:
+        """Publish one loaded device on the bench fabric, or withdraw it.
+
+        Publishing means the OTHER machine's "Scan hardware" lists this
+        device with everything it needs to connect -- no address typed.  A
+        device that speaks the tunable quartet is served by the fabric's
+        generic data plane; one with its own server (the pulse streamer,
+        the SLM) is announced with its endpoint parameters, this machine's
+        LAN address substituted for any loopback, and the existing client
+        protocol stays the data plane it always was.
+        """
+
+        key = str(instance_id)
+        session = self._active_session
+        if session is None:
+            self._report("initialize devices before publishing one", severity="warning")
+            return False
+        leaf = session.installation.devices.get(key)
+        if leaf is None:
+            self._report(f"no loaded device {key!r}", severity="warning")
+            return False
+        from zlc_atom.devices.remote.fabric import (
+            DeviceAnnouncer,
+            PublishedDevice,
+            local_lan_ip,
+        )
+
+        if key in self._remoted:
+            if self._announcer is not None:
+                self._announcer.withdraw(key)
+            self._remoted.discard(key)
+            self.view.set_remoted(tuple(sorted(self._remoted)))
+            self._report(f"{key}: withdrawn from the bench fabric", severity="task")
+            return True
+        config = next(
+            (item for item in self.devices if item.instance_id == key), None
+        )
+        if config is None:
+            self._report(f"{key}: no authored configuration to announce", severity="warning")
+            return False
+        device = leaf.device
+        speaks_tunable = all(
+            callable(getattr(device, name, None))
+            for name in (
+                "tunable_fields",
+                "tune",
+                "tunable_values",
+                "settings_provenance",
+            )
+        )
+        parameters = dict(config.parameters)
+        if not speaks_tunable:
+            if "host" not in parameters or "port" not in parameters:
+                self._report(
+                    f"{key}: neither a tunable surface nor a host/port "
+                    "endpoint -- nothing the fabric can announce",
+                    severity="warning",
+                )
+                return False
+            # The authored host is where THIS machine dials its own server
+            # (usually loopback); a peer needs this machine's address.
+            if str(parameters["host"]).strip() in ("", "127.0.0.1", "localhost"):
+                parameters["host"] = local_lan_ip()
+        if self._announcer is None:
+            try:
+                self._announcer = DeviceAnnouncer()
+            except OSError as error:
+                self._report(
+                    f"the bench fabric could not start: {error}", severity="error"
+                )
+                return False
+        self._announcer.publish(
+            PublishedDevice(
+                instance_id=key,
+                role=config.role,
+                type_id=config.type_id,
+                parameters=parameters,
+                tunable=device if speaks_tunable else None,
+            )
+        )
+        self._remoted.add(key)
+        self.view.set_remoted(tuple(sorted(self._remoted)))
+        self._report(
+            f"{key}: published on the bench fabric (port "
+            f"{self._announcer.port})",
+            severity="task",
+        )
         return True
 
     def close_device(self, instance_id: str) -> bool:
@@ -1041,6 +1135,13 @@ class DeviceManagerPresenter:
             if self._active_session is None
             else frozenset(self._active_session.installation.devices)
         )
+        # A device that left the session leaves the fabric with it: nothing
+        # may stay published that this machine can no longer serve.
+        for stale in tuple(self._remoted - loaded_keys):
+            if self._announcer is not None:
+                self._announcer.withdraw(stale)
+            self._remoted.discard(stale)
+        self.view.set_remoted(tuple(sorted(self._remoted)))
         active_devices = tuple(
             (item.instance_id, item.role, item.type_id)
             for item in (() if self._active_config is None else self._active_config.devices)

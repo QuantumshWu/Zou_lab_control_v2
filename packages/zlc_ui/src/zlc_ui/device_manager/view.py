@@ -122,6 +122,7 @@ class _LiveDeviceCard(FluentFrame):
 
     device_open_requested = QtCore.pyqtSignal(str)
     device_close_requested = QtCore.pyqtSignal(str)
+    device_remote_toggled = QtCore.pyqtSignal(str)
 
     def __init__(self, instance_id: str, parent=None) -> None:
         super().__init__(parent, bordered=True)
@@ -134,21 +135,33 @@ class _LiveDeviceCard(FluentFrame):
         self.role_label = ElidedLabel("")
         self.detail_label = muted_note_label("")
         self.control_button = FluentButton("Control", color=ACCENT)
+        #: One click beside Control publishes this device on the bench
+        #: fabric, so the OTHER machine's "Scan hardware" finds it with no
+        #: address typed anywhere.  A second click withdraws it.
+        self.remote_button = FluentButton("Remote", color=GREY)
         self.close_button = FluentButton("Close", color=ORANGE)
         outer.addWidget(self.role_label)
         outer.addWidget(self.detail_label, 1)
         outer.addWidget(self.control_button)
+        outer.addWidget(self.remote_button)
         outer.addWidget(self.close_button)
         self.control_button.clicked.connect(
             lambda: self.device_open_requested.emit(self.instance_id)
+        )
+        self.remote_button.clicked.connect(
+            lambda: self.device_remote_toggled.emit(self.instance_id)
         )
         self.close_button.clicked.connect(
             lambda: self.device_close_requested.emit(self.instance_id)
         )
 
-    def set_record(self, role: str, type_id: str) -> None:
+    def set_record(
+        self, role: str, type_id: str, *, remote: bool = False
+    ) -> None:
         self.role_label.setText(str(role))
         self.detail_label.setText(f"{type_id} · {self.instance_id}")
+        self.remote_button.setText("Remoted" if remote else "Remote")
+        self.remote_button.set_color(ACCENT if remote else GREY)
         self.setToolTip(self.instance_id)
 
 
@@ -375,6 +388,8 @@ class DeviceManagerView(QtWidgets.QWidget):
     #: Request retirement of exactly one loaded device.  Session ownership,
     #: claims and the actual close remain outside this view.
     device_close_requested = QtCore.pyqtSignal(str)
+    #: Toggle publishing one loaded device on the bench fabric.
+    device_remote_toggled = QtCore.pyqtSignal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -385,6 +400,7 @@ class DeviceManagerView(QtWidgets.QWidget):
         self._discovered_widgets: dict[str, tuple[FluentFrame, ElidedLabel, QtWidgets.QLabel, FluentButton]] = {}
         self._configured_discoveries: set[str] = set()
         self._loaded_cards: dict[str, _LiveDeviceCard] = {}
+        self._remoted: set[str] = set()
         self._dirty = False
         self._busy = False
         self._lifecycle_enabled = False
@@ -628,10 +644,27 @@ class DeviceManagerView(QtWidgets.QWidget):
                 card = _LiveDeviceCard(instance_id, self.loaded_group)
                 card.device_open_requested.connect(self.device_open_requested)
                 card.device_close_requested.connect(self.device_close_requested)
+                card.device_remote_toggled.connect(self.device_remote_toggled)
                 self._loaded_cards[instance_id] = card
                 self.loaded_layout.insertWidget(index, card)
-            card.set_record(str(role), str(type_id))
+            card.set_record(
+                str(role),
+                str(type_id),
+                remote=instance_id in self._remoted,
+            )
         self.loaded_empty.setVisible(not devices)
+
+    def set_remoted(self, instance_ids) -> None:
+        """Mark which loaded devices are currently published on the fabric."""
+
+        self._remoted = {str(instance_id) for instance_id in instance_ids}
+        for instance_id, card in self._loaded_cards.items():
+            card.remote_button.setText(
+                "Remoted" if instance_id in self._remoted else "Remote"
+            )
+            card.remote_button.set_color(
+                ACCENT if instance_id in self._remoted else GREY
+            )
 
     def set_discovery_enabled(
         self,

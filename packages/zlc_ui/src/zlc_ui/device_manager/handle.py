@@ -88,6 +88,7 @@ class DeviceManagerHandle(QtCore.QObject):
     parameter_committed = QtCore.pyqtSignal(str, str)
     device_open_requested = QtCore.pyqtSignal(str)
     device_close_requested = QtCore.pyqtSignal(str)
+    device_remote_toggled = QtCore.pyqtSignal(str)
     template_selected = QtCore.pyqtSignal(str)
     discovery_requested = QtCore.pyqtSignal()
     discovered_add_requested = QtCore.pyqtSignal(str)
@@ -105,6 +106,7 @@ class DeviceManagerHandle(QtCore.QObject):
         "parameter_committed",
         "device_open_requested",
         "device_close_requested",
+        "device_remote_toggled",
         "template_selected",
         "discovery_requested",
         "discovered_add_requested",

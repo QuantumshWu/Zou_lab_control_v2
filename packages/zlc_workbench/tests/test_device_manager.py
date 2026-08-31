@@ -59,6 +59,7 @@ class _ManagerView:
         self.parameter_committed = _Signal()
         self.device_open_requested = _Signal()
         self.device_close_requested = _Signal()
+        self.device_remote_toggled = _Signal()
         self.choices: tuple = ()
         self.devices: tuple = ()
         self.forms: dict = {}
@@ -82,6 +83,9 @@ class _ManagerView:
 
     def set_templates(self, templates) -> None:
         self.templates = tuple(templates)
+
+    def set_remoted(self, instance_ids) -> None:
+        self.remoted = tuple(instance_ids)
 
     def set_lifecycle(
         self,
@@ -975,3 +979,70 @@ def test_busy_presenter_refuses_close_then_closes_its_worker_and_rejects_work(
     assert manager.close() is True
     assert worker_closed == [True]
     assert manager.discover() is False
+
+
+def test_remote_toggle_publishes_and_withdraws_on_the_fabric(tmp_path) -> None:
+    """One click beside Control publishes; a second withdraws; unload withdraws.
+
+    A tunable device (the virtual RF -- the real driver over a memory
+    library) is served by the fabric's generic data plane; the published
+    set always names exactly what this machine can still serve.
+    """
+
+    from zlc_atom.devices.remote.fabric import list_remote_devices
+    from zlc_atom.devices.rf.vaunix_lms import VaunixLmsConfig
+    from zlc_atom.devices.simulation.rf import virtual_rf_source
+    from zlc_atom.install import discover_device_catalog
+
+    rf_type = next(
+        item
+        for item in discover_device_catalog().available
+        if item.type_id == "rf.virtual"
+    )
+    initial = InstallationConfig(
+        (
+            DeviceInstanceConfig(
+                instance_id="rf",
+                role="detuning",
+                type_id=rf_type.type_id,
+                parameters=rf_type.authoring_schema.project_values({}),
+            ),
+        )
+    )
+    source = virtual_rf_source(VaunixLmsConfig(serial=1001))
+    session = SimpleNamespace(
+        installation=SimpleNamespace(
+            devices={"rf": SimpleNamespace(device=source)}, failures={}
+        )
+    )
+    view = _ManagerView()
+    manager = DeviceManagerPresenter(
+        view,
+        tmp_path / "apparatus.json",
+        initial_config=initial,
+        initialize_session=lambda _candidate: session,
+    )
+    assert manager.toggle_lifecycle() is True
+    try:
+        assert manager.toggle_remote("rf") is True
+        assert view.remoted == ("rf",)
+        announcer = manager._announcer
+        assert announcer is not None
+        records = list_remote_devices("127.0.0.1", announcer.port)
+        assert [record["instance_id"] for record in records] == ["rf"]
+        assert records[0]["tunable"] is True
+
+        assert manager.toggle_remote("rf") is True
+        assert view.remoted == ()
+        assert list_remote_devices("127.0.0.1", announcer.port) == ()
+
+        # Published again, then unloaded: the fabric follows the session.
+        assert manager.toggle_remote("rf") is True
+        session.installation.devices.clear()
+        manager._show()
+        assert view.remoted == ()
+        assert list_remote_devices("127.0.0.1", announcer.port) == ()
+    finally:
+        if manager._announcer is not None:
+            manager._announcer.close()
+        manager.close()

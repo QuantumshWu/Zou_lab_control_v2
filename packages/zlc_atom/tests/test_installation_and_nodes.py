@@ -56,6 +56,7 @@ def test_device_discovery_is_the_leaf_manifest() -> None:
         "camera.pylon",
         "camera.virtual",
         "camera.virtual_mot",
+        "remote.tunable",
         "rf.rigol_dg4000",
         "rf.vaunix_lms",
         "rf.virtual",
