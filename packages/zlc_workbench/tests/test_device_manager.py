@@ -60,11 +60,16 @@ class _ManagerView:
         self.device_open_requested = _Signal()
         self.device_close_requested = _Signal()
         self.device_remote_toggled = _Signal()
+        self.server_log_requested = _Signal()
         self.choices: tuple = ()
+        self.server_log_opened: list = []
         self.devices: tuple = ()
         self.forms: dict = {}
         self.values: dict = {}
         self.status: list[tuple[str, str]] = []
+
+    def open_server_log(self, snapshot) -> None:
+        self.server_log_opened.append(snapshot)
 
     def set_discovery_enabled(self, enabled, reason="") -> None:
         self.discovery_enabled = (bool(enabled), str(reason))
@@ -1045,4 +1050,159 @@ def test_remote_toggle_publishes_and_withdraws_on_the_fabric(tmp_path) -> None:
     finally:
         if manager._announcer is not None:
             manager._announcer.close()
+        manager.close()
+
+
+def test_a_published_device_refuses_local_control_until_withdrawn(tmp_path) -> None:
+    """Remote means remote: whoever dialled in owns the knobs.
+
+    Publishing hands the device to the fabric; the local Control button
+    is refused BY NAME until Remote is withdrawn -- two hands on one
+    knob is exactly what publishing exists to prevent.
+    """
+
+    from zlc_atom.devices.rf.vaunix_lms import VaunixLmsConfig
+    from zlc_atom.devices.simulation.rf import virtual_rf_source
+    from zlc_atom.install import discover_device_catalog
+
+    rf_type = next(
+        item
+        for item in discover_device_catalog().available
+        if item.type_id == "rf.virtual"
+    )
+    initial = InstallationConfig(
+        (
+            DeviceInstanceConfig(
+                instance_id="rf",
+                role="detuning",
+                type_id=rf_type.type_id,
+                parameters=rf_type.authoring_schema.project_values({}),
+            ),
+        )
+    )
+    source = virtual_rf_source(VaunixLmsConfig(serial=1001))
+    session = SimpleNamespace(
+        installation=SimpleNamespace(
+            devices={"rf": SimpleNamespace(device=source)}, failures={}
+        )
+    )
+    view = _ManagerView()
+    opened: list[str] = []
+    manager = DeviceManagerPresenter(
+        view,
+        tmp_path / "apparatus.json",
+        initial_config=initial,
+        initialize_session=lambda _candidate: session,
+        on_device_open=opened.append,
+    )
+    assert manager.toggle_lifecycle() is True
+    try:
+        assert manager.open_device("rf") is True
+        assert opened == ["rf"]
+
+        assert manager.toggle_remote("rf") is True
+        assert manager.open_device("rf") is False
+        assert opened == ["rf"], "a published device must not open locally"
+        assert "withdraw Remote" in view.status[-1][1]
+
+        assert manager.toggle_remote("rf") is True
+        assert manager.open_device("rf") is True
+        assert opened == ["rf", "rf"]
+    finally:
+        if manager._announcer is not None:
+            manager._announcer.close()
+        manager.close()
+
+
+def test_a_self_serving_type_is_published_as_its_client_shape(tmp_path) -> None:
+    """sequencer.local is announced as sequencer.hardware at this machine.
+
+    The authored parameters are the SERVER's (backend, port); a peer needs
+    the CLIENT's (host, port).  The family's announce hook does that
+    mapping, and the presenter substitutes this machine's LAN address for
+    the loopback the hook returns.
+    """
+
+    from zlc_atom.devices.remote.fabric import list_remote_devices, local_lan_ip
+    from zlc_atom.install import discover_device_catalog
+
+    local_type = next(
+        item
+        for item in discover_device_catalog().available
+        if item.type_id == "sequencer.local"
+    )
+    initial = InstallationConfig(
+        (
+            DeviceInstanceConfig(
+                instance_id="board",
+                role="sequencer",
+                type_id=local_type.type_id,
+                parameters=local_type.authoring_schema.project_values(
+                    {"port": 18899}
+                ),
+            ),
+        )
+    )
+    session = SimpleNamespace(
+        installation=SimpleNamespace(
+            devices={"board": SimpleNamespace(device=object())}, failures={}
+        )
+    )
+    view = _ManagerView()
+    manager = DeviceManagerPresenter(
+        view,
+        tmp_path / "apparatus.json",
+        initial_config=initial,
+        initialize_session=lambda _candidate: session,
+    )
+    assert manager.toggle_lifecycle() is True
+    try:
+        assert manager.toggle_remote("board") is True
+        announcer = manager._announcer
+        assert announcer is not None
+        (record,) = list_remote_devices("127.0.0.1", announcer.port)
+        assert record["instance_id"] == "board"
+        assert record["type_id"] == "sequencer.hardware"
+        assert record["tunable"] is False
+        assert record["parameters"] == {
+            "host": local_lan_ip(),
+            "port": 18899,
+        }
+    finally:
+        if manager._announcer is not None:
+            manager._announcer.close()
+        manager.close()
+
+
+def test_the_server_log_tail_collects_every_serving_logger(tmp_path) -> None:
+    """One window shows what the .bat consoles used to scroll.
+
+    The pulse server, the SLM server and the fabric all narrate on their
+    package loggers; the process-wide buffer collects them, and the Server
+    log button hands the view that buffer's snapshot.
+    """
+
+    import logging
+
+    from zlc_workbench.device_manager import _server_log_buffer
+
+    buffer = _server_log_buffer()
+    assert _server_log_buffer() is buffer, "one capture point per process"
+    before, _lines = buffer.snapshot()
+    logging.getLogger("zlc_pulse.remote").info("ZLC TEST-EVENT alpha")
+    logging.getLogger("zlc_atom.devices.slm.device").info("SLM TEST-EVENT beta")
+    logging.getLogger("zlc_atom.devices.remote.fabric").info("FABRIC TEST-EVENT gamma")
+    total, lines = buffer.snapshot()
+    assert total == before + 3
+    assert lines[-3].endswith("ZLC TEST-EVENT alpha")
+    assert lines[-2].endswith("SLM TEST-EVENT beta")
+    assert lines[-1].endswith("FABRIC TEST-EVENT gamma")
+
+    view = _ManagerView()
+    manager = DeviceManagerPresenter(view, tmp_path / "apparatus.json")
+    try:
+        view.server_log_requested.emit()
+        (snapshot,) = view.server_log_opened
+        assert snapshot()[0] == total
+    finally:
         manager.close()

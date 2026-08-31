@@ -2,7 +2,7 @@
 
 Vivado Tcl and HDL sources for the neutral-atom runtime pulse streamer. The
 user-facing Windows entry points live at repository root in
-`bin\build_and_program.bat` and `bin\run_server.bat`.
+`bin\build_and_program.bat` and `pulse_server`.
 
 This is a short subsystem pointer. The root `ARCHITECTURE_DESIGN.md` and
 `IMPLEMENTATION_PLAN.md` are the active architecture and evidence authorities;

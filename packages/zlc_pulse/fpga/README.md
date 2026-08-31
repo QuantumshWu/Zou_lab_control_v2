@@ -13,7 +13,7 @@ document is a second source of truth.
 
 - `..\..\..\bin\build_and_program.bat`: evidence-driven recovery tool for an established RTL
   defect or design mismatch; it is not part of normal experiment startup.
-- `..\..\..\bin\run_server.bat`: start the thin length-prefixed-JSON pulse server. It owns
+- `pulse_server`: start the thin length-prefixed-JSON pulse server. It owns
   one `zlc_pulse.PulseStreamer` on the FPGA machine before accepting clients.
 - `pulse_streamer/`: frozen HDL (`zlc_edge_streamer.v`,
   `zlc_pulse_streamer_top.v`), Vivado Tcl, and simulation testbenches. The
@@ -52,8 +52,8 @@ sync, not trigger scheduling or point accounting.
 ## Normal Use
 
 ```powershell
-.\bin\run_server.bat --check-config    # print the deployed geometry and RPC policy
-.\bin\run_server.bat                    # start the thin server (host 0.0.0.0, port 18861)
+pulse_server --check-config    # print the deployed geometry and RPC policy
+pulse_server                    # start the thin server (host 0.0.0.0, port 18861)
 ```
 
 The startup window distinguishes the listen bind from client addresses. With
@@ -71,7 +71,7 @@ real disconnect or server shutdown also drives SAFE.
 The `auto` backend enumerates COM ports, tries USB VID/PID descriptors first,
 and accepts one only after the word-63 fingerprint matches. Failed probes are
 closed before continuing; if none match, it falls back to JTAG-to-AXI. Use
-`.\bin\run_server.bat --backend uart --uart-port COM6` to restrict probing to
+`pulse_server --backend uart --uart-port COM6` to restrict probing to
 one port. An explicit UART failure is loud and does not fall back.
 `--backend jtag-axi` and offline `--backend memory` are explicit alternatives.
 There is no `ZLC_PS_SERVER_BACKEND` environment switch.

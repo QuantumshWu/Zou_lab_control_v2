@@ -75,8 +75,10 @@ truth. A DVI command becomes known after presenter acknowledgement and the
 profile settle wait; USB additionally requires display-slot selection and exact
 active-frame readback.
 
-The computer driving the SLM display runs `bin/slm_server.bat` and is the only
-process that owns the output. Like `sequencer.hardware`, the single real
+The computer driving the SLM display serves it from its own bench process
+(the `slm.hamamatsu_x15213_local` device type; the headless `slm_server`
+command is the no-window fallback) and is the only process that owns the
+output. Like `sequencer.hardware`, the single real
 device type `slm.hamamatsu_x15213` stores only its server host and port (default
 `18862`) in the apparatus; `127.0.0.1` is the same-machine form. The proxy reads
 identity, shape, current

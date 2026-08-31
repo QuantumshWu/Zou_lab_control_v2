@@ -32,8 +32,9 @@ Pulse documents use the stable strict root `zlc.pulse` with no numeric format
 version. The codec accepts only the current complete grammar; unsupported
 workspace files are refused.
 
-For a separated FPGA machine, `bin\run_server.bat` starts the thin
-length-prefixed-JSON facade. The server process is the only hardware-transport
+For a separated FPGA machine, the bench serves the board in-process (the
+`sequencer.local` device type), or the headless `pulse_server` command
+starts the same thin length-prefixed-JSON facade. The server process is the only hardware-transport
 owner. The first valid RPC claims the board; a newer valid client takes over
 only after the old physical state reaches verified SAFE. A real disconnect or
 server shutdown also drives SAFE. There is no normal-connection idle timeout,
@@ -52,7 +53,7 @@ matches. Every failed probe is closed before the next port. To restrict the
 probe to one known port, use:
 
 ```powershell
-.\bin\run_server.bat --backend uart --uart-port COM6
+pulse_server --backend uart --uart-port COM6
 ```
 
 If no enumerated UART matches, `auto` falls back to JTAG-to-AXI.

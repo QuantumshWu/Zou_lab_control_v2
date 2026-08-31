@@ -44,7 +44,7 @@ qualified bitstream.
 the selected XDC must still equal the explicit manifest.
 
 The validator accepts explicit XDC/config paths for tests. The normal notebook
-and `bin\run_server.bat` use the checked-in manifest and projections; a remote
+and `pulse_server` use the checked-in manifest and projections; a remote
 client does not read them.
 
 ## Who reads this directory

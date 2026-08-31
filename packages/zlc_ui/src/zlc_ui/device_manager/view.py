@@ -366,6 +366,39 @@ class DeviceControlView(QtWidgets.QWidget):
         self.status_strip.show_status(str(text), str(severity))
 
 
+class _ServerLogView(QtWidgets.QPlainTextEdit):
+    """Live tail of every server this bench process runs.
+
+    The widget polls a snapshot callable instead of being pushed lines:
+    server threads may narrate at any moment, and a poll on the GUI clock is
+    the one crossing that never needs marshalling.
+    """
+
+    def __init__(self, snapshot, parent=None) -> None:
+        super().__init__(parent)
+        self._snapshot = snapshot
+        self._seen = -1
+        self.setReadOnly(True)
+        self.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+        self.setMaximumBlockCount(4200)
+        self._timer = QtCore.QTimer(self)
+        self._timer.setInterval(500)
+        self._timer.timeout.connect(self.refresh)
+        self._timer.start()
+        self.refresh()
+
+    def refresh(self) -> None:
+        total, lines = self._snapshot()
+        if total == self._seen:
+            return
+        self._seen = total
+        bar = self.verticalScrollBar()
+        follow = bar.value() >= bar.maximum() - 4
+        self.setPlainText("\n".join(lines) if lines else "No server events yet.")
+        if follow:
+            bar.setValue(bar.maximum())
+
+
 class DeviceManagerView(QtWidgets.QWidget):
     """The Config surface for one plain-data apparatus draft."""
 
@@ -390,6 +423,8 @@ class DeviceManagerView(QtWidgets.QWidget):
     device_close_requested = QtCore.pyqtSignal(str)
     #: Toggle publishing one loaded device on the bench fabric.
     device_remote_toggled = QtCore.pyqtSignal(str)
+    #: Open the live tail of every server this bench process runs.
+    server_log_requested = QtCore.pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -483,6 +518,15 @@ class DeviceManagerView(QtWidgets.QWidget):
         self.loaded_empty = muted_note_label("No active installation")
         self.loaded_empty.setWordWrap(True)
         self.loaded_layout.addWidget(self.loaded_empty)
+        log_row = QtWidgets.QHBoxLayout()
+        log_row.addStretch(1)
+        self.server_log_button = FluentButton("Server log", color=GREY)
+        self.server_log_button.setToolTip(
+            "Watch every server this machine runs -- the pulse board, the "
+            "SLM, the bench fabric -- narrate in one live window."
+        )
+        log_row.addWidget(self.server_log_button)
+        self.loaded_layout.addLayout(log_row)
         right.addWidget(self.loaded_group)
         self.runtime_note = muted_note_label(
             "Control opens each loaded device in its own window; this window "
@@ -513,6 +557,7 @@ class DeviceManagerView(QtWidgets.QWidget):
         self.status_strip = StatusStrip()
         page.addWidget(self.status_strip)
         self.discover_button.clicked.connect(self.discovery_requested.emit)
+        self.server_log_button.clicked.connect(self.server_log_requested.emit)
         self.save_button.clicked.connect(self.save_requested.emit)
         self.new_combo.activated[int].connect(self._template_chosen)
         self.load_button.clicked.connect(self.load_requested.emit)
@@ -653,6 +698,24 @@ class DeviceManagerView(QtWidgets.QWidget):
                 remote=instance_id in self._remoted,
             )
         self.loaded_empty.setVisible(not devices)
+
+    def open_server_log(self, snapshot) -> None:
+        """Open (or re-front) the live server-log window for this bench."""
+
+        window = getattr(self, "_server_log_window", None)
+        if window is not None and window.isVisible():
+            window.showNormal()
+            window.raise_()
+            window.activateWindow()
+            return
+        from zlc_ui.fluent import open_fluent_window
+
+        self._server_log_window = open_fluent_window(
+            lambda: _ServerLogView(snapshot),
+            title="Server log@Zou lab",
+            owner=self,
+            window_ratio=0.45,
+        )
 
     def set_remoted(self, instance_ids) -> None:
         """Mark which loaded devices are currently published on the fabric."""

@@ -37,7 +37,7 @@ def _parser() -> argparse.ArgumentParser:
         metavar="MODE[:ENDPOINT]",
         help=(
             "connect at startup: 'virtual', or 'remote:HOST:PORT' for a server "
-            "started by zlc_pulse/fpga/run_server.bat (default: stay offline)"
+            "started by pulse_server or a bench serving its own board (default: stay offline)"
         ),
     )
     parser.add_argument(
@@ -51,7 +51,8 @@ def _parser() -> argparse.ArgumentParser:
 def dial(mode: str, endpoint: str):
     """Open the sequencer the operator asked the window for.
 
-    ``remote`` is the server started by ``zlc_pulse/fpga/run_server.bat`` on the
+    ``remote`` is the pulse server (``pulse_server``, or a bench serving
+    its own board via ``sequencer.local``) on the
     machine wired to the board.  ``virtual`` is zlc_pulse's own host driving a
     memory-backed register file -- the real command sequence with the wire
     substituted, which is what makes it worth rehearsing on.

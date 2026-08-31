@@ -56,12 +56,16 @@ the sole installed-only mode, so its final check cannot be masked by source.
 bin\experiment.bat             Device Manager Init -> Task Console
 bin\pulse_editor.bat           Pulse Editor
 bin\figure_viewer.bat          Figure Viewer
-bin\run_server.bat             pulse server only; never builds/programs FPGA
-bin\slm_server.bat             sole SLM server owner; DVI default
 bin\estimate_resources.bat     current checkout geometry/resource estimate
 bin\build_and_program.bat      build if needed, then program volatile FPGA;
                                build-only/flash remain explicit modes
 ```
+
+The machine a board or SLM head is plugged into serves it from the bench
+itself: install `sequencer.local` / `slm.hamamatsu_x15213_local` in the Device
+Manager and Init starts the server in-process (the Server log window shows
+its narration). The headless `pulse_server` / `slm_server` commands remain
+for a machine without a bench window.
 
 Run experiment windows from the folder owning `pulses\`, `data\`, and
 `apparatus.json`, or pass `--workspace`. Set `ZLC_PY_CMD` only when the intended

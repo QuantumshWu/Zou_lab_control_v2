@@ -20,11 +20,14 @@ a temporary build-and-release test.
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 from threading import Lock
+import logging
+import time
 
 from zlc_atom.install.configuration import (
     DeviceInstanceConfig,
@@ -42,6 +45,55 @@ from .authoring_form import display_value, project_schema
 
 
 __all__ = ["DeviceManagerPresenter"]
+
+
+class _ServerLogBuffer(logging.Handler):
+    """Bounded, thread-safe tail of every server this process runs.
+
+    The pulse server, the SLM server and the fabric announcer all narrate on
+    their package loggers; this single process-wide handler is where a bench
+    that serves its own hardware collects that story, so the machine's
+    operator can watch it in a window the way the old .bat console allowed.
+    """
+
+    #: Every in-process server narrates under one of these loggers.
+    SOURCES = ("zlc_pulse.remote", "zlc_atom.devices")
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.INFO)
+        self._lines: deque[str] = deque(maxlen=4000)
+        self._total = 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        stamp = time.strftime("%H:%M:%S", time.localtime(record.created))
+        line = f"[{stamp}] {record.getMessage()}"
+        with self.lock:
+            self._lines.append(line)
+            self._total += 1
+
+    def snapshot(self) -> tuple[int, tuple[str, ...]]:
+        """The running line count and the retained tail, atomically."""
+
+        with self.lock:
+            return self._total, tuple(self._lines)
+
+
+_SERVER_LOG: _ServerLogBuffer | None = None
+
+
+def _server_log_buffer() -> _ServerLogBuffer:
+    """The one capture point, attached on first use for the process's life."""
+
+    global _SERVER_LOG
+    if _SERVER_LOG is None:
+        buffer = _ServerLogBuffer()
+        for name in _ServerLogBuffer.SOURCES:
+            logger = logging.getLogger(name)
+            logger.addHandler(buffer)
+            if logger.getEffectiveLevel() > logging.INFO:
+                logger.setLevel(logging.INFO)
+        _SERVER_LOG = buffer
+    return _SERVER_LOG
 
 
 #: How long one hardware family may take to answer a scan.  Generous, because
@@ -150,6 +202,7 @@ class DeviceManagerPresenter:
         #: here for the process's life; the set names what is out.
         self._announcer = None
         self._remoted: set[str] = set()
+        self._server_log = _server_log_buffer()
         self._active_config: InstallationConfig | None = None
         self._refresh_pending = False
         self._confirm_overwrite = confirm_overwrite
@@ -175,6 +228,7 @@ class DeviceManagerPresenter:
         self.view.device_open_requested.connect(self.open_device)
         self.view.device_remote_toggled.connect(self.toggle_remote)
         self.view.device_close_requested.connect(self.close_device)
+        self.view.server_log_requested.connect(self.show_server_log)
         # What this machine cannot offer is named too, with the reason: a
         # family that will not import used to be simply absent, which reads
         # exactly like a family that does not exist.
@@ -546,6 +600,15 @@ class DeviceManagerPresenter:
         if key not in session.installation.devices:
             self._report(f"no loaded device {key!r}", severity="warning")
             return False
+        if key in self._remoted:
+            # A published device belongs to whoever dialled in; two hands on
+            # one knob is exactly what publishing exists to prevent.
+            self._report(
+                f"{key}: published on the bench fabric -- withdraw Remote "
+                "to control it here",
+                severity="warning",
+            )
+            return False
         if self._on_device_open is None:
             self._report("this Device Manager has no control-window owner", severity="warning")
             return False
@@ -554,6 +617,12 @@ class DeviceManagerPresenter:
         except Exception as error:
             self._report(f"{key}: {error}", severity="error")
             return False
+        return True
+
+    def show_server_log(self) -> bool:
+        """Open the live tail of every server this bench process runs."""
+
+        self.view.open_server_log(self._server_log.snapshot)
         return True
 
     def toggle_remote(self, instance_id: str) -> bool:
@@ -606,8 +675,18 @@ class DeviceManagerPresenter:
                 "settings_provenance",
             )
         )
+        announced_type = config.type_id
         parameters = dict(config.parameters)
+        descriptor = self.types.get(config.type_id)
+        announce = getattr(descriptor, "announce", None)
         if not speaks_tunable:
+            if announce is not None:
+                # A type that serves its own protocol from this process (a
+                # local pulse board, a local SLM) is not reachable under its
+                # own type_id: the family maps it to the CLIENT type a peer
+                # should install against this machine's endpoint.
+                announced_type, announced = announce(parameters)
+                parameters = dict(announced)
             if "host" not in parameters or "port" not in parameters:
                 self._report(
                     f"{key}: neither a tunable surface nor a host/port "
@@ -631,7 +710,7 @@ class DeviceManagerPresenter:
             PublishedDevice(
                 instance_id=key,
                 role=config.role,
-                type_id=config.type_id,
+                type_id=announced_type,
                 parameters=parameters,
                 tunable=device if speaks_tunable else None,
             )

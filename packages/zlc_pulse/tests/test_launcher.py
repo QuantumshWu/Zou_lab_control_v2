@@ -6,9 +6,9 @@ import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
-# In bin/, with everything else a human clicks -- it still drives THIS layer's
-# board, which is why this layer is what checks it.
-LAUNCHER = ROOT.parents[1] / "bin" / "run_server.bat"
+# The server wrapper is gone -- a bench serves its own board in-process -- so
+# the shared _launch.bat plumbing is checked through a wrapper that remains.
+LAUNCHER = ROOT.parents[1] / "bin" / "pulse_editor.bat"
 SHARED_LAUNCHER = ROOT.parents[1] / "bin" / "_launch.bat"
 BUILD_LAUNCHER = ROOT.parents[1] / "bin" / "build_and_program.bat"
 ESTIMATE_LAUNCHER = ROOT.parents[1] / "bin" / "estimate_resources.bat"
@@ -31,8 +31,6 @@ def _run_batch(*args: str, cwd: Path, python_path: Path) -> subprocess.Completed
         {
             "ZLC_FPGA_PYTHON": str(python_path),
             "ZLC_NO_PAUSE": "1",
-            "ZLC_PS_HOST": "127.0.0.1",
-            "ZLC_PS_PORT": "18861",
             "PYTHONPATH": "",
         }
     )
@@ -55,18 +53,11 @@ def _run_batch(*args: str, cwd: Path, python_path: Path) -> subprocess.Completed
 
 def test_real_batch_wrapper_forwards_exact_modes_without_inner_argument(tmp_path) -> None:
     fake = _fake_python(tmp_path / "fake-python.bat")
-    for args in (
-        (),
-        ("--backend", "jtag-axi"),
-        ("--backend", "uart", "--uart-port", "COM7"),
-        ("--help",),
-    ):
-        result = _run_batch(*args, cwd=ROOT, python_path=fake)
-        assert result.returncode == 0, result.stdout + result.stderr
-        assert "FAKE_ARGS=" in result.stdout
-        assert "--inner" not in result.stdout
     no_args = _run_batch(cwd=ROOT, python_path=fake)
-    assert "-m zou_lab_control pulse_server" in no_args.stdout
+    assert no_args.returncode == 0, no_args.stdout + no_args.stderr
+    assert "FAKE_ARGS=" in no_args.stdout
+    assert "--inner" not in no_args.stdout
+    assert "-m zou_lab_control pulse_editor" in no_args.stdout
     shared = SHARED_LAUNCHER.read_text(encoding="utf-8")
     resolver = TOOLS_RESOLVER.read_text(encoding="utf-8")
     assert 'set "PYTHONPATH=%ZLC_TOOL_REPO_ROOT%;%PYTHONPATH%"' in resolver
@@ -81,11 +72,6 @@ def test_real_batch_wrapper_forwards_exact_modes_without_inner_argument(tmp_path
     assert '_resolve_tools.bat" python "%ZLC_HOME%"' in BUILD_LAUNCHER.read_text(
         encoding="utf-8"
     )
-    assert "--host \"127.0.0.1\" --port \"18861\"" in no_args.stdout
-    jtag = _run_batch("--backend", "jtag-axi", cwd=ROOT, python_path=fake)
-    assert "--backend jtag-axi" in jtag.stdout
-    uart = _run_batch("--backend", "uart", "--uart-port", "COM7", cwd=ROOT, python_path=fake)
-    assert "--backend uart --uart-port COM7" in uart.stdout
 
     exact = _run_batch(
         "value with space", "", "bang!value", "μ-value",

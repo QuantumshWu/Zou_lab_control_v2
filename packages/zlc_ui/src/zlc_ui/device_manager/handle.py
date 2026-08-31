@@ -89,6 +89,7 @@ class DeviceManagerHandle(QtCore.QObject):
     device_open_requested = QtCore.pyqtSignal(str)
     device_close_requested = QtCore.pyqtSignal(str)
     device_remote_toggled = QtCore.pyqtSignal(str)
+    server_log_requested = QtCore.pyqtSignal()
     template_selected = QtCore.pyqtSignal(str)
     discovery_requested = QtCore.pyqtSignal()
     discovered_add_requested = QtCore.pyqtSignal(str)
@@ -107,6 +108,7 @@ class DeviceManagerHandle(QtCore.QObject):
         "device_open_requested",
         "device_close_requested",
         "device_remote_toggled",
+        "server_log_requested",
         "template_selected",
         "discovery_requested",
         "discovered_add_requested",
@@ -204,6 +206,9 @@ class DeviceManagerHandle(QtCore.QObject):
 
     def set_remoted(self, instance_ids) -> None:
         self._view.set_remoted(instance_ids)
+
+    def open_server_log(self, snapshot) -> None:
+        self._view.open_server_log(snapshot)
 
     def set_loaded_devices(
         self,
