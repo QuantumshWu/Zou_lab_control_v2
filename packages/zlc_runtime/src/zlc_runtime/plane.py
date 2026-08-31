@@ -1262,6 +1262,16 @@ class SignalDataPlane:
             SignalPublication,
             tuple[SignalPublication, ...],
         ] = WeakKeyDictionary()
+        #: Which of its parent's signals each derived publication CONSUMED.
+        #: This is a fact of the commit that produced it, recorded when it
+        #: happened: the live state table cannot answer it later -- a
+        #: worker-fed producer's selection exists only inside its one
+        #: commit_live call, and a stream that re-arms or retires takes
+        #: source_name with it while the publication lives on in lineage.
+        self._publication_selections: WeakKeyDictionary[
+            SignalPublication,
+            str,
+        ] = WeakKeyDictionary()
         self._states: dict[str, _GenerationState] = {}
         self._starting: set[str] = set()
         self._indexed_history_demands: dict[str, dict[object, int]] = {}
@@ -2074,13 +2084,16 @@ class SignalDataPlane:
                 values,
                 parents=parents,
             )
+            selected_source = worker_signal or state.source_name
+            if parent is not None:
+                self._publication_selections[publication] = selected_source
             replay_parents = (
                 ()
                 if parent is None
                 else (
                     self._slim_publication_locked(
                         parent,
-                        worker_signal or state.source_name,
+                        selected_source,
                         {},
                     ),
                 )
@@ -2568,6 +2581,12 @@ class SignalDataPlane:
                             event_record=value.event_record,
                         )
                         self._publication_parents[publication] = parents
+                        if parents:
+                            # Replay parents are slim: one signal each, and
+                            # that one signal IS the recorded selection.
+                            self._publication_selections[publication] = next(
+                                iter(parents[0].signals)
+                            )
                     retained.append((sequence, publication))
             elif state.publication is not None:
                 retained.append(
@@ -2915,12 +2934,13 @@ class SignalDataPlane:
         if value is None:
             raise RuntimeError("causal parent lost its selected source signal")
         parents = self._resolved_direct_parents_locked(publication)
-        state = self._states.get(publication.event_ref.stream_id.value)
-        parent_signal = (
-            None
-            if state is None or state.generation != publication.event_ref.generation
-            else state.source_name
-        )
+        # What this publication consumed of ITS parent was recorded by the
+        # commit that produced it.  Asking the live state table instead was
+        # the crash: the table answers for the stream's CURRENT generation
+        # (None once it re-arms or retires, and None for a live worker-fed
+        # producer whose selection was never in the table at all), so a
+        # perfectly healthy retained lineage read as "no selected source".
+        parent_signal = self._publication_selections.get(publication)
         slim_parents = tuple(
             self._slim_publication_locked(parent, parent_signal, memo)
             for parent in parents
@@ -2935,6 +2955,8 @@ class SignalDataPlane:
         )
         memo[publication] = slim
         self._publication_parents[slim] = slim_parents
+        if parent_signal is not None:
+            self._publication_selections[slim] = parent_signal
         return slim
 
     def _resolved_direct_parents_locked(

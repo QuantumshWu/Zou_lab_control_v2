@@ -1387,3 +1387,94 @@ def test_direct_latest_commit_retires_without_cleanup_callbacks() -> None:
         assert plane.latest_publication("preview/preview") is None
     finally:
         plane.close()
+
+
+def test_slimming_reads_the_commit_s_recorded_selection_not_the_live_state() -> None:
+    """The bench-killing crash: "derived publication has no selected source signal".
+
+    A measurement producer commits with ``worker_source``: its publication
+    is DERIVED (it consumed one signal of the worker's input publication),
+    but that selection lived only inside the one ``commit_live`` call --
+    the producer state's ``source_name`` is None.  When a downstream
+    processor (a panel ROI) then committed, slimming the causal chain
+    asked the LIVE state table for the selection, got None, and raised out
+    of the commit.  The selection is a fact of the commit, recorded on the
+    publication itself, so the walk now survives a live worker-fed
+    producer and an ancestor stream that re-armed since -- the retained
+    lineage still reaches the true root.
+    """
+
+    wire_declaration = DatasetOutputDeclaration("frame", "test.frame")
+    measurement_declaration = DatasetOutputDeclaration("frame", "test.frame")
+    roi_declaration = DatasetOutputDeclaration("value", "test.value")
+    fit_declaration = DatasetOutputDeclaration("fit", "test.fit")
+    wire = _node("wire", wire_declaration)
+    measurement = _node("measurement", measurement_declaration)
+    roi = _node("roi", roi_declaration)
+    fit = _node("fit", fit_declaration)
+    plane = SignalDataPlane()
+    roi_tap = None
+    fit_tap = None
+    try:
+        plane.begin_generation(wire)
+        plane.commit_live(
+            wire,
+            {"frame": _finite(wire_declaration, value=1.0, total=1, origin=0, written=1)},
+        )
+        wire_publication = plane.latest_publication("wire/frame")
+        assert wire_publication is not None
+
+        plane.begin_generation(measurement)
+        plane.commit_live(
+            measurement,
+            {
+                "frame": _finite(
+                    measurement_declaration, value=2.0, total=1, origin=0, written=1
+                )
+            },
+            worker_source=("wire/frame", wire_publication),
+        )
+        measured = plane.latest_publication("measurement/frame")
+        assert measured is not None
+        assert measured.direct_parent_refs == (wire_publication.event_ref,)
+
+        # The commit that crashed the bench: a processor over the live
+        # worker-fed producer.
+        roi_tap = plane.reserve_follow_processor(
+            roi, source_name="measurement/frame", source_publication=measured
+        )
+        plane.commit_processor(
+            roi,
+            {"value": _finite(roi_declaration, value=3.0, total=1, origin=0, written=1)},
+            source_publication=measured,
+        )
+        derived = plane.latest_publication("roi/value")
+        assert derived is not None
+        assert plane.publication_roots(derived) == frozenset(
+            {wire_publication.event_ref}
+        )
+
+        # An ancestor stream that MOVED ON is the same fact from the other
+        # side: the wire ends and re-arms, then a deeper commit walks the
+        # retained chain -- whose selections were recorded, not re-derived.
+        plane.seal_committed(wire)
+        plane.begin_generation(wire)
+        fit_tap = plane.reserve_follow_processor(
+            fit, source_name="roi/value", source_publication=derived
+        )
+        plane.commit_processor(
+            fit,
+            {"fit": _finite(fit_declaration, value=4.0, total=1, origin=0, written=1)},
+            source_publication=derived,
+        )
+        answered = plane.latest_publication("fit/fit")
+        assert answered is not None
+        assert plane.publication_roots(answered) == frozenset(
+            {wire_publication.event_ref}
+        )
+    finally:
+        if fit_tap is not None:
+            fit_tap.close()
+        if roi_tap is not None:
+            roi_tap.close()
+        plane.close()
