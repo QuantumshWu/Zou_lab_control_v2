@@ -666,6 +666,110 @@ def masked_finite_extrema(values: Any, valid: Any) -> tuple[int, float, float] |
 
 
 # -------------------------------------------------------------- polylines
+@njit(cache=True, parallel=True, nogil=True)
+def raster_error_bars(
+    x,
+    y_low,
+    y_high,
+    offsets,
+    colours,
+    widths,
+    cap_widths,
+    clips,
+    lane_offsets,
+    out,
+):
+    """Raster independent stem/cap error bars with subpixel coverage.
+
+    Each input sample remains one vertical stem and two horizontal caps.  No
+    display-column aggregation is permitted: neighbouring measurements may
+    overlap on screen, but they never become one invented min/max envelope.
+    Axis-aligned rectangle coverage is analytic, so a fractional-DPR or small
+    Facet cell retains antialiasing without a supersampled temporary atlas.
+    """
+
+    height, width = out.shape[:2]
+    # One lane owns one axes.  Facet axes are disjoint and therefore run in
+    # parallel; grouped series on the same axes remain sequential inside one
+    # lane, preserving their alpha-composition order without races.
+    for lane in prange(lane_offsets.size - 1):
+        for group in range(lane_offsets[lane], lane_offsets[lane + 1]):
+            clip_left = max(0, clips[group, 0])
+            clip_top = max(0, clips[group, 1])
+            clip_right = min(width, clips[group, 2])
+            clip_bottom = min(height, clips[group, 3])
+            if clip_right <= clip_left or clip_bottom <= clip_top:
+                continue
+            radius = max(np.float64(0.5), np.float64(widths[group]) * 0.5)
+            cap_half = max(
+                np.float64(0.0), np.float64(cap_widths[group]) * 0.5
+            )
+            alpha_code = np.float64(colours[group, 3]) / np.float64(255.0)
+
+            # Agg's errorbar topology is one LineCollection of all stems
+            # followed by the low-cap and high-cap Line2Ds.  Preserve that
+            # painter order so overlapping translucent bars accumulate the
+            # way the public artist scene does.
+            for primitive in range(3):
+                if primitive and cap_half <= 0.0:
+                    continue
+                for point in range(offsets[group], offsets[group + 1]):
+                    px = np.float64(x[point])
+                    low = np.float64(y_low[point])
+                    high = np.float64(y_high[point])
+                    if not (
+                        np.isfinite(px)
+                        and np.isfinite(low)
+                        and np.isfinite(high)
+                    ):
+                        continue
+                    if high < low:
+                        low, high = high, low
+                    if primitive == 0:
+                        left = px - radius
+                        right = px + radius
+                        top = low
+                        bottom = high
+                    else:
+                        cap_y = low if primitive == 1 else high
+                        left = px - cap_half
+                        right = px + cap_half
+                        top = cap_y - radius
+                        bottom = cap_y + radius
+                    first_column = max(clip_left, int(np.floor(left)))
+                    last_column = min(clip_right, int(np.ceil(right)))
+                    first_row = max(clip_top, int(np.floor(top)))
+                    last_row = min(clip_bottom, int(np.ceil(bottom)))
+                    for column in range(first_column, last_column):
+                        coverage_x = min(
+                            np.float64(column + 1), right
+                        ) - max(np.float64(column), left)
+                        if coverage_x <= 0.0:
+                            continue
+                        for row in range(first_row, last_row):
+                            coverage_y = min(
+                                np.float64(row + 1), bottom
+                            ) - max(np.float64(row), top)
+                            if coverage_y <= 0.0:
+                                continue
+                            alpha = alpha_code * min(
+                                np.float64(1.0), coverage_x * coverage_y
+                            )
+                            inverse = np.float64(1.0) - alpha
+                            for channel in range(3):
+                                value = (
+                                    np.float64(colours[group, channel]) * alpha
+                                    + np.float64(out[row, column, channel]) * inverse
+                                )
+                                out[row, column, channel] = np.uint8(
+                                    min(
+                                        np.float64(255.0),
+                                        np.floor(value + np.float64(0.5)),
+                                    )
+                                )
+                            out[row, column, 3] = np.uint8(255)
+
+
 @njit(cache=True, nogil=True)
 def raster_polylines(vertices, offsets, colours, widths, clips, low, high, out):
     """Stroke monotonic display curves as one antialiased column envelope."""

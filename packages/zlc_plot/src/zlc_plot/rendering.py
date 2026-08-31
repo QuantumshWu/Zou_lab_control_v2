@@ -2548,6 +2548,133 @@ class MatplotlibRenderer:
         )
         return True
 
+    def _raster_error_bars(
+        self,
+        groups: Sequence[Sequence[Any]],
+        canvas: Any,
+    ) -> bool:
+        """Paint the public error-bar topology through one native kernel.
+
+        Matplotlib remains the style/topology owner: the reused artists carry
+        the exact segments, alpha, linewidth, capsize, z-order and focus state.
+        This consumer only transforms those facts to physical pixels and
+        rasterises every independent stem/cap without rebuilding artists or
+        collapsing neighbouring measurements into a display-column envelope.
+        """
+
+        if not groups:
+            return True
+        canvas_rgba = np.asarray(canvas.buffer_rgba())
+        if (
+            canvas_rgba.dtype != np.uint8
+            or canvas_rgba.ndim != 3
+            or canvas_rgba.shape[2] != 4
+            or not canvas_rgba.flags.c_contiguous
+            or not canvas_rgba.flags.writeable
+        ):
+            return False
+        height, width = canvas_rgba.shape[:2]
+        xs: list[np.ndarray] = []
+        lows: list[np.ndarray] = []
+        highs: list[np.ndarray] = []
+        offsets = [0]
+        colours: list[np.ndarray] = []
+        widths: list[float] = []
+        cap_widths: list[float] = []
+        clips: list[tuple[int, int, int, int]] = []
+        lane_offsets = [0]
+        lane_axis: Any | None = None
+        for group in groups:
+            collections = [
+                artist for artist in group if hasattr(artist, "set_segments")
+            ]
+            caps = [
+                artist for artist in group if not hasattr(artist, "set_segments")
+            ]
+            if len(collections) != 1 or len(caps) not in {0, 2}:
+                return False
+            collection = collections[0]
+            if not collection.get_visible():
+                continue
+            axes = getattr(collection, "axes", None)
+            segments = getattr(collection, "_zlc_segment_buffer", None)
+            if (
+                axes is None
+                or not isinstance(segments, np.ndarray)
+                or segments.ndim != 3
+                or segments.shape[1:] != (2, 2)
+                or not segments.size
+            ):
+                return False
+            if lane_axis is None:
+                lane_axis = axes
+            elif axes is not lane_axis:
+                lane_offsets.append(len(xs))
+                lane_axis = axes
+            display = axes.transData.transform(
+                np.asarray(segments, dtype=np.float64).reshape(-1, 2)
+            ).reshape(segments.shape)
+            top_origin = np.asarray(display, dtype=np.float64)
+            top_origin[..., 1] = float(height) - top_origin[..., 1]
+            group_x = np.mean(top_origin[..., 0], axis=1)
+            group_low = np.min(top_origin[..., 1], axis=1)
+            group_high = np.max(top_origin[..., 1], axis=1)
+            xs.append(np.ascontiguousarray(group_x))
+            lows.append(np.ascontiguousarray(group_low))
+            highs.append(np.ascontiguousarray(group_high))
+            offsets.append(offsets[-1] + group_x.size)
+
+            edge = np.asarray(collection.get_edgecolors(), dtype=float)
+            line_width = np.asarray(collection.get_linewidths(), dtype=float)
+            if edge.ndim != 2 or edge.shape[1] != 4 or not edge.shape[0]:
+                return False
+            if line_width.size == 0:
+                return False
+            colours.append(
+                np.clip(np.rint(edge[0] * 255.0), 0, 255).astype(np.uint8)
+            )
+            widths.append(
+                max(
+                    1.0,
+                    float(line_width[0]) * float(self._figure.dpi) / 72.0,
+                )
+            )
+            cap_widths.append(
+                0.0
+                if not caps
+                else max(
+                    0.0,
+                    float(caps[0].get_markersize())
+                    * float(self._figure.dpi)
+                    / 72.0,
+                )
+            )
+            box = axes.bbox
+            clips.append(
+                (
+                    max(0, int(math.floor(float(box.x0)))),
+                    max(0, int(math.floor(float(height) - float(box.y1)))),
+                    min(width, int(math.ceil(float(box.x1)))),
+                    min(height, int(math.ceil(float(height) - float(box.y0)))),
+                )
+            )
+        if not xs:
+            return True
+        lane_offsets.append(len(xs))
+        kernels.raster_error_bars(
+            kernels.readable(np.concatenate(xs)),
+            kernels.readable(np.concatenate(lows)),
+            kernels.readable(np.concatenate(highs)),
+            kernels.readable(np.asarray(offsets, dtype=np.int64)),
+            kernels.readable(np.asarray(colours, dtype=np.uint8)),
+            kernels.readable(np.asarray(widths, dtype=np.float64)),
+            kernels.readable(np.asarray(cap_widths, dtype=np.float64)),
+            kernels.readable(np.asarray(clips, dtype=np.int32)),
+            kernels.readable(np.asarray(lane_offsets, dtype=np.int64)),
+            canvas_rgba,
+        )
+        return True
+
     def _raster_curve_lines(self, lines: Sequence[Any], canvas: Any) -> bool:
         """Stroke current Line2D geometry into the live Agg buffer in one kernel."""
 
@@ -3099,9 +3226,11 @@ class MatplotlibRenderer:
             for entries in self._boundary_chrome_cache.values():
                 boundary_ids.update(id(artist) for artist, _owner, _zorder in entries)
             draw_boundary_ids = boundary_ids
-            for _key, artist in ordered:
-                if id(artist) in bar_ids and artist.get_visible():
-                    self._draw_dynamic_artist(artist, renderer, canvas)
+            bars_native = self._raster_error_bars(bar_groups, canvas)
+            if not bars_native:
+                for _key, artist in ordered:
+                    if id(artist) in bar_ids and artist.get_visible():
+                        self._draw_dynamic_artist(artist, renderer, canvas)
             if self._raster_curve_lines(data_lines, canvas):
                 for _key, artist in ordered:
                     if (

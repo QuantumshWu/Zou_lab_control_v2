@@ -53,7 +53,7 @@
   2. indexed history旧publication改为正常expired cancellation，Panel保留最后完整front与Fit/Setting vocabulary；Edit拆开`data advanced`和真正configuration incompatibility，并让PanelState/frozen target原子同步；
   3. Image保留框架唯一固定square display frame，以x/y cell pitch归一canonical坐标并在frame内绘制square-cell footprint；非方阵数据居中letterbox，数据extent不变；canonical scan coordinate继续提供ticks、selector、overlay和fit，zoom按相同whole-cell span且不改layout；
   4. Single/Facet/Focus共用同一kind-prepared cell state，native/Agg只是两个consumer，删除`curve:native`/`facet:*_native`承担的平行science/presentation truth和无artist fallback空洞；
-  5. Curve SEM保留独立stem/cap并复用公共Agg subpixel/antialias绘制，native只画同一prepared state的连续data/fit line；删除整数列min/max envelope语义；公共ylim包含SEM bounds；Fit source line/scatter模式不再靠搜索现存Line2D决定；
+  5. Curve SEM保留独立stem/cap，Matplotlib artist继续拥有style/topology，native consumer读取其alpha/linewidth/capsize并以subpixel coverage绘制；删除整数列min/max envelope语义；公共ylim包含SEM bounds；Fit source line/scatter模式不再靠搜索现存Line2D决定；
   6. overview Fit文字恢复公共MathText，删除plain glyph parser/atlas及其warm signatures；
   7. 使用`workspace/layout.json`的50×50、4:1 scan step真实链验收square cells、固定zoom box、partial scan Curve持续显示、Fit立即line→scatter、history expiration不清UI、Edit Fit/Refresh/Save，并重新跑真实四Panel性能和全部像素差异矩阵。
 - Panel Edit/Setting性能cut在同一真实Windows Camera Facet链上完成：Direct Producer不再嵌套
