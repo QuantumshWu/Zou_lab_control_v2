@@ -56,12 +56,19 @@ def test_device_discovery_is_the_leaf_manifest() -> None:
         "camera.pylon",
         "camera.virtual",
         "camera.virtual_mot",
+        "rf.rigol_dg4000",
+        "rf.vaunix_lms",
+        "rf.virtual",
         "sequencer.hardware",
         "sequencer.virtual",
         "slm.hamamatsu_x15213",
         "slm.virtual",
     )
-    assert not any(item.type_id.startswith(("rf", "mot", "temperature")) for item in descriptors)
+    # "rf" left this tombstone in 2026-08: the OLD rf family was purged and
+    # must not resurrect by accident.  The rf.* types above are the NEW
+    # family, added deliberately (Rigol DG4000 / Vaunix LMS / virtual), so
+    # the tombstone now guards only the still-dead names.
+    assert not any(item.type_id.startswith(("mot", "temperature")) for item in descriptors)
 
 
 def test_sequencer_control_is_plugin_owned_and_lazily_discovered(tmp_path: Path) -> None:

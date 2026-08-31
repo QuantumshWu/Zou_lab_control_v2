@@ -1,0 +1,129 @@
+"""Rigol DG4000-series function generator as an RF source, over SCPI.
+
+The instrument speaks SCPI text over VISA (USB-TMC or LAN), and the driver
+is written against a three-verb link so the transport is the ONLY thing a
+test or a virtual bench has to stand in for -- the SCPI vocabulary, the
+read-back discipline and the bound checks are all exercised as shipped.
+
+Frequency is written and read in hertz; power in dBm (the channel's
+amplitude unit is pinned to DBM once at open, so a front-panel change
+cannot silently re-interpret every later write).  ``tune`` returns what the
+instrument reports back, never what was asked -- the scan executor refuses
+any difference, which is how a mistyped bound or a loading-dependent
+amplitude shows up as a named error instead of a wrong dataset column.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Protocol
+
+from zlc_atom.devices.rf.contract import RfSourceBase
+
+
+class ScpiLink(Protocol):
+    """The whole transport surface a SCPI instrument needs."""
+
+    def write(self, command: str) -> None: ...
+
+    def query(self, command: str) -> str: ...
+
+    def close(self) -> None: ...
+
+
+class VisaScpiLink:
+    """A pyvisa resource behind the three-verb link."""
+
+    def __init__(self, resource: str, *, timeout_seconds: float = 5.0) -> None:
+        if not isinstance(resource, str) or not resource.strip():
+            raise ValueError("VISA resource name is required")
+        import pyvisa
+
+        manager = pyvisa.ResourceManager()
+        self._resource = manager.open_resource(resource.strip())
+        self._resource.timeout = int(float(timeout_seconds) * 1000.0)
+
+    def write(self, command: str) -> None:
+        self._resource.write(command)
+
+    def query(self, command: str) -> str:
+        return str(self._resource.query(command))
+
+    def close(self) -> None:
+        self._resource.close()
+
+
+@dataclass(frozen=True)
+class RigolDg4000Config:
+    """Where the instrument is and what this bench allows of it.
+
+    Bounds are AUTHORED, not probed: the add-axis form has to offer a
+    finite range before anything is open, and the bench's own safe window
+    is usually narrower than the instrument's -- a DG4162 goes to 160 MHz,
+    an AOM driver should not.
+    """
+
+    resource: str
+    channel: int = 1
+    frequency_low_hz: float = 1e3
+    frequency_high_hz: float = 160e6
+    power_low_dbm: float = -30.0
+    power_high_dbm: float = 10.0
+    timeout_seconds: float = 5.0
+
+    def __post_init__(self) -> None:
+        if self.channel not in (1, 2):
+            raise ValueError("DG4000 channel must be 1 or 2")
+
+
+class RigolDg4000RfSource(RfSourceBase):
+    def __init__(self, config: RigolDg4000Config, *, link: ScpiLink | None = None) -> None:
+        self.config = config
+        self._link = link if link is not None else VisaScpiLink(
+            config.resource, timeout_seconds=config.timeout_seconds
+        )
+        identity = self._link.query("*IDN?").strip()
+        if not identity:
+            raise RuntimeError("the instrument answered *IDN? with nothing")
+        channel = int(config.channel)
+        self._source = f":SOURce{channel}"
+        self._output = f":OUTPut{channel}"
+        # Pin the amplitude unit once: every later write and read of power
+        # means dBm, whatever the front panel was left showing.
+        self._link.write(f"{self._source}:VOLTage:UNIT DBM")
+        super().__init__(
+            identity=f"{identity}#ch{channel}",
+            frequency_low_hz=config.frequency_low_hz,
+            frequency_high_hz=config.frequency_high_hz,
+            power_low_dbm=config.power_low_dbm,
+            power_high_dbm=config.power_high_dbm,
+        )
+
+    # ------------------------------------------------------- transport verbs
+    def _write_frequency(self, value_hz: float) -> float:
+        self._link.write(f"{self._source}:FREQuency {value_hz:.6f}")
+        return self._read_frequency()
+
+    def _write_power(self, value_dbm: float) -> float:
+        self._link.write(f"{self._source}:VOLTage {value_dbm:.4f}")
+        return self._read_power()
+
+    def _write_output(self, enabled: bool) -> bool:
+        self._link.write(f"{self._output} {'ON' if enabled else 'OFF'}")
+        return self._read_output()
+
+    def _read_frequency(self) -> float:
+        return float(self._link.query(f"{self._source}:FREQuency?"))
+
+    def _read_power(self) -> float:
+        return float(self._link.query(f"{self._source}:VOLTage?"))
+
+    def _read_output(self) -> bool:
+        answer = self._link.query(f"{self._output}?").strip().upper()
+        return answer in ("ON", "1")
+
+    def close(self) -> None:
+        self._link.close()
+
+
+__all__ = ["RigolDg4000Config", "RigolDg4000RfSource", "ScpiLink", "VisaScpiLink"]

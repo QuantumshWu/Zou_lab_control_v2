@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from zlc_atom.devices.camera.contract import CameraAdapter
+from zlc_atom.devices.rf.contract import RfSource
 from zlc_atom.devices.sequencer import SequencerDevice
 from zlc_atom.devices.slm import SlmAdapter
 
 
 CAPABILITY_TYPES: dict[str, type] = {
     "camera.adapter": CameraAdapter,
+    "rf.source": RfSource,
     "sequencer.streamer": SequencerDevice,
     "slm.phase": SlmAdapter,
 }
