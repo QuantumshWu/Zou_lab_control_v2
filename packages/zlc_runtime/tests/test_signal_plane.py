@@ -377,6 +377,8 @@ def test_derived_monitor_materializes_every_source_primary_index() -> None:
         )
         from zlc_runtime import RetainedPublicationExpired
 
+        assert plane.retains("indexed-derived/value", new_publication)
+        assert not plane.retains("indexed-derived/value", second_derived)
         with pytest.raises(RetainedPublicationExpired, match="precedes retained"):
             plane.current_dataset("indexed-derived/value", second_derived)
         small_history.close()
