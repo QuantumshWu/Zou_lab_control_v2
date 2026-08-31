@@ -140,11 +140,9 @@ class _LiveDeviceCard(FluentFrame):
         #: fabric, so the OTHER machine's "Scan hardware" finds it with no
         #: address typed anywhere.  A second click withdraws it.
         self.remote_button = FluentButton("Remote", color=GREY)
-        #: The published device's own console: what remote clients are doing
-        #: to hardware THIS machine serves.  It exists only while published,
-        #: because that is the only time anyone else can be on the knobs.
+        #: The device's own console: who is on its knobs -- local tunes,
+        #: its in-process server, and remote clients once published.
         self.log_button = FluentButton("Log", color=GREY)
-        self.log_button.setVisible(False)
         self.close_button = FluentButton("Close", color=ORANGE)
         outer.addWidget(self.role_label)
         outer.addWidget(self.detail_label, 1)
@@ -170,9 +168,9 @@ class _LiveDeviceCard(FluentFrame):
     ) -> None:
         self.role_label.setText(str(role))
         self.detail_label.setText(f"{type_id} · {self.instance_id}")
-        self.remote_button.setText("Remoted" if remote else "Remote")
+        # Colour alone says published; the caption stays put so the row's
+        # layout does not shuffle every time Remote is toggled.
         self.remote_button.set_color(ACCENT if remote else GREY)
-        self.log_button.setVisible(bool(remote))
         self.setToolTip(self.instance_id)
 
 
@@ -405,7 +403,9 @@ class _ServerLogView(QtWidgets.QPlainTextEdit):
         self._seen = total
         bar = self.verticalScrollBar()
         follow = bar.value() >= bar.maximum() - 4
-        self.setPlainText("\n".join(lines) if lines else "No server events yet.")
+        self.setPlainText(
+            "\n".join(lines) if lines else "No interactions recorded yet."
+        )
         if follow:
             bar.setValue(bar.maximum())
 
@@ -716,10 +716,13 @@ class DeviceManagerView(QtWidgets.QWidget):
             return
         from zlc_ui.fluent import open_fluent_window
 
+        # A plain top-level window, like the pulse editor and the figure
+        # viewer: the owner-parented FluentWindow re-creates its native
+        # window after construction (the flag flip), and on the bench that
+        # produced freezes and closes cascading between owned windows.
         windows[key] = open_fluent_window(
             lambda: _ServerLogView(snapshot),
             title=f"{key} log@Zou lab",
-            owner=self,
             window_ratio=0.45,
         )
 
@@ -728,13 +731,9 @@ class DeviceManagerView(QtWidgets.QWidget):
 
         self._remoted = {str(instance_id) for instance_id in instance_ids}
         for instance_id, card in self._loaded_cards.items():
-            card.remote_button.setText(
-                "Remoted" if instance_id in self._remoted else "Remote"
-            )
             card.remote_button.set_color(
                 ACCENT if instance_id in self._remoted else GREY
             )
-            card.log_button.setVisible(instance_id in self._remoted)
 
     def set_discovery_enabled(
         self,

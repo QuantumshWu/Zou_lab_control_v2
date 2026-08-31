@@ -28,6 +28,7 @@ from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
 
 #: Peers a broadcast cannot reach (a different subnet), named once here
 #: instead of per device: comma-separated hostnames or addresses.
+FABRIC_TUNABLE_TYPE = "remote.tunable"
 FABRIC_PEERS_ENVIRONMENT = "ZLC_FABRIC_PEERS"
 
 REMOTE_TUNABLE_SCHEMA = AuthoringSchema(
@@ -74,7 +75,7 @@ def _remote_tunable_factory(context, key: str, values: dict) -> InstalledLeaf:
     )
     return InstalledLeaf(
         key,
-        "remote.tunable",
+        FABRIC_TUNABLE_TYPE,
         device,
         dict(proof.snapshot),
         binding=binding,
@@ -103,7 +104,7 @@ def _discover_fabric() -> tuple[DeviceInstanceConfig, ...]:
                     DeviceInstanceConfig(
                         instance_id=f"remote_{instance}",
                         role=str(record.get("role") or instance),
-                        type_id="remote.tunable",
+                        type_id=FABRIC_TUNABLE_TYPE,
                         parameters=REMOTE_TUNABLE_SCHEMA.project_values(
                             {
                                 "host": host,
@@ -134,7 +135,7 @@ def _discover_fabric() -> tuple[DeviceInstanceConfig, ...]:
 
 DEVICE_TYPES = (
     DeviceTypeDescriptor(
-        "remote.tunable",
+        FABRIC_TUNABLE_TYPE,
         "remote",
         REMOTE_TUNABLE_SCHEMA,
         (),

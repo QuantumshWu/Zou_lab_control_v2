@@ -372,12 +372,22 @@ class DeviceManagerPresenter:
             self._report(f"no device type {type_id!r}", severity="warning")
             return ""
         role = self._free_name(descriptor.domain)
+        try:
+            # A fresh card is a DRAFT: a required field with no sensible
+            # default (a VISA resource) stands empty for the form to fill.
+            # Init still refuses an incomplete device, per device, by name.
+            parameters = descriptor.authoring_schema.draft_values({})
+        except Exception as error:
+            # A schema defect must land in the status strip, never escape
+            # the Qt slot -- an uncaught exception there aborts the process.
+            self._report(f"{descriptor.type_id}: {error}", severity="error")
+            return ""
         self.devices.append(
             DeviceInstanceConfig(
                 instance_id=role,
                 role=role,
                 type_id=descriptor.type_id,
-                parameters=descriptor.authoring_schema.project_values({}),
+                parameters=parameters,
             )
         )
         self._touch(f"added {role} ({descriptor.type_id})")
@@ -553,7 +563,7 @@ class DeviceManagerPresenter:
             lambda item: replace(
                 item,
                 type_id=descriptor.type_id,
-                parameters=descriptor.authoring_schema.project_values(),
+                parameters=descriptor.authoring_schema.draft_values(),
             ),
         )
 
@@ -571,7 +581,9 @@ class DeviceManagerPresenter:
             return False
         schema = self.types[current.type_id].authoring_schema
         try:
-            frozen = schema.project_values(
+            # The form edits a DRAFT; a still-empty required field must not
+            # veto committing the fields that ARE filled.
+            frozen = schema.draft_values(
                 dict(self.view.read_values(str(instance_id)))
             )
         except Exception as error:
@@ -620,23 +632,24 @@ class DeviceManagerPresenter:
         return True
 
     def show_device_log(self, instance_id: str) -> bool:
-        """Open the live log of ONE published device.
+        """Open the live interaction log of ONE loaded device.
 
-        The log exists to watch what remote clients are doing to hardware
-        this machine serves, so it is offered per device and only while
-        the device is published.  What counts as this device's lines: the
-        logger prefixes its type declares (its own in-process server), plus
-        the fabric's lines that name this instance.
+        Every device's story is the union of three narrations: its
+        driver's own verbs (each line tagged ``device=<identity>`` by the
+        contract layer, whoever called them), its in-process server (the
+        logger prefixes its type declares), and the fabric lines naming
+        this instance once it is published.  A device type with none of
+        these yet says so instead of showing someone else's lines.
         """
 
         key = str(instance_id)
-        if key not in self._remoted:
-            self._report(
-                f"{key}: publish it with Remote first -- its log narrates "
-                "what remote clients do",
-                severity="warning",
-            )
+        session = self._active_session
+        leaf = None if session is None else session.installation.devices.get(key)
+        if leaf is None:
+            self._report(f"no loaded device {key!r}", severity="warning")
             return False
+        identity = getattr(leaf.device, "identity", None)
+        identity_token = None if identity is None else f"device={identity}"
         config = next(
             (item for item in self.devices if item.instance_id == key), None
         )
@@ -644,6 +657,12 @@ class DeviceManagerPresenter:
         channels = tuple(getattr(descriptor, "log_channels", ()) or ())
         buffer = self._server_log
         fabric_token = f"device={key}"
+        note = ()
+        if not channels and identity_token is None:
+            note = (
+                "(this device type does not narrate its own interactions "
+                "yet; fabric lines naming it appear once published)",
+            )
 
         def snapshot() -> tuple[int, tuple[str, ...]]:
             total, entries = buffer.snapshot()
@@ -651,12 +670,13 @@ class DeviceManagerPresenter:
                 line
                 for name, line in entries
                 if name.startswith(channels)
+                or (identity_token is not None and line.endswith(identity_token))
                 or (
                     name.startswith("zlc_atom.devices.remote.fabric")
                     and (f"{fabric_token} " in line or line.endswith(fabric_token))
                 )
             )
-            return total, lines
+            return total, note + lines
 
         self.view.open_device_log(key, snapshot)
         return True
@@ -701,6 +721,17 @@ class DeviceManagerPresenter:
         if config is None:
             self._report(f"{key}: no authored configuration to announce", severity="warning")
             return False
+        from zlc_atom.devices.remote.device_types import FABRIC_TUNABLE_TYPE
+
+        if config.type_id == FABRIC_TUNABLE_TYPE:
+            # Publishing is for hardware THIS machine serves; a device that
+            # already came over the fabric would only make a relay loop.
+            self._report(
+                f"{key}: this device already comes from the bench fabric -- "
+                "publish it on the machine that owns it",
+                severity="warning",
+            )
+            return False
         device = leaf.device
         speaks_tunable = all(
             callable(getattr(device, name, None))
@@ -730,10 +761,19 @@ class DeviceManagerPresenter:
                     severity="warning",
                 )
                 return False
+            authored_host = str(parameters["host"]).strip()
+            if authored_host.lower() not in ("", "127.0.0.1", "localhost"):
+                # A client whose server lives elsewhere has nothing of THIS
+                # machine's to publish.
+                self._report(
+                    f"{key}: its server lives on {authored_host} -- publish "
+                    "it from that machine",
+                    severity="warning",
+                )
+                return False
             # The authored host is where THIS machine dials its own server
-            # (usually loopback); a peer needs this machine's address.
-            if str(parameters["host"]).strip() in ("", "127.0.0.1", "localhost"):
-                parameters["host"] = local_lan_ip()
+            # (loopback); a peer needs this machine's address.
+            parameters["host"] = local_lan_ip()
         if self._announcer is None:
             try:
                 self._announcer = DeviceAnnouncer()
@@ -1165,7 +1205,7 @@ class DeviceManagerPresenter:
             return item
         return replace(
             item,
-            parameters=descriptor.authoring_schema.project_values(item.parameters),
+            parameters=descriptor.authoring_schema.draft_values(item.parameters),
         )
 
     def _free_name(self, domain: str) -> str:

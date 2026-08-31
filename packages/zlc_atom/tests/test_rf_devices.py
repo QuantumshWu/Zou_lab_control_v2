@@ -184,3 +184,46 @@ def test_a_missing_brick_is_a_named_lookup_error() -> None:
         VaunixLmsRfSource(
             VaunixLmsConfig(serial=42), library=InMemoryLmsLibrary((7,))
         )
+
+
+def test_every_interaction_narrates_at_the_contract_layer(caplog) -> None:
+    """Whoever moves a knob, the instrument's log tells the same story.
+
+    The lines land on the ``zlc_atom.devices.rf`` loggers and each ends
+    with ``device=<identity>``, which is how a bench window shows one
+    instrument's story and nobody else's.
+    """
+
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="zlc_atom.devices.rf"):
+        source = virtual_rf_source(VaunixLmsConfig(serial=77))
+        source.tune(FREQUENCY_FIELD, 1_000_000_000.0)
+        with pytest.raises(ValueError):
+            source.tune(FREQUENCY_FIELD, 1_000_000_005.0)
+    lines = [record.getMessage() for record in caplog.records]
+    assert any(
+        line.startswith("OPEN NORMALIZED field=frequency_hz")
+        and line.endswith(f"device={source.identity}")
+        for line in lines
+    ), lines
+    assert any(
+        line.startswith("TUNE field=frequency_hz value=1000000000.0")
+        and line.endswith(f"device={source.identity}")
+        for line in lines
+    )
+    assert any(
+        line.startswith("TUNE REFUSED field=frequency_hz")
+        and line.endswith(f"device={source.identity}")
+        for line in lines
+    )
+
+
+def test_a_machine_without_the_vaunix_dll_simply_finds_no_bricks(monkeypatch) -> None:
+    import zlc_atom.devices.rf.device_types as module
+
+    def _no_dll(_path):
+        raise FileNotFoundError("Could not find module 'vnx_fmsynth.dll'")
+
+    monkeypatch.setattr(module, "CtypesLmsLibrary", _no_dll)
+    assert module._discover_vaunix() == ()

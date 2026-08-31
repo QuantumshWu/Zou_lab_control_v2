@@ -32,6 +32,7 @@ plumbing here owns the rules that must not fork per driver:
 
 from __future__ import annotations
 
+import logging
 import math
 import threading
 from typing import Any, Mapping, Protocol, runtime_checkable
@@ -41,6 +42,12 @@ from zlc_atom.authoring import AuthoringField, TunableField
 FREQUENCY_FIELD = "frequency_hz"
 POWER_FIELD = "power_dbm"
 OUTPUT_FIELD = "output_enabled"
+
+#: Interactions narrate HERE, in the contract, so every path that moves a
+#: knob -- a scan's device axis, the control panel, a notebook, a remote
+#: client -- leaves the same trace.  Each line ends with ``device=<identity>``
+#: so a bench window can show one instrument's story and nobody else's.
+_LOG = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -152,18 +159,30 @@ class RfSourceBase:
                 <= frequency
                 <= self._frequency_bounds[1]
             ):
-                self._write_frequency(
-                    channel,
-                    min(
-                        max(frequency, self._frequency_bounds[0]),
-                        self._frequency_bounds[1],
-                    ),
+                bounded = min(
+                    max(frequency, self._frequency_bounds[0]),
+                    self._frequency_bounds[1],
+                )
+                self._write_frequency(channel, bounded)
+                _LOG.info(
+                    "OPEN NORMALIZED field=%s from=%r to=%r device=%s",
+                    channel_field(channel, FREQUENCY_FIELD),
+                    frequency,
+                    bounded,
+                    self._identity,
                 )
             power = float(self._read_power(channel))
             if not (self._power_bounds[0] <= power <= self._power_bounds[1]):
-                self._write_power(
-                    channel,
-                    min(max(power, self._power_bounds[0]), self._power_bounds[1]),
+                bounded = min(
+                    max(power, self._power_bounds[0]), self._power_bounds[1]
+                )
+                self._write_power(channel, bounded)
+                _LOG.info(
+                    "OPEN NORMALIZED field=%s from=%r to=%r device=%s",
+                    channel_field(channel, POWER_FIELD),
+                    power,
+                    bounded,
+                    self._identity,
                 )
 
     # ------------------------------------------------------- transport verbs
@@ -267,6 +286,12 @@ class RfSourceBase:
                 )
             return values
 
+    @property
+    def identity(self) -> str:
+        """The instrument's own name, as its log lines are tagged."""
+
+        return self._identity
+
     def settings_provenance(self) -> dict[str, object]:
         with self._condition:
             return {
@@ -275,6 +300,28 @@ class RfSourceBase:
             }
 
     def tune(self, name: str, value: Any) -> Any:
+        try:
+            effective = self._resolve_tune(name, value)
+        except Exception as error:
+            _LOG.info(
+                "TUNE REFUSED field=%s value=%r error=%s: %s -- device=%s",
+                name,
+                value,
+                type(error).__name__,
+                str(error).replace(chr(10), " "),
+                self._identity,
+            )
+            raise
+        _LOG.info(
+            "TUNE field=%s value=%r effective=%r device=%s",
+            name,
+            value,
+            effective,
+            self._identity,
+        )
+        return effective
+
+    def _resolve_tune(self, name: str, value: Any) -> Any:
         selected = str(name)
         routed = self._routing.get(selected)
         if routed is None:

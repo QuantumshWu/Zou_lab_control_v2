@@ -140,17 +140,48 @@ class AuthoringSchema:
     ) -> dict[str, Any]:
         """Convert one raw draft and validate it through its sole domain owner."""
 
+        return self._project(values, require_complete=True)
+
+    def draft_values(
+        self,
+        values: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Project an EDITABLE draft: everything checks except completeness.
+
+        Coercion, grids, bounds and choices apply exactly as at build time,
+        but a required field may stand empty -- the form exists to fill it,
+        and a type whose required field has no sensible default (a VISA
+        resource) must still be addable.  The cross-field validator waits
+        until every required field is present, because it is written
+        against complete value sets.  ``project_values`` at Init keeps
+        refusing anything incomplete, per device, by name.
+        """
+
+        return self._project(values, require_complete=False)
+
+    def _project(
+        self,
+        values: Mapping[str, Any] | None,
+        *,
+        require_complete: bool,
+    ) -> dict[str, Any]:
         supplied = dict(values or {})
         unknown = set(supplied) - set(self.field_names)
         if unknown:
             raise ValueError(f"unknown authoring fields: {sorted(unknown)}")
         result: dict[str, Any] = {}
+        complete = True
         for field in self.fields:
             value = _project_value(field, supplied.get(field.name, field.default))
-            if value is None and field.required:
-                raise ValueError(f"missing required authoring field {field.name!r}")
-            if isinstance(value, str) and field.required and not value.strip():
-                raise ValueError(f"missing required authoring field {field.name!r}")
+            vacant = value is None or (
+                isinstance(value, str) and field.required and not value.strip()
+            )
+            if vacant and field.required:
+                if require_complete:
+                    raise ValueError(
+                        f"missing required authoring field {field.name!r}"
+                    )
+                complete = False
             if field.choices and value is not None and not any(
                 _typed_equal(value, choice.value) for choice in field.choices
             ):
@@ -162,7 +193,7 @@ class AuthoringSchema:
                 if field.maximum is not None and value > field.maximum:
                     raise ValueError(f"{field.name!r} is above its maximum")
             result[field.name] = value
-        if self.validator is not None:
+        if self.validator is not None and complete:
             self.validator(result)
         return result
 

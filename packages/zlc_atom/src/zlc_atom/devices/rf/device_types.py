@@ -133,7 +133,12 @@ def _vaunix_factory(context, key: str, values: dict) -> InstalledLeaf:
 def _discover_vaunix() -> tuple[DeviceInstanceConfig, ...]:
     """Every attached Lab Brick, by serial -- a count read, no opens."""
 
-    library = CtypesLmsLibrary("vnx_fmsynth.dll")
+    try:
+        library = CtypesLmsLibrary("vnx_fmsynth.dll")
+    except OSError:
+        # No vendor DLL on this machine means no bricks to find, the same
+        # ordinary emptiness as no bricks attached -- not a scan error.
+        return ()
     return tuple(
         DeviceInstanceConfig(
             instance_id=f"lms_{serial}",

@@ -388,6 +388,9 @@ class RemoteTunableDevice:
         self._host = str(host)
         self._port = int(port)
         self._instance = str(instance_id)
+        #: How this proxy's OWN log lines are tagged on the consuming bench;
+        #: the serving machine tags the same actions with its instance id.
+        self.identity = f"fabric:{self._instance}@{self._host}:{self._port}"
         described = _call(
             self._host,
             self._port,
@@ -433,7 +436,28 @@ class RemoteTunableDevice:
         )
 
     def tune(self, name: str, value: Any) -> Any:
-        return self._call("tune", name=str(name), value=value)["effective"]
+        try:
+            effective = self._call("tune", name=str(name), value=value)[
+                "effective"
+            ]
+        except Exception as error:
+            _LOG.info(
+                "TUNE REFUSED field=%s value=%r error=%s: %s -- device=%s",
+                name,
+                value,
+                type(error).__name__,
+                str(error).replace(chr(10), " "),
+                self.identity,
+            )
+            raise
+        _LOG.info(
+            "TUNE field=%s value=%r effective=%r device=%s",
+            name,
+            value,
+            effective,
+            self.identity,
+        )
+        return effective
 
     def tunable_values(self) -> dict[str, Any]:
         return dict(self._call("values")["values"])

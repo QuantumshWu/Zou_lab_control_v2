@@ -307,3 +307,24 @@ def test_local_types_announce_the_client_shape_a_peer_installs() -> None:
         "zlc_atom.devices.slm",
     )
     assert items["rf.virtual"].log_channels == ()
+
+
+def test_a_draft_projects_without_completeness_and_init_still_refuses() -> None:
+    """draft_values is the add-form's projection; project_values is Init's.
+
+    Coercion, choices and bounds hold in BOTH; only completeness (and the
+    cross-field validator, which is written against complete value sets)
+    waits for the strict one.
+    """
+
+    import pytest
+
+    from zlc_atom.devices.rf.device_types import RIGOL_DG4000_SCHEMA
+
+    draft = RIGOL_DG4000_SCHEMA.draft_values({})
+    assert draft["resource"] == ""
+    assert draft["frequency_high_hz"] == 160e6
+    with pytest.raises(ValueError, match="required authoring field 'resource'"):
+        RIGOL_DG4000_SCHEMA.project_values({})
+    with pytest.raises(ValueError, match="below its minimum"):
+        RIGOL_DG4000_SCHEMA.draft_values({"frequency_low_hz": -1.0})

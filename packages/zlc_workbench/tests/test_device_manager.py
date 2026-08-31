@@ -1219,10 +1219,18 @@ def test_each_published_device_reads_only_its_own_log(tmp_path) -> None:
     )
     assert manager.toggle_lifecycle() is True
     try:
-        assert manager.show_device_log("rf") is False, (
-            "an unpublished device has no log"
-        )
-        assert "Remote first" in view.status[-1][1]
+        # Before any publishing, the device's OWN interactions already
+        # narrate: the contract layer tags every tune with the hardware
+        # identity, whoever called it.
+        source.tune("frequency_hz", 1_000_000_000.0)
+        assert manager.show_device_log("rf") is True
+        (_key, local_snapshot) = view.device_logs_opened[-1]
+        _total, local_lines = local_snapshot()
+        assert any(
+            "TUNE field=frequency_hz" in line
+            and line.endswith(f"device={source.identity}")
+            for line in local_lines
+        ), local_lines
 
         assert manager.toggle_remote("rf") is True
         logging.getLogger("zlc_pulse.remote").info("ZLC NOISE for the board")
@@ -1236,7 +1244,7 @@ def test_each_published_device_reads_only_its_own_log(tmp_path) -> None:
             "FABRIC WITHDRAW device=rf"
         )
         assert manager.show_device_log("rf") is True
-        ((key, snapshot),) = view.device_logs_opened
+        (key, snapshot) = view.device_logs_opened[-1]
         assert key == "rf"
         _total, lines = snapshot()
         tails = [line.split("] ", 1)[1] for line in lines]
@@ -1312,4 +1320,84 @@ def test_a_local_server_device_s_log_includes_its_declared_channels(tmp_path) ->
     finally:
         if manager._announcer is not None:
             manager._announcer.close()
+        manager.close()
+
+
+def test_devices_from_the_fabric_or_another_machine_refuse_remote(tmp_path) -> None:
+    """Publishing is for hardware THIS machine serves.
+
+    A remote.tunable came over the fabric -- republishing it would only
+    build a relay loop -- and an endpoint client whose server lives on
+    another machine has nothing of this machine's to announce.
+    """
+
+    from zlc_atom.install import discover_device_catalog
+
+    items = {
+        item.type_id: item for item in discover_device_catalog().available
+    }
+    initial = InstallationConfig(
+        (
+            DeviceInstanceConfig(
+                instance_id="borrowed",
+                role="detuning",
+                type_id="remote.tunable",
+                parameters=items["remote.tunable"].authoring_schema.draft_values(
+                    {"host": "192.0.2.9", "port": 18859, "instance_id": "rf"}
+                ),
+            ),
+            DeviceInstanceConfig(
+                instance_id="faraway",
+                role="sequencer",
+                type_id="sequencer.hardware",
+                parameters={"host": "10.0.0.7", "port": 18861},
+            ),
+        )
+    )
+    session = SimpleNamespace(
+        installation=SimpleNamespace(
+            devices={
+                "borrowed": SimpleNamespace(device=object()),
+                "faraway": SimpleNamespace(device=object()),
+            },
+            failures={},
+        )
+    )
+    view = _ManagerView()
+    manager = DeviceManagerPresenter(
+        view,
+        tmp_path / "apparatus.json",
+        initial_config=initial,
+        initialize_session=lambda _candidate: session,
+    )
+    assert manager.toggle_lifecycle() is True
+    try:
+        assert manager.toggle_remote("borrowed") is False
+        assert "comes from the bench fabric" in view.status[-1][1]
+        assert manager.toggle_remote("faraway") is False
+        assert "publish it from that machine" in view.status[-1][1]
+        assert manager._announcer is None, "nothing was ever announced"
+        assert view.remoted == ()
+    finally:
+        manager.close()
+
+
+def test_adding_a_type_whose_required_field_has_no_default_is_a_draft(tmp_path) -> None:
+    """Add rf must not abort the bench: the empty resource is the form's job.
+
+    The strict projection stays exactly where it belongs -- Init -- which
+    still refuses the incomplete device by name instead of building it.
+    """
+
+    view = _ManagerView()
+    manager = DeviceManagerPresenter(view, tmp_path / "apparatus.json")
+    try:
+        role = manager.add_device("rf.rigol_dg4000")
+        assert role
+        added = next(item for item in manager.devices if item.role == role)
+        assert added.parameters["resource"] == ""
+        # And the draft survives the type flip too (same latent bomb).
+        camera_role = manager.add_device("camera.virtual")
+        assert manager.set_type(camera_role, "rf.rigol_dg4000") is True
+    finally:
         manager.close()
