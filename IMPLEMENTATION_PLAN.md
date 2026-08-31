@@ -48,6 +48,14 @@
   264.37→58.85 ms、P90为286.34→66.89 ms；70组reduction/validity/group矩阵满足
   既有浮点数值等价与结构精确contract，聚焦回归63项通过。
 - Facet/Single规则tensor投影已收敛到同一retained-axis reduction：一次保留`facet/x/y/group`真实tensor axes、一次归约其它轴，Curve/Image只包装不同payload；Histogram继续共用其批量分箱terminal。Curve/Image/Fit/SEM的native raster快路保留，并继续以完整差异像素而非阈值子集评价其Agg接近度；不得通过回退Agg把差异人为归零。RegularImage即使有完整warm seed也保留cold proxy竞争；Board的active-fit staging保持不变。
+- 当前Render coherence Goal按以下顺序根修，全部在现有owner内完成且允许证据驱动调整实现细节：
+  1. clim move合并为`candidate+clim mutation+compose+front`一次原子preview；
+  2. indexed history旧publication改为正常expired cancellation，Panel保留最后完整front与Fit/Setting vocabulary；Edit拆开`data advanced`和真正configuration incompatibility，并让PanelState/frozen target原子同步；
+  3. Image改用square-cell lattice painted geometry，layout读取`rows/columns`，canonical scan coordinate只通过唯一transform提供ticks、selector、overlay和fit；zoom固定content box且不做canonical square padding；
+  4. Single/Facet/Focus共用同一kind-prepared cell state，native/Agg只是两个consumer，删除`curve:native`/`facet:*_native`承担的平行science/presentation truth和无artist fallback空洞；
+  5. Curve SEM保留独立stem/cap并做subpixel/supersampled overview raster，删除整数列min/max envelope语义；公共ylim包含SEM bounds；Fit source line/scatter模式不再靠搜索现存Line2D决定；
+  6. overview Fit文字恢复公共MathText，删除plain glyph parser/atlas及其warm signatures；
+  7. 使用`workspace/layout.json`的50×50、4:1 scan step真实链验收square cells、固定zoom box、partial scan Curve持续显示、Fit立即line→scatter、history expiration不清UI、Edit Fit/Refresh/Save，并重新跑真实四Panel性能和全部像素差异矩阵。
 - Panel Edit/Setting性能cut在同一真实Windows Camera Facet链上完成：Direct Producer不再嵌套
   LogicEditor而只打开已有Logic tab；Qt owner在Host首次render前传入screen DPR；正常已settle
   Edit首开`update_projection 3→1`、`refresh_panel_editor 3→0`、Form reconcile `19→4`、
