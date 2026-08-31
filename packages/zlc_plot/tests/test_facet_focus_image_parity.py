@@ -283,10 +283,22 @@ def test_focused_cell_colour_limit_drag_moves_the_cell_clim() -> None:
             return 1.0 - (top + (value - y_high) / (y_low - y_high) * (bottom - top))
 
         target = high - 0.25 * (high - low)
+        before = np.array(session.rgba(), copy=True)
         session._raster_pointer_event(
             "press", middle_x, pointer_y(high), button=1, axes_snapshot=transform
         )
-        session._raster_pointer_event("move", middle_x, pointer_y(target), button=1)
+        moved = session._raster_pointer_event(
+            "move", middle_x, pointer_y(target), button=1
+        )
+        assert moved.publish_front
+        during = np.array(session.rgba(), copy=True)
+        assert np.any(during != before), "clim preview waited for button release"
+        assert moved.candidate is not None
+        assert tuple(
+            map(float, renderer._active_image_artist().get_clim())
+        ) == pytest.approx(
+            (moved.candidate.value.low, moved.candidate.value.high)
+        )
         session._raster_pointer_event("release", middle_x, pointer_y(target), button=1)
 
         moved_low, moved_high = renderer.resolved_color_limits()

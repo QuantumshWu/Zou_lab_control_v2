@@ -3897,6 +3897,7 @@ class MatplotlibRenderer:
             return False
         self._color_limit_candidate = candidate
         with style_context(self.style):
+            self.preview_color_limits(candidate.value.low, candidate.value.high)
             self._update_selectors(self._last_selectors)
             self._compose_frame(chrome_stable=True)
         return True
