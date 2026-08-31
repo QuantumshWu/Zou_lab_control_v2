@@ -153,35 +153,34 @@ def test_image_display_unit_change_preserves_canonical_pixel_geometry() -> None:
         image = session._renderer._artists["image"]
         before_bbox = tuple(float(value) for value in axes.bbox.bounds)
         before_array = np.asarray(image.get_array()).copy()
-        assert axes.get_aspect() == 1.0
+        assert axes.get_aspect() == pytest.approx(0.8)
 
         session.set_axis_unit(AxisRef.data("x"), "cm")
 
         image = session._renderer._artists["image"]
         after_bbox = tuple(float(value) for value in axes.bbox.bounds)
         assert np.allclose(after_bbox, before_bbox, rtol=0.0, atol=1.0e-9)
-        assert axes.get_aspect() == 100.0
+        assert axes.get_aspect() == pytest.approx(80.0)
         np.testing.assert_array_equal(np.asarray(image.get_array()), before_array)
         # The display extent changes by the unit conversion, while the
         # renderer's physical box and prepared image remain invariant.  The
-        # PICTURE's extent is the one that carries data coordinates: the
-        # artist's is the view it is composed into, which on a square field
-        # reaches past the picture on the letterboxed side.
+        # picture fills its rows/columns-shaped box; changing display unit
+        # changes only coordinate numbers, not physical cell geometry.
         prepared = session._renderer._artists["image:prepared_current"]
         assert np.isclose(float(prepared.extent[1]), 100.0 * 2.1)
-        assert tuple(map(float, image.get_extent()))[:2] == pytest.approx(
-            tuple(map(float, axes.get_xlim()))
+        assert tuple(map(float, image.get_extent())) == pytest.approx(
+            tuple(map(float, prepared.extent))
         )
     finally:
         session.close()
 
 
-def test_non_equivalent_image_does_not_square_pad_unrelated_axes() -> None:
+def test_non_equivalent_image_still_uses_square_screen_cells() -> None:
     session = _image_session(x_unit="m", y_unit="s")
     try:
         axes = session._renderer.primary_axes
         image = session._renderer._artists["image"]
-        assert axes.get_aspect() == "auto"
+        assert axes.get_aspect() == pytest.approx(0.8)
         extent = tuple(float(value) for value in image.get_extent())
         assert np.allclose(axes.get_xlim(), extent[:2])
         assert np.allclose(axes.get_ylim(), extent[2:])

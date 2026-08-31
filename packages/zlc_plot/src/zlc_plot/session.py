@@ -104,7 +104,7 @@ from .rendering import (
     MatplotlibRenderer,
     RenderFrame,
     _image_axis_span,
-    _image_coordinate_aspect,
+    _image_cell_aspect,
 )
 from .selectors import (
     CrosshairPoint,
@@ -1226,19 +1226,8 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
     def _drawn_image_height_over_width(self, payload: Any) -> float | None:
         """The shape the renderer will actually DRAW an image at.
 
-        ``_image_coordinate_aspect`` says how long one y unit is against one
-        x unit; multiplied by the two spans it gives the drawn box's height
-        over its width.  Where the axes measure unrelated quantities nothing
-        locks the shape, Matplotlib stays in ``auto``, and the answer is
-        ``None`` -- the layout reads that as "no preference".
-
-        This used to answer 1.0 for every locked image, because the renderer
-        then padded the shorter span until the view really was square.  Both
-        halves of that arrangement are gone: a 1200x1920 camera frame now
-        gets a 1.6:1 slot and fills it, instead of a square slot with a third
-        of its area empty and a front that could not be copied.  One
-        payload-level answer serves both surfaces: a facet of image cells
-        asks it of a cell, a standalone image of itself.
+        Cell pitch selects y/x scale, so the full-data box has
+        height/width=rows/columns independent of scan step and display unit.
         """
 
         cells = tuple(getattr(payload, "cells", ()))
@@ -1246,9 +1235,12 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             payload = getattr(cells[0], "payload", None)
         if payload is None or not hasattr(payload, "x") or not hasattr(payload, "y"):
             return 1.0
-        return (
-            1.0 if _image_coordinate_aspect(payload.x, payload.y) is not None else None
-        )
+        aspect = _image_cell_aspect(payload.x, payload.y)
+        x_span = _image_axis_span(payload.x)
+        y_span = _image_axis_span(payload.y)
+        if aspect is None or x_span is None or y_span is None:
+            return None
+        return y_span * aspect / x_span
 
     def _update_renderer(
         self,
@@ -4182,22 +4174,10 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         limits the axes carry are the same number.  The move is under half a
         source pixel -- a thousandth of a 900-pixel view.
 
-        AND THE TWO AXES ARE SNAPPED TOGETHER.  They used to round outward
-        independently, each in its own pitch, so a drag that was a whole
-        sample in x and a fraction in y grew the y span alone: a 900-by-901
-        view in a box that is square by requirement.  Something then absorbs
-        the mismatch -- the picture is stretched where the layout owns the
-        box, and where Matplotlib owns it the box shrinks to the view's
-        aspect and, anchored West, takes the whole shrink off its right
-        edge, out of the gap to the distribution rail.  That gap breathing
-        while an operator drags is this arithmetic, seen.
-
-        Squaring the limits after the fact is NOT the alternative: it takes
-        the view off the pixel grid, and one image front in twenty-seven
-        then loses the exact-copy blit and pays Matplotlib's image machinery
-        instead.  The grid and the square field are both requirements, so
-        the snap satisfies both -- whole samples on each axis, and the same
-        NUMBER of them wherever a sample is the same size on both.
+        THE TWO AXES SNAP TOGETHER at the source rows/columns ratio.  A camera
+        1920x1200 therefore keeps an 8:5 viewport, while a 50x50 scan keeps a
+        square one.  This preserves the fixed layout box and square screen
+        cells through zoom without moving either limit off the source grid.
         """
 
         if selected is None or not isinstance(semantic_spec(self._spec), ImagePlot):
@@ -4246,24 +4226,23 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             lows.append(first)
             counts.append(last - first)
 
-        aspect = _image_coordinate_aspect(*axes_values)
-        # A sample is the same size on both axes exactly when the pitches
-        # agree once the coordinate aspect has been applied.  That is the
-        # square field: same count, same physical span.  Where they differ
-        # there is no count that makes the view square on both grids, and
-        # inventing one would move the picture rather than the box.
-        if aspect is not None and math.isclose(
-            pitches[0], pitches[1] * aspect, rel_tol=1e-9, abs_tol=0.0
-        ):
-            wanted = max(counts)
-            for index, count in enumerate(counts):
-                # Grow OUTWARD and evenly, so the view keeps its centre and
-                # both edges stay on the grid: whole samples, never a half.
-                missing = wanted - count
-                if missing <= 0:
-                    continue
-                lows[index] -= missing // 2
-                counts[index] = wanted
+        full_counts = tuple(
+            np.asarray(getattr(values, "display", values)).size
+            for values in axes_values
+        )
+        divisor = math.gcd(*full_counts)
+        units = (full_counts[0] // divisor, full_counts[1] // divisor)
+        multiple = max(
+            math.ceil(counts[0] / units[0]),
+            math.ceil(counts[1] / units[1]),
+        )
+        wanted = (multiple * units[0], multiple * units[1])
+        for index, count in enumerate(counts):
+            missing = wanted[index] - count
+            if missing <= 0:
+                continue
+            lows[index] -= missing // 2
+            counts[index] = wanted[index]
 
         snapped = [
             NumericRange(

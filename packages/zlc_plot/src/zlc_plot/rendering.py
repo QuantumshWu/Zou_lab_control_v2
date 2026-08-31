@@ -725,10 +725,8 @@ def _image_destination_rect(
     the transform to match, so a rectangle off by one part in a trillion is
     a different picture.
 
-    The image need not fill its axes.  A square field with a 1200x1920 frame
-    letterboxed inside it is exactly the case this exists for: the picture
-    keeps its own shape, and the bands above and below stay whatever the
-    background put there.
+    A zoomed image may occupy only the source-aligned sub-rectangle of its
+    axes; the untouched bands remain whatever the background put there.
     """
 
     left, right, upper, lower = (float(v) for v in extent)
@@ -752,36 +750,6 @@ def _image_destination_rect(
     return (int(round(x_start)), int(round(y_start)), width, height)
 
 
-def _square_image_limits(
-    extent: tuple[float, float, float, float],
-    *,
-    coordinate_aspect: float = 1.0,
-) -> tuple[float, float, float, float]:
-    """Pad the shorter physical span without stretching image pixels."""
-
-    left, right, upper, lower = map(float, extent)
-    x_span = abs(right - left)
-    y_span = abs(lower - upper) * float(coordinate_aspect)
-    if (
-        x_span <= 0.0
-        or y_span <= 0.0
-        or not math.isfinite(float(coordinate_aspect))
-        or float(coordinate_aspect) <= 0.0
-    ):
-        raise ValueError("image extent spans must be positive")
-    if x_span > y_span:
-        padding = (x_span - y_span) / (2.0 * float(coordinate_aspect))
-        direction = 1.0 if lower > upper else -1.0
-        upper -= direction * padding
-        lower += direction * padding
-    elif y_span > x_span:
-        padding = (y_span - x_span) / 2.0
-        direction = 1.0 if right > left else -1.0
-        left -= direction * padding
-        right += direction * padding
-    return left, right, upper, lower
-
-
 def _image_axis_span(coordinates: Any) -> float | None:
     """How wide one image axis is, EXTENT-wise, in display units.
 
@@ -803,24 +771,27 @@ def _image_axis_span(coordinates: Any) -> float | None:
     return span * values.size / (values.size - 1)
 
 
-def _image_coordinate_aspect(x: Any, y: Any) -> float | None:
-    """Return canonical y/x scale, or ``None`` for unrelated quantities.
+def _image_cell_aspect(x: Any, y: Any) -> float | None:
+    """Screen y/x scale that makes one x cell and one y cell equally long."""
 
-    An image whose axes represent different physical dimensions has no
-    meaningful isotropic aspect.  Treating that case as ``1`` silently pads
-    one axis and changes the authored geometry; the renderer must leave it in
-    Matplotlib's normal ``auto`` mode instead.
-    """
-
-    x_unit = getattr(x, "display_unit", None)
-    y_unit = getattr(y, "display_unit", None)
-    if (
-        x_unit is None
-        or y_unit is None
-        or not x_unit.compatible_with(y_unit)
-    ):
-        return None
-    return abs(float(y_unit.scale) / float(x_unit.scale))
+    pitches = []
+    for coordinates in (x, y):
+        values = np.asarray(
+            getattr(coordinates, "display", coordinates), dtype=float
+        ).reshape(-1)
+        if values.size == 0:
+            return None
+        if values.size == 1:
+            pitch = 1.0
+        else:
+            span = _image_axis_span(coordinates)
+            if span is None:
+                return None
+            pitch = span / values.size
+        if not math.isfinite(pitch) or pitch <= 0.0:
+            return None
+        pitches.append(pitch)
+    return pitches[0] / pitches[1]
 
 
 def _histogram_vertices(edges: np.ndarray, counts: np.ndarray) -> np.ndarray:
@@ -5263,7 +5234,6 @@ class MatplotlibRenderer:
         key: str,
         color_limits: tuple[float, float] | None,
         *,
-        square_view: bool,
         coordinate_aspect: float | None,
         valid_identity: object = None,
     ) -> tuple[Any, Any]:
@@ -5294,18 +5264,11 @@ class MatplotlibRenderer:
             self._hide_height_bars_chrome(key)
             self._mark_axes_chrome_dirty(axes)
 
-        # The image panel shows a SQUARE field: an authored requirement, so
-        # a frame that is not square is letterboxed rather than reshaped.
-        # The viewport-sized RGBA front below samples that letterbox in data
-        # coordinates, while the box itself stays a whole-pixel copy target.
-        home_extent = (
-            _square_image_limits(
-                extent,
-                coordinate_aspect=coordinate_aspect,
-            )
-            if square_view and coordinate_aspect is not None
-            else extent
-        )
+        # Cell pitch chooses the axes aspect; the authored data extent fills
+        # that box.  Padding canonical coordinates to force a square field
+        # made unequal scan steps into rectangular cells and turned zoom into
+        # a layout edit.
+        home_extent = extent
         self._home_limits[id(axes)] = (
             (float(home_extent[0]), float(home_extent[1])),
             (float(home_extent[2]), float(home_extent[3])),
@@ -5358,12 +5321,9 @@ class MatplotlibRenderer:
             store = ImageFrontStore()
             self._artists[store_key] = store
         # The PICTURE's pixels, not the box's.  Told the box, the store
-        # reduced only the axis the box happened to crowd -- a 1200x1920
-        # camera in a 1512 square field came back 1200x1512, area-meaned
-        # across but merely re-indexed down, and the rows were then
-        # nearest-decimated to 945 on the way into the front.  One picture
-        # filtered two different ways, and a fifth of the reduction done
-        # twice.
+        # reduced only the axis the box happened to crowd; the source picture
+        # was then nearest-decimated again on its other axis.  One picture
+        # filtered two different ways and repeated part of the reduction.
         display_width = max(display_pixel_shape[0], 1)
         display_height = max(display_pixel_shape[1], 1)
         column_sampling = _view_nearest_map(
@@ -7051,7 +7011,7 @@ class MatplotlibRenderer:
                 if explicit_value and _EXPLICIT_UNIT_SUFFIX.search(explicit_value)
                 else _quantity_label(payload.z, "value", explicit_value)
             ),
-            coordinate_aspect=_image_coordinate_aspect(payload.x, payload.y),
+            coordinate_aspect=_image_cell_aspect(payload.x, payload.y),
             color_limits=color_limits,
             paint_labels=paint_labels,
         )
@@ -7116,7 +7076,6 @@ class MatplotlibRenderer:
             state,
             key,
             (vmin, vmax),
-            square_view=coordinate_aspect is not None,
             coordinate_aspect=coordinate_aspect,
             valid_identity=(
                 None
