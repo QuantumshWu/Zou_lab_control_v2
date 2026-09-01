@@ -10,8 +10,9 @@ Two jobs, kept apart:
 * :func:`describe_archive` projects the document into labelled rows.  It is
   pure, takes no Qt and no session, and is what makes "what was the apparatus
   doing" answerable in a notebook as well as a window.
-* :class:`FigureViewerPresenter` connects those rows and a rebuilt dataset to a
-  mute view.
+* :class:`FigureViewerPresenter` publishes the saved typed datasets into a
+  private Runtime plane and connects those rows to the same Panel engine used
+  by TaskConsole.
 
 Both stop short of scientific interpretation.  Logic and Device facts are
 separated into operator-facing projections, while Raw retains the archive's
@@ -22,26 +23,15 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any
 
-from zlc_plot import (
-    DEFAULTS,
-    paints_image_surface,
-    read_figure_plot,
-)
-from zlc_plot.specs import parameter_schema_for, semantic_spec
+from zlc_plot import read_figure_plot
+from zlc_plot.specs import semantic_spec
 
 from zlc_data.figure_archive import read_archive
-from .panel_catalog import GRID_CELL_KINDS, panel_kind_choices, task_console_fitting_spec
-from .panel_state import (
-    PanelState,
-    fit_edit_targets,
-    panel_data_shape,
-    panel_state_from_description,
-    panel_surface_from_description,
-)
 
 
 __all__ = ["ArchiveDescription", "FigureViewerPresenter", "describe_archive"]
@@ -68,6 +58,194 @@ class ArchiveDescription:
     @property
     def dataset_keys(self) -> tuple[str, ...]:
         return tuple(key for key, _label in self.datasets)
+
+
+class _ArchiveDatasetProducer:
+    """Publish one saved typed Dataset and its saved overlay as one event."""
+
+    def __init__(
+        self,
+        serial: int,
+        index: int,
+        dataset: str,
+        plot_input: object,
+        path: Path,
+    ) -> None:
+        from zlc_plot.primitives import ImageFrame
+        from zlc_runtime import DatasetOutputDeclaration
+
+        safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(dataset)).strip("._")
+        safe = safe or f"dataset-{index + 1}"
+        self.instance_id = f"figure-{serial}-{index + 1}"
+        self.dataset = str(dataset)
+        self.plot_input = plot_input
+        self.path = Path(path)
+        self._data_signal = f"@figure/{serial}/{safe}"
+        self._overlay_signal = f"{self._data_signal}/overlay"
+        overlay = plot_input.overlay if isinstance(plot_input, ImageFrame) else None
+        self._status = None if overlay is None else self._status_snapshot(plot_input)
+        outputs = [DatasetOutputDeclaration("data", "figure.dataset")]
+        if self._status is not None:
+            from zlc_plot import IMAGE_POINT_OVERLAY_CONTRACT
+
+            outputs.append(
+                DatasetOutputDeclaration("overlay", IMAGE_POINT_OVERLAY_CONTRACT)
+            )
+        self.dataset_output_declarations = tuple(outputs)
+
+    def signal_key(self, output_name: str) -> str:
+        if output_name == "data":
+            return self._data_signal
+        if output_name == "overlay" and self._status is not None:
+            return self._overlay_signal
+        raise KeyError(output_name)
+
+    @property
+    def data_signal(self) -> str:
+        return self._data_signal
+
+    @property
+    def overlay_signal(self) -> str:
+        return self._overlay_signal if self._status is not None else ""
+
+    @staticmethod
+    def _status_snapshot(frame: object) -> object | None:
+        import numpy as np
+
+        from zlc_data import (
+            AxisId,
+            AxisSpec,
+            DatasetSchema,
+            SITE,
+            ValidityContract,
+            ValueSchema,
+            owned_snapshot_from_arrays,
+        )
+        from zlc_plot import PointStatus
+
+        overlay = frame.overlay
+        if overlay.status is not None:
+            return overlay.status
+        if overlay.static_statuses is None:
+            return None
+        image = frame.snapshot
+        count = len(overlay.static_statuses)
+        site_axis = AxisSpec(
+            AxisId("figure.overlay.site"),
+            "Site",
+            SITE,
+            count,
+            coordinates=tuple(range(1, count + 1)),
+        )
+        schema = DatasetSchema(
+            image.block.schema.repeat_axis,
+            image.block.schema.point_table,
+            image.block.schema.grid_topology,
+            ValueSchema(
+                (site_axis,),
+                ValidityContract.components(site_axis.axis_id),
+                np.dtype("?"),
+                "1",
+            ),
+        )
+        occupied = np.asarray(
+            tuple(status is PointStatus.OCCUPIED for status in overlay.static_statuses),
+            dtype=np.bool_,
+        )
+        valid = np.asarray(
+            tuple(
+                status in (PointStatus.EMPTY, PointStatus.OCCUPIED)
+                for status in overlay.static_statuses
+            ),
+            dtype=np.bool_,
+        )
+        shape = schema.physical_shape
+        return owned_snapshot_from_arrays(
+            schema,
+            np.broadcast_to(occupied, shape),
+            image.block.revision,
+            validity=np.broadcast_to(valid, shape),
+            stream_generation=image.ref.stream_generation,
+        )
+
+    def publish(self, plane: object) -> object:
+        from zlc_plot import (
+            IMAGE_POINT_OVERLAY_GEOMETRY_RECORD,
+            image_point_overlay_geometry,
+        )
+        from zlc_plot.primitives import ImageFrame
+        from zlc_runtime import LiveDatasetOutput, MonitorCoverage
+
+        snapshot = getattr(self.plot_input, "snapshot", self.plot_input)
+        run_record: dict[str, object] = {
+            "node": self.instance_id,
+            "parameters": {
+                "archive": str(self.path),
+                "dataset": self.dataset,
+            },
+        }
+        if isinstance(self.plot_input, ImageFrame):
+            overlay = self.plot_input.overlay
+            status = self._status
+            status_axis = (
+                None
+                if status is None
+                else status.block.schema.cell_schema.data_axes[0]
+            )
+            if status_axis is not None:
+                point_ids = tuple(
+                    overlay.point_ids
+                    or tuple(f"point-{index + 1}" for index in range(overlay.count))
+                )
+                labels = tuple(
+                    point_id if label is None else str(label)
+                    for point_id, label in zip(
+                        point_ids,
+                        overlay.labels or (None,) * len(point_ids),
+                        strict=True,
+                    )
+                )
+                run_record[IMAGE_POINT_OVERLAY_GEOMETRY_RECORD] = (
+                    image_point_overlay_geometry(
+                        snapshot,
+                        overlay.coordinates,
+                        point_ids,
+                        status_axis=status_axis,
+                        labels=labels,
+                    )
+                )
+        outputs = {
+            "data": LiveDatasetOutput(
+                self.dataset_output_declarations[0],
+                snapshot,
+                MonitorCoverage(
+                    snapshot.block.schema.repeat_axis.size
+                    * snapshot.block.schema.point_table.row_count,
+                    snapshot.block.schema.repeat_axis.size
+                    * snapshot.block.schema.point_table.row_count,
+                    retain_at_terminal=True,
+                ),
+                run_record,
+            )
+        }
+        if self._status is not None:
+            status = self._status
+            outputs["overlay"] = LiveDatasetOutput(
+                self.dataset_output_declarations[1],
+                status,
+                MonitorCoverage(
+                    status.block.schema.repeat_axis.size
+                    * status.block.schema.point_table.row_count,
+                    status.block.schema.repeat_axis.size
+                    * status.block.schema.point_table.row_count,
+                    retain_at_terminal=True,
+                ),
+                run_record,
+            )
+        plane.begin_generation(self)
+        plane.commit_live(self, outputs)
+        plane.seal_committed(self)
+        return plane.latest_publication(self.data_signal)
 
 
 def describe_archive(
@@ -714,7 +892,6 @@ class FigureViewerPresenter:
         self,
         view: object,
         *,
-        make_host: Callable[[Any, str, Mapping[str, object]], Any],
         run_off_thread: Callable[
             [
                 Callable[[], object],
@@ -725,44 +902,49 @@ class FigureViewerPresenter:
         ],
         close_worker: Callable[[], bool],
         request_close: Callable[[], None],
+        panel_presenter: object,
+        signal_plane: object,
     ) -> None:
         self.view = view
-        self._make_host = make_host
         self._run_off_thread = run_off_thread
         self._close_worker = close_worker
         self._request_close = request_close
+        self._panel_presenter = panel_presenter
+        self._signal_plane = signal_plane
+        self._archive_producers: tuple[_ArchiveDatasetProducer, ...] = ()
+        self._archive_serial = 0
+        self._runtime_closed = False
+        self.timer: object | None = None
         self.path: Path | None = None
         self.description: ArchiveDescription | None = None
-        #: The archive as read, kept so switching datasets does not re-read the
-        #: file: an archive is immutable once written.
-        self._info: Mapping[str, Any] = {}
-        self._arrays: Mapping[str, Any] = {}
-        self.panels: dict[str, dict[str, object]] = {}
-        self._panel_serial = 0
+        self.panels = panel_presenter.panels
         self._active_panel_id = ""
-        self._retired_host: Any = None
-        self._retirement_pending = False
         self._busy = False
         self._close_requested = False
         self._closed = False
-        self.view.set_panel_sizes(
-            DEFAULTS.layout.size_names, DEFAULTS.layout.default_preset
-        )
-        self.view.set_panel_kinds(panel_kind_choices())
-        self.view.set_grid_cell_kinds(
-            tuple(kind.value for kind in GRID_CELL_KINDS)
-        )
         self._connect()
 
     def _connect(self) -> None:
         self.view.path_committed.connect(self.open)
-        self.view.add_panel_requested.connect(self.add_panel)
-        self.view.panel_state_changed.connect(self.update_panel)
-        self.view.panel_remove_requested.connect(self.remove_panel)
-        self.view.panel_edit_requested.connect(self.edit_panel)
-        self.view.panel_order_committed.connect(self.reorder_panels)
-        self.view.panel_editor_closed.connect(self.close_panel_editor)
+        # ConsolePresenter remains the sole panel mutation owner.  Viewer only
+        # remembers which card the operator touched so its one global Save
+        # image action targets that card.
+        self.view.add_panel_requested.connect(self._remember_added_panel)
+        self.view.panel_state_changed.connect(self._remember_panel)
+        self.view.panel_edit_requested.connect(self._remember_panel)
+        self.view.panel_remove_requested.connect(self._remember_removed_panel)
         self.view.save_image_requested.connect(self.save_image)
+
+    def _remember_added_panel(self, _kind: object) -> None:
+        self._active_panel_id = next(reversed(self.panels), "")
+
+    def _remember_panel(self, panel_id: str, *_unused: object) -> None:
+        if str(panel_id) in self.panels:
+            self._active_panel_id = str(panel_id)
+
+    def _remember_removed_panel(self, panel_id: str) -> None:
+        if self._active_panel_id == str(panel_id):
+            self._active_panel_id = next(reversed(self.panels), "")
 
     def open(self, path: str) -> None:
         """Submit one complete archive candidate without blocking the Qt owner.
@@ -772,611 +954,163 @@ class FigureViewerPresenter:
         path therefore cannot tear down the last figure that opened correctly.
         """
 
+        self._open_runtime(path)
+
+    def _open_runtime(self, path: str) -> None:
         requested = Path(path)
+        serial = self._archive_serial + 1
 
         def prepare() -> object:
+            import zlc_plot
+
             resolved = requested.resolve()
             info, arrays = read_archive(resolved)
             description = describe_archive(info, arrays)
-            candidate = self._prepare_dataset(
-                info,
-                arrays,
-                description,
-                description.dataset_keys[0] if description.datasets else "",
-            )
-            return resolved, info, arrays, description, candidate
+            loaded = []
+            for index, key in enumerate(description.dataset_keys):
+                plot_input, recipe = read_figure_plot(info, arrays, key)
+                described = None
+                if index == 0:
+                    # Only the default card restores a saved DisplayDescription.
+                    # Other datasets become ordinary Runtime signals and are
+                    # composed only if the operator chooses them later.
+                    host = zlc_plot.open_figure_host(
+                        plot_input,
+                        recipe,
+                        device_pixel_ratio=float(self.view.device_pixel_ratio()),
+                    )
+                    try:
+                        described = self._await(host.describe_display())
+                        described = getattr(described, "value", described)
+                    finally:
+                        self._close_host(host)
+                loaded.append((key, plot_input, recipe, described))
+            return resolved, description, tuple(loaded), serial
 
         self._submit(
             f"opening {requested.name}…",
             prepare,
-            self._accept_archive,
+            self._accept_runtime_archive,
             f"cannot open {requested.name}",
         )
 
-    def add_panel(self, kind: str) -> None:
-        description = self.description
-        if description is None or not description.datasets:
-            self.view.set_status("open a Figure before adding a panel", error=True)
-            return
-        active = self.panels.get(self._active_panel_id)
-        active_state = None if active is None else active["state"]
-        active_dataset = (
-            ""
-            if not isinstance(active_state, PanelState)
-            else active_state.signal
-        )
-        dataset = (
-            active_dataset
-            if active_dataset in description.dataset_keys
-            else description.dataset_keys[0]
-        )
+    def _accept_runtime_archive(self, result: object) -> None:
+        from zlc_plot.specs import FacetGridPlot, semantic_spec
 
-        def prepare() -> object:
-            return self._prepare_dataset(
-                self._info,
-                self._arrays,
-                description,
-                dataset,
-                kind=str(kind),
-            )
-
-        def accepted(candidate: object) -> None:
-            try:
-                panel_id = self._install_panel_candidate(candidate, description)
-            except BaseException:
-                self._discard_candidate(candidate)
-                raise
-            self.view.set_status(f"added {panel_id} as {kind}")
-
-        self._submit(
-            f"adding {kind} panel…",
-            prepare,
-            accepted,
-            f"cannot add {kind} panel",
-        )
-
-    def update_panel(self, panel_id: str, patch: object) -> None:
-        key = str(panel_id)
-        record = self.panels.get(key)
-        if record is None or not isinstance(patch, Mapping):
-            return
-        state = record["state"]
-        assert isinstance(state, PanelState)
-        changes = dict(patch)
-        if set(changes) <= {"title"}:
-            state = replace(state, title=str(changes.get("title", state.title)))
-            record["state"] = state
-            self.view.set_panel_projection(key, state, record["surface"])
-            return
-        if set(changes) <= {"size"}:
-            self.resize_panel(key, str(changes.get("size", state.size)))
-            return
-        if set(changes) <= {"signal"}:
-            self._replace_panel_dataset(
-                key, str(changes.get("signal") or state.signal), state.cell_kind
-            )
-            return
-        if set(changes) <= {"cell_kind"} and state.kind == "facet_grid":
-            self._replace_panel_dataset(
-                key,
-                state.signal,
-                str(changes.get("cell_kind") or ""),
-            )
-            return
-        if len(changes) == 1 and next(iter(changes)) in {
-            "semantic",
-            "display",
-            "fit",
-        }:
-            section = next(iter(changes))
-            updates = dict(changes[section])
-            try:
-                if section == "fit":
-                    candidate_values, transient = fit_edit_targets(
-                        dict(state.fit), updates
-                    )
-                    fit_target = candidate_values if transient is None else transient
-                else:
-                    candidate_values = {**dict(getattr(state, section)), **updates}
-            except (TypeError, ValueError) as error:
-                self.view.set_panel_status(key, str(error), error=True)
-                return
-            configuration = (
-                {"semantic": updates}
-                if section == "semantic"
-                else {"parameters": updates}
-                if section == "display"
-                else {"fit": fit_target, "fit_live": False}
-            )
-            requested_state = replace(
-                state,
-                **{section: candidate_values},
-            )
-
-            def apply() -> object:
-                return self._stage_panel_configuration(record, configuration)
-
-            def accepted(candidate: object) -> object:
-                current = record["state"]
-                if current is not state:
-                    self._discard_candidate(candidate)
-                    raise RuntimeError("saved panel target changed while configuring")
-                previous = record["host"]
-                description = self.description
-                if description is None:
-                    self._discard_candidate(candidate)
-                    raise RuntimeError("viewer has no accepted archive")
-                try:
-                    self._install_panel_candidate(
-                        candidate,
-                        description,
-                        panel_id=key,
-                        requested_state=requested_state,
-                    )
-                except BaseException:
-                    self._discard_candidate(candidate)
-                    raise
-                return self._retire_previous(previous)
-
-            self._submit(
-                f"updating {key} {section}…",
-                apply,
-                accepted,
-                f"cannot update {key} {section}",
-            )
-            return
-        self.view.set_panel_status(
-            key,
-            "Use Edit for semantic, display, and fit changes.",
-            error=True,
-        )
-
-    def _stage_panel_configuration(
-        self,
-        record: Mapping[str, object],
-        configuration: Mapping[str, object],
-    ) -> tuple[str, dict[str, object], object, object, object]:
-        """Configure a detached clone; the accepted Viewer host stays untouched."""
-
-        def recipe_of(value: object) -> dict[str, object]:
-            return {
-                "spec": value.spec,
-                "parameters": dict(value.display_state.values),
-                "size": value.size,
-                "viewport": value.viewport,
-                "classifier_thresholds": value.classifier_thresholds,
-                "facet_focus": value.facet_focus,
-                "fit": dict(value.fit),
-                "selectors": value.selectors,
-            }
-
-        current_host = record["host"]
-        current = self._await(current_host.describe_display())
-        description = getattr(current, "value", current)
-        state = record["state"]
-        assert isinstance(state, PanelState)
-        candidate = self._make_host(
-            record["plot_input"],
-            state.title,
-            recipe_of(description),
-        )
+        resolved, description, loaded, serial = result
+        panel_presenter = self._panel_presenter
+        plane = self._signal_plane
+        if panel_presenter is None or plane is None:
+            raise RuntimeError("FigureViewer has no Runtime panel composition")
+        previous_panels = tuple(panel_presenter.panels)
+        producers: list[_ArchiveDatasetProducer] = []
+        published: list[tuple[object, object, object, object, object]] = []
+        new_panel_id = ""
         try:
-            operation = self._await(candidate.configure(**dict(configuration)))
-            accepted = getattr(operation, "value", operation)
-            if not hasattr(accepted, "spec"):
-                raise TypeError(
-                    "saved panel configuration did not return DisplayDescription"
-                )
-            return (
-                state.signal,
-                recipe_of(accepted),
-                candidate,
-                record["plot_input"],
-                accepted,
-            )
-        except BaseException:
-            self._close_host(candidate)
-            raise
-
-    def _replace_panel_dataset(
-        self, panel_id: str, dataset: str, cell_kind: str
-    ) -> None:
-        record = self.panels.get(str(panel_id))
-        description = self.description
-        if record is None or description is None:
-            return
-        state = record["state"]
-        assert isinstance(state, PanelState)
-
-        def prepare() -> object:
-            return self._prepare_dataset(
-                self._info,
-                self._arrays,
-                description,
-                str(dataset),
-                kind=state.kind,
-                cell_kind=str(cell_kind),
-                size=state.size,
-            )
-
-        def accepted(candidate: object) -> bool:
-            previous = record["host"]
-            try:
-                self._install_panel_candidate(
-                    candidate, description, panel_id=panel_id
-                )
-            except BaseException:
-                self._discard_candidate(candidate)
-                raise
-            return self._retire_previous(previous)
-
-        self._submit(
-            f"rebuilding {panel_id}…",
-            prepare,
-            accepted,
-            f"cannot rebuild {panel_id}",
-        )
-
-    def remove_panel(self, panel_id: str) -> None:
-        if self._busy or self._retired_host is not None:
-            self.view.set_status("viewer is busy; panel was not removed", error=True)
-            return
-        key = str(panel_id)
-        record = self.panels.pop(key, None)
-        if record is None:
-            return
-        self.view.remove_panel(key)
-        self._active_panel_id = next(reversed(self.panels), "")
-        self._busy = True
-        self._start_retirement(
-            record["host"],
-            f"cannot remove {key}",
-            finished=self._finish_operation,
-        )
-
-    def reorder_panels(self, order: object) -> None:
-        wanted = [str(key) for key in tuple(order) if str(key) in self.panels]
-        wanted += [key for key in self.panels if key not in wanted]
-        self.panels = {key: self.panels[key] for key in wanted}
-        self.view.set_panel_order(wanted)
-
-    def edit_panel(self, panel_id: str) -> object | None:
-        record = self.panels.get(str(panel_id))
-        description = self.description
-        if record is None or description is None:
-            return None
-        state = record["state"]
-        assert isinstance(state, PanelState)
-        projection = self._editor_projection(record)
-        self.view.open_panel_editor(
-            str(panel_id), projection, title=f"Edit · {state.title}"
-        )
-        self._active_panel_id = str(panel_id)
-        return projection
-
-    def _editor_projection(
-        self, record: Mapping[str, object]
-    ) -> dict[str, object]:
-        description = self.description
-        if description is None:
-            raise RuntimeError("viewer has no accepted archive")
-        state = record["state"]
-        assert isinstance(state, PanelState)
-        return {
-            "state": state.document(),
-            "parameter_surface": record["surface"],
-            "signal_options": (
-                (
-                    "this archive",
-                    tuple((label, key) for key, label in description.datasets),
-                ),
-            ),
-            "overlay_signal_options": (),
-            "live": False,
-        }
-
-    def close_panel_editor(self, panel_id: str) -> None:
-        self.view.close_panel_editor(str(panel_id))
-
-    def _prepare_dataset(
-        self,
-        info: Mapping[str, Any],
-        arrays: Mapping[str, Any],
-        description: ArchiveDescription,
-        name: str,
-        *,
-        kind: str | None = None,
-        cell_kind: str = "",
-        size: str | None = None,
-    ) -> tuple[
-        str,
-        dict[str, object] | None,
-        Any,
-        object | None,
-        object | None,
-    ]:
-        if not name:
-            return "", None, None, None, None
-        label = dict(description.datasets).get(str(name), str(name))
-        host: Any = None
-        try:
-            plot_input, saved_recipe = read_figure_plot(info, arrays, str(name))
-            recipe = (
-                saved_recipe
-                if kind is None
-                else self._alternate_recipe(
+            for index, (key, plot_input, recipe, described) in enumerate(loaded):
+                producer = _ArchiveDatasetProducer(
+                    serial,
+                    index,
+                    key,
                     plot_input,
-                    str(kind),
-                    str(cell_kind),
-                    size=size,
+                    resolved,
                 )
-            )
-            host = self._make_host(plot_input, label, recipe)
-            described = self._await(host.describe_display())
-            described = getattr(described, "value", described)
-            return (
-                str(name),
-                recipe,
-                host,
-                plot_input,
-                described,
-            )
+                producers.append(producer)
+                publication = producer.publish(plane)
+                published.append(
+                    (producer, plot_input, recipe, described, publication)
+                )
+            if published:
+                producer, plot_input, _recipe, described, publication = published[0]
+                spec = described.spec
+                cell_kind = (
+                    semantic_spec(spec).kind.value
+                    if isinstance(spec, FacetGridPlot)
+                    else ""
+                )
+                semantic = {
+                    str(name): value
+                    for name, value in described.semantics.values.items()
+                    if str(name) != "kind"
+                }
+                label = dict(description.datasets).get(
+                    producer.dataset,
+                    producer.dataset,
+                )
+                binding = panel_presenter.add_panel(
+                    producer.data_signal,
+                    getattr(plot_input, "snapshot", plot_input),
+                    title=label,
+                    kind=spec.kind.value,
+                    size=described.size,
+                    semantic=semantic,
+                    display=dict(described.display_state.values),
+                    fit=dict(described.fit),
+                    overlay_signal=producer.overlay_signal,
+                    initial_publication=publication,
+                )
+                new_panel_id = binding.panel_id
+                panel_presenter.restore_panel_description(
+                    binding.panel_id,
+                    described,
+                )
+                self._active_panel_id = binding.panel_id
         except BaseException:
-            if host is not None:
-                self._close_host(host)
+            if new_panel_id:
+                panel_presenter.remove_panel(new_panel_id)
+            for producer in producers:
+                try:
+                    plane.retire(producer)
+                except BaseException:
+                    pass
             raise
 
-    @staticmethod
-    def _alternate_recipe(
-        plot_input: object,
-        kind: str,
-        cell_kind: str = "",
-        *,
-        size: str | None = None,
-    ) -> dict[str, object]:
-        snapshot = getattr(plot_input, "snapshot", plot_input)
-        schema = getattr(getattr(snapshot, "block", None), "schema", None)
-        if schema is None:
-            raise TypeError("saved dataset has no typed schema")
-        spec = task_console_fitting_spec(schema, kind, cell_kind)
-        if spec is None:
-            raise ValueError(f"saved dataset cannot be drawn as {kind!r}")
-        return {
-            "spec": spec,
-            "parameters": dict(
-                parameter_schema_for(
-                    spec,
-                    style=DEFAULTS.style,
-                ).initial_values(None)
-            ),
-            "size": (
-                DEFAULTS.layout.default_preset
-                if size is None
-                else str(size)
-            ),
-            "viewport": None,
-            "classifier_thresholds": (),
-            "facet_focus": None,
-            "fit": {},
-            "selectors": (),
-        }
-
-    @staticmethod
-    def _panel_state(
-        panel_id: str,
-        dataset: str,
-        title: str,
-        recipe: Mapping[str, object],
-    ) -> PanelState:
-        spec = recipe["spec"]
-        kind = str(spec.kind.value)
-        cell_kind = (
-            semantic_spec(spec).kind.value
-            if kind == "facet_grid"
-            else ""
-        )
-        return PanelState(
-            signal=str(dataset),
-            kind=kind,
-            cell_kind=cell_kind,
-            size=str(recipe["size"]),
-            interval_ms=400,
-            title=str(title or panel_id),
-            semantic={},
-            display=dict(recipe.get("parameters", {})),
-            fit=dict(recipe.get("fit", {})),
-            classifier_thresholds=tuple(
-                recipe.get("classifier_thresholds", ())
-            ),
-            focused_cell=recipe.get("facet_focus"),
-        )
-
-    def _install_panel_candidate(
-        self,
-        candidate: object,
-        description: ArchiveDescription,
-        *,
-        panel_id: str | None = None,
-        requested_state: PanelState | None = None,
-    ) -> str:
-        name, recipe, host, plot_input, described = candidate
-        if recipe is None or host is None or plot_input is None:
-            raise ValueError("saved array has no plot recipe")
-        if panel_id is None:
-            self._panel_serial += 1
-            panel_id = f"saved-panel-{self._panel_serial}"
-        label = dict(description.datasets).get(str(name), str(name) or "figure")
-        state = (
-            self._panel_state(panel_id, str(name), label, recipe)
-            if requested_state is None
-            else requested_state
-        )
-        previous = self.panels.get(panel_id)
-        if previous is not None and requested_state is None:
-            previous_state = previous["state"]
-            assert isinstance(previous_state, PanelState)
-            state = replace(
-                state,
-                title=previous_state.title,
-                size=previous_state.size,
-            )
-        if described is None:
-            raise ValueError("saved plot host has no display description")
-        surface = panel_surface_from_description(
-            state,
-            described,
-        )
-        state = panel_state_from_description(state, described)
-        snapshot = getattr(plot_input, "snapshot", plot_input)
-        surface.update(
-            panel_data_shape(snapshot.block.schema, described),
-            science_locked=False,
-            paints_images=paints_image_surface(described.spec),
-        )
-        candidate_record = {
-            "host": host,
-            "plot_input": plot_input,
-            "state": state,
-            "surface": surface,
-        }
-        if previous is None:
-            self.view.add_panel(panel_id, state.title)
-        has_editor = getattr(self.view, "has_panel_editor", None)
-        editor_open = not callable(has_editor) or has_editor(panel_id)
-        try:
-            self.view.set_panel_datasets(
-                panel_id, description.datasets, str(name)
-            )
-            self.view.set_panel_projection(panel_id, state, surface)
-            self.view.show_panel(panel_id, host)
-            self.panels[panel_id] = candidate_record
-            if previous is not None and editor_open:
-                self.view.update_panel_editor(
-                    panel_id,
-                    self._editor_projection(candidate_record),
-                )
-        except BaseException:
-            if previous is None:
-                self.panels.pop(panel_id, None)
-                self.view.remove_panel(panel_id)
-            else:
-                self.panels[panel_id] = previous
-                self.view.set_panel_datasets(
-                    panel_id,
-                    description.datasets,
-                    str(previous["state"].signal),
-                )
-                self.view.set_panel_projection(
-                    panel_id, previous["state"], previous["surface"]
-                )
-                self.view.show_panel(panel_id, previous["host"])
-                if self.description is not None and editor_open:
-                    self.view.update_panel_editor(
-                        panel_id,
-                        self._editor_projection(previous),
-                    )
-            raise
-        self._active_panel_id = panel_id
-        self.view.set_panel_order(tuple(self.panels))
-        return panel_id
-
-    def _clear_panel_views(self) -> tuple[object, ...]:
-        hosts = tuple(record["host"] for record in self.panels.values())
-        for panel_id in tuple(self.panels):
-            self.view.remove_panel(panel_id)
-        self.panels.clear()
-        self._active_panel_id = ""
-        return hosts
-
-    def _accept_archive(self, result: object) -> bool:
-        resolved, info, arrays, description, candidate = result
-        old_panels = dict(self.panels)
-        old_active = self._active_panel_id
-        old_path = self.path
-        old_description = self.description
-        previous = tuple(record["host"] for record in old_panels.values())
-        self._panel_serial += 1
-        new_panel_id = f"saved-panel-{self._panel_serial}"
-        try:
-            if candidate[2] is not None:
-                self._install_panel_candidate(
-                    candidate, description, panel_id=new_panel_id
-                )
-            # The new plot must mount before any visible archive identity is
-            # replaced.  A rejected host therefore leaves both the old pixels
-            # and the old File/info projection untouched.
-            self.view.set_title(description.name or resolved.stem)
-            self.view.set_path(str(resolved))
-            self.view.set_archive_info(description.tabs, description.flow)
-        except BaseException:
-            self.view.remove_panel(new_panel_id)
-            self.panels.pop(new_panel_id, None)
-            self._active_panel_id = old_active
-            self.view.set_panel_order(tuple(old_panels))
-            try:
-                self.view.set_title(
-                    ""
-                    if old_description is None
-                    else old_description.name
-                    or ("" if old_path is None else old_path.stem)
-                )
-                self.view.set_path("" if old_path is None else str(old_path))
-                self.view.set_archive_info(
-                    () if old_description is None else old_description.tabs,
-                    {"nodes": (), "edges": ()}
-                    if old_description is None
-                    else old_description.flow
-                )
-            except BaseException as restore_error:
-                self._discard_candidate(candidate)
-                raise RuntimeError(
-                    "new archive was rejected and the previous Viewer "
-                    "metadata could not be restored"
-                ) from restore_error
-            self._discard_candidate(candidate)
-            raise
-
-        for panel_id in old_panels:
-            self.view.remove_panel(panel_id)
-            self.panels.pop(panel_id, None)
-        self.view.set_panel_order(tuple(self.panels))
-
+        for panel_id in previous_panels:
+            panel_presenter.remove_panel(panel_id)
+        for producer in self._archive_producers:
+            plane.retire(producer)
+        self._archive_producers = tuple(producers)
+        self._archive_serial = int(serial)
         self.path = resolved
         self.description = description
-        self._info, self._arrays = info, arrays
-        if self.panels:
-            shown_state = next(iter(self.panels.values()))["state"]
-            assert isinstance(shown_state, PanelState)
-            self.view.set_status(
-                f"showing {shown_state.signal}"
-            )
-        else:
-            self.view.set_status(
-                "opened; its arrays were saved without axes, so they cannot be replotted"
-            )
-        return self._retire_previous(previous)
-
-    def _discard_candidate(self, candidate: object) -> None:
-        host = candidate[2]
-        if host is not None and all(
-            host is not record["host"] for record in self.panels.values()
-        ):
-            self._start_retirement(host, "cannot retire rejected figure")
-
-    def _retire_previous(self, previous: object | None) -> bool:
-        active_hosts = tuple(record["host"] for record in self.panels.values())
-        if (
-            previous is None
-            or previous == ()
-            or any(previous is host for host in active_hosts)
-        ):
-            return True
-        self._start_retirement(
-            previous,
-            "cannot retire previous figure",
-            finished=self._finish_operation,
+        self.view.set_title(description.name or resolved.stem)
+        self.view.set_path(str(resolved))
+        self.view.set_archive_info(description.tabs, description.flow)
+        self.view.set_status(
+            "opened; choose a signal in Setting"
+            if not published
+            else f"showing {published[0][0].data_signal}"
         )
-        return False
+        panel_presenter.beat()
+
+    def beat(self) -> None:
+        self._panel_presenter.beat()
+
+    def commit_surfaces(self) -> None:
+        self._panel_presenter.commit_surfaces()
+
+    def add_panel(self, kind: str) -> None:
+        binding = self._panel_presenter.add_selected_panel(str(kind))
+        if binding is not None:
+            self._active_panel_id = binding.panel_id
+
+    def update_panel(self, panel_id: str, patch: object) -> None:
+        self._active_panel_id = str(panel_id)
+        self._panel_presenter.update_panel_state(str(panel_id), patch)
+
+    def remove_panel(self, panel_id: str) -> None:
+        self._panel_presenter.remove_panel(str(panel_id))
+        self._active_panel_id = next(reversed(self.panels), "")
+
+    def reorder_panels(self, order: object) -> None:
+        self._panel_presenter.reorder_panels(tuple(order))
+
+    def edit_panel(self, panel_id: str) -> object | None:
+        self._active_panel_id = str(panel_id)
+        return self._panel_presenter.edit_panel(str(panel_id))
+
+    def close_panel_editor(self, panel_id: str) -> None:
+        self._panel_presenter.close_panel_editor(str(panel_id))
 
     def _submit(
         self,
@@ -1391,11 +1125,6 @@ class FigureViewerPresenter:
             return
         if self._busy:
             self.view.set_status("viewer is busy; wait for the current operation", error=True)
-            return
-        if self._retired_host is not None:
-            self.view.set_status(
-                "viewer is still retiring the previous figure", error=True
-            )
             return
         self._busy = True
         self.view.set_status(busy_status)
@@ -1436,76 +1165,29 @@ class FigureViewerPresenter:
         return operation.result() if hasattr(operation, "result") else operation
 
     def resize_panel(self, panel_id: str, size: str) -> None:
-        record = self.panels.get(str(panel_id))
-        if record is None:
-            return
-        state = record["state"]
-        assert isinstance(state, PanelState)
-        requested_state = replace(state, size=str(size))
-
-        def resize() -> object:
-            return self._stage_panel_configuration(
-                record,
-                {"size": str(size)},
-            )
-
-        def accepted(candidate: object) -> object:
-            if record.get("state") is not state:
-                self._discard_candidate(candidate)
-                raise RuntimeError("saved panel target changed while resizing")
-            description = self.description
-            if description is None:
-                self._discard_candidate(candidate)
-                raise RuntimeError("viewer has no accepted archive")
-            previous = record["host"]
-            try:
-                self._install_panel_candidate(
-                    candidate,
-                    description,
-                    panel_id=str(panel_id),
-                    requested_state=requested_state,
-                )
-            except BaseException:
-                self._discard_candidate(candidate)
-                raise
-            complete = self._retire_previous(previous)
-            accepted_description = candidate[4]
-            self.view.set_status(
-                f"resized {panel_id} to {accepted_description.size}"
-            )
-            return complete
-
-        def rejected(error: BaseException) -> None:
-            self.view.set_panel_projection(
-                str(panel_id), record["state"], record["surface"]
-            )
-            self.view.set_status(f"cannot resize: {error}", error=True)
-
-        self._submit(
-            f"resizing to {size}…",
-            resize,
-            accepted,
-            "cannot resize",
-            on_failure=rejected,
+        self._panel_presenter.update_panel_state(
+            str(panel_id),
+            {"size": str(size)},
         )
 
     def save_image(self) -> None:
-        """Write the figure as it is drawn, beside the archive it came from."""
+        """Write the active shared Panel exactly as drawn beside its archive."""
 
         from zlc_durable import unique_path
 
-        record = self.panels.get(self._active_panel_id)
-        if record is None or self.path is None:
+        binding = self.panels.get(self._active_panel_id)
+        if binding is None and self.panels:
+            binding = next(reversed(self.panels.values()))
+        if binding is None or self.path is None or binding.host is None:
             self.view.set_status("there is no figure to save", error=True)
             return
-        host = record["host"]
+        host = binding.host
         save = getattr(host, "save", None)
         if not callable(save):
             self.view.set_status("this figure cannot save itself", error=True)
             return
-        state = record["state"]
-        assert isinstance(state, PanelState)
-        path, dataset = self.path, state.signal
+        path = self.path
+        dataset = binding.state.signal.rsplit("/", 1)[-1]
 
         def write_image() -> object:
             def write(temporary: Path) -> None:
@@ -1538,47 +1220,8 @@ class FigureViewerPresenter:
         if stopped is False:
             raise RuntimeError("plot host did not stop")
 
-    def _start_retirement(
-        self,
-        host: object,
-        failure_prefix: str,
-        *,
-        finished: Callable[[], None] | None = None,
-    ) -> None:
-        if self._retired_host is None:
-            self._retired_host = host
-        elif self._retired_host is not host:
-            raise RuntimeError("viewer already owns another retiring figure")
-        if self._retirement_pending:
-            return
-        self._retirement_pending = True
-
-        def retired(_result: object) -> None:
-            self._retirement_pending = False
-            if self._retired_host is host:
-                self._retired_host = None
-            if finished is not None:
-                finished()
-            elif self._close_requested:
-                self._request_close()
-
-        def failed(error: BaseException) -> None:
-            self._retirement_pending = False
-            self._busy = False
-            self._close_requested = False
-            self.view.set_status(f"{failure_prefix}: {error}", error=True)
-
-        try:
-            self._run_off_thread(
-                lambda: self._close_host(host),
-                retired,
-                failed,
-            )
-        except BaseException as error:
-            failed(error)
-
     def close(self) -> bool:
-        """Close guard: keep the window until its host and worker are retired."""
+        """Close the shared Panel engine, archive signals, then IO worker."""
 
         self._close_requested = True
         if self._closed:
@@ -1586,27 +1229,24 @@ class FigureViewerPresenter:
         if self._busy:
             self.view.set_status("closing after the current operation…")
             return False
-        if self._retired_host is not None:
-            self.view.set_status("closing previous figure…")
-            if self._retirement_pending:
-                return False
-            self._busy = True
-            self._start_retirement(
-                self._retired_host,
-                "cannot close previous figure",
-                finished=self._finish_operation,
-            )
-            return False
-        if self.panels:
-            hosts = self._clear_panel_views()
-            self._busy = True
+        timer = self.timer
+        if not self._panel_presenter.close():
+            self._panel_presenter.beat()
             self.view.set_status("closing saved panels…")
-            self._start_retirement(
-                hosts,
-                "cannot close saved panels",
-                finished=self._finish_operation,
-            )
+            self._request_close()
             return False
+        stop = getattr(timer, "stop", None)
+        if callable(stop):
+            stop()
+        if not self._runtime_closed:
+            for producer in self._archive_producers:
+                try:
+                    self._signal_plane.retire(producer)
+                except (LookupError, RuntimeError):
+                    pass
+            self._archive_producers = ()
+            self._signal_plane.close()
+            self._runtime_closed = True
         if not self._close_worker():
             self._request_close()
             return False

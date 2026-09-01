@@ -61,6 +61,7 @@ class InfoPane(QtWidgets.QWidget):
         path_label: str = "Path",
         path_caption: str = "Choose a path",
         file_filter: str = "All files (*)",
+        path_base_dir: str = "",
         initial_status: str = "",
         graph_tabs: Iterable[str] = (),
         parent=None,
@@ -93,6 +94,7 @@ class InfoPane(QtWidgets.QWidget):
             mode="file",
             caption=str(path_caption),
             file_filter=str(file_filter),
+            base_dir=str(path_base_dir),
         )
         self.path_edit.selected.connect(self.path_committed.emit)
         self.path_edit.edit.editingFinished.connect(self._commit_path_draft)

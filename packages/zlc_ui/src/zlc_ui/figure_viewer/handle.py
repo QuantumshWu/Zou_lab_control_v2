@@ -33,6 +33,7 @@ class FigureViewerHandle(QtCore.QObject):
     panel_edit_requested = QtCore.pyqtSignal(str)
     panel_order_committed = QtCore.pyqtSignal(tuple)
     panel_editor_closed = QtCore.pyqtSignal(str)
+    panel_plot_error = QtCore.pyqtSignal(str, str)
     save_image_requested = QtCore.pyqtSignal()
 
     def __init__(self, window: Any, view: FigureViewerView) -> None:
@@ -51,6 +52,7 @@ class FigureViewerHandle(QtCore.QObject):
         view.panel_edit_requested.connect(self.panel_edit_requested)
         view.panel_order_committed.connect(self.panel_order_committed)
         view.panel_editor_closed.connect(self.panel_editor_closed)
+        view.panel_plot_error.connect(self.panel_plot_error)
         view.save_image_requested.connect(self.save_image_requested)
         view.close_requested.connect(self.close_requested)
         if window is not None and hasattr(window, "closed"):
@@ -121,8 +123,13 @@ class FigureViewerHandle(QtCore.QObject):
     def set_panel_sizes(self, sizes: object, default_size: str) -> None:
         self._view.set_panel_sizes(sizes, default_size)
 
-    def set_panel_kinds(self, kinds: object) -> None:
-        self._view.set_panel_kinds(kinds)
+    def set_panel_kinds(self, kinds: object, default_kind: str = "") -> None:
+        self._view.set_panel_kinds(kinds, default_kind)
+
+    def set_panel_intervals(
+        self, intervals: object, default_interval: int
+    ) -> None:
+        self._view.set_panel_intervals(intervals, default_interval)
 
     def set_grid_cell_kinds(self, kinds: object) -> None:
         self._view.set_grid_cell_kinds(kinds)
@@ -136,13 +143,23 @@ class FigureViewerHandle(QtCore.QObject):
     def set_panel_order(self, order: object) -> None:
         self._view.set_panel_order(order)
 
-    def set_panel_datasets(
-        self,
-        panel_id: str,
-        datasets: tuple[tuple[str, str], ...],
-        current: str = "",
-    ) -> None:
-        self._view.set_panel_datasets(panel_id, datasets, current)
+    def set_panel_signal_choices(self, panel_id: str, *args, **kwargs) -> None:
+        self._view.set_panel_signal_choices(panel_id, *args, **kwargs)
+
+    def set_panel_publishers(self, publishers: object) -> None:
+        self._view.set_panel_publishers(publishers)
+
+    def panel_ids(self) -> tuple[str, ...]:
+        return self._view.panel_ids()
+
+    def set_panel_selectors_enabled(self, panel_id: str, enabled: bool) -> None:
+        self._view.set_panel_selectors_enabled(panel_id, enabled)
+
+    def set_panel_mutation_enabled(self, panel_id: str, enabled: bool) -> None:
+        self._view.set_panel_mutation_enabled(panel_id, enabled)
+
+    def present_panel_front(self, panel_id: str, front: object) -> bool:
+        return self._view.present_panel_front(panel_id, front)
 
     def set_panel_projection(
         self, panel_id: str, state: object, surface: object
@@ -160,9 +177,11 @@ class FigureViewerHandle(QtCore.QObject):
         )
 
     def open_panel_editor(
-        self, panel_id: str, editor: Any, *, title: str
+        self, panel_id: str, projection: Any, *, title: str = ""
     ) -> None:
-        self._view.open_panel_editor(panel_id, editor, title)
+        state = dict(projection).get("state", {}) if isinstance(projection, dict) else {}
+        resolved_title = str(title or f"Edit Panel · {dict(state).get('title', panel_id)}")
+        self._view.open_panel_editor(panel_id, projection, resolved_title)
 
     def close_panel_editor(self, panel_id: str) -> bool:
         return self._view.close_panel_editor(panel_id)
@@ -172,6 +191,15 @@ class FigureViewerHandle(QtCore.QObject):
 
     def has_panel_editor(self, panel_id: str) -> bool:
         return self._view.has_panel_editor(panel_id)
+
+    def show_panel_editor(self, panel_id: str, host: Any | None) -> None:
+        self._view.show_panel_editor(
+            panel_id,
+            None if host is None else host.qt_widget(),
+        )
+
+    def focus_panel_editor(self, panel_id: str) -> bool:
+        return self._view.focus_panel_editor(panel_id)
 
 
 __all__ = ["FigureViewerHandle"]

@@ -107,6 +107,7 @@ def open_figure_viewer(
     *,
     title: str = "FigureViewer@Zou lab",
     window_ratio: float | None = None,
+    path_base_dir: str = "",
 ) -> Any:
     """Open the figure viewer and return the handle that drives it."""
 
@@ -116,7 +117,7 @@ def open_figure_viewer(
     held: dict[str, Any] = {}
 
     def _body() -> FigureViewerView:
-        view = FigureViewerView()
+        view = FigureViewerView(path_base_dir=path_base_dir)
         held["view"] = view
         return view
 

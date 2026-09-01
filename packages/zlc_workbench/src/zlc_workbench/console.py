@@ -104,6 +104,7 @@ from .presentation import PlotPanelPort
 from .selection import (
     PlotSelectionSource,
     panel_selection_document,
+    panel_selection_from_plot,
     panel_selection_binds_a_revision,
     same_plot_run,
     same_plot_generation,
@@ -445,6 +446,7 @@ class ConsolePresenter:
         request_close: Callable[[], None] | None = None,
         run_off_thread: Callable[..., None] | None = None,
         close_worker: Callable[[], bool] | None = None,
+        panel_only: bool = False,
         review_points: Callable[[Any, ImagePointOverlay, OperatorInputRequest], object]
         | None = None,
         manual_axis: Callable[[OperatorInputRequest], object] | None = None,
@@ -459,6 +461,8 @@ class ConsolePresenter:
             raise TypeError("review_points must be callable or None")
         if manual_axis is not None and not callable(manual_axis):
             raise TypeError("manual_axis must be callable or None")
+        if type(panel_only) is not bool:
+            raise TypeError("panel_only must be bool")
         self.session = session
         self.view = view
         self._make_host = make_host
@@ -473,6 +477,7 @@ class ConsolePresenter:
         self._close_worker = (lambda: True) if close_worker is None else close_worker
         self._review_points = review_points
         self._manual_axis = manual_axis
+        self._panel_only = panel_only
         self.logic: dict[str, LogicBinding] = {}
         self.catalog = LogicCatalog()
         # Task identity is a command-admission projection only.  Its lifecycle,
@@ -559,7 +564,13 @@ class ConsolePresenter:
         if callable(interval_setter):
             interval_setter(self._intervals, self._default_interval_ms)
         self._connect()
-        self._project_task_takeover()
+        if self._panel_only:
+            # A saved Figure board has no Task command surface, but its panels
+            # retain the complete selector/derived-signal behavior.
+            self._paused = False
+            self._deriving = True
+        else:
+            self._project_task_takeover()
 
     # ------------------------------------------------------------------ wiring
 
@@ -613,24 +624,25 @@ class ConsolePresenter:
         nothing, which is worse than a control that is visibly absent.
         """
 
-        self.view.pause_toggled.connect(self._guarded(self.set_paused))
-        self.view.save_layout_requested.connect(self._guarded(self.save_layout))
-        self.view.load_layout_requested.connect(self._guarded(self.load_layout))
-        self.view.save_screenshot_requested.connect(self._guarded(self.save_screenshot))
         self.view.add_panel_requested.connect(self._guarded(self.add_selected_panel))
-        self.view.selectors_toggled.connect(self._guarded(self.set_deriving))
-        self.view.add_logic_requested.connect(self._guarded(self.add_logic))
         self.view.panel_order_committed.connect(self._guarded(self.reorder_panels))
         # Every control on a card is a decision about ONE named panel, wired
         # once here rather than re-strung by whoever built the widget.
         self.view.panel_remove_requested.connect(self._guarded(self.remove_panel))
         self.view.panel_edit_requested.connect(self._guarded(self.edit_panel))
-        self.view.logic_start_requested.connect(self._guarded(self.start_logic))
-        self.view.logic_auto_preview_changed.connect(self._guarded(self.set_logic_auto_preview))
-        self.view.logic_stop_requested.connect(self._guarded(self.stop_logic))
-        self.view.logic_edit_requested.connect(self._guarded(self.edit_logic))
-        self.view.logic_remove_requested.connect(self._guarded(self.remove_logic))
-        self.view.stop_task_requested.connect(self._guarded(self.stop_active_task))
+        if not self._panel_only:
+            self.view.pause_toggled.connect(self._guarded(self.set_paused))
+            self.view.save_layout_requested.connect(self._guarded(self.save_layout))
+            self.view.load_layout_requested.connect(self._guarded(self.load_layout))
+            self.view.save_screenshot_requested.connect(self._guarded(self.save_screenshot))
+            self.view.selectors_toggled.connect(self._guarded(self.set_deriving))
+            self.view.add_logic_requested.connect(self._guarded(self.add_logic))
+            self.view.logic_start_requested.connect(self._guarded(self.start_logic))
+            self.view.logic_auto_preview_changed.connect(self._guarded(self.set_logic_auto_preview))
+            self.view.logic_stop_requested.connect(self._guarded(self.stop_logic))
+            self.view.logic_edit_requested.connect(self._guarded(self.edit_logic))
+            self.view.logic_remove_requested.connect(self._guarded(self.remove_logic))
+            self.view.stop_task_requested.connect(self._guarded(self.stop_active_task))
         plot_error = getattr(self.view, "panel_plot_error", None)
         if plot_error is not None:
             # The plot widget's own refusal channel (errorOccurred, relayed by
@@ -661,8 +673,9 @@ class ConsolePresenter:
         editor_closed = getattr(self.view, "panel_editor_closed", None)
         if editor_closed is not None:
             editor_closed.connect(self._guarded(self._panel_editor_closed))
-        self.set_paused(False)
-        self.set_deriving(False)
+        if not self._panel_only:
+            self.set_paused(False)
+            self.set_deriving(False)
 
     # ------------------------------------------------------------------ panels
 
@@ -870,6 +883,52 @@ class ConsolePresenter:
         self.view.set_panel_selectors_enabled(panel_id, self._deriving)
         self._publish_panel_state(binding)
         self._refresh_console_projection()
+        return binding
+
+    def restore_panel_description(
+        self,
+        panel_id: str,
+        description: object,
+    ) -> PanelBinding:
+        """Seed one shared Panel from an accepted archived Figure recipe."""
+
+        from zlc_plot.selectors import CrosshairPoint
+
+        binding = self.panels[str(panel_id)]
+        state = panel_state_from_description(binding.state, description)
+        selection = None
+        crosshair: dict[str, float] = {}
+        subject = description.selection_subject
+        for selector in tuple(description.selectors):
+            if selector.kind is SelectorKind.CROSSHAIR:
+                point = selector.value
+                if isinstance(point, CrosshairPoint):
+                    crosshair = {"x": float(point.x), "y": float(point.y)}
+            elif selector.kind in (SelectorKind.AREA, SelectorKind.X_RANGE):
+                selection = panel_selection_from_plot(selector, subject)
+        state = replace(
+            state,
+            selector=panel_selection_document(selection),
+            crosshair=crosshair,
+            classifier_thresholds=tuple(description.classifier_thresholds),
+            focused_cell=description.facet_focus,
+        )
+        binding.state = state
+        current = self.session.signal_plane.freeze().value(state.signal)
+        snapshot = None if current is None else current.snapshot
+        if description.viewport is not None and snapshot is not None:
+            binding.interaction_viewport = (
+                self._panel_view_identity(
+                    binding,
+                    state=state,
+                    subject=snapshot,
+                ),
+                description.viewport,
+            )
+        if binding.port is not None:
+            binding.port.retarget(state)
+        self._publish_panel_state(binding)
+        self.board.owe_presentation((binding.panel_id,))
         return binding
 
     @staticmethod
@@ -1573,6 +1632,12 @@ class ConsolePresenter:
             accepted_display = self._panel_accepted_display(binding, host)
             if accepted_display is None:
                 accepted_display = binding.accepted_display
+            if accepted_display is None:
+                describe = getattr(host, "describe_display", None)
+                if callable(describe):
+                    answer = describe()
+                    answer = answer.result() if hasattr(answer, "result") else answer
+                    accepted_display = getattr(answer, "value", answer)
             interaction_spec = (
                 None
                 if accepted_display is None
@@ -3408,6 +3473,11 @@ class ConsolePresenter:
         producer_node_id = self._direct_producer_node_id(binding.state.signal)
         return {
             "panel_id": binding.panel_id,
+            # FigureViewer reuses the complete Panel editor but its archive
+            # signals are sealed.  The shared editor therefore receives the
+            # mode as data and hides cadence/snapshot/producer controls; the
+            # Figure view does not maintain a second projection vocabulary.
+            "live": not self._panel_only,
             "state": binding.state.document(),
             "parameter_surface": binding.parameter_surface,
             "signal_options": self.signal_groups(),
@@ -7173,6 +7243,9 @@ class ConsolePresenter:
         # that cannot move while the GUI thread holds the turn: five rows
         # meant five full scans and five sets of throwaway dataclasses,
         # taking the same lock the publishing threads commit under.
+        if self._panel_only:
+            self._refresh_signal_choices()
+            return
         descriptions = {
             item.name: item
             for item in self.session.signal_plane.describe_signals()

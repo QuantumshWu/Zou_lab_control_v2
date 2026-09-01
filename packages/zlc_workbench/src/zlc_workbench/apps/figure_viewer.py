@@ -34,6 +34,7 @@ def _parser() -> argparse.ArgumentParser:
 def build(
     view: object,
     *,
+    workspace: object | None = None,
     run_off_thread,
     close_worker,
     request_close,
@@ -43,43 +44,119 @@ def build(
     from ..panel_sizes import install as install_panel_sizes
 
     install_panel_sizes()
-    import zlc_plot as plot
+    from datetime import date
+    from types import SimpleNamespace
+
+    from zlc_durable import day_folder
+    from zlc_runtime import SignalDataPlane
+    from ..console import ConsolePresenter
+    from ..device_use import DeviceUseCoordinator
+    from ..panel_catalog import task_console_fitting_spec
     from ..viewer import FigureViewerPresenter
-    def make_host(plot_input, name: str, recipe):
-        del name
-        return plot.open_figure_host(
+
+    if workspace is None:
+        from ..session import Workspace
+
+        space = Workspace.discover().prepare()
+        workspace = SimpleNamespace(
+            root=space.root,
+            data=space.data,
+            today=day_folder(space.data, date.today()),
+        )
+
+    plane = SignalDataPlane()
+    session = SimpleNamespace(
+        signal_plane=plane,
+        workspace=workspace,
+        installation=SimpleNamespace(devices={}, revision=0),
+        device_use=DeviceUseCoordinator(),
+        day_folder=lambda: workspace.today,
+        resolve_device_setting_records=lambda _records: (),
+    )
+
+    def make_host(plot_input, state):
+        from .task_console import build_panel_host
+
+        return build_panel_host(
             plot_input,
-            recipe,
+            state,
             device_pixel_ratio=float(view.device_pixel_ratio()),
         )
 
-    return FigureViewerPresenter(
+    def spec_for(snapshot, kind: str = "", cell_kind: str = ""):
+        return task_console_fitting_spec(
+            snapshot.block.schema,
+            kind,
+            cell_kind,
+        )
+
+    panels = ConsolePresenter(
+        session,
         view,
         make_host=make_host,
+        spec_for=spec_for,
+        run_off_thread=run_off_thread,
+        close_worker=lambda: True,
+        panel_only=True,
+    )
+
+    return FigureViewerPresenter(
+        view,
         run_off_thread=run_off_thread,
         close_worker=close_worker,
         request_close=request_close,
+        panel_presenter=panels,
+        signal_plane=plane,
     )
 
 
-def create_window(*, path=None, window_ratio: float | None = None):
+def create_window(
+    *,
+    path=None,
+    workspace=None,
+    window_ratio: float | None = None,
+):
     """Open the viewer the way a human does, and return its window.
 
     The non-blocking public entry: what the launcher runs, what a notebook
     calls, and what zlc_ui's acceptance capture opens.
     """
 
+    from datetime import date
+    from types import SimpleNamespace
+
+    from zlc_durable import day_folder
     from zlc_ui import open_figure_viewer
-    from zlc_workbench.board import attach_qt_worker
+    from zlc_workbench.board import (
+        attach_qt,
+        attach_qt_owner_turn,
+        attach_qt_worker,
+    )
+    from ..session import Workspace
+
+    space = (
+        Workspace.discover()
+        if workspace is None
+        else Workspace(workspace)
+    ).prepare()
+    today = day_folder(space.data, date.today())
+    viewer_workspace = SimpleNamespace(
+        root=space.root,
+        data=space.data,
+        today=today,
+    )
 
     # One call, one handle: this layer never names a widget class.
     window = open_figure_viewer(
-        title="FigureViewer@Zou lab", window_ratio=window_ratio
+        title="FigureViewer@Zou lab",
+        window_ratio=window_ratio,
+        path_base_dir=str(today),
     )
     run_off_thread, close_worker = attach_qt_worker("zlc-figure-viewer")
     try:
         window.presenter = build(
             window,
+            workspace=viewer_workspace,
             run_off_thread=run_off_thread,
             close_worker=close_worker,
             request_close=window.close_later,
@@ -89,6 +166,14 @@ def create_window(*, path=None, window_ratio: float | None = None):
         window.close()
         raise
     window.set_close_guard(window.presenter.close)
+    panel_presenter = window.presenter._panel_presenter
+    panel_presenter.board.wake.set_notify(
+        attach_qt_owner_turn(window.presenter.commit_surfaces)
+    )
+    window.presenter.timer = attach_qt(
+        window.presenter.beat,
+        interval_ms=panel_presenter.board.base_interval_ms,
+    )
     if path is not None:
         window.presenter.open(str(path))
     return window

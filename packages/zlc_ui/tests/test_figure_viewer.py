@@ -36,21 +36,27 @@ def test_figure_viewer_mount_reconcile_and_open_intent() -> None:
     _run_qt(
         """
 from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
+from pathlib import Path
 from zlc_ui.figure_viewer import FigureViewerHandle, FigureViewerView
 from zlc_ui.qt import ensure_qt_app
 app = ensure_qt_app(["figure-test"])
-view = FigureViewerView(); view.set_archive_info(
+viewer_folder = str(Path.cwd())
+view = FigureViewerView(path_base_dir=viewer_folder); view.set_archive_info(
     (("Summary", (("Name", "fake"),)), ("Flow", ())),
     {'nodes': (), 'edges': ()},
 )
 assert view.info_pane.path_edit._filter == "Saved figure archives (*.npz)"
+assert view.info_pane.path_edit._base_dir == viewer_folder
 view.set_panel_sizes(('2x2',), '2x2')
 view.set_grid_cell_kinds(('curve', 'image', 'histogram'))
 view.set_panel_kinds((('image', 'Image'), ('curve', 'Curve')))
-view.add_panel('saved-panel-1', 'Camera frame')
-view.set_panel_datasets('saved-panel-1', (('data', 'Camera frame'),), 'data')
+view.add_panel('panel-1', 'Camera frame')
+view.set_panel_signal_choices(
+    'panel-1', (('this archive', (('Camera frame', '@figure/1/data'),)),),
+    current='@figure/1/data',
+)
 state = {
-    'signal': 'data', 'kind': 'image', 'cell_kind': '', 'size': '2x2',
+    'signal': '@figure/1/data', 'kind': 'image', 'cell_kind': '', 'size': '2x2',
     'interval_ms': 400, 'title': 'Camera frame', 'semantic': {}, 'display': {},
     'fit': {}, 'overlay_signal': '',
 }
@@ -58,13 +64,13 @@ surface = {
     'semantic': (), 'display': (), 'fit': (),
     'data_structure': (), 'data_scope': (), 'paints_images': True,
 }
-view.set_panel_projection('saved-panel-1', state, surface)
+view.set_panel_projection('panel-1', state, surface)
 first = QtWidgets.QLabel("first"); second = QtWidgets.QLabel("second")
-view.set_panel_surface('saved-panel-1', first); view.set_panel_surface('saved-panel-1', second)
-assert view._cards['saved-panel-1'].surface is second and first.parentWidget() is None
+view.set_panel_surface('panel-1', first); view.set_panel_surface('panel-1', second)
+assert view._cards['panel-1'].surface is second and first.parentWidget() is None
 view.resize(1200, 700); view.show(); app.processEvents()
-assert view._dataset_bar.height() == view._dataset_bar.sizeHint().height()
-assert view.board._cards['saved-panel-1'] is view._cards['saved-panel-1']
+assert view._panel_bar.height() == view._panel_bar.sizeHint().height()
+assert view.board._cards['panel-1'] is view._cards['panel-1']
 assert view.scroll.isVisible() and not view._placeholder.isVisible()
 
 # Showing which file is open must not re-ask for it to be opened.
@@ -125,9 +131,9 @@ projection = {
     'live': False,
 }
 view.open_panel_editor(
-    'saved-panel-1', projection, 'Edit · Camera frame'
+    'panel-1', projection, 'Edit · Camera frame'
 )
-editor = view._editors['saved-panel-1']
+editor = view._editors['panel-1']
 assert view.tabs.currentWidget() is editor
 assert 'interval_ms' not in editor.panel_form.spec.keys
 assert editor.snapshot_group.isHidden()
@@ -178,7 +184,7 @@ def test_figure_viewer_demo_smoke() -> None:
     # What the demo shows now is a HOST filling the page through the handle;
     # the File field's own intent is checked against the widget above, which is
     # where a widget may be poked at all.
-    assert "filled: 2 datasets" in completed.stdout
+    assert "filled: 2 signals" in completed.stdout
 
 
 def test_the_info_pane_width_is_stable_across_loaded_content() -> None:
