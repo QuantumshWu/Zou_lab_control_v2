@@ -716,10 +716,6 @@ class DeviceManagerView(QtWidgets.QWidget):
             return
         from zlc_ui.fluent import open_fluent_window
 
-        # A plain top-level window, like the pulse editor and the figure
-        # viewer: the owner-parented FluentWindow re-creates its native
-        # window after construction (the flag flip), and on the bench that
-        # produced freezes and closes cascading between owned windows.
         windows[key] = open_fluent_window(
             lambda: _ServerLogView(snapshot),
             title=f"{key} log@Zou lab",

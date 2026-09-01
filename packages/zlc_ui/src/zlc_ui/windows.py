@@ -29,15 +29,9 @@ def open_device_control(
 ) -> Any:
     """Open one projection-driven generic control without exposing Qt.
 
-    A PLAIN top-level, deliberately -- like the pulse editor and the
-    figure viewer, which have never misbehaved.  This window used to be
-    OWNED by the console, and on the bench the owner-parented frameless
-    window (whose native handle is re-created when the Qt.Window flag is
-    applied after construction) twice produced closes cascading the WRONG
-    way: closing one owned window froze and took its siblings and then
-    its owner down, and the console's close guard then shut the running
-    installation.  Closing a control must close one window and nothing
-    else, so no window here owns another.
+    A plain top-level like every launcher window (the window law lives on
+    :func:`zlc_ui.fluent.fluent.launch_fluent_window`), opened at half the
+    standard width and its content's own height, still resizable.
     """
 
     from .device_manager.handle import DeviceControlHandle
