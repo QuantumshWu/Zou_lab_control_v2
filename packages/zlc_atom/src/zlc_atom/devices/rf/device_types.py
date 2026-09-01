@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
 from zlc_atom.devices.rf.binding import bind_rf_source
+from zlc_atom.devices.rf.contract import (
+    WINDOW_AUTHORING_FIELDS,
+    validate_window_values,
+)
 from zlc_atom.devices.rf.rigol_dg4000 import RigolDg4000Config, RigolDg4000RfSource
 from zlc_atom.devices.rf.vaunix_lms import (
     CtypesLmsLibrary,
@@ -13,9 +17,9 @@ from zlc_atom.devices.rf.vaunix_lms import (
 from zlc_atom.install.configuration import DeviceInstanceConfig
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
 
-#: Bounds are AUTHORED because they are bench policy, not instrument fact:
-#: the form has to offer a finite scan range before anything is open, and
-#: the window an experiment allows is usually narrower than the datasheet's.
+#: Bounds are optional bench policy, not instrument facts.  Omitting an edge
+#: means no policy limit on that side; it can still be set or cleared later in
+#: Device Control through the same shared RF contract.
 RIGOL_DG4000_SCHEMA = AuthoringSchema(
     (
         AuthoringField(
@@ -33,7 +37,9 @@ RIGOL_DG4000_SCHEMA = AuthoringSchema(
             minimum=0.1,
             unit="s",
         ),
-    )
+        *WINDOW_AUTHORING_FIELDS,
+    ),
+    validator=validate_window_values,
 )
 
 VAUNIX_LMS_SCHEMA = AuthoringSchema(
@@ -43,7 +49,9 @@ VAUNIX_LMS_SCHEMA = AuthoringSchema(
         AuthoringField(
             "serial", "int", "Serial number", None, required=True, minimum=1
         ),
-    )
+        *WINDOW_AUTHORING_FIELDS,
+    ),
+    validator=validate_window_values,
 )
 
 
@@ -52,6 +60,10 @@ def _rigol_factory(context, key: str, values: dict) -> InstalledLeaf:
     config = RigolDg4000Config(
         resource=str(authored["resource"]),
         timeout_seconds=float(authored["timeout_seconds"]),
+        frequency_low_hz=authored["frequency_low_hz"],
+        frequency_high_hz=authored["frequency_high_hz"],
+        power_low_dbm=authored["power_low_dbm"],
+        power_high_dbm=authored["power_high_dbm"],
     )
     source = RigolDg4000RfSource(config)
     return bind_rf_source(
@@ -67,6 +79,10 @@ def _vaunix_factory(context, key: str, values: dict) -> InstalledLeaf:
     authored = VAUNIX_LMS_SCHEMA.project_values(values)
     config = VaunixLmsConfig(
         serial=int(authored["serial"]),
+        frequency_low_hz=authored["frequency_low_hz"],
+        frequency_high_hz=authored["frequency_high_hz"],
+        power_low_dbm=authored["power_low_dbm"],
+        power_high_dbm=authored["power_high_dbm"],
     )
     source = VaunixLmsRfSource(config)
     return bind_rf_source(

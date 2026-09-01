@@ -324,10 +324,22 @@ def test_a_draft_projects_without_completeness_and_init_still_refuses() -> None:
     draft = RIGOL_DG4000_SCHEMA.draft_values({})
     assert draft["resource"] == ""
     assert draft["timeout_seconds"] == 5.0
+    assert draft["frequency_low_hz"] is None
+    assert draft["frequency_high_hz"] is None
+    assert draft["power_low_dbm"] is None
+    assert draft["power_high_dbm"] is None
     with pytest.raises(ValueError, match="required authoring field 'resource'"):
         RIGOL_DG4000_SCHEMA.project_values({})
     with pytest.raises(ValueError, match="below its minimum"):
         RIGOL_DG4000_SCHEMA.draft_values({"timeout_seconds": 0.0})
+    with pytest.raises(ValueError, match="frequency low must be below"):
+        RIGOL_DG4000_SCHEMA.project_values(
+            {
+                "resource": "TCPIP::example",
+                "frequency_low_hz": 2e6,
+                "frequency_high_hz": 1e6,
+            }
+        )
 
 
 def test_a_field_default_must_obey_its_own_bounds() -> None:

@@ -117,7 +117,7 @@ class CtypesLmsLibrary:
 
 @dataclass(frozen=True)
 class VaunixLmsConfig:
-    """Which brick, inside which authored window.
+    """Which brick, plus any optional bench-policy window.
 
     WHERE the vendor DLL lives is a machine fact, not an apparatus fact:
     the driver looks in this family's ``vendor/`` folder (see the README
@@ -125,10 +125,10 @@ class VaunixLmsConfig:
     """
 
     serial: int
-    frequency_low_hz: float = 500e6
-    frequency_high_hz: float = 8e9
-    power_low_dbm: float = -40.0
-    power_high_dbm: float = 10.0
+    frequency_low_hz: float | None = None
+    frequency_high_hz: float | None = None
+    power_low_dbm: float | None = None
+    power_high_dbm: float | None = None
 
 
 class VaunixLmsRfSource(RfSourceBase):

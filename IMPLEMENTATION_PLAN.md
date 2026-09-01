@@ -121,9 +121,9 @@
 - 公共Figure API严格编码/解码PlotSpec、parameters、size、viewport、selectors、facet focus、classifier、fit与
   typed image overlay；archive先发布，preview后渲染。
 - Panel Save只是公共Figure API的adapter，不再维护第二套writer或restore grammar。
-- FigureViewer必须从archive exact recipe恢复typed input，不按shape推断plot kind。
+- FigureViewer把archive typed Dataset发布为sealed Runtime signals，默认panel从archive exact recipe恢复，且不按shape推断plot kind；Add Panel只建立空的fixed-kind `panel-N`，Signal/ROI/Fit派生及后续compose全部走与TaskConsole相同的ConsolePresenter、SelectionBridge和Plot host，不再保留static panel owner。
 - FigureViewer与TaskConsole Live/Frozen使用同一个accepted PlotSpec、parameter、selector/
-  viewport capability contract；Viewer semantic edit同样只在host accept后更新surface。
+  viewport capability contract；Viewer semantic edit同样只在host accept后更新surface，文件选择默认定位workspace当天data目录。
 - Lineage保存root、event nodes和direct parent IDs；Viewer验证引用、reachability和cycle后
   投影为tree。
 - 显式消费Dataset的Measurement worker在每次保留值时将exact source publication随同一次Runtime commit提交；Scan Flow因此从Scan event沿真实parent回到Measurement/Processor，Save与Viewer不得按signal名查latest。Device tab从node run record显示baseline working point，并另列event ranges实际引用的active override epoch。
@@ -154,6 +154,7 @@
 ### 2.5 Device Control与settings provenance
 
 - Generic Device Control只消费adapter的`TunableField` contract，显示Current、Desired、Live apply、Apply、Status、Refresh及active owners；已删除旧的edit-immediate `field_committed/read_values/set_form`路径和demo残余。
+- RF frequency/power四个policy edge已进入Rigol、Vaunix及Virtual RF的optional Init schema并复用同一Control tunable；空值表示无该侧policy、可随时清回空值。只有完整有限的low/high pair才形成Scan port范围，单侧edge只约束直接tune；全空Init不归一化或改写硬件当前值。
 - Pylon公开`gain_db`的SDK bounds/current与grabbing-safe write；Virtual camera公开`exposure_seconds`。成功且effective实际改变才推进session-local epoch；Stepped Scan严格使用effective return，不能把hardware未接受的值写成Dataset coordinate。
 - Logic静态requirements与Stepped Scan运行时选择的device ports都形成field claim。DeviceUse按device-specific owner revision原子核风险授权、dependency closure与pending write；字段命令期间不能进入新Logic，owner变化取消尚未执行的write。
 - Device I/O只在现有串行worker/adapter command lane执行。Refresh去重合并且属于close guard；75 ms live input在相同policy projection及in-flight write期间保留每字段latest-only值，Qt owner只处理plain projection和已完成readback。

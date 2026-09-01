@@ -38,7 +38,13 @@ def test_a_published_tunable_is_listed_and_driven_over_the_wire(announcer) -> No
     panel can tell the difference -- which is the entire point.
     """
 
-    source = virtual_rf_source(VaunixLmsConfig(serial=1001))
+    source = virtual_rf_source(
+        VaunixLmsConfig(
+            serial=1001,
+            frequency_low_hz=500e6,
+            frequency_high_hz=8e9,
+        )
+    )
     announcer.publish(
         PublishedDevice(
             instance_id="rf_main",

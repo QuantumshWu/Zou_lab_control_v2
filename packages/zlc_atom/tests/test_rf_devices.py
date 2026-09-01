@@ -115,7 +115,7 @@ def test_one_instrument_is_one_instance_with_every_channel_s_knobs() -> None:
 
 
 def test_bounds_are_bench_policy_and_refuse_before_writing() -> None:
-    source, instrument = _rigol(frequency_high_hz=1e6)
+    source, instrument = _rigol(frequency_high_hz=1e6, power_high_dbm=10.0)
     written = {
         channel: dict(registers)
         for channel, registers in instrument.registers.items()
@@ -142,7 +142,12 @@ def test_every_accepted_tune_advances_the_settings_epoch() -> None:
 
 
 def test_the_scan_facing_fields_carry_bounds_and_units() -> None:
-    source, _instrument = _rigol()
+    source, _instrument = _rigol(
+        frequency_low_hz=1e3,
+        frequency_high_hz=160e6,
+        power_low_dbm=-30.0,
+        power_high_dbm=10.0,
+    )
     by_name = {field.metadata.name: field for field in source.tunable_fields()}
     for channel in ("ch1", "ch2"):
         frequency = by_name[f"{channel}_frequency_hz"].metadata
@@ -159,7 +164,7 @@ def test_the_scan_facing_fields_carry_bounds_and_units() -> None:
         assert field.dependency_group == (field.metadata.name,)
 
 
-def test_the_window_is_a_control_knob_and_never_a_scan_axis() -> None:
+def test_optional_window_is_one_init_and_control_policy() -> None:
     """The bench's safety window moved to the control panel, off Init.
 
     It is adjusted with plain Apply (never live), or through the same
@@ -172,7 +177,7 @@ def test_the_window_is_a_control_knob_and_never_a_scan_axis() -> None:
 
     from zlc_atom.nodes.scan.plan import scan_ports_for_devices
 
-    source, _instrument = _rigol()
+    source, instrument = _rigol()
     by_name = {field.metadata.name: field for field in source.tunable_fields()}
     for name in (
         "frequency_low_hz",
@@ -183,7 +188,18 @@ def test_the_window_is_a_control_knob_and_never_a_scan_axis() -> None:
         window = by_name[name]
         assert not window.live_write, "the window applies, never live"
         assert window.metadata.minimum is None and window.metadata.maximum is None
+        assert window.current is None
 
+    ports = scan_ports_for_devices({"rf": source})
+    assert ports == (), "an unbounded knob has no finite scan-authoring range"
+    assert not any("FREQuency " in command for command in instrument.log), (
+        "omitting all policy edges must not move hardware at open"
+    )
+
+    assert source.tune("frequency_low_hz", 1e3) == 1e3
+    assert source.tune("frequency_high_hz", 80e6) == 80e6
+    assert source.tune("power_low_dbm", -30.0) == -30.0
+    assert source.tune("power_high_dbm", 10.0) == 10.0
     ports = scan_ports_for_devices({"rf": source})
     offered = {port.port.split(":")[-1] for port in ports}
     assert offered == {
@@ -191,9 +207,13 @@ def test_the_window_is_a_control_knob_and_never_a_scan_axis() -> None:
     }
 
     before = source.settings_provenance()["settings_epoch"]
-    assert source.tune("frequency_high_hz", 80e6) == 80e6
-    assert source.tunable_values()["frequency_high_hz"] == 80e6
+    assert source.tune("frequency_high_hz", None) is None
+    assert source.tunable_values()["frequency_high_hz"] is None
     assert source.settings_provenance()["settings_epoch"] == before + 1
+    assert not any(
+        port.port.endswith(":ch1_frequency_hz") for port in scan_ports_for_devices({"rf": source})
+    ), "clearing either edge removes the finite scan range"
+    assert source.tune("frequency_high_hz", 80e6) == 80e6
     # The channel knobs' own scan bounds follow the window immediately.
     by_name = {field.metadata.name: field for field in source.tunable_fields()}
     assert by_name["ch1_frequency_hz"].metadata.maximum == 80e6
@@ -252,11 +272,7 @@ def test_every_interaction_narrates_at_the_contract_layer(caplog) -> None:
         with pytest.raises(ValueError):
             source.tune(FREQUENCY_FIELD, 1_000_000_005.0)
     lines = [record.getMessage() for record in caplog.records]
-    assert any(
-        line.startswith("OPEN NORMALIZED field=frequency_hz")
-        and line.endswith(f"device={source.identity}")
-        for line in lines
-    ), lines
+    assert not any(line.startswith("OPEN NORMALIZED") for line in lines), lines
     assert any(
         line.startswith("TUNE field=frequency_hz value=1000000000.0")
         and line.endswith(f"device={source.identity}")
