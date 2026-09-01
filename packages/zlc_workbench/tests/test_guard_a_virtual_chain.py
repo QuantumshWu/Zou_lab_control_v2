@@ -269,11 +269,15 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         ]["repeats"]
         assert set(record["actual_devices"]) == {"camera", "sequencer"}
         assert record["actual_devices"]["camera"]["exposure_seconds"] > 0.0
-        # Calibration's three-frame facet is a monitor preview, not a second
-        # scientific result.  Runtime retires it when the Task seals; the
-        # artifact above is the terminal truth.
+        # Calibration's three-frame facet is a monitor preview, not a
+        # second scientific result -- the artifact above is the terminal
+        # truth.  The preview's last publication is nonetheless RETAINED
+        # when the Task seals (stop ends production, never the data): a
+        # panel still showing it keeps deriving from it until the next
+        # generation replaces it.
         preview_signal = calibration_host.signal_key("capture_preview")
-        assert preview_signal not in plane.freeze().signals
+        assert preview_signal in plane.freeze().signals
+        assert not plane.is_generation_live(preview_signal)
         assert "@logic/calibration/review/site_review" not in plane.freeze().signals
         calibration_host.start(
             run_root=tmp_path,
@@ -308,7 +312,8 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
             "psf_kernels.npz",
             "psf_kernels.png",
         }
-        assert preview_signal not in plane.freeze().signals
+        # Retained at seal, like every sealed monitor publication.
+        assert preview_signal in plane.freeze().signals
 
         one_window_program = _one_camera_window_program()
         sequencer.load(one_window_program)
@@ -465,7 +470,11 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         occupancy_host.shutdown()
         finite_host.shutdown()
         plane.retire(finite_host)
-        assert plane.freeze().signals == {}
+        # No generation is live; the retained terminal publications of the
+        # sealed monitors stay in the front by the retention law.
+        assert not any(
+            plane.is_generation_live(name) for name in plane.freeze().signals
+        )
 
         sequencer.load(one_window_program)
         infinite_finalization = finalize_logic_draft(
@@ -525,16 +534,23 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         infinite_host.cancel("Guard A repeat-zero stop")
         _wait_terminal(infinite_host, phase="cancelled")
         assert camera.capture_state() is False
-        assert plane.latest_publication(live_signal) is None
+        # Stopped, not gone: the last live frame is retained for the panels
+        # (and derivations) that still show it.
+        assert plane.latest_publication(live_signal) is not None
+        assert not plane.is_generation_live(live_signal)
 
         for host in reversed(hosts):
             host.shutdown()
         assert all(
             host.terminal and not host.running and host.worker_idle for host in hosts
         )
-        assert plane.freeze().signals == {}
+        assert not any(
+            plane.is_generation_live(name) for name in plane.freeze().signals
+        )
         plane.retire(calibration_host)
-        assert plane.freeze().signals == {}
+        assert not any(
+            plane.is_generation_live(name) for name in plane.freeze().signals
+        )
         assert camera.capture_state() is False
         assert sequencer.snapshot()["firing"] is False
     finally:

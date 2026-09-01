@@ -1617,7 +1617,6 @@ class SlmFeedbackTask:
                     image,
                     self._site_centers_xy,
                     radius=self.model.integration_half_width,
-                    reducer=self.model.reducer,  # type: ignore[arg-type]
                 )
                 for image in frames
             ],
@@ -1664,7 +1663,6 @@ class SlmFeedbackTask:
             metadata={
                 "format": "zlc.slm.feedback-sites",
                 "box_half_width": int(self.model.integration_half_width),
-                "box_reducer": str(self.model.reducer),
                 "calibration_path": str(self.calibration_path),
                 "science_context_path": str(self.science_context_path),
             },

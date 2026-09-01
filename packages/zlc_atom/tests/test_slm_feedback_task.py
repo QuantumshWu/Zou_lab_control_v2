@@ -224,7 +224,6 @@ def _calibration(
         dark_sample_variance=np.zeros(35),
         kind=ReadoutModelKind.BOX,
         integration_half_width=0,
-        reducer="mean",
     )
     return TrapCalibration(
         site_map,
@@ -254,7 +253,6 @@ def _calibration_at(
         dark_sample_variance=np.zeros(count),
         kind=ReadoutModelKind.BOX,
         integration_half_width=0,
-        reducer="mean",
     )
     return TrapCalibration(
         site_map,
@@ -430,7 +428,6 @@ def _calibration_with_unresolved_site(
         dark_sample_variance=np.zeros(site_map.n_sites),
         kind=ReadoutModelKind.BOX,
         integration_half_width=0,
-        reducer="mean",
     )
     return TrapCalibration(
         site_map,
@@ -1588,9 +1585,9 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
 
         sample = 0
 
-        def partial_signals(image, centers, *, radius, reducer):
+        def partial_signals(image, centers, *, radius):
             nonlocal sample
-            del image, centers, radius, reducer
+            del image, centers, radius
             sample += 1
             values = np.ones(task.calibration.n_sites)
             if sample > 2:
@@ -2383,7 +2380,7 @@ def test_virtual_feedback_recovers_missing_sites_and_retains_best_candidate(
         assert calibration.site_map.n_sites == 25
         assert calibration.site_map.topology is None
         box = calibration.select_model(ReadoutModelKind.BOX)
-        assert box.integration_half_width == 1 and box.reducer == "mean"
+        assert box.integration_half_width == 1
         installation = create_installation(
             "virtual",
             world=SimulationWorld(SimulationWorldConfig(loading_probability=0.5)),

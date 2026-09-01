@@ -39,7 +39,6 @@ def _calibration(
                 dark_sample_variance=np.asarray([4.0]),
                 kind=kind,
                 integration_half_width=1,
-                reducer="mean" if kind is ReadoutModelKind.BOX else None,
                 psf_weights=psf_weights,
                 psf_boxes=psf_boxes,
                 background=None if kind is ReadoutModelKind.BOX else "none",
@@ -67,8 +66,9 @@ def test_trap_calibration_single_dispatch_supports_box(tmp_path: Path) -> None:
             binning_yx=(2, 2),
         )
     )
-    np.testing.assert_allclose(calibration.signals(image), [5.0])
-    np.testing.assert_array_equal(calibration.detect(image), [False])
+    np.testing.assert_allclose(calibration.signals(image), [45.0])
+    np.testing.assert_array_equal(calibration.detect(image), [True])
+    np.testing.assert_array_equal(calibration.detect(np.zeros((3, 3))), [False])
     target = calibration.save(tmp_path / "calibration.json")
     payload = json.loads(target.read_text(encoding="utf-8"))
     assert set(payload) == {
@@ -87,7 +87,7 @@ def test_trap_calibration_single_dispatch_supports_box(tmp_path: Path) -> None:
     np.testing.assert_allclose(loaded.select_model().bright_mean, [9.0])
     np.testing.assert_array_equal(loaded.select_model().dark_sample_count, [8])
     np.testing.assert_allclose(loaded.select_model().dark_sample_variance, [4.0])
-    np.testing.assert_allclose(loaded.signals(image), [5.0])
+    np.testing.assert_allclose(loaded.signals(image), [45.0])
 
     unformatted = calibration.to_dict()
     unformatted.pop("format")
@@ -260,8 +260,15 @@ def test_psf_dispatch_is_explicit_and_not_a_name_substring() -> None:
     np.testing.assert_allclose(calibration.signals(np.arange(9, dtype=float).reshape(3, 3) + 1.0), [5.0])
 
 
-def test_box_reducer_oracle_is_shared_by_public_function_and_calibration() -> None:
+def test_the_box_signal_is_the_total_of_the_box() -> None:
+    """One physical quantity: how much the site's footprint collected.
+
+    The reducer knob (mean/median/max) is gone -- a mean is the same
+    number rescaled by the arbitrary box size, and the PSF models answer
+    in the same total-counts currency, so every readout's signal,
+    threshold and histogram share a meaning.
+    """
+
     image = np.asarray([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]])
     centers = np.asarray([[1.0, 1.0]])
-    np.testing.assert_allclose(extract_box_signals(image, centers, reducer="mean"), [5.0])
-    np.testing.assert_allclose(extract_box_signals(image, centers, reducer="sum"), [45.0])
+    np.testing.assert_allclose(extract_box_signals(image, centers), [45.0])

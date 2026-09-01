@@ -163,8 +163,7 @@ def readout_summary(
             entry["integration"] = {
                 "box": f"{2 * model.integration_half_width + 1}"
                 f"x{2 * model.integration_half_width + 1}",
-                "reducer": model.reducer,
-            }
+                            }
         else:
             entry["integration"] = {
                 "box": f"{2 * model.integration_half_width + 1}"

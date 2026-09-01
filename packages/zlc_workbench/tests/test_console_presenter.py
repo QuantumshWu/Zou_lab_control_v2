@@ -5737,11 +5737,22 @@ def test_refresh_adopts_the_card_when_the_derived_signal_retired(
         "the card must move ahead of Edit for this to mean anything"
     )
 
-    # The producing run ends: the derived signal leaves the plane.
+    # The producing run ends.  STOP ENDS PRODUCTION, NEVER THE DATA: the
+    # derived publication is retained -- the operator keeps deriving from
+    # a stopped panel -- so ending the run is no longer what retires it.
     assert presenter.stop_logic(camera_id)
     for _beat in range(40):
         presenter.beat()
         presenter.poll_logic()
+        time.sleep(0.005)
+    assert session.signal_plane.latest_publication(roi_signal) is not None
+
+    # What genuinely retires the derived signal is its OWNER going away:
+    # removing the source panel closes its bridge, which withdraws the
+    # derived route from the plane.
+    presenter.remove_panel(image.panel_id)
+    for _beat in range(10):
+        presenter.beat()
         time.sleep(0.005)
     assert session.signal_plane.latest_publication(roi_signal) is None
 

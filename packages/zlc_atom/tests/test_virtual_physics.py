@@ -764,7 +764,6 @@ def test_a_removed_trap_cannot_resurrect_its_atom(monkeypatch) -> None:
             restored_frame,
             (kept_center, removed_center, background_center),
             radius=1,
-            reducer="mean",
         )
         assert kept_signal > background
         assert removed_signal < kept_signal
@@ -798,7 +797,6 @@ def test_occupied_qcmos_box_brightness_tracks_physical_trap_depth() -> None:
         frame,
         (*world._trap_centers_xy, (15.0, 15.0)),
         radius=1,
-        reducer="mean",
     )
     box_means = extracted[:-1] - extracted[-1]
     depths = world._trap_intensities / world._loading_intensity_scale
@@ -872,7 +870,6 @@ def test_add_remove_and_move_change_the_next_triggered_qcmos_frame(
                 records[1].image,
                 (old_center, measured_new_center, background_center),
                 radius=1,
-                reducer="mean",
             )
             assert world._propagated_revision == world._slm_phase_revision
             return old_signal - background, new_signal - background
@@ -1544,7 +1541,7 @@ def test_public_repeat_reduction_conflates_loading_and_bright_dark_contrast() ->
         # the authored 20 ms sensor / 5 ms probe readout frame.
         reduced = np.mean(frames[:, 1], axis=0)
         site_boxes = extract_box_signals(
-            reduced, world._trap_centers_xy, radius=1, reducer="mean"
+            reduced, world._trap_centers_xy, radius=1
         )
         observed_raw_count_ratio = float(
             np.max(site_boxes) / np.min(site_boxes)
@@ -1570,7 +1567,6 @@ def test_public_repeat_reduction_conflates_loading_and_bright_dark_contrast() ->
             corrected_reduced,
             world._trap_centers_xy,
             radius=1,
-            reducer="mean",
         )
         corrected_raw_count_ratio = float(
             np.max(corrected_site_boxes) / np.min(corrected_site_boxes)

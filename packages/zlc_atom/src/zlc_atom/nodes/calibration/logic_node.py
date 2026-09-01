@@ -134,18 +134,6 @@ CALIBRATION_SCHEMA = AuthoringSchema(
             minimum=0,
         ),
         AuthoringField(
-            "box_reducer",
-            "choice",
-            "Box reducer",
-            "mean",
-            choices=(
-                AuthoringChoice("mean", "Mean"),
-                AuthoringChoice("sum", "Sum"),
-                AuthoringChoice("median", "Median"),
-                AuthoringChoice("max", "Maximum"),
-            ),
-        ),
-        AuthoringField(
             "psf_half_width",
             "int",
             "PSF half-width",
@@ -251,7 +239,6 @@ def _build(
             default_model_kind=ReadoutModelKind(authored["default_model_kind"]),
             threshold_method=str(authored["threshold_method"]),
             box_half_width=int(authored["box_half_width"]),
-            box_reducer=str(authored["box_reducer"]),
             psf_half_width=int(authored["psf_half_width"]),
             psf_padding=int(authored["psf_padding"]),
             detection_spot_sigma=float(authored["detection_spot_sigma"]),

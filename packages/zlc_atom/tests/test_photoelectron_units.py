@@ -29,6 +29,7 @@ from zlc_atom.devices.camera.photoelectrons import (
     stated_conversion,
 )
 from zlc_atom.install import create_installation
+from zlc_atom.nodes.calibration.calibration import ReadoutModelKind
 from zlc_atom.nodes.calibration.task import CalibrationTask
 from zlc_atom.nodes.occupancy import OccupancyProcessor
 
@@ -162,20 +163,20 @@ def test_a_calibration_in_photoelectrons_reads_the_same_atoms(tmp_path: Path) ->
         scale = installation.world.conversion_e_per_count
     finally:
         installation.close()
-    box_counts = counts.calibration.select_model(
-        counts.calibration.default_model_kind
-    )
-    box_electrons = electrons.calibration.select_model(
-        electrons.calibration.default_model_kind
-    )
+    box_counts = counts.calibration.select_model(ReadoutModelKind.BOX)
+    box_electrons = electrons.calibration.select_model(ReadoutModelKind.BOX)
     usable = np.asarray(box_counts.usable_sites, dtype=bool) & np.asarray(
         box_electrons.usable_sites, dtype=bool
     )
     assert usable.any()
-    # A mean of counts becomes a mean of electrons by the same affine map.
+    # The box TOTAL of counts becomes the total of electrons by the same
+    # per-pixel affine map applied once per pixel of the box:
+    # sum_e = (sum_c - N_box * offset) * scale.
+    box_pixels = float((2 * box_counts.integration_half_width + 1) ** 2)
     np.testing.assert_allclose(
         np.asarray(box_electrons.dark_mean)[usable],
-        (np.asarray(box_counts.dark_mean)[usable] - offset) * scale,
+        (np.asarray(box_counts.dark_mean)[usable] - box_pixels * offset)
+        * scale,
         rtol=0.05,
         atol=0.5,
     )
