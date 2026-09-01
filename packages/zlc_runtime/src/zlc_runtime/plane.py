@@ -1270,7 +1270,7 @@ class SignalDataPlane:
         #: source_name with it while the publication lives on in lineage.
         self._publication_selections: WeakKeyDictionary[
             SignalPublication,
-            str,
+            tuple[str, ...],
         ] = WeakKeyDictionary()
         self._states: dict[str, _GenerationState] = {}
         self._starting: set[str] = set()
@@ -1828,6 +1828,7 @@ class SignalDataPlane:
         outputs: Mapping[str, LiveDatasetOutput],
         *,
         source_publication: SignalPublication,
+        source_signals: tuple[str, ...] | None = None,
         trigger: tuple[str, int] | None = None,
         retain: bool = False,
     ) -> Mapping[str, SignalValue]:
@@ -1837,6 +1838,18 @@ class SignalDataPlane:
             raise TypeError("Processor commit requires its exact parent")
         if type(retain) is not bool:
             raise TypeError("retain must be bool")
+        selected_signals = (
+            None
+            if source_signals is None
+            else tuple(
+                canonical_text(name, "processor source signal")
+                for name in source_signals
+            )
+        )
+        if selected_signals is not None and (
+            not selected_signals or len(set(selected_signals)) != len(selected_signals)
+        ):
+            raise ValueError("processor source signals must be non-empty and unique")
         if trigger is not None:
             if (
                 not isinstance(trigger, tuple)
@@ -1874,6 +1887,7 @@ class SignalDataPlane:
             node,
             selected,
             source_publication=source_publication,
+            source_signals=selected_signals,
             trigger=trigger,
         )
 
@@ -1883,6 +1897,7 @@ class SignalDataPlane:
         outputs: Mapping[str, LiveDatasetOutput],
         *,
         source_publication: SignalPublication | None = None,
+        source_signals: tuple[str, ...] | None = None,
         worker_source: tuple[str, SignalPublication] | None = None,
         trigger: tuple[str, int] | None = None,
     ) -> Mapping[str, SignalValue]:
@@ -1915,10 +1930,27 @@ class SignalDataPlane:
             if state.publication is not None and state.exact_outputs is None:
                 raise RuntimeError("one generation cannot mix publication paths")
             route_source = None
+            selected_sources: tuple[str, ...] = ()
             if source_publication is not None:
                 route_source = self._require_route_parent_locked(
                     state, source_publication
                 )
+                selected_sources = (
+                    (state.source_name,)
+                    if source_signals is None
+                    else source_signals
+                )
+                if (
+                    state.source_name is None
+                    or state.source_name not in selected_sources
+                    or any(
+                        source_publication.value(name) is None
+                        for name in selected_sources
+                    )
+                ):
+                    raise ValueError(
+                        "processor source publication lacks a declared input signal"
+                    )
                 source_sequence = source_publication.event_ref.sequence
                 if source_sequence < state.last_parent_sequence or (
                     source_sequence == state.last_parent_sequence
@@ -1937,6 +1969,7 @@ class SignalDataPlane:
                     raise ValueError(
                         "worker source publication does not contain its signal"
                     )
+                selected_sources = (worker_signal,)
 
             declared = self._declarations_by_bare(state)
             if set(outputs) != set(declared):
@@ -2084,16 +2117,15 @@ class SignalDataPlane:
                 values,
                 parents=parents,
             )
-            selected_source = worker_signal or state.source_name
             if parent is not None:
-                self._publication_selections[publication] = selected_source
+                self._publication_selections[publication] = selected_sources
             replay_parents = (
                 ()
                 if parent is None
                 else (
                     self._slim_publication_locked(
                         parent,
-                        selected_source,
+                        selected_sources,
                         {},
                     ),
                 )
@@ -2547,32 +2579,98 @@ class SignalDataPlane:
             state = self._state_for_signal_locked(name)
             return None if state is None else state.publication
 
+    def resolve_sibling_signals(
+        self,
+        signal_name: str,
+        sibling_outputs: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        """Resolve named outputs owned by the selected signal's publication."""
+
+        name = canonical_text(signal_name, "signal name")
+        siblings = tuple(
+            canonical_text(value, "sibling output name")
+            for value in sibling_outputs
+        )
+        with self._lock:
+            state = self._state_for_signal_locked(name)
+            if state is None or state.retired:
+                raise LookupError(f"signal {name!r} has no retained producer")
+            by_bare = {
+                bare: qualified
+                for qualified, bare in state.bare_names.items()
+            }
+            missing = tuple(value for value in siblings if value not in by_bare)
+            if missing:
+                raise ValueError(
+                    f"signal {name!r} has no sibling outputs {missing!r}"
+                )
+            return tuple(by_bare[value] for value in siblings)
+
     def _follow_tap_locked(
         self,
         state: _GenerationState,
         signal_name: str,
         *,
         replay: bool,
+        selected_signals: tuple[str, ...] | None = None,
     ) -> FollowTap[SignalPublication]:
         stream = self._ensure_publication_stream_locked(state)
+        selected = (signal_name,) if selected_signals is None else selected_signals
+        if (
+            signal_name not in selected
+            or len(set(selected)) != len(selected)
+            or any(name not in state.output_names for name in selected)
+        ):
+            raise ValueError(
+                "followed publication inputs must be unique siblings of its source"
+            )
         retained: list[tuple[int, SignalPublication]] = []
         if replay:
             committed = state.commit_chunks.get(signal_name, ())
             if committed:
+                by_signal = {
+                    name: {
+                        sequence: (value, origin, parents)
+                        for sequence, value, origin, parents in state.commit_chunks.get(
+                            name, ()
+                        )
+                    }
+                    for name in selected
+                }
                 for sequence, value, _origin, parents in committed:
                     if (
                         state.publication is not None
                         and state.publication.event_ref.sequence == sequence
                     ):
                         publication = state.publication
+                        if any(
+                            publication.value(name) is None for name in selected
+                        ):
+                            raise RuntimeError(
+                                "current publication lost a selected sibling input"
+                            )
                     else:
+                        signals: dict[str, SignalValue] = {}
+                        selected_parents = parents
+                        for name in selected:
+                            entry = by_signal[name].get(sequence)
+                            if entry is None:
+                                raise RuntimeError(
+                                    "exact sibling outputs did not commit together"
+                                )
+                            sibling, _sibling_origin, sibling_parents = entry
+                            if sibling_parents != selected_parents:
+                                raise RuntimeError(
+                                    "exact sibling outputs have different parents"
+                                )
+                            signals[name] = sibling
                         publication = SignalPublication(
                             EventRef(
                                 StreamId(state.owner_id),
                                 state.generation,
                                 sequence,
                             ),
-                            {signal_name: value},
+                            signals,
                             self._publication_issuer,
                             direct_parent_refs=tuple(
                                 parent.event_ref for parent in parents
@@ -2582,13 +2680,19 @@ class SignalDataPlane:
                         )
                         self._publication_parents[publication] = parents
                         if parents:
-                            # Replay parents are slim: one signal each, and
-                            # that one signal IS the recorded selection.
-                            self._publication_selections[publication] = next(
-                                iter(parents[0].signals)
+                            # Replay parents are already slim: their retained
+                            # signal bundle is exactly the recorded selection.
+                            self._publication_selections[publication] = tuple(
+                                parents[0].signals
                             )
                     retained.append((sequence, publication))
             elif state.publication is not None:
+                if any(
+                    state.publication.value(name) is None for name in selected
+                ):
+                    raise RuntimeError(
+                        "current publication lost a selected sibling input"
+                    )
                 retained.append(
                     (state.publication.event_ref.sequence, state.publication)
                 )
@@ -2837,6 +2941,7 @@ class SignalDataPlane:
         *,
         source_name: str,
         source_publication: SignalPublication | None,
+        source_signals: tuple[str, ...] | None = None,
     ) -> FollowTap[SignalPublication]:
         """Bind one Processor to the current exact publication and its future events.
 
@@ -2848,6 +2953,21 @@ class SignalDataPlane:
         """
 
         source_name = canonical_text(source_name, "processor source name")
+        selected_signals = (
+            (source_name,)
+            if source_signals is None
+            else tuple(
+                canonical_text(name, "processor source signal")
+                for name in source_signals
+            )
+        )
+        if (
+            source_name not in selected_signals
+            or len(set(selected_signals)) != len(selected_signals)
+        ):
+            raise ValueError(
+                "processor source signals must uniquely include its primary source"
+            )
         if source_publication is not None:
             if not isinstance(source_publication, SignalPublication):
                 raise TypeError(
@@ -2885,6 +3005,7 @@ class SignalDataPlane:
                 source_state,
                 source_name,
                 replay=True,
+                selected_signals=selected_signals,
             )
             try:
                 self._install_state_locked(
@@ -2920,7 +3041,7 @@ class SignalDataPlane:
     def _slim_publication_locked(
         self,
         publication: SignalPublication,
-        selected_signal: str | None,
+        selected_signals: tuple[str, ...] | None,
         memo: dict[SignalPublication, SignalPublication],
     ) -> SignalPublication:
         """Retain one causal route without retaining unconsumed siblings."""
@@ -2928,11 +3049,14 @@ class SignalDataPlane:
         existing = memo.get(publication)
         if existing is not None:
             return existing
-        if selected_signal is None:
-            raise RuntimeError("derived publication has no selected source signal")
-        value = publication.value(selected_signal)
-        if value is None:
-            raise RuntimeError("causal parent lost its selected source signal")
+        if not selected_signals:
+            raise RuntimeError("derived publication has no selected source signals")
+        values = {
+            name: publication.value(name)
+            for name in selected_signals
+        }
+        if any(value is None for value in values.values()):
+            raise RuntimeError("causal parent lost a selected source signal")
         parents = self._resolved_direct_parents_locked(publication)
         # What this publication consumed of ITS parent was recorded by the
         # commit that produced it.  Asking the live state table instead was
@@ -2947,7 +3071,7 @@ class SignalDataPlane:
         )
         slim = SignalPublication(
             publication.event_ref,
-            {selected_signal: value},
+            values,
             self._publication_issuer,
             direct_parent_refs=tuple(parent.event_ref for parent in slim_parents),
             run_record=publication.run_record,

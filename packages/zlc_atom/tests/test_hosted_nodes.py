@@ -60,6 +60,15 @@ def test_descriptor_role_is_independent_of_camera_measurement_extent() -> None:
     assert camera.kind is NodeKind.MEASUREMENT
     assert descriptors["calibration"].kind is NodeKind.TASK
     assert descriptors["occupancy"].kind is NodeKind.PROCESSOR
+    agreement = descriptors["occupancy_agreement"]
+    assert agreement.kind is NodeKind.PROCESSOR
+    assert agreement.authoring_schema.project_values({}) == {
+        "first_occupancy_frame": 0,
+        "counts_frame": 1,
+        "second_occupancy_frame": 2,
+    }
+    assert agreement.input_specs[0].contract_id == "occupancy.counts"
+    assert agreement.input_specs[0].sibling_outputs == ("occupied",)
     assert camera.authoring_schema.project_values({})["repeat"] == 0
     assert camera.authoring_schema.project_values({"repeat": 0})["repeat"] == 0
     assert camera.authoring_schema.project_values({"repeat": 3})["repeat"] == 3
