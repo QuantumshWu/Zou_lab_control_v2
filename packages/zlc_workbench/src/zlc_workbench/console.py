@@ -216,6 +216,17 @@ def _same_panel_plot_target(left: PanelState, right: PanelState) -> bool:
     return _PLOT_TARGET(left) == _PLOT_TARGET(right)
 
 
+#: The identity a Setting VOCABULARY derives from -- the same three inputs
+#: task_console_fitting_spec takes.  Narrower than _PLOT_TARGET on purpose:
+#: authored VALUES drift between presents (a display echo, an edited fate)
+#: without changing which controls exist.
+_PLOT_IDENTITY = attrgetter("signal", "kind", "cell_kind")
+
+
+def _same_panel_plot_identity(left: PanelState, right: PanelState) -> bool:
+    return _PLOT_IDENTITY(left) == _PLOT_IDENTITY(right)
+
+
 def _run_of(publication: object) -> object | None:
     """Which RUN a publication belongs to.
 
@@ -2878,8 +2889,17 @@ class ConsolePresenter:
                 facet_cell_kind=state.cell_kind or None,
             )
         except (TypeError, ValueError, KeyError) as error:
-            controls = ()
+            # Never answer a refused VALUE by deleting the vocabulary:
+            # which controls a panel has is a fact about its KIND.  The
+            # schema-projected sibling learned this first; this path kept
+            # answering with an empty control set, which is a different
+            # FIELD SET and sends the form down its replacement path.
             display_unavailable = _error_text(error)
+            controls = parameter_controls_for_kind(
+                state.kind,
+                None,
+                facet_cell_kind=state.cell_kind or None,
+            )
         else:
             display_unavailable = ""
         return self._parameter_surface(
@@ -3059,24 +3079,49 @@ class ConsolePresenter:
         return None
 
     def _degrade_panel_surface(self, binding: PanelBinding) -> None:
-        """Keep the semantic form alive when a host fails to mount.
+        """Keep the WHOLE described form alive when something is refused.
 
-        The Fit column says why FIT is unavailable -- it needs a mounted
-        surface and there is not one.  It used to be handed the mount's
-        refusal instead, so a fate the vocabulary rejected was announced
-        under "Fit", where it means nothing.  The refusal itself belongs
-        to the panel's status, which every caller here already writes.
+        A refusal is a STATE of the panel, never an edit of its
+        vocabulary: the field set is declared -- by the host's accepted
+        description while one still describes the authored target, by the
+        schema projection before any host ever has -- and an error may
+        only annotate it.  This used to swap every degraded panel onto
+        the schema projection, whose fit section is empty by design
+        ("only fit truly needs a live host"), so any late error -- one
+        recorded AFTER a run stopped, with no next present to write the
+        description back -- deleted the fit controls from the Setting
+        form for good.  The tenth-odd instance of the same disease, and
+        the law it violated was already written
+        (ARCHITECTURE_DESIGN.md:101/103).
+
+        The Fit column's reason line exists for the never-described case
+        only: there it is true that fit models resolve when the plot
+        surface mounts.
         """
 
+        surface = binding.accepted_surface
+        description = None if surface is None else surface.description
+        if description is not None and _same_panel_plot_identity(
+            surface.target, binding.state
+        ):
+            binding.parameter_surface = panel_surface_from_description(
+                binding.state,
+                description,
+            )
+            try:
+                self._publish_panel_state(binding)
+            except Exception:
+                pass
+            return
         schema = self._panel_schema(binding)
         if schema is None:
             return
-        surface = self._schema_projected_parameters(
+        projected = self._schema_projected_parameters(
             binding, schema, self._RESOLVING_REASON
         )
-        if surface is None:
+        if projected is None:
             return
-        binding.parameter_surface = surface
+        binding.parameter_surface = projected
         try:
             self._publish_panel_state(binding)
         except Exception:
@@ -5564,10 +5609,9 @@ class ConsolePresenter:
             # as a field instead, which put a control-shaped thing that is
             # not a control under the controls it was about.
             refused = _refused_expression(binding)
+            unapplied = binding.vacancy or binding.unapplied_display or refused
             standing = (
-                binding.vacancy
-                or binding.unapplied_display
-                or refused
+                unapplied
                 or str(getattr(binding.bridge, "last_condition", "") or "")
                 or str(getattr(binding.port, "waiting_condition", "") or "")
             )
@@ -5577,8 +5621,15 @@ class ConsolePresenter:
                 # last one that could be drawn, and the settings the
                 # operator just wrote are not in it.  The card says so for
                 # as long as it stays true -- the status line said it once
-                # and scrolled away.
-                condition = f"settings not applied -- {standing}"
+                # and scrolled away.  Only the authoring sources wear the
+                # settings-not-applied preface: a bridge or port level
+                # (run no longer held, waiting for data) is not about the
+                # operator's settings and says itself verbatim.
+                condition = (
+                    f"settings not applied -- {standing}"
+                    if unapplied
+                    else str(standing)
+                )
                 if binding.reported_condition != condition:
                     binding.reported_condition = condition
                     if standing is refused and refused:

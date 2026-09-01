@@ -1291,10 +1291,14 @@ class SelectionBridge:
         if not output_names:
             return
         if not self._source_retained(publication):
-            self._record_error(
-                RuntimeError(
-                    "this run is no longer held, so its fit derives nothing"
-                )
+            # A real answer, not a failure: the run this fit solved against
+            # has been let go -- a Stop's ordinary lifecycle, reached here
+            # because the last solve is asynchronous and can land after the
+            # plane withdrew the run.  A LEVEL, so a restarted run's first
+            # successful fit clears it; recorded as an ERROR it latched
+            # forever and its red report degraded the whole panel surface.
+            self._record_condition(
+                "this run is no longer held, so its fit derives nothing"
             )
             return
         outputs = self._materialize_fit_outputs(
@@ -1335,6 +1339,7 @@ class SelectionBridge:
                 # the slot AT CLAIM TIME, not whichever was read before this
                 # event materialized.
                 self._publish_terminal("fit", outputs, publication)
+                self._derivation_succeeded()
                 return
             with self._lock:
                 processor = self._fit_processor
@@ -1393,6 +1398,7 @@ class SelectionBridge:
                     self._withdraw_processor(processor)
                     return
                 raise
+            self._derivation_succeeded()
 
     def _retire_selection_outputs(self) -> None:
         """Take down what the PREVIOUS region derived.
@@ -1446,12 +1452,12 @@ class SelectionBridge:
                 # data the plane has let go.  Asked about the PUBLICATION,
                 # so a Stop and a Start -- which mint a new generation under
                 # the same name -- reach this answer instead of raising out
-                # of the materialization below.
-                self._record_error(
-                    RuntimeError(
-                        "this run is no longer held, so a selection drawn "
-                        "on it derives nothing"
-                    )
+                # of the materialization below.  A LEVEL, like every other
+                # cannot-answer-right-now: the next region that derives
+                # clears it.
+                self._record_condition(
+                    "this run is no longer held, so a selection drawn "
+                    "on it derives nothing"
                 )
                 self._forget_selection()
                 self._retire_selection_outputs()
@@ -1483,7 +1489,7 @@ class SelectionBridge:
                 self._forget_selection()
                 self._retire_selection_outputs()
                 return
-        self._selection_succeeded()
+        self._derivation_succeeded()
         # From here the plane's output NAMES are claimed, and only afterwards
         # can this commit learn whether its claim is still wanted -- the same
         # sequence the fit route runs, and the same reason it is serialized:
@@ -1932,15 +1938,17 @@ class SelectionBridge:
         with self._lock:
             self._last_condition = str(condition)
 
-    def _selection_succeeded(self) -> None:
-        """A commit that worked ends whatever the last one could not do.
+    def _derivation_succeeded(self) -> None:
+        """A derivation that worked ends whatever the last one could not do.
 
-        THE CONDITION ONLY.  ``_last_error`` is shared with the fit route,
-        which reports its own refusals through it, so a selection has no
-        business clearing one -- that is why the condition is a separate
-        level in the first place.  What made an ROI a shade too small end
-        the panel for the session was routing it into a channel that has no
-        clear at all; it now has its own, and this is it.
+        THE CONDITION ONLY, and for BOTH routes: the level says what this
+        bridge cannot answer right now, and a selection or fit that just
+        published is the proof it can answer again.  ``_last_error`` stays
+        untouched -- it reports defects, which do not heal by a later
+        success.  What made an ROI a shade too small end the panel for the
+        session was routing it into that clear-less channel; the same
+        misrouting made a Stop's perfectly ordinary run-no-longer-held
+        answer wear an error dot until the console closed.
         """
 
         with self._lock:

@@ -6007,3 +6007,114 @@ def test_a_refused_parameter_expression_is_said_where_messages_are_said(
             for identifier, text, error in marks
         ),
     )
+
+
+def _setting_field_sets(surface) -> dict:
+    """The form's field IDENTITY, section by section -- what may not move."""
+
+    return {
+        section: tuple(str(row["key"]) for row in surface[section])
+        for section in ("semantic", "display", "fit")
+    }
+
+
+def test_a_reported_refusal_never_edits_the_setting_field_set(
+    presenter, session
+) -> None:
+    """THE FIELD SET IS A DECLARATION; a refusal may only annotate it.
+
+    The tenth-odd instance of one disease: some transient non-error --
+    here the bridge's answers after a run stops -- reached
+    ``_report_panel_errors``, whose degrade swapped the panel onto the
+    schema projection, whose fit section is empty by design.  With the
+    run stopped there is no next present to write the description back,
+    so the fit controls were simply GONE from the Setting form.  The law
+    was already written (ARCHITECTURE_DESIGN.md:101/103); this is the
+    mechanical form of it: whatever a bridge reports, the key set of
+    every Setting section stays exactly what the accepted description
+    declared.
+    """
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(
+        node.signal_key("frames"), snapshot, kind="image"
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: bool(binding.parameter_surface.get("fit"))
+        and binding.accepted_surface is not None,
+    )
+    declared = _setting_field_sets(binding.parameter_surface)
+    assert declared["fit"], "the fixture must describe a fit vocabulary"
+
+    class _ErroredBridge:
+        last_error = RuntimeError("a genuine bridge defect")
+        last_condition = ""
+
+        def close(self) -> None:
+            pass
+
+    binding.bridge = _ErroredBridge()
+    presenter.beat()
+    assert _setting_field_sets(binding.parameter_surface) == declared
+
+    class _WaitingBridge:
+        last_error = None
+        last_condition = (
+            "this run is no longer held, so its fit derives nothing"
+        )
+
+        def close(self) -> None:
+            pass
+
+    binding.bridge = _WaitingBridge()
+    presenter.view.status.clear()
+    presenter.beat()
+    assert _setting_field_sets(binding.parameter_surface) == declared
+    # A condition is the panel's own state: said verbatim on the card --
+    # it is not about the operator's settings -- and never at error
+    # severity on the board line.
+    status, _marked = presenter.view.cards[0].status
+    assert status == _WaitingBridge.last_condition
+    assert not [item for item in presenter.view.status if item[0] == "error"]
+
+    # The level clears itself: a bridge that can answer again ends the
+    # condition, and the card follows.
+    class _HealthyBridge:
+        last_error = None
+        last_condition = ""
+
+        def close(self) -> None:
+            pass
+
+    binding.bridge = _HealthyBridge()
+    presenter.beat()
+    assert presenter.view.cards[0].status == ("", False)
+    assert _setting_field_sets(binding.parameter_surface) == declared
+
+
+def test_an_unbound_refused_value_keeps_the_kind_vocabulary(
+    presenter,
+) -> None:
+    """The unbound twin of the schema-projection law.
+
+    Which controls a panel has is a fact about its KIND; what they hold
+    is the authored bag.  The schema-projected path already answers a
+    refused value with the full vocabulary plus a reason; this pins the
+    unbound path to the same law -- it used to return an empty control
+    set, a different FIELD SET, sending the form down its replacement
+    path.
+    """
+
+    binding = presenter.add_selected_panel("histogram")
+    assert binding is not None
+    clean = _setting_field_sets(binding.parameter_surface)
+    assert clean["display"], "a histogram declares display controls unbound"
+
+    poisoned = replace(
+        binding.state,
+        display={**binding.state.display, "bin_count": "not-a-count"},
+    )
+    surface = presenter._unbound_panel_parameters(poisoned)
+    assert _setting_field_sets(surface)["display"] == clean["display"]
+    assert surface["display_unavailable"]
