@@ -1249,7 +1249,7 @@ def _bimodal_classifier_metrics(
 class FacetFitBatchResult:
     """Ordered fit results for every cell of one FacetGrid projection."""
 
-    facet: AxisRef
+    facet: AxisRef | None
     facet_values: tuple[Any, ...]
     model: FitModelSpec
     results: tuple[FitResult | None, ...]
@@ -1264,8 +1264,8 @@ class FacetFitBatchResult:
     batch_revision: int = 0
 
     def __post_init__(self) -> None:
-        if not isinstance(self.facet, AxisRef):
-            raise TypeError("facet must be AxisRef")
+        if self.facet is not None and not isinstance(self.facet, AxisRef):
+            raise TypeError("facet must be AxisRef or None")
         if not isinstance(self.model, FitModelSpec):
             raise TypeError("model must be FitModelSpec")
         values = tuple(self.facet_values)

@@ -342,22 +342,22 @@ CellPlot: TypeAlias = CurvePlot | ImagePlot | HistogramPlot
 
 @dataclass(frozen=True, slots=True)
 class FacetGridPlot:
-    """One cell per value of a single facet axis.
+    """One cell per value of an optional facet axis.
 
-    The facet axis determines the cell count; how those cells pack into
-    rows and columns is a layout decision the fixed layout optimizes, never
-    an authored semantic.
+    With an axis, its values determine the cells.  With ``None`` the grid is
+    still a grid layout containing exactly one cell; no synthetic Dataset axis
+    is invented merely to satisfy the layout.
     """
 
-    facet: AxisRef
+    facet: AxisRef | None
     cell: CellPlot
     labels: PlotLabels = field(default_factory=PlotLabels)
     scope: tuple[ScopeTerm, ...] = ()
     kind: ClassVar[PlotKind] = PlotKind.FACET_GRID
 
     def __post_init__(self) -> None:
-        if not isinstance(self.facet, AxisRef):
-            raise TypeError("FacetGridPlot.facet must be AxisRef")
+        if self.facet is not None and not isinstance(self.facet, AxisRef):
+            raise TypeError("FacetGridPlot.facet must be AxisRef or None")
         if not isinstance(self.cell, (CurvePlot, ImagePlot, HistogramPlot)):
             raise TypeError("FacetGrid cells must be CurvePlot, ImagePlot or HistogramPlot")
         if not isinstance(self.labels, PlotLabels):
@@ -962,6 +962,7 @@ class _ParameterSchemaContext:
     kind: PlotKind
     semantic_kind: PlotKind
     labels: PlotLabels
+    has_facet: bool
 
 
 def _parameter_schema_context(spec: PlotSpec) -> _ParameterSchemaContext:
@@ -978,7 +979,10 @@ def _parameter_schema_context(spec: PlotSpec) -> _ParameterSchemaContext:
     ):
         raise TypeError("unsupported plot specification")
     return _ParameterSchemaContext(
-        spec.kind, semantic_spec(spec).kind, spec.labels
+        spec.kind,
+        semantic_spec(spec).kind,
+        spec.labels,
+        not isinstance(spec, FacetGridPlot) or spec.facet is not None,
     )
 
 
@@ -1008,13 +1012,14 @@ def _parameter_schema_for_context(
             entries.append(_unit_parameter("x_display_unit"))
         if semantic_kind is PlotKind.IMAGE:
             entries.append(_unit_parameter("y_display_unit"))
-        if kind is PlotKind.FACET_GRID:
+        if kind is PlotKind.FACET_GRID and context.has_facet:
             entries.append(
                 _unit_parameter(
                     "facet_display_unit",
                     effects=_FACET_UNIT_EFFECTS,
                 )
             )
+        if kind is PlotKind.FACET_GRID:
             entries.append(
                 ParameterSpec(
                     FACET_FIT_PARAMETER,
@@ -1175,7 +1180,7 @@ def parameter_schema_for_kind(
     elif facet_cell_kind is not None:
         raise ValueError("facet_cell_kind is only valid for a facet grid")
     return _parameter_schema_for_context(
-        _ParameterSchemaContext(resolved, semantic_kind, PlotLabels()),
+        _ParameterSchemaContext(resolved, semantic_kind, PlotLabels(), True),
         style=style,
     )
 

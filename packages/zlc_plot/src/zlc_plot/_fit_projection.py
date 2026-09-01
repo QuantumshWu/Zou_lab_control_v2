@@ -657,7 +657,7 @@ class FitProjection:
         overrides: dict[AxisRef, object] = {}
         x_ref = getattr(self._semantic_spec(), "x", None)
         y_ref = getattr(self._semantic_spec(), "y", None)
-        if isinstance(self._spec, FacetGridPlot):
+        if isinstance(self._spec, FacetGridPlot) and self._spec.facet is not None:
             facet_unit = values.get("facet_display_unit")
             if facet_unit is not None:
                 overrides[self._spec.facet] = facet_unit
@@ -1009,6 +1009,8 @@ class FitProjection:
         if selected is None or selected < 0 or selected >= len(cells):
             raise IndexError("facet index is outside the current grid")
         cell = cells[selected]
+        if self._spec.facet is None:
+            return None
         coordinate = np.asarray(self._coordinate(self._spec.facet).canonical)
         return np.asarray(
             np.equal(coordinate, cell.facet_value_canonical),

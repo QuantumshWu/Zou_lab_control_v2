@@ -189,6 +189,8 @@ def _panel_interaction_subject_matches(
     if not isinstance(spec, FacetGridPlot):
         return False
     facet = spec.facet
+    if facet is None:
+        return False
 
     def without_facet(value: object) -> object:
         scope = tuple(
@@ -1481,7 +1483,8 @@ class ConsolePresenter:
             if (
                 not isinstance(spec, FacetGridPlot)
                 or schema is None
-                or state.focused_cell >= axis_size(schema, spec.facet)
+                or state.focused_cell
+                >= (1 if spec.facet is None else axis_size(schema, spec.facet))
             ):
                 changes["focused_cell"] = None
         if (

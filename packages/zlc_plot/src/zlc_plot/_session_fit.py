@@ -162,9 +162,19 @@ class FitSessionMixin:
             and not isinstance(value, (bool, np.bool_))
             for value in values
         )
-        coordinate = projection._coordinate(projection._spec.facet)
+        facet = projection._spec.facet
+        if facet is None:
+            return {
+                "facet": None,
+                "facet_values": values,
+                "sample_axis_name": "Facet",
+                "sample_coordinates": np.ones(len(cells), dtype=np.float64),
+                "sample_unit": "",
+                "sample_labels": None,
+            }
+        coordinate = projection._coordinate(facet)
         return {
-            "facet": projection._spec.facet,
+            "facet": facet,
             "facet_values": values,
             "sample_axis_name": coordinate.label,
             "sample_coordinates": (

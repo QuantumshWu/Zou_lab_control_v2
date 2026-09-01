@@ -166,6 +166,8 @@ def cell_within_one_cell(schema: Any, facet: Any, cell: Any) -> Any | None:
     moved off the facet axis is a refusal, not a guess.
     """
 
+    if facet is None:
+        return cell
     dense = tuple(axis for axis in schema.cell_schema.data_axes if axis.size > 1)
     if isinstance(cell, ImagePlot) and len(dense) >= 2:
         # Data axes are declared slowest-first, so the last is horizontal.
@@ -237,7 +239,7 @@ def default_spec(schema: Any) -> FacetGridPlot | None:
             )
             if len(live) >= 3:
                 return FacetGridPlot(AxisRef.point_dimension(live[0]), heatmap)
-            return None
+            return FacetGridPlot(None, heatmap)
         # A scalar measured repeatedly at authored point coordinates is a
         # distribution per point.  A curve would consume that point axis and
         # leave only repeat, which must not become the automatic facet.  The
@@ -256,7 +258,7 @@ def default_spec(schema: Any) -> FacetGridPlot | None:
         return None
     facet = _facet_axis(schema, cell)
     if facet is None:
-        return None
+        return FacetGridPlot(None, cell)
     cell = cell_within_one_cell(schema, facet, cell)
     return None if cell is None else FacetGridPlot(facet, cell)
 
@@ -303,7 +305,7 @@ def chosen_spec(schema: Any, current: Any) -> FacetGridPlot | None:
         offered[0] if offered else None,
     )
     if facet is None:
-        return None
+        return FacetGridPlot(None, cell)
     within = cell_within_one_cell(schema, facet, cell)
     return FacetGridPlot(facet, cell if within is None else within)
 

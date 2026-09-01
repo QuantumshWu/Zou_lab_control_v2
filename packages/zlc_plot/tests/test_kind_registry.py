@@ -154,7 +154,9 @@ def test_default_specs_put_the_innermost_scan_loop_on_x() -> None:
     # the heatmap consumes both scan dimensions, while repeat is acquisition
     # history and may become a facet only through an explicit operator edit.
     inferred_facet = facet.default_spec(topology_schema)
-    assert inferred_facet is None
+    assert isinstance(inferred_facet, FacetGridPlot)
+    assert inferred_facet.facet is None
+    assert isinstance(inferred_facet.cell, ImagePlot)
 
 
 def test_repeat_is_not_an_automatic_facet_but_remains_explicitly_valid() -> None:
@@ -183,7 +185,9 @@ def test_repeat_is_not_an_automatic_facet_but_remains_explicitly_valid() -> None
     image = next(h for h in HANDLERS if h.kind is PlotKind.IMAGE)
     curve = next(h for h in HANDLERS if h.kind is PlotKind.CURVE)
     assert facet.admits(schema)
-    assert facet.default_spec(schema) is None
+    inferred = facet.default_spec(schema)
+    assert isinstance(inferred, FacetGridPlot)
+    assert inferred.facet is None
     heatmap = image.default_spec(schema)
     assert heatmap.x == AxisRef.point_dimension("y")
     assert heatmap.y == AxisRef.point_dimension("x")
@@ -203,7 +207,10 @@ def test_repeat_is_not_an_automatic_facet_but_remains_explicitly_valid() -> None
         generation="facet-default-flat",
     )
     assert facet.admits(flat)
-    assert facet.default_spec(flat) is None
+    inferred_flat = facet.default_spec(flat)
+    assert isinstance(inferred_flat, FacetGridPlot)
+    assert inferred_flat.facet is None
+    assert isinstance(inferred_flat.cell, CurvePlot)
     explicit_flat = FacetGridPlot(AxisRef.repeat(), curve.default_spec(flat))
     DataView(
         DatasetSnapshot(flat, np.zeros(flat.shape, dtype=np.float64), revision=0)
