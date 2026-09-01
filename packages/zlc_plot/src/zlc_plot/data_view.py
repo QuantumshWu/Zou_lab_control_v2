@@ -291,7 +291,17 @@ class RollingSample:
             )
         if np.any(counts < 0):
             raise ValueError("rolling sample counts cannot be negative")
-        keys = tuple(tuple(item) for item in self.group_keys)
+        source_keys = self.group_keys
+        if type(source_keys) is tuple and all(
+            type(item) is tuple for item in source_keys
+        ):
+            # Already canonical: KEEP the caller's object.  One projection
+            # batch stamps the same keys tuple onto every sample it emits,
+            # and downstream reads that sharing by identity to skip an
+            # O(window x groups^2) per-sample key search.
+            keys = source_keys
+        else:
+            keys = tuple(tuple(item) for item in source_keys)
         if len(keys) != values.size:
             raise ValueError("rolling sample group keys must match value count")
         if self.sem is not None:

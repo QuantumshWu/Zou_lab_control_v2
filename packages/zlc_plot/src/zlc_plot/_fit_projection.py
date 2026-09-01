@@ -712,11 +712,23 @@ class FitProjection:
         visible_size = len(visible)
         if not visible:
             raise ValueError("rolling history cannot be empty")
-        keys: list[tuple[AxisValue, ...]] = []
-        for sample in visible:
-            for key in sample.group_keys:
-                if key not in keys:
-                    keys.append(key)
+        # One projection batch stamps the SAME group_keys tuple onto every
+        # sample it emits, so a window normally shares one object -- checked
+        # by identity, because the general discovery below cost
+        # O(window x groups^2) list scans: at 5000 shots of 35 sites that
+        # alone was millions of comparisons per drawn frame.
+        first_keys = visible[0].group_keys
+        shared_keys = all(
+            sample.group_keys is first_keys for sample in visible
+        )
+        if shared_keys:
+            keys: list[tuple[AxisValue, ...]] = list(first_keys)
+        else:
+            discovered: dict[tuple[AxisValue, ...], None] = {}
+            for sample in visible:
+                for key in sample.group_keys:
+                    discovered.setdefault(key)
+            keys = list(discovered)
         # x is how many shots ago each point is: 0 is the newest, and the
         # ones behind it count back.  A rolling window shows the last N
         # shots, so what a point MEANS is its distance from now -- the
@@ -739,8 +751,31 @@ class FitProjection:
         unit = self._view.samples.value.display_unit
         canonical_unit = self._view.samples.value.canonical_unit
         x_unit = resolve_unit("1", DEFAULT_UNITS)
+        stacked = None
+        if shared_keys and trailing == 1 and keys:
+            # The whole window as three arrays: each drawn series is then a
+            # column slice instead of a per-sample Python loop with a
+            # linear key lookup inside it -- the O(window x groups^2) cost
+            # that made a deep occupancy history drag the whole console.
+            raw = np.asarray(
+                [np.asarray(sample.values, dtype=float) for sample in visible]
+            ).reshape(visible_size, len(keys))
+            valid_planes = np.asarray(
+                [np.asarray(sample.valid, dtype=bool) for sample in visible]
+            ).reshape(visible_size, len(keys))
+            sem_planes = None
+            if visible[0].sem is not None and all(
+                sample.sem is not None for sample in visible
+            ):
+                sem_planes = np.asarray(
+                    [
+                        np.asarray(sample.sem, dtype=float)
+                        for sample in visible
+                    ]
+                ).reshape(visible_size, len(keys))
+            stacked = (raw, valid_planes, sem_planes)
         series: list[CurveSeries] = []
-        for key in keys:
+        for column, key in enumerate(keys):
             canonical_values = np.full(visible_size, np.nan, dtype=float)
             valid = np.zeros(visible_size, dtype=np.bool_)
             sem = None
@@ -750,6 +785,16 @@ class FitProjection:
                 )
                 if uncertainty:
                     sem = running_sem
+            elif stacked is not None:
+                raw, valid_planes, sem_planes = stacked
+                valid = valid_planes[:, column]
+                canonical_values = np.where(valid, raw[:, column], np.nan)
+                if uncertainty:
+                    sem = np.where(
+                        valid,
+                        np.nan if sem_planes is None else sem_planes[:, column],
+                        np.nan,
+                    )
             else:
                 point_sem = np.full(visible_size, np.nan, dtype=float)
                 for index, sample in enumerate(visible):
