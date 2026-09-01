@@ -4251,9 +4251,8 @@ class FluentWindow(FramelessWindow):
         widget: QtWidgets.QWidget,
         title: str = "",
         hide_on_close: bool = False,
-        parent=None,
     ):
-        super().__init__(parent)
+        super().__init__()
         self._hide_on_close = bool(hide_on_close)
         self._zlc_close_guard = None
         self._zlc_hide_guard = None
@@ -4393,22 +4392,23 @@ class FluentDialogWindow(FluentWindow):
         *,
         widget: QtWidgets.QWidget,
         title: str,
-        parent=None,
+        anchor: QtWidgets.QWidget | None = None,
         window_ratio: float = WINDOW_SCREEN_FRACTION,
     ) -> None:
         ratio = float(window_ratio)
         if not 0 < ratio <= 1:
             raise ValueError("window_ratio must be between 0 and 1")
-        super().__init__(widget=widget, title=str(title), parent=parent)
-        # FramelessWindow is a QWidget.  With a parent and no explicit window
-        # type Qt turns it into an ordinary child widget: its title bar cannot
-        # move a top-level window and WindowModal is ignored.  Qt.Window keeps
-        # the parent as transient/modal owner without replacing Fluent's
-        # frameless chrome with a native platform dialog title bar.
-        self.setWindowFlag(QtCore.Qt.Window, True)
-        self.setWindowModality(
-            QtCore.Qt.WindowModal if parent is not None else QtCore.Qt.ApplicationModal
-        )
+        super().__init__(widget=widget, title=str(title))
+        # Its own top-level FROM CONSTRUCTION, on purpose.  This dialog used
+        # to be Qt-parented to the window it was opened from and then given
+        # the Window flag afterwards -- and a frameless window realizes its
+        # native handle inside __init__, so the late flag re-created the
+        # handle under it, the construct that froze and cascaded closes on
+        # the bench twice.  ``anchor`` is only WHERE to appear: the dialog
+        # centres on it, and application modality does the blocking without
+        # any native ownership between windows.
+        self.setWindowModality(QtCore.Qt.ApplicationModal)
+        self._dialog_anchor = anchor
         self._dialog_ratio = ratio
         self._dialog_result = self.Rejected
         self._dialog_loop = None
@@ -4434,12 +4434,12 @@ class FluentDialogWindow(FluentWindow):
         if QtCore.QThread.currentThread() != app.thread():
             raise RuntimeError("Fluent dialogs must run on the GUI thread")
         self.resize(screen_fit_window_size(self._dialog_ratio))
-        parent = self.parentWidget()
-        if parent is None:
+        anchor = self._dialog_anchor
+        if anchor is None:
             center_window_on_primary_screen(self, app)
         else:
             frame = self.frameGeometry()
-            frame.moveCenter(parent.window().frameGeometry().center())
+            frame.moveCenter(anchor.window().frameGeometry().center())
             self.move(frame.topLeft())
         retain_window(self)
         loop = QtCore.QEventLoop(self)
@@ -4512,18 +4512,23 @@ def launch_fluent_window(
     fixed_size: bool = False,
     size: tuple | None = None,
     window_ratio: float = WINDOW_SCREEN_FRACTION,
-    owner: QtWidgets.QWidget | None = None,
     wire=None,
 ) -> FluentWindow:
     """The ONE top-level-GUI launcher sequence.
 
-    ``owner`` is the window this one was opened FROM.  A window opened from
-    another belongs to it: the desktop keeps it above its owner, they raise
-    and minimise together, and closing the owner closes it.  Without an
-    owner every window of one application is an unrelated top-level, so
-    anything else on the desktop -- a browser, a terminal -- can sit
-    BETWEEN a console and the settings frame that belongs to it, which is
-    not a stack any operator asked for and not one they can fix.
+    Every window from here is a PLAIN top-level that belongs to nobody.
+    There used to be an ``owner`` parameter that Qt-parented a new window
+    to the one it was opened from and applied the Window flag afterwards
+    -- but a frameless window realizes its native handle inside __init__,
+    so the late flag re-created the handle underneath it, and on the
+    bench that construct twice cascaded closes the wrong way (one closed
+    log window froze its siblings; one closed device control reached the
+    console, whose close guard shut the running installation).  A surface
+    that genuinely belongs to a window -- the panel Setting frame -- is a
+    :class:`FluentCompanionFrame`: a real Qt parent and its window type
+    declared AT construction, which is the one safe way to buy stacking,
+    shared minimise and shared close.  Window flags are never changed
+    after construction, anywhere.
 
     ``widget_or_factory`` may be an already constructed QWidget or a zero-
     argument factory.  The factory form is the canonical public entry because
@@ -4559,19 +4564,11 @@ def launch_fluent_window(
         widget = widget()
     if not isinstance(widget, QtWidgets.QWidget):
         raise TypeError("window factory must return QWidget")
-    if owner is not None and not isinstance(owner, QtWidgets.QWidget):
-        raise TypeError("owner must be a QWidget or None")
     window = FluentWindow(
         widget=widget,
         title=title,
         hide_on_close=hide_on_close,
-        parent=None if owner is None else owner.window(),
     )
-    if owner is not None:
-        # Parenting alone would make it a CHILD WIDGET inside the owner.
-        # The flag keeps it what it is -- its own movable, closable window
-        # -- while the parent is what the desktop reads as ownership.
-        window.setWindowFlag(QtCore.Qt.Window, True)
     bind_body_close(window, widget)
     if wire is not None:
         wire(window)
@@ -4595,7 +4592,6 @@ def open_fluent_window(
     title: str,
     hide_on_close: bool = False,
     window_ratio: float = WINDOW_SCREEN_FRACTION,
-    owner: QtWidgets.QWidget | None = None,
     wire=None,
 ) -> FluentWindow:
     """Open a human-facing frameless window from a zero-argument body factory.
@@ -4617,7 +4613,6 @@ def open_fluent_window(
         hide_on_close=hide_on_close,
         fixed_size=False,
         window_ratio=float(window_ratio),
-        owner=owner,
         wire=wire,
     )
 

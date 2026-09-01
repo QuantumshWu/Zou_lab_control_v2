@@ -281,7 +281,7 @@ class PointReviewView(FluentFrame):
         dialog = FluentDialogWindow(
             widget=self,
             title=str(title),
-            parent=parent,
+            anchor=parent,
         )
         self.accept_requested.connect(dialog.accept)
         self.reject_requested.connect(dialog.reject)

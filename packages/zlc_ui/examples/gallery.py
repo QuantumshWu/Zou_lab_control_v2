@@ -549,12 +549,11 @@ class _GalleryBody(QtWidgets.QWidget):
 class GalleryWindow(FluentWindow):
     """The public gallery hosted by the reference frameless Fluent window."""
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self) -> None:
         body = _GalleryBody()
         super().__init__(
             widget=body,
             title="zlc_ui control gallery — fake data only",
-            parent=parent,
         )
         self.body = body
         self.scroll = body.scroll
