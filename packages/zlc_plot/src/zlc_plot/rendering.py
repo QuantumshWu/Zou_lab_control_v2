@@ -2630,19 +2630,18 @@ class MatplotlibRenderer:
                 valid &= np.isfinite(low)
                 valid &= np.isfinite(high)
                 valid &= high > low
-                shape = low.shape + (2,)
+                # Low and high edges ride ONE kernel launch as one stack:
+                # the transform is per row, so rows (S..2S) are the high
+                # edges of rows (0..S), bit-identically.
+                lanes = low.shape[0]
+                stack_shape = (2 * lanes,) + low.shape[1:] + (2,)
                 geometry = self._artists.get("curve:grouped_band_geometry")
                 if (
                     len(surfaces) != 1
-                    or not isinstance(geometry, tuple)
-                    or len(geometry) != 2
-                    or geometry[0].shape != shape
-                    or geometry[1].shape != shape
+                    or not isinstance(geometry, np.ndarray)
+                    or geometry.shape != stack_shape
                 ):
-                    geometry = (
-                        np.empty(shape, dtype=np.float64),
-                        np.empty(shape, dtype=np.float64),
-                    )
+                    geometry = np.empty(stack_shape, dtype=np.float64)
                     if len(surfaces) == 1:
                         self._artists["curve:grouped_band_geometry"] = geometry
                 affine = np.asarray(
@@ -2651,22 +2650,21 @@ class MatplotlibRenderer:
                 x = kernels.readable(
                     np.asarray(band_items[0].x, dtype=np.float64)
                 )
-                for values, output in zip((low, high), geometry, strict=True):
-                    kernels.transform_curve_batch(
-                        x,
-                        kernels.readable(values),
-                        kernels.readable(valid),
-                        kernels.readable(affine),
-                        np.float64(height),
-                        output,
-                    )
-                low_y = geometry[0][..., 1]
-                high_y = geometry[1][..., 1]
+                kernels.transform_curve_batch(
+                    x,
+                    kernels.readable(np.concatenate((low, high), axis=0)),
+                    kernels.readable(np.concatenate((valid, valid), axis=0)),
+                    kernels.readable(affine),
+                    np.float64(height),
+                    geometry,
+                )
+                low_y = geometry[:lanes, ..., 1]
+                high_y = geometry[lanes:, ..., 1]
                 for row, item in enumerate(band_items):
                     if bool(np.any(valid[row])):
                         append_group(
                             item,
-                            geometry[0][row, :, 0],
+                            geometry[row, :, 0],
                             low_y[row],
                             high_y[row],
                             clip,

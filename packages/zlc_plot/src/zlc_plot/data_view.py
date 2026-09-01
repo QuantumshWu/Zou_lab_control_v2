@@ -5118,12 +5118,23 @@ def _centred_square_sums(
     keeps axis 1 and a group axis keeps a run of adjacent axes whenever a
     three-dimensional view of the tensor exists at all, and where it does
     the view costs nothing -- the array is C-contiguous, so the reshape is
-    a reshape and not a copy.  Where it does not, the caller's einsum is
-    still the answer.
+    a reshape and not a copy.  A size-1 axis inside the run is part of the
+    block by layout: it contributes no positions and no strides, and
+    reading the span literally sent every facet curve with such an axis
+    down the einsum fallback -- a full centred copy of the tensor per
+    revision.  Where no block exists, the caller's einsum is still the
+    answer.
     """
 
-    if not kept or kept != list(range(kept[0], kept[-1] + 1)):
+    if not kept:
         return None
+    span = list(range(kept[0], kept[-1] + 1))
+    if any(
+        axis not in kept and int(shape[axis]) != 1 for axis in span
+    ):
+        return None
+    kept_shape = tuple(int(shape[axis]) for axis in kept)
+    kept = span
     array = np.asarray(plane)
     if array.shape != tuple(shape) or not array.flags.c_contiguous:
         return None
@@ -5153,7 +5164,9 @@ def _centred_square_sums(
     )
     if summed is None:
         return None
-    return summed.reshape(tuple(int(shape[axis]) for axis in kept))
+    # Back to the CALLER'S kept axes: the span may carry size-1 padding
+    # axes that exist in the layout but not in the caller's vocabulary.
+    return summed.reshape(kept_shape)
 
 
 def _sem_of_mean(

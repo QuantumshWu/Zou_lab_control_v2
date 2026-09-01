@@ -37,6 +37,12 @@ class PreparedImageFront:
     extent: tuple[float, float, float, float]
 
 
+#: Untouched stand-ins for the merged block-sum kernel's masked face.
+_NO_VALID = np.zeros((1, 1), dtype=np.bool_)
+_NO_VALID.setflags(write=False)
+_NO_COUNTS = np.zeros((1, 1), dtype=np.int64)
+
+
 def _all_true(values: np.ndarray) -> bool:
     array = np.asarray(values, dtype=np.bool_)
     if not array.size:
@@ -126,8 +132,14 @@ def _area_mean(
         # a tighter one; measured 9.24 ms -> 0.25 ms on a 1200x1920 plane,
         # and 35.1 -> 0.46 on 2048x2048.
         summed = np.empty(shape, dtype=mean_dtype)
-        kernels.block_sum_float(
-            kernels.readable(values), row_starts, column_starts, summed
+        kernels.block_sum_valid(
+            kernels.readable(values),
+            _NO_VALID,
+            False,
+            row_starts,
+            column_starts,
+            summed,
+            _NO_COUNTS,
         )
     elif compiled:
         # Missing samples, in ONE pass.  The reference builds a whole
@@ -138,6 +150,7 @@ def _area_mean(
         kernels.block_sum_valid(
             kernels.readable(values),
             kernels.readable(valid),
+            True,
             row_starts,
             column_starts,
             summed,
