@@ -277,6 +277,8 @@ class NodeHost:
         kind: str,
         dataset_output_declarations: Iterable[DatasetOutputDeclaration],
         input_signal: str | None = None,
+        input_name: str | None = None,
+        input_siblings: Iterable[str] = (),
         input_delivery: str | None = None,
         required_artifacts: Mapping[str, str] | None = None,
         task_name: str | None = None,
@@ -335,12 +337,32 @@ class NodeHost:
                 raise ValueError(
                     "processor input_delivery must be 'exact' or 'latest'"
                 )
+            selected_input_name = canonical_text(
+                "source" if input_name is None else input_name,
+                "processor input name",
+            )
+            sibling_inputs = tuple(
+                canonical_text(value, "processor sibling input")
+                for value in input_siblings
+            )
+            if (
+                len(set(sibling_inputs)) != len(sibling_inputs)
+                or selected_input_name in sibling_inputs
+            ):
+                raise ValueError(
+                    "processor input and sibling names must be unique"
+                )
         elif (source_signal is None) != (delivery is None):
             raise ValueError(
                 "worker input_signal and input_delivery must be supplied together"
             )
         elif delivery is not None and delivery not in _INPUT_DELIVERIES:
             raise ValueError("worker input_delivery must be 'exact' or 'latest'")
+        else:
+            if input_name is not None or tuple(input_siblings):
+                raise ValueError("only a processor accepts Dataset input names")
+            selected_input_name = None
+            sibling_inputs = ()
 
         if required_artifacts is None:
             required_artifacts = {}
@@ -365,6 +387,9 @@ class NodeHost:
         self.instance_id = identity
         self._dataset_outputs = declarations
         self._source_signal = source_signal
+        self._input_name = selected_input_name
+        self._input_siblings = sibling_inputs
+        self._resolved_input_signals: Mapping[str, str] | None = None
         self._input_delivery = delivery
         self._required_artifacts = artifacts
         self._task_name = selected_task_name
@@ -400,6 +425,7 @@ class NodeHost:
         self._processor_path: str | None = None
         self._source_publication: SignalPublication | None = None
         self._terminal_source: SignalValue | None = None
+        self._terminal_inputs: Mapping[str, SignalValue] | None = None
         self._follow_tap: FollowTap[SignalPublication] | None = None
         self._task_run: TaskRun | None = None
         self._partial_exit_writer: Callable[[str, BaseException], None] | None = None
@@ -598,6 +624,8 @@ class NodeHost:
         self._processor_path = None
         self._source_publication = None
         self._terminal_source = None
+        self._terminal_inputs = None
+        self._resolved_input_signals = None
         self._follow_tap = None
         self._task_run = None
         with self._operator_condition:
@@ -1000,6 +1028,64 @@ class NodeHost:
         )
         self._plane_state = retained
 
+    def _processor_signal_names(self) -> Mapping[str, str]:
+        resolved = self._resolved_input_signals
+        if resolved is not None:
+            return resolved
+        if self._source_signal is None or self._input_name is None:
+            raise RuntimeError("processor Dataset inputs are not configured")
+        siblings = self._data_plane.resolve_sibling_signals(
+            self._source_signal,
+            self._input_siblings,
+        )
+        resolved = MappingProxyType(
+            {
+                self._input_name: self._source_signal,
+                **dict(zip(self._input_siblings, siblings, strict=True)),
+            }
+        )
+        self._resolved_input_signals = resolved
+        return resolved
+
+    def _publication_inputs(
+        self,
+        publication: SignalPublication,
+    ) -> Mapping[str, SignalValue]:
+        inputs: dict[str, SignalValue] = {}
+        for input_name, signal_name in self._processor_signal_names().items():
+            value = publication.value(signal_name)
+            if not isinstance(value, SignalValue):
+                raise RuntimeError(
+                    f"processor publication lost sibling input {input_name!r}"
+                )
+            inputs[input_name] = value
+        return MappingProxyType(inputs)
+
+    def _terminal_processor_inputs(
+        self,
+        publication: SignalPublication,
+    ) -> Mapping[str, SignalValue]:
+        inputs: dict[str, SignalValue] = {}
+        for input_name, signal_name in self._processor_signal_names().items():
+            current = publication.value(signal_name)
+            if not isinstance(current, SignalValue):
+                raise RuntimeError(
+                    f"processor publication lost sibling input {input_name!r}"
+                )
+            snapshot, event_record = self._data_plane.current_dataset_view(
+                signal_name,
+                publication,
+            )
+            inputs[input_name] = SignalValue(
+                signal_name,
+                snapshot,
+                None,
+                run_record=publication.run_record,
+                primary_index=current.primary_index,
+                event_record=event_record,
+            )
+        return MappingProxyType(inputs)
+
     def _start_processor(self) -> None:
         assert self._source_signal is not None
         publication = self._data_plane.latest_publication(self._source_signal)
@@ -1029,18 +1115,9 @@ class NodeHost:
             self._error = "processor publication lost its selected input signal"
             raise RuntimeError(self._error)
         if not self._data_plane.is_generation_live(self._source_signal):
-            snapshot, event_record = self._data_plane.current_dataset_view(
-                self._source_signal,
-                publication,
-            )
-            self._terminal_source = SignalValue(
-                self._source_signal,
-                snapshot,
-                None,
-                run_record=publication.run_record,
-                primary_index=source.primary_index,
-                event_record=event_record,
-            )
+            self._terminal_inputs = self._terminal_processor_inputs(publication)
+            assert self._input_name is not None
+            self._terminal_source = self._terminal_inputs[self._input_name]
             self._processor_path = "frozen"
             self._start_frozen_processor(publication, self._terminal_source)
             return
@@ -1057,6 +1134,7 @@ class NodeHost:
     def _start_latest_processor(self, publication: SignalPublication) -> None:
         assert self._source_signal is not None
         self.validate_processor_source(publication.value(self._source_signal))
+        self._publication_inputs(publication)
         self._active = True
         try:
             self._data_plane.attach_latest_only_processor(
@@ -1112,9 +1190,14 @@ class NodeHost:
             raise _StartSuppressed()
         publication = self._source_publication
         source = self._terminal_source
-        if publication is None or source is None:
+        inputs = self._terminal_inputs
+        if publication is None or source is None or inputs is None:
             raise RuntimeError("frozen Processor lost its exact source publication")
-        return self._evaluate_processor_outputs(source)
+        return self._evaluate_processor_outputs(
+            source,
+            publication,
+            inputs=inputs,
+        )
 
     def _poll_frozen_processor(self) -> None:
         owner = self._owner
@@ -1150,6 +1233,9 @@ class NodeHost:
                     self,
                     outputs,
                     source_publication=publication,
+                    source_signals=tuple(
+                        self._processor_signal_names().values()
+                    ),
                     retain=True,
                 )
                 self._data_plane.seal_processor(self)
@@ -1213,6 +1299,7 @@ class NodeHost:
             self,
             source_name=self._source_signal,
             source_publication=publication,
+            source_signals=tuple(self._processor_signal_names().values()),
         )
         self._plane_state = True
         self._source_publication = publication
@@ -1278,13 +1365,16 @@ class NodeHost:
                     self._request_owner_wake()
                     return
                 source = self._validate_follow_source(publication.value(source_name))
-                outputs = self._evaluate_processor_outputs(source)
+                outputs = self._evaluate_processor_outputs(source, publication)
                 if self._stop_event.is_set():
                     raise _StartSuppressed()
                 self._data_plane.commit_processor(
                     self,
                     outputs,
                     source_publication=publication,
+                    source_signals=tuple(
+                        self._processor_signal_names().values()
+                    ),
                 )
                 self._request_owner_wake()
                 last_publication = publication
@@ -1379,19 +1469,35 @@ class NodeHost:
     def evaluate_processor(
         self,
         source: SignalValue,
-        _source_publication: SignalPublication,
+        source_publication: SignalPublication,
     ) -> Mapping[str, LiveDatasetOutput]:
         self.validate_processor_source(source)
-        return self._evaluate_processor_outputs(source)
+        return self._evaluate_processor_outputs(source, source_publication)
 
     def _evaluate_processor_outputs(
         self,
         source: SignalValue,
+        source_publication: SignalPublication,
+        *,
+        inputs: Mapping[str, SignalValue] | None = None,
     ) -> Mapping[str, LiveDatasetOutput]:
-        evaluate = getattr(self._node, "evaluate", None)
-        if not callable(evaluate):
-            raise TypeError("processor must provide evaluate(SignalValue)")
-        outputs = evaluate(source)
+        if self._input_siblings:
+            evaluate_inputs = getattr(self._node, "evaluate_inputs", None)
+            if not callable(evaluate_inputs):
+                raise TypeError(
+                    "a sibling-input processor must provide evaluate_inputs(mapping)"
+                )
+            selected_inputs = (
+                self._publication_inputs(source_publication)
+                if inputs is None
+                else inputs
+            )
+            outputs = evaluate_inputs(selected_inputs)
+        else:
+            evaluate = getattr(self._node, "evaluate", None)
+            if not callable(evaluate):
+                raise TypeError("processor must provide evaluate(SignalValue)")
+            outputs = evaluate(source)
         if not isinstance(outputs, Mapping) or not outputs:
             raise TypeError("processor evaluate() must return a non-empty mapping")
         return dict(outputs)
@@ -1409,6 +1515,7 @@ class NodeHost:
             self,
             outputs,
             source_publication=source_publication,
+            source_signals=tuple(self._processor_signal_names().values()),
         )
 
     def accept_processor_failure(self, error: Exception) -> None:

@@ -32,6 +32,7 @@
   通过presentation epoch使同signal全部Panel重新投影，不增加scientific publication/revision。
   Runtime内部绝对ordinal在materialize时统一转换为以最新为0的相对primary-index；Plot与
   Workbench只把它当普通AxisRef，不自动scope或建立history专用interaction路径。
+- `Occupancy Agreement`是普通Occupancy的纯数据下游：source picker选择`counts`，Runtime从同一原子publication交付其`occupied` sibling；默认frame `0/1/2`但三项均可编辑且可重复。一致的首/末occupancy保留共同bool和中间counts，不一致或任一所需值invalid则只通过Dataset validity标为invalid；不重新读取camera/calibration，不重新提取counts或分类，也不携带overlay知识。
 - Panel window demand在authored state接受时先于Plot render同步；最后lease的`10→1`在调用
   返回前释放并切回event表示。当前host的Focus/Area/Crosshair按同generation与accepted轴词汇
   接受，owner落后一版不得否决indexed front，Facet只忽略其自身focus cell这一层subject差异。

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import json
 from pathlib import Path
 import threading
@@ -86,6 +87,8 @@ def _host(
     kind: str,
     outputs: tuple[DatasetOutputDeclaration, ...] = (),
     source: str | None = None,
+    input_name: str | None = None,
+    input_siblings: tuple[str, ...] = (),
     delivery: str | None = None,
     artifacts: dict[str, str] | None = None,
     task_name: str | None = None,
@@ -98,6 +101,8 @@ def _host(
         kind=kind,
         dataset_output_declarations=outputs,
         input_signal=source,
+        input_name=input_name,
+        input_siblings=input_siblings,
         input_delivery=delivery,
         required_artifacts={} if artifacts is None else artifacts,
         task_name=task_name,
@@ -766,9 +771,13 @@ def test_task_can_accept_a_stop_inside_its_terminal_commit(tmp_path: Path) -> No
 
 
 class _Source:
-    def __init__(self, instance_id: str, declaration: DatasetOutputDeclaration) -> None:
+    def __init__(
+        self,
+        instance_id: str,
+        *declarations: DatasetOutputDeclaration,
+    ) -> None:
         self.instance_id = instance_id
-        self.dataset_output_declarations = (declaration,)
+        self.dataset_output_declarations = tuple(declarations)
 
     def signal_key(self, output_name: str) -> str:
         return f"@logic/{self.instance_id}/{output_name}"
@@ -958,6 +967,85 @@ def test_exact_processor_receives_each_event_chunk_not_cumulative_history() -> N
         assert plane.direct_parent_publications(publication) == (
             source_publication,
         )
+    finally:
+        host.shutdown()
+        plane.close()
+
+
+def test_exact_processor_receives_selected_atomic_siblings_on_late_replay() -> None:
+    counts = DatasetOutputDeclaration("counts", "test.counts")
+    occupied = DatasetOutputDeclaration("occupied", "test.occupied")
+    derived = DatasetOutputDeclaration("derived", "test.derived")
+    source = _Source("sibling-source", counts, occupied)
+    plane = SignalDataPlane()
+    plane.begin_generation(source)
+    for index in range(2):
+        plane.commit_live(
+            source,
+            {
+                "counts": _finite_output(
+                    counts,
+                    value=float(index + 1),
+                    total=2,
+                    origin=index,
+                    written=index + 1,
+                ),
+                "occupied": _finite_output(
+                    occupied,
+                    value=float((index + 1) * 10),
+                    total=2,
+                    origin=index,
+                    written=index + 1,
+                ),
+            },
+        )
+    seen: list[tuple[float, float]] = []
+
+    class Processor:
+        def evaluate_inputs(self, inputs: Mapping[str, SignalValue]):
+            seen.append(
+                (
+                    float(inputs["counts"].values[0, 0, 0]),
+                    float(inputs["occupied"].values[0, 0, 0]),
+                )
+            )
+            return {
+                "derived": _finite_output(
+                    derived,
+                    value=float(len(seen)),
+                    total=2,
+                    origin=len(seen) - 1,
+                    written=len(seen),
+                )
+            }
+
+    wake = Event()
+    host = _host(
+        Processor(),
+        plane,
+        wake,
+        instance_id="sibling-processor",
+        kind="processor",
+        outputs=(derived,),
+        source=source.signal_key("counts"),
+        input_name="counts",
+        input_siblings=("occupied",),
+        delivery="exact",
+    )
+    try:
+        host.start()
+        plane.seal_committed(source)
+        assert _wait(host, wake).phase == "done"
+        assert seen == [(1.0, 10.0), (2.0, 20.0)]
+        result = plane.current_dataset(host.signal_key("derived"))
+        assert result.block.values[:, 0, 0].tolist() == [1.0, 2.0]
+        publication = plane.latest_publication(host.signal_key("derived"))
+        assert publication is not None
+        (parent,) = plane.direct_parent_publications(publication)
+        assert set(parent.signals) == {
+            source.signal_key("counts"),
+            source.signal_key("occupied"),
+        }
     finally:
         host.shutdown()
         plane.close()

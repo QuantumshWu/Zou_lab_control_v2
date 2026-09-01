@@ -212,6 +212,7 @@ def test_logic_discovery_is_derived_from_leaf_modules() -> None:
         "camera_measurement",
         "frame_survival",
         "occupancy",
+        "occupancy_agreement",
         "seamless_scan",
         "slm_feedback",
         "stepped_scan",
