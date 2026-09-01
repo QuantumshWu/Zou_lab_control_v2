@@ -561,3 +561,40 @@ Rolling session construction fell from 44.24/44.53 to 31.97/34.00 ms. Four
 1200×1920 Histogram facet cells now pass their contiguous values and validity
 views directly: projection fell from 50.43/51.13 to 40.15/41.26 ms and peak
 allocation from 19.79 MiB to 17.59 MiB, with exact edges and counts.
+
+## Facet, fit and kernel round (September 2026)
+
+Session-layer medians at 2x2, offscreen (`bench/plot_perf/run_session`),
+before -> after: facet64_curve 29.3 -> 17.8, facet64_histogram 45.6 -> 34.2,
+facet64_image 22.6 -> 17.2, facet34_mixed 48.1 -> 37.1, rolling_2M
+18.6 -> 14.4, image_camera_4M 16.2 -> 14.7, fit_facet10 solve 20.3 -> 13.7 ms;
+deep indexed rolling (35 sites x 5000 window) update 34.9 -> 27.9 ms.
+Isolated MOT-ROI cases (`run_mot_roi_isolated`): camera-grid render
+29.1 -> 18.2, facet-curve-fit-40 total 47.6 -> 34.2, facet-curve-40
+10.9 -> 6.5 ms.
+
+What changed: `raster_polylines` strokes disjoint clip lanes in parallel
+(the error-bar kernel's own grouping), and the facet caller applies a
+linear cell's transData as the affine it is; the whole-pixel cell-box
+searches are memoized on (plan box, figure size, ratio); the centred
+square-sum kernel accepts size-1 axes inside its kept block, which had
+been sending every facet-curve sem down a full centred-copy einsum;
+`block_sum_float` folded into `block_sum_valid` behind a loop-invariant
+flag (measured faster on both faces); the uncertainty band's two edges
+ride one `transform_curve_batch` launch; batch fit proves each shared
+coordinate object once (digest and finiteness).  The damped-sine seeder's
+frequency scan swapped its per-sample trig calls for Goertzel
+(60.6 -> 31.9 ms solve; a measured-phase seed was tried and reverted --
+it made the solve basin-sensitive).  Refused with numbers:
+`uniform_histogram` into `uniform_facet_histograms` (+18% on the single
+histogram hot loop even with a hoisted single-facet branch).
+
+Four-panel contention, measured on the MOT-ROI chain: worker-thread
+masks 2/4/8 move the causal critical path 90.0/84.5/79.2 ms (mild
+under-parallelization, no oversubscription); `OMP_WAIT_POLICY=ACTIVE`
+is not faster (wake latency is not the wall-cpu gap); with
+`ZLC_PLOT_KERNELS=numpy` the same chain's composes inflate ~6-10x with
+cpu~wall -- the nogil kernels are what keep four panels affordable.
+The residual console/isolated render ratio (camera-grid ~2x) is
+scheduler-level sharing among four worker threads, their kernel teams
+and the GUI thread; it shrinks only by making composes cheaper.
