@@ -120,6 +120,7 @@ class PanelCardView(FluentGroupBox):
         self._settings_popup: FluentCompanionFrame | None = None
         self._settings_anchor: FluentSettingsPopupAnchor | None = None
         self._settings_drag_handle: FluentLabel | None = None
+        self._settings_close_button: FluentButton | None = None
         self._settings_scroll: FluentScrollArea | None = None
         self._settings_body: QtWidgets.QWidget | None = None
         self._settings_form: FluentParameterForm | None = None
@@ -413,6 +414,10 @@ class PanelCardView(FluentGroupBox):
         previous_size = str(self._state_projection.get("size") or "")
         self._state_projection = dict(incoming)
         self._base_title = incoming["title"] or "Panel"
+        if self._settings_drag_handle is not None:
+            self._settings_drag_handle.setText(
+                f"Setting · {self._base_title}"
+            )
         self._refresh_title_band()
         with signals_blocked(self.title_edit, self.signal_combo, self.size_combo):
             self.title_edit.setText(self._base_title)
@@ -1079,10 +1084,27 @@ class PanelCardView(FluentGroupBox):
             pad = max(1, scaled_px(10))
             layout.setContentsMargins(pad, pad, 0, pad)
             layout.setSpacing(0)
-            drag_handle = FluentLabel("Setting", popup)
+            header = QtWidgets.QWidget(popup)
+            header.setStyleSheet("background: transparent;")
+            header_layout = QtWidgets.QHBoxLayout(header)
+            header_layout.setContentsMargins(0, 0, pad, 0)
+            header_layout.setSpacing(max(1, scaled_px(5)))
+            drag_handle = FluentLabel(
+                f"Setting · {self._base_title}",
+                header,
+            )
             drag_handle.setCursor(QtCore.Qt.SizeAllCursor)
             drag_handle.installEventFilter(self)
-            layout.addWidget(drag_handle)
+            header_layout.addWidget(drag_handle, 1)
+            close_button = FluentButton("×", header, color=GREY)
+            close_button.setFixedSize(
+                scaled_px(24, minimum=20),
+                scaled_px(24, minimum=20),
+            )
+            close_button.setToolTip("Close settings")
+            close_button.clicked.connect(self.retire_settings_popup)
+            header_layout.addWidget(close_button, 0)
+            layout.addWidget(header)
             scroll = FluentScrollArea(popup)
             body = QtWidgets.QWidget()
             body.setStyleSheet("background: transparent;")
@@ -1120,6 +1142,7 @@ class PanelCardView(FluentGroupBox):
                 popup, self.settings_button
             )
             self._settings_drag_handle = drag_handle
+            self._settings_close_button = close_button
             self._settings_scroll = scroll
             self._settings_body = body
             # LayoutRequest-driven measurement: the body says when its own

@@ -207,6 +207,8 @@ popup = card._settings_popup
 assert isinstance(popup, FluentCompanionFrame)
 assert popup.parentWidget() is card
 assert popup.isWindow()
+assert card._settings_drag_handle.text() == 'Setting · Card'
+assert card._settings_close_button.toolTip() == 'Close settings'
 # The masked TYPE, not a bit test: Qt.Tool is defined as Qt.Popup |
 # Qt.Dialog, so `flags & Qt.Popup` is true for a tool window as well and
 # cannot tell a frame from a menu.
@@ -269,6 +271,12 @@ QtWidgets.QApplication.sendEvent(
 )
 app.processEvents()
 assert popup.pos() != start
+QtTest.QTest.mouseClick(card._settings_close_button, QtCore.Qt.LeftButton)
+app.processEvents()
+assert not popup.isVisible()
+QtTest.QTest.qWait(300)
+QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
+app.processEvents()
 popup.hide()  # Qt.Popup's outside-click dismissal reaches the same hide path.
 app.processEvents()
 assert not popup.isVisible()
