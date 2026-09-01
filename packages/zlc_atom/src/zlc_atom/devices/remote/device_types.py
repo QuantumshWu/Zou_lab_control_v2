@@ -140,6 +140,7 @@ DEVICE_TYPES = (
         REMOTE_TUNABLE_SCHEMA,
         (),
         factory=_remote_tunable_factory,
+        addable=False,
         discover=_discover_fabric,
     ),
 )

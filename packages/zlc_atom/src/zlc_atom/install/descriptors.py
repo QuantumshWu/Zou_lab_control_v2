@@ -79,6 +79,12 @@ class DeviceTypeDescriptor:
     #: one published device's own log; the fabric's per-device lines are
     #: matched by instance id instead, so plain tunables leave this empty.
     log_channels: tuple[str, ...] = ()
+    #: Whether the Device Manager's Add picker offers this type.  A type
+    #: authored BY DISCOVERY (a peer's device found on the bench fabric)
+    #: is a way of reaching some real family, not a device family of its
+    #: own -- offering it for hand-adding would ask the operator to type
+    #: the very address the fabric exists to carry.
+    addable: bool = True
 
     def __post_init__(self) -> None:
         if not self.type_id or not self.domain:
@@ -104,6 +110,8 @@ class DeviceTypeDescriptor:
             raise TypeError("device type control_factory must be callable or None")
         if self.announce is not None and not callable(self.announce):
             raise TypeError("device type announce must be callable or None")
+        if not isinstance(self.addable, bool):
+            raise TypeError("device type addable must be bool")
         log_channels = tuple(self.log_channels)
         if any(not isinstance(name, str) or not name for name in log_channels):
             raise TypeError("device type log_channels must be non-empty strings")

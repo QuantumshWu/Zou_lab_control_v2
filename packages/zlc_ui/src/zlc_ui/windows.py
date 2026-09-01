@@ -26,19 +26,18 @@ def open_device_control(
     spec: Any,
     projection: Any,
     window_ratio: float | None = None,
-    owner=None,
 ) -> Any:
     """Open one projection-driven generic control without exposing Qt.
 
-    ``owner`` is for a frame that has no life of its own: a console opens
-    this to show the settings of a card it is already showing, so the two
-    belong together and the desktop must not stack anything between them.
-    An APPLICATION window is not that.  The pulse editor, the figure
-    viewer, the device manager and the console itself each open on their
-    own, outlive whatever happened to launch them and are moved, raised
-    and closed on their own -- tying one to another would mean minimising
-    a console takes an editor down with it, which is a relationship
-    neither of them has.
+    A PLAIN top-level, deliberately -- like the pulse editor and the
+    figure viewer, which have never misbehaved.  This window used to be
+    OWNED by the console, and on the bench the owner-parented frameless
+    window (whose native handle is re-created when the Qt.Window flag is
+    applied after construction) twice produced closes cascading the WRONG
+    way: closing one owned window froze and took its siblings and then
+    its owner down, and the console's close guard then shut the running
+    installation.  Closing a control must close one window and nothing
+    else, so no window here owns another.
     """
 
     from .device_manager.handle import DeviceControlHandle
@@ -53,7 +52,6 @@ def open_device_control(
 
     window = open_fluent_window(
         _body,
-        owner=owner,
         title=str(title),
         window_ratio=(
             WINDOW_SCREEN_FRACTION if window_ratio is None else float(window_ratio)

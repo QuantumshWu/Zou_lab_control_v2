@@ -150,12 +150,20 @@ def test_a_bench_with_no_apparatus_yet_is_answered_not_refused(manager) -> None:
 
 
 def test_the_types_offered_are_the_types_that_can_be_built(manager) -> None:
-    """Not a list this window keeps.  A second catalog drifts from the real one."""
+    """Not a list this window keeps.  A second catalog drifts from the real one.
+
+    Minus the types discovery authors (a peer's fabric device): those are
+    reachable, not hand-addable, and the catalog itself says which.
+    """
 
     from zlc_atom.install import discover_device_catalog
 
     offered = {key for _label, key, _domain in manager.view.choices}
-    assert offered == {item.type_id for item in discover_device_catalog().available}
+    assert offered == {
+        item.type_id
+        for item in discover_device_catalog().available
+        if item.addable
+    }
 
 
 def test_one_catalog_snapshot_drives_choices_unavailable_and_templates(tmp_path) -> None:
@@ -1435,4 +1443,25 @@ def test_a_defective_handler_is_an_error_line_not_a_dead_bench(tmp_path) -> None
             manager.remove_device("rf")
     finally:
         del manager.remove_device
+        manager.close()
+
+
+def test_a_discovery_authored_type_is_not_in_the_hand_add_picker(tmp_path) -> None:
+    """remote.tunable is a way of REACHING a family, not a family to add.
+
+    Hand-adding it would ask the operator to type the very address the
+    fabric exists to carry, so the Add picker does not offer it -- while
+    Scan hardware still installs it, prefilled, like before.
+    """
+
+    view = _ManagerView()
+    manager = DeviceManagerPresenter(view, tmp_path / "apparatus.json")
+    try:
+        offered = [key for _label, key, _domain in view.choices]
+        assert "remote.tunable" not in offered
+        assert "rf.vaunix_lms" in offered, "real families still offered"
+        assert "remote.tunable" in manager.types, (
+            "the type stays in the catalog for discovery to author"
+        )
+    finally:
         manager.close()

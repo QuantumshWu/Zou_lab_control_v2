@@ -276,6 +276,7 @@ class DeviceManagerPresenter:
                     descriptor.domain,
                 )
                 for descriptor in sorted(self.types.values(), key=lambda item: item.type_id)
+                if descriptor.addable
             ),
             tuple(
                 (value.family, value.reason)

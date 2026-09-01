@@ -418,22 +418,6 @@ class ExperimentGuiFlow:
         control.closed.connect(released)
         return control
 
-    def _console_owner_window(self):
-        """The console window a FRAME of this console belongs to.
-
-        Only for a window that has no life of its own -- the generic
-        settings frame below is one: it shows the settings of a card this
-        console is already showing, so the desktop must not stack anything
-        between them.  A device that brings its own EDITOR (the pulse
-        editor, the SLM editor) opens an application window instead: it is
-        launched from here and then lives on its own, so it is not raised,
-        minimised or closed with this console, and claiming it would tie
-        two peers together.
-        """
-
-        console = self.console
-        return None if console is None else console.owner_window
-
     def _open_generic_control(self, key: str, device: object) -> object:
         from zlc_atom.authoring import AuthoringSchema
         from zlc_ui import open_device_control
@@ -445,7 +429,6 @@ class ExperimentGuiFlow:
             raise RuntimeError("initialize devices before opening a control")
         empty_spec = project_schema(AuthoringSchema(()))
         control = open_device_control(
-            owner=self._console_owner_window(),
             title=f"{key} control",
             spec=empty_spec,
             projection={

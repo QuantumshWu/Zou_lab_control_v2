@@ -280,6 +280,10 @@ assert not isinstance(control, QtWidgets.QWidget), 'a QWidget escaped zlc_ui'
 # Snug fit (user decree): the control opens at half the standard width and
 # its content's own height -- a fixed screen fraction full of blank space
 # is exactly what it must not be.  It stays resizable.
+# A control window is a PLAIN top-level: it owns nothing and nothing owns
+# it, so closing it can never take another window along.  (The owned
+# frameless construct twice cascaded closes on the bench.)
+assert control._window.parent() is None
 standard = screen_fit_window_size(WINDOW_SCREEN_FRACTION)
 size = control._window.size()
 view_hint = control._view.sizeHint()
