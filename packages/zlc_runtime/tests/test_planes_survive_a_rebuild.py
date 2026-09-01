@@ -37,6 +37,7 @@ from zlc_data import (
 )
 from zlc_runtime.plane import (
     SignalDataPlane,
+    _IndexedMaterialization,
     _materialize_indexed_dataset,
 )
 
@@ -86,14 +87,19 @@ def test_indexed_history_keeps_each_shots_stated_error() -> None:
         for index in range(3)
     )
     built = _materialize_indexed_dataset(
-        "@logic/fit/amplitude",
-        GENERATION,
-        7,
-        schema,
-        events,
-        first_index=0,
-        latest_index=2,
-        capacity=8,
+        _IndexedMaterialization(
+            "@logic/fit/amplitude",
+            GENERATION,
+            7,
+            schema,
+            None,
+            events,
+            0,
+            2,
+            None,
+            {},
+            {},
+        )
     )
     assert built.block.sigma is not None
     np.testing.assert_allclose(
@@ -110,14 +116,19 @@ def test_an_index_nobody_published_has_an_unknown_error_not_a_zero_one() -> None
     schema = _schema("fit")
     events = ((0, _shot(schema, 4.0, 0.1)), (2, _shot(schema, 6.0, 0.3)))
     built = _materialize_indexed_dataset(
-        "@logic/fit/amplitude",
-        GENERATION,
-        7,
-        schema,
-        events,
-        first_index=0,
-        latest_index=2,
-        capacity=8,
+        _IndexedMaterialization(
+            "@logic/fit/amplitude",
+            GENERATION,
+            7,
+            schema,
+            None,
+            events,
+            0,
+            2,
+            None,
+            {},
+            {},
+        )
     )
     sigma = np.asarray(built.block.sigma).reshape(-1)
     assert sigma[0] == pytest.approx(0.1)
@@ -133,14 +144,19 @@ def test_a_history_of_shots_that_state_nothing_states_nothing() -> None:
         (index, _shot(schema, float(index), None)) for index in range(3)
     )
     built = _materialize_indexed_dataset(
-        "camera/frame",
-        GENERATION,
-        7,
-        schema,
-        events,
-        first_index=0,
-        latest_index=2,
-        capacity=8,
+        _IndexedMaterialization(
+            "camera/frame",
+            GENERATION,
+            7,
+            schema,
+            None,
+            events,
+            0,
+            2,
+            None,
+            {},
+            {},
+        )
     )
     assert built.block.sigma is None
 

@@ -33,6 +33,15 @@ LATEST_COORDINATE = CoordinateSelector.LATEST
 def canonical_coordinate_scalar(value: Any, field: str = "coordinate") -> CoordinateScalar:
     """Return the sole canonical scalar vocabulary used by named coordinates."""
 
+    # Exact-type identities first: a plain int, str, or None IS its own
+    # canonical form (bool is excluded because type(True) is bool, never
+    # int).  This function runs once per coordinate of every constructed
+    # point column -- a materialized indexed history calls it hundreds of
+    # thousands of times per shot -- and the generic path below spends
+    # most of that in abc instance checks re-proving these identities.
+    kind = type(value)
+    if kind is int or kind is str or value is None:
+        return value
     scalar = value.item() if isinstance(value, np.generic) else value
     if scalar is None or isinstance(scalar, str):
         return scalar
