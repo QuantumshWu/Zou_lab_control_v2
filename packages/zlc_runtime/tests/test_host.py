@@ -1226,3 +1226,175 @@ def test_a_schema_advance_ends_a_processor_cancelled_not_failed() -> None:
     finally:
         host.shutdown()
         plane.close()
+
+
+def test_a_bind_race_ends_cancelled_and_never_strands_starting(monkeypatch) -> None:
+    """The intermittent frozen overlay after a measurement restart.
+
+    Between the host's snapshot of the source publication and the plane
+    lock, a fast-restarting camera publishes again: the plane raises
+    SourceGenerationEnded from reserve_follow_processor BY DESIGN.  That
+    raise used to escape start() outside any guard, stranding the host in
+    phase "starting" -- a zombie the console's re-follow beat could
+    neither restart nor skip, cured only by an operator restarting the
+    node.  A start-time refusal must always land a TERMINAL phase:
+    lifecycle races end CANCELLED (the re-follow retries next beat with
+    the newer truth), real refusals end FAILED.
+    """
+
+    from zlc_runtime.plane import SignalDataPlane
+    from zlc_runtime.streams import SourceGenerationEnded
+
+    source_declaration = DatasetOutputDeclaration("frame", "test.frame")
+    derived_declaration = DatasetOutputDeclaration("derived", "test.derived")
+
+    class Processor:
+        def evaluate(self, value: SignalValue):
+            raise AssertionError("the bind never succeeds in this test")
+
+    for raised, expected_phase in (
+        (SourceGenerationEnded("the source moved on during the bind"), "cancelled"),
+        (RuntimeError("exact sibling outputs did not commit together"), "failed"),
+    ):
+        source = _Source("racing-source", source_declaration)
+        plane = SignalDataPlane()
+        plane.begin_generation(source)
+        plane.commit_live(
+            source,
+            {
+                "frame": _finite_output(
+                    source_declaration, value=1.0, total=3, origin=0, written=1
+                )
+            },
+        )
+
+        def refuse(*_args, **_kwargs):
+            raise raised
+
+        monkeypatch.setattr(plane, "reserve_follow_processor", refuse)
+        wake = Event()
+        host = _host(
+            Processor(),
+            plane,
+            wake,
+            instance_id="racing-processor",
+            kind="processor",
+            outputs=(derived_declaration,),
+            source=source.signal_key("frame"),
+            delivery="exact",
+        )
+        try:
+            with pytest.raises(type(raised)):
+                host.start()
+            observation = host.poll()
+            assert observation.phase == expected_phase, (raised, observation)
+            assert observation.phase != "starting", "zombie host"
+        finally:
+            host.shutdown()
+            plane.close()
+
+
+def test_an_unarmed_exact_source_leaves_the_follow_cancelled() -> None:
+    """No generation to follow YET is the source's lifecycle, not a fault.
+
+    The console's gate can see a source alive and lose it before the
+    bind; landing "failed" cleared ``following`` for good and the overlay
+    never came back.  CANCELLED is the phase the automatic re-follow
+    restarts from when the next generation arms.
+    """
+
+    from zlc_runtime.plane import SignalDataPlane
+    from zlc_runtime.streams import SourceGenerationEnded
+
+    source_declaration = DatasetOutputDeclaration("frame", "test.frame")
+    derived_declaration = DatasetOutputDeclaration("derived", "test.derived")
+
+    class Processor:
+        def evaluate(self, value: SignalValue):
+            raise AssertionError("never evaluated")
+
+    source = _Source("silent-source", source_declaration)
+    plane = SignalDataPlane()
+    wake = Event()
+    host = _host(
+        Processor(),
+        plane,
+        wake,
+        instance_id="waiting-processor",
+        kind="processor",
+        outputs=(derived_declaration,),
+        source=source.signal_key("frame"),
+        delivery="exact",
+    )
+    try:
+        with pytest.raises(SourceGenerationEnded):
+            host.start()
+        observation = host.poll()
+        assert observation.phase == "cancelled", observation
+        assert observation.error is None
+    finally:
+        host.shutdown()
+        plane.close()
+
+
+def test_failure_acceptance_excuses_the_source_lifecycle() -> None:
+    """The latest lane's twin of the follow-finish law.
+
+    A commit landing between the new generation's retirement closure and
+    the lane's own cancellation arrives as SourceGenerationEnded through
+    accept_processor_failure -- which used to end EVERY error "failed",
+    clearing ``following`` permanently.  Source-lifecycle exceptions end
+    CANCELLED; real defects still end FAILED.
+    """
+
+    from zlc_runtime.plane import SignalDataPlane
+    from zlc_runtime.streams import SourceGenerationEnded
+
+    _ = _Source  # the acceptor needs no live source
+    derived_declaration = DatasetOutputDeclaration("derived", "test.derived")
+
+    class Processor:
+        def evaluate(self, value: SignalValue):
+            raise AssertionError("never evaluated")
+
+    plane = SignalDataPlane()
+    wake = Event()
+    host = _host(
+        Processor(),
+        plane,
+        wake,
+        instance_id="draining-processor",
+        kind="processor",
+        outputs=(derived_declaration,),
+        source="draining-source/frame",
+        delivery="exact",
+    )
+    try:
+        # The acceptor is the latest lane's delivery seam; exercise its
+        # classification directly, without a worker thread to unwind.
+        host._active = True
+        host.accept_processor_failure(
+            SourceGenerationEnded(
+                "the processor's generation was retired before its commit"
+            )
+        )
+        observation = host.poll()
+        assert observation.phase == "cancelled", observation
+        assert observation.error is None
+
+        other = _host(
+            Processor(),
+            plane,
+            wake,
+            instance_id="defective-processor",
+            kind="processor",
+            outputs=(derived_declaration,),
+            source="draining-source/frame",
+            delivery="exact",
+        )
+        other._active = True
+        other.accept_processor_failure(ValueError("a real defect"))
+        observation = other.poll()
+        assert observation.phase == "failed", observation
+    finally:
+        plane.close()

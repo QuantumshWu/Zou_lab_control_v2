@@ -1086,6 +1086,31 @@ class NodeHost:
             )
         return MappingProxyType(inputs)
 
+    def _refuse_start(self, error: BaseException) -> None:
+        """End the host in a TERMINAL phase for a start-time refusal.
+
+        The bind can lose the very race it exists for: between the
+        caller's snapshot and the plane lock the source may publish again,
+        move to a new generation, end, or fail.  That is the SOURCE's
+        lifecycle, not this node's fault -- CANCELLED, the phase a
+        standing re-follow restarts from.  Anything else is a real refusal
+        and lands FAILED.  Both are terminal, deliberately: an exception
+        that strands the host in "starting" leaves the re-follow beat
+        unable to restart it OR skip it -- the frozen overlay only an
+        operator's manual restart could cure.
+        """
+
+        self._terminal = True
+        if isinstance(
+            error,
+            (SourceGenerationEnded, SourceFailed, GenerationSchemaAdvanced),
+        ):
+            self._phase = "cancelled"
+            self._error = None
+        else:
+            self._phase = "failed"
+            self._error = f"{type(error).__name__}: {error}"
+
     def _start_processor(self) -> None:
         assert self._source_signal is not None
         publication = self._data_plane.latest_publication(self._source_signal)
@@ -1104,6 +1129,18 @@ class NodeHost:
                 self._processor_path = "follow"
                 self._start_follow_processor(None, None)
                 return
+            if self._input_delivery == "exact":
+                # The console's re-follow gate saw this source alive and it
+                # ended, empty, before the bind -- or it simply has not
+                # armed yet.  Either way the next generation is exactly
+                # what a standing follow waits for; failing here cleared
+                # ``following`` for good and the overlay never returned.
+                error = SourceGenerationEnded(
+                    f"processor input signal {self._source_signal!r} has "
+                    "no live generation to follow yet"
+                )
+                self._refuse_start(error)
+                raise error
             self._phase = "failed"
             self._terminal = True
             self._error = f"processor input signal {self._source_signal!r} is not active"
@@ -1146,9 +1183,7 @@ class NodeHost:
             self._phase = "running"
         except BaseException as error:
             self._active = False
-            self._terminal = True
-            self._phase = "failed"
-            self._error = f"{type(error).__name__}: {error}"
+            self._refuse_start(error)
             raise
 
     def _start_frozen_processor(
@@ -1159,11 +1194,15 @@ class NodeHost:
         assert self._source_signal is not None
         if source.name != self._source_signal:
             raise ValueError("frozen Processor received another input signal")
-        self._data_plane.reserve_frozen_processor(
-            self,
-            source_name=self._source_signal,
-            source_publication=publication,
-        )
+        try:
+            self._data_plane.reserve_frozen_processor(
+                self,
+                source_name=self._source_signal,
+                source_publication=publication,
+            )
+        except BaseException as error:
+            self._refuse_start(error)
+            raise
         self._plane_state = True
         self._source_publication = publication
         owner = self._ensure_owner()
@@ -1179,9 +1218,7 @@ class NodeHost:
         except BaseException as error:
             owner.mark_owner_reaped()
             self._active = False
-            self._terminal = True
-            self._phase = "failed"
-            self._error = f"{type(error).__name__}: {error}"
+            self._refuse_start(error)
             self._retire_plane_state()
             raise
 
@@ -1295,12 +1332,22 @@ class NodeHost:
         assert self._source_signal is not None
         if publication is not None:
             self._validate_follow_source(source)
-        tap = self._data_plane.reserve_follow_processor(
-            self,
-            source_name=self._source_signal,
-            source_publication=publication,
-            source_signals=tuple(self._processor_signal_names().values()),
-        )
+        try:
+            tap = self._data_plane.reserve_follow_processor(
+                self,
+                source_name=self._source_signal,
+                source_publication=publication,
+                source_signals=tuple(self._processor_signal_names().values()),
+            )
+        except BaseException as error:
+            # The plane raises SourceGenerationEnded here BY DESIGN when
+            # the source moved between the snapshot and the bind -- the
+            # guard below only wrapped ``submit``, which never raises it,
+            # so the race escaped start() and stranded the host in
+            # "starting": the intermittent frozen overlay after a
+            # measurement restart.
+            self._refuse_start(error)
+            raise
         self._plane_state = True
         self._source_publication = publication
         self._follow_tap = tap
@@ -1319,16 +1366,7 @@ class NodeHost:
             self._follow_tap = None
             owner.mark_owner_reaped()
             self._active = False
-            self._terminal = True
-            if isinstance(error, SourceGenerationEnded):
-                # The source moved on between the caller's snapshot and the
-                # bind: a lifecycle race, ended as CANCELLED so a standing
-                # follow may complete against the next generation.
-                self._phase = "cancelled"
-                self._error = None
-            else:
-                self._phase = "failed"
-                self._error = f"{type(error).__name__}: {error}"
+            self._refuse_start(error)
             self._retire_plane_state()
             raise
 
@@ -1520,6 +1558,19 @@ class NodeHost:
 
     def accept_processor_failure(self, error: Exception) -> None:
         if not self._active:
+            return
+        if isinstance(
+            error,
+            (SourceGenerationEnded, SourceFailed, GenerationSchemaAdvanced),
+        ):
+            # Same law as the follow finish: the source's lifecycle is not
+            # this node's failure, and CANCELLED is the phase a standing
+            # re-follow restarts from.  A commit that lands in the window
+            # between the new generation's retirement closure and the
+            # lane's own cancellation arrives here as
+            # SourceGenerationEnded -- ending it "failed" cleared
+            # ``following`` for good.
+            self.accept_processor_cancelled()
             return
         self._data_plane.withdraw_processor(self)
         self._plane_state = False
