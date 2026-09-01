@@ -398,3 +398,47 @@ def test_generic_kind_updates_remain_stable_under_their_owned_draw_path(
             assert _composed_matches_full_draw(session) == 0
     finally:
         session.close()
+
+
+def test_the_side_frames_stay_above_their_own_content() -> None:
+    """The rail's spines and the colorbar's outline draw ABOVE their fills.
+
+    The native-image compose used to pull ALL boundary chrome into its
+    first pass, so the colorbar gradient and the rail histogram painted
+    over the inner half of their own black frames -- on the console the
+    borders looked partly missing.  Only chrome the image raster can
+    overwrite comes forward; everything else keeps full-draw z order.
+    """
+
+    schema = _image_contract(96)
+    session = PlotSession(
+        _snapshot(schema, 96, 30000.0, 1, seed=3),
+        ImagePlot(
+            AxisRef.data("camera_x"),
+            AxisRef.data("camera_y"),
+            labels=PlotLabels("frames", "x", "y", value="Counts"),
+        ),
+    )
+    try:
+        session.set_size("2x2")
+        pixels = np.asarray(session.rgba())
+        height = pixels.shape[0]
+        gray = pixels[..., :3].min(axis=2)
+        renderer = session._renderer
+
+        def edge_dark(role, side):
+            box = renderer._axes[role][0].bbox
+            x0, x1 = int(box.x0), int(box.x1)
+            top = int(height - box.y1)
+            bottom = int(height - box.y0)
+            if side == "top":
+                band = gray[max(top - 2, 0) : top + 3, x0:x1]
+                return float(np.mean((band < 128).any(axis=0)))
+            band = gray[top:bottom, max(x0 - 2, 0) : x0 + 3]
+            return float(np.mean((band < 128).any(axis=1)))
+
+        assert edge_dark("colorbar", "top") > 0.9, "colorbar outline top missing"
+        assert edge_dark("colorbar", "left") > 0.9, "colorbar outline left missing"
+        assert edge_dark("distribution", "left") > 0.9, "rail left spine missing"
+    finally:
+        session.close()

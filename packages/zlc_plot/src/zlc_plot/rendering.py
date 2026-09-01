@@ -3617,13 +3617,25 @@ class MatplotlibRenderer:
                 color_overlay_ids = {id(artist) for _key, artist in color_overlay}
         used_native = False
         if native_image:
-            boundary_ids = set(self._boundary_chrome_commands)
-            for entries in self._boundary_chrome_cache.values():
-                boundary_ids.update(id(artist) for artist, _owner, _zorder in entries)
-            draw_boundary_ids = boundary_ids
+            # Only the chrome the image raster may have OVERWRITTEN comes
+            # forward: the image axes' own frames, and the overview's
+            # replayed cell chrome.  Every other axes' boundary chrome --
+            # the distribution rail's spines, the colorbar's outline --
+            # keeps its full-draw z order, ABOVE its own fill and gradient.
+            # Pulling ALL boundary chrome into the first pass painted the
+            # rail fill and the colorbar gradient over the inner half of
+            # those black frames, which is exactly the console's missing
+            # borders.
+            forward_ids = set(self._boundary_chrome_commands)
+            image_axis_ids = {id(axis) for axis in self._axes.get("image", ())}
+            for axis_id, entries in self._boundary_chrome_cache.items():
+                if axis_id in image_axis_ids:
+                    forward_ids.update(
+                        id(artist) for artist, _owner, _zorder in entries
+                    )
             for _key, artist in ordered:
                 if (
-                    id(artist) in draw_boundary_ids
+                    id(artist) in forward_ids
                     and id(artist) not in color_overlay_ids
                     and artist.get_visible()
                 ):
@@ -3633,7 +3645,7 @@ class MatplotlibRenderer:
                 if (
                     id(artist) not in native_image_ids
                     and id(artist) not in facet_annotation_ids
-                    and id(artist) not in boundary_ids
+                    and id(artist) not in forward_ids
                     and id(artist) not in color_overlay_ids
                     and (not ellipses_drawn or id(artist) not in facet_ellipse_ids)
                     and artist.get_visible()
