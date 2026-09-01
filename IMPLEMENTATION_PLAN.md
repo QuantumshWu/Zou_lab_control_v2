@@ -121,7 +121,7 @@
 - 公共Figure API严格编码/解码PlotSpec、parameters、size、viewport、selectors、facet focus、classifier、fit与
   typed image overlay；archive先发布，preview后渲染。
 - Panel Save只是公共Figure API的adapter，不再维护第二套writer或restore grammar。
-- FigureViewer把archive typed Dataset发布为sealed Runtime signals，默认panel从archive exact recipe恢复，且不按shape推断plot kind；Add Panel只建立空的fixed-kind `panel-N`，Signal/ROI/Fit派生及后续compose全部走与TaskConsole相同的ConsolePresenter、SelectionBridge和Plot host，不再保留static panel owner。
+- FigureViewer把archive typed Dataset发布为sealed Runtime signals，默认panel从archive exact recipe恢复，且不按shape推断plot kind；Add Panel只建立空的fixed-kind `panel-N`，Signal/ROI/Fit派生及后续compose全部走与TaskConsole相同的ConsolePresenter、SelectionBridge和Plot host，不再保留static panel owner。静态host在Bridge订阅前已有accepted fit时，Fit subscription只replay该immutable FitEvent，不重复solve/render；因此ROI与Fit参数都继续发布给后续Panel。
 - FigureViewer与TaskConsole Live/Frozen使用同一个accepted PlotSpec、parameter、selector/
   viewport capability contract；Viewer semantic edit同样只在host accept后更新surface，文件选择默认定位workspace当天data目录。
 - Lineage保存root、event nodes和direct parent IDs；Viewer验证引用、reachability和cycle后

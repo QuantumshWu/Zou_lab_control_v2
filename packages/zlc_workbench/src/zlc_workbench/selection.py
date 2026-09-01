@@ -801,7 +801,13 @@ class PlotSelectionSource:
             self._last_error = None
             self._deliver(callback, value)
 
-        return self._install(self._host.subscribe_fit, _on_fit)
+        return self._install(
+            lambda listener: self._host.subscribe_fit(
+                listener,
+                replay_current=True,
+            ),
+            _on_fit,
+        )
 
     def _deliver(self, callback: Callable[..., object], *payload: object) -> None:
         """Hand one translated event downstream, keeping its failure visible.

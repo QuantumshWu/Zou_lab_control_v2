@@ -887,6 +887,21 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
             for row in real_presenter._signal_plane.describe_signals()
             if row.source_name == source_signal and row.name.endswith("/roi_frame")
         )
+        _wait_until(
+            lambda: (
+                real_presenter.beat()
+                or any(
+                    row.source_name == source_signal
+                    and row.name.endswith("/center_x")
+                    for row in real_presenter._signal_plane.describe_signals()
+                )
+            )
+        )
+        fit_center = next(
+            row.name
+            for row in real_presenter._signal_plane.describe_signals()
+            if row.source_name == source_signal and row.name.endswith("/center_x")
+        )
 
         # Add Panel authors an empty fixed-kind card first.  It cannot reject
         # the archive Dataset before the operator has selected a signal/fates.
@@ -898,6 +913,11 @@ def test_panel_save_reopens_fixed_kind_state_fit_and_typed_image_overlay(
         assert added.host is None
         assert any(
             source_signal == signal
+            for _group, leaves in real_view.panels[added_id]["signal_groups"]
+            for _label, signal in leaves
+        )
+        assert any(
+            fit_center == signal
             for _group, leaves in real_view.panels[added_id]["signal_groups"]
             for _label, signal in leaves
         )

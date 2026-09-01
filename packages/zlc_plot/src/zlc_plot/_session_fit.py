@@ -2086,16 +2086,51 @@ class FitSessionMixin:
                 RenderEffect.OVERLAY,
             )
 
-    def subscribe_fit(self, callback: FitCallback) -> Callable[[], None]:
+    def subscribe_fit(
+        self,
+        callback: FitCallback,
+        *,
+        replay_current: bool = False,
+    ) -> Callable[[], None]:
         """Observe exact fit results at their one authoritative completion.
 
         A live data-pair event follows its solve and precedes that pair's
         raster; an explicit/manual fit event follows its accepted overlay
         presentation.  ``None`` withdraws the answer when its request is
-        removed.
+        removed.  A late subscriber may explicitly request the current
+        accepted result; this replays the immutable accepted FitEvent without
+        solving or rendering again.
         """
 
-        return self._subscribe_callback(self._fit_callbacks, callback)
+        if type(replay_current) is not bool:
+            raise TypeError("replay_current must be bool")
+        if not callable(callback):
+            raise TypeError("callback must be callable")
+        with self._render_lock:
+            with self._lock:
+                self._assert_open()
+                self._fit_callbacks.append(callback)
+                current = self._accepted_fit if replay_current else None
+
+        released = False
+
+        def unsubscribe() -> None:
+            nonlocal released
+            with self._lock:
+                if released:
+                    return
+                released = True
+                if callback in self._fit_callbacks:
+                    self._fit_callbacks.remove(callback)
+
+        if current is not None:
+            try:
+                callback(self._fit_event(current))
+            except Exception:
+                # Identical isolation to ordinary fit notifications: one
+                # observer cannot invalidate the accepted fit or subscription.
+                pass
+        return unsubscribe
 
     def _notify_fit(self, event: FitEvent | None) -> None:
         deferred = getattr(self, "_configuration_fit_events", None)
