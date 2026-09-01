@@ -1774,6 +1774,10 @@ class FitEngine:
         results: list[FitResult | None] = [None] * len(coordinates)
         failures: list[str | None] = [None] * len(coordinates)
         prepared: dict[int, dict[str, Any]] = {}
+        #: Finiteness of a coordinate OBJECT, by identity -- a tensor
+        #: facet's cells share their axis arrays, and every cell re-scanned
+        #: the same megabytes for NaNs.  True means proven all-finite.
+        axis_all_finite: dict[int, bool] = {}
         for cell, coordinate_item in enumerate(coordinates):
             check()
             try:
@@ -1815,7 +1819,12 @@ class FitEngine:
                         )
                 finite = np.isfinite(values)
                 for axis in coords:
-                    finite &= np.isfinite(axis)
+                    proven = axis_all_finite.get(id(axis))
+                    if proven is None:
+                        proven = bool(np.all(np.isfinite(axis)))
+                        axis_all_finite[id(axis)] = proven
+                    if not proven:
+                        finite &= np.isfinite(axis)
                 if not bool(np.all(finite)):
                     coords = tuple(axis[finite] for axis in coords)
                     values = values[finite]
@@ -1998,12 +2007,24 @@ class FitEngine:
             return tuple(results), tuple(failures)
 
         buckets: dict[tuple[int, bytes], list[int]] = {}
+        # One digest per coordinate OBJECT, not per cell: a tensor facet's
+        # cells share the same axis arrays, and hashing the same quarter
+        # megabyte forty times over was most of the batch's Python time.
+        # Identity is only a fast path -- equal content in distinct objects
+        # hashes separately and still lands in the same bucket.
+        axis_digests: dict[int, bytes] = {}
         for cell, item in prepared.items():
             digest = hashlib.blake2b(digest_size=20)
             for axis in item["compiled_coords"]:
-                values = np.ascontiguousarray(axis, dtype=np.float64)
-                digest.update(str(values.shape).encode("ascii"))
-                digest.update(memoryview(values).cast("B"))
+                known = axis_digests.get(id(axis))
+                if known is None:
+                    values = np.ascontiguousarray(axis, dtype=np.float64)
+                    axis_hash = hashlib.blake2b(digest_size=20)
+                    axis_hash.update(str(values.shape).encode("ascii"))
+                    axis_hash.update(memoryview(values).cast("B"))
+                    known = axis_hash.digest()
+                    axis_digests[id(axis)] = known
+                digest.update(known)
             key = (int(item["solver_values"].size), digest.digest())
             buckets.setdefault(key, []).append(cell)
 
