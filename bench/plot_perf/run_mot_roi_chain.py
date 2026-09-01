@@ -435,6 +435,9 @@ def run(*, seconds: float, baseline_seconds: float, panel3: str) -> dict:
             "panel3": panel3,
             "fit": fit_model,
             "numba_threads": int(os.environ.get("NUMBA_NUM_THREADS", "0") or 0),
+            "numba_worker_threads": int(
+                os.environ.get("ZLC_NUMBA_WORKER_THREADS", "0") or 0
+            ),
         },
     }
     with bench:

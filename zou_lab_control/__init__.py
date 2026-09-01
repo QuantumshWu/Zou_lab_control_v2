@@ -28,7 +28,7 @@ _LAYERS = (
 
 
 def _configure_compiled_worker_threads() -> None:
-    """Bound the shared native pool and let it sleep between kernels.
+    """Size the native pool, bound each ZLC worker team, and let it sleep.
 
     Parallel compiled kernels in this product run on Numba's OpenMP pool.
     Its worker threads busy-wait after each parallel
@@ -45,23 +45,26 @@ def _configure_compiled_worker_threads() -> None:
     10.94 ms minimum to 10.36, because the work gets a machine that is not
     already busy spinning.
 
-    A panel is already one independent worker.  Letting every small native
-    region request every logical CPU made four same-shot panels compete for
-    the same OpenMP pool: on the 16-logical-core reference machine the real
-    four-panel critical path was 85.77/92.93/99.64 ms at four workers but
-    105.52/115.72/116.60 ms at eight.  Single-panel camera, batched fits and
-    dense 3D were no slower at four; these kernels saturate memory bandwidth
-    or expose too few independent lanes before they can use a larger pool.
+    A panel is already one independent worker.  Giving every panel all
+    logical CPUs oversubscribes them, while shrinking the PROCESS pool to
+    four makes four same-shot panels wait on one tiny pool.  The process now
+    retains the machine's logical capacity and ZLC's Raster/analysis workers
+    mask their own native team to four; four panels can therefore make useful
+    progress together without each claiming the machine.  Explicit operator
+    thread settings remain authoritative.
 
     Set both policies here because the environment must be in place before
     Numba/OpenMP initializes, and this bootstrap is what every entry point
     imports first.  ``setdefault`` preserves an operator's explicit choice.
     """
 
-    os.environ.setdefault(
-        "NUMBA_NUM_THREADS",
-        str(max(1, min(4, os.cpu_count() or 1))),
-    )
+    logical = max(1, os.cpu_count() or 1)
+    authored = os.environ.get("NUMBA_NUM_THREADS")
+    if authored is None:
+        os.environ["NUMBA_NUM_THREADS"] = str(logical)
+        os.environ.setdefault("ZLC_NUMBA_WORKER_THREADS", str(min(4, logical)))
+    else:
+        os.environ.setdefault("ZLC_NUMBA_WORKER_THREADS", authored)
     os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
 
 
