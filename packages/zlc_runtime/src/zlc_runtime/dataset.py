@@ -26,12 +26,9 @@ class MonitorCoverage:
 
     written_cells: int
     total_cells: int
-    retain_at_terminal: bool = False
 
     def __post_init__(self) -> None:
         _validate_cell_counts(self)
-        if type(self.retain_at_terminal) is not bool:
-            raise TypeError("retain_at_terminal must be bool")
 
     @property
     def complete(self) -> bool:

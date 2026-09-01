@@ -1355,7 +1355,7 @@ class SlmFeedbackTask:
             CANDIDATE_PHASE_OUTPUT.name: LiveDatasetOutput(
                 CANDIDATE_PHASE_OUTPUT,
                 phase_event,
-                MonitorCoverage(1, 1, retain_at_terminal=True),
+                MonitorCoverage(1, 1),
                 record,
                 event_record=event_record,
             ),
@@ -1365,7 +1365,6 @@ class SlmFeedbackTask:
                 MonitorCoverage(
                     self._candidate_capacity,
                     self._candidate_capacity,
-                    retain_at_terminal=True,
                 ),
                 record,
                 event_record=event_record,
@@ -1376,7 +1375,6 @@ class SlmFeedbackTask:
                 MonitorCoverage(
                     self._candidate_capacity,
                     self._candidate_capacity,
-                    retain_at_terminal=True,
                 ),
                 record,
                 event_record=event_record,
@@ -1387,7 +1385,6 @@ class SlmFeedbackTask:
                 MonitorCoverage(
                     self._candidate_capacity,
                     self._candidate_capacity,
-                    retain_at_terminal=True,
                 ),
                 record,
                 event_record=event_record,
@@ -1398,7 +1395,6 @@ class SlmFeedbackTask:
                 MonitorCoverage(
                     self._candidate_capacity,
                     self._candidate_capacity,
-                    retain_at_terminal=True,
                 ),
                 record,
                 event_record=event_record,

@@ -2505,9 +2505,20 @@ class SignalDataPlane:
                         )
             else:
                 producer = state.publication_stream
+                # STOP ENDS PRODUCTION, NEVER THE DATA.  The last monitor
+                # publication is the picture still on every panel that
+                # views this signal, and an operator draws ROIs and arms
+                # fits on a stopped run exactly as on a live one -- the
+                # bridge's terminal route exists for that.  Retention was
+                # once a per-origin opt-in flag, so the policy lived in N
+                # node declarations and the origins that forgot it (the
+                # camera, the calibration preview) had their whole derived
+                # chain answer "this run is no longer held" the moment a
+                # measurement stopped.  The plane is the one owner of
+                # retention; the next begin_generation replaces the state,
+                # so the cost is bounded at one publication per signal.
                 retain_latest_monitor = bool(state.publication.signals) and all(
                     isinstance(value.coverage, MonitorCoverage)
-                    and value.coverage.retain_at_terminal
                     for value in state.publication.signals.values()
                 )
                 if retain_latest_monitor:

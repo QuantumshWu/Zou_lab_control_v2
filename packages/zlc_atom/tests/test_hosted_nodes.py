@@ -369,7 +369,14 @@ def test_a_node_host_runs_and_stops_repeat_zero_camera_measurement() -> None:
             time.sleep(0.005)
         assert host.observation.terminal
         assert camera.capture_state() is False
-        assert plane.latest_publication(signal_key) is None
+        # Stop ends production, never the data: the sealed monitor
+        # publication stays retained -- the picture still on the panel,
+        # and the thing ROIs and fits keep deriving from -- until the
+        # next generation replaces it.
+        publication = plane.latest_publication(signal_key)
+        assert publication is not None
+        assert not plane.is_generation_live(signal_key)
+        assert plane.retains(signal_key, publication)
     finally:
         if host is not None:
             if host.observation.running:
