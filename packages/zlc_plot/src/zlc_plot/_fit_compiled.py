@@ -3758,15 +3758,28 @@ def _prepare_damped(coords, observations, valid, seeds, lower, upper, context):
     spacing = _unique_step(x) if count > 1 else 1.0
     best_harmonic = 1
     best_power = -1.0
+    # Goertzel per harmonic: the same |DFT|^2 the naive scan computed,
+    # via one multiply-add recurrence per sample instead of a sine and a
+    # cosine call each -- the scan is O(N^2) either way, but the naive
+    # form spent ~60 ms of a damped-sine solve inside the trig calls at
+    # two thousand points, ten times the whole solve of every other
+    # curve model.
     for harmonic in range(1, count // 2 + 1):
-        real = 0.0
-        imaginary = 0.0
+        angle = 2.0 * math.pi * harmonic / count
+        coefficient = 2.0 * math.cos(angle)
+        previous = 0.0
+        before = 0.0
         for index in range(count):
-            centered = values[index] - offset
-            angle = 2.0 * math.pi * harmonic * index / count
-            real += centered * math.cos(angle)
-            imaginary -= centered * math.sin(angle)
-        power = real * real + imaginary * imaginary
+            current = (
+                (values[index] - offset) + coefficient * previous - before
+            )
+            before = previous
+            previous = current
+        power = (
+            previous * previous
+            + before * before
+            - coefficient * previous * before
+        )
         if power > best_power:
             best_power = power
             best_harmonic = harmonic
@@ -3777,6 +3790,9 @@ def _prepare_damped(coords, observations, valid, seeds, lower, upper, context):
     )
     frequency = max(frequency, EPSILON)
     decay = _array_span(x)
+    # Three blind phases on purpose: a measured DFT phase was tried and
+    # made the solve basin-sensitive (batch and single diverged on
+    # ordinary data); the third lane is robustness, priced in.
     phases = (-0.5 * math.pi, 0.0, 0.5 * math.pi)
     for seed in range(3):
         seeds[seed, 0] = amplitude
