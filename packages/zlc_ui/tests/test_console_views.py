@@ -207,7 +207,7 @@ popup = card._settings_popup
 assert isinstance(popup, FluentCompanionFrame)
 assert popup.parentWidget() is card
 assert popup.isWindow()
-assert card._settings_drag_handle.text() == 'Setting · Card'
+assert card._settings_drag_handle.text() == 'Setting · panel-1'
 assert card._settings_close_button.toolTip() == 'Close settings'
 # The masked TYPE, not a bit test: Qt.Tool is defined as Qt.Popup |
 # Qt.Dialog, so `flags & Qt.Popup` is true for a tool window as well and
@@ -238,6 +238,7 @@ assert scroll.verticalScrollBar().maximum() == overflow
 title = card._settings_form.widget_for('title')
 title.setText('Card changed')
 title.editingFinished.emit()
+assert card._settings_drag_handle.text() == 'Setting · panel-1'
 interval = card._settings_form.widget_for('interval_ms')
 interval.setCurrentIndex(interval.findData(800))
 interval.activated.emit(interval.currentIndex())

@@ -414,10 +414,6 @@ class PanelCardView(FluentGroupBox):
         previous_size = str(self._state_projection.get("size") or "")
         self._state_projection = dict(incoming)
         self._base_title = incoming["title"] or "Panel"
-        if self._settings_drag_handle is not None:
-            self._settings_drag_handle.setText(
-                f"Setting · {self._base_title}"
-            )
         self._refresh_title_band()
         with signals_blocked(self.title_edit, self.signal_combo, self.size_combo):
             self.title_edit.setText(self._base_title)
@@ -1090,7 +1086,7 @@ class PanelCardView(FluentGroupBox):
             header_layout.setContentsMargins(0, 0, pad, 0)
             header_layout.setSpacing(max(1, scaled_px(5)))
             drag_handle = FluentLabel(
-                f"Setting · {self._base_title}",
+                f"Setting · {self.panel_id}",
                 header,
             )
             drag_handle.setCursor(QtCore.Qt.SizeAllCursor)
