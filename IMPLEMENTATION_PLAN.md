@@ -126,6 +126,7 @@
 - FigureViewer与TaskConsole Live/Frozen使用同一个accepted PlotSpec、parameter、selector/
   viewport capability contract；Viewer semantic edit同样只在host accept后更新surface，文件选择默认定位workspace当天data目录。
 - `board.commit`首次接受Panel host后在同一owner turn幂等挂载Selection/Fit Bridge；真实Qt首个drag/release已验证可立即发布ROI，不等待下一display beat。
+- SLM Feedback camera preview第一轮后停更的根因是`holds_live_revision`只识别裸`OwnedSnapshot`，带site overlay的`ImageFrame`把第二generation的revision 10误判为旧run的`10<=10`并cancel。现统一解包snapshot；真实两轮Camera Measurement→Panel从generation A前进至B、同host复用、无busy/error，Plot/Workbench seam各有回归。
 - Lineage保存root、event nodes和direct parent IDs；Viewer验证引用、reachability和cycle后
   投影为tree。
 - 显式消费Dataset的Measurement worker在每次保留值时将exact source publication随同一次Runtime commit提交；Scan Flow因此从Scan event沿真实parent回到Measurement/Processor，Save与Viewer不得按signal名查latest。Device tab从node run record显示baseline working point，并另列event ranges实际引用的active override epoch。

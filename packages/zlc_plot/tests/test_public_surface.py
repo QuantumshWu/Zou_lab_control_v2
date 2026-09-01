@@ -12,6 +12,7 @@ from zlc_plot import (
     ImagePlot,
     PlotSession,
     RollingPlot,
+    RasterPlotHost,
 )
 from zlc_plot.fit import FacetFitBatchResult
 from zlc_plot.primitives import ImageFrame, ImagePointOverlay, PointStatus
@@ -75,6 +76,40 @@ def test_image_overlay_is_explicit_data_not_a_display_mode() -> None:
     finally:
         curve.close()
         session.close()
+
+
+def test_image_frame_new_generation_may_restart_the_same_revision() -> None:
+    """ImageFrame wrapping must not hide the Dataset generation from live flow."""
+
+    from zlc_data import owned_snapshot_from_arrays
+
+    base = _image_snapshot()
+    first = owned_snapshot_from_arrays(
+        base.block.schema,
+        base.block.values,
+        10,
+        validity=base.block.validity,
+        stream_generation="image-run-a",
+    )
+    second = owned_snapshot_from_arrays(
+        base.block.schema,
+        base.block.values,
+        10,
+        validity=base.block.validity,
+        stream_generation="image-run-b",
+    )
+    overlay = ImagePointOverlay(0, np.empty((0, 2), dtype=float))
+    spec = ImagePlot(AxisRef.data("column"), AxisRef.data("row"))
+    host = RasterPlotHost.from_plot(ImageFrame(first, overlay), spec)
+    try:
+        host.wait_for_front(timeout=10)
+        operation = host.update_data(ImageFrame(second, overlay)).result(timeout=10)
+        assert operation.value.spec == spec
+        assert host.front is not None
+        assert host.front.identity.data_generation == "image-run-b"
+        assert host.front.identity.data_revision == 10
+    finally:
+        host.close(timeout=10)
 
 
 def test_image_site_numbers_use_their_ring_status_style() -> None:
