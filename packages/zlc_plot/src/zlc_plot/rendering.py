@@ -1363,6 +1363,10 @@ class MatplotlibRenderer:
         self._planned_ratio: dict[int, float | None] = {}
         #: The whole-pixel box this renderer last applied per axes.
         self._quantized_bounds: dict[int, tuple[float, ...]] = {}
+        #: Memo for _pixel_quantized_bounds: the ulp searches are a pure
+        #: function of (plan box, figure size, ratio), and a 64-cell grid
+        #: re-ran all of them on every frame of an unchanged layout.
+        self._quantized_box_cache: dict[int, tuple] = {}
         #: One settled opacity answer per composed front, kept beside
         #: the array so its identity cannot be recycled underneath.
         self._front_opacity: dict[int, tuple[weakref.ref, bool]] = {}
@@ -2370,6 +2374,63 @@ class MatplotlibRenderer:
             return None
         return bars, data, fit
 
+    @staticmethod
+    def _polyline_lane_offsets(clips: np.ndarray) -> np.ndarray:
+        """Contiguous lane boundaries whose clip boxes cannot share a pixel.
+
+        The polyline kernel strokes lanes in parallel, so two lanes must
+        never write the same canvas pixel.  Lines arrive in painter order,
+        cell by cell; a lane extends while boxes overlap its union, and a
+        new lane opens only for a box disjoint from EVERY earlier lane.
+        One overlap with a non-adjacent lane and the whole batch collapses
+        to a single lane -- the old serial behaviour, always safe.
+        """
+
+        total = int(clips.shape[0])
+        serial = np.asarray([0, total], dtype=np.int64)
+        if total <= 1:
+            return serial
+
+        def overlaps(one, other) -> bool:
+            return bool(
+                one[0] < other[2]
+                and other[0] < one[2]
+                and one[1] < other[3]
+                and other[1] < one[3]
+            )
+
+        finished: list[tuple[int, int, int, int]] = []
+        boundaries = [0]
+        current = (
+            int(clips[0, 0]),
+            int(clips[0, 1]),
+            int(clips[0, 2]),
+            int(clips[0, 3]),
+        )
+        for index in range(1, total):
+            box = (
+                int(clips[index, 0]),
+                int(clips[index, 1]),
+                int(clips[index, 2]),
+                int(clips[index, 3]),
+            )
+            if overlaps(box, current):
+                current = (
+                    min(current[0], box[0]),
+                    min(current[1], box[1]),
+                    max(current[2], box[2]),
+                    max(current[3], box[3]),
+                )
+                continue
+            for earlier in finished:
+                if overlaps(box, earlier):
+                    return serial
+            finished.append(current)
+            boundaries.append(index)
+            current = box
+        boundaries.append(total)
+        return np.asarray(boundaries, dtype=np.int64)
+
     def _raster_grouped_curve_command(
         self,
         series: Sequence[_PreparedSeries],
@@ -2451,6 +2512,8 @@ class MatplotlibRenderer:
             kernels.readable(np.asarray(line_colours, dtype=np.uint8)),
             kernels.readable(line_widths),
             kernels.readable(clips),
+            # One axes: every line may overlap, one sequential lane.
+            kernels.readable(np.asarray([0, len(series)], dtype=np.int64)),
             scratch[0],
             scratch[1],
             canvas_rgba,
@@ -2694,6 +2757,11 @@ class MatplotlibRenderer:
         clips: list[tuple[int, int, int, int]] = []
         cycle = self.style.palette.line_cycle
         line_policy = self.style.artists.curve
+        line_width = max(
+            1.0,
+            float(line_policy.linewidth) * float(self._figure.dpi) / 72.0,
+        )
+        slot_colours: dict[int, np.ndarray] = {}
         for (_key, axes, _index), cell_series in zip(
             surfaces, series_by_cell, strict=True
         ):
@@ -2704,29 +2772,45 @@ class MatplotlibRenderer:
                 min(width, int(math.ceil(float(box.x1)))),
                 min(height, int(math.ceil(float(height) - float(box.y0)))),
             )
+            # A linear cell's transData IS one affine; applying it directly
+            # skips matplotlib's per-series Python transform stack -- with
+            # matplotlib's own operand order (a*x + c*y + e), so the pixels
+            # are the ones transform() produces.  A log cell keeps the
+            # stack.
+            transform = axes.transData
+            affine = (
+                transform.get_affine().to_values()
+                if transform.is_affine
+                else None
+            )
             for item in cell_series:
                 plotted_y = np.where(item.valid, item.y, np.nan)
-                points = axes.transData.transform(
-                    np.column_stack((item.x, plotted_y))
-                )
-                display = np.asarray(points, dtype=np.float64)
-                display[:, 1] = float(height) - display[:, 1]
+                if affine is not None:
+                    a, b, c, d, e, f = affine
+                    display = np.empty((item.x.shape[0], 2), dtype=np.float64)
+                    display[:, 0] = a * item.x + c * plotted_y + e
+                    display[:, 1] = float(height) - (
+                        b * item.x + d * plotted_y + f
+                    )
+                else:
+                    points = transform.transform(
+                        np.column_stack((item.x, plotted_y))
+                    )
+                    display = np.asarray(points, dtype=np.float64)
+                    display[:, 1] = float(height) - display[:, 1]
                 vertices.append(display)
                 offsets.append(offsets[-1] + display.shape[0])
-                colour = cycle[_series_slot(item.identity, len(cycle))]
-                rgba = np.asarray(to_rgba(colour), dtype=float)
-                rgba[3] *= float(line_policy.alpha)
-                colours.append(
-                    np.clip(np.rint(rgba * 255.0), 0, 255).astype(np.uint8)
-                )
-                widths.append(
-                    max(
-                        1.0,
-                        float(line_policy.linewidth)
-                        * float(self._figure.dpi)
-                        / 72.0,
-                    )
-                )
+                slot = _series_slot(item.identity, len(cycle))
+                packed_colour = slot_colours.get(slot)
+                if packed_colour is None:
+                    rgba = np.asarray(to_rgba(cycle[slot]), dtype=float)
+                    rgba[3] *= float(line_policy.alpha)
+                    packed_colour = np.clip(
+                        np.rint(rgba * 255.0), 0, 255
+                    ).astype(np.uint8)
+                    slot_colours[slot] = packed_colour
+                colours.append(packed_colour)
+                widths.append(line_width)
                 clips.append(clip)
         if not vertices:
             return False
@@ -2742,12 +2826,14 @@ class MatplotlibRenderer:
                 np.empty(shape, dtype=np.float64),
             )
             self._artists["facet:curve_command_envelope"] = cache
+        clip_boxes = np.asarray(clips, dtype=np.int32)
         kernels.raster_polylines(
             kernels.readable(np.concatenate(vertices)),
             kernels.readable(np.asarray(offsets, dtype=np.int64)),
             kernels.readable(np.asarray(colours, dtype=np.uint8)),
             kernels.readable(np.asarray(widths, dtype=np.float64)),
-            kernels.readable(np.asarray(clips, dtype=np.int32)),
+            kernels.readable(clip_boxes),
+            kernels.readable(self._polyline_lane_offsets(clip_boxes)),
             cache[0],
             cache[1],
             canvas_rgba,
@@ -2956,6 +3042,7 @@ class MatplotlibRenderer:
             kernels.readable(colours),
             kernels.readable(widths),
             kernels.readable(clips),
+            kernels.readable(self._polyline_lane_offsets(clips)),
             cache[0],
             cache[1],
             canvas_rgba,
@@ -7899,6 +7986,17 @@ class MatplotlibRenderer:
         height = float(figure_box.height)
         if width <= 1.0 or height <= 1.0:
             return bounds
+        ratio = (
+            planned_ratio
+            if planned_ratio is not None
+            else self._drawn_box_ratio(axis)
+        )
+        key = (tuple(bounds), width, height, ratio)
+        cached = self._quantized_box_cache.get(id(axis))
+        if cached is not None and cached[0] == key:
+            self._planned_ratio[id(axis)] = ratio
+            self._box_exact[id(axis)] = cached[2]
+            return cached[1]
         # Grow-only snapping: the box floor/ceils outward into the grid
         # gap, so the tick policy never sees LESS room than the plan gave
         # it (a half-pixel shrink at a pricing threshold dropped a cell
@@ -7908,12 +8006,8 @@ class MatplotlibRenderer:
         x1 = math.ceil((bounds[0] + bounds[2]) * width)
         y1 = math.ceil((bounds[1] + bounds[3]) * height)
         if x1 - x0 < 2 or y1 - y0 < 2:
+            self._quantized_box_cache[id(axis)] = (key, bounds, False)
             return bounds
-        ratio = (
-            planned_ratio
-            if planned_ratio is not None
-            else self._drawn_box_ratio(axis)
-        )
         self._planned_ratio[id(axis)] = ratio
         if ratio is not None:
             # The layout settles the box ITSELF, on whole pixels and on the
@@ -7922,6 +8016,7 @@ class MatplotlibRenderer:
             # yet, and a focus round trip came back with a different picture.
             sized = _box_on_aspect(x1 - x0, y1 - y0, ratio)
             if sized is None:
+                self._quantized_box_cache[id(axis)] = (key, bounds, False)
                 return bounds
             fraction_x, fraction_y = _ANCHOR_FRACTIONS.get(
                 str(self.style.render.image_anchor), (0.5, 0.5)
@@ -7933,8 +8028,11 @@ class MatplotlibRenderer:
         # Exactly integral, not nearly: see ``_exact_box_fractions``.
         left, span_x, exact_x = _exact_box_fractions(x0, x1, width)
         bottom, span_y, exact_y = _exact_box_fractions(y0, y1, height)
-        self._box_exact[id(axis)] = bool(exact_x and exact_y)
-        return (left, bottom, span_x, span_y)
+        exact = bool(exact_x and exact_y)
+        self._box_exact[id(axis)] = exact
+        snapped = (left, bottom, span_x, span_y)
+        self._quantized_box_cache[id(axis)] = (key, snapped, exact)
+        return snapped
 
     def _settle_owned_boxes(self) -> None:
         """Decide, once the surfaces have spoken, whose box each axes is.

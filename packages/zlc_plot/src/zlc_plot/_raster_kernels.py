@@ -784,12 +784,24 @@ def raster_error_bars(
                             out[row, column, 3] = np.uint8(255)
 
 
-@njit(cache=True, nogil=True)
-def raster_polylines(vertices, offsets, colours, widths, clips, low, high, out):
-    """Stroke monotonic display curves as one antialiased column envelope."""
+@njit(cache=True, parallel=True, nogil=True)
+def raster_polylines(
+    vertices, offsets, colours, widths, clips, lane_offsets, low, high, out
+):
+    """Stroke monotonic display curves as one antialiased column envelope.
+
+    One lane owns one axes-worth of lines, exactly as the error-bar kernel
+    groups its stems: a Facet grid's cells are disjoint pixel boxes, so its
+    lanes stroke in parallel without a write race, while the lines INSIDE a
+    lane keep their sequential painter order -- overlapping translucent
+    strokes accumulate the way the artist scene composes them.  Callers
+    prove disjointness (``_polyline_lane_offsets``); anything they cannot
+    prove arrives as one lane, which is the old serial behaviour.
+    """
 
     height, width = out.shape[:2]
-    for line in range(offsets.size - 1):
+    for lane in prange(lane_offsets.size - 1):
+      for line in range(lane_offsets[lane], lane_offsets[lane + 1]):
         start = offsets[line]
         stop = offsets[line + 1]
         if stop - start < 2:
