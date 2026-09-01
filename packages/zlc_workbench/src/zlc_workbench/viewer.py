@@ -29,7 +29,6 @@ import re
 from typing import Any
 
 from zlc_plot import read_figure_plot
-from zlc_plot.specs import semantic_spec
 
 from zlc_data.figure_archive import read_archive
 
@@ -993,7 +992,7 @@ class FigureViewerPresenter:
         )
 
     def _accept_runtime_archive(self, result: object) -> None:
-        from zlc_plot.specs import FacetGridPlot, semantic_spec
+        from .panel_catalog import task_console_panel_identity_for_spec
 
         resolved, description, loaded, serial = result
         panel_presenter = self._panel_presenter
@@ -1019,11 +1018,7 @@ class FigureViewerPresenter:
             if published:
                 producer, plot_input, _recipe, described, publication = published[0]
                 spec = described.spec
-                cell_kind = (
-                    semantic_spec(spec).kind.value
-                    if isinstance(spec, FacetGridPlot)
-                    else ""
-                )
+                kind, cell_kind = task_console_panel_identity_for_spec(spec)
                 semantic = {
                     str(name): value
                     for name, value in described.semantics.values.items()
@@ -1037,7 +1032,8 @@ class FigureViewerPresenter:
                     producer.data_signal,
                     getattr(plot_input, "snapshot", plot_input),
                     title=label,
-                    kind=spec.kind.value,
+                    kind=kind,
+                    cell_kind=cell_kind,
                     size=described.size,
                     semantic=semantic,
                     display=dict(described.display_state.values),

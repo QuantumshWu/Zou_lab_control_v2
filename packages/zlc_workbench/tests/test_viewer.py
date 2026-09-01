@@ -1141,6 +1141,80 @@ def test_viewer_reenabling_facet_fit_solves_every_cell(tmp_path) -> None:
         _close_presenter(presenter)
 
 
+def test_viewer_restores_facet_cell_kind_before_its_semantic_vocabulary(
+    tmp_path,
+) -> None:
+    """A saved Histogram vocabulary must not be applied to an inferred Image."""
+
+    from data_factory import Axis, DatasetSchema, DatasetSnapshot, PointTable
+    from zlc_plot import HistogramPlot
+
+    schema = DatasetSchema.create(
+        Axis.create("repeat", size=8),
+        PointTable.from_columns({"source_index": (0.0, 1.0)}),
+        data_axes=(
+            Axis.create("frame", size=3),
+            Axis.create("site", size=4),
+        ),
+        dtype=np.float64,
+        generation="viewer-histogram-cell-identity",
+    )
+    snapshot = DatasetSnapshot(
+        schema,
+        np.arange(np.prod(schema.shape), dtype=np.float64).reshape(schema.shape),
+        revision=0,
+    )
+    state = PanelState(
+        signal="saved/site-histograms",
+        kind="facet_grid",
+        cell_kind="histogram",
+        size="2x2",
+        interval_ms=400,
+        title="site histograms",
+        semantic={
+            "fate:repeat": "pool",
+            "fate:point_coordinate:source_index": "pool",
+            "fate:data:frame": ["scope-value", 1],
+            "fate:data:site": "facet",
+            "reduction": "mean",
+        },
+    )
+    written = save_panel_figure(
+        tmp_path / "site-histograms",
+        state=state,
+        frozen=_frozen_surface(state, snapshot),
+    )
+    view = _ViewerView()
+    presenter = _built_presenter(view)
+    try:
+        presenter.open(str(written.archive))
+        _wait_until(lambda: not presenter._busy)
+        assert presenter.description is not None, view.status
+        _wait_until(
+            lambda: (
+                presenter.beat()
+                or _active_record(presenter)["host"] is not None
+            )
+        )
+        active = _active_record(presenter)
+        assert active["state"].cell_kind == "histogram"
+        described = active["host"].describe_display().result().value
+        assert isinstance(described.spec.cell, HistogramPlot)
+        assert described.semantics.values["fate:repeat"] == "pool"
+        assert (
+            described.semantics.values[
+                "fate:point_coordinate:source_index"
+            ]
+            == "pool"
+        )
+        assert described.semantics.values["fate:data:frame"] == (
+            "scope-value",
+            1,
+        )
+    finally:
+        _close_presenter(presenter)
+
+
 def test_panel_save_reports_that_the_archive_survived_an_image_failure(
     saved,
     tmp_path,

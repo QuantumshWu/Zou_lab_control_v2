@@ -85,6 +85,7 @@ from .panel_catalog import (
     panel_kind_choices,
     task_console_fitting_spec,
     task_console_panel_identity,
+    task_console_panel_identity_for_spec,
     task_console_panel_kind,
 )
 from .panel_state import (
@@ -795,6 +796,7 @@ class ConsolePresenter:
         *,
         title: str = "",
         kind: str = "",
+        cell_kind: str = "",
         size: str = "",
         interval_ms: int | None = None,
         semantic: Mapping[str, Any] | None = None,
@@ -803,11 +805,11 @@ class ConsolePresenter:
         overlay_signal: str = "",
         initial_publication: object | None = None,
     ) -> PanelBinding:
-        """Show a signal, as ``kind`` when one is asked for.
+        """Show a signal under one complete ``kind + cell_kind`` identity.
 
         With no kind the plotting package decides from the data, which is what
-        a notebook wants; the window always names one, because the operator
-        picked it beside the button.
+        a notebook wants; a named FacetGrid cell kind is fixed before semantic
+        vocabulary is projected, never repaired after a host rejects it.
         """
 
         # Never reused.  Minted from the panel COUNT, an id came back the moment
@@ -843,7 +845,7 @@ class ConsolePresenter:
             if not inferred_kind:
                 raise ValueError("this signal has no TaskConsole plot kind")
             wanted = str(inferred_kind)
-        definition = task_console_panel_kind(wanted)
+        definition = task_console_panel_identity(wanted, cell_kind)
         selected_interval = self._panel_interval(
             self._default_interval_ms if interval_ms is None else interval_ms
         )
@@ -852,7 +854,7 @@ class ConsolePresenter:
         state = PanelState(
             signal=signal_name,
             kind=definition.kind.value,
-            cell_kind="",
+            cell_kind=str(cell_kind),
             size=str(size).strip() or DEFAULTS.layout.default_preset,
             interval_ms=selected_interval,
             title=str(title).strip() or signal_name,
@@ -906,6 +908,16 @@ class ConsolePresenter:
         from zlc_plot.selectors import CrosshairPoint
 
         binding = self.panels[str(panel_id)]
+        accepted_kind, accepted_cell_kind = task_console_panel_identity_for_spec(
+            description.spec
+        )
+        if (
+            binding.state.kind != accepted_kind
+            or binding.state.cell_kind != accepted_cell_kind
+        ):
+            raise ValueError(
+                "accepted Figure identity differs from its Panel identity"
+            )
         state = panel_state_from_description(binding.state, description)
         selection = None
         crosshair: dict[str, float] = {}
