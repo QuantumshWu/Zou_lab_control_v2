@@ -131,6 +131,11 @@ class _Sample:
         total = float(np.dot(self._counts, self._levels()))
         return total / float(self._size)
 
+    def total(self) -> float:
+        if self._counts is None:
+            return float(np.sum(self._values, dtype=np.float64))
+        return float(np.dot(self._counts, self._levels()))
+
     def minimum(self) -> float:
         if self._counts is None:
             return float(np.min(self._values))
@@ -178,6 +183,10 @@ def _mean(sample: _Sample) -> float:
     return sample.mean()
 
 
+def _sum(sample: _Sample) -> float:
+    return sample.total()
+
+
 def _minimum(sample: _Sample) -> float:
     return sample.minimum()
 
@@ -199,6 +208,10 @@ def _top_10_mean(sample: _Sample) -> float:
 #: two spellings of one statistic that drift apart are two statistics.
 def _mean_rows(rows: np.ndarray) -> np.ndarray:
     return rows.mean(axis=-1, dtype=np.float64)
+
+
+def _sum_rows(rows: np.ndarray) -> np.ndarray:
+    return rows.sum(axis=-1, dtype=np.float64)
 
 
 def _minimum_rows(rows: np.ndarray) -> np.ndarray:
@@ -232,6 +245,7 @@ def _top_10_mean_rows(rows: np.ndarray) -> np.ndarray:
 
 _ROW_REDUCERS: Mapping[Callable[..., float], Callable[[np.ndarray], np.ndarray]] = {
     _mean: _mean_rows,
+    _sum: _sum_rows,
     _minimum: _minimum_rows,
     _maximum: _maximum_rows,
     _bottom_10_mean: _bottom_10_mean_rows,
@@ -249,6 +263,11 @@ _SELECTED_FRAME = ("roi_frame", "ROI frame", None)
 _AREA_SELECTION_OUTPUTS = (
     _SELECTED_FRAME,
     ("roi_mean", "Mean", _mean),
+    # The photons inside the box.  Summed over the VALID pixels, under the
+    # same rule every other scalar here follows: the mean pools what is
+    # countable, and so does the sum -- a reading whose meaning drifts
+    # with validity, exactly like the mean's, never a silent zero.
+    ("roi_sum", "Sum", _sum),
     ("roi_min", "Min", _minimum),
     ("roi_max", "Max", _maximum),
     ("roi_min_10_mean", "Min 10 mean", _bottom_10_mean),

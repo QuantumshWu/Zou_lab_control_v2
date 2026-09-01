@@ -1611,7 +1611,7 @@ def test_panel_publisher_edit_owns_stable_output_selection(
     assert projection["source_required"] is False
     assert "source_signal" not in projection
     assert set(projection["form_spec"].keys) == {
-        "roi_frame", "roi_mean", "roi_min", "roi_max",
+        "roi_frame", "roi_mean", "roi_sum", "roi_min", "roi_max",
         "roi_min_10_mean", "roi_max_10_mean",
     }
     assert all(field.kind == "bool" for field in projection["form_spec"].fields)

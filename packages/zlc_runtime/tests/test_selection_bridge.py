@@ -366,6 +366,7 @@ def test_image_area_catalog_statistics_and_publication_choice_share_one_owner() 
     assert derived == {
         "roi_frame",
         "roi_mean",
+        "roi_sum",
         "roi_min",
         "roi_max",
         "roi_min_10_mean",
@@ -390,6 +391,7 @@ def test_image_area_catalog_statistics_and_publication_choice_share_one_owner() 
         front = plane.freeze()
         expected = {
             "roi_mean": 5.5,
+            "roi_sum": 66.0,
             "roi_min": 0.0,
             "roi_max": 11.0,
             "roi_min_10_mean": 4.5,
