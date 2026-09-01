@@ -569,8 +569,8 @@ class FluentPopup(QtWidgets.QFrame):
             # A MENU follows its owner by going away: it is anchored to a
             # widget in that window, and the moment the window moves,
             # resizes or loses the desktop the anchor means nothing.  A
-            # frame the operator carried somewhere follows by MOVING --
-            # see FluentCompanionFrame, which overrides this.
+            # frame the operator keeps open is not a window at all -- see
+            # FluentOverlayFrame, which lives inside its page instead.
             if owner_retired and self.isVisible():
                 self.hide()
         return super().eventFilter(watched, event)
@@ -581,96 +581,64 @@ class FluentPopup(QtWidgets.QFrame):
         super().hideEvent(event)
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
-        pen = QtGui.QPen(self._border)
-        pen.setWidthF(1.0)
-        painter.setPen(pen)
-        painter.setBrush(self._fill)
-        # inset by the half pen width so the 1 px stroke hugs the edge unclipped
-        rect = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        radius = float(_radius() if self._radius is None else self._radius)
-        painter.drawRoundedRect(rect, radius, radius)
+        _paint_fluent_card(self, self._radius, self._border, self._fill)
 
 
-class FluentCompanionFrame(FluentPopup):
-    """An auxiliary frame that BELONGS to the window it was opened from.
+def _paint_fluent_card(
+    widget: QtWidgets.QWidget,
+    radius: float | None,
+    border: QtGui.QColor,
+    fill: QtGui.QColor,
+) -> None:
+    """The one painted Fluent card: rounded, hairline-bordered, filled."""
 
-    Same painted card as :class:`FluentPopup`, a different relationship with
-    the desktop.  A popup is a menu: transient, dismissed by the next click,
-    and gone.  A companion frame is something the operator opens, carries
-    where they want it and works with -- so it must behave like a window
-    owned by its console: stacked directly above it and nowhere else, moved
-    with it, minimised with it, closed with it.  Nothing on the desktop can
-    get between them.
+    painter = QtGui.QPainter(widget)
+    painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+    pen = QtGui.QPen(border)
+    pen.setWidthF(1.0)
+    painter.setPen(pen)
+    painter.setBrush(fill)
+    # inset by the half pen width so the 1 px stroke hugs the edge unclipped
+    rect = QtCore.QRectF(widget.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+    corner = float(_radius() if radius is None else radius)
+    painter.drawRoundedRect(rect, corner, corner)
 
-    ``Qt.Tool`` plus a real parent is what tells the desktop that.  The
-    previous type, ``Qt.Popup``, told it the opposite: auto-dismiss covers
-    only presses inside this application, so clicking another program left
-    the frame up while that program sank the console behind it.
 
-    Following the owner is done by FOLLOWING, not by hiding.  The base class
-    hides on the owner's Move and Resize, which is right for something
-    anchored to a button in that window and wrong for a frame the operator
-    put somewhere: it made moving the console make the frame disappear.
-    Here the frame travels the same delta and keeps its place relative to
-    the window it belongs to.
+class FluentOverlayFrame(QtWidgets.QWidget):
+    """An auxiliary frame that lives INSIDE the page it serves.
+
+    Same painted card as :class:`FluentPopup`, no relationship with the
+    desktop at all.  The Setting frame was a ``Qt.Tool`` top-level window
+    once -- "the operator carries it anywhere" -- and that ability was the
+    product defect: a top-level survives its page being hidden, so
+    switching the console to another tab left the frame floating over the
+    wrong page, and nothing bounded a drag to the panel area.  As an
+    ordinary child of the panel page the desktop questions dissolve
+    instead of needing answers: it is clipped by the page, hides and
+    returns with the tab, travels with the window, minimises with it,
+    closes with it, and there is no Z order for anything to cut into.
     """
 
-    WINDOW_TYPE = QtCore.Qt.Tool
-
-    def __init__(self, parent, **kwargs):
+    def __init__(self, parent, *, radius: float | None = None,
+                 border: str = DIVIDER, fill: str = "white"):
         if not isinstance(parent, QtWidgets.QWidget):
-            raise TypeError("a companion frame must belong to a widget")
-        super().__init__(parent, **kwargs)
-        self._owner_at = (
-            None
-            if self._owner_window is None
-            else self._owner_window.frameGeometry().topLeft()
-        )
+            raise TypeError("an overlay frame must live inside a widget")
+        super().__init__(parent)
+        self._radius = None if radius is None else float(radius)
+        self._border = QtGui.QColor(border)
+        self._fill = QtGui.QColor(fill)
+        #: Same hide hook the popup offers: the Setting anchor's toggle
+        #: debounce reads it, whatever class stands behind the button.
+        self._on_hidden = None
+        self.hide()
 
-    def eventFilter(self, watched, event):  # noqa: N802 - Qt naming
-        if watched is self._owner_window:
-            kind = event.type()
-            if kind == QtCore.QEvent.Move:
-                # TRAVEL WITH IT.  The base class hides here, which is what
-                # made dragging the console take the frame off the screen.
-                previous, self._owner_at = (
-                    self._owner_at,
-                    watched.frameGeometry().topLeft(),
-                )
-                if previous is not None and self.isVisible():
-                    self.move(self.frameGeometry().topLeft()
-                              + (self._owner_at - previous))
-                return False
-            if kind == QtCore.QEvent.Resize:
-                # A window resize is not a reason to take a frame away.
-                return False
-            if kind == QtCore.QEvent.WindowDeactivate:
-                # The console going behind another program takes this frame
-                # with it -- that is what OWNING it means, and it is why the
-                # frame must not close itself here.
-                return False
-            if kind == QtCore.QEvent.WindowStateChange:
-                # Minimise/restore are the desktop's to perform on an owned
-                # window; asked here only so a platform that does not do it
-                # still keeps the two together.
-                minimised = bool(watched.windowState() & QtCore.Qt.WindowMinimized)
-                if minimised and self.isVisible():
-                    self._minimised_with_owner = True
-                    self.hide()
-                elif not minimised and getattr(
-                    self, "_minimised_with_owner", False
-                ):
-                    self._minimised_with_owner = False
-                    self.show()
-                return False
-        return super().eventFilter(watched, event)
+    def hideEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        if callable(self._on_hidden):
+            self._on_hidden()
+        super().hideEvent(event)
 
-    def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        if self._owner_window is not None:
-            self._owner_at = self._owner_window.frameGeometry().topLeft()
-        super().showEvent(event)
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        _paint_fluent_card(self, self._radius, self._border, self._fill)
 
 
 def _popup_content_chrome(
@@ -755,8 +723,8 @@ def show_fluent_popup_for_anchor(
     placement per open and nothing to preserve across it.
     """
 
-    if not isinstance(popup, FluentPopup):
-        raise TypeError("popup must be FluentPopup")
+    if not isinstance(popup, (FluentPopup, FluentOverlayFrame)):
+        raise TypeError("popup must be FluentPopup or FluentOverlayFrame")
     if not isinstance(anchor, QtWidgets.QWidget):
         raise TypeError("anchor must be QWidget")
     if not isinstance(content, QtWidgets.QWidget):
@@ -796,20 +764,37 @@ def show_fluent_popup_for_anchor(
     # has no geometry side effect.
     popup.ensurePolished()
     hint = content.sizeHint()
-    anchor_top_left = anchor.mapToGlobal(QtCore.QPoint(0, 0))
-    anchor_bottom_right = anchor.mapToGlobal(
-        QtCore.QPoint(max(0, anchor.width() - 1), max(0, anchor.height() - 1))
-    )
-    anchor_center = QtCore.QPoint(
-        (anchor_top_left.x() + anchor_bottom_right.x()) // 2,
-        (anchor_top_left.y() + anchor_bottom_right.y()) // 2,
-    )
-    screen = QtWidgets.QApplication.screenAt(anchor_center)
-    if screen is None and hasattr(anchor, "screen"):
-        screen = anchor.screen()
-    if screen is None:
-        screen = QtWidgets.QApplication.primaryScreen()
-    available = None if screen is None else screen.availableGeometry()
+    # ONE algorithm, two coordinate spaces.  A window popup is placed in
+    # global coordinates and clamped to the screen; an overlay frame is
+    # placed in ITS PAGE's coordinates and clamped to the page -- which is
+    # exactly what keeps the Setting frame inside the panel area.
+    page = None if popup.isWindow() else popup.parentWidget()
+    if page is None:
+        anchor_top_left = anchor.mapToGlobal(QtCore.QPoint(0, 0))
+        anchor_bottom_right = anchor.mapToGlobal(
+            QtCore.QPoint(
+                max(0, anchor.width() - 1), max(0, anchor.height() - 1)
+            )
+        )
+        anchor_center = QtCore.QPoint(
+            (anchor_top_left.x() + anchor_bottom_right.x()) // 2,
+            (anchor_top_left.y() + anchor_bottom_right.y()) // 2,
+        )
+        screen = QtWidgets.QApplication.screenAt(anchor_center)
+        if screen is None and hasattr(anchor, "screen"):
+            screen = anchor.screen()
+        if screen is None:
+            screen = QtWidgets.QApplication.primaryScreen()
+        available = None if screen is None else screen.availableGeometry()
+    else:
+        anchor_top_left = anchor.mapTo(page, QtCore.QPoint(0, 0))
+        anchor_bottom_right = anchor.mapTo(
+            page,
+            QtCore.QPoint(
+                max(0, anchor.width() - 1), max(0, anchor.height() - 1)
+            ),
+        )
+        available = page.rect()
     chrome_width, chrome_height = _popup_content_chrome(popup, content)
     desired_width = max(
         scaled_px(minimum_width),
@@ -881,8 +866,8 @@ class FluentSettingsPopupAnchor:
         *,
         reopen_debounce_s: float = 0.25,
     ) -> None:
-        if not isinstance(popup, FluentPopup):
-            raise TypeError("popup must be FluentPopup")
+        if not isinstance(popup, (FluentPopup, FluentOverlayFrame)):
+            raise TypeError("popup must be FluentPopup or FluentOverlayFrame")
         if not isinstance(anchor, QtWidgets.QWidget):
             raise TypeError("anchor must be QWidget")
         if isinstance(reopen_debounce_s, bool) or not isinstance(
@@ -4524,11 +4509,11 @@ def launch_fluent_window(
     bench that construct twice cascaded closes the wrong way (one closed
     log window froze its siblings; one closed device control reached the
     console, whose close guard shut the running installation).  A surface
-    that genuinely belongs to a window -- the panel Setting frame -- is a
-    :class:`FluentCompanionFrame`: a real Qt parent and its window type
-    declared AT construction, which is the one safe way to buy stacking,
-    shared minimise and shared close.  Window flags are never changed
-    after construction, anywhere.
+    that genuinely belongs to a page -- the panel Setting frame -- is a
+    :class:`FluentOverlayFrame`: an ordinary child widget of that page, so
+    stacking, tab visibility, shared minimise and shared close all follow
+    from parenthood with no desktop machinery at all.  Window flags are
+    never changed after construction, anywhere.
 
     ``widget_or_factory`` may be an already constructed QWidget or a zero-
     argument factory.  The factory form is the canonical public entry because
