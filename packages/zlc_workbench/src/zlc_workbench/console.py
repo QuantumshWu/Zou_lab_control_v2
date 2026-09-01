@@ -3499,10 +3499,6 @@ class ConsolePresenter:
                         f"{_error_text(error)}",
                         severity="error",
                     )
-            if host is not None:
-                self._apply_deriving(binding)
-
-
     def _direct_producer_node_id(self, signal: str) -> str | None:
         for binding in self.logic.values():
             if any(
@@ -4333,6 +4329,7 @@ class ConsolePresenter:
         self._settle_panel_hosts()
         self.board.tick(stage=not self._paused)
         self.board.commit(admit_new=not self._paused)
+        self._reconcile_panel_derivations()
         self._report_panel_errors()
         self.poll_logic()
         self._refresh_signal_choices()
@@ -4354,6 +4351,8 @@ class ConsolePresenter:
         self._drain_panel_interactions()
         self._settle_panel_hosts()
         self.board.commit(admit_new=not self._paused and not self._closing)
+        if not self._closing:
+            self._reconcile_panel_derivations()
         self._report_panel_errors()
         if self._closing:
             self._poll_retired_plot_hosts()
@@ -4363,6 +4362,19 @@ class ConsolePresenter:
     def _enqueue_panel_interaction(self, interaction: Callable[[], None]) -> None:
         self._panel_interactions.put(interaction)
         self.board.wake.request_owner_wake()
+
+    def _reconcile_panel_derivations(self) -> None:
+        """Attach each accepted host's Bridge before interaction can resume.
+
+        A host may become accepted inside ``board.commit``.  Waiting until the
+        next display beat leaves its pixels interactive without the resource
+        that records/publishes the first gesture.  This level reconciliation
+        runs in the same owner turn after commit; ``_apply_deriving`` is
+        idempotent and therefore creates exactly one Bridge per accepted host.
+        """
+
+        for binding in tuple(self.panels.values()):
+            self._apply_deriving(binding)
 
     def _drain_panel_interactions(self) -> None:
         while True:

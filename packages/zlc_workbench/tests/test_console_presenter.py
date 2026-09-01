@@ -1599,6 +1599,31 @@ def test_selector_interaction_does_not_disconnect_panel_signals(
     assert presenter.view.selectors is False
 
 
+def test_first_visible_panel_host_already_owns_its_derivation_bridge(
+    presenter,
+    session,
+) -> None:
+    """No owner turn may expose interactive pixels before their Bridge."""
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(
+        node.signal_key("frames"),
+        snapshot,
+        kind="image",
+    )
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        presenter.beat()
+        if binding.host is not None:
+            assert binding.accepted_display is not None
+            assert binding.bridge is not None
+            assert binding.selections is not None
+            break
+        time.sleep(0.005)
+    else:
+        raise AssertionError("panel host did not become visible")
+
+
 def test_panel_publisher_edit_owns_stable_output_selection(
     presenter, session
 ) -> None:

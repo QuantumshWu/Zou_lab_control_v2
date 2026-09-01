@@ -124,6 +124,7 @@
 - FigureViewer把archive typed Dataset发布为sealed Runtime signals，默认panel从archive exact recipe恢复，且不按shape推断plot kind；保存spec的`kind + cell_kind`在Panel创建前经同一个catalog identity owner解析，semantic vocabulary随后才投影。Add Panel只建立空的fixed-kind `panel-N`，Signal/ROI/Fit派生及后续compose全部走与TaskConsole相同的ConsolePresenter、SelectionBridge和Plot host，不再保留static panel owner。静态host在Bridge订阅前已有accepted fit时，Fit subscription只replay该immutable FitEvent，不重复solve/render；因此ROI与Fit参数都继续发布给后续Panel。
 - FigureViewer与TaskConsole Live/Frozen使用同一个accepted PlotSpec、parameter、selector/
   viewport capability contract；Viewer semantic edit同样只在host accept后更新surface，文件选择默认定位workspace当天data目录。
+- `board.commit`首次接受Panel host后在同一owner turn幂等挂载Selection/Fit Bridge；真实Qt首个drag/release已验证可立即发布ROI，不等待下一display beat。
 - Lineage保存root、event nodes和direct parent IDs；Viewer验证引用、reachability和cycle后
   投影为tree。
 - 显式消费Dataset的Measurement worker在每次保留值时将exact source publication随同一次Runtime commit提交；Scan Flow因此从Scan event沿真实parent回到Measurement/Processor，Save与Viewer不得按signal名查latest。Device tab从node run record显示baseline working point，并另列event ranges实际引用的active override epoch。
