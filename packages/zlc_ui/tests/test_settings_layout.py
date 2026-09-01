@@ -79,7 +79,21 @@ state = {
     'semantic': {}, 'display': {}, 'fit': {}, 'overlay_signal': '',
 }
 card.set_panel_projection(state, parameter_surface(8))
-card.show()
+# The Setting frame is a child overlay clipped to the page it lives in --
+# the nearest scroll viewport, exactly as in the real console.  A bare
+# card would be its own (panel-sized) page, so these tests mount the card
+# the way the console does and give the page the room a real panel area
+# has: they measure the FORM's layout truth, not the page wall.
+from PyQt5 import QtWidgets
+area = QtWidgets.QScrollArea()
+area.setWidgetResizable(True)
+holder = QtWidgets.QWidget()
+holder_layout = QtWidgets.QVBoxLayout(holder)
+holder_layout.addWidget(card)
+holder_layout.addStretch(1)
+area.setWidget(holder)
+area.resize(920, 760)
+area.show()
 app.processEvents()
 card._open_settings()
 app.processEvents()
