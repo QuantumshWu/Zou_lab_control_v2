@@ -354,6 +354,25 @@ def test_figure_archive_round_trip_validates_members_and_dataset_shape():
     assert read_dataset(info, arrays, "data").exactly_equals(snapshot)
 
 
+def test_figure_archive_compresses_only_members_that_shrink_materially():
+    rng = np.random.default_rng(7)
+    compressible = np.zeros(2 << 20, dtype=np.uint8)
+    camera_noise = rng.integers(0, 256, size=2 << 20, dtype=np.uint8)
+    stream = _figure_stream(
+        "adaptive compression",
+        arrays={"compressible": compressible, "camera_noise": camera_noise},
+        sections={},
+    )
+
+    with zipfile.ZipFile(stream) as archive:
+        assert archive.getinfo("compressible.npy").compress_type == zipfile.ZIP_DEFLATED
+        assert archive.getinfo("camera_noise.npy").compress_type == zipfile.ZIP_STORED
+
+    _info, arrays = read_archive(stream)
+    np.testing.assert_array_equal(arrays["compressible"], compressible)
+    np.testing.assert_array_equal(arrays["camera_noise"], camera_noise)
+
+
 @pytest.mark.parametrize("extra", ({"unexpected": 2}, {"schema": "not-zlc.figure"}))
 def test_figure_reader_rejects_non_current_roots(extra):
     members = _figure_members(
