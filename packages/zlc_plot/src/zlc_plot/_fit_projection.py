@@ -33,7 +33,7 @@ from .data_view import (
     HistogramData,
     ImageData,
     QuantityArray,
-    RollingSample,
+    RollingHistory,
     aligned_histogram_edges,
     _finite_probe,
     finite_probe,
@@ -103,8 +103,8 @@ def _window_totals(totals: np.ndarray, span: int) -> np.ndarray:
 
 
 def _trailing_trace(
-    history: tuple[RollingSample, ...],
-    key: tuple,
+    history: RollingHistory,
+    column: int,
     start: int,
     span: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -121,52 +121,40 @@ def _trailing_trace(
     """
 
     total = len(history)
-    n = np.zeros(total, dtype=float)
-    sums = np.zeros(total, dtype=float)
-    squares = np.zeros(total, dtype=float)
-    ungrouped = key == ()
-    contributions: list[tuple[int, float, float, float]] = []
-    for index, sample in enumerate(history):
-        try:
-            source_index = sample.group_keys.index(key)
-        except ValueError:
-            continue
-        if not bool(sample.valid[source_index]):
-            continue
-        value = float(sample.values[source_index])
-        if ungrouped:
-            count = float(sample.counts[source_index])
-            if count <= 0.0:
-                continue
-            sem = (
-                np.nan
-                if sample.sem is None
-                else float(sample.sem[source_index])
-            )
-        else:
-            # One per-key value per shot: for a per-site trace that IS the
-            # shot's one sample, so it has no spread of its own.
-            count, sem = 1.0, np.nan
-        contributions.append((index, count, value, sem))
+    values = np.asarray(history.values, dtype=float)[:, column]
+    contributing = np.asarray(history.valid[:, column], dtype=bool)
+    if history.group_keys[column] == ():
+        counts = np.asarray(history.counts, dtype=float)[:, column]
+        contributing = contributing & (counts > 0.0)
+        count = np.where(contributing, counts, 0.0)
+        sems = (
+            np.full(total, np.nan)
+            if history.sem is None
+            else np.asarray(history.sem, dtype=float)[:, column]
+        )
+    else:
+        # One per-key value per shot: for a per-site trace that IS the
+        # shot's one sample, so it has no spread of its own.
+        count = contributing.astype(float)
+        sems = np.full(total, np.nan)
 
     # Square about the data, not about zero -- the same reason every bucket
     # reduction does.  A shot counter's values are small; a fitted optical
     # frequency's are not, and E[x^2] - mean^2 about zero would report a
     # spread made entirely of rounding.
-    reference = _sem_reference(
-        np.asarray([value for _, _, value, _ in contributions], dtype=float)
+    reference = _sem_reference(values[contributing])
+    centred = np.where(contributing, values - reference, 0.0)
+    mean_square = centred * centred
+    # sem = s / sqrt(count), and E[x^2] about the shot's own mean is
+    # mean^2 + s^2 (count - 1) / count.  Shifting the origin does not
+    # change a spread, so the same term rides the centred mean.
+    stated = contributing & (count > 1.0) & np.isfinite(sems)
+    mean_square = mean_square + np.where(
+        stated, np.where(stated, sems, 0.0) ** 2 * (count - 1.0), 0.0
     )
-    for index, count, value, sem in contributions:
-        centred = value - reference
-        mean_square = centred * centred
-        if count > 1.0 and np.isfinite(sem):
-            # sem = s / sqrt(count), and E[x^2] about the shot's own mean is
-            # mean^2 + s^2 (count - 1) / count.  Shifting the origin does not
-            # change a spread, so the same term rides the centred mean.
-            mean_square += sem * sem * (count - 1.0)
-        n[index] = count
-        sums[index] = count * centred
-        squares[index] = count * mean_square
+    n = np.where(contributing, count, 0.0)
+    sums = n * centred
+    squares = n * np.where(contributing, mean_square, 0.0)
     running_n = _window_totals(np.cumsum(n), span)
     running_sum = _window_totals(np.cumsum(sums), span)
     running_squares = _window_totals(np.cumsum(squares), span)
@@ -689,7 +677,7 @@ class FitProjection:
 
     def _rolling_payload(
         self,
-        history: tuple[RollingSample, ...],
+        history: RollingHistory,
         *,
         window: int,
         trailing: int = 1,
@@ -708,27 +696,22 @@ class FitProjection:
 
         if window <= 0:
             raise ValueError("rolling window must be positive")
-        visible = history[-window:]
-        visible_size = len(visible)
-        if not visible:
+        total = len(history)
+        if not total:
             raise ValueError("rolling history cannot be empty")
-        # One projection batch stamps the SAME group_keys tuple onto every
-        # sample it emits, so a window normally shares one object -- checked
-        # by identity, because the general discovery below cost
-        # O(window x groups^2) list scans: at 5000 shots of 35 sites that
-        # alone was millions of comparisons per drawn frame.
-        first_keys = visible[0].group_keys
-        shared_keys = all(
-            sample.group_keys is first_keys for sample in visible
-        )
-        if shared_keys:
-            keys: list[tuple[AxisValue, ...]] = list(first_keys)
-        else:
-            discovered: dict[tuple[AxisValue, ...], None] = {}
-            for sample in visible:
-                for key in sample.group_keys:
-                    discovered.setdefault(key)
-            keys = list(discovered)
+        visible_size = min(window, total)
+        start = total - visible_size
+        keys = history.group_keys
+        # Each drawn series is a column slice of the history planes -- no
+        # per-shot objects, no per-shot key lookup.
+        values_plane = np.asarray(history.values, dtype=float)[start:]
+        valid_plane = np.asarray(history.valid, dtype=bool)[start:]
+        masked_plane = np.where(valid_plane, values_plane, np.nan)
+        sem_plane = None
+        if history.sem is not None:
+            sem_plane = np.where(
+                valid_plane, np.asarray(history.sem, dtype=float)[start:], np.nan
+            )
         # x is how many shots ago each point is: 0 is the newest, and the
         # ones behind it count back.  A rolling window shows the last N
         # shots, so what a point MEANS is its distance from now -- the
@@ -737,92 +720,47 @@ class FitProjection:
         # revision.  Once the window is full the axis stops moving, which
         # is also what lets a composed frame keep its cached chrome
         # instead of re-laying the tick labels on each shot.
-        start = len(history) - visible_size
-        source_coordinates = np.asarray(
-            [
-                sample.source_index
-                if sample.source_index is not None
-                else index
-                for index, sample in enumerate(visible, start=start)
-            ],
-            dtype=float,
-        )
+        if history.source_indices is not None:
+            source_coordinates = np.asarray(
+                history.source_indices[start:], dtype=float
+            )
+        else:
+            source_coordinates = np.arange(start, total, dtype=float)
         x_values = source_coordinates - source_coordinates[-1]
         unit = self._view.samples.value.display_unit
         canonical_unit = self._view.samples.value.canonical_unit
         x_unit = resolve_unit("1", DEFAULT_UNITS)
-        stacked = None
-        if shared_keys and trailing == 1 and keys:
-            # The whole window as three arrays: each drawn series is then a
-            # column slice instead of a per-sample Python loop with a
-            # linear key lookup inside it -- the O(window x groups^2) cost
-            # that made a deep occupancy history drag the whole console.
-            raw = np.asarray(
-                [np.asarray(sample.values, dtype=float) for sample in visible]
-            ).reshape(visible_size, len(keys))
-            valid_planes = np.asarray(
-                [np.asarray(sample.valid, dtype=bool) for sample in visible]
-            ).reshape(visible_size, len(keys))
-            sem_planes = None
-            if visible[0].sem is not None and all(
-                sample.sem is not None for sample in visible
-            ):
-                sem_planes = np.asarray(
-                    [
-                        np.asarray(sample.sem, dtype=float)
-                        for sample in visible
-                    ]
-                ).reshape(visible_size, len(keys))
-            stacked = (raw, valid_planes, sem_planes)
+        display_plane = canonical_unit.convert_value_to(masked_plane, unit)
+        x = QuantityArray(
+            x_values,
+            x_values,
+            x_unit,
+            x_unit,
+            # Not a shot NUMBER: the axis says how far back a point is
+            # from the newest one, which is what a rolling window shows.
+            "Shots from latest",
+        )
         series: list[CurveSeries] = []
         for column, key in enumerate(keys):
-            canonical_values = np.full(visible_size, np.nan, dtype=float)
-            valid = np.zeros(visible_size, dtype=np.bool_)
             sem = None
             if trailing > 1:
                 canonical_values, running_sem, valid = _trailing_trace(
-                    history, key, start, trailing
+                    history, column, start, trailing
                 )
                 if uncertainty:
                     sem = running_sem
-            elif stacked is not None:
-                raw, valid_planes, sem_planes = stacked
-                valid = valid_planes[:, column]
-                canonical_values = np.where(valid, raw[:, column], np.nan)
-                if uncertainty:
-                    sem = np.where(
-                        valid,
-                        np.nan if sem_planes is None else sem_planes[:, column],
-                        np.nan,
-                    )
+                display_values = canonical_unit.convert_value_to(
+                    canonical_values, unit
+                )
             else:
-                point_sem = np.full(visible_size, np.nan, dtype=float)
-                for index, sample in enumerate(visible):
-                    try:
-                        source_index = sample.group_keys.index(key)
-                    except ValueError:
-                        continue
-                    if bool(sample.valid[source_index]):
-                        canonical_values[index] = float(
-                            sample.values[source_index]
-                        )
-                        valid[index] = True
-                        if sample.sem is not None:
-                            point_sem[index] = float(
-                                sample.sem[source_index]
-                            )
-                if uncertainty:
-                    sem = point_sem
-            display_values = canonical_unit.convert_value_to(canonical_values, unit)
-            x = QuantityArray(
-                x_values,
-                x_values,
-                x_unit,
-                x_unit,
-                # Not a shot NUMBER: the axis says how far back a point is
-                # from the newest one, which is what a rolling window shows.
-                "Shots from latest",
-            )
+                valid = valid_plane[:, column]
+                canonical_values = masked_plane[:, column]
+                display_values = display_plane[:, column]
+                if uncertainty and sem_plane is not None:
+                    # A history whose shots state no error has NO band --
+                    # None, not a plane of NaN for every consumer to carry,
+                    # mask and skip again.
+                    sem = sem_plane[:, column]
             y = QuantityArray(
                 canonical_values,
                 display_values,
@@ -845,8 +783,8 @@ class FitProjection:
                 )
             )
         return CurveData(
-            revision=visible[-1].revision,
-            generation=visible[-1].generation,
+            revision=history.revision,
+            generation=history.generation,
             x_ref=AxisRef.point_rows(),
             group_by=(() if self._spec.group is None else (self._spec.group,)),
             series=tuple(series),

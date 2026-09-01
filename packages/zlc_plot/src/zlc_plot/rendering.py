@@ -7577,15 +7577,24 @@ class MatplotlibRenderer:
         history = axes
         series = self._series(payload)
         sliced: list[_PreparedSeries] = []
+        # Every rolling series shares ONE x -- the payload hands all of
+        # them the same shots-from-latest array object -- so its float
+        # view and finite mask are facts about the payload, not about any
+        # series, and computing them per series walked the same window
+        # thirty-five times over.
+        prepared_x: dict[int, tuple[np.ndarray, np.ndarray]] = {}
         for item in series:
             y_values = np.asarray(_display_array(item.y), dtype=float).reshape(-1)
-            x_values = np.asarray(_display_array(item.x), dtype=float).reshape(-1)
+            x_source = _display_array(item.x)
+            cached_x = prepared_x.get(id(x_source))
+            if cached_x is None:
+                x_values = np.asarray(x_source, dtype=float).reshape(-1)
+                cached_x = (x_values, np.isfinite(x_values))
+                prepared_x[id(x_source)] = cached_x
+            x_values, x_finite = cached_x
             valid = (
-                _valid_array(
-                    item,
-                    _display_array(item.x).reshape(-1).shape,
-                )
-                & np.isfinite(x_values)
+                _valid_array(item, x_values.shape)
+                & x_finite
                 & np.isfinite(y_values)
             )
             label = getattr(item, "label", "")

@@ -660,24 +660,15 @@ def _indexed_schema(
         "source index",
         PRIMARY_INDEX,
         PointColumn.NUMERIC,
-        tuple(index for index in indices for _row in range(point_count)),
+        # An integer ndarray is PointColumn's dtype-proof construction
+        # path: no per-element canonical walk over count x rows values.
+        np.repeat(np.asarray(indices, dtype=np.int64), point_count),
     )
     columns = [primary]
     for column in event_schema.point_table.columns:
-        columns.append(
-            PointColumn(
-                column.coordinate_id,
-                column.name,
-                column.role,
-                column.value_kind,
-                tuple(column.values) * len(indices),
-                column.unit,
-                column.coordinate_frame,
-                None
-                if column.coordinate_labels is None
-                else tuple(column.coordinate_labels) * len(indices),
-            )
-        )
+        # The event column is already canonical; whole-column replication
+        # keeps it so without re-proving 175k values one at a time.
+        columns.append(column.replicated(len(indices)))
     topology = event_schema.grid_topology
     if topology is not None:
         topology = GridTopology(

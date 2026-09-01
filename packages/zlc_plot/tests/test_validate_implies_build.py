@@ -116,7 +116,7 @@ def _project(view: DataView, spec) -> None:
             bins=_BINS if isinstance(spec.cell, HistogramPlot) else None,
         )
     elif isinstance(spec, RollingPlot):
-        view.rolling_sample(group=spec.group, aggregation=spec.reduction)
+        view.rolling_history(group=spec.group, aggregation=spec.reduction)
     elif isinstance(spec, HistogramPlot):
         view.histogram(bins=_BINS)
     else:  # pragma: no cover

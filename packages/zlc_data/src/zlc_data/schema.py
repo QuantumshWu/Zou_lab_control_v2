@@ -100,19 +100,38 @@ class PointColumn:
             raise ValueError("point column role is outside the point-domain role set")
         if self.value_kind not in {self.NUMERIC, self.TEXT}:
             raise ValueError("point column value_kind must be NUMERIC or TEXT")
-        values = tuple(
-            canonical_coordinate_scalar(value, "point coordinate")
-            for value in self.values
-        )
-        if not values:
-            raise ValueError("point column values must be non-empty")
-        if self.value_kind == self.NUMERIC:
-            if any(
-                value is not None and not isinstance(value, (int, float))
-                for value in values
-            ):
-                raise TypeError("NUMERIC point columns accept only numbers or None")
+        if (
+            self.value_kind == self.NUMERIC
+            and isinstance(self.values, np.ndarray)
+            and self.values.ndim == 1
+            and issubclass(self.values.dtype.type, np.integer)
+        ):
+            # The dtype IS the proof: a one-dimensional integer array can
+            # hold nothing but plain finite integers, which are their own
+            # canonical form and are NUMERIC by definition -- so the
+            # per-value canonical walk below would re-prove 
+            # element by element what one dtype check already settled.  A
+            # materialized indexed history states its primary column for
+            # count x rows coordinates this way on every retained shot.
+            values = tuple(self.values.tolist())
+            if not values:
+                raise ValueError("point column values must be non-empty")
         else:
+            values = tuple(
+                canonical_coordinate_scalar(value, "point coordinate")
+                for value in self.values
+            )
+            if not values:
+                raise ValueError("point column values must be non-empty")
+            if self.value_kind == self.NUMERIC:
+                if any(
+                    value is not None and not isinstance(value, (int, float))
+                    for value in values
+                ):
+                    raise TypeError(
+                        "NUMERIC point columns accept only numbers or None"
+                    )
+        if self.value_kind != self.NUMERIC:
             if any(value is not None and not isinstance(value, str) for value in values):
                 raise TypeError("TEXT point columns accept only text or None")
             if self.unit is not None:
@@ -141,6 +160,38 @@ class PointColumn:
                         "equal point coordinates must share one display label"
                     )
             object.__setattr__(self, "coordinate_labels", labels)
+
+    def replicated(self, times: int) -> PointColumn:
+        """This canonical column repeated whole, without re-proving it.
+
+        Replication cannot break any law ``__post_init__`` checks one
+        value at a time: the values are already canonical, the value kind
+        already holds for every one of them, and repeating (value, label)
+        pairs cannot make equal coordinates disagree on a label.  So the
+        per-element walk is skipped -- a materialized indexed history
+        builds its event columns this way for every retained shot, and
+        the walk was most of the cost of materializing one.
+        """
+
+        times = positive_integer(times, "replication count")
+        if times == 1:
+            return self
+        column = object.__new__(PointColumn)
+        object.__setattr__(column, "coordinate_id", self.coordinate_id)
+        object.__setattr__(column, "name", self.name)
+        object.__setattr__(column, "role", self.role)
+        object.__setattr__(column, "value_kind", self.value_kind)
+        object.__setattr__(column, "values", self.values * times)
+        object.__setattr__(column, "unit", self.unit)
+        object.__setattr__(column, "coordinate_frame", self.coordinate_frame)
+        object.__setattr__(
+            column,
+            "coordinate_labels",
+            None
+            if self.coordinate_labels is None
+            else self.coordinate_labels * times,
+        )
+        return column
 
 
 @dataclass(frozen=True)

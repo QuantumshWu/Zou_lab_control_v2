@@ -12,6 +12,12 @@ import numpy as np
 from .validation import DIGEST_BITS
 
 
+#: Types _normalize provably leaves untouched: exactly the leaves json
+#: serializes as-is.  Exact-type membership on purpose -- an int subclass
+#: (an IntEnum, a numpy scalar) falls through to the per-item walk.
+_SCALAR_TYPES = frozenset((str, int, float, bool, type(None)))
+
+
 def _normalize(value: Any) -> Any:
     if isinstance(value, np.generic):
         return _normalize(value.item())
@@ -20,6 +26,12 @@ def _normalize(value: Any) -> Any:
             raise TypeError("tree mapping keys must be strings")
         return {key: _normalize(value[key]) for key in value}
     if isinstance(value, (list, tuple)):
+        # A coordinate table is one list of hundreds of thousands of plain
+        # scalars; walking it item by item in Python was ~100 ms per
+        # materialized indexed schema.  One C-level type sweep proves the
+        # whole list is already normal.
+        if _SCALAR_TYPES.issuperset(map(type, value)):
+            return list(value)
         return [_normalize(item) for item in value]
     return value
 

@@ -130,7 +130,7 @@ def test_a_rolling_shot_of_one_fit_carries_its_error() -> None:
             revision=0,
             sigma=np.asarray([[error]]),
         )
-        history = DataView(snapshot).rolling_history_samples(
+        history = DataView(snapshot).rolling_history(
             aggregation=Reduction.MEAN, uncertainty=True
         )
         assert len(history) == 1
@@ -152,7 +152,7 @@ def test_a_grouped_rolling_shot_carries_the_error_of_each_group() -> None:
     values = np.asarray([[1.0, 2.0, 3.0, 4.0]])
     errors = np.asarray([[0.10, 0.20, 0.30, 0.40]])
     view = DataView(DatasetSnapshot(schema, values, revision=0, sigma=errors))
-    history = view.rolling_history_samples(
+    history = view.rolling_history(
         group=AxisRef.point("site"),
         aggregation=Reduction.MEAN,
         uncertainty=True,
@@ -179,5 +179,5 @@ def test_the_whole_revision_pooled_uses_its_one_samples_error() -> None:
             sigma=np.asarray([[0.25]]),
         )
     )
-    sample = view.rolling_sample(aggregation=Reduction.MEAN)
+    sample = view.rolling_history(aggregation=Reduction.MEAN)[0]
     assert float(sample.sem[0]) == pytest.approx(0.25, rel=0, abs=0)
