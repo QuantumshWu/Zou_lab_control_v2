@@ -157,6 +157,10 @@ def test_the_trailing_band_renders(tmp_path) -> None:
     )
     try:
         session._renderer.draw()
+        # A native prepared scene rasters the bars without artists; the
+        # curve band tests set the precedent -- materialize first, then
+        # assert on the public artists it builds back.
+        session._renderer._materialize_prepared_curve()
         bands = [
             artist
             for axes in session._renderer.figure.axes
@@ -214,6 +218,10 @@ def test_plain_rolling_uncertainty_is_each_shot_pooled_error() -> None:
             )
             np.testing.assert_allclose(series.sem[index], expected, rtol=1e-12)
         session._renderer.draw()
+        # A native prepared scene rasters the bars without artists; the
+        # curve band tests set the precedent -- materialize first, then
+        # assert on the public artists it builds back.
+        session._renderer._materialize_prepared_curve()
         bands = [
             artist
             for axes in session._renderer.figure.axes

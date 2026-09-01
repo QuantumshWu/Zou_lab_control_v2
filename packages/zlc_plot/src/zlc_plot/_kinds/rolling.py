@@ -18,7 +18,7 @@ def build_payload(projection: Any, view: Any, state: Any) -> None:
     uncertainty = (
         bool(state["uncertainty"]) and spec.reduction is Reduction.MEAN
     )
-    history = view.rolling_history_samples(
+    history = view.rolling_history(
         group=spec.group,
         aggregation=spec.reduction,
         uncertainty=uncertainty,

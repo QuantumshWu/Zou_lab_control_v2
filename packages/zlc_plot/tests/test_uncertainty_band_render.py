@@ -302,3 +302,44 @@ def test_a_band_of_no_width_draws_no_bar() -> None:
         assert _bands(session) == []
     finally:
         session.close()
+
+
+def test_export_draws_the_data_a_native_scene_was_hiding() -> None:
+    """A saved figure must contain the data, not just axes and chrome.
+
+    ``savefig`` draws through matplotlib's own machinery, which knows
+    nothing of the native prepared scene -- and that scene keeps its
+    series artists HIDDEN and empty.  An export of a natively stroked
+    Curve (or Rolling) panel was a complete frame with NO data on it.
+    ``save`` must materialize the scene into public artists first.
+    """
+
+    import io
+
+    session = PlotSession(
+        _snapshot(24, 1, 0.2),
+        CurvePlot(AxisRef.point("x"), labels=PlotLabels("band", "x", "y")),
+        parameters={"uncertainty": True},
+    )
+    try:
+        session._renderer.draw()
+        if not isinstance(
+            session._renderer._artists.get("curve:prepared"), dict
+        ):
+            import pytest
+
+            pytest.skip("native scene disengaged; nothing to materialize")
+        session._renderer.save(io.BytesIO(), format="png")
+        axes_id = id(session._renderer.primary_axes)
+        lines = [
+            line
+            for line, _identity, _label in (
+                session._renderer._series_lines.get(axes_id, ())
+            )
+        ]
+        assert lines and any(
+            line.get_visible() and np.asarray(line.get_xdata()).size
+            for line in lines
+        ), "export must draw from materialized artists, not a hidden scene"
+    finally:
+        session.close()

@@ -23,7 +23,7 @@ from zlc_ui.fluent import (
     FluentGroupBox,
     FluentLabel,
     FluentLineEdit,
-    FluentCompanionFrame,
+    FluentOverlayFrame,
     FluentScrollArea,
     FluentSettingsPopupAnchor,
     FluentStatusDot,
@@ -117,7 +117,7 @@ class PanelCardView(FluentGroupBox):
         self.panel_id = str(panel_id)
         self._base_title = str(title)
         self._surface: QtWidgets.QWidget | None = None
-        self._settings_popup: FluentCompanionFrame | None = None
+        self._settings_popup: FluentOverlayFrame | None = None
         self._settings_anchor: FluentSettingsPopupAnchor | None = None
         self._settings_drag_handle: FluentLabel | None = None
         self._settings_close_button: FluentButton | None = None
@@ -649,18 +649,23 @@ class PanelCardView(FluentGroupBox):
                 and event.button() == QtCore.Qt.LeftButton
             ):
                 self._settings_drag_offset = (
-                    event.globalPos() - popup.frameGeometry().topLeft()
+                    event.globalPos() - popup.mapToGlobal(QtCore.QPoint(0, 0))
                 )
                 return True
             if (
                 event.type() == QtCore.QEvent.MouseMove
                 and self._settings_drag_offset is not None
             ):
-                # Moving the window IS the gesture.  Nothing else needs
-                # to remember where it went: no placement runs again while
-                # the frame is open, so there is nothing left to re-anchor
-                # it beside the button.
-                popup.move(event.globalPos() - self._settings_drag_offset)
+                # Moving the frame IS the gesture -- inside its page.
+                # Nothing else needs to remember where it went: no placement
+                # runs again while the frame is open.  The clamp is the
+                # page's edge: a Setting frame belongs to the panel area
+                # and cannot be carried off it.
+                popup.move(
+                    self._clamped_overlay_position(
+                        event.globalPos() - self._settings_drag_offset
+                    )
+                )
                 return True
             if (
                 event.type() == QtCore.QEvent.MouseButtonRelease
@@ -794,7 +799,7 @@ class PanelCardView(FluentGroupBox):
             self.retire_settings_popup()
 
     def retire_settings_popup(self) -> None:
-        """Hide the card-owned top-level popup before its owner is retired."""
+        """Hide the page-owned Setting overlay without removing its Panel."""
 
         if self._settings_popup is not None:
             self._settings_popup.hide()
@@ -1016,19 +1021,22 @@ class PanelCardView(FluentGroupBox):
         shortfall = required_width - scroll.viewport().width()
         if shortfall <= 0:
             return
-        screen = QtWidgets.QApplication.screenAt(popup.geometry().center())
-        if screen is None:
-            screen = QtWidgets.QApplication.primaryScreen()
-        limit = (
-            popup.width() + shortfall
-            if screen is None
-            else min(
-                popup.width() + shortfall,
-                max(1, screen.availableGeometry().right() - popup.x() + 1),
-            )
+        page = popup.parentWidget()
+        limit = min(
+            popup.width() + shortfall,
+            max(1, page.width() - popup.x()),
         )
         if limit > popup.width():
             popup.resize(limit, popup.height())
+        # The page is a hard wall now -- the frame cannot grow past the
+        # panel area the way it once grew to the screen edge.  When the
+        # form is wider than the page can afford, the content scrolls
+        # sideways instead of being cut off.
+        self._settings_scroll.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarAsNeeded
+            if limit < popup.width() + shortfall
+            else QtCore.Qt.ScrollBarAlwaysOff
+        )
 
     def _settings_available_height(self) -> int:
         """Vertical room the popup may take: from below Setting to the card foot."""
@@ -1070,12 +1078,13 @@ class PanelCardView(FluentGroupBox):
 
     def _open_settings(self) -> None:
         if self._settings_popup is None:
-            # A FRAME, not a menu.  It has a drag handle, the operator
-            # carries it where they want it and works with it open, so it
-            # belongs to the console the way every other auxiliary window
-            # does: stacked directly above it and nowhere else, travelling,
-            # minimising and closing with it.
-            popup = FluentCompanionFrame(self)
+            # A frame INSIDE the page, not a window.  It lives in the panel
+            # area's viewport, so it is clipped to that area, hides and
+            # returns with the tab, and travels/minimises/closes with the
+            # window without any desktop machinery.  The page owns the
+            # widget; the card's death takes it along explicitly.
+            popup = FluentOverlayFrame(self._settings_overlay_host())
+            self.destroyed.connect(popup.deleteLater)
             layout = QtWidgets.QVBoxLayout(popup)
             pad = max(1, scaled_px(10))
             layout.setContentsMargins(pad, pad, 0, pad)
@@ -1154,6 +1163,35 @@ class PanelCardView(FluentGroupBox):
             # just measured, where a value passed alongside ``prepare`` would
             # be the one measured BEFORE it ran.
             present=self._show_settings_popup,
+        )
+
+    def _settings_overlay_host(self) -> QtWidgets.QWidget:
+        """The page area the Setting frame lives in and is clipped to.
+
+        The nearest scroll viewport is the panel area of the tab page --
+        the same ancestor the wheel forwarder walks to -- so the frame
+        hides with the tab and cannot leave the panel region.  A bare
+        card (tests, previews) is its own page.
+        """
+
+        ancestor = self.parentWidget()
+        while ancestor is not None:
+            if isinstance(ancestor, QtWidgets.QAbstractScrollArea):
+                return ancestor.viewport()
+            ancestor = ancestor.parentWidget()
+        return self.window()
+
+    def _clamped_overlay_position(
+        self, global_top_left: QtCore.QPoint
+    ) -> QtCore.QPoint:
+        """The frame's page-local position, kept wholly inside its page."""
+
+        popup = self._settings_popup
+        page = popup.parentWidget()
+        local = page.mapFromGlobal(global_top_left)
+        return QtCore.QPoint(
+            min(max(local.x(), 0), max(0, page.width() - popup.width())),
+            min(max(local.y(), 0), max(0, page.height() - popup.height())),
         )
 
     def _request_edit(self) -> None:

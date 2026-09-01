@@ -362,8 +362,18 @@ def _box_bounds(center: tuple[float, float], radius: int, image_shape: tuple[int
     return x - int(radius), y - int(radius), width, height
 
 
-def extract_box_signals(image: object, centers_xy: object, *, radius: int = 1, reducer: str = "mean") -> np.ndarray:
-    """Extract one box statistic per site."""
+def extract_box_signals(image: object, centers_xy: object, *, radius: int = 1) -> np.ndarray:
+    """The TOTAL of each site's box, in the frame's own counts.
+
+    The box statistic is the sum of the pixels inside it -- how much the
+    site's footprint collected, whatever unit the frame arrives in; this
+    layer neither knows nor asks.  A mean is the same number rescaled by
+    the arbitrary box size, and the reducer knob that once offered
+    mean/median/max answered a question nobody should be asking a
+    readout: there is one physical quantity here.  The PSF extractors
+    answer in the same currency (see _measure_readout_weights), so every
+    readout model's signal, threshold and histogram share a meaning.
+    """
 
     array = np.asarray(image.values if hasattr(image, "values") else image, dtype=float)
     if array.ndim != 2:
@@ -371,9 +381,6 @@ def extract_box_signals(image: object, centers_xy: object, *, radius: int = 1, r
     radius = int(radius)
     if radius < 0:
         raise ValueError("radius must be non-negative")
-    reducer = str(reducer).lower()
-    if reducer not in {"mean", "sum", "median", "max"}:
-        raise ValueError("reducer must be mean, sum, median, or max")
     output = np.full(len(np.asarray(centers_xy)), np.nan, dtype="<f8")
     for index, center in enumerate(np.asarray(centers_xy, dtype=float).reshape(-1, 2)):
         x, y, width, height = _box_bounds(tuple(center), radius, array.shape)
@@ -381,7 +388,7 @@ def extract_box_signals(image: object, centers_xy: object, *, radius: int = 1, r
         finite = values[np.isfinite(values)]
         if not finite.size:
             continue
-        output[index] = {"mean": np.mean, "sum": np.sum, "median": np.median, "max": np.max}[reducer](finite)
+        output[index] = float(np.sum(finite, dtype=np.float64))
     return output
 
 
@@ -403,7 +410,10 @@ def extract_psf_signals(
     centers = np.asarray(centers_xy, dtype=float).reshape(-1, 2)
     size = 2 * int(radius) + 1
     if kernels is None:
-        kernels = np.broadcast_to(gaussian_psf_kernel(1.0, radius), (len(centers), size, size))
+        kernels = np.broadcast_to(
+            _amplitude_weights(gaussian_psf_kernel(1.0, radius)),
+            (len(centers), size, size),
+        )
     kernels = np.asarray(kernels, dtype=float)
     if kernels.shape != (len(centers), size, size):
         raise ValueError("kernels must have shape (N, 2*radius+1, 2*radius+1)")
@@ -636,7 +646,6 @@ class ReadoutModel:
     dark_sample_variance: np.ndarray | None = None
     kind: ReadoutModelKind = ReadoutModelKind.BOX
     integration_half_width: int = 1
-    reducer: str | None = "mean"
     threshold_method: str = "gaussian"
     psf_weights: np.ndarray | None = None
     psf_boxes: np.ndarray | None = None
@@ -701,14 +710,10 @@ class ReadoutModel:
         threshold_method = str(self.threshold_method).lower()
         if threshold_method not in {"empirical", "gaussian"}:
             raise ValueError("threshold_method must be 'empirical' or 'gaussian'")
-        reducer: str | None
         background: str | None
         padding: int | None
         weights = boxes = None
         if self.kind is ReadoutModelKind.BOX:
-            reducer = str(self.reducer).lower()
-            if reducer not in {"mean", "sum", "median", "max"}:
-                raise ValueError("box reducer must be mean, sum, median, or max")
             if self.psf_weights is not None or self.psf_boxes is not None:
                 raise ValueError("box model cannot carry PSF features")
             if self.background is not None or self.psf_padding is not None:
@@ -716,8 +721,6 @@ class ReadoutModel:
             background = None
             padding = None
         else:
-            if self.reducer is not None:
-                raise ValueError("PSF model cannot carry a box reducer")
             if self.psf_weights is None or self.psf_boxes is None:
                 raise ValueError("PSF calibration requires psf_weights and psf_boxes")
             weights = _immutable_array(self.psf_weights, "<f8")
@@ -732,7 +735,6 @@ class ReadoutModel:
             padding = int(self.psf_padding)
             if padding <= 0:
                 raise ValueError("psf_padding must be positive")
-            reducer = None
         object.__setattr__(self, "site_ids", site_ids)
         object.__setattr__(self, "thresholds", thresholds)
         object.__setattr__(self, "dark_mean", dark_mean)
@@ -742,7 +744,6 @@ class ReadoutModel:
         object.__setattr__(self, "dark_sample_count", dark_count)
         object.__setattr__(self, "dark_sample_variance", dark_variance)
         object.__setattr__(self, "integration_half_width", half_width)
-        object.__setattr__(self, "reducer", reducer)
         object.__setattr__(self, "threshold_method", threshold_method)
         object.__setattr__(self, "psf_weights", weights)
         object.__setattr__(self, "psf_boxes", boxes)
@@ -765,7 +766,6 @@ class ReadoutModel:
             "threshold_method": self.threshold_method,
             "integration": {
                 "half_width": self.integration_half_width,
-                "reducer": self.reducer,
                 "psf_weights": None if self.psf_weights is None else self.psf_weights.tolist(),
                 "psf_boxes": None if self.psf_boxes is None else self.psf_boxes.tolist(),
                 "background": self.background,
@@ -798,7 +798,6 @@ class ReadoutModel:
             frozenset(
                 {
                     "half_width",
-                    "reducer",
                     "psf_weights",
                     "psf_boxes",
                     "background",
@@ -819,7 +818,6 @@ class ReadoutModel:
             ),
             kind=ReadoutModelKind(values["kind"]),
             integration_half_width=integration["half_width"],
-            reducer=integration["reducer"],
             threshold_method=values["threshold_method"],
             psf_weights=None if integration["psf_weights"] is None else np.asarray(integration["psf_weights"]),
             psf_boxes=None if integration["psf_boxes"] is None else np.asarray(integration["psf_boxes"]),
@@ -1016,7 +1014,6 @@ class TrapCalibration:
                 array,
                 self.site_map.centers_xy,
                 radius=model.integration_half_width,
-                reducer=model.reducer,  # type: ignore[arg-type]
             )
         else:
             values = extract_psf_signals(
@@ -1855,6 +1852,26 @@ class _MeasuredSpots:
     fit_ok: np.ndarray
 
 
+def _amplitude_weights(shape: np.ndarray) -> np.ndarray:
+    """A matched filter scaled to answer in the site's own total counts.
+
+    ``shape`` is the site's normalized light distribution p (sum 1).  The
+    least-squares amplitude of that pattern in a frame I is
+    sum(p * I) / sum(p^2), so the stored kernel is w = p / sum(p^2): the
+    readout sum(w * I) then estimates the TOTAL counts the site's pattern
+    contributed -- the same currency the box sum answers in, exactly (a
+    flat p over N pixels gives w = 1 everywhere, which IS the box sum).
+    Scaling does not turn the filter: the SNR of a matched filter is
+    invariant under a positive scale, so nothing optimal is given up.
+    """
+
+    shape = np.asarray(shape, dtype="<f8")
+    power = float(np.sum(np.square(shape)))
+    if not np.isfinite(power) or power <= 0.0:
+        return shape
+    return np.asarray(shape / power, dtype="<f8")
+
+
 def _measure_readout_weights(
     references: np.ndarray,
     centers_xy: np.ndarray,
@@ -1938,13 +1955,22 @@ def _measure_readout_weights(
     # the shape the OTHER sites agreed on -- one optic images them all -- and
     # a run where no site could be measured falls back to the spot size
     # detection was told to look for.
-    normalised = np.zeros_like(weights)
-    normalised[usable] = weights[usable] / totals[usable, np.newaxis, np.newaxis]
+    shapes = np.zeros_like(weights)
+    shapes[usable] = weights[usable] / totals[usable, np.newaxis, np.newaxis]
     if np.any(usable):
-        uniform = normalised[usable].mean(axis=0)
-        uniform = uniform / float(np.sum(uniform))
+        uniform_shape = shapes[usable].mean(axis=0)
+        uniform_shape = uniform_shape / float(np.sum(uniform_shape))
     else:
-        uniform = np.asarray(gaussian_psf_kernel(float(fallback_sigma), radius))
+        uniform_shape = np.asarray(
+            gaussian_psf_kernel(float(fallback_sigma), radius)
+        )
+    # From shape to answer: each kernel is scaled so the matched filter
+    # reports the site's total counts (see _amplitude_weights) -- box and
+    # PSF models then speak one currency.
+    normalised = np.zeros_like(shapes)
+    for index in np.flatnonzero(usable):
+        normalised[index] = _amplitude_weights(shapes[index])
+    uniform = _amplitude_weights(uniform_shape)
     normalised[~usable] = uniform
 
     window_light = template_stack.sum(axis=(1, 2))
@@ -2556,7 +2582,6 @@ def calibrate(
     default_model_kind: ReadoutModelKind = ReadoutModelKind.BOX,
     threshold_method: str = "gaussian",
     box_half_width: int = 1,
-    box_reducer: str = "mean",
     psf_half_width: int = 3,
     psf_padding: int = 3,
     detection_spot_sigma: float = 1.0,
@@ -2577,9 +2602,6 @@ def calibrate(
         raise ValueError("integration half-widths must be non-negative")
     if psf_padding <= 0:
         raise ValueError("psf_padding must be positive")
-    box_reducer = str(box_reducer).lower()
-    if box_reducer not in {"mean", "sum", "median", "max"}:
-        raise ValueError("box_reducer must be mean, sum, median, or max")
     if site_map_filter is not None and not callable(site_map_filter):
         raise TypeError("site_map_filter must be callable or None")
 
@@ -2612,7 +2634,6 @@ def calibrate(
         frame,
         centers,
         radius=box_half_width,
-        reducer=box_reducer,
     )
     reference_label_signals = np.asarray(
         [[box_extractor(frame) for frame in group] for group in references],
@@ -2690,7 +2711,6 @@ def calibrate(
             box_extractor,
             {
                 "integration_half_width": box_half_width,
-                "reducer": box_reducer,
             },
             {},
         ),
@@ -2699,7 +2719,6 @@ def calibrate(
             psf_extractor(per_site_weights),
             {
                 "integration_half_width": psf_half_width,
-                "reducer": None,
                 "psf_weights": per_site_weights,
                 "psf_boxes": psf_boxes,
                 "background": "none",
@@ -2720,7 +2739,6 @@ def calibrate(
             psf_extractor(uniform_weights),
             {
                 "integration_half_width": psf_half_width,
-                "reducer": None,
                 "psf_weights": uniform_weights,
                 "psf_boxes": psf_boxes,
                 "background": "none",

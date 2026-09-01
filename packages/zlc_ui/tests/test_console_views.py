@@ -155,7 +155,7 @@ print(zou_lab_control.__file__)
 from zlc_ui.console import panel_card_view as tested_module
 print(tested_module.__file__)
 from PyQt5 import QtCore, QtGui, QtTest, QtWidgets
-from zlc_ui.fluent import GREY, RED, FluentCompanionFrame, FluentPopup
+from zlc_ui.fluent import GREY, RED, FluentOverlayFrame
 from zlc_ui.qt import ensure_qt_app
 PanelCardView = tested_module.PanelCardView
 app = ensure_qt_app(['test'])
@@ -201,27 +201,19 @@ app.installEventFilter(show_spy)
 QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
 app.processEvents()
 popup = card._settings_popup
-# A FRAME, not a menu: the operator carries it around and works with it
-# open, so it is a window that BELONGS to the console rather than a
-# menu-class surface the desktop keeps above everything.
-assert isinstance(popup, FluentCompanionFrame)
-assert popup.parentWidget() is card
-assert popup.isWindow()
+# A frame INSIDE the page, not a window.  A bare card is its own page, so
+# the frame is an ordinary child clipped to the card -- and no top-level
+# of any kind is shown for it: there is nothing the desktop could stack,
+# lose behind another program, or leave floating over the wrong tab.
+assert isinstance(popup, FluentOverlayFrame)
+assert not popup.isWindow()
+assert popup.parentWidget() is card.window()
+assert shown_top_levels == []
 assert card._settings_drag_handle.text() == 'Setting · panel-1'
 assert card._settings_close_button.toolTip() == 'Close settings'
-# The masked TYPE, not a bit test: Qt.Tool is defined as Qt.Popup |
-# Qt.Dialog, so `flags & Qt.Popup` is true for a tool window as well and
-# cannot tell a frame from a menu.
-assert (
-    popup.windowFlags() & QtCore.Qt.WindowType_Mask
-) == QtCore.Qt.Tool, popup.windowFlags()
-assert (
-    QtWidgets.QWidget(card).windowFlags() & QtCore.Qt.WindowType_Mask
-) != QtCore.Qt.Tool
-assert shown_top_levels == ['FluentCompanionFrame']
 assert {
     widget for widget in app.topLevelWidgets() if widget.isVisible()
-} == top_levels | {popup}
+} == top_levels
 assert 240 <= popup.width() <= 320
 assert popup.height() <= card.height()
 assert popup.mapToGlobal(popup.rect().bottomRight()).y() <= card.mapToGlobal(
@@ -278,7 +270,7 @@ assert not popup.isVisible()
 QtTest.QTest.qWait(300)
 QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
 app.processEvents()
-popup.hide()  # Qt.Popup's outside-click dismissal reaches the same hide path.
+popup.hide()  # The page owner may hide it while switching views.
 app.processEvents()
 assert not popup.isVisible()
 QtTest.QTest.qWait(300)
@@ -300,16 +292,19 @@ app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete); app.processEvents()
     )
 
 
-def test_the_setting_frame_belongs_to_the_console_window() -> None:
-    """It goes WITH its owner -- it does not go away when the owner does.
+def test_the_setting_frame_belongs_to_the_panel_page() -> None:
+    """The Setting frame lives inside the panel page, full stop.
 
-    The first answer to "the desktop put a browser between the console and
-    its Setting frame" was to hide the frame the moment the console lost the
-    desktop, moved or resized.  That answered the symptom by removing the
-    frame: minimising the console destroyed the view of it, and dragging the
-    console made it disappear.  A frame the operator carries around and
-    works with is a WINDOW BELONGING TO the console, and the desktop already
-    knows how to stack, minimise and restore those.
+    It was a Qt.Popup once (dismissed by the next click), then a Qt.Tool
+    companion window (round after round of desktop bookkeeping: follow the
+    console's moves, hide on minimise, restore with it) -- and the window
+    kind still had the two defects ownership cannot fix: a top-level
+    survives its page being hidden, so switching the console to another
+    tab left the frame floating over the wrong page, and nothing bounded
+    a drag to the panel area.  As an ordinary child of the panel page's
+    viewport every one of those behaviours is parenthood, not machinery:
+    clipped to the page, hidden and restored with the tab, travelling
+    with the window, gone with it.
     """
 
     _run_qt(
@@ -322,8 +317,7 @@ from PyQt5 import QtCore, QtTest, QtWidgets
 from zlc_ui import open_task_console
 from zlc_ui.console import PanelCardView
 from zlc_ui.qt import ensure_qt_app
-FluentPopup = tested_module.FluentPopup
-FluentCompanionFrame = tested_module.FluentCompanionFrame
+FluentOverlayFrame = tested_module.FluentOverlayFrame
 app = ensure_qt_app(['test'])
 top_levels = set(app.topLevelWidgets())
 console = open_task_console(window_ratio=0.4)
@@ -349,50 +343,79 @@ assert card is not None
 
 QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
 app.processEvents()
-popup = owner.findChild(FluentPopup)
+popup = card._settings_popup
 assert popup is not None
 assert popup.isVisible()
+# NOT a window: the console window is the only top-level there is.
+assert not popup.isWindow()
+assert popup.window() is owner
 assert {
     widget for widget in app.topLevelWidgets() if widget.isVisible()
-} == top_levels | {owner, popup}
-# THE CONSOLE LOSING THE DESKTOP TAKES THE FRAME WITH IT, it does not
-# take the frame AWAY.  This used to hide the frame -- the first answer to
-# "a browser sat between the console and its Setting frame" -- and that is
-# why minimising destroyed the view of it and moving the console made it
-# vanish.  Ownership is what keeps them stacked; the frame stays open.
+} == top_levels | {owner}
+# Its page is the panel area's scroll viewport -- the widget the tab
+# shows and hides.
+page = popup.parentWidget()
+scroll_ancestor = card.parentWidget()
+while scroll_ancestor is not None and not isinstance(
+    scroll_ancestor, QtWidgets.QAbstractScrollArea
+):
+    scroll_ancestor = scroll_ancestor.parentWidget()
+assert scroll_ancestor is not None
+assert page is scroll_ancestor.viewport()
+
+# THE TAB IS THE LAW.  Switching the console to Logic hides the panel
+# page, and the frame -- its child -- goes with it; switching back
+# brings it back.  This is the exact defect the window kind had: a
+# Qt.Tool top-level stayed up, floating over the Logic page.
+tabs = owner.findChild(tested_module.FluentTabWidget)
+assert tabs is not None and tabs.count() >= 2
+tabs.setCurrentIndex(1)
+app.processEvents()
+assert not popup.isVisible(), 'the frame floated over another tab'
+tabs.setCurrentIndex(0)
+app.processEvents()
+assert popup.isVisible(), 'the frame did not come back with its tab'
+
+# The console going behind another program cannot separate them: a child
+# has no desktop presence to leave behind.
 QtWidgets.QApplication.sendEvent(
     owner, QtCore.QEvent(QtCore.QEvent.WindowDeactivate)
 )
 app.processEvents()
-assert popup.isVisible(), 'the frame left its owner rather than going behind with it'
+assert popup.isVisible()
 
-# The console MOVING takes the frame with it, at the same offset.
-before = popup.frameGeometry().topLeft()
+# The console MOVING takes the frame with it -- parenthood, not tracking.
+before = popup.mapToGlobal(QtCore.QPoint(0, 0))
 was = owner.frameGeometry().topLeft()
 owner.move(was.x() + 37, was.y() + 23)
 app.processEvents()
-assert popup.frameGeometry().topLeft() - before == QtCore.QPoint(37, 23), (
-    before, popup.frameGeometry().topLeft()
+delta = popup.mapToGlobal(QtCore.QPoint(0, 0)) - before
+assert delta == QtCore.QPoint(37, 23), delta
+
+# A DRAG CANNOT LEAVE THE PAGE.  The clamp is the page rect: asked to put
+# the frame far outside, the position pins to the page's edge.
+low = card._clamped_overlay_position(
+    page.mapToGlobal(QtCore.QPoint(-5000, -5000))
 )
+assert low == QtCore.QPoint(0, 0), low
+high = card._clamped_overlay_position(
+    page.mapToGlobal(QtCore.QPoint(5000, 5000))
+)
+assert high == QtCore.QPoint(
+    max(0, page.width() - popup.width()),
+    max(0, page.height() - popup.height()),
+), high
 
-# Minimise takes it down and RESTORE BRINGS IT BACK.  It used to stay gone.
-owner.setWindowState(owner.windowState() | QtCore.Qt.WindowMinimized)
-app.processEvents()
-assert not popup.isVisible(), 'a minimized owner left its frame visible'
-owner.showNormal()
-app.processEvents()
-assert popup.isVisible(), 'restoring the console left its own frame behind'
-
-# But a frame the operator CLOSED stays closed: the owner coming back is
-# not a reason to reopen something they put away.
+# A frame the operator CLOSED stays closed: nothing re-shows it but the
+# Setting button.
 card.retire_settings_popup()
 app.processEvents()
 assert not popup.isVisible()
-owner.setWindowState(owner.windowState() | QtCore.Qt.WindowMinimized)
+tabs.setCurrentIndex(1)
 app.processEvents()
-owner.showNormal()
+tabs.setCurrentIndex(0)
 app.processEvents()
-assert not popup.isVisible(), 'a retired frame was resurrected by its owner'
+assert not popup.isVisible(), 'a retired frame was resurrected by its tab'
 
 QtTest.QTest.qWait(300)
 QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
@@ -404,17 +427,9 @@ assert not popup.isVisible(), 'a hidden owner left its frame visible'
 
 owner.show()
 app.processEvents()
-QtTest.QTest.qWait(300)
-QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
-app.processEvents()
 owner.close()
 app.processEvents()
 assert not popup.isVisible(), 'a closed owner left its frame visible'
-assert not any(
-    widget.isVisible() and isinstance(widget, FluentPopup)
-    for widget in app.topLevelWidgets()
-)
-popup.close()
 console.deleteLater()
 owner.deleteLater()
 QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
@@ -1142,6 +1157,12 @@ blank_surface = {
 handle.set_panel_projection('panel-1', state, blank_surface)
 card.resize(340, 180)
 authored_size = card.size()
+# The Setting frame is a child of the panel page now: like any child it is
+# only visible inside a shown window, which is the one an operator ever
+# clicks the button in.
+view.resize(1400, 900)
+view.show()
+app.processEvents()
 card._open_settings()
 assert card._settings_popup.isVisible()
 blank_popup_width = card._settings_popup.width()

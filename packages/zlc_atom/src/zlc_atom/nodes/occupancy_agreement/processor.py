@@ -277,7 +277,6 @@ class OccupancyAgreementProcessor:
             coverage = MonitorCoverage(
                 min(cycles, counts.coverage.written_cells // frames),
                 cycles,
-                retain_at_terminal=counts.coverage.retain_at_terminal,
             )
             origin = None
         return {

@@ -256,17 +256,30 @@ class AxisValue:
 
 
 @dataclass(frozen=True, slots=True)
-class RollingSample:
-    """One scalar-per-group projection owned by a rolling plot."""
+class RollingHistory:
+    """Every shot of one rolling projection, as whole planes.
+
+    One projection batch is one truth: its shots share a revision, a
+    generation and one group-keys tuple, and their values live in
+    ``(shots, groups)`` planes validated ONCE.  The per-shot object this
+    replaced was constructed five thousand times per drawn frame -- most
+    of that re-proving, one shot at a time, exactly what the batch
+    establishes here once -- and the payload's first act was to stack the
+    shots straight back into these planes.  Row access (``history[i]``)
+    hands out a lightweight :class:`RollingShot` view for the callers
+    that want one shot.
+    """
 
     revision: int
     generation: str
     values: NDArray[Any] | ArrayLike
     valid: NDArray[np.bool_] | ArrayLike
     counts: NDArray[np.int64] | ArrayLike
-    source_index: int | None = None
     group_keys: tuple[tuple[AxisValue, ...], ...] = ()
-    #: Standard error of each MEAN entry over what this shot pooled, or
+    #: The authored primary index of each shot, oldest first, or None when
+    #: the shots are arrival-ordered repeats.
+    source_indices: NDArray[np.int64] | ArrayLike | None = None
+    #: Standard error of each MEAN entry over what its shot pooled, or
     #: None when uncertainty was not requested.  Canonical-only, like the
     #: curve companion.
     sem: NDArray[np.float64] | ArrayLike | None = None
@@ -275,39 +288,100 @@ class RollingSample:
         values = _readonly(self.values)
         valid = _readonly(self.valid, dtype=np.bool_)
         counts = _readonly(self.counts, dtype=np.int64)
-        source_index = self.source_index
-        if source_index is not None and (
-            isinstance(source_index, bool)
-            or not isinstance(source_index, Integral)
-        ):
-            raise TypeError("rolling source_index must be an integer or None")
         if (
-            values.ndim != 1
+            values.ndim != 2
             or valid.shape != values.shape
             or counts.shape != values.shape
         ):
             raise ValueError(
-                "rolling sample values, validity, and counts must be one-dimensional"
+                "rolling history planes must share one (shots, groups) shape"
             )
         if np.any(counts < 0):
-            raise ValueError("rolling sample counts cannot be negative")
-        keys = tuple(tuple(item) for item in self.group_keys)
-        if len(keys) != values.size:
-            raise ValueError("rolling sample group keys must match value count")
+            raise ValueError("rolling history counts cannot be negative")
+        source_keys = self.group_keys
+        if type(source_keys) is tuple and all(
+            type(item) is tuple for item in source_keys
+        ):
+            keys = source_keys
+        else:
+            keys = tuple(tuple(item) for item in source_keys)
+        if len(keys) != values.shape[1]:
+            raise ValueError(
+                "rolling history group keys must match the group count"
+            )
+        if self.source_indices is not None:
+            source_indices = _readonly(self.source_indices, dtype=np.int64)
+            if source_indices.shape != (values.shape[0],):
+                raise ValueError(
+                    "rolling history source indices must be one per shot"
+                )
+            object.__setattr__(self, "source_indices", source_indices)
         if self.sem is not None:
             sem = _readonly(self.sem, dtype=np.float64)
             if sem.shape != values.shape:
-                raise ValueError("rolling sample sem must match value count")
+                raise ValueError(
+                    "rolling history sem must match the value planes"
+                )
             object.__setattr__(self, "sem", sem)
         object.__setattr__(self, "values", values)
         object.__setattr__(self, "valid", valid)
         object.__setattr__(self, "counts", counts)
-        object.__setattr__(
-            self,
-            "source_index",
-            None if source_index is None else int(source_index),
-        )
         object.__setattr__(self, "group_keys", keys)
+
+    def __len__(self) -> int:
+        return int(self.values.shape[0])
+
+    def __getitem__(self, index: int) -> RollingShot:
+        shots = len(self)
+        if not -shots <= index < shots:
+            raise IndexError(index)
+        return RollingShot(self, index % shots)
+
+    def __iter__(self) -> Iterator[RollingShot]:
+        for index in range(len(self)):
+            yield RollingShot(self, index)
+
+
+@dataclass(frozen=True, slots=True)
+class RollingShot:
+    """One shot of a :class:`RollingHistory`, as row views of its planes."""
+
+    history: RollingHistory
+    index: int
+
+    @property
+    def revision(self) -> int:
+        return self.history.revision
+
+    @property
+    def generation(self) -> str:
+        return self.history.generation
+
+    @property
+    def values(self) -> NDArray[Any]:
+        return self.history.values[self.index]
+
+    @property
+    def valid(self) -> NDArray[np.bool_]:
+        return self.history.valid[self.index]
+
+    @property
+    def counts(self) -> NDArray[np.int64]:
+        return self.history.counts[self.index]
+
+    @property
+    def group_keys(self) -> tuple[tuple[AxisValue, ...], ...]:
+        return self.history.group_keys
+
+    @property
+    def source_index(self) -> int | None:
+        indices = self.history.source_indices
+        return None if indices is None else int(indices[self.index])
+
+    @property
+    def sem(self) -> NDArray[np.float64] | None:
+        sem = self.history.sem
+        return None if sem is None else sem[self.index]
 
 
 @dataclass(frozen=True, slots=True)
@@ -3094,13 +3168,13 @@ class DataView:
                 raise TypeError("rolling group must be an AxisRef or None")
             self._resolve(group)
 
-    def rolling_sample(
+    def _single_revision_history(
         self,
         *,
         group: AxisRef | None = None,
         aggregation: Reduction = Reduction.MEAN,
-    ) -> RollingSample:
-        """Reduce one source revision to scalar values for rolling history.
+    ) -> RollingHistory:
+        """Reduce one source revision to a one-shot rolling history.
 
         The MEAN's standard error and count are always computed alongside;
         whether the operator shows the band is only a display choice.
@@ -3145,14 +3219,14 @@ class DataView:
                     self._pooled_sigma(),
                     mean_of_squares,
                 )
-            return RollingSample(
+            return RollingHistory(
                 revision=self._samples.revision,
                 generation=self._samples.generation,
-                values=np.asarray([value], dtype=np.float64),
-                valid=np.asarray([pooled.size > 0 and np.isfinite(value)]),
-                counts=np.asarray([pooled.size], dtype=np.int64),
+                values=np.asarray([[value]], dtype=np.float64),
+                valid=np.asarray([[pooled.size > 0 and np.isfinite(value)]]),
+                counts=np.asarray([[pooled.size]], dtype=np.int64),
                 group_keys=((),),
-                sem=sem,
+                sem=None if sem is None else np.asarray(sem).reshape(1, 1),
             )
         positions = self._all_positions()
         flat_values = self._samples.value.canonical.reshape(-1)
@@ -3190,29 +3264,28 @@ class DataView:
                 mean_of_squares,
             )
         valid = (counts > 0) & np.isfinite(values)
-        return RollingSample(
+        return RollingHistory(
             revision=self._samples.revision,
             generation=self._samples.generation,
-            values=values,
-            valid=valid,
-            counts=counts,
+            values=np.asarray(values).reshape(1, -1),
+            valid=valid.reshape(1, -1),
+            counts=np.asarray(counts).reshape(1, -1),
             group_keys=keys,
-            sem=sem,
+            sem=None if sem is None else np.asarray(sem).reshape(1, -1),
         )
 
-    def rolling_history_samples(
+    def rolling_history(
         self,
         *,
         group: AxisRef | None = None,
         aggregation: Reduction = Reduction.MEAN,
         uncertainty: bool = True,
-    ) -> tuple[RollingSample, ...]:
-        """Expand the repeat axis into per-shot rolling samples, oldest first.
+    ) -> RollingHistory:
+        """The shot history of this snapshot as one batch of planes.
 
         A static snapshot carries its shot history on the repeat axis; each
-        repeat reduces to one rolling sample exactly as :meth:`rolling_sample`
-        reduces one whole revision.  A snapshot without repeats degenerates to
-        the single whole-revision sample.
+        repeat reduces to one row exactly as a whole revision reduces to
+        one.  A snapshot without repeats degenerates to a one-shot history.
 
         ``uncertainty`` is whether the caller will DRAW the band.  Its
         standard error needs a second pass over every value -- squared,
@@ -3221,15 +3294,15 @@ class DataView:
         """
 
         if self.has_primary_index:
-            return self._history_samples_by_primary_index(
+            return self._history_by_primary_index(
                 group=group,
                 aggregation=aggregation,
                 uncertainty=uncertainty,
             )
         repeats = schema_repeat_count(self._schema)
         if repeats <= 1:
-            return (
-                self.rolling_sample(group=group, aggregation=aggregation),
+            return self._single_revision_history(
+                group=group, aggregation=aggregation
             )
         self.validate_rolling(group)
         aggregation = _validate_aggregation(aggregation)
@@ -3293,17 +3366,14 @@ class DataView:
                 mean_of_squares,
             )
         valid = (counts > 0) & np.isfinite(values)
-        return tuple(
-            RollingSample(
-                revision=self._samples.revision,
-                generation=self._samples.generation,
-                values=values[index],
-                valid=valid[index],
-                counts=counts[index],
-                group_keys=keys,
-                sem=None if sem is None else sem[index],
-            )
-            for index in range(repeats)
+        return RollingHistory(
+            revision=self._samples.revision,
+            generation=self._samples.generation,
+            values=values,
+            valid=valid,
+            counts=counts,
+            group_keys=keys,
+            sem=sem,
         )
 
     def _repeat_history_tensor(
@@ -3313,7 +3383,7 @@ class DataView:
         aggregation: Reduction,
         repeats: int,
         uncertainty: bool = True,
-    ) -> tuple[RollingSample, ...] | None:
+    ) -> RollingHistory | None:
         """Reduce a regular repeat history once, not once per repeat.
 
         Runtime remains the only history owner; this is only a projection of
@@ -3405,26 +3475,23 @@ class DataView:
                 mean_of_squares,
             )
         valid = (counts > 0) & np.isfinite(reduced)
-        return tuple(
-            RollingSample(
-                revision=self._samples.revision,
-                generation=self._samples.generation,
-                values=reduced[index],
-                valid=valid[index],
-                counts=counts[index],
-                group_keys=keys,
-                sem=None if sem is None else sem[index],
-            )
-            for index in range(repeats)
+        return RollingHistory(
+            revision=self._samples.revision,
+            generation=self._samples.generation,
+            values=reduced,
+            valid=valid,
+            counts=counts,
+            group_keys=keys,
+            sem=sem,
         )
 
-    def _history_samples_by_primary_index(
+    def _history_by_primary_index(
         self,
         *,
         group: AxisRef | None,
         aggregation: Reduction,
         uncertainty: bool = True,
-    ) -> tuple[RollingSample, ...]:
+    ) -> RollingHistory:
         """Reduce every authored primary-index cell without arrival history."""
 
         self.validate_rolling(group)
@@ -3478,18 +3545,19 @@ class DataView:
                 mean_of_squares,
             )
         valid = (counts > 0) & np.isfinite(values)
-        return tuple(
-            RollingSample(
-                revision=self._samples.revision,
-                generation=self._samples.generation,
-                values=values[index],
-                valid=valid[index],
-                counts=counts[index],
-                source_index=int(source.canonical),
-                group_keys=keys,
-                sem=None if sem is None else sem[index],
-            )
-            for index, source in enumerate(primary.values)
+        return RollingHistory(
+            revision=self._samples.revision,
+            generation=self._samples.generation,
+            values=values,
+            valid=valid,
+            counts=counts,
+            group_keys=keys,
+            source_indices=np.fromiter(
+                (int(source.canonical) for source in primary.values),
+                dtype=np.int64,
+                count=history_count,
+            ),
+            sem=sem,
         )
 
     def histogram_pool(
@@ -5174,6 +5242,15 @@ def _sem_of_mean(
     passed the sigma at all.
     """
 
+    if sigma is None and not np.any(counts > 1):
+        # Nothing to estimate FROM: no bucket has a second member, so the
+        # scatter is undefined everywhere (n - 1 = 0), and no sample
+        # states its own error.  The moments below would only spell the
+        # same all-NaN answer at two full passes over every value --
+        # which an indexed rolling history, one member per bucket by
+        # construction, paid on every drawn frame.
+        sem = np.full(np.shape(means), np.nan, dtype=np.float64)
+        return sem
     reference = _sem_reference(means)
     mean_square = np.asarray(mean_of_squares(samples, reference), dtype=np.float64)
     mean_sigma_square = (
@@ -5362,6 +5439,21 @@ def _aggregate_by_codes(
     """
 
     output_dtype = np.complex128 if values.dtype.kind == "c" else np.float64
+    if bucket_count == codes.size and np.array_equal(
+        codes, np.arange(bucket_count, dtype=codes.dtype)
+    ):
+        # Identity layout: every sample IS its own bucket, so every
+        # reduction of one member is the member.  The indexed rolling
+        # projection reduces (shots x groups) cells laid out exactly this
+        # way on every drawn frame; the scatter below only re-derived a
+        # masked copy of the input.
+        output = np.where(
+            usable, values.astype(output_dtype, copy=False), np.nan
+        )
+        counts = usable.astype(np.int64)
+        output.setflags(write=False)
+        counts.setflags(write=False)
+        return output, counts
     output = np.full(bucket_count, np.nan, dtype=output_dtype)
     counts = np.zeros(bucket_count, dtype=np.int64)
     positions = np.flatnonzero(usable & (codes >= 0))
@@ -5458,7 +5550,8 @@ __all__ = [
     "FacetPayload",
     "HistogramData",
     "ImageData",
-    "RollingSample",
+    "RollingHistory",
+    "RollingShot",
     "SelectionSubject",
     "QuantityArray",
     "SampleProjection",

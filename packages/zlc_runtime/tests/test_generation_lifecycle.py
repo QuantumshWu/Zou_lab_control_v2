@@ -91,7 +91,19 @@ def _latest_value(plane: SignalDataPlane, node: _Producer) -> float:
     return float(np.asarray(values).reshape(-1)[0])
 
 
-def test_retained_monitor_keeps_its_last_value_until_the_next_run() -> None:
+def test_a_sealed_monitor_keeps_its_last_value_until_the_next_run() -> None:
+    """Stop ends production, never the data.
+
+    The last publication is the picture still on every panel viewing this
+    signal, and the operator derives from a stopped run -- ROIs, fits --
+    exactly as from a live one.  Retention used to be a per-origin opt-in
+    flag; the origins that forgot it (the camera, the calibration
+    preview) had their whole derived chain answer "this run is no longer
+    held" the moment a measurement stopped.  The plane now owns the one
+    policy: a sealed monitor publication is retained, and the next
+    begin_generation replaces it.
+    """
+
     plane = SignalDataPlane()
     node = _Producer()
     signal = node.signal_key("frames")
@@ -103,13 +115,14 @@ def test_retained_monitor_keeps_its_last_value_until_the_next_run() -> None:
                 "frames": LiveDatasetOutput(
                     node.declaration,
                     snapshot("probe", 1),
-                    MonitorCoverage(1, 1, retain_at_terminal=True),
+                    MonitorCoverage(1, 1),
                 )
             },
         )
         assert plane.seal_committed(node)
         assert _latest_value(plane, node) == 1.0
         assert not plane.is_generation_live(signal)
+        assert plane.retains(signal)
 
         second = plane.begin_generation(node)
         assert second != first
@@ -119,33 +132,12 @@ def test_retained_monitor_keeps_its_last_value_until_the_next_run() -> None:
                 "frames": LiveDatasetOutput(
                     node.declaration,
                     snapshot("probe", 2),
-                    MonitorCoverage(1, 1, retain_at_terminal=True),
+                    MonitorCoverage(1, 1),
                 )
             },
         )
         assert plane.seal_committed(node)
         assert _latest_value(plane, node) == 2.0
-    finally:
-        plane.close()
-
-
-def test_transient_monitor_still_retires_at_terminal() -> None:
-    plane = SignalDataPlane()
-    node = _Producer()
-    try:
-        plane.begin_generation(node)
-        plane.commit_live(
-            node,
-            {
-                "frames": LiveDatasetOutput(
-                    node.declaration,
-                    snapshot("probe", 1),
-                    MonitorCoverage(1, 1),
-                )
-            },
-        )
-        assert not plane.seal_committed(node)
-        assert plane.latest_publication(node.signal_key("frames")) is None
     finally:
         plane.close()
 

@@ -7577,15 +7577,24 @@ class MatplotlibRenderer:
         history = axes
         series = self._series(payload)
         sliced: list[_PreparedSeries] = []
+        # Every rolling series shares ONE x -- the payload hands all of
+        # them the same shots-from-latest array object -- so its float
+        # view and finite mask are facts about the payload, not about any
+        # series, and computing them per series walked the same window
+        # thirty-five times over.
+        prepared_x: dict[int, tuple[np.ndarray, np.ndarray]] = {}
         for item in series:
             y_values = np.asarray(_display_array(item.y), dtype=float).reshape(-1)
-            x_values = np.asarray(_display_array(item.x), dtype=float).reshape(-1)
+            x_source = _display_array(item.x)
+            cached_x = prepared_x.get(id(x_source))
+            if cached_x is None:
+                x_values = np.asarray(x_source, dtype=float).reshape(-1)
+                cached_x = (x_values, np.isfinite(x_values))
+                prepared_x[id(x_source)] = cached_x
+            x_values, x_finite = cached_x
             valid = (
-                _valid_array(
-                    item,
-                    _display_array(item.x).reshape(-1).shape,
-                )
-                & np.isfinite(x_values)
+                _valid_array(item, x_values.shape)
+                & x_finite
                 & np.isfinite(y_values)
             )
             label = getattr(item, "label", "")
@@ -7624,15 +7633,88 @@ class MatplotlibRenderer:
         # because an axis with two owners is an axis that moves twice.
         window = int(state["window"])
         frame = _curve_x_limits(np.asarray([1.0 - window, 0.0]))
-        self._mutate_series_artists(
-            history,
-            tuple(sliced),
-            state,
-            f"{key}:history",
-            x_label=payload_x if explicit_x is None else explicit_x,
-            y_label=y_label,
-            x_limits=frame,
+        x_text = payload_x if explicit_x is None else explicit_x
+        native_direct = (
+            kernels.engaged()
+            and self._series_hover is None
+            and self._series_locked is None
+            and not self._last_fit_overlays
+            and self._native_curve_scene_supported(sliced)
         )
+        if native_direct:
+            # The SAME prepared-scene contract a Curve installs: series
+            # arrays in, native stroke out, artists materialized back the
+            # moment a gesture needs them.  A deep window is where it
+            # matters -- matplotlib's per-vertex path machinery spent
+            # ~9 us a vertex, so 35 sites at a 5000-shot window paid
+            # ~0.5 s PER SHOT stroking one panel's history.
+            extremes = np.array([np.inf, -np.inf])
+            for item in sliced:
+                if not bool(np.any(item.valid)):
+                    continue
+                if item.band is None:
+                    low_values = high_values = item.y
+                else:
+                    low_values = np.where(
+                        np.isfinite(item.band[0]), item.band[0], item.y
+                    )
+                    high_values = np.where(
+                        np.isfinite(item.band[1]), item.band[1], item.y
+                    )
+                extremes[0] = min(
+                    extremes[0],
+                    float(np.min(low_values, where=item.valid, initial=np.inf)),
+                )
+                extremes[1] = max(
+                    extremes[1],
+                    float(
+                        np.max(high_values, where=item.valid, initial=-np.inf)
+                    ),
+                )
+            y_range = (
+                _data_limits(extremes) if math.isfinite(extremes[0]) else None
+            )
+            if frame is not None:
+                self._set_xlim(history, *frame)
+            self._set_ylim(
+                history,
+                *self._resolve_curve_y_limits(f"{key}:history", y_range, state),
+            )
+            if history.get_xlabel() != x_text:
+                history.set_xlabel(x_text)
+            if history.get_ylabel() != y_label:
+                history.set_ylabel(y_label)
+            apply_smart_ticks(history, label_pt=self.style.fonts.tick_pt)
+            self._artists["curve:prepared"] = {
+                "series": (tuple(sliced),),
+                "limits": (
+                    tuple(history.get_xlim()),
+                    tuple(history.get_ylim()),
+                ),
+                "state": state,
+                "key": f"{key}:history",
+                "x_label": x_text,
+                "y_label": y_label,
+            }
+            for line, _identity, _label in self._series_lines.get(
+                id(history), ()
+            ):
+                line.set_visible(False)
+            for artists in self._series_bars.get(id(history), {}).values():
+                for artist in artists:
+                    artist.set_visible(False)
+            self._series_hit_cache.clear()
+        else:
+            self._artists.pop("curve:prepared", None)
+            self._mutate_series_artists(
+                history,
+                tuple(sliced),
+                state,
+                f"{key}:history",
+                x_label=x_text,
+                y_label=y_label,
+                x_limits=frame,
+            )
         latest = None
         if sliced:
             usable = sliced[0].y[sliced[0].valid]
@@ -9892,6 +9974,15 @@ class MatplotlibRenderer:
             self._series_locked = self._series_hover = None
             self._apply_series_focus()
             with style_context(self.style):
+                # ``savefig`` draws through matplotlib's own machinery, which
+                # knows nothing of the native prepared scene -- and that scene
+                # keeps its series artists HIDDEN and empty.  An export of a
+                # natively stroked Curve or Rolling panel was a complete frame
+                # of axes and chrome with NO data on it.  Image is unaffected:
+                # its artist always carries the picture.  The final draw()
+                # below composes from the materialized artists, and the next
+                # data update reinstalls the native scene.
+                self._materialize_prepared_curve()
                 # ``savefig`` creates a private renderer internally, so the
                 # live-draw hook cannot wrap that renderer's mathtext parser.
                 # It must join the same process-global parser lane here or a

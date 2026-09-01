@@ -11,12 +11,12 @@ def test_every_window_is_nobody_s_property() -> None:
     running installation mid-UART-transfer.
 
     So: every launcher window is a plain top-level and no opener takes an
-    owner.  The one surface that genuinely belongs to a window -- the
-    panel Setting frame -- is a FluentCompanionFrame: a real Qt parent
-    with its window type declared AT construction, which buys stacking,
-    shared minimise and shared close safely (pinned by the console view
-    tests).  Modal dialogs anchor where they appear without any native
-    ownership either.
+    owner.  The one surface that genuinely belongs elsewhere -- the panel
+    Setting frame -- is not a window at all: a FluentOverlayFrame is an
+    ordinary child of the panel page, so stacking, tab visibility and
+    shared minimise/close all follow from parenthood (pinned by the
+    console view tests).  Modal dialogs anchor where they appear without
+    any native ownership either.
     """
 
     import inspect

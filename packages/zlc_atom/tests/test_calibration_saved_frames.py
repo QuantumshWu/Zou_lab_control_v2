@@ -237,10 +237,15 @@ def test_a_replay_publishes_what_the_node_declares(tmp_path: Path) -> None:
         )
         key = host.signal_key(CAPTURE_PREVIEW_DECLARATION.name)
         # A successful Task proves every declared output committed at least
-        # once.  This preview is deliberately Monitor/latest-only, so Runtime
-        # retires it at terminal instead of preserving one arbitrary sample as
-        # the calibration's scientific final dataset.
-        assert plane.latest_publication(key) is None
+        # once.  The preview stays Monitor/latest-only: its retained last
+        # sample is the picture a panel keeps after the task ends, never
+        # the calibration's scientific final dataset -- the saved report
+        # is that.  (It used to be withdrawn at terminal, which also made
+        # every derivation on a stopped preview answer "run no longer
+        # held".)
+        preview = plane.latest_publication(key)
+        assert preview is not None
+        assert not plane.is_generation_live(key)
     finally:
         if host is not None:
             host.shutdown()

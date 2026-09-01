@@ -223,7 +223,6 @@ class _ArchiveDatasetProducer:
                     * snapshot.block.schema.point_table.row_count,
                     snapshot.block.schema.repeat_axis.size
                     * snapshot.block.schema.point_table.row_count,
-                    retain_at_terminal=True,
                 ),
                 run_record,
             )
@@ -238,7 +237,6 @@ class _ArchiveDatasetProducer:
                     * status.block.schema.point_table.row_count,
                     status.block.schema.repeat_axis.size
                     * status.block.schema.point_table.row_count,
-                    retain_at_terminal=True,
                 ),
                 run_record,
             )
@@ -1000,8 +998,6 @@ class FigureViewerPresenter:
         resolved, description, loaded, serial = result
         panel_presenter = self._panel_presenter
         plane = self._signal_plane
-        if panel_presenter is None or plane is None:
-            raise RuntimeError("FigureViewer has no Runtime panel composition")
         previous_panels = tuple(panel_presenter.panels)
         producers: list[_ArchiveDatasetProducer] = []
         published: list[tuple[object, object, object, object, object]] = []

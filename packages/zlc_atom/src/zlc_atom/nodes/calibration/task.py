@@ -86,7 +86,6 @@ _FRAME_SOURCES = frozenset({FRAMES_FROM_CAMERA, FRAMES_FROM_FOLDER})
 SAVED_SAMPLE_STEM = "sample"
 
 _THRESHOLD_METHODS = {"empirical", "gaussian"}
-_REDUCERS = {"mean", "sum", "median", "max"}
 
 
 def _roi_xywh(point: CameraWorkingPoint) -> tuple[int, int, int, int]:
@@ -141,7 +140,6 @@ class CalibrationRequest:
     default_model_kind: ReadoutModelKind
     threshold_method: str
     box_half_width: int
-    box_reducer: str
     psf_half_width: int
     psf_padding: int
     detection_spot_sigma: float
@@ -204,9 +202,6 @@ class CalibrationRequest:
         psf_padding = int(self.psf_padding)
         if psf_padding <= 0:
             raise ValueError("psf_padding must be positive")
-        box_reducer = str(self.box_reducer).lower()
-        if box_reducer not in _REDUCERS:
-            raise ValueError("box_reducer must be mean, sum, median, or max")
         detection_spot_sigma = _positive_float(
             self.detection_spot_sigma,
             "detection_spot_sigma",
@@ -234,7 +229,6 @@ class CalibrationRequest:
         object.__setattr__(self, "reference_after_slot", slots[2])
         object.__setattr__(self, "threshold_method", threshold_method)
         object.__setattr__(self, "box_half_width", box_half_width)
-        object.__setattr__(self, "box_reducer", box_reducer)
         object.__setattr__(self, "psf_half_width", psf_half_width)
         object.__setattr__(self, "psf_padding", psf_padding)
         object.__setattr__(self, "detection_spot_sigma", detection_spot_sigma)
@@ -261,7 +255,6 @@ class CalibrationRequest:
             "default_model_kind": self.default_model_kind.value,
             "threshold_method": self.threshold_method,
             "box_half_width": self.box_half_width,
-            "box_reducer": self.box_reducer,
             "psf_half_width": self.psf_half_width,
             "psf_padding": self.psf_padding,
             "detection_spot_sigma": self.detection_spot_sigma,
@@ -1569,7 +1562,6 @@ class CalibrationTask:
             default_model_kind=self.request.default_model_kind,
             threshold_method=self.request.threshold_method,
             box_half_width=self.request.box_half_width,
-            box_reducer=self.request.box_reducer,
             psf_half_width=self.request.psf_half_width,
             psf_padding=self.request.psf_padding,
             detection_spot_sigma=self.request.detection_spot_sigma,

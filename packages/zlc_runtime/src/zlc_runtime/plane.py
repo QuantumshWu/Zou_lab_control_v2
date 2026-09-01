@@ -660,24 +660,15 @@ def _indexed_schema(
         "source index",
         PRIMARY_INDEX,
         PointColumn.NUMERIC,
-        tuple(index for index in indices for _row in range(point_count)),
+        # An integer ndarray is PointColumn's dtype-proof construction
+        # path: no per-element canonical walk over count x rows values.
+        np.repeat(np.asarray(indices, dtype=np.int64), point_count),
     )
     columns = [primary]
     for column in event_schema.point_table.columns:
-        columns.append(
-            PointColumn(
-                column.coordinate_id,
-                column.name,
-                column.role,
-                column.value_kind,
-                tuple(column.values) * len(indices),
-                column.unit,
-                column.coordinate_frame,
-                None
-                if column.coordinate_labels is None
-                else tuple(column.coordinate_labels) * len(indices),
-            )
-        )
+        # The event column is already canonical; whole-column replication
+        # keeps it so without re-proving 175k values one at a time.
+        columns.append(column.replicated(len(indices)))
     topology = event_schema.grid_topology
     if topology is not None:
         topology = GridTopology(
@@ -698,24 +689,21 @@ def _indexed_schema(
 
 
 def _materialize_indexed_dataset(
-    signal_name: str,
-    generation: StreamGenerationId,
-    revision: int,
-    event_schema: DatasetSchema,
-    events: tuple[tuple[int, OwnedSnapshot], ...],
-    first_index: int,
-    latest_index: int,
-    capacity: int,
+    materialization: _IndexedMaterialization,
 ) -> OwnedSnapshot:
-    start = max(first_index, latest_index - capacity + 1)
-    absolute_indices = tuple(range(start, latest_index + 1))
-    relative_indices = tuple(index - latest_index for index in absolute_indices)
-    schema = _indexed_schema(event_schema, relative_indices)
+    event_schema = materialization.event_schema
+    start = materialization.start
+    latest_index = materialization.latest
+    schema = materialization.schema
+    if schema is None:
+        schema = _indexed_schema(
+            event_schema, tuple(range(start - latest_index, 1))
+        )
     point_count = event_schema.point_table.row_count
     trailing = (slice(None),) * len(event_schema.cell_schema.data_axes)
 
     def placements():
-        for primary_index, snapshot in events:
+        for primary_index, snapshot in materialization.appended:
             if not start <= primary_index <= latest_index:
                 continue
             point_start = (primary_index - start) * point_count
@@ -728,20 +716,73 @@ def _materialize_indexed_dataset(
                 snapshot,
             )
 
-    values, validity, sigma = _assembled_planes(
-        schema.physical_shape,
-        event_schema.cell_schema.dtype,
-        placements(),
-    )
+    basis = materialization.basis
+    if basis is None:
+        values, validity, sigma = _assembled_planes(
+            schema.physical_shape,
+            event_schema.cell_schema.dtype,
+            placements(),
+        )
+    else:
+        values, validity, sigma = _rolled_planes(
+            schema.physical_shape,
+            event_schema.cell_schema.dtype,
+            basis,
+            start,
+            point_count,
+            trailing,
+            tuple(placements()),
+        )
     return owned_snapshot_from_arrays(
         schema,
         values,
-        revision,
+        materialization.sequence,
         validity=validity,
         sigma=sigma,
-        block_id=BlockId(f"{signal_name}.indexed"),
-        stream_generation=generation,
+        block_id=BlockId(f"{materialization.signal_name}.indexed"),
+        stream_generation=materialization.generation,
     )
+
+
+def _rolled_planes(
+    shape: tuple[int, ...],
+    dtype: object,
+    basis: _MaterializedIndexed,
+    start: int,
+    point_count: int,
+    trailing: tuple[slice, ...],
+    placements: tuple,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    """Planes for a window that only ROLLED FORWARD from a known basis.
+
+    The overlapping indices are copied out of the basis planes in one
+    slice per plane -- holes, validity, and per-event sigma exactly as
+    the from-scratch assembly left them -- and only the appended events
+    are placed.  Callers guarantee the overlap really is unchanged (no
+    retained index was replaced since the basis was built).
+    """
+
+    block = basis.snapshot.block
+    keep = (basis.latest - start + 1) * point_count
+    source = (slice(None), slice((start - basis.start) * point_count, (start - basis.start) * point_count + keep), *trailing)
+    target = (slice(None), slice(0, keep), *trailing)
+    values = np.zeros(shape, dtype=dtype)
+    validity = np.zeros(shape, dtype=np.bool_)
+    values[target] = block.values[source]
+    validity[target] = basis.snapshot.expanded_validity()[source]
+    sigma: np.ndarray | None = None
+    if block.sigma is not None or any(
+        snapshot.block.sigma is not None for _place, snapshot in placements
+    ):
+        sigma = np.full(shape, np.nan, dtype=np.float64)
+        if block.sigma is not None:
+            sigma[target] = block.sigma[source]
+    for place, snapshot in placements:
+        values[place] = snapshot.block.values
+        validity[place] = snapshot.expanded_validity()
+        if snapshot.block.sigma is not None:
+            sigma[place] = snapshot.block.sigma
+    return values, validity, sigma
 
 
 def _assembled_planes(
@@ -778,12 +819,71 @@ def _assembled_planes(
     return values, validity, sigma
 
 
-_IndexedHistory: TypeAlias = tuple[
-    dict[int, tuple[int, OwnedSnapshot, Mapping[str, object]]],
-    int,
-    int,
-    tuple[int, OwnedSnapshot, Mapping[str, object]] | None,
-]
+@dataclass(slots=True)
+class _MaterializedIndexed:
+    """One full indexed materialization, kept as the next shot's basis."""
+
+    sequence: int
+    snapshot: OwnedSnapshot
+    record: Mapping[str, object]
+    #: The UNFROZEN merged event record.  Kept because the merge is
+    #: re-entrant -- merging this with each appended event's record gives
+    #: the same result as merging every retained record from scratch --
+    #: while the frozen form is not a valid merge input.
+    raw_record: Mapping[str, object]
+    start: int
+    latest: int
+
+
+@dataclass(slots=True)
+class _IndexedHistory:
+    """One indexed signal's retained events, plus its steady-state reuse.
+
+    At a deep window the naive materialization was O(window) PER SHOT in
+    three separate ways -- the indexed schema retupled every point column
+    across the whole window, the planes were reassembled event by event,
+    and every retained event record was re-merged -- turning a 5000-deep
+    35-site occupancy history into ~300 ms on the one presentation
+    thread every panel shares.  ``materialized`` therefore keeps the last
+    full materialization as a BASIS: while the window only rolls forward,
+    the next shot reuses its schema object outright (the indexed schema
+    depends on nothing but the retained count), copies the overlapping
+    plane rows in one slice, and merges only the appended records.
+
+    The basis is invalidated by COMPARISON, never by clearing:
+    ``replaced_at`` records the last sequence at which a retained index
+    was overwritten -- the one mutation that changes rows a rolled copy
+    would silently carry forward -- and every consumer checks it against
+    the basis sequence.  Appends and front-trims stay cheap because the
+    roll arithmetic simply does not copy rows that left the window.
+    """
+
+    events: dict[int, tuple[int, OwnedSnapshot, Mapping[str, object]]]
+    first_index: int
+    capacity: int
+    materialized: _MaterializedIndexed | None = None
+    replaced_at: int = -1
+
+
+@dataclass(slots=True)
+class _IndexedMaterialization:
+    """Everything one indexed materialization needs OUTSIDE the plane lock."""
+
+    signal_name: str
+    generation: StreamGenerationId
+    sequence: int
+    event_schema: DatasetSchema
+    #: The reused indexed schema, when the retained count matches the last
+    #: materialization's; None means build it.
+    schema: DatasetSchema | None
+    #: Events to place into freshly assembled rows: every selected event
+    #: for a from-scratch build, only the appended ones over a basis.
+    appended: tuple[tuple[int, OwnedSnapshot], ...]
+    start: int
+    latest: int
+    basis: _MaterializedIndexed | None
+    record: Mapping[str, object]
+    raw_record: Mapping[str, object]
 
 
 def _validate_indexed_event(
@@ -791,7 +891,7 @@ def _validate_indexed_event(
     event: OwnedSnapshot,
     primary_index: int,
 ) -> None:
-    events, _first_index, _capacity, _materialized = history
+    events = history.events
     current_schema = next(iter(events.values()))[1].block.schema
     if event.block.schema != current_schema:
         raise ValueError(
@@ -820,34 +920,38 @@ def _update_indexed_history(
     selected_record = value.event_record
     if history is None:
         return (
-            (
+            _IndexedHistory(
                 {primary_index: (sequence, event, selected_record)},
                 primary_index,
                 min(demand, _indexed_capacity(event)),
-                None,
             ),
             True,
         )
     _validate_indexed_event(history, event, primary_index)
-    events, first_index, _capacity, materialized = history
+    events = history.events
     current = events.get(primary_index)
     changed = current is None or current[0] != sequence
     if changed:
+        if current is not None:
+            # A retained index was REPLACED: every basis built before this
+            # sequence still shows the old value at this index, so rolled
+            # copies must stop at this fence.  Appends and trims need no
+            # fence -- the roll arithmetic never copies rows they touch.
+            history.replaced_at = sequence
         events[primary_index] = (
             sequence,
             event,
             selected_record,
         )
-    capacity = min(demand, _indexed_capacity(event))
-    previous_first = first_index
-    first_index = max(first_index, primary_index - capacity + 1)
-    while events and next(iter(events)) < first_index:
-        events.pop(next(iter(events)))
-    changed = changed or first_index != previous_first
-    return (
-        (events, first_index, capacity, None if changed else materialized),
-        changed,
+    history.capacity = min(demand, _indexed_capacity(event))
+    previous_first = history.first_index
+    history.first_index = max(
+        previous_first, primary_index - history.capacity + 1
     )
+    while events and next(iter(events)) < history.first_index:
+        events.pop(next(iter(events)))
+    changed = changed or history.first_index != previous_first
+    return history, changed
 
 
 def _indexed_materialization_input(
@@ -857,21 +961,41 @@ def _indexed_materialization_input(
     generation: StreamGenerationId,
     sequence: int,
     value: SignalValue,
-) -> tuple[OwnedSnapshot, Mapping[str, object]] | tuple[tuple, Mapping[str, object]]:
-    events, first_index, capacity, cached = history
-    if cached is not None and cached[0] == sequence:
-        return cached[1], cached[2]
+) -> tuple[OwnedSnapshot, Mapping[str, object]] | _IndexedMaterialization:
     primary_index = value.primary_index
     if primary_index is None:
         raise RuntimeError("indexed signal lost its source primary index")
-    if primary_index < first_index:
+    if primary_index < history.first_index:
         raise RetainedPublicationExpired(
             "publication precedes retained indexed history"
         )
-    start = max(first_index, primary_index - capacity + 1)
+    events = history.events
+    start = max(history.first_index, primary_index - history.capacity + 1)
+    cached = history.materialized
+    if (
+        cached is not None
+        and cached.sequence == sequence
+        and cached.start == start
+        and cached.latest == primary_index
+        and history.replaced_at <= cached.sequence
+    ):
+        # The exact hit must match the WINDOW, not just the sequence: a
+        # lease change moves ``start`` for the very same publication, and
+        # the kept basis honestly describes the window it was built for.
+        return cached.snapshot, cached.record
+    basis = None
+    if (
+        cached is not None
+        and cached.sequence <= sequence
+        and history.replaced_at <= cached.sequence
+        and primary_index > cached.latest
+        and start >= cached.start
+    ):
+        basis = cached
     selected_events = []
     selected_records = []
-    for index in range(start, primary_index + 1):
+    append_from = start if basis is None else basis.latest + 1
+    for index in range(append_from, primary_index + 1):
         if index == primary_index:
             selected_events.append((index, value.snapshot))
             held = events.get(index)
@@ -885,18 +1009,34 @@ def _indexed_materialization_input(
         if held is not None and held[0] <= sequence:
             selected_events.append((index, held[1]))
             selected_records.append(held[2])
-    return (
-        (
-            signal_name,
-            generation,
-            sequence,
-            next(iter(events.values()))[1].block.schema,
-            tuple(selected_events),
-            first_index,
-            primary_index,
-            capacity,
-        ),
-        _freeze_run_record(_merge_event_records(selected_records)),
+    if basis is None:
+        raw_record = _merge_event_records(selected_records)
+    else:
+        raw_record = _merge_event_records(
+            (basis.raw_record, *selected_records)
+        )
+    schema = None
+    if (
+        cached is not None
+        and cached.latest - cached.start == primary_index - start
+    ):
+        # The indexed schema depends on nothing but the retained COUNT
+        # (its indices are always the contiguous relative range ending at
+        # zero), so an unchanged count reuses the object -- and with it
+        # every fingerprint and equality answer cached downstream.
+        schema = cached.snapshot.block.schema
+    return _IndexedMaterialization(
+        signal_name,
+        generation,
+        sequence,
+        next(iter(events.values()))[1].block.schema,
+        schema,
+        tuple(selected_events),
+        start,
+        primary_index,
+        basis,
+        _freeze_run_record(raw_record),
+        raw_record,
     )
 
 
@@ -2211,9 +2351,10 @@ class SignalDataPlane:
                     sequence=sequence,
                     value=value,
                 )
-                if isinstance(indexed_result[0], OwnedSnapshot):
+                if not isinstance(indexed_result, _IndexedMaterialization):
                     return indexed_result
-                indexed_input, materialized_record = indexed_result
+                indexed_input = indexed_result
+                materialized_record = indexed_result.record
             elif state.exact_outputs is None or name not in state.exact_outputs:
                 return value.snapshot, value.event_record
             else:
@@ -2242,7 +2383,7 @@ class SignalDataPlane:
                     )
                 )
         snapshot = (
-            _materialize_indexed_dataset(*indexed_input)
+            _materialize_indexed_dataset(indexed_input)
             if indexed_input is not None
             else self._materialize_dataset(name, sequence, *finite_input)
         )
@@ -2251,20 +2392,24 @@ class SignalDataPlane:
                 if indexed_input is not None:
                     history = state.indexed_history.get(name)
                     if history is not None:
-                        events, first_index, capacity, current = history
-                        if current is None or current[0] <= sequence:
+                        current = history.materialized
+                        # Keep one basis per signal, never a list of them.
+                        # A later materialization must not be displaced by
+                        # an older request that happened to finish
+                        # afterwards.  A replacement committed since this
+                        # build does not invalidate the STORE -- the
+                        # basis honestly describes sequence; replaced_at
+                        # fences its reuse.
+                        if current is None or current.sequence <= sequence:
                             assert materialized_record is not None
-                            current = (
+                            history.materialized = _MaterializedIndexed(
                                 sequence,
                                 snapshot,
                                 materialized_record,
+                                indexed_input.raw_record,
+                                indexed_input.start,
+                                indexed_input.latest,
                             )
-                        state.indexed_history[name] = (
-                            events,
-                            first_index,
-                            capacity,
-                            current,
-                        )
                 else:
                     cached = state.materialized.get(name)
                     # Keep one immutable prefix per signal, never a list of all
@@ -2360,9 +2505,20 @@ class SignalDataPlane:
                         )
             else:
                 producer = state.publication_stream
+                # STOP ENDS PRODUCTION, NEVER THE DATA.  The last monitor
+                # publication is the picture still on every panel that
+                # views this signal, and an operator draws ROIs and arms
+                # fits on a stopped run exactly as on a live one -- the
+                # bridge's terminal route exists for that.  Retention was
+                # once a per-origin opt-in flag, so the policy lived in N
+                # node declarations and the origins that forgot it (the
+                # camera, the calibration preview) had their whole derived
+                # chain answer "this run is no longer held" the moment a
+                # measurement stopped.  The plane is the one owner of
+                # retention; the next begin_generation replaces the state,
+                # so the cost is bounded at one publication per signal.
                 retain_latest_monitor = bool(state.publication.signals) and all(
                     isinstance(value.coverage, MonitorCoverage)
-                    and value.coverage.retain_at_terminal
                     for value in state.publication.signals.values()
                 )
                 if retain_latest_monitor:
@@ -2570,7 +2726,7 @@ class SignalDataPlane:
             primary_index = value.primary_index
             return (
                 primary_index is not None
-                and primary_index >= history[1]
+                and primary_index >= history.first_index
             )
 
     def latest_publication(self, signal_name: str) -> SignalPublication | None:

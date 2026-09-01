@@ -131,6 +131,11 @@ class _Sample:
         total = float(np.dot(self._counts, self._levels()))
         return total / float(self._size)
 
+    def total(self) -> float:
+        if self._counts is None:
+            return float(np.sum(self._values, dtype=np.float64))
+        return float(np.dot(self._counts, self._levels()))
+
     def minimum(self) -> float:
         if self._counts is None:
             return float(np.min(self._values))
@@ -178,6 +183,10 @@ def _mean(sample: _Sample) -> float:
     return sample.mean()
 
 
+def _sum(sample: _Sample) -> float:
+    return sample.total()
+
+
 def _minimum(sample: _Sample) -> float:
     return sample.minimum()
 
@@ -199,6 +208,10 @@ def _top_10_mean(sample: _Sample) -> float:
 #: two spellings of one statistic that drift apart are two statistics.
 def _mean_rows(rows: np.ndarray) -> np.ndarray:
     return rows.mean(axis=-1, dtype=np.float64)
+
+
+def _sum_rows(rows: np.ndarray) -> np.ndarray:
+    return rows.sum(axis=-1, dtype=np.float64)
 
 
 def _minimum_rows(rows: np.ndarray) -> np.ndarray:
@@ -232,6 +245,7 @@ def _top_10_mean_rows(rows: np.ndarray) -> np.ndarray:
 
 _ROW_REDUCERS: Mapping[Callable[..., float], Callable[[np.ndarray], np.ndarray]] = {
     _mean: _mean_rows,
+    _sum: _sum_rows,
     _minimum: _minimum_rows,
     _maximum: _maximum_rows,
     _bottom_10_mean: _bottom_10_mean_rows,
@@ -249,6 +263,11 @@ _SELECTED_FRAME = ("roi_frame", "ROI frame", None)
 _AREA_SELECTION_OUTPUTS = (
     _SELECTED_FRAME,
     ("roi_mean", "Mean", _mean),
+    # The photons inside the box.  Summed over the VALID pixels, under the
+    # same rule every other scalar here follows: the mean pools what is
+    # countable, and so does the sum -- a reading whose meaning drifts
+    # with validity, exactly like the mean's, never a silent zero.
+    ("roi_sum", "Sum", _sum),
     ("roi_min", "Min", _minimum),
     ("roi_max", "Max", _maximum),
     ("roi_min_10_mean", "Min 10 mean", _bottom_10_mean),
@@ -1291,10 +1310,14 @@ class SelectionBridge:
         if not output_names:
             return
         if not self._source_retained(publication):
-            self._record_error(
-                RuntimeError(
-                    "this run is no longer held, so its fit derives nothing"
-                )
+            # A real answer, not a failure: the run this fit solved against
+            # has been let go -- a Stop's ordinary lifecycle, reached here
+            # because the last solve is asynchronous and can land after the
+            # plane withdrew the run.  A LEVEL, so a restarted run's first
+            # successful fit clears it; recorded as an ERROR it latched
+            # forever and its red report degraded the whole panel surface.
+            self._record_condition(
+                "this run is no longer held, so its fit derives nothing"
             )
             return
         outputs = self._materialize_fit_outputs(
@@ -1335,6 +1358,7 @@ class SelectionBridge:
                 # the slot AT CLAIM TIME, not whichever was read before this
                 # event materialized.
                 self._publish_terminal("fit", outputs, publication)
+                self._derivation_succeeded()
                 return
             with self._lock:
                 processor = self._fit_processor
@@ -1393,6 +1417,7 @@ class SelectionBridge:
                     self._withdraw_processor(processor)
                     return
                 raise
+            self._derivation_succeeded()
 
     def _retire_selection_outputs(self) -> None:
         """Take down what the PREVIOUS region derived.
@@ -1446,12 +1471,12 @@ class SelectionBridge:
                 # data the plane has let go.  Asked about the PUBLICATION,
                 # so a Stop and a Start -- which mint a new generation under
                 # the same name -- reach this answer instead of raising out
-                # of the materialization below.
-                self._record_error(
-                    RuntimeError(
-                        "this run is no longer held, so a selection drawn "
-                        "on it derives nothing"
-                    )
+                # of the materialization below.  A LEVEL, like every other
+                # cannot-answer-right-now: the next region that derives
+                # clears it.
+                self._record_condition(
+                    "this run is no longer held, so a selection drawn "
+                    "on it derives nothing"
                 )
                 self._forget_selection()
                 self._retire_selection_outputs()
@@ -1483,7 +1508,7 @@ class SelectionBridge:
                 self._forget_selection()
                 self._retire_selection_outputs()
                 return
-        self._selection_succeeded()
+        self._derivation_succeeded()
         # From here the plane's output NAMES are claimed, and only afterwards
         # can this commit learn whether its claim is still wanted -- the same
         # sequence the fit route runs, and the same reason it is serialized:
@@ -1932,15 +1957,17 @@ class SelectionBridge:
         with self._lock:
             self._last_condition = str(condition)
 
-    def _selection_succeeded(self) -> None:
-        """A commit that worked ends whatever the last one could not do.
+    def _derivation_succeeded(self) -> None:
+        """A derivation that worked ends whatever the last one could not do.
 
-        THE CONDITION ONLY.  ``_last_error`` is shared with the fit route,
-        which reports its own refusals through it, so a selection has no
-        business clearing one -- that is why the condition is a separate
-        level in the first place.  What made an ROI a shade too small end
-        the panel for the session was routing it into a channel that has no
-        clear at all; it now has its own, and this is it.
+        THE CONDITION ONLY, and for BOTH routes: the level says what this
+        bridge cannot answer right now, and a selection or fit that just
+        published is the proof it can answer again.  ``_last_error`` stays
+        untouched -- it reports defects, which do not heal by a later
+        success.  What made an ROI a shade too small end the panel for the
+        session was routing it into that clear-less channel; the same
+        misrouting made a Stop's perfectly ordinary run-no-longer-held
+        answer wear an error dot until the console closed.
         """
 
         with self._lock:

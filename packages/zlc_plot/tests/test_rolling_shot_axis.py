@@ -181,7 +181,7 @@ def test_primary_index_history_keeps_source_order_holes_and_site_groups() -> Non
         revision=9,
         validity=indexed_valid,
     )
-    history = DataView(snapshot).rolling_history_samples(
+    history = DataView(snapshot).rolling_history(
         group=AxisRef.data("site"), aggregation=Reduction.MEAN
     )
     assert tuple(sample.source_index for sample in history) == (-2, 0)
@@ -203,7 +203,7 @@ def test_primary_index_history_keeps_source_order_holes_and_site_groups() -> Non
     np.testing.assert_array_equal(history[1].counts, [2] * 3)
     np.testing.assert_allclose(history[1].sem, [1.5] * 3)
 
-    repeat = DataView(_snapshot(0, repeats=3)).rolling_history_samples()
+    repeat = DataView(_snapshot(0, repeats=3)).rolling_history()
     np.testing.assert_allclose(
         [sample.values[0] for sample in repeat], [1.5, 5.5, 9.5]
     )

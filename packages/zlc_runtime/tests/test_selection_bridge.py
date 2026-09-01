@@ -366,6 +366,7 @@ def test_image_area_catalog_statistics_and_publication_choice_share_one_owner() 
     assert derived == {
         "roi_frame",
         "roi_mean",
+        "roi_sum",
         "roi_min",
         "roi_max",
         "roi_min_10_mean",
@@ -390,6 +391,7 @@ def test_image_area_catalog_statistics_and_publication_choice_share_one_owner() 
         front = plane.freeze()
         expected = {
             "roi_mean": 5.5,
+            "roi_sum": 66.0,
             "roi_min": 0.0,
             "roi_max": 11.0,
             "roi_min_10_mean": 4.5,
@@ -2538,7 +2540,11 @@ def test_a_box_drawn_on_a_retired_run_answers_instead_of_raising() -> None:
     arrived as ``LookupError`` -- a class the console's interaction drain
     did not name -- and left a Qt slot, which is where PyQt ends the
     process.  It is not a defect at all: it is what "this run is gone"
-    looks like from inside a derivation, and it is reported.
+    looks like from inside a derivation -- so it is reported as a
+    CONDITION, the self-clearing what-cannot-be-answered-now level,
+    never as an error: the error channel has no clear, and this text
+    in it wore a red dot (and degraded the panel's Setting surface)
+    until the console closed.
     """
 
     schema = _image_schema()
@@ -2572,8 +2578,8 @@ def test_a_box_drawn_on_a_retired_run_answers_instead_of_raising() -> None:
             ),
             source_publication=publication,
         )
-        assert bridge.last_error is not None
-        assert "no longer held" in str(bridge.last_error)
+        assert bridge.last_error is None
+        assert "no longer held" in bridge.last_condition
         assert plane.freeze().value("@logic/box/roi_frame") is None
     finally:
         bridge.close()
@@ -2798,3 +2804,51 @@ def test_the_stacked_reduction_gives_the_per_cell_numbers() -> None:
                 f"{label}: {name} disagrees between the stacked and per-cell paths"
             )
             assert bool(np.all(answered[name][1]))
+
+
+def test_a_selection_on_a_stopped_run_still_derives() -> None:
+    """Stop ends production, never the data.
+
+    The picture is still on the panel after the operator presses Stop,
+    and drawing an ROI on it is the most ordinary thing an operator does
+    next.  The camera's monitor publication used to be WITHDRAWN at the
+    stop's seal (terminal retention was a per-origin opt-in flag the
+    camera never set), so the bridge answered "this run is no longer
+    held" for every derivation on a stopped panel.  The plane now owns
+    the one retention policy -- a sealed monitor publication is retained
+    until the next generation -- and the bridge's terminal route derives
+    from it exactly as from a finished exact run.
+    """
+
+    schema = _image_schema()
+    values = np.arange(12, dtype=float).reshape(1, 1, 4, 3)
+    plane, source, _slot, _state, initial = _source_setup(schema, values)
+    plane.set_front_signals({"camera/frame", "@logic/box/roi_frame"})
+    events = _Events()
+    bridge = SelectionBridge(plane, "camera/frame", events, bridge_id="box")
+    bridge.start()
+    try:
+        publication = initial.publication("camera/frame")
+        assert publication is not None
+        assert plane.seal_committed(source, cut_short=True)
+        assert not plane.is_generation_live("camera/frame")
+        assert plane.retains("camera/frame", publication)
+
+        bridge.commit_selection(
+            SelectionState(
+                "image",
+                "area",
+                (
+                    SelectionRange("x", 0.0, 1.0, domain="data"),
+                    SelectionRange("y", 20.0, 30.0, domain="data"),
+                ),
+                revision=1,
+            ),
+            source_publication=publication,
+        )
+        assert plane.freeze().value("@logic/box/roi_frame") is not None
+        assert bridge.last_error is None
+        assert bridge.last_condition == ""
+    finally:
+        bridge.close()
+        plane.close()

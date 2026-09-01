@@ -460,7 +460,9 @@ def test_large_ungrouped_rolling_reuses_its_exact_valid_pool(
         view = DataView(snapshot)
         tracemalloc.start()
         tracemalloc.reset_peak()
-        sample = view.rolling_sample(group=None, aggregation=reduction)
+        sample = view.rolling_history(
+            group=None, aggregation=reduction
+        )[0]
         pooled = view.pooled_values()
         again = view.pooled_values()
         _current, peak = tracemalloc.get_traced_memory()

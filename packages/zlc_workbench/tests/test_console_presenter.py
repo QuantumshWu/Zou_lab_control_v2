@@ -1446,18 +1446,20 @@ def test_a_wedged_display_state_cannot_lock_the_editor_that_repairs_it(
         "a dead plot surface closed the editor whose form repairs it"
     )
     assert binding.editor_open is True
-    # The mount may refuse synchronously (no host) or die on its worker (a
-    # host whose startup_failure is the reason); either way the editor is
-    # open and surface-less in substance.
-    _settle_panel_hosts(
-        presenter,
-        lambda: binding.editor_host is None
-        or binding.editor_host.startup_failure is not None,
-    )
-    assert any(
-        "must be smaller" in text
-        for severity, text in presenter.view.status
-        if severity == "error"
+    # ``editor_host is None`` is also the ordinary state BEFORE the async
+    # mount worker starts, so it cannot prove a refusal has settled.  Wait for
+    # the owner-visible refusal itself; only then inspect whether the mount
+    # refused synchronously or left a host carrying startup_failure.
+    def mount_refused() -> bool:
+        return any(
+            "must be smaller" in text
+            for severity, text in presenter.view.status
+            if severity == "error"
+        )
+
+    _settle_panel_hosts(presenter, mount_refused)
+    assert binding.editor_host is None or (
+        binding.editor_host.startup_failure is not None
     )
 
     assert presenter.update_panel_state(
@@ -1611,7 +1613,7 @@ def test_panel_publisher_edit_owns_stable_output_selection(
     assert projection["source_required"] is False
     assert "source_signal" not in projection
     assert set(projection["form_spec"].keys) == {
-        "roi_frame", "roi_mean", "roi_min", "roi_max",
+        "roi_frame", "roi_mean", "roi_sum", "roi_min", "roi_max",
         "roi_min_10_mean", "roi_max_10_mean",
     }
     assert all(field.kind == "bool" for field in projection["form_spec"].fields)
@@ -5737,11 +5739,22 @@ def test_refresh_adopts_the_card_when_the_derived_signal_retired(
         "the card must move ahead of Edit for this to mean anything"
     )
 
-    # The producing run ends: the derived signal leaves the plane.
+    # The producing run ends.  STOP ENDS PRODUCTION, NEVER THE DATA: the
+    # derived publication is retained -- the operator keeps deriving from
+    # a stopped panel -- so ending the run is no longer what retires it.
     assert presenter.stop_logic(camera_id)
     for _beat in range(40):
         presenter.beat()
         presenter.poll_logic()
+        time.sleep(0.005)
+    assert session.signal_plane.latest_publication(roi_signal) is not None
+
+    # What genuinely retires the derived signal is its OWNER going away:
+    # removing the source panel closes its bridge, which withdraws the
+    # derived route from the plane.
+    presenter.remove_panel(image.panel_id)
+    for _beat in range(10):
+        presenter.beat()
         time.sleep(0.005)
     assert session.signal_plane.latest_publication(roi_signal) is None
 
@@ -6007,3 +6020,114 @@ def test_a_refused_parameter_expression_is_said_where_messages_are_said(
             for identifier, text, error in marks
         ),
     )
+
+
+def _setting_field_sets(surface) -> dict:
+    """The form's field IDENTITY, section by section -- what may not move."""
+
+    return {
+        section: tuple(str(row["key"]) for row in surface[section])
+        for section in ("semantic", "display", "fit")
+    }
+
+
+def test_a_reported_refusal_never_edits_the_setting_field_set(
+    presenter, session
+) -> None:
+    """THE FIELD SET IS A DECLARATION; a refusal may only annotate it.
+
+    The tenth-odd instance of one disease: some transient non-error --
+    here the bridge's answers after a run stops -- reached
+    ``_report_panel_errors``, whose degrade swapped the panel onto the
+    schema projection, whose fit section is empty by design.  With the
+    run stopped there is no next present to write the description back,
+    so the fit controls were simply GONE from the Setting form.  The law
+    was already written (ARCHITECTURE_DESIGN.md:101/103); this is the
+    mechanical form of it: whatever a bridge reports, the key set of
+    every Setting section stays exactly what the accepted description
+    declared.
+    """
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(
+        node.signal_key("frames"), snapshot, kind="image"
+    )
+    _settle_panel_hosts(
+        presenter,
+        lambda: bool(binding.parameter_surface.get("fit"))
+        and binding.accepted_surface is not None,
+    )
+    declared = _setting_field_sets(binding.parameter_surface)
+    assert declared["fit"], "the fixture must describe a fit vocabulary"
+
+    class _ErroredBridge:
+        last_error = RuntimeError("a genuine bridge defect")
+        last_condition = ""
+
+        def close(self) -> None:
+            pass
+
+    binding.bridge = _ErroredBridge()
+    presenter.beat()
+    assert _setting_field_sets(binding.parameter_surface) == declared
+
+    class _WaitingBridge:
+        last_error = None
+        last_condition = (
+            "this run is no longer held, so its fit derives nothing"
+        )
+
+        def close(self) -> None:
+            pass
+
+    binding.bridge = _WaitingBridge()
+    presenter.view.status.clear()
+    presenter.beat()
+    assert _setting_field_sets(binding.parameter_surface) == declared
+    # A condition is the panel's own state: said verbatim on the card --
+    # it is not about the operator's settings -- and never at error
+    # severity on the board line.
+    status, _marked = presenter.view.cards[0].status
+    assert status == _WaitingBridge.last_condition
+    assert not [item for item in presenter.view.status if item[0] == "error"]
+
+    # The level clears itself: a bridge that can answer again ends the
+    # condition, and the card follows.
+    class _HealthyBridge:
+        last_error = None
+        last_condition = ""
+
+        def close(self) -> None:
+            pass
+
+    binding.bridge = _HealthyBridge()
+    presenter.beat()
+    assert presenter.view.cards[0].status == ("", False)
+    assert _setting_field_sets(binding.parameter_surface) == declared
+
+
+def test_an_unbound_refused_value_keeps_the_kind_vocabulary(
+    presenter,
+) -> None:
+    """The unbound twin of the schema-projection law.
+
+    Which controls a panel has is a fact about its KIND; what they hold
+    is the authored bag.  The schema-projected path already answers a
+    refused value with the full vocabulary plus a reason; this pins the
+    unbound path to the same law -- it used to return an empty control
+    set, a different FIELD SET, sending the form down its replacement
+    path.
+    """
+
+    binding = presenter.add_selected_panel("histogram")
+    assert binding is not None
+    clean = _setting_field_sets(binding.parameter_surface)
+    assert clean["display"], "a histogram declares display controls unbound"
+
+    poisoned = replace(
+        binding.state,
+        display={**binding.state.display, "bin_count": "not-a-count"},
+    )
+    surface = presenter._unbound_panel_parameters(poisoned)
+    assert _setting_field_sets(surface)["display"] == clean["display"]
+    assert surface["display_unavailable"]

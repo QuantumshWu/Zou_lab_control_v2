@@ -115,7 +115,10 @@ def test_repeat_zero_monitor_replaces_latest_only_with_a_complete_camera_cycle()
         terminal = monitor.close()
         assert terminal.source_stopped and terminal.joined
         assert measurement.camera.capture_state() is False
-        assert plane.latest_publication(signal_key) is None
+        # The close ends the run; the sealed monitor publication is
+        # retained for the panels (and derivations) that still show it.
+        assert plane.latest_publication(signal_key) is not None
+        assert not plane.is_generation_live(signal_key)
     finally:
         plane.close()
         installation.close()

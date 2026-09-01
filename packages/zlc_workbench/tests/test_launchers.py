@@ -40,7 +40,9 @@ def _authored_batch_files() -> list[pathlib.Path]:
 def test_there_are_launchers_to_check() -> None:
     # Without this the rule below passes loudest when it is checking nothing --
     # a renamed folder or a moved test file would silently retire the guard.
-    assert len(_authored_batch_files()) >= 10
+    # Nine since the in-process serving round deleted the pulse and SLM
+    # server launchers (the console serves both itself).
+    assert len(_authored_batch_files()) >= 9
 
 
 @pytest.mark.parametrize(

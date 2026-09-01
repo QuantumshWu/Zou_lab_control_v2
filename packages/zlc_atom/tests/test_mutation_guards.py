@@ -37,7 +37,6 @@ def _calibrate(data: dict[str, np.ndarray]):
         data["input_short_frames"],
         frame_contract=FrameContract((34, 40), exposure_seconds=0.005),
         box_half_width=1,
-        box_reducer="mean",
     )
 
 

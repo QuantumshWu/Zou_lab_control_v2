@@ -217,7 +217,7 @@ def test_a_threshold_is_the_weighted_crossing_of_the_unlabelled_fit() -> None:
                 labels_occupied=labels,
                 labels_valid=np.ones(samples.shape, dtype=bool),
                 threshold_method="gaussian",
-                model_parameters={"integration_half_width": 0, "reducer": "mean"},
+                model_parameters={"integration_half_width": 0},
             )
         )
     for field in (
@@ -249,7 +249,7 @@ def test_a_threshold_is_the_weighted_crossing_of_the_unlabelled_fit() -> None:
         labels_occupied=np.asarray([[False], [True]]),
         labels_valid=np.ones((2, 1), dtype=bool),
         threshold_method="gaussian",
-        model_parameters={"integration_half_width": 0, "reducer": "mean"},
+        model_parameters={"integration_half_width": 0},
     )
     np.testing.assert_allclose(fallback_model.thresholds, [5.0])
     np.testing.assert_array_equal(fallback_report["threshold_fallback"], [True])
@@ -262,12 +262,16 @@ def test_a_threshold_is_the_weighted_crossing_of_the_unlabelled_fit() -> None:
 
 
 def test_a_psf_kernel_is_the_spot_it_was_measured_from() -> None:
-    """Normalised, peaked on the site, and concentrated where the light is.
+    """Amplitude-scaled, peaked on the site, concentrated where the light is.
 
     Not non-negative: the kernel is a MEASURED difference image, so its wings
     carry the noise of the shots it was measured from, and a pixel where the
     atom happened to subtract a little is worth what it is worth.  What must
-    be true is that the weight is where the atom is.
+    be true is that the weight is where the atom is -- and that the filter
+    answers in the site's own total counts: applied to its own unit-total
+    shape it must report exactly 1, so sum(w * p) with p = w / sum(w) is 1
+    (equivalently w = p / sum(p^2), the least-squares amplitude of the
+    measured pattern; a flat pattern degenerates to the box sum).
     """
 
     result, _truth = _calibration()
@@ -276,15 +280,18 @@ def test_a_psf_kernel_is_the_spot_it_was_measured_from() -> None:
 
     for kernels in (np.asarray(per_site.psf_weights), np.asarray(uniform.psf_weights)):
         assert kernels.ndim == 3
-        np.testing.assert_allclose(kernels.sum(axis=(1, 2)), 1.0, atol=1e-9)
+        totals = kernels.sum(axis=(1, 2))
+        powers = np.square(kernels).sum(axis=(1, 2))
+        np.testing.assert_allclose(powers / totals, 1.0, atol=1e-9)
         for kernel in kernels:
             peak = np.unravel_index(int(np.argmax(kernel)), kernel.shape)
             centre = (kernel.shape[0] // 2, kernel.shape[1] // 2)
             assert abs(peak[0] - centre[0]) <= 1 and abs(peak[1] - centre[1]) <= 1
-            core = kernel[
+            shape = kernel / float(kernel.sum())
+            core = shape[
                 centre[0] - 1 : centre[0] + 2, centre[1] - 1 : centre[1] + 2
             ]
-            assert float(core.sum()) > 0.5, "most of the weight sits on the spot"
+            assert float(core.sum()) > 0.5, "most of the light sits on the spot"
             edge = float(np.max(np.abs(kernel[0]))), float(np.max(np.abs(kernel[-1])))
             assert max(edge) < float(kernel[centre]) / 5.0, "the wings are wings"
 

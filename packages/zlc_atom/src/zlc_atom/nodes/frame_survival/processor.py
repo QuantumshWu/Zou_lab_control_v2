@@ -256,7 +256,6 @@ class FrameSurvivalProcessor:
             coverage = MonitorCoverage(
                 min(cycles, monitor.written_cells // frames),
                 cycles,
-                retain_at_terminal=monitor.retain_at_terminal,
             )
             origin = None
         return {

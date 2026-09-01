@@ -45,7 +45,6 @@ def _calibration_request() -> CalibrationRequest:
         default_model_kind=ReadoutModelKind.BOX,
         threshold_method="gaussian",
         box_half_width=1,
-        box_reducer="mean",
         psf_half_width=3,
         psf_padding=3,
         detection_spot_sigma=1.0,
