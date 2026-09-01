@@ -650,6 +650,14 @@ def make_host(
         kind=kind,
         dataset_output_declarations=tuple(descriptor.outputs),
         input_signal=selected_source,
+        input_name=(
+            inputs[0].name if has_input and kind == "processor" else None
+        ),
+        input_siblings=(
+            inputs[0].sibling_outputs
+            if has_input and kind == "processor"
+            else ()
+        ),
         input_delivery=(
             str(inputs[0].delivery) if has_input else None
         ),
