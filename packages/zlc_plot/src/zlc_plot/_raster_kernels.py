@@ -37,11 +37,13 @@ from . import _kernel_cache
 _kernel_cache.install()
 
 try:  # pragma: no cover - absence is exercised by the dispatch fallback
-    from numba import njit, prange
+    from numba import config, njit, prange, set_num_threads
 
     HAVE_NUMBA = True
 except Exception:  # pragma: no cover
     HAVE_NUMBA = False
+    config = None
+    set_num_threads = None
 
     def njit(*args, **kwargs):  # type: ignore[misc]
         def wrap(fn):
@@ -65,6 +67,18 @@ def engaged() -> bool:
     if ENGINE == "numba":
         return True
     return HAVE_NUMBA
+
+
+def configure_worker_threads() -> int:
+    """Mask one ZLC worker's native team without shrinking the process pool."""
+
+    if not HAVE_NUMBA:
+        return 1
+    maximum = int(config.NUMBA_NUM_THREADS)
+    requested = int(os.environ.get("ZLC_NUMBA_WORKER_THREADS", maximum))
+    selected = max(1, min(requested, maximum))
+    set_num_threads(selected)
+    return selected
 
 
 def readable(array: Any) -> Any:
