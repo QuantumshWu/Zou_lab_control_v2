@@ -29,6 +29,8 @@ PARAMETERS = {
     "damped_sine": (1.2, 0.1, 1.4, 3.0, 0.2),
     "exponential_decay": (2.2, 0.1, 2.5),
     "radial_gaussian_center": (3.0, 0.2, 0.8, 0.4, -0.3),
+    "histogram_poisson_gaussian": (2.0, 1.5, 0.6),
+    "bimodal_poisson_gaussian": (0.8, 3.2, 1.2, 0.5, 0.9, 0.7),
 }
 
 _ANCHOR_PATH = Path(__file__).with_name("fixtures") / "fit_anchors.json"
@@ -73,8 +75,18 @@ _BUILTIN_MODEL_IDS = (
     "exponential_decay",
     "anisotropic_gaussian_center",
     "radial_gaussian_center",
+    "histogram_poisson_gaussian",
+    "bimodal_poisson_gaussian",
 )
-_HISTOGRAM_MODELS = frozenset(("histogram_gaussian", "bimodal_gaussian"))
+_HISTOGRAM_MODELS = frozenset((
+    "histogram_gaussian",
+    "bimodal_gaussian",
+    "histogram_poisson_gaussian",
+    "bimodal_poisson_gaussian",
+))
+_POISSON_MODELS = frozenset(
+    ("histogram_poisson_gaussian", "bimodal_poisson_gaussian")
+)
 _BASE_PARAMETERS = {
     "lorentzian": (-0.4, 1.1, 2.2, 0.25),
     "gaussian_offset": (2.0, 0.2, 0.9, -0.3),
@@ -85,10 +97,24 @@ _BASE_PARAMETERS = {
     "exponential_decay": (1.6, 0.2, 3.0),
     "anisotropic_gaussian_center": (3.0, 0.2, 0.9, 0.6, 0.35, -0.25),
     "radial_gaussian_center": (3.0, 0.2, 0.8, 0.35, -0.25),
+    # Amplitudes ten times the Gaussian models': here A multiplies the unit
+    # lattice shape, whose peak is sigma / sqrt(rate + sigma^2) ~ 0.12, so
+    # these put ~70 counts in the tallest bin like the Gaussian rows do.
+    "histogram_poisson_gaussian": (900.0, 4.0, 0.3),
+    "bimodal_poisson_gaussian": (1.0, 6.0, 600.0, 0.3, 450.0, 0.35),
 }
 
 
 def _coordinates(model_id: str) -> tuple[np.ndarray, ...]:
+    if model_id in _POISSON_MODELS:
+        # Photon counts on the integer lattice at a quarter-photon bin with a
+        # 0.3-photon read noise: the comb is visible (its contrast is
+        # exp(-2 pi^2 sigma^2), 17% here and 0.1% at sigma 0.58), so the
+        # width is a resolved quantity, the optimum is sharp and two solvers
+        # land on the same point.  At twenty photons the width would be a 3%
+        # share of the variance -- physically unidentifiable, and a flat
+        # valley two solvers stop in differently.
+        return (np.linspace(-2.0, 16.0, 73),)
     if model_id == "symmetric_lorentzian_doublet":
         return (np.linspace(-6.0, 6.0, 128),)
     if model_id == "damped_sine":
@@ -132,6 +158,12 @@ def _cell_parameters(model_id: str, cell: int) -> np.ndarray:
         )
     elif model_id == "exponential_decay":
         parameters[[0, 2]] += (0.2 * position, 0.5 * position)
+    elif model_id == "histogram_poisson_gaussian":
+        parameters[[0, 1, 2]] += (120.0 * position, 0.8 * position, 0.03 * position)
+    elif model_id == "bimodal_poisson_gaussian":
+        parameters += np.asarray(
+            (0.2, 0.8, 80.0, 0.02, -60.0, -0.02)
+        ) * position
     elif model_id == "anisotropic_gaussian_center":
         parameters[[0, 2, 3, 4, 5]] += (
             0.3 * position,

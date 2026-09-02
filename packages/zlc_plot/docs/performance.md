@@ -683,3 +683,59 @@ Two measurement lessons worth keeping: kernel inputs captured by
 reference belong to a later frame (the renderer reuses its geometry
 buffers), so a golden capture copies at capture time; and a same-source
 comparison is only a comparison when both sides ask for the same picture.
+
+## Poisson-Gaussian histogram models (2026-09-02)
+
+Two histogram models joined the catalogue: `histogram_poisson_gaussian` and
+`bimodal_poisson_gaussian`, the exact convolution of a Poisson photon count on
+the integer lattice with Gaussian read noise (parameters `A, lambda, sigma`
+per state; the bimodal is parameterised by `lambda_L` and the splitting
+`delta`, its headline).  The lattice sum has one implementation, the compiled
+kernel: one Poisson table per objective evaluation (exact at the mode, walked
+outward), three exponentials per bin, a five-multiply recursion per lattice
+term, and the sum restricted to the intersection of the +-8 sigma Gaussian
+window with the rate's own window (`rate - 10 sqrt(rate) - 10` to
+`rate + 12 sqrt(rate) + 20`, outside which a term is under e^-50 of the
+mode).  The SciPy path and the overlays call the same kernel; the frozen
+anchors hold it to independent arithmetic.  Seeds come from the histogram's
+weighted median and quartile range, not its moments: a hot-pixel spike far
+from the peak put the moment seed in a flat valley (rate on its zero bound
+under a ten-photon-wide bump).
+
+`python -m bench.plot_perf.run_fit_models --rounds 8`, `session.fit` wall
+on the sweep's own two-normal histogram (states at 8 +- 2 and 30 +- 4, so
+the read-noise widths here are two and four lattice steps -- wide for this
+model, whose regime is under one), median ms:
+
+| Model | Before this round | After |
+|---|---:|---:|
+| histogram_gaussian | 3.03 | 3.04 |
+| bimodal_gaussian | 3.82 | 3.50 |
+| histogram_poisson_gaussian | -- | 5.45 |
+| bimodal_poisson_gaussian | -- | 3.91 |
+
+The single Poisson-Gaussian row is a misfit by construction (one state
+asked to cover two, so its width runs to twelve lattice steps and the solver
+iterates longer); the bimodal row is the model on data shaped for it, 1.1x
+the Gaussian bimodal.  On a photon-count histogram (states at 0.7 and 6
+photons, read noise 0.45, 64 bins) the compiled solves are 0.7 / 1.0 ms for
+the Poisson-Gaussian single / bimodal against 0.6 / 0.7 ms for the Gaussian
+pair, and the compiled and SciPy optima agree to 3e-15.
+
+`python -m bench.plot_perf.run_mot_roi_chain --panel3 histogram --fit-model
+<model> --seconds 12` (new `--panel3 histogram`: forty source-index
+Histogram cells of the 40x500 MOT ROI, live bimodal fit per cell; pixel
+values, so the read-noise widths are tens of lattice steps -- the worst
+regime for the lattice sum):
+
+| panel3 facet-histogram-fit-40 | bimodal_gaussian | bimodal_poisson_gaussian |
+|---|---:|---:|
+| fit_total wall / cpu ms per call | 18.6 / 8.0 | 22.3 / 13.9 |
+| numeric_fit_batch wall / cpu | 13.7 / 3.7 | 13.0 / 4.3 |
+| four-panel critical path median | 94.4 ms | 97.2 ms |
+| all four panels | 7.7 fps | 7.6 fps |
+
+The first Poisson-Gaussian cut measured 259 ms `fit_total` here: not the
+solve (15 ms) but forty cells' overlays evaluated through a NumPy twin of
+the lattice sum over hundreds of terms per bin.  Deleting the twin and
+routing the evaluator through the compiled kernel is what the table shows.

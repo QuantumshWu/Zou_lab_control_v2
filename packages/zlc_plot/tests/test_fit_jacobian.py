@@ -10,6 +10,13 @@ from zlc_plot.fit import FitEngine, FitOptions, builtin_fit_models
 
 def _coordinates(model_id: str) -> tuple[np.ndarray, ...]:
     x = np.linspace(-1.3, 1.4, 41)
+    if model_id == "histogram_poisson_gaussian":
+        # Photon counts on the integer lattice, over the bins the state
+        # occupies: a bin the model puts nothing in, perturbed below zero,
+        # is a kink no finite difference can differentiate across.
+        return (np.linspace(-0.5, 6.5, 36),)
+    if model_id == "bimodal_poisson_gaussian":
+        return (np.linspace(-0.5, 10.5, 45),)
     if model_id in {"radial_gaussian_center", "anisotropic_gaussian_center"}:
         y = np.linspace(-1.1, 1.2, 37)
         xx, yy = np.meshgrid(x, y)
@@ -28,6 +35,8 @@ def _parameters(model_id: str) -> np.ndarray:
         "exponential_decay": np.array([1.2, 0.1, 1.4]),
         "anisotropic_gaussian_center": np.array([1.2, 0.1, 1.1, 0.8, 0.2, -0.1]),
         "radial_gaussian_center": np.array([1.2, 0.1, 1.1, 0.2, -0.1]),
+        "histogram_poisson_gaussian": np.array([1.2, 3.0, 0.6]),
+        "bimodal_poisson_gaussian": np.array([0.5, 5.0, 1.2, 0.5, 0.9, 0.6]),
     }[model_id].copy()
 
 

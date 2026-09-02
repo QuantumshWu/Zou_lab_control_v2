@@ -114,7 +114,7 @@ session.set_size("2x4")
 
 Panel的单行Fit表达式使用当前显示单位，参数名就是公式里印出来的符号（`FitModelSpec.symbols`）：exponential decay 画的是 $f(x)=A e^{-x/\tau}+B$，所以写 `A=2` 把参数精确固定并从优化自由度移除，`tau=guess(5)` 只替换初始猜测；省略参数即保持Auto。PanelState与Figure只保存canonical `fixed`/`initial` mappings。表达式无效时忽略这份optional override、继续同model自动fit并显示warning；fixed参数显示为`(fixed)`且没有估计误差。
 
-`session.fit_models` 与 `plot_host.fit_models()` 只返回当前 plot 语义和坐标单位都兼容的模型，并把该语义的默认模型排在第一位。Curve/Rolling 提供 Lorentzian、Gaussian with offset、symmetric Lorentzian doublet、damped sine 和 exponential decay；Histogram 提供 bimodal 与 single Gaussian；Image 仅在 x/y 坐标量纲兼容时提供 radial Gaussian center；PulseTimeline 不伪造可用的数值 fit。
+`session.fit_models` 与 `plot_host.fit_models()` 只返回当前 plot 语义和坐标单位都兼容的模型，并把该语义的默认模型排在第一位。Curve/Rolling 提供 Lorentzian、Gaussian with offset、symmetric Lorentzian doublet、damped sine 和 exponential decay；Histogram 提供 bimodal 与 single Gaussian，以及 single/bimodal Poisson-Gaussian（`histogram_poisson_gaussian`、`bimodal_poisson_gaussian`：光子计数在整数格点上服从泊松分布、相机读出叠加高斯噪声，模型是二者的精确卷积 $A\sum_k \frac{\lambda^k e^{-\lambda}}{k!}e^{-\frac{1}{2}((x-k)/\sigma)^2}$，x 轴必须是光电子单位；负值是读出噪声的正常结果而不是非法输入；每类参数为 A、λ、σ，bimodal 以 λ_L 与 δ=λ_R−λ_L 参数化，headline 为 δ 即 bright−dark contrast）；Image 仅在 x/y 坐标量纲兼容时提供 radial Gaussian center；PulseTimeline 不伪造可用的数值 fit。
 
 Live fit 的唯一自动触发源是宿主的通用 indexed-derived signal。只有真实Rolling/Histogram等history consumer取得window lease后，Runtime才从当时的current event开始记录；lease区间内每个Measurement primary index都在同一个普通Dataset中有value或invalid cell，之前的shot不回填。`display_interval`只控制Surface deadline。Host只保留一个active pair和一个latest完整输入，中间输入不排FIFO；现有Raster worker的active deadline超过1秒会loud发布invalid、取消该solve并继续latest。任何window/history按lease内source index连续，cadence skip与solver failure都显示为invalid/NaN，但只有后者是错误。主Panel的commit仍把`data@N + fit@N`原子画进同一front。
 

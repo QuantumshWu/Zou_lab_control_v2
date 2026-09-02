@@ -2,12 +2,14 @@
 
 The scenario is intentionally specific: CameraMeasurement's own FacetGrid
 preview, a 40x500 Area-derived ROI, a 40-shot Histogram history lease, a
-source-index FacetGrid of Image or Curve cells with live fits, and a Curve over
-source index grouped by the ROI's 40-sample spatial-y axis.
+source-index FacetGrid of Image, Curve or Histogram cells with live fits, and
+a Curve over source index grouped by the ROI's 40-sample spatial-y axis.
 
 Run from the repository root on the real display::
 
     python -m bench.plot_perf.run_mot_roi_chain --seconds 15
+    python -m bench.plot_perf.run_mot_roi_chain --panel3 histogram \
+        --fit-model bimodal_poisson_gaussian
 """
 from __future__ import annotations
 
@@ -405,17 +407,31 @@ def _window_revision_rate(
     return begin, finish
 
 
-def run(*, seconds: float, baseline_seconds: float, panel3: str) -> dict:
-    if panel3 not in {"image", "curve"}:
-        raise ValueError("panel3 must be 'image' or 'curve'")
-    panel3_label = (
-        "panel3 facet-fit-40"
-        if panel3 == "image"
-        else "panel3 facet-curve-fit-40"
-    )
-    fit_model = (
-        "anisotropic_gaussian_center" if panel3 == "image" else "gaussian_offset"
-    )
+#: The fit each panel3 cell kind is measured under when none is named: the
+#: default model of that cell's fit target.
+_PANEL3_FITS = {
+    "image": "anisotropic_gaussian_center",
+    "curve": "gaussian_offset",
+    "histogram": "bimodal_gaussian",
+}
+_PANEL3_LABELS = {
+    "image": "panel3 facet-fit-40",
+    "curve": "panel3 facet-curve-fit-40",
+    "histogram": "panel3 facet-histogram-fit-40",
+}
+
+
+def run(
+    *,
+    seconds: float,
+    baseline_seconds: float,
+    panel3: str,
+    fit_model: str | None = None,
+) -> dict:
+    if panel3 not in _PANEL3_FITS:
+        raise ValueError("panel3 must be 'image', 'curve' or 'histogram'")
+    panel3_label = _PANEL3_LABELS[panel3]
+    fit_model = fit_model or _PANEL3_FITS[panel3]
     labels = (
         "panel1 camera-grid",
         "panel2 histogram-40",
@@ -500,22 +516,22 @@ def run(*, seconds: float, baseline_seconds: float, panel3: str) -> dict:
             timeout=30.0,
         )
 
-        if panel3 == "curve":
+        if panel3 in {"curve", "histogram"}:
             grid = bench.presenter.add_selected_panel("facet_grid")
             bench.view.panel_state_changed.emit(
                 grid.panel_id,
-                {"cell_kind": "curve", "signal": roi_signal, "size": "2x2"},
+                {"cell_kind": panel3, "signal": roi_signal, "size": "2x2"},
             )
             bench._until(
                 lambda: (
-                    grid.state.cell_kind == "curve"
+                    grid.state.cell_kind == panel3
                     and grid.host is not None
                     and bench.surface(grid) is not None
                     and bench.surface(grid).presented_front is not None
                 ),
-                "Curve-cell FacetGrid",
+                f"{panel3.capitalize()}-cell FacetGrid",
             )
-            bench._name(grid, "facet_grid:curve")
+            bench._name(grid, f"facet_grid:{panel3}")
         else:
             grid = bench.add_panel_on(roi_signal, "facet_grid", size="2x2")
         bench._labels[grid.panel_id] = labels[2]
@@ -544,7 +560,7 @@ def run(*, seconds: float, baseline_seconds: float, panel3: str) -> dict:
         curve_roles = _assign_roles(
             bench,
             curve,
-            {"source index": "x", "spatial-y": "group"},
+            {"source index": "x", "spatial-x": "reduced", "spatial-y": "group"},
         )
 
         panels = (camera, histogram, grid, curve)
@@ -669,18 +685,28 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seconds", type=float, default=15.0)
     parser.add_argument("--baseline-seconds", type=float, default=6.0)
-    parser.add_argument("--panel3", choices=("image", "curve"), default="curve")
+    parser.add_argument(
+        "--panel3", choices=tuple(_PANEL3_FITS), default="curve"
+    )
+    parser.add_argument(
+        "--fit-model",
+        default="",
+        help="the fit model on panel3's forty cells; default is the cell "
+             "kind's own default model (see _PANEL3_FITS)",
+    )
     arguments = parser.parse_args()
+    fit_model = str(arguments.fit_model).strip() or None
     payload = run(
         seconds=max(3.0, float(arguments.seconds)),
         baseline_seconds=max(3.0, float(arguments.baseline_seconds)),
         panel3=str(arguments.panel3),
+        fit_model=fit_model,
     )
     _print(payload)
-    path = write_result(
-        payload,
-        f"console-mot-roi-four-panel-{arguments.panel3}",
-    )
+    label = f"console-mot-roi-four-panel-{arguments.panel3}"
+    if fit_model is not None and fit_model != _PANEL3_FITS[arguments.panel3]:
+        label += f"-{fit_model}"
+    path = write_result(payload, label)
     print(f"\nwrote {path}")
 
 

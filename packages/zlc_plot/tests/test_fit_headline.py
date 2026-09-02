@@ -14,6 +14,8 @@ def test_builtin_models_declare_a_parameter_headline() -> None:
         "gaussian_offset": "center",
         "histogram_gaussian": "center",
         "bimodal_gaussian": "center",
+        "histogram_poisson_gaussian": "rate",
+        "bimodal_poisson_gaussian": "rate_splitting",
         "symmetric_lorentzian_doublet": "center",
         "damped_sine": "decay_time",
         "exponential_decay": "decay_time",

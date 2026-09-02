@@ -2884,6 +2884,49 @@ def _value_jacobian_bimodal(coords: np.ndarray, parameters: np.ndarray):
 
 
 @njit(cache=True)
+def _value_jacobian_poisson(coords: np.ndarray, parameters: np.ndarray):
+    x = coords[0]
+    output = np.empty(x.size, dtype=np.float64)
+    jacobian = np.empty((x.size, 3), dtype=np.float64)
+    valid = np.ones(x.size, dtype=np.bool_)
+    table = np.empty(
+        _lattice_extent(coords, valid, parameters[1], parameters[2]), dtype=np.float64
+    )
+    _poisson_table(parameters[1], table)
+    floor, _ceiling = _poisson_rate_window(parameters[1])
+    for point in range(x.size):
+        output[point] = _point_poisson(
+            coords, point, parameters, jacobian[point], table, floor
+        )
+    return output, jacobian
+
+
+@njit(cache=True)
+def _value_jacobian_poisson_bimodal(coords: np.ndarray, parameters: np.ndarray):
+    x = coords[0]
+    output = np.empty(x.size, dtype=np.float64)
+    jacobian = np.empty((x.size, 6), dtype=np.float64)
+    valid = np.ones(x.size, dtype=np.bool_)
+    right_rate = parameters[0] + parameters[1]
+    left = np.empty(
+        _lattice_extent(coords, valid, parameters[0], parameters[3]), dtype=np.float64
+    )
+    right = np.empty(
+        _lattice_extent(coords, valid, right_rate, parameters[5]), dtype=np.float64
+    )
+    _poisson_table(parameters[0], left)
+    _poisson_table(right_rate, right)
+    left_floor, _l = _poisson_rate_window(parameters[0])
+    right_floor, _r = _poisson_rate_window(right_rate)
+    for point in range(x.size):
+        output[point] = _point_poisson_bimodal(
+            coords, point, parameters, jacobian[point],
+            left, left_floor, right, right_floor,
+        )
+    return output, jacobian
+
+
+@njit(cache=True)
 def _value_jacobian_doublet(coords: np.ndarray, parameters: np.ndarray):
     x = coords[0]
     output = np.empty(x.size, dtype=np.float64)
@@ -3064,6 +3107,153 @@ def _point_bimodal(coords, point, parameters, row):
     return left_amp * left_shape + right_amp * right_shape
 
 
+#: How many read-noise widths a Poisson-Gaussian lattice sum reaches from the
+#: bin: the dropped tail is under 2e-14 of the peak term, which keeps the
+#: model exact to the frozen anchors' 2e-12.
+POISSON_GAUSSIAN_WINDOW = 8.0
+#: ...and never reaches lattice terms the Poisson factor itself has left:
+#: below ``rate - 10 sqrt(rate) - 10`` and above ``rate + 12 sqrt(rate) + 20``
+#: the term is under e^-50 of the mode at every rate, so a wide read noise
+#: (a pixel-value histogram, a misfit) does not sum hundreds of zeros.
+POISSON_RATE_WINDOW_BELOW = 10.0
+POISSON_RATE_WINDOW_BELOW_MARGIN = 10.0
+POISSON_RATE_WINDOW_ABOVE = 12.0
+POISSON_RATE_WINDOW_ABOVE_MARGIN = 20.0
+TINY = float(np.finfo(np.float64).tiny)
+
+
+@njit(cache=True, inline="always")
+def _poisson_rate_window(rate):
+    root = math.sqrt(max(rate, 0.0))
+    lowest = int(math.floor(rate - POISSON_RATE_WINDOW_BELOW * root - POISSON_RATE_WINDOW_BELOW_MARGIN))
+    highest = int(math.ceil(rate + POISSON_RATE_WINDOW_ABOVE * root + POISSON_RATE_WINDOW_ABOVE_MARGIN))
+    return max(lowest, 0), highest
+
+
+@njit(cache=True, inline="always")
+def _lattice_extent(coords, valid, rate, sigma):
+    """How many lattice terms ``0..K`` the bins can reach: the largest bin
+    plus the window, and no further than the rate's own window.  At least
+    one term, so an empty cell still has a table."""
+
+    half = int(math.ceil(POISSON_GAUSSIAN_WINDOW * sigma))
+    largest = -math.inf
+    for point in range(coords.shape[1]):
+        if valid[point] and coords[0, point] > largest:
+            largest = coords[0, point]
+    if not math.isfinite(largest):
+        return 1
+    _lowest, highest = _poisson_rate_window(rate)
+    return max(min(int(np.rint(largest)) + half, highest) + 1, 1)
+
+
+@njit(cache=True, inline="always")
+def _poisson_table(rate, table):
+    """``table[k] = P(k | rate)`` for every lattice term the bins can reach.
+
+    Exact at the mode, walked outward on both sides by the ratio of
+    neighbouring terms -- each step is a multiply and the terms only shrink,
+    so nothing overflows and a far tail underflows to the zero it is.  Filled
+    once per objective evaluation; the per-bin lattice sums then only read it.
+    """
+
+    size = table.size
+    if rate <= 0.0:
+        for k in range(size):
+            table[k] = 0.0
+        table[0] = 1.0
+        return
+    mode = min(int(rate), size - 1)
+    centre = math.exp(mode * math.log(rate) - rate - math.lgamma(mode + 1.0))
+    table[mode] = centre
+    value = centre
+    for k in range(mode, size - 1):
+        value *= rate / (k + 1.0)
+        table[k + 1] = value
+    value = centre
+    for k in range(mode, 0, -1):
+        value *= k / rate
+        table[k - 1] = value
+
+
+@njit(cache=True, inline="always")
+def _poisson_lattice(x, sigma, table, k_floor):
+    """``sum_k P_k g_k``, ``sum_k P_k g_k k`` and ``sum_k P_k g_k (x-k)^2``
+    over the lattice window around one bin, ``P_k`` read from ``table``;
+    ``k_floor`` is the rate window's lower edge, its upper edge the table's.
+
+    Three exponentials per bin and none per lattice term: the Gaussian
+    factor walks the lattice as ``g(k+1) = g(k) exp((d_k - 1/2)/sigma^2)``,
+    whose own ratio is the constant ``exp(-1/sigma^2)``.  Per term that is
+    five multiplies and a table read, which keeps this model within a small
+    factor of the plain Gaussian at read-noise widths.  A width so small
+    that the running ratio would overflow falls back to the direct
+    exponential.
+    """
+
+    half = int(math.ceil(POISSON_GAUSSIAN_WINDOW * sigma))
+    centre = int(np.rint(x))
+    k_low = centre - half
+    if k_low < k_floor:
+        k_low = k_floor
+    k_high = centre + half
+    if k_high > table.size - 1:
+        k_high = table.size - 1
+    if k_high < k_low:
+        return 0.0, 0.0, 0.0
+    inverse = 1.0 / (sigma * sigma)
+    delta = x - k_low
+    direct = inverse * (half + 1.0) > 300.0
+    shape = math.exp(-0.5 * delta * delta * inverse)
+    ratio = math.exp((delta - 0.5) * inverse)
+    decay = math.exp(-inverse)
+    s0 = 0.0
+    s1 = 0.0
+    s2 = 0.0
+    for k in range(k_low, k_high + 1):
+        weight = table[k] * shape
+        s0 += weight
+        s1 += weight * k
+        s2 += weight * delta * delta
+        delta -= 1.0
+        if direct:
+            shape = math.exp(-0.5 * delta * delta * inverse)
+        else:
+            shape *= ratio
+            ratio *= decay
+    return s0, s1, s2
+
+
+@njit(cache=True, inline="always")
+def _point_poisson(coords, point, parameters, row, table, k_floor):
+    amplitude, rate, sigma = parameters
+    s0, s1, s2 = _poisson_lattice(coords[0, point], sigma, table, k_floor)
+    row[0] = s0
+    row[1] = amplitude * (s1 / max(rate, TINY) - s0)
+    row[2] = amplitude * s2 / (sigma * sigma * sigma)
+    return amplitude * s0
+
+
+@njit(cache=True, inline="always")
+def _point_poisson_bimodal(
+    coords, point, parameters, row, left_table, left_floor, right_table, right_floor
+):
+    left_rate, splitting, left_amp, left_sigma, right_amp, right_sigma = parameters
+    x = coords[0, point]
+    right_rate = left_rate + splitting
+    l0, l1, l2 = _poisson_lattice(x, left_sigma, left_table, left_floor)
+    r0, r1, r2 = _poisson_lattice(x, right_sigma, right_table, right_floor)
+    left_rate_d = left_amp * (l1 / max(left_rate, TINY) - l0)
+    right_rate_d = right_amp * (r1 / max(right_rate, TINY) - r0)
+    row[0] = left_rate_d + right_rate_d
+    row[1] = right_rate_d
+    row[2] = l0
+    row[3] = left_amp * l2 / (left_sigma * left_sigma * left_sigma)
+    row[4] = r0
+    row[5] = right_amp * r2 / (right_sigma * right_sigma * right_sigma)
+    return left_amp * l0 + right_amp * r0
+
+
 @njit(cache=True, inline="always")
 def _point_doublet(coords, point, parameters, row):
     center, width, amplitude, offset, splitting = parameters
@@ -3203,6 +3393,43 @@ def _objective_bimodal(coords, obs, valid, params, free, weights, use_w, poisson
     for point in range(obs.size):
         if not valid[point]: continue
         predicted=_point_bimodal(coords, point, params, full)
+        pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point], use_w, poisson, loss, gradient, info, row, derivatives)
+        if not ok: return math.inf, math.inf, False
+        cost+=pc; rss+=pr
+    if derivatives: compiled_finish_information(info)
+    return cost, rss, True
+
+
+@njit(cache=True)
+def _objective_poisson(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives):
+    if derivatives: compiled_reset_accumulators(gradient, info)
+    cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
+    table=np.empty(_lattice_extent(coords, valid, params[1], params[2]), dtype=np.float64)
+    _poisson_table(params[1], table)
+    floor, _ceiling=_poisson_rate_window(params[1])
+    for point in range(obs.size):
+        if not valid[point]: continue
+        predicted=_point_poisson(coords, point, params, full, table, floor)
+        pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point], use_w, poisson, loss, gradient, info, row, derivatives)
+        if not ok: return math.inf, math.inf, False
+        cost+=pc; rss+=pr
+    if derivatives: compiled_finish_information(info)
+    return cost, rss, True
+
+
+@njit(cache=True)
+def _objective_poisson_bimodal(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives):
+    if derivatives: compiled_reset_accumulators(gradient, info)
+    cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
+    left=np.empty(_lattice_extent(coords, valid, params[0], params[3]), dtype=np.float64)
+    right=np.empty(_lattice_extent(coords, valid, params[0] + params[1], params[5]), dtype=np.float64)
+    _poisson_table(params[0], left)
+    _poisson_table(params[0] + params[1], right)
+    left_floor, _l=_poisson_rate_window(params[0])
+    right_floor, _r=_poisson_rate_window(params[0] + params[1])
+    for point in range(obs.size):
+        if not valid[point]: continue
+        predicted=_point_poisson_bimodal(coords, point, params, full, left, left_floor, right, right_floor)
         pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point], use_w, poisson, loss, gradient, info, row, derivatives)
         if not ok: return math.inf, math.inf, False
         cost+=pc; rss+=pr
@@ -3521,35 +3748,13 @@ def _try_bimodal_split(x, counts, split_value, step, output):
     )
 
 
-@njit(cache=True)
-def _prepare_bimodal(coords, observations, valid, seeds, lower, upper, context):
-    compact, raw_values = _compact_observations(coords, observations, valid)
-    count = raw_values.size
-    if count == 0:
-        return 0
-    order = np.argsort(compact[0])
-    x = compact[0, order]
-    values = raw_values[order]
-    span = _array_span(x)
-    step = _unique_step(x)
-    total = 0.0
-    maximum = 0.0
-    for index in range(count):
-        value = max(values[index], 0.0)
-        total += value
-        maximum = max(maximum, value)
-    if count < 3 or total <= 0.0:
-        midpoint = 0.5 * (x[0] + x[count - 1])
-        seeds[0, 0] = midpoint
-        seeds[0, 1] = span / 2.0
-        seeds[0, 2] = maximum
-        seeds[0, 3] = span / 10.0
-        seeds[0, 4] = maximum
-        seeds[0, 5] = span / 10.0
-        lower[3] = max(lower[3], 0.5 * step)
-        lower[5] = max(lower[5], 0.5 * step)
-        return 1
-    split_values = np.empty(10, dtype=np.float64)
+@njit(cache=True, inline="always")
+def _two_state_cuts(x, values, total, split_values):
+    """Fill the cuts a two-peak seed is tried from (sorted ``x``): deciles of
+    the distribution, then the cut that most separates its two halves.
+    Returns how many were written; ``split_values`` holds at least ten."""
+
+    count = x.size
     split_count = 0
     cumulative = 0.0
     target = 1
@@ -3597,6 +3802,39 @@ def _prepare_bimodal(coords, observations, valid, seeds, lower, upper, context):
         if not duplicate:
             split_values[split_count] = candidate
             split_count += 1
+    return split_count
+
+
+@njit(cache=True)
+def _prepare_bimodal(coords, observations, valid, seeds, lower, upper, context):
+    compact, raw_values = _compact_observations(coords, observations, valid)
+    count = raw_values.size
+    if count == 0:
+        return 0
+    order = np.argsort(compact[0])
+    x = compact[0, order]
+    values = raw_values[order]
+    span = _array_span(x)
+    step = _unique_step(x)
+    total = 0.0
+    maximum = 0.0
+    for index in range(count):
+        value = max(values[index], 0.0)
+        total += value
+        maximum = max(maximum, value)
+    if count < 3 or total <= 0.0:
+        midpoint = 0.5 * (x[0] + x[count - 1])
+        seeds[0, 0] = midpoint
+        seeds[0, 1] = span / 2.0
+        seeds[0, 2] = maximum
+        seeds[0, 3] = span / 10.0
+        seeds[0, 4] = maximum
+        seeds[0, 5] = span / 10.0
+        lower[3] = max(lower[3], 0.5 * step)
+        lower[5] = max(lower[5], 0.5 * step)
+        return 1
+    split_values = np.empty(10, dtype=np.float64)
+    split_count = _two_state_cuts(x, values, total, split_values)
     trial = np.empty(6, dtype=np.float64)
     best = np.empty(6, dtype=np.float64)
     best_score = math.inf
@@ -3619,6 +3857,170 @@ def _prepare_bimodal(coords, observations, valid, seeds, lower, upper, context):
         seeds[0, parameter] = best[parameter]
     lower[3] = max(lower[3], 0.5 * step)
     lower[5] = max(lower[5], 0.5 * step)
+    return 1
+
+
+@njit(cache=True, inline="always")
+def _poisson_moments(x, values, split, side, step):
+    """(amplitude, rate, sigma, mass) of one Poisson-Gaussian component from
+    the quartiles of the bins on one ``side`` of ``split`` (0: every bin);
+    ``x`` is sorted.  Mirrors ``fit._poisson_moments``."""
+
+    total = 0.0
+    maximum = 0.0
+    for index in range(x.size):
+        if side < 0 and x[index] > split:
+            continue
+        if side > 0 and x[index] <= split:
+            continue
+        value = max(values[index], 0.0)
+        total += value
+        maximum = max(maximum, value)
+    if total <= 0.0:
+        return 0.0, 0.0, 0.0, 0.0
+    cumulative = 0.0
+    lower = x[0]
+    median = x[0]
+    upper = x[0]
+    quartile = 0
+    for index in range(x.size):
+        if side < 0 and x[index] > split:
+            continue
+        if side > 0 and x[index] <= split:
+            continue
+        cumulative += max(values[index], 0.0)
+        while quartile < 3 and cumulative >= 0.25 * (quartile + 1) * total:
+            if quartile == 0:
+                lower = x[index]
+            elif quartile == 1:
+                median = x[index]
+            else:
+                upper = x[index]
+            quartile += 1
+    rate = max(median, 0.0)
+    width = (upper - lower) / 1.349
+    sigma = math.sqrt(max(width * width - rate, 0.25 * step * step))
+    amplitude = maximum * math.sqrt(rate + sigma * sigma) / sigma
+    return amplitude, rate, sigma, total
+
+
+@njit(cache=True)
+def _prepare_poisson_histogram(coords, observations, valid, seeds, lower, upper, context):
+    compact, raw_values = _compact_observations(coords, observations, valid)
+    if raw_values.size == 0:
+        return 0
+    order = np.argsort(compact[0])
+    x = compact[0, order]
+    values = raw_values[order]
+    step = _unique_step(x)
+    span = _array_span(x)
+    amplitude, rate, sigma, total = _poisson_moments(x, values, 0.0, 0, step)
+    if total <= 0.0:
+        amplitude = 0.0
+        rate = max(np.mean(x), 0.0)
+        sigma = max(span / 6.0, 0.5 * step)
+    seeds[0, 0] = amplitude
+    seeds[0, 1] = rate
+    seeds[0, 2] = sigma
+    lower[2] = max(lower[2], 0.5 * step); upper[2] = min(upper[2], span)
+    return 1
+
+
+@njit(cache=True, inline="always")
+def _poisson_bimodal_score(x, counts, seed):
+    """Distance of a two-state seed from the histogram by each component's
+    Gaussian approximation (variance ``rate + sigma^2``): one exponential
+    per bin ranks the cuts.  ``fit._poisson_seed_distance`` is the same
+    arithmetic for the SciPy path."""
+
+    total = 0.0
+    left_rate = seed[0]
+    right_rate = seed[0] + seed[1]
+    left_variance = left_rate + seed[3] * seed[3]
+    right_variance = right_rate + seed[5] * seed[5]
+    left_height = seed[2] * seed[3] / math.sqrt(left_variance)
+    right_height = seed[4] * seed[5] / math.sqrt(right_variance)
+    for index in range(x.size):
+        left_delta = x[index] - left_rate
+        right_delta = x[index] - right_rate
+        predicted = (
+            left_height * math.exp(-0.5 * left_delta * left_delta / left_variance)
+            + right_height * math.exp(-0.5 * right_delta * right_delta / right_variance)
+        )
+        difference = predicted - counts[index]
+        total += difference * difference
+    return total
+
+
+@njit(cache=True, inline="always")
+def _try_poisson_split(x, counts, split_value, step, output):
+    left_amplitude, left_rate, left_sigma, left_mass = _poisson_moments(
+        x, counts, split_value, -1, step
+    )
+    right_amplitude, right_rate, right_sigma, right_mass = _poisson_moments(
+        x, counts, split_value, 1, step
+    )
+    if left_mass <= 0.0 or right_mass <= 0.0 or not right_rate > left_rate:
+        return math.inf
+    output[0] = left_rate
+    output[1] = right_rate - left_rate
+    output[2] = left_amplitude
+    output[3] = left_sigma
+    output[4] = right_amplitude
+    output[5] = right_sigma
+    return _poisson_bimodal_score(x, counts, output)
+
+
+@njit(cache=True)
+def _prepare_poisson_bimodal(coords, observations, valid, seeds, lower, upper, context):
+    compact, raw_values = _compact_observations(coords, observations, valid)
+    count = raw_values.size
+    if count == 0:
+        return 0
+    order = np.argsort(compact[0])
+    x = compact[0, order]
+    values = raw_values[order]
+    span = _array_span(x)
+    step = _unique_step(x)
+    total = 0.0
+    maximum = 0.0
+    for index in range(count):
+        value = max(values[index], 0.0)
+        total += value
+        maximum = max(maximum, value)
+    lower[3] = max(lower[3], 0.5 * step); upper[3] = min(upper[3], span)
+    lower[5] = max(lower[5], 0.5 * step); upper[5] = min(upper[5], span)
+    midpoint = 0.5 * (x[0] + x[count - 1])
+    if count < 3 or total <= 0.0:
+        seeds[0, 0] = max(midpoint - span / 4.0, 0.0)
+        seeds[0, 1] = span / 2.0
+        seeds[0, 2] = maximum
+        seeds[0, 3] = span / 10.0
+        seeds[0, 4] = maximum
+        seeds[0, 5] = span / 10.0
+        return 1
+    split_values = np.empty(10, dtype=np.float64)
+    split_count = _two_state_cuts(x, values, total, split_values)
+    trial = np.empty(6, dtype=np.float64)
+    best = np.empty(6, dtype=np.float64)
+    best_score = math.inf
+    found = False
+    for split in range(split_count):
+        score = _try_poisson_split(x, values, split_values[split], step, trial)
+        if score < best_score:
+            best_score = score
+            for parameter in range(6):
+                best[parameter] = trial[parameter]
+            found = True
+    if not found:
+        best[0] = max(midpoint - span / 4.0, 0.0)
+        best[1] = span / 2.0
+        best[2] = maximum
+        best[3] = span / 10.0
+        best[4] = maximum
+        best[5] = span / 10.0
+    for parameter in range(6):
+        seeds[0, parameter] = best[parameter]
     return 1
 
 
@@ -4001,6 +4403,28 @@ def bimodal_gaussian_descriptor() -> CompiledFitDescriptor:
     )
 
 
+def histogram_poisson_gaussian_descriptor() -> CompiledFitDescriptor:
+    return CompiledFitDescriptor(
+        prepare=_prepare_poisson_histogram,
+        objective=_objective_poisson,
+        value_jacobian=_value_jacobian_poisson,
+        context_builder=series_context_builder,
+        max_candidates=1,
+        cache_key="histogram-poisson-gaussian-v1",
+    )
+
+
+def bimodal_poisson_gaussian_descriptor() -> CompiledFitDescriptor:
+    return CompiledFitDescriptor(
+        prepare=_prepare_poisson_bimodal,
+        objective=_objective_poisson_bimodal,
+        value_jacobian=_value_jacobian_poisson_bimodal,
+        context_builder=series_context_builder,
+        max_candidates=1,
+        cache_key="bimodal-poisson-gaussian-v1",
+    )
+
+
 def symmetric_lorentzian_doublet_descriptor() -> CompiledFitDescriptor:
     return CompiledFitDescriptor(
         prepare=_prepare_doublet,
@@ -4059,7 +4483,7 @@ def anisotropic_gaussian_center_descriptor() -> CompiledFitDescriptor:
 
 
 def production_dispatchers() -> tuple[Any, ...]:
-    """The exact 33 dispatchers whose machine code belongs in production cache.
+    """The exact 39 dispatchers whose machine code belongs in production cache.
 
     Inline algebra helpers compile as dependencies of these roots and are not
     independent warmer responsibilities.  Keeping this list explicit prevents
@@ -4072,6 +4496,8 @@ def production_dispatchers() -> tuple[Any, ...]:
         _prepare_gaussian,
         _prepare_histogram,
         _prepare_bimodal,
+        _prepare_poisson_histogram,
+        _prepare_poisson_bimodal,
         _prepare_doublet,
         _prepare_damped,
         _prepare_exponential,
@@ -4081,6 +4507,8 @@ def production_dispatchers() -> tuple[Any, ...]:
         _objective_gaussian,
         _objective_histogram,
         _objective_bimodal,
+        _objective_poisson,
+        _objective_poisson_bimodal,
         _objective_doublet,
         _objective_damped,
         _objective_exponential,
@@ -4090,6 +4518,8 @@ def production_dispatchers() -> tuple[Any, ...]:
         _value_jacobian_gaussian,
         _value_jacobian_histogram,
         _value_jacobian_bimodal,
+        _value_jacobian_poisson,
+        _value_jacobian_poisson_bimodal,
         _value_jacobian_doublet,
         _value_jacobian_damped,
         _value_jacobian_exponential,
@@ -4204,6 +4634,35 @@ def warm_production_cache() -> dict[str, Any]:
         bimodal_values,
         bimodal,
         np.asarray((-infinity, 0.0, 0.0, positive, 0.0, positive)),
+        np.asarray((infinity, infinity, infinity, infinity, infinity, infinity)),
+        poisson=True,
+    )
+
+    # Photon-count histograms: the values come from the compiled kernels
+    # themselves (their pure-Python twins would compile the inlined lattice
+    # helper on its own, which is not a production dispatcher).
+    photons = np.linspace(-2.0, 14.0, 97, dtype=np.float64)
+    photon_coords = np.ascontiguousarray(photons.reshape(1, -1))
+    poisson_single = np.asarray((60.0, 1.5, 0.6), dtype=np.float64)
+    run_single(
+        "histogram_poisson_gaussian_poisson",
+        histogram_poisson_gaussian_descriptor(),
+        (photons,),
+        _value_jacobian_poisson(photon_coords, poisson_single)[0],
+        poisson_single,
+        np.asarray((0.0, 0.0, positive)),
+        np.asarray((infinity, infinity, infinity)),
+        poisson=True,
+    )
+
+    poisson_bimodal = np.asarray((0.8, 5.2, 55.0, 0.5, 40.0, 0.7), dtype=np.float64)
+    run_single(
+        "bimodal_poisson_gaussian_poisson",
+        bimodal_poisson_gaussian_descriptor(),
+        (photons,),
+        _value_jacobian_poisson_bimodal(photon_coords, poisson_bimodal)[0],
+        poisson_bimodal,
+        np.asarray((0.0, 0.0, 0.0, positive, 0.0, positive)),
         np.asarray((infinity, infinity, infinity, infinity, infinity, infinity)),
         poisson=True,
     )
@@ -4363,6 +4822,7 @@ __all__ = [
     "STATUS_XTOL",
     "anisotropic_gaussian_center_descriptor",
     "bimodal_gaussian_descriptor",
+    "bimodal_poisson_gaussian_descriptor",
     "compiled_accumulate",
     "compiled_finish_information",
     "compiled_overload_counts",
@@ -4372,6 +4832,7 @@ __all__ = [
     "exponential_decay_descriptor",
     "gaussian_offset_descriptor",
     "histogram_gaussian_descriptor",
+    "histogram_poisson_gaussian_descriptor",
     "lorentzian_descriptor",
     "production_dispatchers",
     "radial_gaussian_center_descriptor",
