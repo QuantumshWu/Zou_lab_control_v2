@@ -560,3 +560,91 @@ def test_replayed_side_chrome_follows_a_limit_change_exactly() -> None:
         assert _composed_matches_full_draw(session) == 0
     finally:
         session.close()
+
+
+def _curve_contract(points: int, repeats: int):
+    repeat = Axis.create("repeat", values=np.arange(repeats, dtype=np.int64))
+    table = PointTable.from_columns({"x": np.linspace(-3.0, 3.0, points)})
+    return DatasetSchema.create(
+        repeat,
+        table,
+        data_axes=(),
+        value_label="Counts",
+        canonical_unit="1",
+        display_unit="1",
+        dtype=np.float64,
+        generation="compose-identity-curve",
+    )
+
+
+def _curve_snapshot(schema, points: int, repeats: int, revision: int, seed: int):
+    rng = np.random.default_rng(seed)
+    x = np.linspace(-3.0, 3.0, points)
+    # The peak height moves with the revision so TIGHT limits re-fit on
+    # every frame, which is what keeps the chrome background missing.
+    peak = 40.0 + 15.0 * np.sin(revision)
+    values = peak * np.exp(-0.5 * (x / 0.8) ** 2) + rng.normal(0.0, 1.5, (repeats, points))
+    return DatasetSnapshot(schema, values[..., None], revision=revision)
+
+
+def _live_advance(session, snapshot) -> None:
+    prepared = session.prepare_live_frame(snapshot).result()
+    solved = session.solve_live_frame(prepared)
+    finalization = session.commit_live_frame(
+        prepared, None if solved is None else solved.result()
+    )
+    assert finalization is not None, "the live frame was not committed"
+    session.publish_live_frame(finalization)
+
+
+@pytest.mark.parametrize("spec_kind", ["curve", "facet_curve"])
+def test_a_re_fitting_curve_stays_full_draw_exact_frame_after_frame(spec_kind: str) -> None:
+    """Limits that re-fit every shot keep the chrome background missing.
+
+    Two misses in a row used to send the compose down a bare full draw --
+    complete for a scene of artists, an empty axes for a curve whose data
+    is a prepared scene stroked by the kernels.  A Curve in TIGHT mode, or
+    a Facet grid of curve cells that inherited TIGHT from its image cells,
+    went blank from its second live frame on and stayed blank while the
+    data kept moving.  Every frame here must be the full draw, pixel for
+    pixel, and must actually contain the data.
+    """
+
+    points, repeats = 160, 6
+    schema = _curve_contract(points, repeats)
+    cell = CurvePlot(AxisRef.point("x"), labels=PlotLabels("tight-curve", "x", "y"))
+    spec = (
+        cell
+        if spec_kind == "curve"
+        else FacetGridPlot(AxisRef.repeat(), CurvePlot(AxisRef.point("x")))
+    )
+    session = PlotSession(
+        _curve_snapshot(schema, points, repeats, 1, seed=61),
+        spec,
+        parameters={"relim_mode": "tight", "uncertainty": spec_kind == "curve"},
+    )
+    try:
+        session.configure(selectors=(), fit={}, fit_live=True)
+        renderer = session._renderer
+        session.rgba()
+        first = np.array(renderer.figure.canvas.buffer_rgba(), copy=True)
+        chrome_only = None
+        for revision in range(2, 7):
+            _live_advance(session, _curve_snapshot(schema, points, repeats, revision, seed=60 + revision))
+            if revision >= 4:
+                # The oracle draw below resets the count; read it here.
+                assert renderer._chrome_churn > 1, "the scene was meant to keep missing its background"
+            composed = np.array(renderer.figure.canvas.buffer_rgba(), copy=True)
+            renderer.draw()
+            full = np.array(renderer.figure.canvas.buffer_rgba(), copy=True)
+            differing = int(np.count_nonzero(np.any(composed != full, axis=-1)))
+            assert differing == 0, f"revision {revision}: {differing} pixels differ from the full draw"
+            ink = int(np.count_nonzero(np.any(composed != composed[0, 0], axis=-1)))
+            if chrome_only is None:
+                chrome_only = ink
+            # The frame carries the curve, not just the axes: its ink is
+            # within a third of the first frame's, never a fraction of it.
+            first_ink = int(np.count_nonzero(np.any(first != first[0, 0], axis=-1)))
+            assert ink > 0.66 * first_ink, f"revision {revision}: {ink} ink pixels against {first_ink} on the first frame"
+    finally:
+        session.close()

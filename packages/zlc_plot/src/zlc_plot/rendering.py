@@ -3813,29 +3813,6 @@ class MatplotlibRenderer:
         # rather than partitioning by ownership is what keeps the compose
         # full-draw-exact: anything that legitimately draws above a selector
         # stays above it, and is simply repainted with it.
-        if (
-            not reusable
-            and self._chrome_churn > 1
-            and self._selector_gesture_kind is None
-        ):
-            # A cache that keeps missing is not a cache, it is a tax.  The
-            # capture path draws the scene once with the dynamics hidden,
-            # copies the whole figure, restores it, and paints the dynamics
-            # again -- worth it only if the NEXT frame can reuse that copy.
-            # A panel whose tick labels are re-laid on every revision makes
-            # the copy dead on arrival: it pays eighteen megabytes of
-            # capture and a restore, every frame, to avoid a draw it does
-            # anyway.  Two consecutive misses is the evidence; the churn
-            # counter goes back to zero the moment a frame is reusable, so a
-            # panel that settles returns to the fast path by itself.
-            self._native_draw(canvas)
-            self._chrome_dirty_axes.clear()
-            self._background_region = None
-            self._background_signature = None
-            self._forget_gesture_region()
-            self._raster_generation += 1
-            self._composed_generation = self._raster_generation
-            return
         selector_ids = self._selector_artist_ids()
         split = None
         if (
@@ -3867,10 +3844,33 @@ class MatplotlibRenderer:
             finally:
                 for artist, visible in visibility:
                     artist.set_visible(visible)
-            self._background_region = capture(self._figure.bbox)
-            self._background_signature = signature
             self._chrome_dirty_axes.clear()
-        restore(self._background_region)
+            if self._chrome_churn > 1 and self._selector_gesture_kind is None:
+                # A copy that keeps missing is not a cache, it is a tax: a
+                # panel whose tick labels are re-laid on every revision
+                # (a curve whose limits re-fit each shot) would pay eighteen
+                # megabytes of capture and restore per frame for a copy no
+                # frame ever reuses.  Two consecutive misses is the
+                # evidence, so the chrome just drawn is composed over in
+                # place and no copy is kept; the churn counter returns to
+                # zero the moment a frame is reusable, and a panel that
+                # settles returns to the cached path by itself.
+                #
+                # What is NOT skipped is the compose.  This used to be a
+                # bare full draw with every artist visible, which is a
+                # complete frame only for a scene made of artists: a kind
+                # whose data is a prepared scene -- a Curve stroked by the
+                # kernels, a Facet grid's cells -- has no artist for it,
+                # and the full draw painted an empty axes.  A curve in
+                # TIGHT mode went blank from its second frame on.
+                self._background_region = None
+                self._background_signature = None
+                self._forget_gesture_region()
+            else:
+                self._background_region = capture(self._figure.bbox)
+                self._background_signature = signature
+        else:
+            restore(self._background_region)
         renderer = _prepare_renderer(get_renderer())
         prepared_image_command = isinstance(
             self._artists.get("image:prepared"), dict
