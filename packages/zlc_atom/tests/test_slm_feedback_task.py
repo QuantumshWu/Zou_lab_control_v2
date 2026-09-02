@@ -10,6 +10,8 @@ import numpy as np
 import pytest
 from zlc_data.figure_archive import read_archive
 from zlc_pulse import PulseSequence
+from zlc_pulse.device import DoneReport
+from zlc_pulse.wire import STATUS_DONE, STATUS_ERROR
 from zlc_plot import FacetGridPlot, HistogramPlot, Reduction, read_figure_plot
 from zlc_runtime import NodeHost, SignalDataPlane
 
@@ -39,18 +41,24 @@ from zlc_atom.nodes.calibration.pulse import resolve_pulse
 from zlc_atom.nodes.slm_feedback import task as feedback_module
 from zlc_atom.nodes.slm_feedback.task import (
     SlmFeedbackTask,
-    _adapt_double_gain,
     _allocate_requested_shares,
     _control_weights,
+    _excitation_pattern,
+    _excited_target,
+    _expected_noise_ratio,
     _fit_contrasts,
+    _half_contrasts,
     _needs_probe,
+    _plant_slope,
     _probe_boundary,
     _relative_probe_target,
     _ratio_interval,
     _selected_probe_target,
     _single_bracket_step,
+    _split_half_dispersion,
     _updated_single_bracket,
     _updated_target,
+    _usable_plant_slope,
 )
 from zlc_atom.nodes.calibration.calibration import (
     _register_target_sites,
@@ -371,9 +379,12 @@ def _fitted_result(
     fit_single &= ~fit_invalid
     error = np.broadcast_to(np.asarray(standard_error, dtype=float), (sites,)).copy()
     error[~fit_valid] = np.nan
+    halves = np.where(fit_valid, values, np.nan)
     return {
         "contrast": values,
         "standard_error": error,
+        "odd_contrast": halves.copy(),
+        "even_contrast": halves.copy(),
         "dark_mean": np.full(sites, 10.0),
         "dark_sigma": np.full(sites, 1.0),
         "dark_standard_error": np.full(sites, 0.1),
@@ -450,6 +461,7 @@ def _task(
     updates: int = 3,
     probe_factors: tuple[float, ...] = (0.5, 2.0),
     science_context: dict[str, object] | None = None,
+    feedback_gain: float = 0.25,
 ) -> SlmFeedbackTask:
     if science_context is None:
         if target is None:
@@ -477,20 +489,24 @@ def _task(
         exposure_seconds=0.020,
         shots_per_candidate=shots,
         probe_factors=probe_factors,
-        feedback_gain=0.25,
+        feedback_gain=feedback_gain,
         maximum_weight_change=0.5,
         max_updates=updates,
     )
 
 
 def _measured(task: SlmFeedbackTask, result):
-    """Give a mocked shot batch the exact device facts the real path freezes."""
+    """Give a mocked shot batch the exact device facts the real path freezes.
+
+    A mocked batch is a clean shot: the pulse verdict the real path returns
+    fifth is "" here.
+    """
 
     task._actual_device_snapshots = {
         "camera": {"exposure_seconds": 0.020},
         "sequencer": {"state": {"loaded": True}},
     }
-    return result
+    return (*result, "")
 
 
 def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
@@ -501,7 +517,7 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
     }
     assert defaults["shots_per_candidate"] == 100
     assert defaults["probe_factors"] == (0.5, 2.0)
-    assert defaults["feedback_gain"] == pytest.approx(0.25)
+    assert defaults["feedback_gain"] == pytest.approx(0.3)
     assert defaults["maximum_weight_change"] == pytest.approx(0.5)
     assert defaults["max_updates"] == 12
     assert defaults["feedback_mode"] == "qcmos_bright_dark"
@@ -590,7 +606,7 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
     target = _grid_target((17, 23))
     rows, columns = np.nonzero(target)
     contrast = np.linspace(0.6, 1.4, 35)
-    updated, correction, slope, decision = _updated_target(
+    updated, correction, decision = _updated_target(
         target,
         contrast,
         np.zeros(35),
@@ -598,17 +614,47 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
         rows,
         columns,
         reference_valid=np.ones(35, dtype=bool),
-        previous_weights=np.full(35, np.nan),
-        previous_contrast=np.full(35, np.nan),
         feedback_gain=0.25,
+        plant_slope=None,
         maximum_weight_change=0.5,
     )
     assert updated[rows[0], columns[0]] < updated[rows[-1], columns[-1]]
     assert correction[0] < 0.0 < correction[-1]
-    assert np.all(np.isnan(slope))
     assert set(decision) == {"feedback_assumed_slope"}
     multipliers = updated[rows, columns] / target[rows, columns]
     assert float(np.max(multipliers) / np.min(multipliers)) <= np.exp(0.4)
+    # The loop gain is what the operator authored; the weight step is that
+    # gain divided by the measured plant slope, and half the gain at unit
+    # slope while no slope is trusted.
+    residual = np.log(contrast) - np.mean(np.log(contrast))
+    measured, measured_step, measured_decision = _updated_target(
+        target,
+        contrast,
+        np.zeros(35),
+        np.ones(35, dtype=bool),
+        rows,
+        columns,
+        reference_valid=np.ones(35, dtype=bool),
+        feedback_gain=0.25,
+        plant_slope=2.0,
+        maximum_weight_change=0.5,
+    )
+    assert set(measured_decision) == {"feedback_estimated_slope"}
+    np.testing.assert_allclose(measured_step, 0.125 * residual, atol=3e-3)
+    np.testing.assert_allclose(correction, 0.125 * residual, atol=3e-3)
+    with pytest.raises(ValueError, match="plant_slope"):
+        _updated_target(
+            target,
+            contrast,
+            np.zeros(35),
+            np.ones(35, dtype=bool),
+            rows,
+            columns,
+            reference_valid=np.ones(35, dtype=bool),
+            feedback_gain=0.25,
+            plant_slope=-2.0,
+            maximum_weight_change=0.5,
+        )
     standard_error = 0.02 * contrast
     estimate, lower, upper, max_relative_sem = _ratio_interval(
         contrast, standard_error
@@ -618,36 +664,111 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
     assert max_relative_sem == pytest.approx(0.02)
 
 
-def test_double_gain_adapts_only_after_significant_formal_evidence() -> None:
-    valid = np.ones(3, dtype=bool)
-    zero = np.zeros(3)
-    gain, streak, action, common, previous, current = _adapt_double_gain(
-        (2.0, 1.0, 1.0), zero, valid,
-        (1.6, 1.0, 1.0), zero, valid,
-        gain=0.25,
-        improvement_streak=0,
+def test_pooled_plant_slope_and_split_half_dispersion_see_through_loop_noise() -> None:
+    # The archived run's plant: -1.8 now, -1.3 one candidate later, -0.24
+    # two later (static -3.3), read at 1.2% relative error, AND wandering
+    # by 1.6% per candidate on its own (mean-reverting, as the archived
+    # residuals do).  The controller assumes -1 at half gain, then divides
+    # by the estimate; the first six updates carry the excitation.  The
+    # pooled estimate must recover the static slope through both the loop's
+    # own noise-induced correlation and the wander -- the half-batch
+    # instrument this replaced read the same plant as -5 here -- and no
+    # slope at all may be read from a run that carried no excitation.
+    rng = np.random.default_rng(5)
+    sites, candidates = 35, 30
+    lags = (-1.8, -1.3, -0.24)
+    sigma, wander, reversion = 0.012, 0.016, 0.35
+    control = np.zeros(sites)
+    excitation = np.zeros(sites)
+    truth = rng.normal(0.0, 0.06, sites)
+    exogenous = rng.normal(0.0, wander, sites)
+    weights, contrasts, excitations = [], [], []
+    history = [np.zeros(sites)] * 3
+    for candidate in range(candidates):
+        applied = control + excitation
+        history = history[1:] + [applied.copy()]
+        level = truth + exogenous + sum(
+            slope * lagged for slope, lagged in zip(lags, history[::-1], strict=True)
+        )
+        full = level + rng.normal(0.0, sigma, sites)
+        weights.append(applied.copy())
+        contrasts.append(full)
+        excitations.append(excitation.copy())
+        estimate, estimate_error, _rows = _plant_slope(weights, contrasts, excitations)
+        usable = _usable_plant_slope(len(weights), estimate, estimate_error)
+        step_gain = 0.15 if usable is None else 0.3 / usable
+        control = control + step_gain * (full - np.mean(full))
+        excitation = (
+            _excitation_pattern(rng, np.ones(sites, dtype=bool))
+            if candidate + 1 <= feedback_module._PLANT_EXCITATION_CANDIDATES
+            else np.zeros(sites)
+        )
+        exogenous = reversion * exogenous + rng.normal(
+            0.0, wander * np.sqrt(1.0 - reversion**2), sites
+        )
+    assert all(
+        np.count_nonzero(item) == sites and abs(np.sum(item)) < 1e-12
+        for item in excitations[1:7]
     )
-    assert (gain, streak, action, common) == (
-        0.25, 1, "hold_first_significant_improvement", 3
+    assert not any(np.any(item != 0.0) for item in excitations[7:])
+    slope, error, rows = _plant_slope(weights, contrasts, excitations)
+    # Transitions 1..9 are touched by an excitation difference at some lag
+    # (the last excited candidate is 7; lag 2 reaches transition 9).
+    assert rows == sites * 9
+    assert slope == pytest.approx(sum(lags), abs=0.4)
+    assert abs(slope - sum(lags)) < 3.0 * error
+    assert _usable_plant_slope(candidates, slope, error) == pytest.approx(
+        abs(slope), abs=1e-12
     )
-    assert previous == pytest.approx(2.0)
-    assert current == pytest.approx(1.6)
-    gain, streak, action, *_ = _adapt_double_gain(
-        (1.6, 1.0, 1.0), zero, valid,
-        (1.3, 1.0, 1.0), zero, valid,
-        gain=gain,
-        improvement_streak=streak,
+    assert _usable_plant_slope(2, slope, error) is None
+    assert _usable_plant_slope(candidates, -slope, error) is None
+    assert _usable_plant_slope(candidates, slope, 0.4 * abs(slope)) is None
+    assert _usable_plant_slope(candidates, -12.0, 0.1) == pytest.approx(5.0)
+    assert _usable_plant_slope(candidates, -0.1, 0.01) == pytest.approx(0.3)
+    assert np.isnan(_plant_slope(weights[:1], contrasts[:1], excitations[:1])[0])
+    unexcited = _plant_slope(weights, contrasts, [np.zeros(sites)] * candidates)
+    assert np.isnan(unexcited[0]) and unexcited[2] == 0
+
+    # Split halves: independent noise cancels in the cross-covariance, so
+    # the dispersion estimate is the truth (within its error), and an array
+    # that is uniform is reported as zero within error -- where max/min of
+    # the same noisy estimates would still read 1.05.
+    dispersion = rng.normal(0.0, 0.03, sites)
+    odd = np.exp(dispersion + rng.normal(0.0, sigma, sites))
+    even = np.exp(dispersion + rng.normal(0.0, sigma, sites))
+    variance, variance_error = _split_half_dispersion(odd, even, np.ones(sites, bool))
+    assert variance == pytest.approx(float(np.var(dispersion, ddof=1)), abs=3.0 * variance_error)
+    assert variance > variance_error
+    uniform_variance, uniform_error = _split_half_dispersion(
+        np.exp(rng.normal(0.0, sigma, sites)),
+        np.exp(rng.normal(0.0, sigma, sites)),
+        np.ones(sites, bool),
     )
-    assert gain == pytest.approx(0.3125)
-    assert streak == 1 and action == "increase_after_continuous_improvement"
-    gain, streak, action, *_ = _adapt_double_gain(
-        (1.3, 1.0, 1.0), zero, valid,
-        (1.8, 1.0, 1.0), zero, valid,
-        gain=gain,
-        improvement_streak=streak,
+    assert uniform_variance <= uniform_error
+    assert np.isnan(_split_half_dispersion(odd, even, np.zeros(sites, bool))[0])
+    assert _expected_noise_ratio(np.full(sites, sigma), np.ones(sites, bool)) == pytest.approx(
+        1.054, abs=0.006
     )
-    assert gain == pytest.approx(0.15625)
-    assert streak == 0 and action == "decrease_after_worsening"
+    assert np.isnan(_expected_noise_ratio(np.full(sites, sigma), np.zeros(sites, bool)))
+
+    # Half-batch contrasts classify with the whole batch's threshold and need
+    # two shots on each side of it per half.
+    samples = np.full((8, 2), 10.0)
+    samples[[0, 1, 4, 5], 0] = (30.0, 32.0, 34.0, 36.0)
+    samples[0, 1] = 30.0
+    odd_half, even_half = _half_contrasts(samples, np.asarray((20.0, 20.0)))
+    assert odd_half[0] == pytest.approx(22.0) and even_half[0] == pytest.approx(24.0)
+    assert np.isnan(odd_half[1]) and np.isnan(even_half[1])
+    fitted = _fit_contrasts(
+        np.column_stack((
+            np.where(np.arange(40) % 3 == 0, 40.0, 10.0) + 0.1 * np.arange(40),
+            np.full(40, 10.0) + 0.01 * np.arange(40),
+        ))
+    )
+    assert fitted["valid"].tolist() == [True, False]
+    assert fitted["odd_contrast"][0] == pytest.approx(fitted["contrast"][0], rel=0.05)
+    assert fitted["even_contrast"][0] == pytest.approx(fitted["contrast"][0], rel=0.05)
+    assert np.isnan(fitted["odd_contrast"][1])
 
 
 def test_single_population_classification_and_baseline_relative_probe_selection() -> None:
@@ -855,9 +976,8 @@ def test_direction_preserving_share_allocator_moves_only_balanced_requested_powe
         rows,
         columns,
         reference_valid=np.zeros(4, dtype=bool),
-        previous_weights=np.full(4, np.nan),
-        previous_contrast=np.full(4, np.nan),
         feedback_gain=0.25,
+        plant_slope=None,
         maximum_weight_change=0.5,
         directed_log_step=np.log((1.25, 0.5, 1.0, 1.0)),
         control_boundary=np.asarray((2.0, np.nan, np.nan, np.nan)),
@@ -876,9 +996,8 @@ def test_direction_preserving_share_allocator_moves_only_balanced_requested_powe
         rows,
         columns,
         reference_valid=np.ones(4, dtype=bool),
-        previous_weights=np.full(4, np.nan),
-        previous_contrast=np.full(4, np.nan),
-        feedback_gain=0.25,
+        feedback_gain=0.5,
+        plant_slope=None,
         maximum_weight_change=0.5,
         control_boundary=np.asarray((1.4, np.nan, np.nan, np.nan)),
         control_direction=np.asarray((1.0, 0.0, 0.0, 0.0)),
@@ -962,14 +1081,20 @@ def test_feedback_applies_science_context_then_measures_before_solving_update(
         np.ones(35, dtype=bool),
         *np.nonzero(frozen_target),
         reference_valid=np.ones(35, dtype=bool),
-        previous_weights=np.full(35, np.nan),
-        previous_contrast=np.full(35, np.nan),
         feedback_gain=0.25,
+        plant_slope=None,
         maximum_weight_change=0.5,
+    )
+    # The first update is solved for the control Target with the run's
+    # first identification excitation on it, drawn from its seeded generator.
+    expected_solved = _excited_target(
+        expected_target,
+        _excitation_pattern(np.random.default_rng(0), np.ones(35, dtype=bool)),
+        *np.nonzero(frozen_target),
     )
 
     def solve(target, **kwargs):
-        np.testing.assert_allclose(target, expected_target)
+        np.testing.assert_allclose(target, expected_solved)
         assert kwargs["objective_kind"] == "spots"
         assert kwargs["iterations"] is None
         np.testing.assert_array_equal(kwargs["initial_phase"], pattern)
@@ -1050,7 +1175,9 @@ def test_feedback_applies_science_context_then_measures_before_solving_update(
         )
         np.testing.assert_array_equal(artifact["operator_wavefront"], wavefront)
         np.testing.assert_array_equal(artifact["pupil_amplitude"], pupil)
-        np.testing.assert_allclose(artifact["target_intensity"], expected_target)
+        # final/ carries the Target the sealed Pattern was solved for --
+        # excitation included -- never a Target the phase does not realise.
+        np.testing.assert_allclose(artifact["target_intensity"], expected_solved)
         np.testing.assert_array_equal(artifact["phase"], expected)
         np.testing.assert_array_equal(slm.last_commanded_phase, expected)
         assert artifact["pattern_metadata"]["solver"]["iterations_run"] == 19
@@ -1140,15 +1267,25 @@ def test_arbitrary_sparse_geometry_matches_calibration_sites_before_updating_tar
             rows,
             columns,
             reference_valid=np.ones(len(rows), dtype=bool),
-            previous_weights=np.full(len(rows), np.nan),
-            previous_contrast=np.full(len(rows), np.nan),
             feedback_gain=0.25,
+            plant_slope=None,
             maximum_weight_change=0.5,
         )
-        np.testing.assert_allclose(solved_targets[0], expected)
+        expected_solved = _excited_target(
+            expected,
+            _excitation_pattern(
+                np.random.default_rng(0), np.ones(len(rows), dtype=bool)
+            ),
+            rows,
+            columns,
+        )
+        np.testing.assert_allclose(solved_targets[0], expected_solved)
         history = _load_history(result["artifact_path"])
         np.testing.assert_allclose(
-            history[1]["target_weight"], expected[rows, columns]
+            history[1]["target_weight"], expected_solved[rows, columns]
+        )
+        np.testing.assert_allclose(
+            history[1]["control_weight"], _control_weights(expected[rows, columns])
         )
         np.testing.assert_allclose(
             history[0]["bright_minus_dark"],
@@ -1519,7 +1656,10 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
             return current_dataset(*args, **kwargs)
 
         monkeypatch.setattr(plane, "current_dataset", one_result_lookup)
-        samples, saturated, missing, _mean = task._measure(pulse, _Context(), 0)
+        samples, saturated, missing, _mean, pulse_warning = task._measure(
+            pulse, _Context(), 0
+        )
+        assert pulse_warning == ""
         assert lookup_count == 1
         monkeypatch.setattr(plane, "current_dataset", current_dataset)
         np.testing.assert_allclose(samples, np.broadcast_to(fluorescence, (10, 35)))
@@ -1597,8 +1737,8 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
 
         monkeypatch.setattr(feedback_module, "extract_box_signals", partial_signals)
         slm.apply_phase(np.full(slm.shape_yx, 0.25, dtype=np.float32))
-        partial_samples, _saturated, partial_missing, _mean = task._measure(
-            pulse, _Context(), 1
+        partial_samples, _saturated, partial_missing, _mean, _warning = (
+            task._measure(pulse, _Context(), 1)
         )
         second_camera = plane.current_dataset(signal)
         assert second_camera.ref.stream_generation != first_camera_generation
@@ -1696,7 +1836,9 @@ def test_electron_measurement_uses_current_conversion_and_saturation(
             calibration=calibration(),
         )
         try:
-            _samples, saturated, missing, _mean = task._measure(pulse, _Context(), 0)
+            _samples, saturated, missing, _mean, _warning = task._measure(
+                pulse, _Context(), 0
+            )
             assert saturated == (17,) and not missing
             assert task._effective_photoelectrons is effective_photoelectrons
         finally:
@@ -1706,6 +1848,180 @@ def test_electron_measurement_uses_current_conversion_and_saturation(
     run(recorded_offset, recorded_scale, True)
     run(None, None, False)
     run(recorded_offset, 0.6, True)
+
+
+def test_measure_keeps_observer_only_faults_repeats_board_faults_and_loads_once(
+    tmp_path: Path,
+) -> None:
+    """The real-run failure: one lost UART poll byte at shot 85 of 200.
+
+    An observer-only fault with every frame delivered is a good batch; a
+    board fault -- reported after every trigger, or mid-batch so that the
+    camera times out first -- repeats the batch once with the first fault on
+    record, and the second fault is fatal naming both; the program is loaded
+    once per run because the board reports still holding it.
+    """
+
+    def frame_source(ordinal: int, exposure: float) -> np.ndarray:
+        del ordinal, exposure
+        return np.full((5, 7), 3, dtype=np.uint16)
+
+    camera = VirtualCamera(
+        VirtualCameraConfig(frame_shape_yx=(5, 7), exposure_seconds=0.005),
+        frame_source=frame_source,
+    )
+    observer_error = (
+        "TimeoutError: UART reply timed out on COM10 at 3000000 baud: "
+        "0 of 1 replies in 4.88s (12 byte(s) read, 12 unparsed)"
+    )
+
+    def report(*, status: int, observer_error: str = "", underflow: bool = False):
+        return DoneReport(
+            status=status,
+            cursor=85,
+            underflow=underflow,
+            elapsed_seconds=1.0,
+            status_reads=(status, status),
+            cursor_reads=(85, 85),
+            observer_error=observer_error,
+        )
+
+    class Sequencer:
+        def __init__(self) -> None:
+            self.digest = None
+            self.loads = 0
+            self.fires: list[int | None] = []
+            self.reports: list[DoneReport] = []
+            #: Triggers the next fire plays before the board "stops".
+            self.trigger_limit: int | None = None
+
+        def describe(self):
+            return object()
+
+        def load(self, program, *, source=None, rows=()) -> None:
+            del source, rows
+            self.loads += 1
+            self.digest = program.digest
+
+        def fire(self, *, cycles=1) -> None:
+            self.fires.append(cycles)
+            played = int(cycles) if self.trigger_limit is None else self.trigger_limit
+            self.trigger_limit = None
+            camera.trigger(played)
+
+        def wait_done(self, timeout=None):
+            del timeout
+            return self.reports.pop(0) if self.reports else None
+
+        def safe(self):
+            return None
+
+        def snapshot(self):
+            return {"loaded": self.digest is not None, "applied_digest": self.digest}
+
+    sequencer = Sequencer()
+    plane = SignalDataPlane()
+    slm = _Slm((5, 7))
+    task = _task(
+        tmp_path,
+        slm=slm,
+        camera=camera,
+        sequencer=sequencer,
+        plane=plane,
+        target=np.ones((5, 7), dtype=np.float32),
+        calibration=_calibration(),
+    )
+    installation = create_installation("virtual")
+    try:
+        pulse = resolve_pulse(
+            FEEDBACK_PULSE_SEQUENCE,
+            path=IMAGING_PULSE_RESOURCE.path,
+            board=installation.device("sequencer").describe(),
+            api_values={},
+        )
+    finally:
+        installation.close()
+    try:
+        # Observer-only fault, all ten frames in hand: kept, with the fault
+        # recorded as the batch's warning, in one fire.
+        sequencer.reports = [
+            report(status=STATUS_ERROR, observer_error=observer_error)
+        ]
+        samples, _saturated, _missing, _mean, warning = task._measure(
+            pulse, _Context(), 0
+        )
+        assert samples.shape == (10, 35)
+        assert warning == (
+            "batch accepted with a pulse fault: pulse observer failed: "
+            f"{observer_error}"
+        )
+        assert sequencer.fires == [10]
+        assert sequencer.loads == 1
+
+        # The board itself reporting an error repeats the batch once; the
+        # clean repeat is the candidate's measurement, and the first fault
+        # is on record.
+        slm.apply_phase(np.full(slm.shape_yx, 0.25, dtype=np.float32))
+        sequencer.reports = [
+            report(status=STATUS_ERROR),
+            report(status=STATUS_DONE),
+        ]
+        _samples, _saturated, _missing, _mean, warning = task._measure(
+            pulse, _Context(), 1
+        )
+        assert warning == (
+            "batch repeated after a pulse fault: the board reported an error"
+        )
+        assert sequencer.fires == [10, 10, 10]
+        # The board still holds the program: no second LOAD in this run.
+        assert sequencer.loads == 1
+
+        # The board stops after three of ten triggers: the camera times out
+        # first, the board's report is read before the camera is blamed,
+        # and the batch is repeated -- the archived rule's mid-batch case.
+        slm.apply_phase(np.full(slm.shape_yx, 0.375, dtype=np.float32))
+        sequencer.trigger_limit = 3
+        sequencer.reports = [
+            report(status=STATUS_ERROR),
+            report(status=STATUS_DONE),
+        ]
+        samples, _saturated, _missing, _mean, warning = task._measure(
+            pulse, _Context(), 2
+        )
+        assert samples.shape == (10, 35)
+        assert warning == (
+            "batch repeated after a pulse fault: the board reported an error"
+        )
+        assert sequencer.fires == [10, 10, 10, 10, 10]
+
+        # The board stops mid-batch and reports nothing wrong: that is the
+        # camera's fault, and the camera's complaint is what comes out.
+        slm.apply_phase(np.full(slm.shape_yx, 0.4375, dtype=np.float32))
+        sequencer.trigger_limit = 3
+        sequencer.reports = []
+        with pytest.raises(RuntimeError, match="the camera returned 0 frame"):
+            task._measure(pulse, _Context(), 3)
+        assert sequencer.fires == [10] * 6
+
+        # An observer fault that also saw the bank underrun is a board fact;
+        # a second fault on the repeat is the candidate's failure, naming both.
+        slm.apply_phase(np.full(slm.shape_yx, 0.5, dtype=np.float32))
+        sequencer.reports = [
+            report(status=STATUS_ERROR, observer_error=observer_error, underflow=True),
+            report(status=STATUS_ERROR),
+        ]
+        with pytest.raises(
+            RuntimeError,
+            match="failed twice for one candidate: first pulse observer failed.*"
+            "the scan bank underran; then the board reported an error",
+        ):
+            task._measure(pulse, _Context(), 4)
+        assert sequencer.fires == [10] * 8
+        assert not sequencer.reports
+        assert not camera.capture_state()
+    finally:
+        plane.close()
+        camera.close()
 
 
 def test_single_population_sites_probe_both_sides_then_measure_combined_target(
@@ -1839,9 +2155,8 @@ def test_single_population_sites_probe_both_sides_then_measure_combined_target(
             rows,
             columns,
             reference_valid=valid,
-            previous_weights=np.full(35, np.nan),
-            previous_contrast=np.full(35, np.nan),
             feedback_gain=0.25,
+            plant_slope=None,
             maximum_weight_change=0.5,
             directed_log_step=np.zeros(35),
         )
@@ -1979,9 +2294,8 @@ def test_baseline_single_with_formal_history_steps_to_bracket_midpoint_without_p
         ]
         assert history[0]["probe_sites"] == []
         assert history[0]["decision"][17] == "single_bracket_midpoint"
-        assert _control_weights(
-            solved_targets[0][rows, columns]
-        )[17] == pytest.approx(np.sqrt(1.2))
+        assert history[1]["control_weight"][17] == pytest.approx(np.sqrt(1.2))
+        assert solved_targets
     finally:
         plane.close()
 
@@ -2437,9 +2751,23 @@ def test_virtual_feedback_recovers_missing_sites_and_retains_best_candidate(
         assert float(progress[-1]) < float(progress[0])
         if len(finite):
             assert metadata["measurement"]["valid"]
-            assert metadata["measurement"]["uniformity_ratio"] == pytest.approx(
-                float(np.min(finite))
+            formal = [
+                item
+                for item in history
+                if item["candidate_kind"] != "probe" and item["valid"]
+            ]
+            scores = [
+                np.inf
+                if item["true_uniformity_variance"] is None
+                or item["true_uniformity_variance_error"] is None
+                else float(item["true_uniformity_variance"])
+                + float(item["true_uniformity_variance_error"])
+                for item in formal
+            ]
+            best = max(
+                index for index, score in enumerate(scores) if score == min(scores)
             )
+            assert metadata["candidate"] == formal[best]["iteration"]
         else:
             assert result["feedback_status"] in {"completed", "stalled"}
             assert result["terminal_uniformity"] is None
@@ -2513,6 +2841,17 @@ def test_completed_run_selects_best_candidate_without_extra_shots(
             np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
         )[1:]),
     )
+    # The figures are the report, not the deliverable: a figure writer that
+    # breaks at the seal leaves the run completed, final/ and the SLM on the
+    # selected candidate, and the failure in the summary -- it used to seal
+    # the same candidate twice and then restore the incoming phase.
+    monkeypatch.setattr(
+        SlmFeedbackTask,
+        "_save_figures",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            OSError("figure writer broke")
+        ),
+    )
     task = _task(
         tmp_path,
         slm=slm,
@@ -2522,8 +2861,9 @@ def test_completed_run_selects_best_candidate_without_extra_shots(
         target=_grid_target(slm.shape_yx),
         updates=2,
     )
+    context = _Context(tmp_path)
     try:
-        result = task.execute(_Context(tmp_path))
+        result = task.execute(context)
         saved, metadata = _load_candidate(result["artifact_path"])
         np.testing.assert_array_equal(saved, slm.last_commanded_phase)
         np.testing.assert_array_equal(
@@ -2537,60 +2877,81 @@ def test_completed_run_selects_best_candidate_without_extra_shots(
         assert resolved_api_values == [{}]
         assert result["updates"] == 3
         assert result["feedback_status"] == "completed"
+        assert metadata["status"] == "completed"
         assert np.array_equal(slm.commands[-1], saved)
+        summary = json.loads((tmp_path / "summary.json").read_text())
+        assert summary["status"] == "completed"
+        assert summary["rollback"] is None
+        assert summary["figures_error"]["message"] == "figure writer broke"
+        assert "Figures not written: OSError: figure writer broke" in (
+            tmp_path / "summary.txt"
+        ).read_text()
+        assert not tuple((tmp_path / "figures").glob("*.npz"))
+        assert any(
+            "figure writer broke" in str(args[0]) for args, _kwargs in context.progress
+        )
     finally:
         plane.close()
 
 
-def test_valid_site_history_changes_the_next_target_correction(
+def test_measured_plant_slope_sets_the_step_and_proven_uniformity_stops_the_run(
     tmp_path: Path, monkeypatch
 ) -> None:
+    # A closed loop against a plant three times harder than the assumed
+    # unit slope and answering over two candidates, read at the archived
+    # run's 1.2% noise: the first candidates step at half gain on the
+    # assumption while the first six updates carry the +-2% excitation
+    # the slope is read through, the pooled estimate then takes over and
+    # the loop gain becomes the authored one; three candidates whose split
+    # halves resolve no dispersion end the run before max_updates, and the
+    # most recent of them is the retained candidate.
     slm = _Slm((17, 23))
-    incoming = freeze_pattern_phase(slm.last_commanded_phase, slm.shape_yx)
     plane = SignalDataPlane()
-    phases = tuple(
-        freeze_pattern_phase(
-            np.full(slm.shape_yx, value, dtype=np.float32), slm.shape_yx
-        )
-        for value in (0.25, 0.50, 0.75)
-    )
-    phase_results = iter(phases)
-    first_contrast = np.concatenate(([2.0], np.ones(34)))
-    fit_results = iter(
-        (
-            _fitted_result(first_contrast),
-            _fitted_result(np.concatenate(([1.8], np.ones(34)))),
-            _fitted_result(np.concatenate(([1.5], np.ones(34)))),
-            _fitted_result(np.ones(35)),
-        )
-    )
-    requested_shots: list[int] = []
-    solved_targets: list[np.ndarray] = []
+    base = _grid_target(slm.shape_yx)
+    rows, columns = np.nonzero(base)
+    plant_lags = (-2.0, -1.0)
+    sigma = 0.012
+    truth = np.linspace(-0.04, 0.04, 35)
+    noise = np.random.default_rng(11)
+    applied: list[np.ndarray] = [base]
+    solver_kwargs: list[dict[str, object]] = []
+
+    def solve(target, **kwargs):
+        applied.append(np.array(target, copy=True))
+        solver_kwargs.append(dict(kwargs))
+        return freeze_pattern_phase(
+            np.full(slm.shape_yx, 0.3 + 0.05 * len(applied), dtype=np.float32),
+            slm.shape_yx,
+        ), {"method": "test"}
+
+    def fit(samples):
+        level = np.array(truth, copy=True)
+        for slope, target in zip(plant_lags, applied[::-1], strict=False):
+            level += slope * np.log(_control_weights(target[rows, columns]))
+        odd = np.exp(level + noise.normal(0.0, sigma * np.sqrt(2.0), 35))
+        even = np.exp(level + noise.normal(0.0, sigma * np.sqrt(2.0), 35))
+        contrast = np.sqrt(odd * even)
+        result = _fitted_result(contrast, standard_error=sigma * contrast)
+        result["odd_contrast"] = odd
+        result["even_contrast"] = even
+        return result
+
     monkeypatch.setattr(
         feedback_module,
         "resolve_pulse",
         lambda *args, **kwargs: SimpleNamespace(program=object()),
     )
-    def solve(target, **kwargs):
-        solved_targets.append(np.array(target, copy=True))
-        return next(phase_results), {"method": "test"}
-
     monkeypatch.setattr(feedback_module, "solve_phase", solve)
-    monkeypatch.setattr(
-        feedback_module,
-        "_fit_contrasts",
-        lambda samples, **_kwargs: next(fit_results),
-    )
+    monkeypatch.setattr(feedback_module, "_fit_contrasts", fit)
     monkeypatch.setattr(
         SlmFeedbackTask,
         "_measure",
         lambda self, pulse, context, iteration: _measured(self, (
-            requested_shots.append(self.shots),
             np.zeros((self.shots, 35)),
             (),
             (),
             np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
-        )[1:]),
+        )),
     )
     task = _task(
         tmp_path,
@@ -2598,60 +2959,105 @@ def test_valid_site_history_changes_the_next_target_correction(
         camera=object(),
         sequencer=SimpleNamespace(describe=lambda: object()),
         plane=plane,
-        target=_grid_target(slm.shape_yx),
-        updates=3,
+        target=base,
+        updates=24,
+        feedback_gain=0.4,
     )
     try:
         result = task.execute(_Context(tmp_path))
-        saved, metadata = _load_candidate(result["artifact_path"])
-        np.testing.assert_array_equal(saved, phases[2])
-        assert requested_shots == [10, 10, 10, 10]
+        assert result["feedback_status"] == "completed"
         history = _load_history(result["artifact_path"])
+        assert 10 <= len(history) < 1 + task.max_updates
+        assert all(item["candidate_kind"] != "probe" for item in history)
+        excitation = np.asarray(
+            [item["excitation_log_step"] for item in history], dtype=float
+        )
+        assert not np.any(excitation[0]) and not np.any(excitation[7:])
+        assert np.all(np.count_nonzero(excitation[1:7], axis=1) == 35)
+        np.testing.assert_allclose(np.sum(excitation[1:7], axis=1), 0.0, atol=1e-12)
+        assert np.all(np.abs(excitation[1:7]) < 0.021)
+        # The SLM saw the control weights times the excitation (up to the
+        # common-mode renormalisation, which no site can tell from another);
+        # the control step alone is what the controller requested.
+        for previous, item in zip(history, history[1:], strict=False):
+            relative = (
+                np.log(_control_weights(np.asarray(item["target_weight"])))
+                - np.log(_control_weights(np.asarray(item["control_weight"])))
+                - np.asarray(item["excitation_log_step"])
+            )
+            np.testing.assert_allclose(relative - np.mean(relative), 0.0, atol=1e-6)
+            np.testing.assert_allclose(
+                np.log(np.asarray(item["control_weight"]))
+                - np.log(np.asarray(previous["control_weight"])),
+                previous["requested_log_correction"],
+                atol=1e-6,
+            )
+        assert {item["plant_slope_source"] for item in history[:2]} == {"assumed"}
+        assert {history[0]["decision"][0], history[1]["decision"][0]} == {
+            "feedback_assumed_slope"
+        }
+        residual = np.log(
+            np.asarray(history[0]["bright_minus_dark"], dtype=float)
+        )
+        residual -= np.mean(residual)
         np.testing.assert_allclose(
-            [item["double_feedback_gain"] for item in history],
-            (0.25, 0.25, 0.3125, 0.390625),
+            history[0]["requested_log_correction"],
+            0.5 * 0.4 * (1.0 - 4.0 * sigma) * residual,
+            atol=2e-3,
         )
-        assert history[0]["adaptive_gain_action"] == (
-            "initialize_formal_double_history"
+        estimated = [
+            item for item in history if item["plant_slope_source"] == "estimated"
+        ]
+        assert estimated and estimated[0]["iteration"] >= 3
+        assert history[-1]["plant_slope_source"] == "estimated"
+        assert history[-1]["plant_slope_estimate"] == pytest.approx(
+            sum(plant_lags), abs=3.0 * history[-1]["plant_slope_se"]
         )
-        assert history[2]["adaptive_gain_action"] == (
-            "increase_after_continuous_improvement"
+        assert history[-1]["plant_slope_se"] < 0.3 * abs(sum(plant_lags))
+        assert estimated[0]["decision"][0] == "feedback_estimated_slope"
+        assert [item["converged"] for item in history[-3:]] == [True] * 3
+        assert history[-1]["convergence_streak"] == 3
+        assert history[-1]["true_uniformity_cv"] < 0.5 * sigma
+        assert history[-1]["next_phase_changed"] is None
+        assert all(item["expected_noise_ratio"] > 1.0 for item in history)
+        ratios = np.asarray([item["uniformity_ratio"] for item in history])
+        assert ratios[-1] < ratios[0]
+        saved, metadata = _load_candidate(result["artifact_path"])
+        bounds = [
+            item["true_uniformity_variance"] + item["true_uniformity_variance_error"]
+            for item in history
+        ]
+        assert metadata["candidate"] == history[int(np.argmin(bounds))]["iteration"]
+        assert history[metadata["candidate"] - 1]["converged"]
+        np.testing.assert_array_equal(saved, slm.last_commanded_phase)
+        assert metadata["outcome"]["reason"] == (
+            "true between-site contrast dispersion indistinguishable from zero "
+            "for 3 consecutive candidates"
         )
-        base = _grid_target(slm.shape_yx)
-        rows, columns = np.nonzero(base)
-        first_target, *_details = _updated_target(
-            base,
-            first_contrast,
-            np.zeros(35),
-            np.ones(35, dtype=bool),
-            rows,
-            columns,
-            reference_valid=np.ones(35, dtype=bool),
-            previous_weights=np.full(35, np.nan),
-            previous_contrast=np.full(35, np.nan),
-            feedback_gain=0.25,
-            maximum_weight_change=0.5,
+        assert all(
+            kwargs["support_tolerance"] == 1.002 and kwargs["minimum_iterations"] == 5
+            for kwargs in solver_kwargs
         )
-        second_target, *_details = _updated_target(
-            first_target,
-            np.concatenate(([1.8], np.ones(34))),
-            np.zeros(35),
-            np.ones(35, dtype=bool),
-            rows,
-            columns,
-            reference_valid=np.ones(35, dtype=bool),
-            previous_weights=base[rows, columns],
-            previous_contrast=first_contrast,
-            feedback_gain=0.25,
-            maximum_weight_change=0.5,
+        summary = json.loads((tmp_path / "summary.json").read_text())
+        assert summary["plant_slope_history"][-1]["source"] == "estimated"
+        assert summary["uniformity_history"][-1]["converged"] is True
+        assert summary["selected_true_uniformity_cv"] < 0.5 * sigma
+        assert summary["selected_expected_noise_ratio"] == pytest.approx(1.054, abs=0.01)
+        assert "double_gain_history" not in summary
+        text = (tmp_path / "summary.txt").read_text()
+        assert "Final plant slope:" in text and "estimated" in text
+        assert result["true_uniformity_cv"] == summary["selected_true_uniformity_cv"]
+        info, arrays = read_archive(tmp_path / "figures" / "uniformity_history.npz")
+        assert info["sections"]["source"]["run_record"]["readout_model_kind"] == "box"
+        plot_input, _recipe = read_figure_plot(info, arrays, "data")
+        metric_axis = next(
+            spec
+            for spec in plot_input.block.schema.cell_schema.data_axes
+            if str(spec.axis_id) == "slm_feedback.uniformity.metric"
         )
-        np.testing.assert_allclose(solved_targets[0], first_target)
-        np.testing.assert_allclose(solved_targets[1], second_target)
-        assert history[1]["decision"][0] == "feedback_history_slope"
-        np.testing.assert_array_equal(slm.commands[0], incoming)
-        np.testing.assert_array_equal(slm.commands[1], phases[0])
-        np.testing.assert_array_equal(slm.commands[2], phases[1])
-        np.testing.assert_array_equal(slm.commands[3], phases[2])
+        assert metric_axis.coordinate_labels == (
+            "all sites", "observable sites", "expected noise floor"
+        )
     finally:
         plane.close()
 
@@ -2808,7 +3214,9 @@ def test_failure_after_a_completed_candidate_saves_figures_and_context(
         assert info["sections"]["source"]["run_record"][
             "device_snapshot_context"
         ] == {"candidate": 1, "measurement_completed": True}
-        assert archived_slm["command_revision"] < slm.command_revision
+        # The phase measured for candidate 1 is the phase the failed run
+        # leaves on the SLM: no command follows the measurement.
+        assert archived_slm["command_revision"] == slm.command_revision
         _plot_input, recipe = read_figure_plot(info, arrays, "data")
         assert isinstance(recipe["spec"], FacetGridPlot)
         assert isinstance(recipe["spec"].cell, HistogramPlot)
@@ -2831,7 +3239,22 @@ def test_failure_after_a_completed_candidate_saves_figures_and_context(
         )
         assert summary["status"] == "failed"
         assert summary["selected_candidate"] == 1
+        assert summary["rollback"] is None
+        assert summary["error"]["message"] == "candidate solve failed"
+        # The measured candidate is sealed exactly as a completed run seals
+        # its result: in final/, with the failure in its outcome, and on the
+        # SLM (candidate 1 was measured at the incoming phase).
+        final_phase, final_metadata = _load_candidate(
+            run_root / "final" / "science-context.npz"
+        )
+        assert final_metadata["status"] == "failed"
+        assert final_metadata["candidate"] == 1
+        assert final_metadata["outcome"]["status"] == "failed"
+        assert final_metadata["outcome"]["selected_candidate"] == 1
+        assert "candidate solve failed" in final_metadata["outcome"]["reason"]
+        np.testing.assert_array_equal(final_phase, incoming)
         np.testing.assert_array_equal(slm.last_commanded_phase, incoming)
+        assert artifact_roles["artifact_path"] == "final"
     finally:
         host.shutdown()
         plane.close()
@@ -3005,7 +3428,10 @@ def test_terminal_save_failure_restores_incoming_and_fails_host(
     original_save = feedback_module.save_science_context
 
     def fail_terminal_save(path, phase, **kwargs):
-        if kwargs["pattern_metadata"]["status"] == "completed":
+        # final/ cannot be written at all: neither the completed seal nor
+        # the failed-run seal of the same candidate.  Only then does the
+        # incoming phase come back.
+        if kwargs["pattern_metadata"]["status"] in {"completed", "failed"}:
             raise OSError("terminal save failed")
         return original_save(path, phase, **kwargs)
 

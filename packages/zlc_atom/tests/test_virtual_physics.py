@@ -2202,7 +2202,32 @@ def test_slm_solver_reuses_small_plain_state_without_relaxing_quality() -> None:
     assert accepted_metadata["early_stopped"] is True
     assert accepted_metadata["iterations_run"] >= 1
     assert accepted_metadata["support_intensity_ratio"] <= 1.01
+    assert accepted_metadata["support_tolerance"] == 1.01
+    assert accepted_metadata["minimum_iterations"] == 1
     assert ratio <= 1.01
+
+    # A caller may tighten the gate: no early stop before the minimum passes,
+    # and none until the support ratio is inside the requested tolerance.
+    tightened_state = json.loads(encoded_state)
+    _tightened, tightened_metadata = solve_phase(
+        changed,
+        pupil_amplitude=pupil,
+        objective_kind="spots",
+        spot_optimizer_state=tightened_state,
+        support_tolerance=1.002,
+        minimum_iterations=5,
+    )
+    assert tightened_metadata["support_tolerance"] == 1.002
+    assert tightened_metadata["minimum_iterations"] == 5
+    assert tightened_metadata["iterations_run"] >= 5
+    if tightened_metadata["early_stopped"]:
+        assert tightened_metadata["support_intensity_ratio"] <= 1.002
+    else:
+        assert tightened_metadata["iterations_run"] == tightened_metadata["max_iterations"]
+    with pytest.raises(ValueError, match="support_tolerance"):
+        solve_phase(changed, objective_kind="spots", support_tolerance=0.99)
+    with pytest.raises(ValueError, match="minimum_iterations"):
+        solve_phase(changed, objective_kind="spots", minimum_iterations=0)
 
     stopped_state = json.loads(encoded_state)
     unchanged = json.dumps(stopped_state, sort_keys=True)
