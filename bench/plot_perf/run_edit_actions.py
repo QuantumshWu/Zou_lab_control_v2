@@ -311,7 +311,7 @@ class _EventWatch:
                     watch._record(now - began, kind, who)
                 try:
                     kind = str(event.type())
-                    who = f"{type(receiver).__name__}:{receiver.objectName() or ''}"
+                    who = f"{receiver.metaObject().className()}:{receiver.objectName() or ''}"
                 except Exception:
                     kind, who = "?", "?"
                 self._open = (now, kind, who)
@@ -319,12 +319,25 @@ class _EventWatch:
 
         self._filter = Filter()
         self._app.installEventFilter(self._filter)
+        _EventWatch.current = self
         return self
+
+    current: "_EventWatch | None" = None
+
+    def close_open(self) -> None:
+        """The pump returned: the open event's cost ends here, not at the next pump."""
+
+        if self._filter is not None and self._filter._open is not None:
+            began, kind, who = self._filter._open
+            self._record(time.perf_counter() - began, kind, who)
+            self._filter._open = None
 
     def __exit__(self, *_exc) -> None:
         if self._filter is not None:
             self._app.removeEventFilter(self._filter)
             self._filter = None
+        if _EventWatch.current is self:
+            _EventWatch.current = None
 
     def _record(self, cost: float, kind: str, who: str) -> None:
         if cost < 0.004:
@@ -337,6 +350,147 @@ class _EventWatch:
     def summary(self, top: int = 8) -> list[str]:
         self.slowest.sort(reverse=True)
         return [f"{cost * 1000.0:6.1f} ms  {kind}  {who}" for cost, kind, who in self.slowest[:top]]
+
+
+class _RelayTimer:
+    """Every owner-turn relay's slot, timed: which turn a queued call is.
+
+    A queued meta-call on the owner is one of two things here -- the
+    board's completion turn, or a Qt worker's delivery drain -- and both
+    reach the owner through ``attach_qt_owner_turn``.  Wrapping that
+    factory before the console is built names and times every slot it
+    creates; the workers are named by the ``attach_qt_worker`` call that
+    made them.
+    """
+
+    log: list[tuple[float, str, float]] = []
+    _worker: list[str] = []
+
+    @classmethod
+    def install(cls) -> None:
+        from zlc_workbench import board
+
+        if getattr(board.attach_qt_owner_turn, "_bench_timed", False):
+            return
+        original_turn = board.attach_qt_owner_turn
+        original_worker = board.attach_qt_worker
+
+        def attach_qt_owner_turn(turn):
+            name = getattr(turn, "__qualname__", repr(turn))
+            if "drain" in name and cls._worker:
+                name = f"worker drain [{cls._worker[-1]}]"
+
+            def timed(*args, **kwargs):
+                began = time.perf_counter()
+                try:
+                    return turn(*args, **kwargs)
+                finally:
+                    end = time.perf_counter()
+                    cls.log.append((end, name, end - began))
+
+            timed.__qualname__ = name
+            return original_turn(timed)
+
+        def attach_qt_worker(name, *args, **kwargs):
+            cls._worker.append(str(name))
+            try:
+                return original_worker(name, *args, **kwargs)
+            finally:
+                cls._worker.pop()
+
+        attach_qt_owner_turn._bench_timed = True
+        board.attach_qt_owner_turn = attach_qt_owner_turn
+        board.attach_qt_worker = attach_qt_worker
+
+    @classmethod
+    def summary(cls, window: tuple[float, float]) -> list[str]:
+        import collections
+
+        begin, end = window
+        totals: dict = collections.defaultdict(lambda: [0, 0.0, 0.0])
+        for stamp, name, cost in cls.log:
+            if begin <= stamp <= end:
+                entry = totals[name]
+                entry[0] += 1
+                entry[1] += cost
+                entry[2] = max(entry[2], cost)
+        rows = sorted(totals.items(), key=lambda item: -item[1][1])
+        return [
+            f"{name:<44} calls {count:4d}  total {total * 1000.0:7.1f} ms  worst {worst * 1000.0:6.1f} ms"
+            for name, (count, total, worst) in rows[:8]
+        ]
+
+
+class _OwnerSteps:
+    """Wall time of each step the owner's turns run, while installed.
+
+    The beat and the completion-driven commit are the two slots a queued
+    event delivers to; both are sequences of presenter and board steps.
+    Wrapping the bound methods for the window charges every slot to its
+    steps -- count, total and worst -- which a stack sample cannot do for
+    a step that spends its time in a C call holding the interpreter.
+    """
+
+    STEPS = (
+        ("presenter", "commit_surfaces"),
+        ("presenter", "beat"),
+        ("presenter", "_settle_panel_hosts"),
+        ("presenter", "_drain_panel_interactions"),
+        ("presenter", "_poll_retired_plot_hosts"),
+        ("presenter", "_reconcile_panel_derivations"),
+        ("presenter", "_report_panel_errors"),
+        ("presenter", "poll_logic"),
+        ("presenter", "_refresh_signal_choices"),
+        ("board", "tick"),
+        ("board", "commit"),
+    )
+
+    def __init__(self, bench: ConsoleBench) -> None:
+        self._bench = bench
+        self._originals: list = []
+        self.stats: dict[str, list[float]] = {}
+
+    def __enter__(self) -> "_OwnerSteps":
+        for owner_name, method in self.STEPS:
+            owner = self._bench.presenter if owner_name == "presenter" else self._bench.presenter.board
+            original = getattr(owner, method, None)
+            if not callable(original):
+                continue
+            label = f"{owner_name}.{method}"
+            self.stats[label] = []
+
+            def timed(*args, _original=original, _label=label, **kwargs):
+                began = time.perf_counter()
+                try:
+                    return _original(*args, **kwargs)
+                finally:
+                    self.stats[_label].append(time.perf_counter() - began)
+
+            setattr(owner, method, timed)
+            self._originals.append((owner, method, original))
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        for owner, method, original in self._originals:
+            try:
+                delattr(owner, method)
+            except AttributeError:
+                setattr(owner, method, original)
+            if getattr(owner, method, None) is not original and not callable(getattr(type(owner), method, None)):
+                setattr(owner, method, original)
+        self._originals.clear()
+
+    def summary(self) -> list[str]:
+        rows = []
+        for label, samples in self.stats.items():
+            if not samples:
+                continue
+            rows.append((sum(samples), label, len(samples), max(samples)))
+        rows.sort(reverse=True)
+        return [
+            f"{label:<38} calls {count:4d}  total {total * 1000.0:7.1f} ms  worst {worst * 1000.0:6.1f} ms"
+            for total, label, count, worst in rows[:9]
+        ]
 
 
 class _LoopClock:
@@ -353,6 +507,9 @@ class _LoopClock:
     def pump(self) -> None:
         begin = time.perf_counter()
         self._app.processEvents(self._flag, 20)
+        watch = _EventWatch.current
+        if watch is not None:
+            watch.close_open()
         end = time.perf_counter()
         self.turns.append(end - begin)
         if end - begin > self.longest[1] - self.longest[0]:
@@ -492,7 +649,7 @@ def _steady_state(bench: ConsoleBench, seconds: float) -> dict:
     clock = _LoopClock(bench.app)
     # The console beats on its own timer in the product; the bench stands
     # that timer up for the window, or nothing is staged at all.
-    with guards.ProductBeat(bench.app, bench.presenter), _OwnerSampler() as sampler, _HostTimeline() as timeline:
+    with guards.ProductBeat(bench.app, bench.presenter), _OwnerSampler() as sampler, _HostTimeline() as timeline, _OwnerSteps(bench) as steps:
         began = time.perf_counter()
         while time.perf_counter() - began < seconds:
             clock.pump()
@@ -532,6 +689,8 @@ def _steady_state(bench: ConsoleBench, seconds: float) -> dict:
         "owner": sampler.summary(),
         "longest_turn_frames": sampler.during(clock.longest),
         "hosts": hosts,
+        "owner_steps": steps.summary(),
+        "relay_turns": _RelayTimer.summary((began, finished)),
     }
 
 
@@ -547,7 +706,7 @@ def _timed_action(bench: ConsoleBench, what: str, trigger, predicate, *, timeout
         profile = cProfile.Profile()
         if mode != "trigger":
             profile.enable()
-    with _OwnerSampler() as sampler, _HostTimeline() as timeline, _EventWatch(bench.app) as events:
+    with _OwnerSampler() as sampler, _HostTimeline() as timeline, _EventWatch(bench.app) as events, _OwnerSteps(bench) as steps:
         began = time.perf_counter()
         # "trigger" profiles the synchronous call alone: it runs on the
         # owner with the workers mostly waiting, so its self times are the
@@ -577,6 +736,8 @@ def _timed_action(bench: ConsoleBench, what: str, trigger, predicate, *, timeout
             for index, host in enumerate(timeline.new_hosts(began))
         },
         "slowest_events": events.summary(),
+        "owner_steps": steps.summary(),
+        "relay_turns": _RelayTimer.summary((began, finished)),
     }
     if mode == "trigger":
         import io
@@ -663,6 +824,7 @@ def _scroll(bench: ConsoleBench, editor, steps: int = 20, *, hide: str = "") -> 
 def run(
     *, window: int, exposure: float, save_dir: pathlib.Path, screenshots: bool = False
 ) -> dict:
+    _RelayTimer.install()
     bench = ConsoleBench()
     payload: dict = {
         "scenario": "edit-actions-on-deep-history-grid",
@@ -857,6 +1019,14 @@ def _print(payload: dict) -> None:
             if row.get("slowest_events"):
                 print("   slowest Qt events delivered during the action:")
                 for line in row["slowest_events"]:
+                    print("     ", line)
+            if row.get("owner_steps"):
+                print("   owner turn steps during the action:")
+                for line in row["owner_steps"]:
+                    print("     ", line)
+            if row.get("relay_turns"):
+                print("   owner-turn relays during the action:")
+                for line in row["relay_turns"]:
                     print("     ", line)
             for index, rows in (row.get("host_timelines") or {}).items():
                 print(f"   new host {index}: {len(rows)} operations (ms after the trigger)")
