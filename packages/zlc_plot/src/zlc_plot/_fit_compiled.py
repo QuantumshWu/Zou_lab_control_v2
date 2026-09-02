@@ -3864,11 +3864,11 @@ READ_NOISE_FLOOR = 1e-3
 
 
 @njit(cache=True, inline="always")
-def _read_noise_floor(rate, step):
-    """The width floor is on the TOTAL width ``sqrt(rate + sigma^2)``, half a
-    bin; below that only a numerical floor on ``1/sigma^2``."""
+def _read_noise_floor(step):
+    """``bin / sqrt(12)``: the bin's own smoothing, under which a bin-centre
+    value no longer stands for the bin (see ``fit._poisson_moments``)."""
 
-    return max(math.sqrt(max(0.25 * step * step - rate, 0.0)), READ_NOISE_FLOOR)
+    return max(step / math.sqrt(12.0), READ_NOISE_FLOOR)
 
 
 @njit(cache=True, inline="always")
@@ -3904,8 +3904,9 @@ def _poisson_moments(x, values, split, side, step):
         value = max(values[index], 0.0)
         total += value
         maximum = max(maximum, value)
+    floor = _read_noise_floor(step)
     if total <= 0.0:
-        return 0.0, 0.0, 0.0, 0.0, READ_NOISE_FLOOR
+        return 0.0, 0.0, 0.0, 0.0, floor
     cumulative = 0.0
     lower = x[0]
     upper = x[0]
@@ -3936,7 +3937,6 @@ def _poisson_moments(x, values, split, side, step):
         core_moment += x[index] * value
     rate = max(core_moment / core_mass, 0.25 * step)
     width = (upper - lower) / 1.349
-    floor = _read_noise_floor(rate, step)
     sigma = _read_noise_seed(width * width - rate, rate, floor)
     amplitude = maximum * math.sqrt(rate + sigma * sigma) / sigma
     return amplitude, rate, sigma, total, floor
@@ -3956,7 +3956,6 @@ def _prepare_poisson_histogram(coords, observations, valid, seeds, lower, upper,
     if total <= 0.0:
         amplitude = 0.0
         rate = max(np.mean(x), 0.25 * step)
-        floor = _read_noise_floor(rate, step)
         sigma = _read_noise_seed(span * span / 36.0, rate, floor)
     seeds[0, 0] = amplitude
     seeds[0, 1] = rate
@@ -4051,16 +4050,15 @@ def _prepare_poisson_bimodal(coords, observations, valid, seeds, lower, upper, c
     if not found:
         left_rate = max(midpoint - span / 4.0, 0.25 * step)
         right_rate = left_rate + span / 2.0
-        left_floor = _read_noise_floor(left_rate, step)
-        right_floor = _read_noise_floor(right_rate, step)
+        floor = _read_noise_floor(step)
         best[0] = left_rate
         best[1] = span / 2.0
         best[2] = maximum
-        best[3] = _read_noise_seed(span * span / 100.0, left_rate, left_floor)
+        best[3] = _read_noise_seed(span * span / 100.0, left_rate, floor)
         best[4] = maximum
-        best[5] = _read_noise_seed(span * span / 100.0, right_rate, right_floor)
-        best[6] = left_floor
-        best[7] = right_floor
+        best[5] = _read_noise_seed(span * span / 100.0, right_rate, floor)
+        best[6] = floor
+        best[7] = floor
     for parameter in range(6):
         seeds[0, parameter] = best[parameter]
     lower[3] = max(lower[3], best[6])

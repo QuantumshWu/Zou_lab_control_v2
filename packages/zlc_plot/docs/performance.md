@@ -774,9 +774,14 @@ ten-photon-wide bump).  A width seed never sits on a bound and never under
 `sqrt(rate)/3`: seeded at half a photon under 210 photons the width was 0.1%
 of the variance, the solver saw no gradient and reported convergence there
 with a small error bar while the deviance kept falling to sigma = 4.  The
-half-bin floor is on the TOTAL width `sqrt(rate + sigma^2)`, not on the read
-noise: at a thousand photons in a sixteen-photon bin the old floor forced
-sigma = 8 onto a 0.3-photon camera and fitted worse than a Gaussian.
+width floor is `bin / sqrt(12)`, the bin's own box smoothing: under it the
+integer-photon comb is not smoothed between bin centres and a 0.03-photon
+width put a whole peak into the two bins whose centres fell on integers;
+over it -- the Gaussian models' half bin -- a thousand photons in a
+sixteen-photon bin forced sigma = 8 onto a 0.3-photon camera and fitted
+worse than a Gaussian.  The models are offered only on histograms whose
+values carry no unit (the photoelectron readout); a raw camera `count` has
+no photon lattice and is refused with the reason.
 Recovery on synthetic Poisson + Gaussian histograms (64 bins, 5000 samples):
 rate and read noise within errors from 0.1 photons with half the samples
 negative (0.0998 +- 0.006 / 0.301 +- 0.004 for 0.1 / 0.3) up to 60 photons

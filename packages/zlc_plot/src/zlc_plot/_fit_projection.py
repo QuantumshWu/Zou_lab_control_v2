@@ -44,6 +44,7 @@ from .fit import (
     FitParameterDisplay,
     FitResult,
     FitTarget,
+    PHOTOELECTRON_AXIS,
     RegularImageFitInput,
     UnitRelation,
     _REGULAR_IMAGE_CAPABILITIES,
@@ -530,10 +531,37 @@ class FitProjection:
         target = handler.fit_target
         return None if target is None else FitTarget(target)
 
+    def _fit_model_needs_photoelectrons(self, model: FitModelSpec) -> str | None:
+        """Why a photon-counting model cannot fit this plot's values, or None.
+
+        The Poisson lattice is the integer photoelectron count.  The product's
+        photoelectron readout publishes values with no unit; a camera read raw
+        publishes its ``count`` (an ADU under an unknown gain), and any other
+        unit is not a count at all.  Fitting a raw MOT ROI's pixel histogram
+        put a 0.03-photon comb under a 7-ADU peak narrower than seven photons
+        allow; the answer is the calibration that converts the camera to
+        photoelectrons, not a fit.
+        """
+
+        if PHOTOELECTRON_AXIS not in model.capabilities:
+            return None
+        if not self._is_histogram_plot():
+            return "photon-counting fit models fit histograms"
+        unit = self._value_quantity().canonical_unit
+        if unit.dimension == "dimensionless":
+            return None
+        return (
+            f"fit model {model.model_id!r} counts photoelectrons; these values "
+            f"are in {unit.symbol!r}. Read the camera through a photoelectron "
+            "calibration, or fit a Gaussian model"
+        )
+
     def _fit_model_units_compatible(self, model: FitModelSpec) -> bool:
         if self._view is None:
             return False
         try:
+            if self._fit_model_needs_photoelectrons(model) is not None:
+                return False
             sources = (
                 (self._value_quantity(),)
                 if self._is_histogram_plot()
@@ -567,8 +595,14 @@ class FitProjection:
                 f"fit model {model.model_id!r} is not authored for {name} plots"
             )
         if not self._fit_model_units_compatible(model):
+            reason = None
+            try:
+                reason = self._fit_model_needs_photoelectrons(model)
+            except (AttributeError, TypeError, ValueError):
+                reason = None
             raise ValueError(
-                f"fit model {model.model_id!r} is incompatible with the plot axes"
+                reason
+                or f"fit model {model.model_id!r} is incompatible with the plot axes"
             )
 
     def _build_view_and_payload(self) -> None:

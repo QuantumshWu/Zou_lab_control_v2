@@ -3544,10 +3544,17 @@ def _histogram_cuts(x: np.ndarray, counts: np.ndarray) -> tuple[float, ...]:
     return tuple(dict.fromkeys(splits))
 
 
-#: The read-noise width may go this small: a numerical floor for ``1/sigma^2``,
-#: not a resolution claim.  What the histogram resolves is the TOTAL width,
-#: ``sqrt(rate + sigma^2)``, which the seeder holds to half a bin.
+#: The read-noise width may go this small: a numerical floor for ``1/sigma^2``.
 _READ_NOISE_FLOOR = 1e-3
+
+#: A Poisson-Gaussian model reads its x axis as photoelectrons: the lattice
+#: is the integer count.  A histogram in a camera's raw unit ("count", an
+#: ADU with an unknown gain) has no such lattice, and fitting it produced a
+#: 0.03-photon "read noise" comb under a 7-ADU background peak whose width
+#: was BELOW the Poisson width of 7 photons.  The plot offers these models
+#: only where the values carry no unit -- the product's photoelectron
+#: readout -- and refuses them, saying why, everywhere else.
+PHOTOELECTRON_AXIS = "photoelectron_axis"
 
 
 def _poisson_moments(
@@ -3565,12 +3572,17 @@ def _poisson_moments(
     its zero bound under a ten-photon-wide bump) from which neither solver
     finds the peak.
 
-    The floor is on the total width: ``rate + sigma^2`` may not go under a
-    quarter of a bin squared, which is nothing at sixty photons in a
-    one-photon bin and half a bin at a fraction of a photon.  The old rule
-    floored the read noise itself at half a bin, and at a thousand photons
-    in a sixteen-photon bin that forced sigma = 8 onto a 0.3-photon camera
-    and fitted worse than a Gaussian.  A seed NEVER sits on a bound: a
+    The width floor is ``bin / sqrt(12)``: the model is evaluated at bin
+    centres, and a read noise narrower than that leaves the comb of integer
+    photon counts unsmoothed between the centres -- a 0.03-photon width put
+    every count of a 7-photon peak into the two bins whose centres happened
+    to fall on integers, with an amplitude of two million.  At bin/sqrt(12)
+    the width equals the bin's own smoothing (a box of width W has variance
+    W^2/12), so the bin-centre value stands for the bin's average and the
+    fitted width carries that smoothing, no more; half a bin, the Gaussian
+    models' floor, forced sigma = 8 onto a 0.3-photon camera at a thousand
+    photons in sixteen-photon bins and fitted worse than a Gaussian.  A
+    seed NEVER sits on a bound: a
     trust-region solver scales its step by the distance to the bound, so a
     width seeded on its floor while the rate seed was still a bin off
     stayed there for good (deviance 1.75 where 1.22 was one photon away).
@@ -3585,9 +3597,9 @@ def _poisson_moments(
 
     total = float(counts.sum())
     span = _span(x)
+    floor = _read_noise_floor(step)
     if total <= 0.0:
         rate = max(float(np.mean(x)), 0.25 * step)
-        floor = _read_noise_floor(rate, step)
         return 0.0, rate, _read_noise_seed(span / 36.0, rate, floor), floor
     cumulative = np.cumsum(counts)
     lower, upper = (
@@ -3597,14 +3609,13 @@ def _poisson_moments(
     core = (x >= lower) & (x <= upper)
     rate = max(float(np.sum(x[core] * counts[core]) / float(counts[core].sum())), 0.25 * step)
     width = (upper - lower) / 1.349
-    floor = _read_noise_floor(rate, step)
     sigma = _read_noise_seed(width * width - rate, rate, floor)
     amplitude = max(float(np.max(counts)), 0.0) * math.sqrt(rate + sigma * sigma) / sigma
     return amplitude, rate, sigma, floor
 
 
-def _read_noise_floor(rate: float, step: float) -> float:
-    return max(math.sqrt(max(0.25 * step * step - rate, 0.0)), _READ_NOISE_FLOOR)
+def _read_noise_floor(step: float) -> float:
+    return max(step / math.sqrt(12.0), _READ_NOISE_FLOOR)
 
 
 def _read_noise_seed(excess_variance: float, rate: float, floor: float) -> float:
@@ -3655,19 +3666,18 @@ def _poisson_bimodal_seed(
         height = max(float(np.max(counts)) if counts.size else 0.0, 0.0)
         left_rate = max(midpoint - span / 4.0, 0.25 * step)
         right_rate = left_rate + span / 2.0
-        left_floor = _read_noise_floor(left_rate, step)
-        right_floor = _read_noise_floor(right_rate, step)
+        floor = _read_noise_floor(step)
         return (
             (
                 left_rate,
                 span / 2.0,
                 height,
-                _read_noise_seed(span * span / 100.0, left_rate, left_floor),
+                _read_noise_seed(span * span / 100.0, left_rate, floor),
                 height,
-                _read_noise_seed(span * span / 100.0, right_rate, right_floor),
+                _read_noise_seed(span * span / 100.0, right_rate, floor),
             ),
-            left_floor,
-            right_floor,
+            floor,
+            floor,
         )
 
     if x.size < 3 or total <= 0.0:
@@ -4199,6 +4209,7 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             ),
             jacobian=_histogram_poisson_gaussian_jacobian,
             bounds_initializer=_poisson_histogram_bounds,
+            capabilities=frozenset({PHOTOELECTRON_AXIS}),
             compiled_descriptor=(
                 _compiled_fit.histogram_poisson_gaussian_descriptor()
             ),
@@ -4251,6 +4262,7 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
                     FitComponentSpec("right", _poisson_bimodal_right),
                 ),
             ),
+            capabilities=frozenset({PHOTOELECTRON_AXIS}),
             compiled_descriptor=(
                 _compiled_fit.bimodal_poisson_gaussian_descriptor()
             ),
