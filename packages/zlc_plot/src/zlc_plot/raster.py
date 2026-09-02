@@ -2415,9 +2415,15 @@ class RasterPlotHost:
                     self._pending.clear()
                     self._closing = True
                     self._condition.notify_all()
+                    # The initial front is one of these tasks.  A caller
+                    # already blocked on it must hear the same sentence as
+                    # every later refusal -- "failed to start: <reason>" --
+                    # not the bare exception, which only a caller who
+                    # arrived AFTER the failure was told the reason for.
+                    failure = self._unusable()
                 for task in pending:
                     if not task.completion.done():
-                        task.completion.set_exception(error)
+                        task.completion.set_exception(failure)
                 return
             else:
                 with self._condition:
