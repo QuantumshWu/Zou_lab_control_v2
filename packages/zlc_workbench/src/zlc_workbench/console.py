@@ -3812,16 +3812,23 @@ class ConsolePresenter:
         the target moved, the geometry changed -- is replaced, as before.
         """
 
-        host = binding.editor_host
         entry = binding.editor_configuration
+        # The surface Edit has, or the one being staged for it: a host
+        # built for the previous freeze takes this one through its data
+        # pipeline, queued behind its own configuration.  Opening Edit
+        # under a live source used to build a second host here -- the
+        # owed presentation arrived while the first was still starting,
+        # and the first was retired before it ran a single operation.
+        host = binding.editor_host
+        if host is None and entry is not None:
+            host = entry[0]
         if (
             host is None
             or previous is None
             or (entry is not None and entry[0] is not host)
             or not _same_panel_plot_target(previous.target, binding.state)
         ):
-            # No surface yet, a replacement already being built, or a
-            # moved target: stage a complete host, as before.
+            # No host at all, or a moved target: stage a complete host.
             self._replace_panel_editor_host(binding)
             return
         frozen = binding.frozen_data

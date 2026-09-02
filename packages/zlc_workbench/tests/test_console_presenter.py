@@ -6476,3 +6476,76 @@ def test_an_editor_hosts_finished_operation_wakes_the_owner(
         time.sleep(0.005)
     assert entry[1].done()
     assert presenter.board.wake.take(), "the in-place freeze did not wake the owner"
+
+
+def test_opening_edit_under_a_newer_shot_stages_one_host(
+    presenter, session, monkeypatch
+) -> None:
+    """A shot pending when Edit opens does not build a second host: the
+    staged host takes the newer freeze through its data pipeline, queued
+    behind its own configuration.
+
+    Under a live source this was every Edit-open: Refresh at open found a
+    newer publication pending, the owed presentation adopted it, and the
+    first host -- still building its session -- was retired before it ran
+    a single operation, and a second was staged in its place.
+    """
+
+    import time
+
+    from zlc_plot.session import PlotSession
+
+    node, snap = _one_shot(session)
+    panel = presenter.add_panel(node.signal_key("frames"), snap, kind="image")
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.host is not None and panel.accepted_surface is not None,
+    )
+    built: list[object] = []
+    original_make = presenter._make_host
+
+    def counting(plot_input, state):
+        host = original_make(plot_input, state)
+        built.append(host)
+        return host
+
+    monkeypatch.setattr(presenter, "_make_host", counting)
+    # The staged host's session build is held, so its worker runs nothing
+    # -- not even its configuration -- until the newer shot is adopted.
+    hold_until = [0.0]
+    original_init = PlotSession.__init__
+
+    def slow_init(self, *args, **kwargs):
+        time.sleep(max(0.0, hold_until[0] - time.monotonic()))
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(PlotSession, "__init__", slow_init)
+    # A shot published but not yet presented: Refresh at open finds it
+    # pending and asks for the owed presentation.
+    _one_shot(session, producer="cm")
+    hold_until[0] = time.monotonic() + 1.5
+    assert presenter.edit_panel(panel.panel_id)
+    assert len(built) == 1
+    staged = built[0]
+    assert panel.editor_host is None and panel.editor_configuration[0] is staged
+    assert panel.refresh_requested, "the pending shot was not owed to Edit"
+    opened = panel.frozen_data
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and panel.frozen_data is opened:
+        presenter.beat()
+        time.sleep(0.005)
+    assert panel.frozen_data is not opened, "the newer shot was not adopted"
+    assert panel.frozen_data.publication is panel.accepted_surface.publication
+    assert len(built) == 1, "a second host was built for the newer freeze"
+    assert panel.editor_configuration is not None
+    assert panel.editor_configuration[0] is staged
+    hold_until[0] = 0.0
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.editor_host is not None and panel.editor_configuration is None,
+    )
+    assert panel.editor_host is staged and not staged.closing
+    assert panel.frozen_data.publication is panel.accepted_surface.publication
+    assert not [
+        text for severity, text in presenter.view.status if severity == "error"
+    ]
