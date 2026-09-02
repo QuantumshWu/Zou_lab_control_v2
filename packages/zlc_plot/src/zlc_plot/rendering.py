@@ -2301,18 +2301,25 @@ class MatplotlibRenderer:
 
         return self._raster_generation
 
+    #: The commands under which a scene is painted by the kernels instead of
+    #: by artists.  Matplotlib's own draw sees none of them, so anything that
+    #: wants a complete picture asks :meth:`_has_prepared_scene` and composes
+    #: -- the one place the question is answered.
+    _PREPARED_SCENE_KEYS = ("image:prepared", "curve:prepared", "facet:fit_native")
+
+    def _has_prepared_scene(self) -> bool:
+        """Whether any part of the picture exists only as a kernel command."""
+
+        return any(
+            isinstance(self._artists.get(key), dict)
+            for key in self._PREPARED_SCENE_KEYS
+        )
+
     def draw(self) -> None:
         """Compose one complete Agg frame from the current artist state."""
 
         with style_context(self.style):
-            if any(
-                isinstance(self._artists.get(key), dict)
-                for key in (
-                    "image:prepared",
-                    "curve:prepared",
-                    "facet:fit_native",
-                )
-            ):
+            if self._has_prepared_scene():
                 self._background_region = None
                 self._background_signature = None
                 self._chrome_churn = 0
@@ -8146,11 +8153,9 @@ class MatplotlibRenderer:
             return
         # Overview/focus is a new surface geometry, not evidence that a
         # stable background cache keeps missing.  Retire the entire previous
-        # composition epoch here, before axes are removed/created.  Leaving
-        # ``_chrome_churn`` from the overview made the first focused frame hit
-        # the repeated-miss escape hatch and full-draw a different picture;
-        # the next revision then returned to native compose, producing the
-        # visible one-frame geometry/style jump reported by the operator.
+        # composition epoch here, before axes are removed/created, so the
+        # first frame of the new surface starts from no background and a
+        # zero churn count rather than inheriting the old surface's.
         self._retire_composition_epoch()
         if previous is not None:
             key = f"facet:{previous}"
