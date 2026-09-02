@@ -344,9 +344,9 @@ class UartRegisterTransport:
         self._until_answered(
             absolute,
             attempt,
-            budget=lambda: self._attempt_budget(outstanding),
-            pending=lambda: len(outstanding),
-            may_resend=lambda: resend or all(frame[3] in rejected for frame in outstanding),
+            outstanding=lambda: outstanding,
+            resend=resend,
+            refused=lambda: all(frame[3] in rejected for frame in outstanding),
             what=f"write of {len(frames)} frame(s)",
         )
 
@@ -355,9 +355,9 @@ class UartRegisterTransport:
         absolute: float,
         attempt: "Callable[[float], str | None]",
         *,
-        budget: "Callable[[], float]",
-        pending: "Callable[[], int]",
-        may_resend: "Callable[[], bool]",
+        outstanding: "Callable[[], Sequence[bytes]]",
+        resend: bool,
+        refused: "Callable[[], bool]",
         what: str,
     ) -> None:
         """THE retry law -- reads and writes alike run their attempts here.
@@ -366,14 +366,14 @@ class UartRegisterTransport:
         microseconds of arriving or is gone forever, and so is its reply.
         Therefore waiting is never the answer to a missing frame -- sending
         again is -- and an attempt is worth exactly what its bytes need plus
-        host slack (``_attempt_budget``), after which the next attempt goes
-        out.  How many attempts there are is not a rule of its own: it is
-        whatever the transaction deadline divides into.  The former rule --
-        three attempts, the last inheriting the remaining deadline "to keep
-        patience for a slow link" -- answered a LOST byte with the patience
-        owed to a SLOW one, and a read whose reply arrived one byte short
-        three times spent 4.88 s waiting for that byte instead of asking
-        sixty more times.
+        host slack (``_attempt_budget`` of what is still ``outstanding``),
+        after which the next attempt goes out.  How many attempts there are
+        is not a rule of its own: it is whatever the transaction deadline
+        divides into.  The former rule -- three attempts, the last inheriting
+        the remaining deadline "to keep patience for a slow link" -- answered
+        a LOST byte with the patience owed to a SLOW one, and a read whose
+        reply arrived one byte short three times spent 4.88 s waiting for
+        that byte instead of asking sixty more times.
 
         ``attempt(deadline)`` returns None when the transaction is complete,
         otherwise how that try failed.  EVERY failure is kept and reported:
@@ -381,30 +381,45 @@ class UartRegisterTransport:
         first two attempts had seen -- the one fact that tells a run of lost
         bytes from a line that went dead -- was nowhere.
 
-        ``may_resend`` is asked before each retry: a command strobe whose
-        acknowledgement went missing may have run, so its caller forbids a
-        second send unless the board refused the first (nothing ran).
+        ``resend=False`` is the command-strobe contract: a strobe whose
+        acknowledgement went missing may have run, so it is never sent again
+        blindly.  ``refused()`` -- the board answered and rejected what is
+        outstanding as damaged (ST_CRC_FAIL), so nothing ran -- lifts that
+        ban, and when the deadline ends on refusals the error says CRC, not
+        timeout: that verdict about the host-to-board direction is what
+        separates a corrupting cable from a dead one.
+
         Resends are counted when a frame is actually SENT again, not when it
         is found missing: a link that gives up is not a link that retried.
         """
 
         started = time.monotonic()
-        failures: list[str] = []
+        # (first attempt, last attempt, how it failed): runs, not a list of
+        # every string -- a board refusing every request answers within a
+        # round trip, and a deadline holds thousands of those.
+        failures: list[tuple[int, int, str]] = []
+        attempts = 0
         while True:
             now = time.monotonic()
-            if now >= absolute or (failures and not may_resend()):
+            if now >= absolute or (failures and not (resend or refused())):
                 break
             if failures:
-                self.resends += pending()
-            failure = attempt(min(absolute, now + budget()))
+                self.resends += len(outstanding())
+            attempts += 1
+            failure = attempt(min(absolute, now + self._attempt_budget(outstanding())))
             if failure is None:
                 return
-            failures.append(failure)
-        raise TimeoutError(
-            f"UART reply timed out on {self.port} at {self.baud} baud after "
-            f"{len(failures)} attempt(s) in {time.monotonic() - started:.2f}s "
-            f"({what}): {_attempt_record(failures)}"
+            if failures and failures[-1][2] == failure:
+                failures[-1] = (failures[-1][0], attempts, failure)
+            else:
+                failures.append((attempts, attempts, failure))
+        record = (
+            f"on {self.port} at {self.baud} baud after {attempts} attempt(s) in "
+            f"{time.monotonic() - started:.2f}s ({what}): {_attempt_record(failures)}"
         )
+        if failures and refused():
+            raise UartError(f"UART request rejected as damaged (request CRC) {record}")
+        raise TimeoutError(f"UART reply timed out {record}")
 
     def _attempt_budget(self, frames: "Sequence[bytes]") -> float:
         """How long one attempt may reasonably take for THESE frames.
@@ -496,21 +511,23 @@ class UartRegisterTransport:
         """
 
         value: int | None = None
+        refused = False
 
         def attempt(attempt_deadline: float) -> str | None:
-            nonlocal value
+            nonlocal value, refused
+            refused = False
             try:
                 reply = self._link.exchange(request, deadline=attempt_deadline, stop=stop)
             except TimeoutError as error:
                 return getattr(self._link, "last_shortfall", "") or str(error)
             sequence, status, words = framing.decode_reply(reply)
-            if status == framing.ST_CRC_FAIL:
-                # Our question arrived damaged: ask again, and say CRC out
-                # loud -- that verdict is what separates a corrupting cable
-                # from a dead one.
-                return "the board rejected the request as damaged (CRC error)"
             if sequence != request[3]:
+                # A stale answer to an earlier question, dropped like the
+                # write path's classifier drops it.
                 return f"stale reply seq={sequence}, expected {request[3]}"
+            if status == framing.ST_CRC_FAIL:
+                refused = True
+                return "the board rejected the request as damaged (CRC error)"
             if status != framing.ST_OK or len(words) != 1:
                 raise UartError(f"UART read reply was invalid (status=0x{status:02X})")
             value = int(words[0]) & 0xFFFFFFFF
@@ -519,9 +536,9 @@ class UartRegisterTransport:
         self._until_answered(
             absolute,
             attempt,
-            budget=lambda: self._attempt_budget((request,)),
-            pending=lambda: 1,
-            may_resend=lambda: True,
+            outstanding=lambda: (request,),
+            resend=True,
+            refused=lambda: refused,
             what=f"read of word {int.from_bytes(request[4:8], 'little')}",
         )
         assert value is not None
@@ -652,7 +669,7 @@ def _describe_shortfall(
     return ", ".join(parts)
 
 
-def _attempt_record(failures: Sequence[str]) -> str:
+def _attempt_record(failures: Sequence[tuple[int, int, str]]) -> str:
     """Every attempt's failure, in order, runs of the same shape folded.
 
     "#1-3: incomplete frame: 12 of 13 bytes (count=1); #4: no bytes" says
@@ -662,15 +679,9 @@ def _attempt_record(failures: Sequence[str]) -> str:
 
     if not failures:
         return "no attempt ran"
-    runs: list[tuple[int, int, str]] = []
-    for index, failure in enumerate(failures, start=1):
-        if runs and runs[-1][2] == failure:
-            runs[-1] = (runs[-1][0], index, failure)
-        else:
-            runs.append((index, index, failure))
     return "; ".join(
         f"#{first}: {failure}" if first == last else f"#{first}-{last}: {failure}"
-        for first, last, failure in runs
+        for first, last, failure in failures
     )
 
 
