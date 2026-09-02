@@ -683,3 +683,72 @@ Two measurement lessons worth keeping: kernel inputs captured by
 reference belong to a later frame (the renderer reuses its geometry
 buffers), so a golden capture copies at capture time; and a same-source
 comparison is only a comparison when both sides ask for the same picture.
+
+## Indexed history at depth (September 2026, third pass)
+
+The scenario: a qCMOS camera, the occupancy processor's `counts`, a
+FacetGrid of histogram cells faceted by site, a 3000-shot window and a
+live bimodal fit in every cell.  The bench for it is
+`bench/plot_perf/run_indexed_history.py --kind facet_histogram --site-axis
+cell --fit bimodal_gaussian` (`--site-axis point` is the per-site point
+table whose history rows multiply by the site count).  Medians per shot,
+`update_data` of the isolated session (projection + fit + compose, no Qt),
+pushed baseline -> this tree:
+
+| geometry                         | window | before  | after |
+|----------------------------------|-------:|--------:|------:|
+| 35 sites in the cell, fit        |   3000 | 176 ms  | 69 ms |
+| 35 sites in the cell, fit        |     40 | 104 ms  | 70 ms |
+| 35 sites in the cell, no fit     |   3000 |         | 20 ms |
+| 35 sites in the cell, no fit     |      1 |         | 17 ms |
+| 64 sites in the cell, fit        |   3000 | 266 ms  | 118 ms |
+| 64 sites in the cell, no fit     | 1/3000 |         | 31 / 31 ms |
+| 35 sites as point rows, fit      |   3000 | 2636 ms | 77 ms |
+| rolling, 35 sites                | 1/3000 |  7 / 15 | 7 / 15 ms |
+
+What changed:
+
+* ONE reading of the history's layout.  "Which rows belong to the last N
+  shots" was answered four times: the rolling trace through the domain
+  machinery, every histogram and facet path by a Python walk over the
+  rows plus `np.isin` over dtype=object (1.2 s per call at 105k rows,
+  twice a shot), the compatibility gate by another Python walk per shot,
+  and the title by a set over the column.  `zlc_data.snapshot_projection.
+  indexed_history_layout` now derives shots, rows per shot and the
+  repeating event once, vectorised, cached on the schema; the window
+  mask, the rolling shot codes and source indices,
+  `indexed_schemas_compatible` and `schema_structure` all read it.
+* A cell's fit label is two artists: the catalogue's mathtext symbol,
+  constant while the parameter is chosen and parse-cached by Matplotlib,
+  and a plain value placed after it by the symbol's measured width.  One
+  Text carrying the whole live line parsed it as MathText on every shot
+  (thirty-five pyparsing runs a frame, half of the update).  The
+  batched-mask blit that existed for this ran only behind the native
+  curve and image rasters and painted masks that were not the full
+  draw's pixels; it is gone with its cache and every exclusion it needed.
+* A cell title is replayed above the chrome it may touch: the full draw
+  paints the title after the spines, the composed frame had held it in
+  the background under the replayed spine -- one level, six pixels, in
+  every histogram grid.  Replayed text is faded rather than hidden for
+  the background draw, because Matplotlib positions a title from its own
+  extent during the draw and a hidden Text reports a unit box.
+* A labelled point coordinate names its distinct values from their first
+  rows instead of a dict over every row (105k `_python_scalar` calls a
+  shot for a 35-value domain).
+
+Where the remaining 69 ms go (35 cells, profile of one shot): drawing
+the cells through Matplotlib's Agg path pipeline -- thirty-five bar
+collections rebuilt and stroked (~15 ms), a hundred and five fit
+polylines (~10 ms), seventy label texts laid out and blitted (~8 ms);
+the fit batch itself 7 ms (4 ms of numeric solve); projection, history
+mask and binning under 3 ms.  The window depth no longer matters (40
+and 3000 shots draw alike); the cost is proportional to cells x artists.
+The next floor would be a native raster for histogram bars and their
+fit curves, as the curve cells already have, which is a larger project
+and was not taken here.
+
+Two observations, not changes: a bimodal fit over cells holding one or
+a few samples (window 1) spends 75-90 ms a shot converging to nothing,
+ten times its cost on a real histogram -- a fit that lacks the samples
+for its parameters would be cheaper refused than solved; and at window 1
+the p90 of any kind is dominated by the plane's ramp, not the plot.
