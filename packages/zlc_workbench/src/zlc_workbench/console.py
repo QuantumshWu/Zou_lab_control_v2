@@ -1777,11 +1777,24 @@ class ConsolePresenter:
                 style=DEFAULTS.style,
             ).declared_subset(display_updates)
         pending = host.configure(**configuration)
-        if host is binding.host:
-            add = getattr(pending, "add_done_callback", None)
-            if callable(add):
-                add(lambda _future: self.board.wake.request_owner_wake())
+        self._wake_when_done(pending)
         return pending
+
+    def _wake_when_done(self, pending: object) -> None:
+        """Have a host's finished operation start the owner turn that consumes it.
+
+        Every pending host operation is settled on the owner -- the live
+        card's presentation, but also the Edit surface's mount, its gesture
+        subscription and the clearing of its pending entry.  Only the live
+        host used to ask for the wake; an editor's finished configuration
+        or freeze then waited for whatever woke the owner next -- a shot,
+        or the display beat -- one such wait per hop of opening Edit, of
+        Refresh, of a moved target.
+        """
+
+        add = getattr(pending, "add_done_callback", None)
+        if callable(add):
+            add(lambda _future: self.board.wake.request_owner_wake())
 
     def _remember_panel_view(self, binding: PanelBinding, **changes: Any) -> None:
         """Write down how this panel is being looked at.
@@ -3823,6 +3836,7 @@ class ConsolePresenter:
         # itself, and the entry simply points at the newest.  A live source
         # makes this the common case -- every owed presentation while the
         # previous adoption is still painting.
+        self._wake_when_done(pending)
         binding.editor_configuration = (host, pending, True, binding.state, frozen)
 
     def _refresh_panel_editor_selection(self, binding: PanelBinding) -> None:

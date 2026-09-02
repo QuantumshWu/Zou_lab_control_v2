@@ -6422,3 +6422,57 @@ def test_save_renders_through_the_settled_editor_host(
     assert binding.editor_host is host and not host.closing, (
         "the editor's host must survive the save it rendered"
     )
+
+
+def test_an_editor_hosts_finished_operation_wakes_the_owner(
+    presenter, session
+) -> None:
+    """Edit's pending configuration and its in-place freeze both wake the owner.
+
+    Only the live host used to ask for the wake when its configuration
+    finished.  The editor's settle -- mount, gesture subscription, clearing
+    the pending entry -- is owner work too, and without the wake it waited
+    for the next shot or display beat, once per hop of opening Edit and of
+    Refresh.
+    """
+
+    import time
+
+    node, snap = _one_shot(session)
+    panel = presenter.add_panel(node.signal_key("frames"), snap, kind="image")
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.host is not None and panel.accepted_surface is not None,
+    )
+    assert presenter.edit_panel(panel.panel_id)
+    entry = panel.editor_configuration
+    assert entry is not None
+    presenter.board.wake.take()
+    deadline = time.monotonic() + 10.0
+    while not entry[1].done() and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert entry[1].done()
+    assert presenter.board.wake.take(), "Edit's finished configuration did not wake the owner"
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.editor_host is not None
+        and panel.editor_configuration is None
+        and panel.frozen_data is not None
+        and panel.frozen_data.description is not None,
+    )
+    before = panel.frozen_data.publication
+    _one_shot(session, producer="cm")
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.accepted_surface is not None
+        and panel.accepted_surface.publication is not before,
+    )
+    assert presenter.refresh_panel_snapshot(panel.panel_id) is True
+    entry = panel.editor_configuration
+    assert entry is not None and entry[0] is panel.editor_host
+    presenter.board.wake.take()
+    deadline = time.monotonic() + 10.0
+    while not entry[1].done() and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert entry[1].done()
+    assert presenter.board.wake.take(), "the in-place freeze did not wake the owner"
