@@ -21,7 +21,7 @@ from zlc_data import (
     DatasetSchema,
     canonical_coordinate_scalar,
 )
-from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
+from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID, indexed_history_layout
 from .kinds import AxisDomain, AxisRef, PlotKind
 from .layout import DEFAULT_LAYOUT, PlotLayoutConfig
 from .session_policy import merge_labels
@@ -351,24 +351,15 @@ def schema_structure(schema: DatasetSchema) -> SchemaStructure:
         # table (rows = shots x event points).  Fusing that into one
         # "point N" invents a geometry the event never had; the shot
         # index is its own bracket entry and the residue is the event's.
-        from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
-
         points = []
-        shot_column = next(
-            (
-                column
-                for column in columns
-                if column.coordinate_id == PRIMARY_INDEX_AXIS_ID
-            ),
-            None,
-        )
-        if shot_column is not None:
-            shots = max(len(set(shot_column.values)), 1)
-            points.append((str(shot_column.name), shots))
+        layout = indexed_history_layout(schema)
+        if layout is not None:
+            shot_column = schema.point_table.column(PRIMARY_INDEX_AXIS_ID)
+            points.append((str(shot_column.name), layout.shot_count))
             columns = tuple(
                 column for column in columns if column is not shot_column
             )
-            rows = rows // shots if rows % shots == 0 else rows
+            rows = layout.inner_count
         # Without topology, every point column is a coordinate over the SAME
         # physical row dimension.  Printing one ``row_count`` per column turns
         # 100 rows carrying (x, y) into a fictional 100×100 geometry.
@@ -620,8 +611,6 @@ def _role_holder(spec: PlotSpec, role: str) -> AxisRef | None:
 
 def _is_primary_index_axis(schema: DatasetSchema, ref: AxisRef) -> bool:
     """Whether this fate row is the Runtime's materialized shot index."""
-
-    from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
 
     return any(
         column.coordinate_id == PRIMARY_INDEX_AXIS_ID

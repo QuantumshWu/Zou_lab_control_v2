@@ -228,10 +228,13 @@ def test_relative_indexed_windows_share_one_event_layout() -> None:
         _indexed_schema((-1, 0)),
         _indexed_schema((-2, -1, 0)),
     )
-    assert not indexed_schemas_compatible(
-        _indexed_schema((4, 5)),
-        _indexed_schema((5, 6)),
-    )
+    # Offsets that do not end at the latest shot are not a different
+    # history: they are no history at all, and the one layout reader says so.
+    with pytest.raises(ValueError, match="latest offset 0"):
+        indexed_schemas_compatible(
+            _indexed_schema((4, 5)),
+            _indexed_schema((5, 6)),
+        )
 
 
 def test_take_indices_rejects_stepped_range_instead_of_silently_ignoring_step():

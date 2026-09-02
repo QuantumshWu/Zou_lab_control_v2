@@ -648,3 +648,60 @@ def test_a_re_fitting_curve_stays_full_draw_exact_frame_after_frame(spec_kind: s
             assert ink > 0.66 * first_ink, f"revision {revision}: {ink} ink pixels against {first_ink} on the first frame"
     finally:
         session.close()
+
+
+def _bimodal_snapshot(schema, points: int, repeats: int, revision: int, seed: int):
+    """Two populations per cell, so every cell's bimodal fit converges."""
+
+    rng = np.random.default_rng(seed)
+    bright = rng.random((repeats, points)) < 0.5
+    values = np.where(
+        bright,
+        rng.normal(40.0 + revision, 6.0, (repeats, points)),
+        rng.normal(8.0, 3.0, (repeats, points)),
+    )
+    return DatasetSnapshot(schema, np.clip(values, 0.0, None)[..., None], revision=revision)
+
+
+def test_a_histogram_grid_with_live_cell_fits_stays_full_draw_exact_and_parses_once() -> None:
+    """A cell label is a constant mathtext symbol and a plain live value, so
+    a shot parses no MathText at all, and the composed frame of a grid of
+    histogram cells -- Matplotlib collections, not a native raster -- is the
+    full draw, pixel for pixel."""
+
+    from zlc_plot import FacetGridPlot, PlotSession
+
+    points, repeats = 160, 6
+    schema = _curve_contract(points, repeats)
+    spec = FacetGridPlot(AxisRef.repeat(), HistogramPlot())
+    session = PlotSession(_bimodal_snapshot(schema, points, repeats, 1, seed=71), spec)
+    try:
+        renderer = session._renderer
+        session.rgba()
+        result = session.fit("bimodal_gaussian")
+        assert len(tuple(result.results)) == repeats
+        from matplotlib.mathtext import MathTextParser
+
+        for revision in range(2, 6):
+            misses_before = MathTextParser._parse_cached.cache_info().misses
+            _live_advance(session, _bimodal_snapshot(schema, points, repeats, revision, seed=70 + revision))
+            composed = np.array(renderer.figure.canvas.buffer_rgba(), copy=True)
+            if revision >= 3:
+                assert MathTextParser._parse_cached.cache_info().misses == misses_before, (
+                    f"revision {revision}: a cell label was parsed as MathText again"
+                )
+            renderer.draw()
+            full = np.array(renderer.figure.canvas.buffer_rgba(), copy=True)
+            differing = int(np.count_nonzero(np.any(composed != full, axis=-1)))
+            assert differing == 0, f"revision {revision}: {differing} pixels differ from the full draw"
+            labels = tuple(
+                artist.get_text()
+                for artist in renderer._fit_artists
+                if hasattr(artist, "get_text") and artist.get_visible()
+            )
+            symbols = tuple(label for label in labels if "$" in label)
+            values = tuple(label for label in labels if "$" not in label)
+            assert len(symbols) == repeats and len(set(symbols)) == 1
+            assert len(values) == repeats and all("±" in value for value in values)
+    finally:
+        session.close()
