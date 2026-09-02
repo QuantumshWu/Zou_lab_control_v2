@@ -91,11 +91,16 @@ SLM_FEEDBACK_SCHEMA = AuthoringSchema(
             "Single-population probe factors",
             (0.5, 2.0),
         ),
+        # LOOP gain: the fraction of each site's residual removed per
+        # candidate, once the plant slope has been measured.  Not a weight
+        # multiplier -- the task divides by the measured response so that
+        # 0.3 means 30% of the residual regardless of how hard the traps
+        # answer; before a slope is trusted it steps at half this.
         AuthoringField(
             "feedback_gain",
             "float",
-            "Bright-dark feedback gain",
-            0.25,
+            "Loop gain (residual fraction removed per candidate)",
+            0.3,
             minimum=0.0,
         ),
         AuthoringField(

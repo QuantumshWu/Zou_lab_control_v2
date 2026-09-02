@@ -303,33 +303,44 @@ explicit operator selection; camera exposure is a separate visible/editable
 field with a `0.1 s` default. Feedback neither derives one from the other nor
 reuses Calibration exposure.
 
-Calibration contributes only registered site centers, BOX half-width/reducer
-and image-coordinate geometry. It contributes no dark/bright level, threshold,
-exposure, photoelectron choice or camera working-point authority. For each
-candidate, Feedback integrates every site's BOX on every shot and fits the two
-Gaussian populations of empty (`dark`) and loaded (`bright`) shots. The metric
-is `bright_mean - dark_mean`; loading probability is reported as the mixture
+Calibration contributes registered site centers, its default readout model
+(the per-site matched filter, or the box) and image-coordinate geometry. It
+contributes no dark/bright level, threshold, exposure, photoelectron choice or
+camera working-point authority. For each candidate, Feedback reads every site
+on every shot with that default model -- a predicted site the Calibration never
+observed reads with the uniform PSF kernel, as the Calibration itself does for
+a site whose atoms it could not measure -- and fits the two Gaussian
+populations of empty (`dark`) and loaded (`bright`) shots. The metric is
+`bright_mean - dark_mean`; loading probability is reported as the mixture
 fraction but is not multiplied into that metric. Penalized likelihood selects
 the single- or double-Gaussian result; every finite selected fit is valid, and
 only a numerical/non-finite fit failure holds that site.
 
 The controller records every site's normalized Target intensity share,
-contrast, fit choice, action and local log-response slope. A high contrast
-means the trap is shallow at the experiment's red-detuned probe point, so its
-share increases; a low contrast makes it decrease. Three authored parameters
-own the update: `single_gaussian_boost`, `feedback_gain`, and
-`maximum_weight_change`. Dark-only sites receive the exact feasible normalized
-share increase; invalid sites keep their share; loaded sites divide only the
-remaining power by their relative corrections. Accumulated dark/loaded bounds
-form a per-site loading floor which later normalization may not cross.
-Prior response state is reused only when mode, Pulse, exposure and all three
-controller parameters match.
+contrast, fit choice and action, and ONE plant slope for the whole array: the
+pooled, instrumented regression of every site's change in log contrast on the
+applied change in log weight at lags 0, 1 and 2. A high contrast means the trap
+is shallow at the experiment's red-detuned probe point, so its share increases;
+a low contrast makes it decrease. `feedback_gain` is the loop gain -- the
+fraction of a site's log residual the next candidate removes -- and the step
+that does it is the residual times `feedback_gain` divided by the measured
+slope magnitude (held to 0.3-5); until three candidates exist and the slope is
+resolved to 30%, the step assumes unit slope at half gain. Steps are scaled by
+fit quality, clamped to `maximum_weight_change` and pass through the
+share-conserving allocator. Dark-only sites receive the exact feasible
+normalized share increase; invalid sites keep their share.
 
-Normal terminal and Stop retain the best fully measured candidate (or the most
-observable measured candidate when no all-site ratio exists); an applied but
+Every candidate splits its shots into odd and even halves and reports the
+true between-site dispersion (the cross-covariance of the two halves' log
+residuals) with its standard error, next to the observed max/min ratio and the
+max/min a perfectly uniform array would show at the same noise. The run stops
+when three formal candidates in a row resolve no dispersion, or at
+`max_updates`. Normal terminal and Stop retain the fully measured candidate
+with the smallest proven dispersion, the most recent among ties (or the most
+observable measured candidate when no all-site result exists); an applied but
 unmeasured phase is never promoted. A Stop already requested before the initial
 solve makes zero solver calls. A genuine failure restores the Context starting
-phase. The run stores each completed candidate's curated BOX samples, fit,
+phase. The run stores each completed candidate's per-site shot samples, fit,
 weights, actions, metrics, phase-change fact and command receipt. Every completed
 candidate has one compact standalone Science Context containing the Pattern that
 was frozen before its shots; only selected initial/final phases are additionally

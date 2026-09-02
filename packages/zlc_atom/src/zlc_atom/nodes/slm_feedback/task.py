@@ -54,10 +54,12 @@ from zlc_atom.devices.slm.solver import (
     validate_target,
 )
 from zlc_atom.nodes.calibration import (
+    ReadoutModel,
     ReadoutModelKind,
     SiteMap,
     TrapCalibration,
     extract_box_signals,
+    extract_psf_signals,
     fit_bimodal,
 )
 from zlc_atom.nodes.calibration.calibration import (
@@ -94,6 +96,15 @@ TARGET_SHARE_HISTORY_OUTPUT = DatasetOutputDeclaration(
 )
 _CONTROLLER_CONTRACT = "slm-feedback.qcmos-bright-dark"
 READOUT_FRAME_COORDINATE = 0
+#: Formal candidates in a row whose split-half dispersion is within its own
+#: standard error of zero before the run declares itself converged.
+_CONVERGENCE_CANDIDATES = 3
+#: The feedback re-solve is a small perturbation of a converged phase, so it
+#: is held to a far tighter support gate than an editor solve: the default
+#: 1% early stop left a fresh ~0.2% rms site-intensity pattern each candidate,
+#: three times the loop's own step (see ``solve_phase``).
+_FEEDBACK_SOLVE_SUPPORT_TOLERANCE = 1.002
+_FEEDBACK_SOLVE_MINIMUM_ITERATIONS = 5
 
 
 def _check_cancelled(context: object) -> None:
@@ -163,91 +174,198 @@ def _ratio_interval(
     return estimate, max(1.0, lower), upper, float(np.max(relative))
 
 
-def _adapt_double_gain(
-    previous_contrast: object,
-    previous_error: object,
-    previous_valid: object,
-    current_contrast: object,
-    current_error: object,
-    current_valid: object,
-    *,
-    gain: float,
-    improvement_streak: int,
-) -> tuple[float, int, str, int, float | None, float | None]:
-    """Adapt one scalar double-site gain from comparable formal candidates."""
+def _half_contrasts(
+    samples: object, threshold: object
+) -> tuple[np.ndarray, np.ndarray]:
+    """Bright-minus-dark of the odd shots and of the even shots, per site.
 
-    before = np.asarray(previous_contrast, dtype=float)
-    before_error = np.asarray(previous_error, dtype=float)
-    before_valid = np.asarray(previous_valid, dtype=bool)
-    after = np.asarray(current_contrast, dtype=float)
-    after_error = np.asarray(current_error, dtype=float)
-    after_valid = np.asarray(current_valid, dtype=bool)
-    if not (
-        before.shape
-        == before_error.shape
-        == before_valid.shape
-        == after.shape
-        == after_error.shape
-        == after_valid.shape
+    Both halves classify their shots with the WHOLE batch's fitted threshold,
+    so they are two independent readings of the same quantity the full fit
+    reports.  Their agreement is the only thing in a shot batch that can tell
+    real site-to-site dispersion from estimator noise: noise is independent
+    between the halves, true dispersion is shared by both.  A half with fewer
+    than two shots on either side of the threshold gives NaN.
+    """
+
+    values = np.asarray(samples, dtype=float)
+    cut = np.asarray(threshold, dtype=float).reshape(-1)
+    if values.ndim != 2 or values.shape[1] != cut.shape[0]:
+        raise ValueError("half-batch contrasts need (shots, sites) samples")
+    halves = []
+    for start in (0, 1):
+        half = values[start::2]
+        finite = np.isfinite(half)
+        bright = finite & (half > cut[None, :])
+        dark = finite & ~bright
+        bright_count = np.count_nonzero(bright, axis=0)
+        dark_count = np.count_nonzero(dark, axis=0)
+        usable = (bright_count >= 2) & (dark_count >= 2) & np.isfinite(cut)
+        contrast = np.full(cut.shape, np.nan, dtype=float)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            bright_mean = np.sum(np.where(bright, half, 0.0), axis=0) / bright_count
+            dark_mean = np.sum(np.where(dark, half, 0.0), axis=0) / dark_count
+        contrast[usable] = bright_mean[usable] - dark_mean[usable]
+        halves.append(contrast)
+    return halves[0], halves[1]
+
+
+def _split_half_dispersion(
+    odd_contrast: object, even_contrast: object, valid: object
+) -> tuple[float, float]:
+    """The TRUE between-site variance of log contrast, and its standard error.
+
+    ``max/min`` of N noisy estimates never reaches 1: with 35 sites at 1.2%
+    relative error its expectation is 1.054 when the array is perfectly
+    uniform, so a controller judged by it keeps chasing noise for ever.  The
+    cross-covariance of the two half-batch residuals is unbiased for the real
+    dispersion, because the halves share the truth and not the noise; it can
+    come out negative, and a value within its own standard error of zero is
+    the honest statement "no dispersion is resolved by this batch".
+    """
+
+    odd = np.asarray(odd_contrast, dtype=float)
+    even = np.asarray(even_contrast, dtype=float)
+    usable = (
+        np.asarray(valid, dtype=bool)
+        & np.isfinite(odd) & np.isfinite(even)
+        & (odd > 0.0) & (even > 0.0)
+    )
+    count = int(np.count_nonzero(usable))
+    if count < 3:
+        return float("nan"), float("nan")
+    first = np.log(odd[usable])
+    second = np.log(even[usable])
+    products = (first - np.mean(first)) * (second - np.mean(second))
+    variance = float(np.sum(products) / (count - 1))
+    error = float(np.std(products, ddof=1) * np.sqrt(count) / (count - 1))
+    return variance, error
+
+
+def _expected_noise_ratio(
+    relative_error: object, valid: object, *, draws: int = 4096
+) -> float:
+    """The max/min a perfectly uniform array would show with these errors."""
+
+    sigma = np.asarray(relative_error, dtype=float)[np.asarray(valid, dtype=bool)]
+    sigma = sigma[np.isfinite(sigma) & (sigma >= 0.0)]
+    if sigma.size < 2:
+        return float("nan")
+    noise = np.random.default_rng(0).standard_normal((int(draws), sigma.size)) * sigma
+    return float(np.mean(np.exp(np.max(noise, axis=1) - np.min(noise, axis=1))))
+
+
+_PLANT_SLOPE_LAGS = 3
+_PLANT_SLOPE_MINIMUM_CANDIDATES = 3
+_PLANT_SLOPE_RELATIVE_ERROR = 0.3
+_PLANT_SLOPE_BOUNDS = (0.3, 5.0)
+
+
+def _plant_slope(
+    log_weights: list[np.ndarray],
+    log_contrast: list[np.ndarray],
+    odd_log_contrast: list[np.ndarray],
+    even_log_contrast: list[np.ndarray],
+) -> tuple[float, float, int]:
+    """Pool every site's response to every applied step into ONE plant slope.
+
+    Model: ``Δlog C_t = s0 Δlog w_t + s1 Δlog w_{t-1} + s2 Δlog w_{t-2}``
+    per site, with common-mode drift removed by centring each candidate's
+    rows across sites; the static slope is ``s0 + s1 + s2``.  The old
+    per-site rule needed a single site to move by 2% before it would look,
+    which a 0.35% typical step never did, and read a slope of -1 into a plant
+    that actually answers with about -3.3 spread over two candidates.
+
+    The lag-0 regressor is instrumented: ``Δlog w_t`` is the controller's
+    reaction to the previous batch's noisy estimate, and that same noise sits
+    in ``Δlog C_t`` with the opposite sign, so a plain regression is biased
+    towards zero by roughly ``gain·Var(noise)/Var(step)`` -- over one unit of
+    slope at the archived run's numbers.  Reading the outcome against the
+    EVEN half of the previous batch and instrumenting the step with the ODD
+    half's residual leaves nothing the two sides share except the plant.
+
+    Returns the signed slope, its standard error and the row count; NaN slope
+    when the design is not estimable.  Steps before the first candidate are
+    zero, which is the physical truth of a settled baseline, not a fill.
+    """
+
+    count = len(log_weights)
+    if count < 2:
+        return float("nan"), float("nan"), 0
+    outcomes: list[np.ndarray] = []
+    regressors: list[np.ndarray] = []
+    instruments: list[np.ndarray] = []
+    for index in range(1, count):
+        step = log_weights[index] - log_weights[index - 1]
+        outcome = log_contrast[index] - even_log_contrast[index - 1]
+        instrument = -odd_log_contrast[index - 1]
+        lagged = [
+            log_weights[index - lag] - log_weights[index - lag - 1]
+            if index - lag >= 1
+            else np.zeros_like(step)
+            for lag in range(_PLANT_SLOPE_LAGS)
+        ]
+        usable = np.isfinite(outcome) & np.isfinite(instrument) & np.all(
+            np.isfinite(np.stack(lagged)), axis=0
+        )
+        if np.count_nonzero(usable) < 2:
+            continue
+        design = np.column_stack([column[usable] for column in lagged])
+        design -= np.mean(design, axis=0, keepdims=True)
+        rows = np.column_stack(
+            (instrument[usable], design[:, 1:])
+        )
+        rows[:, 0] -= np.mean(rows[:, 0])
+        outcomes.append(outcome[usable] - np.mean(outcome[usable]))
+        regressors.append(design)
+        instruments.append(rows)
+    if not outcomes:
+        return float("nan"), float("nan"), 0
+    y = np.concatenate(outcomes)
+    x = np.concatenate(regressors)
+    z = np.concatenate(instruments)
+    rows_used = int(len(y))
+    if rows_used <= _PLANT_SLOPE_LAGS:
+        return float("nan"), float("nan"), rows_used
+    # The pseudo-inverse keeps the estimate defined while a lag column is
+    # still identically zero (no step that old has been applied yet): that
+    # coefficient is zero and the static sum is the estimable part.
+    cross = z.T @ x
+    inverse = np.linalg.pinv(cross)
+    beta = inverse @ (z.T @ y)
+    residual = y - x @ beta
+    sigma_squared = float(residual @ residual) / (rows_used - _PLANT_SLOPE_LAGS)
+    covariance = sigma_squared * inverse @ (z.T @ z) @ inverse.T
+    ones = np.ones(_PLANT_SLOPE_LAGS)
+    slope = float(ones @ beta)
+    error = float(np.sqrt(max(float(ones @ covariance @ ones), 0.0)))
+    if not np.isfinite(slope) or not np.isfinite(error):
+        return float("nan"), float("nan"), rows_used
+    return slope, error, rows_used
+
+
+def _usable_plant_slope(
+    candidates: int, slope: float, error: float
+) -> float | None:
+    """The step divisor the controller may use, or None for the assumed plant.
+
+    An estimate is trusted once at least three candidates exist, it has the
+    physical sign (more weight, deeper trap, less contrast) and its standard
+    error is under 30% of it; the magnitude is then held to [0.3, 5].  Without
+    one the controller assumes unit slope at HALF the authored loop gain --
+    the archived run showed the real plant answering three times harder than
+    assumed, and the safe side of not knowing is the small step.
+    """
+
+    if (
+        candidates < _PLANT_SLOPE_MINIMUM_CANDIDATES
+        or not np.isfinite(slope)
+        or not np.isfinite(error)
+        or slope >= 0.0
+        or error >= _PLANT_SLOPE_RELATIVE_ERROR * abs(slope)
     ):
-        raise ValueError("adaptive double-gain histories differ in shape")
-    common = (
-        before_valid
-        & after_valid
-        & np.isfinite(before)
-        & np.isfinite(before_error)
-        & np.isfinite(after)
-        & np.isfinite(after_error)
-        & (before > 0.0)
-        & (after > 0.0)
-        & (before_error >= 0.0)
-        & (after_error >= 0.0)
-    )
-    common_count = int(np.count_nonzero(common))
-    if common_count < 2:
-        return float(gain), 0, "hold_insufficient_common_double", common_count, None, None
-
-    previous_ratio, previous_lower, previous_upper, _ = _ratio_interval(
-        before[common], before_error[common]
-    )
-    current_ratio, current_lower, current_upper, _ = _ratio_interval(
-        after[common], after_error[common]
-    )
-    previous_uncertainty = max(
-        np.log(previous_ratio / previous_lower),
-        np.log(previous_upper / previous_ratio),
-    )
-    current_uncertainty = max(
-        np.log(current_ratio / current_lower),
-        np.log(current_upper / current_ratio),
-    )
-    noise = float(np.hypot(previous_uncertainty, current_uncertainty))
-    improvement = float(np.log(previous_ratio / current_ratio))
-    selected_gain = float(gain)
-    streak = int(improvement_streak)
-    if improvement > noise:
-        streak += 1
-        if streak >= 2:
-            selected_gain *= 1.25
-            streak = 1
-            action = "increase_after_continuous_improvement"
-        else:
-            action = "hold_first_significant_improvement"
-    elif improvement < -noise:
-        selected_gain *= 0.5
-        streak = 0
-        action = "decrease_after_worsening"
-    else:
-        streak = 0
-        action = "hold_within_uncertainty"
-    return (
-        selected_gain,
-        streak,
-        action,
-        common_count,
-        previous_ratio,
-        current_ratio,
-    )
+        return None
+    lower, upper = _PLANT_SLOPE_BOUNDS
+    return float(np.clip(abs(slope), lower, upper))
 
 
 def _bic_gain(samples: object, fit: object) -> float:
@@ -379,9 +497,14 @@ def _fit_contrasts(samples: object) -> dict[str, np.ndarray]:
             separated[site] = True
         else:
             single_population[site] = True
+    odd_contrast, even_contrast = _half_contrasts(values, threshold)
+    odd_contrast[~separated] = np.nan
+    even_contrast[~separated] = np.nan
     return {
         "contrast": contrast,
         "standard_error": error,
+        "odd_contrast": odd_contrast,
+        "even_contrast": even_contrast,
         "dark_mean": dark_mean,
         "dark_sigma": dark_sigma,
         "dark_standard_error": dark_standard_error,
@@ -477,9 +600,10 @@ _CANDIDATE_VECTOR_FIELDS = (
     "fit_invalid",
     "single_mean",
     "single_sigma",
+    "odd_shot_bright_minus_dark",
+    "even_shot_bright_minus_dark",
     "decision",
     "requested_log_correction",
-    "response_log_slope",
     "previous_double_control_weight",
     "previous_double_bright_minus_dark",
     "probe_effective_factor",
@@ -553,16 +677,21 @@ def _allocate_requested_shares(
 def _support(
     target: np.ndarray,
     calibration: TrapCalibration,
+    model: ReadoutModel,
     *,
     science_context_path: str | Path,
     command_receipt: Mapping[str, object],
-) -> tuple[np.ndarray, np.ndarray, SiteMap]:
-    """Register only the Calibration's site boxes to this Feedback Target."""
+) -> tuple[np.ndarray, np.ndarray, SiteMap, np.ndarray]:
+    """Register the Calibration's sites to this Feedback Target.
 
-    model = calibration.select_model(ReadoutModelKind.BOX)
+    Returns the Target rows and columns, the registered roster, and for every
+    roster site the index of the Calibration site it was matched to (``-1``
+    for a site the Calibration never observed, whose centre is predicted).
+    """
+
     usable = np.asarray(calibration.site_map.valid_sites, dtype=bool)
     if not np.any(usable):
-        raise ValueError("SLM Feedback requires at least one calibrated BOX site")
+        raise ValueError("SLM Feedback requires at least one calibrated site")
     source_indices = np.flatnonzero(usable)
     source_map = SiteMap(
         tuple(calibration.site_map.site_ids[index] for index in source_indices),
@@ -582,20 +711,41 @@ def _support(
             "command_receipt": dict(command_receipt),
         },
         frame_shape=calibration.frame_contract.image_shape,
-        measurement_radius=model.integration_half_width,
+        measurement_radius=_readout_window_half_width(model),
     )
     support, provenance = validate_target_registration(
         registered,
         frame_shape=calibration.frame_contract.image_shape,
-        box_half_width=model.integration_half_width,
+        box_half_width=_readout_window_half_width(model),
     )
     rows, columns = support.T
     if not np.array_equal(support, np.column_stack(np.nonzero(target > 0.0))):
         raise ValueError("registered Calibration support differs from Science Context")
     if provenance["command_receipt"] != dict(command_receipt):
         raise RuntimeError("Feedback registration lost its Science Context receipt")
+    observed = np.asarray(registered.topology["observed_sites"], dtype=bool)
+    lookup = {
+        tuple(center): int(source)
+        for center, source in zip(
+            np.asarray(source_map.centers_xy, dtype=float).tolist(),
+            source_indices.tolist(),
+            strict=True,
+        )
+    }
+    source_index = np.full(len(rows), -1, dtype=int)
+    for site in np.flatnonzero(observed):
+        source_index[site] = lookup[
+            tuple(np.asarray(registered.centers_xy, dtype=float)[site].tolist())
+        ]
+    return rows, columns, registered, source_index
 
-    return rows, columns, registered
+
+def _readout_window_half_width(model: ReadoutModel) -> int:
+    """Every pixel the model's readout touches around a site centre."""
+
+    if model.kind is ReadoutModelKind.BOX or model.background != "annulus":
+        return int(model.integration_half_width)
+    return int(model.integration_half_width) + int(model.psf_padding)
 
 
 def _relative_probe_target(
@@ -792,23 +942,39 @@ def _updated_target(
     columns: np.ndarray,
     *,
     reference_valid: np.ndarray,
-    previous_weights: np.ndarray,
-    previous_contrast: np.ndarray,
     feedback_gain: float,
+    plant_slope: float | None,
     maximum_weight_change: float,
     directed_log_step: np.ndarray | None = None,
     control_boundary: np.ndarray | None = None,
     control_direction: np.ndarray | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Update observable sites relatively while holding all others."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Update observable sites relatively while holding all others.
+
+    ``feedback_gain`` is the LOOP gain: the fraction of each site's log
+    residual the next candidate is asked to remove.  Dividing by the
+    measured ``plant_slope`` magnitude turns that into the weight step which
+    does it; with no trusted slope the step assumes unit slope at half gain
+    (see ``_usable_plant_slope``).  Every step is then scaled by the fit
+    quality, clamped to ``maximum_weight_change`` and passed through the
+    share-conserving allocator, so the recorded correction is what was
+    actually applied.
+    """
 
     values = np.asarray(contrast, dtype=float)
     errors = np.asarray(standard_error, dtype=float)
     control_valid = np.asarray(valid, dtype=bool)
     references = np.asarray(reference_valid, dtype=bool)
-    prior_weights = np.asarray(previous_weights, dtype=float)
-    prior_values = np.asarray(previous_contrast, dtype=float)
     gain = float(feedback_gain)
+    if plant_slope is None:
+        step_gain = 0.5 * gain
+        feedback_decision = "feedback_assumed_slope"
+    else:
+        slope = float(plant_slope)
+        if not np.isfinite(slope) or slope <= 0.0:
+            raise ValueError("plant_slope must be a positive magnitude or None")
+        step_gain = gain / slope
+        feedback_decision = "feedback_estimated_slope"
     maximum_change = float(maximum_weight_change)
     site_shape = (len(rows),)
     direction = (
@@ -829,8 +995,6 @@ def _updated_target(
         or errors.shape != site_shape
         or control_valid.shape != site_shape
         or references.shape != site_shape
-        or prior_weights.shape != site_shape
-        or prior_values.shape != site_shape
         or direction.shape != site_shape
         or boundary.shape != site_shape
         or boundary_direction.shape != site_shape
@@ -851,38 +1015,17 @@ def _updated_target(
     else:
         reference = float(np.exp(np.mean(np.log(values[references]))))
     raw_weights = np.asarray(target[rows, columns], dtype=float)
-    current_weights = _control_weights(raw_weights)
     log_correction = np.zeros(site_shape, dtype=float)
-    response_slope = np.full(site_shape, np.nan, dtype=float)
     decision = np.full(site_shape, "hold_invalid", dtype="<U32")
     for site in range(len(rows)):
         if control_valid[site] and np.isfinite(reference):
             residual = float(np.log(values[site] / reference))
             relative_error = max(float(errors[site]), 0.0) / values[site]
             quality = float(np.clip(1.0 - 4.0 * relative_error, 0.1, 1.0))
-            correction = quality * residual
-            if (
-                np.isfinite(prior_weights[site])
-                and prior_weights[site] > 0.0
-                and np.isfinite(prior_values[site])
-                and prior_values[site] > 0.0
-            ):
-                moved = float(np.log(current_weights[site] / prior_weights[site]))
-                if abs(moved) >= 0.02:
-                    slope = float(np.log(values[site] / prior_values[site]) / moved)
-                    if -4.0 <= slope <= -0.20:
-                        response_slope[site] = slope
-                        correction = -quality * residual / slope
-                        decision[site] = "feedback_history_slope"
-                    else:
-                        decision[site] = "feedback_assumed_slope"
-                else:
-                    decision[site] = "feedback_assumed_slope"
-            else:
-                decision[site] = "feedback_assumed_slope"
+            decision[site] = feedback_decision
             log_correction[site] = float(
                 np.clip(
-                    gain * correction,
+                    step_gain * quality * residual,
                     -np.log1p(maximum_change),
                     np.log1p(maximum_change),
                 )
@@ -927,7 +1070,7 @@ def _updated_target(
     updated[rows, columns] = (
         next_shares * float(np.sum(raw_weights))
     ).astype(np.float32)
-    return validate_target(updated), log_correction, response_slope, decision
+    return validate_target(updated), log_correction, decision
 
 
 class SlmFeedbackTask:
@@ -991,15 +1134,22 @@ class SlmFeedbackTask:
         receipt = science_context.get("command_receipt")
         if not isinstance(receipt, Mapping):
             raise TypeError("Science Context command receipt must be a mapping")
-        model = calibration.select_model(ReadoutModelKind.BOX)
+        # The readout is the Calibration's DEFAULT model -- the same matched
+        # filter (or box) that occupancy reads with, at the registered site
+        # centres.  The task no longer sums its own 3x3 box: that box caught
+        # 66% of a site's light and lost 1.25% of signal per quarter pixel
+        # of drift, the same size as the residuals the loop was correcting.
+        model = calibration.select_model()
         context_path = Path(science_context_path).expanduser().resolve()
         (
             self._rows,
             self._columns,
             self._registered_site_map,
+            source_index,
         ) = _support(
             frozen_target,
             calibration,
+            model,
             science_context_path=context_path,
             command_receipt=receipt,
         )
@@ -1008,6 +1158,35 @@ class SlmFeedbackTask:
             self._registered_site_map.centers_xy, dtype=float
         ).copy()
         self._site_centers_xy.setflags(write=False)
+        self._site_kernels: np.ndarray | None = None
+        if model.kind is not ReadoutModelKind.BOX:
+            observed = source_index >= 0
+            kernels = np.empty(
+                (self._site_count, *model.psf_weights.shape[1:]), dtype=float
+            )
+            kernels[observed] = model.psf_weights[source_index[observed]]
+            if not np.all(observed):
+                # A site the Calibration never saw has no measured shape; it
+                # reads with the shape the other sites agreed on, exactly as
+                # the Calibration itself treats a site whose atoms it could
+                # not measure.
+                try:
+                    uniform = calibration.select_model(ReadoutModelKind.UNIFORM_PSF)
+                except KeyError:
+                    raise ValueError(
+                        "predicted Target sites need the Calibration's uniform "
+                        "PSF model to read with"
+                    ) from None
+                if (
+                    uniform.psf_weights.shape[1:] != kernels.shape[1:]
+                    or uniform.integration_half_width != model.integration_half_width
+                ):
+                    raise ValueError(
+                        "Calibration uniform PSF differs in size from its default model"
+                    )
+                kernels[~observed] = uniform.psf_weights[0]
+            kernels.setflags(write=False)
+            self._site_kernels = kernels
         self.camera, self.sequencer, self.slm = camera, sequencer, slm
         self.camera_key, self.sequencer_key, self.slm_key = camera_key, sequencer_key, slm_key
         self.signal_plane, self.calibration, self.model = signal_plane, calibration, model
@@ -1126,7 +1305,28 @@ class SlmFeedbackTask:
             "probe_factors": list(self.probe_factors),
             "feedback_gain": self.feedback_gain,
             "maximum_weight_change": self.maximum_weight_change,
+            "readout_model_kind": self.model.kind.value,
+            "readout_half_width": int(self.model.integration_half_width),
         }
+
+    def _site_signals(self, image: np.ndarray) -> np.ndarray:
+        """One frame read with the Calibration's default model at every site."""
+
+        model = self.model
+        if self._site_kernels is None:
+            return extract_box_signals(
+                image,
+                self._site_centers_xy,
+                radius=model.integration_half_width,
+            )
+        return extract_psf_signals(
+            image,
+            self._site_centers_xy,
+            kernels=self._site_kernels,
+            background=model.background,
+            radius=model.integration_half_width,
+            padding=model.psf_padding,
+        )
 
     def _device_event_record(
         self,
@@ -1611,22 +1811,15 @@ class SlmFeedbackTask:
             saturated_sites.update(
                 self._saturated_sites(image, saturation_value)
             )
-        box_samples = np.asarray(
-            [
-                extract_box_signals(
-                    image,
-                    self._site_centers_xy,
-                    radius=self.model.integration_half_width,
-                )
-                for image in frames
-            ],
+        site_samples = np.asarray(
+            [self._site_signals(image) for image in frames],
             dtype=float,
         )
-        complete = np.all(np.isfinite(box_samples), axis=0)
+        complete = np.all(np.isfinite(site_samples), axis=0)
         missing_sites = set(int(index) for index in np.flatnonzero(~complete))
         mean_frame = np.asarray(np.mean(frames, axis=0), dtype=np.float32)
         return (
-            box_samples,
+            site_samples,
             tuple(sorted(saturated_sites)),
             tuple(sorted(missing_sites)),
             mean_frame,
@@ -1662,7 +1855,8 @@ class SlmFeedbackTask:
             },
             metadata={
                 "format": "zlc.slm.feedback-sites",
-                "box_half_width": int(self.model.integration_half_width),
+                "readout_model_kind": self.model.kind.value,
+                "readout_half_width": int(self.model.integration_half_width),
                 "calibration_path": str(self.calibration_path),
                 "science_context_path": str(self.science_context_path),
             },
@@ -1685,7 +1879,7 @@ class SlmFeedbackTask:
         history: list[dict[str, object]],
     ) -> Path:
         arrays: dict[str, object] = {
-            "box_samples": np.asarray(samples, dtype="<f8"),
+            "site_samples": np.asarray(samples, dtype="<f8"),
         }
         bool_fields = {
             "fit_valid",
@@ -1852,7 +2046,7 @@ class SlmFeedbackTask:
             HistogramPlot(
                 labels=PlotLabels(
                     title=f"Candidate {candidate} ({kind}) site histograms and fits",
-                    x="box signal",
+                    x="site signal",
                     y="shots",
                 ),
             ),
@@ -1952,17 +2146,21 @@ class SlmFeedbackTask:
             AxisId("slm_feedback.uniformity.metric"),
             "metric",
             COMPONENT,
-            2,
-            (0, 1),
-            coordinate_labels=("all sites", "observable sites"),
+            3,
+            (0, 1, 2),
+            coordinate_labels=(
+                "all sites", "observable sites", "expected noise floor"
+            ),
         )
         uniformity = np.asarray(
             [
                 [
-                    np.nan if item["uniformity_ratio"] is None else item["uniformity_ratio"],
-                    np.nan
-                    if item["observable_uniformity_ratio"] is None
-                    else item["observable_uniformity_ratio"],
+                    np.nan if item[field] is None else item[field]
+                    for field in (
+                        "uniformity_ratio",
+                        "observable_uniformity_ratio",
+                        "expected_noise_ratio",
+                    )
                 ]
                 for item in history
             ],
@@ -2058,7 +2256,7 @@ class SlmFeedbackTask:
                 HistogramPlot(
                     labels=PlotLabels(
                         title="Selected candidate site distributions",
-                        x="box signal",
+                        x="site signal",
                         y="shots",
                     )
                 ),
@@ -2238,19 +2436,12 @@ class SlmFeedbackTask:
             "candidate_count": len(history),
             "settings": self._run_record(),
             "outcome": None if outcome is None else dict(outcome),
-            "final_double_feedback_gain": (
-                None
-                if not formal_history
-                else formal_history[-1]["double_feedback_gain"]
-            ),
-            "double_gain_history": [
+            "plant_slope_history": [
                 {
                     "candidate": item["iteration"],
-                    "gain": item["double_feedback_gain"],
-                    "action": item["adaptive_gain_action"],
-                    "common_double_sites": item["adaptive_gain_common_sites"],
-                    "previous_ratio": item["adaptive_gain_previous_ratio"],
-                    "current_ratio": item["adaptive_gain_current_ratio"],
+                    "estimate": item["plant_slope_estimate"],
+                    "standard_error": item["plant_slope_se"],
+                    "source": item["plant_slope_source"],
                 }
                 for item in formal_history
             ],
@@ -2321,6 +2512,12 @@ class SlmFeedbackTask:
                 if selected is None
                 else selected["maximum_relative_standard_error"]
             ),
+            "selected_true_uniformity_cv": (
+                None if selected is None else selected["true_uniformity_cv"]
+            ),
+            "selected_expected_noise_ratio": (
+                None if selected is None else selected["expected_noise_ratio"]
+            ),
             "common_observable_sites": common_site_count,
             "selected_common_site_total_bright_minus_dark": selected_common_total,
             "uniformity_history": [
@@ -2333,8 +2530,11 @@ class SlmFeedbackTask:
                         "total_observable_bright_minus_dark"
                     ],
                     "common_site_total_bright_minus_dark": common_total,
-                    "double_feedback_gain": item["double_feedback_gain"],
-                    "adaptive_gain_action": item["adaptive_gain_action"],
+                    "true_uniformity_cv": item["true_uniformity_cv"],
+                    "expected_noise_ratio": item["expected_noise_ratio"],
+                    "converged": item["converged"],
+                    "plant_slope_estimate": item["plant_slope_estimate"],
+                    "plant_slope_source": item["plant_slope_source"],
                 }
                 for item, common_total in zip(history, common_totals, strict=True)
             ],
@@ -2351,11 +2551,22 @@ class SlmFeedbackTask:
         json_path = write_readable_json(
             paths["root"] / "summary.json", _plain_json(document)
         )
+        final_slope = (
+            document["plant_slope_history"][-1]
+            if document["plant_slope_history"]
+            else None
+        )
         lines = [
             f"SLM feedback status: {status}",
             f"Candidates measured: {len(history)}",
             f"Selected candidate: {selected_candidate if selected_candidate is not None else 'none'}",
-            f"Final double feedback gain: {document['final_double_feedback_gain']}",
+            "Final plant slope: "
+            + (
+                "none"
+                if final_slope is None
+                else f"{final_slope['estimate']} +/- {final_slope['standard_error']} "
+                f"({final_slope['source']})"
+            ),
         ]
         if outcome is not None and outcome.get("reason"):
             lines.append(f"Outcome: {outcome['reason']}")
@@ -2384,6 +2595,10 @@ class SlmFeedbackTask:
                     "Simultaneous 95% interval: "
                     f"[{selected['uniformity_confidence_lower']}, "
                     f"{selected['uniformity_confidence_upper']}]",
+                    "True between-site contrast CV (split-half): "
+                    f"{selected['true_uniformity_cv']}",
+                    "Expected max/min of a uniform array at this noise: "
+                    f"{selected['expected_noise_ratio']}",
                 )
             )
         if rollback is not None:
@@ -2528,6 +2743,16 @@ class SlmFeedbackTask:
             ),
             "maximum_relative_standard_error": (
                 retained_history.get("maximum_relative_standard_error")
+                if isinstance(retained_history, Mapping)
+                else None
+            ),
+            "true_uniformity_cv": (
+                retained_history.get("true_uniformity_cv")
+                if isinstance(retained_history, Mapping)
+                else None
+            ),
+            "expected_noise_ratio": (
+                retained_history.get("expected_noise_ratio")
                 if isinstance(retained_history, Mapping)
                 else None
             ),
@@ -2694,11 +2919,14 @@ class SlmFeedbackTask:
             candidate_number = 0
             candidate_kind = "baseline"
             formal_updates = 0
-            double_feedback_gain = self.feedback_gain
-            adaptive_improvement_streak = 0
-            previous_formal_contrast: np.ndarray | None = None
-            previous_formal_error: np.ndarray | None = None
-            previous_formal_valid: np.ndarray | None = None
+            # The plant record: every candidate's applied control weights and
+            # the contrasts it produced, in the order the SLM saw them.  The
+            # slope estimate pools all of it; a new run starts without one.
+            plant_log_weights: list[np.ndarray] = []
+            plant_log_contrast: list[np.ndarray] = []
+            plant_odd_log_contrast: list[np.ndarray] = []
+            plant_even_log_contrast: list[np.ndarray] = []
+            convergence_streak = 0
             probe_sites = np.zeros(self._site_count, dtype=bool)
             probe_episode_used = np.zeros(self._site_count, dtype=bool)
             probe_adoption_pending = np.zeros(self._site_count, dtype=bool)
@@ -2714,12 +2942,6 @@ class SlmFeedbackTask:
             probe_baseline_valid = np.zeros(self._site_count, dtype=bool)
             probe_baseline_reference_valid = np.zeros(
                 self._site_count, dtype=bool
-            )
-            probe_baseline_previous_weights = np.full(
-                self._site_count, np.nan, dtype=float
-            )
-            probe_baseline_previous_contrast = np.full(
-                self._site_count, np.nan, dtype=float
             )
             probe_baseline_directed_step = np.zeros(
                 self._site_count, dtype=float
@@ -2823,38 +3045,22 @@ class SlmFeedbackTask:
                 contrast = np.asarray(fitted["contrast"], dtype=float)
                 error = np.asarray(fitted["standard_error"], dtype=float)
                 observable_valid = fit_valid
-                adaptive_gain_action = "ignored_diagnostic_probe"
-                adaptive_gain_common_sites = 0
-                adaptive_gain_previous_ratio: float | None = None
-                adaptive_gain_current_ratio: float | None = None
-                if candidate_kind != "probe":
-                    if (
-                        previous_formal_contrast is None
-                        or previous_formal_error is None
-                        or previous_formal_valid is None
-                    ):
-                        adaptive_gain_action = "initialize_formal_double_history"
-                    else:
-                        (
-                            double_feedback_gain,
-                            adaptive_improvement_streak,
-                            adaptive_gain_action,
-                            adaptive_gain_common_sites,
-                            adaptive_gain_previous_ratio,
-                            adaptive_gain_current_ratio,
-                        ) = _adapt_double_gain(
-                            previous_formal_contrast,
-                            previous_formal_error,
-                            previous_formal_valid,
-                            contrast,
-                            error,
-                            observable_valid,
-                            gain=double_feedback_gain,
-                            improvement_streak=adaptive_improvement_streak,
-                        )
-                    previous_formal_contrast = np.array(contrast, copy=True)
-                    previous_formal_error = np.array(error, copy=True)
-                    previous_formal_valid = np.array(observable_valid, copy=True)
+                odd_contrast = np.asarray(fitted["odd_contrast"], dtype=float).copy()
+                even_contrast = np.asarray(fitted["even_contrast"], dtype=float).copy()
+                odd_contrast[~observable_valid] = np.nan
+                even_contrast[~observable_valid] = np.nan
+                true_variance, true_variance_error = _split_half_dispersion(
+                    odd_contrast, even_contrast, observable_valid
+                )
+                true_uniformity_cv = (
+                    float(np.sqrt(max(true_variance, 0.0)))
+                    if np.isfinite(true_variance)
+                    else float("nan")
+                )
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    expected_noise_ratio = _expected_noise_ratio(
+                        error / contrast, observable_valid
+                    )
                 needs_probe_sites = _needs_probe(
                     fit_single,
                     observable_valid,
@@ -2899,6 +3105,38 @@ class SlmFeedbackTask:
                     current_target[self._rows, self._columns], dtype=float
                 )
                 current_control_weights = _control_weights(current_weights)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    plant_log_weights.append(np.log(current_control_weights))
+                    plant_log_contrast.append(
+                        np.where(observable_valid, np.log(contrast), np.nan)
+                    )
+                    plant_odd_log_contrast.append(np.log(odd_contrast))
+                    plant_even_log_contrast.append(np.log(even_contrast))
+                plant_slope_estimate, plant_slope_se, plant_slope_rows = _plant_slope(
+                    plant_log_weights,
+                    plant_log_contrast,
+                    plant_odd_log_contrast,
+                    plant_even_log_contrast,
+                )
+                plant_slope_magnitude = _usable_plant_slope(
+                    len(plant_log_weights), plant_slope_estimate, plant_slope_se
+                )
+                plant_slope_source = (
+                    "assumed" if plant_slope_magnitude is None else "estimated"
+                )
+                # CONVERGED means: every site loaded and resolved, and the two
+                # half batches agree that whatever dispersion is left is
+                # within this batch's own power to see.  Three formal
+                # candidates in a row saying so end the run; a diagnostic
+                # probe neither counts nor breaks the streak.
+                converged = bool(
+                    valid
+                    and np.isfinite(true_variance)
+                    and np.isfinite(true_variance_error)
+                    and true_variance <= true_variance_error
+                )
+                if candidate_kind != "probe":
+                    convergence_streak = convergence_streak + 1 if converged else 0
                 bracket_recovery = np.zeros(self._site_count, dtype=bool)
                 episode_probe_sites = np.zeros(self._site_count, dtype=bool)
                 starts_probe_episode = False
@@ -3048,8 +3286,6 @@ class SlmFeedbackTask:
                     probe_baseline_error[:] = error
                     probe_baseline_valid[:] = observable_valid
                     probe_baseline_reference_valid[:] = fit_valid
-                    probe_baseline_previous_weights[:] = previous_weights
-                    probe_baseline_previous_contrast[:] = previous_contrast
                     for requested_factor in self.probe_factors:
                         requested = np.ones(self._site_count, dtype=float)
                         requested[probe_sites] = requested_factor
@@ -3098,9 +3334,6 @@ class SlmFeedbackTask:
                         current_target, dtype=np.float32, copy=True
                     )
                     log_correction = np.zeros(self._site_count, dtype=float)
-                    response_slope = np.full(
-                        self._site_count, np.nan, dtype=float
-                    )
                     decisions = np.full(
                         self._site_count, "hold_for_probe", dtype="<U32"
                     )
@@ -3112,7 +3345,7 @@ class SlmFeedbackTask:
                     allocation_boundary = np.array(
                         probe_control_boundary, copy=True
                     )
-                    proposed_target, log_correction, response_slope, decisions = (
+                    proposed_target, log_correction, decisions = (
                         _updated_target(
                             current_target,
                             contrast,
@@ -3121,9 +3354,8 @@ class SlmFeedbackTask:
                             self._rows,
                             self._columns,
                             reference_valid=fit_valid,
-                            previous_weights=previous_weights,
-                            previous_contrast=previous_contrast,
-                            feedback_gain=double_feedback_gain,
+                            feedback_gain=self.feedback_gain,
+                            plant_slope=plant_slope_magnitude,
                             maximum_weight_change=self.maximum_weight_change,
                             directed_log_step=directed_step,
                             control_boundary=allocation_boundary,
@@ -3173,12 +3405,33 @@ class SlmFeedbackTask:
                     "maximum_relative_standard_error": (
                         None if not valid else relative_sem
                     ),
-                    "authored_feedback_gain": self.feedback_gain,
-                    "double_feedback_gain": double_feedback_gain,
-                    "adaptive_gain_action": adaptive_gain_action,
-                    "adaptive_gain_common_sites": adaptive_gain_common_sites,
-                    "adaptive_gain_previous_ratio": adaptive_gain_previous_ratio,
-                    "adaptive_gain_current_ratio": adaptive_gain_current_ratio,
+                    "true_uniformity_variance": (
+                        None if not np.isfinite(true_variance) else true_variance
+                    ),
+                    "true_uniformity_variance_error": (
+                        None
+                        if not np.isfinite(true_variance_error)
+                        else true_variance_error
+                    ),
+                    "true_uniformity_cv": (
+                        None if not np.isfinite(true_uniformity_cv) else true_uniformity_cv
+                    ),
+                    "expected_noise_ratio": (
+                        None
+                        if not np.isfinite(expected_noise_ratio)
+                        else expected_noise_ratio
+                    ),
+                    "converged": converged,
+                    "convergence_streak": convergence_streak,
+                    "feedback_gain": self.feedback_gain,
+                    "plant_slope_estimate": (
+                        None if not np.isfinite(plant_slope_estimate) else plant_slope_estimate
+                    ),
+                    "plant_slope_se": (
+                        None if not np.isfinite(plant_slope_se) else plant_slope_se
+                    ),
+                    "plant_slope_rows": plant_slope_rows,
+                    "plant_slope_source": plant_slope_source,
                     "formal_updates_applied": formal_updates,
                     "maximum_weight_change": self.maximum_weight_change,
                     "candidate_kind": candidate_kind,
@@ -3204,6 +3457,8 @@ class SlmFeedbackTask:
                     "fit_threshold": _json_floats(fitted["threshold"]),
                     "bright_minus_dark": _json_floats(contrast),
                     "contrast_standard_error": _json_floats(error),
+                    "odd_shot_bright_minus_dark": _json_floats(odd_contrast),
+                    "even_shot_bright_minus_dark": _json_floats(even_contrast),
                     "bright_fraction": _json_floats(fitted["bright_fraction"]),
                     "fit_fidelity": _json_floats(fitted["fidelity"]),
                     "bic_gain": _json_floats(fitted["bic_gain"]),
@@ -3217,7 +3472,6 @@ class SlmFeedbackTask:
                     "single_sigma": _json_floats(fitted["single_sigma"]),
                     "decision": [str(value) for value in decisions],
                     "requested_log_correction": _json_floats(log_correction),
-                    "response_log_slope": _json_floats(response_slope),
                     "previous_double_control_weight": _json_floats(
                         previous_weights
                     ),
@@ -3270,7 +3524,17 @@ class SlmFeedbackTask:
                     "target": np.array(current_target, copy=True),
                     "solver": candidate_solver,
                     "history": history[-1],
-                    "score": observed_score,
+                    # The candidate's rank is the dispersion it can PROVE,
+                    # never the max/min of one noisy batch: that number's
+                    # minimum over 68 candidates was a sampling extreme, and
+                    # picking it was the winner's curse.  A negative
+                    # covariance is as uniform as zero, so ties among
+                    # converged candidates go to the most recent one.
+                    "score": (
+                        max(true_variance, 0.0)
+                        if np.isfinite(true_variance)
+                        else float("inf")
+                    ),
                     "contrast": np.array(contrast, copy=True),
                     "standard_error": np.array(error, copy=True),
                     "samples": np.array(samples, copy=True),
@@ -3292,12 +3556,14 @@ class SlmFeedbackTask:
                 if valid and candidate_kind != "probe":
                     if (
                         retained_valid is None
-                        or float(completed["score"]) < float(retained_valid["score"])
+                        or float(completed["score"]) <= float(retained_valid["score"])
                     ):
                         retained_valid = completed
                     context.report_progress(
-                        f"qCMOS bright-dark ratio {score:.5f}; "
-                        f"simultaneous 95% upper {confidence_upper:.5f}"
+                        f"qCMOS bright-dark ratio {score:.5f} "
+                        f"(uniform-array floor {expected_noise_ratio:.5f}); "
+                        f"true site CV {true_uniformity_cv:.4f}; "
+                        f"plant slope {plant_slope_source}"
                     )
                 elif candidate_kind == "probe":
                     context.report_progress(
@@ -3408,9 +3674,8 @@ class SlmFeedbackTask:
                             self._rows,
                             self._columns,
                             reference_valid=probe_baseline_reference_valid,
-                            previous_weights=probe_baseline_previous_weights,
-                            previous_contrast=probe_baseline_previous_contrast,
-                            feedback_gain=double_feedback_gain,
+                            feedback_gain=self.feedback_gain,
+                            plant_slope=plant_slope_magnitude,
                             maximum_weight_change=self.maximum_weight_change,
                             directed_log_step=combined_directed_step,
                             control_boundary=(
@@ -3446,7 +3711,15 @@ class SlmFeedbackTask:
                             next_kind = "probe_combined"
                             formal_updates += 1
                 else:
-                    if formal_updates >= self.max_updates:
+                    if convergence_streak >= _CONVERGENCE_CANDIDATES:
+                        continue_feedback = False
+                        history[-1]["next_phase_changed"] = None
+                        termination_reason = (
+                            "true between-site contrast dispersion indistinguishable "
+                            f"from zero for {_CONVERGENCE_CANDIDATES} consecutive "
+                            "candidates"
+                        )
+                    elif formal_updates >= self.max_updates:
                         continue_feedback = False
                         history[-1]["next_phase_changed"] = None
                     elif np.array_equal(proposed_target, current_target):
@@ -3487,6 +3760,8 @@ class SlmFeedbackTask:
                             iterations=None,
                             stop_requested=context.cancel_requested,
                             spot_optimizer_state=solve_state,
+                            support_tolerance=_FEEDBACK_SOLVE_SUPPORT_TOLERANCE,
+                            minimum_iterations=_FEEDBACK_SOLVE_MINIMUM_ITERATIONS,
                         )
                         next_pattern = freeze_pattern_phase(
                             next_pattern, self.slm.shape_yx
