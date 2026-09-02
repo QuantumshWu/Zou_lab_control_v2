@@ -13,7 +13,7 @@ from zlc_plot import (
     describe_semantics,
     normalize_classifier_threshold_targets,
 )
-from zlc_plot.specs import FACET_FIT_PARAMETER, limit_pair_for
+from zlc_plot.specs import FACET_FIT_PARAMETER, GRID_CELL_KINDS, limit_pair_for
 from zlc_plot.semantics import (
     FATE_PREFIX,
     SemanticVacancy,
@@ -684,13 +684,10 @@ class PanelState:
         if resolved_kind is PlotKind.FACET_GRID:
             # Empty means the DATA decides the cell, at every bind; a named
             # cell is the operator's fixed choice.
-            if cell_kind and cell_kind not in {
-                PlotKind.CURVE.value,
-                PlotKind.IMAGE.value,
-                PlotKind.HISTOGRAM.value,
-            }:
+            if cell_kind and PlotKind(cell_kind) not in GRID_CELL_KINDS:
                 raise ValueError(
-                    "FacetGrid cell kind must be curve, image, or histogram"
+                    "FacetGrid cell kind must be one of "
+                    + ", ".join(kind.value for kind in GRID_CELL_KINDS)
                 )
         elif cell_kind:
             raise ValueError("only a FacetGrid panel has a cell kind")

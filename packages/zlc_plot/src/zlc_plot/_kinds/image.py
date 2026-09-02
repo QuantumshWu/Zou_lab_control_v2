@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..data_contract import image_axes, live_grid_dimensions
 from ..kinds import AxisRef, PlotKind
-from zlc_data import DatasetSchema
-from ..specs import ImagePlot, Reduction
+from ..specs import ImagePlot
 from .base import KindHandler
+from . import defaults
 
 
 def render(renderer: Any, payload: Any, state: Any, *, axes: Any, key: str, **pooled: Any) -> None:
@@ -40,66 +39,14 @@ def label_roles(spec: Any) -> tuple[tuple[str, tuple], ...]:
 
 
 def default_spec(schema: Any) -> ImagePlot | None:
-    """Infer a regular image only when the schema proves two image axes."""
+    """The image this dataset shows unasked, or None when it has none.
 
-    if not isinstance(schema, DatasetSchema):
-        return None
-    dimensions = live_grid_dimensions(schema)
-    if len(dimensions) >= 2:
-        # Dense data axes collapse under the declared reduction; the scan
-        # grid itself is the unambiguous image surface.  Only LIVE dimensions
-        # count -- a one-value dimension cannot be an image axis, and it used
-        # to produce a one-pixel-thick "grid image" instead of falling back
-        # to the data axes below.
-        # Axes are declared slowest-first (C order), so the last dimension is
-        # the innermost scan loop: that is the horizontal image axis, and the
-        # dimension above it is the vertical one.  Slowest-first here would
-        # silently transpose every scan image.
-        return ImagePlot(
-            AxisRef.point_dimension(dimensions[-1]),
-            AxisRef.point_dimension(dimensions[-2]),
-            reduction=Reduction.MEAN,
-        )
-    # By role, through the one place that decides which axes are the image.
-    # This used to pick by size and position, which refused a two-window
-    # bracket outright and a one-pixel-tall ROI strip from the other side --
-    # for datasets whose schema names their two spatial axes.  Point rows
-    # beyond the image collapse under the declared reduction, the same fate
-    # every unassigned axis has: a single-axis scan of frames averages its
-    # scan points here, and shows them apart as a facet grid instead.
-    pair = image_axes(schema)
-    if pair is not None:
-        x_axis, y_axis = pair
-        return ImagePlot(
-            AxisRef.data(str(x_axis.axis_id)),
-            AxisRef.data(str(y_axis.axis_id)),
-            reduction=Reduction.MEAN,
-        )
-    # One coordinate from the point table and one dense data axis are still
-    # two coordinates: a scan of a per-site quantity IS a map of site against
-    # what was scanned, and the view has always been able to draw that pair.
-    # Refusing to offer it left an operator with thirty-five overlaid curves
-    # and no legend -- no way to see WHICH trap stopped coming back.
-    dense = tuple(axis for axis in schema.cell_schema.data_axes if axis.size > 1)
-    if len(dense) != 1:
-        return None
-    if len(dimensions) == 1:
-        point = AxisRef.point_dimension(dimensions[0])
-    elif (
-        not dimensions
-        and schema.point_table.row_count > 1
-        and len(schema.point_table.columns) == 1
-    ):
-        point = AxisRef.point(str(schema.point_table.columns[0].coordinate_id))
-    else:
-        return None
-    # The scanned knob runs along x, the way it does on the curve of the same
-    # data; the sites stack up the side.
-    return ImagePlot(
-        point,
-        AxisRef.data(str(dense[0].axis_id)),
-        reduction=Reduction.MEAN,
-    )
+    A declared picture, two content axes, a two-dimensional scan, or one
+    position axis against one content axis -- in that order.  See
+    :mod:`zlc_plot._kinds.defaults`.
+    """
+
+    return defaults.default_spec(schema, PlotKind.IMAGE)
 
 
 HANDLER = KindHandler(

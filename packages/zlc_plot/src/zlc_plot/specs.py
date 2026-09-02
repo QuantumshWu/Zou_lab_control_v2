@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import partial
-from typing import ClassVar, TypeAlias
+from typing import ClassVar, get_args, TypeAlias
 
 from zlc_data import (
     CoordinateScalar,
@@ -339,6 +339,14 @@ class RollingPlot:
 
 CellPlot: TypeAlias = CurvePlot | ImagePlot | HistogramPlot
 
+#: The kinds one facet-grid cell can be, read off the cell type above.
+#: The spec's validation, the display contract, the default table and
+#: every product gate read this one tuple; nothing spells the names
+#: again.
+GRID_CELL_KINDS: tuple[PlotKind, ...] = tuple(
+    spec.kind for spec in get_args(CellPlot)
+)
+
 
 @dataclass(frozen=True, slots=True)
 class FacetGridPlot:
@@ -358,8 +366,11 @@ class FacetGridPlot:
     def __post_init__(self) -> None:
         if self.facet is not None and not isinstance(self.facet, AxisRef):
             raise TypeError("FacetGridPlot.facet must be AxisRef or None")
-        if not isinstance(self.cell, (CurvePlot, ImagePlot, HistogramPlot)):
-            raise TypeError("FacetGrid cells must be CurvePlot, ImagePlot or HistogramPlot")
+        if not isinstance(self.cell, get_args(CellPlot)):
+            raise TypeError(
+                "FacetGrid cells must be one of "
+                + ", ".join(spec.__name__ for spec in get_args(CellPlot))
+            )
         if not isinstance(self.labels, PlotLabels):
             raise TypeError("FacetGridPlot.labels must be PlotLabels")
         if self.cell.scope:
@@ -1169,13 +1180,10 @@ def parameter_schema_for_kind(
                 "facet grid display parameters require a fixed cell kind"
             )
         semantic_kind = PlotKind(facet_cell_kind)
-        if semantic_kind not in {
-            PlotKind.CURVE,
-            PlotKind.IMAGE,
-            PlotKind.HISTOGRAM,
-        }:
+        if semantic_kind not in GRID_CELL_KINDS:
             raise ValueError(
-                "facet grid cell kind must be curve, image, or histogram"
+                "facet grid cell kind must be one of "
+                + ", ".join(kind.value for kind in GRID_CELL_KINDS)
             )
     elif facet_cell_kind is not None:
         raise ValueError("facet_cell_kind is only valid for a facet grid")

@@ -2,19 +2,12 @@
 
 from __future__ import annotations
 
-from zlc_plot import PlotKind, fitting_spec, updated_spec
+from zlc_plot import GRID_CELL_KINDS, PlotKind, fitting_spec, updated_spec
 from zlc_plot.semantics import axis_choices_for_schema, axis_size
 from zlc_plot.specs import semantic_spec
 
 
 __all__ = ["fitting_panel_spec"]
-
-
-_FACET_CELL_KINDS = {
-    PlotKind.CURVE,
-    PlotKind.IMAGE,
-    PlotKind.HISTOGRAM,
-}
 
 
 def _dense_series_x(schema: object, spec: object) -> object:
@@ -71,8 +64,11 @@ def fitting_panel_spec(
     cell = None
     if cell_text:
         cell = PlotKind(cell_text)
-        if cell not in _FACET_CELL_KINDS:
-            raise ValueError("FacetGrid cell kind must be curve, image, or histogram")
+        if cell not in GRID_CELL_KINDS:
+            raise ValueError(
+                "FacetGrid cell kind must be one of "
+                + ", ".join(kind.value for kind in GRID_CELL_KINDS)
+            )
     # An empty cell kind means the DATA decides, and either way the grid and
     # its cell are composed once, in zlc_plot: this layer only says which.
     outer_spec = fitting_spec(schema, PlotKind.FACET_GRID, cell=cell)

@@ -16,14 +16,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from zlc_plot import PlotKind
+from zlc_plot import GRID_CELL_KINDS, PlotKind
 from zlc_plot.specs import semantic_spec
 
 from .panel_spec import fitting_panel_spec
 
 
 __all__ = [
-    "GRID_CELL_KINDS",
     "TASK_CONSOLE_PANEL_CATALOG",
     "TaskConsolePanelKind",
     "panel_kind_choices",
@@ -32,11 +31,6 @@ __all__ = [
     "task_console_panel_identity_for_spec",
     "task_console_panel_kind",
 ]
-
-
-# What a grid cell may be.  The identity gate, the spec resolver, and the
-# panel settings control all speak this one vocabulary.
-GRID_CELL_KINDS = (PlotKind.CURVE, PlotKind.IMAGE, PlotKind.HISTOGRAM)
 
 
 @dataclass(frozen=True, slots=True)

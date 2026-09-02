@@ -42,6 +42,7 @@ from zlc_ui import STATUS_SEVERITIES
 from zlc_plot.semantics import FATE_REDUCE, ROLE_FATES
 from zlc_plot.specs import semantic_spec, validate_authored_display
 from zlc_plot.ui import parameter_controls_for_kind
+from zlc_plot.specs import GRID_CELL_KINDS
 from zlc_runtime import (
     DatasetCoverage,
     IndexedHistoryLease,
@@ -80,7 +81,6 @@ from .panel_save import (
     save_panel_figure as _save_panel_figure,
 )
 from .panel_catalog import (
-    GRID_CELL_KINDS,
     TASK_CONSOLE_PANEL_CATALOG,
     panel_kind_choices,
     task_console_fitting_spec,

@@ -39,6 +39,7 @@ _EXPORTS = {
     "save_figure_artifact": ("zlc_plot.figure_artifact", "save_figure_artifact"),
     "AxisRef": ("zlc_plot.kinds", "AxisRef"),
     "PlotKind": ("zlc_plot.kinds", "PlotKind"),
+    "GRID_CELL_KINDS": ("zlc_plot.specs", "GRID_CELL_KINDS"),
     "ImageFrame": ("zlc_plot.primitives", "ImageFrame"),
     "ImagePointOverlay": ("zlc_plot.primitives", "ImagePointOverlay"),
     "IMAGE_POINT_OVERLAY_CONTRACT": (
@@ -180,6 +181,7 @@ __all__ = [
     "NumericRange",
     "open_figure_host",
     "PlotKind",
+    "GRID_CELL_KINDS",
     "PlotLabels",
     "PlotSession",
     "PlotSpec",
