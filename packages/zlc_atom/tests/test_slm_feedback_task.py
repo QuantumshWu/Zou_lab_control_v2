@@ -43,6 +43,8 @@ from zlc_atom.nodes.slm_feedback.task import (
     SlmFeedbackTask,
     _allocate_requested_shares,
     _control_weights,
+    _excitation_pattern,
+    _excited_target,
     _expected_noise_ratio,
     _fit_contrasts,
     _half_contrasts,
@@ -664,35 +666,56 @@ def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
 
 def test_pooled_plant_slope_and_split_half_dispersion_see_through_loop_noise() -> None:
     # The archived run's plant: -1.8 now, -1.3 one candidate later, -0.24
-    # two later (static -3.3), read at 1.2% relative error by a controller
-    # that assumed -1 and reacted to the full noisy estimate.  Sites do not
-    # matter individually; the pooled estimate must recover the static slope
-    # through the feedback's own noise-induced correlation, and its error
-    # must be small enough to be trusted.
+    # two later (static -3.3), read at 1.2% relative error, AND wandering
+    # by 1.6% per candidate on its own (mean-reverting, as the archived
+    # residuals do).  The controller assumes -1 at half gain, then divides
+    # by the estimate; the first six updates carry the excitation.  The
+    # pooled estimate must recover the static slope through both the loop's
+    # own noise-induced correlation and the wander -- the half-batch
+    # instrument this replaced read the same plant as -5 here -- and no
+    # slope at all may be read from a run that carried no excitation.
     rng = np.random.default_rng(5)
     sites, candidates = 35, 30
     lags = (-1.8, -1.3, -0.24)
-    sigma = 0.012
-    log_weight = np.zeros(sites)
+    sigma, wander, reversion = 0.012, 0.016, 0.35
+    control = np.zeros(sites)
+    excitation = np.zeros(sites)
     truth = rng.normal(0.0, 0.06, sites)
-    weights, contrasts, odds, evens = [], [], [], []
+    exogenous = rng.normal(0.0, wander, sites)
+    weights, contrasts, excitations = [], [], []
     history = [np.zeros(sites)] * 3
-    for _candidate in range(candidates):
-        history = history[1:] + [log_weight.copy()]
-        level = truth + sum(
+    for candidate in range(candidates):
+        applied = control + excitation
+        history = history[1:] + [applied.copy()]
+        level = truth + exogenous + sum(
             slope * lagged for slope, lagged in zip(lags, history[::-1], strict=True)
         )
-        odd = level + rng.normal(0.0, sigma * np.sqrt(2.0), sites)
-        even = level + rng.normal(0.0, sigma * np.sqrt(2.0), sites)
-        full = 0.5 * (odd + even)
-        weights.append(log_weight.copy())
+        full = level + rng.normal(0.0, sigma, sites)
+        weights.append(applied.copy())
         contrasts.append(full)
-        odds.append(odd)
-        evens.append(even)
-        log_weight = log_weight + 0.25 * (full - np.mean(full))
-    slope, error, rows = _plant_slope(weights, contrasts, odds, evens)
-    assert rows == sites * (candidates - 1)
-    assert slope == pytest.approx(sum(lags), abs=0.35)
+        excitations.append(excitation.copy())
+        estimate, estimate_error, _rows = _plant_slope(weights, contrasts, excitations)
+        usable = _usable_plant_slope(len(weights), estimate, estimate_error)
+        step_gain = 0.15 if usable is None else 0.3 / usable
+        control = control + step_gain * (full - np.mean(full))
+        excitation = (
+            _excitation_pattern(rng, np.ones(sites, dtype=bool))
+            if candidate + 1 <= feedback_module._PLANT_EXCITATION_CANDIDATES
+            else np.zeros(sites)
+        )
+        exogenous = reversion * exogenous + rng.normal(
+            0.0, wander * np.sqrt(1.0 - reversion**2), sites
+        )
+    assert all(
+        np.count_nonzero(item) == sites and abs(np.sum(item)) < 1e-12
+        for item in excitations[1:7]
+    )
+    assert not any(np.any(item != 0.0) for item in excitations[7:])
+    slope, error, rows = _plant_slope(weights, contrasts, excitations)
+    # Transitions 1..9 are touched by an excitation difference at some lag
+    # (the last excited candidate is 7; lag 2 reaches transition 9).
+    assert rows == sites * 9
+    assert slope == pytest.approx(sum(lags), abs=0.4)
     assert abs(slope - sum(lags)) < 3.0 * error
     assert _usable_plant_slope(candidates, slope, error) == pytest.approx(
         abs(slope), abs=1e-12
@@ -702,7 +725,9 @@ def test_pooled_plant_slope_and_split_half_dispersion_see_through_loop_noise() -
     assert _usable_plant_slope(candidates, slope, 0.4 * abs(slope)) is None
     assert _usable_plant_slope(candidates, -12.0, 0.1) == pytest.approx(5.0)
     assert _usable_plant_slope(candidates, -0.1, 0.01) == pytest.approx(0.3)
-    assert np.isnan(_plant_slope(weights[:1], contrasts[:1], odds[:1], evens[:1])[0])
+    assert np.isnan(_plant_slope(weights[:1], contrasts[:1], excitations[:1])[0])
+    unexcited = _plant_slope(weights, contrasts, [np.zeros(sites)] * candidates)
+    assert np.isnan(unexcited[0]) and unexcited[2] == 0
 
     # Split halves: independent noise cancels in the cross-covariance, so
     # the dispersion estimate is the truth (within its error), and an array
@@ -1060,9 +1085,16 @@ def test_feedback_applies_science_context_then_measures_before_solving_update(
         plant_slope=None,
         maximum_weight_change=0.5,
     )
+    # The first update is solved for the control Target with the run's
+    # first identification excitation on it, drawn from its seeded generator.
+    expected_solved = _excited_target(
+        expected_target,
+        _excitation_pattern(np.random.default_rng(0), np.ones(35, dtype=bool)),
+        *np.nonzero(frozen_target),
+    )
 
     def solve(target, **kwargs):
-        np.testing.assert_allclose(target, expected_target)
+        np.testing.assert_allclose(target, expected_solved)
         assert kwargs["objective_kind"] == "spots"
         assert kwargs["iterations"] is None
         np.testing.assert_array_equal(kwargs["initial_phase"], pattern)
@@ -1143,7 +1175,9 @@ def test_feedback_applies_science_context_then_measures_before_solving_update(
         )
         np.testing.assert_array_equal(artifact["operator_wavefront"], wavefront)
         np.testing.assert_array_equal(artifact["pupil_amplitude"], pupil)
-        np.testing.assert_allclose(artifact["target_intensity"], expected_target)
+        # final/ carries the Target the sealed Pattern was solved for --
+        # excitation included -- never a Target the phase does not realise.
+        np.testing.assert_allclose(artifact["target_intensity"], expected_solved)
         np.testing.assert_array_equal(artifact["phase"], expected)
         np.testing.assert_array_equal(slm.last_commanded_phase, expected)
         assert artifact["pattern_metadata"]["solver"]["iterations_run"] == 19
@@ -1237,10 +1271,21 @@ def test_arbitrary_sparse_geometry_matches_calibration_sites_before_updating_tar
             plant_slope=None,
             maximum_weight_change=0.5,
         )
-        np.testing.assert_allclose(solved_targets[0], expected)
+        expected_solved = _excited_target(
+            expected,
+            _excitation_pattern(
+                np.random.default_rng(0), np.ones(len(rows), dtype=bool)
+            ),
+            rows,
+            columns,
+        )
+        np.testing.assert_allclose(solved_targets[0], expected_solved)
         history = _load_history(result["artifact_path"])
         np.testing.assert_allclose(
-            history[1]["target_weight"], expected[rows, columns]
+            history[1]["target_weight"], expected_solved[rows, columns]
+        )
+        np.testing.assert_allclose(
+            history[1]["control_weight"], _control_weights(expected[rows, columns])
         )
         np.testing.assert_allclose(
             history[0]["bright_minus_dark"],
@@ -1811,8 +1856,10 @@ def test_measure_keeps_observer_only_faults_repeats_board_faults_and_loads_once(
     """The real-run failure: one lost UART poll byte at shot 85 of 200.
 
     An observer-only fault with every frame delivered is a good batch; a
-    board fault repeats the batch once and the second fault is fatal; the
-    program is loaded once per run because the board reports still holding it.
+    board fault -- reported after every trigger, or mid-batch so that the
+    camera times out first -- repeats the batch once with the first fault on
+    record, and the second fault is fatal naming both; the program is loaded
+    once per run because the board reports still holding it.
     """
 
     def frame_source(ordinal: int, exposure: float) -> np.ndarray:
@@ -1845,6 +1892,8 @@ def test_measure_keeps_observer_only_faults_repeats_board_faults_and_loads_once(
             self.loads = 0
             self.fires: list[int | None] = []
             self.reports: list[DoneReport] = []
+            #: Triggers the next fire plays before the board "stops".
+            self.trigger_limit: int | None = None
 
         def describe(self):
             return object()
@@ -1856,11 +1905,13 @@ def test_measure_keeps_observer_only_faults_repeats_board_faults_and_loads_once(
 
         def fire(self, *, cycles=1) -> None:
             self.fires.append(cycles)
-            camera.trigger(int(cycles))
+            played = int(cycles) if self.trigger_limit is None else self.trigger_limit
+            self.trigger_limit = None
+            camera.trigger(played)
 
         def wait_done(self, timeout=None):
             del timeout
-            return self.reports.pop(0)
+            return self.reports.pop(0) if self.reports else None
 
         def safe(self):
             return None
@@ -1900,12 +1951,16 @@ def test_measure_keeps_observer_only_faults_repeats_board_faults_and_loads_once(
             pulse, _Context(), 0
         )
         assert samples.shape == (10, 35)
-        assert warning == f"pulse observer failed: {observer_error}"
+        assert warning == (
+            "batch accepted with a pulse fault: pulse observer failed: "
+            f"{observer_error}"
+        )
         assert sequencer.fires == [10]
         assert sequencer.loads == 1
 
         # The board itself reporting an error repeats the batch once; the
-        # clean repeat is the candidate's measurement, with no warning.
+        # clean repeat is the candidate's measurement, and the first fault
+        # is on record.
         slm.apply_phase(np.full(slm.shape_yx, 0.25, dtype=np.float32))
         sequencer.reports = [
             report(status=STATUS_ERROR),
@@ -1914,21 +1969,54 @@ def test_measure_keeps_observer_only_faults_repeats_board_faults_and_loads_once(
         _samples, _saturated, _missing, _mean, warning = task._measure(
             pulse, _Context(), 1
         )
-        assert warning == ""
+        assert warning == (
+            "batch repeated after a pulse fault: the board reported an error"
+        )
         assert sequencer.fires == [10, 10, 10]
         # The board still holds the program: no second LOAD in this run.
         assert sequencer.loads == 1
 
+        # The board stops after three of ten triggers: the camera times out
+        # first, the board's report is read before the camera is blamed,
+        # and the batch is repeated -- the archived rule's mid-batch case.
+        slm.apply_phase(np.full(slm.shape_yx, 0.375, dtype=np.float32))
+        sequencer.trigger_limit = 3
+        sequencer.reports = [
+            report(status=STATUS_ERROR),
+            report(status=STATUS_DONE),
+        ]
+        samples, _saturated, _missing, _mean, warning = task._measure(
+            pulse, _Context(), 2
+        )
+        assert samples.shape == (10, 35)
+        assert warning == (
+            "batch repeated after a pulse fault: the board reported an error"
+        )
+        assert sequencer.fires == [10, 10, 10, 10, 10]
+
+        # The board stops mid-batch and reports nothing wrong: that is the
+        # camera's fault, and the camera's complaint is what comes out.
+        slm.apply_phase(np.full(slm.shape_yx, 0.4375, dtype=np.float32))
+        sequencer.trigger_limit = 3
+        sequencer.reports = []
+        with pytest.raises(RuntimeError, match="the camera returned 0 frame"):
+            task._measure(pulse, _Context(), 3)
+        assert sequencer.fires == [10] * 6
+
         # An observer fault that also saw the bank underrun is a board fact;
-        # a second fault on the repeat is the candidate's failure.
+        # a second fault on the repeat is the candidate's failure, naming both.
         slm.apply_phase(np.full(slm.shape_yx, 0.5, dtype=np.float32))
         sequencer.reports = [
             report(status=STATUS_ERROR, observer_error=observer_error, underflow=True),
             report(status=STATUS_ERROR),
         ]
-        with pytest.raises(RuntimeError, match="failed twice"):
-            task._measure(pulse, _Context(), 2)
-        assert sequencer.fires == [10, 10, 10, 10, 10]
+        with pytest.raises(
+            RuntimeError,
+            match="failed twice for one candidate: first pulse observer failed.*"
+            "the scan bank underran; then the board reported an error",
+        ):
+            task._measure(pulse, _Context(), 4)
+        assert sequencer.fires == [10] * 8
         assert not sequencer.reports
         assert not camera.capture_state()
     finally:
@@ -2206,9 +2294,8 @@ def test_baseline_single_with_formal_history_steps_to_bracket_midpoint_without_p
         ]
         assert history[0]["probe_sites"] == []
         assert history[0]["decision"][17] == "single_bracket_midpoint"
-        assert _control_weights(
-            solved_targets[0][rows, columns]
-        )[17] == pytest.approx(np.sqrt(1.2))
+        assert history[1]["control_weight"][17] == pytest.approx(np.sqrt(1.2))
+        assert solved_targets
     finally:
         plane.close()
 
@@ -2672,7 +2759,9 @@ def test_virtual_feedback_recovers_missing_sites_and_retains_best_candidate(
             scores = [
                 np.inf
                 if item["true_uniformity_variance"] is None
-                else max(float(item["true_uniformity_variance"]), 0.0)
+                or item["true_uniformity_variance_error"] is None
+                else float(item["true_uniformity_variance"])
+                + float(item["true_uniformity_variance_error"])
                 for item in formal
             ]
             best = max(
@@ -2752,6 +2841,17 @@ def test_completed_run_selects_best_candidate_without_extra_shots(
             np.zeros(self.calibration.frame_contract.image_shape, dtype=np.float32),
         )[1:]),
     )
+    # The figures are the report, not the deliverable: a figure writer that
+    # breaks at the seal leaves the run completed, final/ and the SLM on the
+    # selected candidate, and the failure in the summary -- it used to seal
+    # the same candidate twice and then restore the incoming phase.
+    monkeypatch.setattr(
+        SlmFeedbackTask,
+        "_save_figures",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            OSError("figure writer broke")
+        ),
+    )
     task = _task(
         tmp_path,
         slm=slm,
@@ -2761,8 +2861,9 @@ def test_completed_run_selects_best_candidate_without_extra_shots(
         target=_grid_target(slm.shape_yx),
         updates=2,
     )
+    context = _Context(tmp_path)
     try:
-        result = task.execute(_Context(tmp_path))
+        result = task.execute(context)
         saved, metadata = _load_candidate(result["artifact_path"])
         np.testing.assert_array_equal(saved, slm.last_commanded_phase)
         np.testing.assert_array_equal(
@@ -2776,7 +2877,19 @@ def test_completed_run_selects_best_candidate_without_extra_shots(
         assert resolved_api_values == [{}]
         assert result["updates"] == 3
         assert result["feedback_status"] == "completed"
+        assert metadata["status"] == "completed"
         assert np.array_equal(slm.commands[-1], saved)
+        summary = json.loads((tmp_path / "summary.json").read_text())
+        assert summary["status"] == "completed"
+        assert summary["rollback"] is None
+        assert summary["figures_error"]["message"] == "figure writer broke"
+        assert "Figures not written: OSError: figure writer broke" in (
+            tmp_path / "summary.txt"
+        ).read_text()
+        assert not tuple((tmp_path / "figures").glob("*.npz"))
+        assert any(
+            "figure writer broke" in str(args[0]) for args, _kwargs in context.progress
+        )
     finally:
         plane.close()
 
@@ -2787,10 +2900,11 @@ def test_measured_plant_slope_sets_the_step_and_proven_uniformity_stops_the_run(
     # A closed loop against a plant three times harder than the assumed
     # unit slope and answering over two candidates, read at the archived
     # run's 1.2% noise: the first candidates step at half gain on the
-    # assumption, the pooled estimate then takes over and the loop gain
-    # becomes the authored one; three candidates whose split halves resolve
-    # no dispersion end the run before max_updates, and the most recent of
-    # them is the retained candidate.
+    # assumption while the first six updates carry the +-2% excitation
+    # the slope is read through, the pooled estimate then takes over and
+    # the loop gain becomes the authored one; three candidates whose split
+    # halves resolve no dispersion end the run before max_updates, and the
+    # most recent of them is the retained candidate.
     slm = _Slm((17, 23))
     plane = SignalDataPlane()
     base = _grid_target(slm.shape_yx)
@@ -2846,15 +2960,38 @@ def test_measured_plant_slope_sets_the_step_and_proven_uniformity_stops_the_run(
         sequencer=SimpleNamespace(describe=lambda: object()),
         plane=plane,
         target=base,
-        updates=12,
+        updates=24,
         feedback_gain=0.4,
     )
     try:
         result = task.execute(_Context(tmp_path))
         assert result["feedback_status"] == "completed"
         history = _load_history(result["artifact_path"])
-        assert 6 <= len(history) < 1 + task.max_updates
+        assert 10 <= len(history) < 1 + task.max_updates
         assert all(item["candidate_kind"] != "probe" for item in history)
+        excitation = np.asarray(
+            [item["excitation_log_step"] for item in history], dtype=float
+        )
+        assert not np.any(excitation[0]) and not np.any(excitation[7:])
+        assert np.all(np.count_nonzero(excitation[1:7], axis=1) == 35)
+        np.testing.assert_allclose(np.sum(excitation[1:7], axis=1), 0.0, atol=1e-12)
+        assert np.all(np.abs(excitation[1:7]) < 0.021)
+        # The SLM saw the control weights times the excitation (up to the
+        # common-mode renormalisation, which no site can tell from another);
+        # the control step alone is what the controller requested.
+        for previous, item in zip(history, history[1:], strict=False):
+            relative = (
+                np.log(_control_weights(np.asarray(item["target_weight"])))
+                - np.log(_control_weights(np.asarray(item["control_weight"])))
+                - np.asarray(item["excitation_log_step"])
+            )
+            np.testing.assert_allclose(relative - np.mean(relative), 0.0, atol=1e-6)
+            np.testing.assert_allclose(
+                np.log(np.asarray(item["control_weight"]))
+                - np.log(np.asarray(previous["control_weight"])),
+                previous["requested_log_correction"],
+                atol=1e-6,
+            )
         assert {item["plant_slope_source"] for item in history[:2]} == {"assumed"}
         assert {history[0]["decision"][0], history[1]["decision"][0]} == {
             "feedback_assumed_slope"
@@ -2886,7 +3023,12 @@ def test_measured_plant_slope_sets_the_step_and_proven_uniformity_stops_the_run(
         ratios = np.asarray([item["uniformity_ratio"] for item in history])
         assert ratios[-1] < ratios[0]
         saved, metadata = _load_candidate(result["artifact_path"])
-        assert metadata["candidate"] == len(history)
+        bounds = [
+            item["true_uniformity_variance"] + item["true_uniformity_variance_error"]
+            for item in history
+        ]
+        assert metadata["candidate"] == history[int(np.argmin(bounds))]["iteration"]
+        assert history[metadata["candidate"] - 1]["converged"]
         np.testing.assert_array_equal(saved, slm.last_commanded_phase)
         assert metadata["outcome"]["reason"] == (
             "true between-site contrast dispersion indistinguishable from zero "

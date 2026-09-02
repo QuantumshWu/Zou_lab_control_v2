@@ -293,15 +293,69 @@ _PLANT_SLOPE_LAGS = 3
 _PLANT_SLOPE_MINIMUM_CANDIDATES = 3
 _PLANT_SLOPE_RELATIVE_ERROR = 0.3
 _PLANT_SLOPE_BOUNDS = (0.3, 5.0)
+#: The identification excitation: the first this many formal updates after
+#: the baseline carry a fresh zero-sum +-2% log-weight pattern on top of the
+#: controller's own step, and that pattern is the only instrument the plant
+#: slope is read through.  Six at 2% resolve a unit-slope plant to under 30%
+#: in 95% of simulated runs at the archived run's 1.2% read noise; the
+#: archived plant itself (-3.3) needs three.  A fixed count, never "until
+#: trusted": stopping on the estimate's own size selects the runs where it
+#: came out large (12-16% bias in simulation).
+_PLANT_EXCITATION_CANDIDATES = 6
+_PLANT_EXCITATION_LOG_STEP = 0.02
+
+
+def _excitation_pattern(
+    rng: np.random.Generator, excitable: np.ndarray
+) -> np.ndarray:
+    """One excited candidate's zero-sum +-δ log-weight pattern on the
+    ``excitable`` sites; a held site (invalid, unobservable) gets none, as it
+    would answer with no usable row and its share is to stay where it is.
+
+    Fresh random signs every candidate: the three lag columns are then driven
+    at every frequency and can be told apart.  A pattern that merely flipped
+    each candidate would excite only the alternating response and measure
+    ``s0 - s1 + s2`` -- 0.7 for the archived plant whose static slope is 3.3.
+    """
+
+    mask = np.asarray(excitable, dtype=bool)
+    pattern = np.zeros(mask.shape, dtype=float)
+    count = int(np.count_nonzero(mask))
+    if count >= 2:
+        signs = np.where(np.arange(count) % 2 == 0, 1.0, -1.0)
+        values = _PLANT_EXCITATION_LOG_STEP * rng.permutation(signs)
+        pattern[mask] = values - float(np.mean(values))
+    return pattern
+
+
+def _excited_target(
+    target: np.ndarray,
+    excitation: np.ndarray,
+    rows: np.ndarray,
+    columns: np.ndarray,
+) -> np.ndarray:
+    """The Target the phase is solved for: the control Target times ``exp``
+    of this candidate's excitation on its sites.
+
+    The control Target stays the integrator the controller updates; the
+    excitation is applied on top for one candidate and is gone from the next
+    one's Target unless a new pattern is drawn, so it is never integrated.
+    """
+
+    updated = np.array(target, dtype=np.float32, copy=True)
+    updated[rows, columns] = (
+        np.asarray(target[rows, columns], dtype=float)
+        * np.exp(np.asarray(excitation, dtype=float))
+    ).astype(np.float32)
+    return validate_target(updated)
 
 
 def _plant_slope(
     log_weights: list[np.ndarray],
     log_contrast: list[np.ndarray],
-    odd_log_contrast: list[np.ndarray],
-    even_log_contrast: list[np.ndarray],
+    excitation: list[np.ndarray],
 ) -> tuple[float, float, int]:
-    """Pool every site's response to every applied step into ONE plant slope.
+    """Pool every site's response to the EXCITATION into ONE plant slope.
 
     Model: ``Δlog C_t = s0 Δlog w_t + s1 Δlog w_{t-1} + s2 Δlog w_{t-2}``
     per site, with common-mode drift removed by centring each candidate's
@@ -310,17 +364,23 @@ def _plant_slope(
     which a 0.35% typical step never did, and read a slope of -1 into a plant
     that actually answers with about -3.3 spread over two candidates.
 
-    The lag-0 regressor is instrumented: ``Δlog w_t`` is the controller's
-    reaction to the previous batch's noisy estimate, and that same noise sits
-    in ``Δlog C_t`` with the opposite sign, so a plain regression is biased
-    towards zero by roughly ``gain·Var(noise)/Var(step)`` -- over one unit of
-    slope at the archived run's numbers.  Reading the outcome against the
-    EVEN half of the previous batch and instrumenting the step with the ODD
-    half's residual leaves nothing the two sides share except the plant.
+    The three lag regressors are instrumented by the excitation differences
+    at the same lags.  Nothing else in a closed loop is exogenous: the
+    controller's step is its reaction to the previous batch, and that batch
+    carries not only estimator noise but the plant's own per-candidate wander
+    (1.1-1.5% between archived candidates, gone again the next one).  The
+    half-batch instrument this replaces was blind to exactly that wander --
+    both halves share it -- and in simulation read -2.6 into a unit plant
+    and -5.4 into the archived one while reporting a standard error of 0.2.
+    The excitation is drawn by the task itself, so it shares nothing with
+    the plant but the response.
 
-    Returns the signed slope, its standard error and the row count; NaN slope
-    when the design is not estimable.  Steps before the first candidate are
-    zero, which is the physical truth of a settled baseline, not a fill.
+    A transition no excitation touches contributes nothing and is left out,
+    so the estimate is frozen once the excitation ends and the residual
+    variance is that of the excited rows.  Returns the signed slope, its
+    standard error and the row count; NaN slope when nothing is estimable.
+    Steps before the first candidate are zero, which is the physical truth
+    of a settled baseline, not a fill.
     """
 
     count = len(log_weights)
@@ -330,26 +390,30 @@ def _plant_slope(
     regressors: list[np.ndarray] = []
     instruments: list[np.ndarray] = []
     for index in range(1, count):
-        step = log_weights[index] - log_weights[index - 1]
-        outcome = log_contrast[index] - even_log_contrast[index - 1]
-        instrument = -odd_log_contrast[index - 1]
+        outcome = log_contrast[index] - log_contrast[index - 1]
         lagged = [
             log_weights[index - lag] - log_weights[index - lag - 1]
             if index - lag >= 1
-            else np.zeros_like(step)
+            else np.zeros_like(outcome)
             for lag in range(_PLANT_SLOPE_LAGS)
         ]
-        usable = np.isfinite(outcome) & np.isfinite(instrument) & np.all(
+        excited = [
+            excitation[index - lag] - excitation[index - lag - 1]
+            if index - lag >= 1
+            else np.zeros_like(outcome)
+            for lag in range(_PLANT_SLOPE_LAGS)
+        ]
+        usable = np.isfinite(outcome) & np.all(
             np.isfinite(np.stack(lagged)), axis=0
         )
-        if np.count_nonzero(usable) < 2:
+        if np.count_nonzero(usable) < 2 or not np.any(
+            np.stack(excited)[:, usable] != 0.0
+        ):
             continue
         design = np.column_stack([column[usable] for column in lagged])
         design -= np.mean(design, axis=0, keepdims=True)
-        rows = np.column_stack(
-            (instrument[usable], design[:, 1:])
-        )
-        rows[:, 0] -= np.mean(rows[:, 0])
+        rows = np.column_stack([column[usable] for column in excited])
+        rows -= np.mean(rows, axis=0, keepdims=True)
         outcomes.append(outcome[usable] - np.mean(outcome[usable]))
         regressors.append(design)
         instruments.append(rows)
@@ -620,6 +684,7 @@ def _write_npz(
 _CANDIDATE_VECTOR_FIELDS = (
     "target_weight",
     "control_weight",
+    "excitation_log_step",
     "dark_mean",
     "dark_sigma",
     "dark_standard_error",
@@ -1720,13 +1785,20 @@ class SlmFeedbackTask:
     ]:
         """Shoot one candidate and return its samples plus the pulse verdict.
 
-        The fifth value is the pulse fault this batch was ACCEPTED with (see
-        ``_accepted_pulse_fault``), or "" for a clean shot.  A fault the batch
-        cannot be accepted with -- a board error, an underflow, a short frame
-        count -- repeats the whole batch once (safe, arm, fire, collect); the
-        second fault is the candidate's.  The unchanged-phase guard below is
-        checked once per CANDIDATE: a repeat inside this call is the same
-        candidate being measured, not a second batch at the same phase.
+        The fifth value is the pulse warning the candidate carries: "" for a
+        clean shot, else the fault the batch was ACCEPTED with (see
+        ``_accepted_pulse_fault``) and/or the fault a first batch was REPEATED
+        after -- both spelled out, because a run whose first attempt's
+        failure is not written down cannot be understood afterwards (the
+        UART transport already lost its first two attempts' shortfalls that
+        way).  A fault the batch cannot be accepted with -- the board
+        reporting an error or an underflow, whether it played every trigger
+        or stopped so that the camera timed out (``_shoot`` asks the board
+        then) -- repeats the whole batch once (safe, arm, fire, collect); a
+        second fault is the candidate's, and names both.  The unchanged-phase
+        guard below is checked once per CANDIDATE: a repeat inside this call
+        is the same candidate being measured, not a second batch at the same
+        phase.
         """
 
         contract = self.calibration.frame_contract
@@ -1745,21 +1817,21 @@ class SlmFeedbackTask:
             )
         self._last_measured_phase = np.array(phase, copy=True)
         camera_owner = f"{context.instance_id}/camera"
-        attempt = 0
+        repeated_after = ""
         while True:
-            attempt += 1
             result, saturation_value, report = self._shoot(
                 pulse, context, iteration, camera_owner=camera_owner
             )
             delivered = 0 if result is None else int(result.cycle_count)
             fault = str(report.fault or "")
             if not fault:
-                pulse_warning = ""
+                accepted_with = ""
             elif _accepted_pulse_fault(
                 report, delivered_cycles=delivered, requested_cycles=requested
             ):
-                pulse_warning = fault
-            elif attempt == 1:
+                accepted_with = fault
+            elif not repeated_after:
+                repeated_after = fault
                 context.report_progress(
                     f"Repeating the shot batch of candidate {iteration + 1} "
                     f"after a pulse fault: {fault}"
@@ -1767,11 +1839,20 @@ class SlmFeedbackTask:
                 continue
             else:
                 raise RuntimeError(
-                    f"the pulse failed twice for one candidate: {fault}"
+                    "the pulse failed twice for one candidate: first "
+                    f"{repeated_after}; then {fault}"
                 )
-            if delivered != requested:
-                raise RuntimeError("canonical Camera Measurement ended before all shots")
             break
+        pulse_warning = "; ".join(
+            text
+            for text in (
+                f"batch repeated after a pulse fault: {repeated_after}"
+                if repeated_after else "",
+                f"batch accepted with a pulse fault: {accepted_with}"
+                if accepted_with else "",
+            )
+            if text
+        )
         context.report_progress(
             f"Reading mean qCMOS brightness for candidate {iteration + 1}",
             current=requested,
@@ -1915,12 +1996,30 @@ class SlmFeedbackTask:
                     )
                 node._commit_direct_outputs({CAMERA_FRAMES_OUTPUT.name: output})
 
-            result = capture.collect(
-                commit_cycle=commit_camera_cycle,
-                retain_cycles=False,
-            )
-            _check_cancelled(context)
-            report = wait_for_report(self.sequencer, context)
+            try:
+                result = capture.collect(
+                    commit_cycle=commit_camera_cycle,
+                    retain_cycles=False,
+                )
+            except Exception:
+                # THE BOARD IS ASKED BEFORE THE CAMERA IS BLAMED.  A board
+                # that errs or underruns mid-batch stops playing triggers,
+                # and the first thing to notice is the camera's frame
+                # timeout -- which used to leave here as the candidate's
+                # failure before the board's report was ever read, so the
+                # one-repeat rule of ``_measure`` never saw a mid-batch
+                # board fault.  One poll, no wait: a board still playing
+                # (a genuine camera fault) reports nothing and the camera's
+                # complaint stands; a board that has faulted hands its
+                # report back and the batch is the board's fault, with no
+                # frames to keep.
+                report = self.sequencer.wait_done(0.0)
+                if report is None or not report.fault:
+                    raise
+                result = None
+            else:
+                _check_cancelled(context)
+                report = wait_for_report(self.sequencer, context)
         finally:
             try:
                 self.sequencer.safe()
@@ -2489,6 +2588,7 @@ class SlmFeedbackTask:
         outcome: Mapping[str, object] | None = None,
         error: BaseException | None = None,
         rollback: Mapping[str, object] | None = None,
+        figures_error: BaseException | None = None,
     ) -> None:
         initial = None if not history else history[0]
         formal_history = [
@@ -2651,6 +2751,17 @@ class SlmFeedbackTask:
                     "message": str(error),
                 }
             ),
+            "figures_error": (
+                None
+                if figures_error is None
+                else {
+                    "type": (
+                        f"{type(figures_error).__module__}."
+                        f"{type(figures_error).__qualname__}"
+                    ),
+                    "message": str(figures_error),
+                }
+            ),
         }
         json_path = write_readable_json(
             paths["root"] / "summary.json", _plain_json(document)
@@ -2709,6 +2820,11 @@ class SlmFeedbackTask:
             lines.append(f"Rollback: {rollback.get('status')}")
         if error is not None:
             lines.append(f"Error: {type(error).__name__}: {error}")
+        if figures_error is not None:
+            lines.append(
+                "Figures not written: "
+                f"{type(figures_error).__name__}: {figures_error}"
+            )
         text_path = atomic_write_text(
             paths["root"] / "summary.txt", "\n".join(lines) + "\n"
         )
@@ -2736,9 +2852,17 @@ class SlmFeedbackTask:
         never disagree about what was chosen.  The failure path used to skip
         this and restore the incoming phase instead: a run that had selected
         candidate 66 of 68 died on one pulse poll with an empty ``final/``
-        and the SLM showing the phase it started from.  The artifact is
-        written before the figures: it is the deliverable, they are the
-        report, and a report that fails must not take the deliverable with it.
+        and the SLM showing the phase it started from.
+
+        The artifact is the deliverable, the figures are the report, and a
+        report that fails must not take the deliverable with it: the figures
+        are written after the artifact, and a figure writer that raises does
+        not raise out of the seal.  It is recorded in the summary, told to
+        the operator, and noted on the run's error when there is one.
+        Letting it out of here made the failure handler seal the same
+        candidate a second time, fail at the same figures, and then restore
+        the incoming phase -- ``final/`` claiming candidate 3 with the SLM on
+        the phase the run started from, and a summary saying "restored".
         """
 
         expected = canonical_phase(candidate["phase"], self.slm.shape_yx)
@@ -2812,6 +2936,7 @@ class SlmFeedbackTask:
             role="final",
             contract_id=SLM_PHASE_ARTIFACT_CONTRACT,
         )
+        figures_error: BaseException | None = None
         if (
             history
             and isinstance(retained_history, Mapping)
@@ -2819,15 +2944,27 @@ class SlmFeedbackTask:
             and candidate.get("mean_frame") is not None
             and initial_mean_frame is not None
         ):
-            self._save_figures(
-                context,
-                paths,
-                history=history,
-                selected=candidate,
-                initial_phase=initial_phase,
-                initial_mean_frame=initial_mean_frame,
-                candidate_reports=candidate_reports,
-            )
+            try:
+                self._save_figures(
+                    context,
+                    paths,
+                    history=history,
+                    selected=candidate,
+                    initial_phase=initial_phase,
+                    initial_mean_frame=initial_mean_frame,
+                    candidate_reports=candidate_reports,
+                )
+            except Exception as figure_error:
+                figures_error = figure_error
+                context.report_progress(
+                    "Feedback figures were not written: "
+                    f"{type(figure_error).__name__}: {figure_error}"
+                )
+                if error is not None:
+                    error.add_note(
+                        "Feedback figures were not written: "
+                        f"{type(figure_error).__name__}: {figure_error}"
+                    )
         self._write_summary(
             context,
             paths,
@@ -2838,6 +2975,7 @@ class SlmFeedbackTask:
             ),
             outcome=metadata["outcome"],
             error=error,
+            figures_error=figures_error,
         )
         terminal_uniformity = (
             retained_history.get("uniformity_ratio")
@@ -2914,6 +3052,12 @@ class SlmFeedbackTask:
             )
             _check_cancelled(context)
             current_target = self.target
+            # The Target on the SLM is the control Target with this
+            # candidate's identification excitation on its sites (see
+            # ``_excited_target``); the baseline is the Context's own.
+            current_solved_target = self.target
+            current_excitation = np.zeros(self._site_count, dtype=float)
+            excitation_rng = np.random.default_rng(0)
             spot_optimizer_state: dict[str, object] = {}
             current_pattern = incoming_pattern
             current_phase = incoming
@@ -2983,13 +3127,13 @@ class SlmFeedbackTask:
             candidate_number = 0
             candidate_kind = "baseline"
             formal_updates = 0
-            # The plant record: every candidate's applied control weights and
-            # the contrasts it produced, in the order the SLM saw them.  The
-            # slope estimate pools all of it; a new run starts without one.
+            # The plant record: every candidate's weights as the SLM saw them
+            # (excitation included), the excitation itself, and the contrasts
+            # they produced.  The slope estimate pools all of it; a new run
+            # starts without one.
             plant_log_weights: list[np.ndarray] = []
             plant_log_contrast: list[np.ndarray] = []
-            plant_odd_log_contrast: list[np.ndarray] = []
-            plant_even_log_contrast: list[np.ndarray] = []
+            plant_excitation: list[np.ndarray] = []
             convergence_streak = 0
             probe_sites = np.zeros(self._site_count, dtype=bool)
             probe_episode_used = np.zeros(self._site_count, dtype=bool)
@@ -3170,21 +3314,23 @@ class SlmFeedbackTask:
                     else float(np.min(visible_margin))
                 )
                 current_weights = np.asarray(
-                    current_target[self._rows, self._columns], dtype=float
+                    current_solved_target[self._rows, self._columns], dtype=float
                 )
-                current_control_weights = _control_weights(current_weights)
+                current_control_weights = _control_weights(
+                    np.asarray(current_target[self._rows, self._columns], dtype=float)
+                )
                 with np.errstate(divide="ignore", invalid="ignore"):
-                    plant_log_weights.append(np.log(current_control_weights))
+                    plant_log_weights.append(
+                        np.log(_control_weights(current_weights))
+                    )
                     plant_log_contrast.append(
                         np.where(observable_valid, np.log(contrast), np.nan)
                     )
-                    plant_odd_log_contrast.append(np.log(odd_contrast))
-                    plant_even_log_contrast.append(np.log(even_contrast))
+                    plant_excitation.append(np.array(current_excitation, copy=True))
                 plant_slope_estimate, plant_slope_se, plant_slope_rows = _plant_slope(
                     plant_log_weights,
                     plant_log_contrast,
-                    plant_odd_log_contrast,
-                    plant_even_log_contrast,
+                    plant_excitation,
                 )
                 plant_slope_magnitude = _usable_plant_slope(
                     len(plant_log_weights), plant_slope_estimate, plant_slope_se
@@ -3515,6 +3661,7 @@ class SlmFeedbackTask:
                     "effective_count_unit": self._effective_count_unit,
                     "target_weight": _json_floats(current_weights),
                     "control_weight": _json_floats(current_control_weights),
+                    "excitation_log_step": _json_floats(current_excitation),
                     "dark_mean": _json_floats(fitted["dark_mean"]),
                     "dark_sigma": _json_floats(fitted["dark_sigma"]),
                     "dark_standard_error": _json_floats(
@@ -3563,7 +3710,7 @@ class SlmFeedbackTask:
                         probe_control_boundary
                     ),
                     "missing_sites": list(missing_sites),
-                    "pulse_observer_warning": pulse_warning or None,
+                    "pulse_warning": pulse_warning or None,
                     "single_population_sites": [
                         int(value) for value in np.flatnonzero(fit_single)
                     ],
@@ -3590,18 +3737,23 @@ class SlmFeedbackTask:
                     "candidate": candidate_number,
                     "phase": np.array(applied, copy=True),
                     "pattern_phase": np.array(current_pattern, copy=True),
-                    "target": np.array(current_target, copy=True),
+                    "target": np.array(current_solved_target, copy=True),
                     "solver": candidate_solver,
                     "history": history[-1],
-                    # The candidate's rank is the dispersion it can PROVE,
-                    # never the max/min of one noisy batch: that number's
-                    # minimum over 68 candidates was a sampling extreme, and
-                    # picking it was the winner's curse.  A negative
-                    # covariance is as uniform as zero, so ties among
-                    # converged candidates go to the most recent one.
+                    # The candidate's rank is the dispersion it can PROVE it
+                    # is under -- the split-half variance plus its own
+                    # standard error -- never the max/min of one noisy batch:
+                    # that number's minimum over 68 candidates was a sampling
+                    # extreme, and picking it was the winner's curse.  Nor
+                    # the variance clipped at zero: a single low draw of a
+                    # noisy estimate then tied at "zero" with the genuinely
+                    # uniform candidates (archived candidate 41, whose
+                    # neighbours both resolved 1.7% CV, tied with 62 and 65).
+                    # Ties go to the most recent candidate.
                     "score": (
-                        max(true_variance, 0.0)
+                        true_variance + true_variance_error
                         if np.isfinite(true_variance)
+                        and np.isfinite(true_variance_error)
                         else float("inf")
                     ),
                     "contrast": np.array(contrast, copy=True),
@@ -3805,6 +3957,25 @@ class SlmFeedbackTask:
                         formal_updates += 1
                 if continue_feedback:
                     assert next_target is not None
+                    # The identification excitation rides on the first
+                    # ordinary updates only; a probe's Target is the probe's
+                    # own statement and carries none.
+                    next_excitation = (
+                        _excitation_pattern(excitation_rng, feedback_valid)
+                        if next_kind == "ordinary"
+                        and formal_updates <= _PLANT_EXCITATION_CANDIDATES
+                        else np.zeros(self._site_count, dtype=float)
+                    )
+                    next_solved_target = (
+                        _excited_target(
+                            next_target,
+                            next_excitation,
+                            self._rows,
+                            self._columns,
+                        )
+                        if np.any(next_excitation != 0.0)
+                        else next_target
+                    )
                     if next_kind == "probe":
                         context.report_progress(
                             "Solving SLM probe "
@@ -3819,7 +3990,7 @@ class SlmFeedbackTask:
                             if probe_solve else spot_optimizer_state
                         )
                         next_pattern, solver_metadata = solve_phase(
-                            next_target,
+                            next_solved_target,
                             pupil_amplitude=self._pupil_amplitude,
                             initial_phase=(
                                 probe_baseline_pattern
@@ -3869,6 +4040,8 @@ class SlmFeedbackTask:
                             spot_optimizer_state.update(solve_state)
                         history[-1]["next_phase_changed"] = True
                         current_target = next_target
+                        current_solved_target = next_solved_target
+                        current_excitation = next_excitation
                         current_pattern = next_pattern
                         current_phase = next_phase
                         candidate_kind = next_kind

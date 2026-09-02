@@ -297,8 +297,18 @@ pre-existing device-state requirement. Every candidate owns exactly one
 canonical Camera Measurement generation under the stable companion
 producer `<task>/camera`: current mode `qcmos_bright_dark` requires exactly one
 camera frame per cycle, commits all `repeat=N` cycles, seals them, and uses the
-same single-frame Dataset for preview and estimation. It never retries or adds
-a second batch at an unchanged phase. The Pulse resource is an
+same single-frame Dataset for preview and estimation. It never adds a second
+batch at an unchanged phase once that phase has been measured. A batch the
+board reports faulted is kept when the only fault is the host's own
+observation of the board (the pulse observer's UART poll), no underflow was
+seen and the camera delivered every requested cycle; any other board fault --
+reported after every trigger, or mid-batch so that the camera times out first
+(the board's report is read before the camera is blamed) -- repeats the whole
+batch once, and a second fault fails the candidate naming both. The candidate
+records the fault it was accepted with and the fault it was repeated after.
+The pulse program is loaded once per run: `fire` replays the board's resident
+image, and the board's own reported digest decides whether a LOAD is needed.
+The Pulse resource is an
 explicit operator selection; camera exposure is a separate visible/editable
 field with a `0.1 s` default. Feedback neither derives one from the other nor
 reuses Calibration exposure.
@@ -318,33 +328,47 @@ only a numerical/non-finite fit failure holds that site.
 
 The controller records every site's normalized Target intensity share,
 contrast, fit choice and action, and ONE plant slope for the whole array: the
-pooled, instrumented regression of every site's change in log contrast on the
-applied change in log weight at lags 0, 1 and 2. A high contrast means the trap
-is shallow at the experiment's red-detuned probe point, so its share increases;
-a low contrast makes it decrease. `feedback_gain` is the loop gain -- the
-fraction of a site's log residual the next candidate removes -- and the step
-that does it is the residual times `feedback_gain` divided by the measured
-slope magnitude (held to 0.3-5); until three candidates exist and the slope is
-resolved to 30%, the step assumes unit slope at half gain. Steps are scaled by
-fit quality, clamped to `maximum_weight_change` and pass through the
+pooled regression of every site's change in log contrast on the applied change
+in log weight at lags 0, 1 and 2, instrumented by an identification
+excitation. The first six ordinary updates after the baseline carry a fresh
+zero-sum +-2% log-weight pattern on top of the controller's step (recorded per
+site as `excitation_log_step`; the control Target is the integrator and never
+absorbs it), and only transitions that pattern touches enter the regression --
+the excitation is the one thing in a closed loop that shares nothing with the
+plant's own per-candidate wander, which biased any instrument taken from the
+measurements themselves. A high contrast means the trap is shallow at the
+experiment's red-detuned probe point, so its share increases; a low contrast
+makes it decrease. `feedback_gain` is the loop gain -- the fraction of a
+site's log residual the next candidate removes -- and the step that does it is
+the residual times `feedback_gain` divided by the measured slope magnitude
+(held to 0.3-5); until three candidates exist and the slope is resolved to
+30%, the step assumes unit slope at half gain. Steps are scaled by fit
+quality, clamped to `maximum_weight_change` and pass through the
 share-conserving allocator. Dark-only sites receive the exact feasible
-normalized share increase; invalid sites keep their share.
+normalized share increase; invalid sites keep their share. The feedback
+re-solve holds the solver to a support ratio of 1.002 and at least five
+passes.
 
 Every candidate splits its shots into odd and even halves and reports the
 true between-site dispersion (the cross-covariance of the two halves' log
 residuals) with its standard error, next to the observed max/min ratio and the
 max/min a perfectly uniform array would show at the same noise. The run stops
 when three formal candidates in a row resolve no dispersion, or at
-`max_updates`. Normal terminal and Stop retain the fully measured candidate
-with the smallest proven dispersion, the most recent among ties (or the most
-observable measured candidate when no all-site result exists); an applied but
-unmeasured phase is never promoted. A Stop already requested before the initial
-solve makes zero solver calls. A genuine failure restores the Context starting
-phase. The run stores each completed candidate's per-site shot samples, fit,
-weights, actions, metrics, phase-change fact and command receipt. Every completed
-candidate has one compact standalone Science Context containing the Pattern that
-was frozen before its shots; only selected initial/final phases are additionally
-rendered as report Figures.
+`max_updates`. Normal terminal, Stop and a genuine failure all seal the same
+choice: the fully measured candidate with the smallest dispersion it can prove
+it is under (the split-half variance plus its standard error), the most recent
+among ties (or the most observable measured candidate when no all-site result
+exists) -- on the SLM, in `final/science-context.npz`, and in the summary,
+which carries the error of a failed run; an applied but unmeasured phase is
+never promoted. Only when that seal itself cannot be written is the Context
+starting phase restored. A Stop already requested before the initial solve
+makes zero solver calls. The run stores each completed candidate's per-site
+shot samples, fit, weights, actions, metrics, phase-change fact and command
+receipt. Every completed candidate has one compact standalone Science Context
+containing the Pattern that was frozen before its shots; only selected
+initial/final phases are additionally rendered as report Figures, and a
+figure writer that fails leaves the sealed run intact with the failure in
+the summary.
 
 `candidate_phase` publishes immediately after the SLM confirms each phase and
 before that candidate's shots begin. `uniformity_history` contains only true
@@ -360,11 +384,9 @@ Each Feedback run writes summary JSON/text and six important Figure pairs:
 `phase_initial_selected`. The NPZ is the typed primary artifact and PNG is its
 preview. Raw camera frames and per-shot images are not saved by default.
 
-The loop defaults to 100 shots and 12 updates and normally completes every one.
-Afterwards it retains the all-site candidate with the smallest measured ratio,
-or the most observable measured candidate if no all-site ratio exists. No
-built-in ratio threshold ends a run early. The simultaneous interval is
-recorded as uncertainty but never triggers an extra acquisition.
+The loop defaults to 100 shots and 12 updates. No max/min ratio threshold
+ends a run early; the simultaneous interval is recorded as uncertainty but
+never triggers an extra acquisition.
 
 The supported product path discovers seven logic descriptors: `calibration`,
 `camera_measurement`, `occupancy`, `seamless_scan`, `slm_feedback`,
