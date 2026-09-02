@@ -328,9 +328,11 @@ def _plant_slope(
         return float("nan"), float("nan"), rows_used
     # The pseudo-inverse keeps the estimate defined while a lag column is
     # still identically zero (no step that old has been applied yet): that
-    # coefficient is zero and the static sum is the estimable part.
+    # coefficient is zero and the static sum is the estimable part.  The
+    # cut-off is far above float noise so a direction the data has not
+    # excited reads as zero rather than as a 1e29 with a 1e42 error.
     cross = z.T @ x
-    inverse = np.linalg.pinv(cross)
+    inverse = np.linalg.pinv(cross, rcond=1e-6)
     beta = inverse @ (z.T @ y)
     residual = y - x @ beta
     sigma_squared = float(residual @ residual) / (rows_used - _PLANT_SLOPE_LAGS)
