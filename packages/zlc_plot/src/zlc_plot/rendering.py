@@ -2547,6 +2547,7 @@ class MatplotlibRenderer:
                 for entry in entries
                 if self._chrome_meets_data(entry[0], axes)
             ]
+            entries.extend(self._text_chrome_above(axes, entries))
             self._boundary_chrome_cache[id(axes)] = tuple(entries)
             for artist, owner, zorder in entries:
                 if (
@@ -3763,6 +3764,47 @@ class MatplotlibRenderer:
         except Exception:
             return True
 
+    def _text_chrome_above(
+        self,
+        axes: Any,
+        chrome: Sequence[tuple[Any, Any, float]],
+    ) -> tuple[tuple[Any, Any, float], ...]:
+        """Axes text a full draw paints ABOVE the chrome replayed for ``axes``.
+
+        A cell title's descender reaches the top spine's anti-aliased fringe.
+        The full draw paints the title (zorder 3) after the spine (2.5), so
+        the glyph lies on the fringe; the cached background held the title
+        over white, and the replayed spine then went over the glyph -- one
+        level in six pixels of every histogram grid.  Such text is replayed
+        as well, at its own zorder, so the stacking is the full draw's.
+
+        Every title above a replayed chrome artist comes along, without
+        measuring whether it touches one: Matplotlib places a title during
+        the draw, so its extent between draws is not a fact, and a replayed
+        title that never touches the chrome costs one memoized blit.  Only
+        the titles: they are the axes' own children, painted at their own
+        zorder after the spines.  An axis LABEL is painted inside Axis.draw,
+        below the spines whatever its zorder says, so it belongs to the
+        background and must not be lifted above them.  Titles are faded,
+        not hidden, for the background draw -- see ``_compose_frame``.
+        """
+
+        if not chrome:
+            return ()
+        lowest = min(float(zorder) for _artist, _owner, zorder in chrome)
+        return tuple(
+            (text, axes, float(text.get_zorder()))
+            for text in (
+                axes.title,
+                getattr(axes, "_left_title", None),
+                getattr(axes, "_right_title", None),
+            )
+            if text is not None
+            and text.get_visible()
+            and text.get_text()
+            and float(text.get_zorder()) > lowest
+        )
+
     def _compose_frame(self, *, chrome_stable: bool) -> None:
         """Compose one complete frame, reusing the cached chrome background.
 
@@ -3841,16 +3883,31 @@ class MatplotlibRenderer:
         # and compose.  Re-entering here copied the full rcParams mapping for
         # every frame without changing a property on any existing artist.
         if not reusable:
-            visibility = [
-                (artist, artist.get_visible()) for _key, artist in dynamics
+            # Replayed TEXT is faded for the background draw, not hidden:
+            # Matplotlib positions a title during Axes.draw from the title's
+            # own extent, and a hidden Text reports a unit box, so hiding it
+            # sent the title off the canvas and the next recording drew it
+            # there.  Fully transparent, it lays out where it always does
+            # and leaves the background untouched.
+            from matplotlib.text import Text
+
+            withheld = [
+                (artist, isinstance(artist, Text), artist.get_visible(), artist.get_alpha())
+                for _key, artist in dynamics
             ]
             try:
-                for artist, _visible in visibility:
-                    artist.set_visible(False)
+                for artist, is_text, _visible, _alpha in withheld:
+                    if is_text:
+                        artist.set_alpha(0.0)
+                    else:
+                        artist.set_visible(False)
                 self._native_draw(canvas)
             finally:
-                for artist, visible in visibility:
-                    artist.set_visible(visible)
+                for artist, is_text, visible, alpha in withheld:
+                    if is_text:
+                        artist.set_alpha(alpha)
+                    else:
+                        artist.set_visible(visible)
             self._chrome_dirty_axes.clear()
             if self._chrome_churn > 1 and self._selector_gesture_kind is None:
                 # A copy that keeps missing is not a cache, it is a tax: a
