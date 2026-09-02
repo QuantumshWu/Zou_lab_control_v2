@@ -25,7 +25,10 @@ from zlc_data import (
     OwnedSnapshot,
     canonical_coordinate_scalar,
 )
-from zlc_data.snapshot_projection import PRIMARY_INDEX_AXIS_ID
+from zlc_data.snapshot_projection import (
+    IndexedHistoryLayout,
+    indexed_history_layout,
+)
 
 from .data_contract import (
     DEFAULT_UNITS,
@@ -668,6 +671,8 @@ class DataView:
         "_facet_histogram_cache",
         "_domain_carry",
         "_unit_registry_revision",
+        "_history_layout",
+        "_history_mask_cache",
     )
 
     def __init__(
@@ -741,6 +746,13 @@ class DataView:
         self._pooled_cache: NDArray[Any] | None = None
         self._positions_cache: NDArray[np.int64] | None = None
         self._facet_histogram_cache: tuple[object, "_FacetHistogramPlan"] | None = None
+        #: The Runtime history's shot structure, read off the schema once
+        #: (it is cached there) and the per-window sample mask derived from
+        #: it, built once per view however many projections ask.
+        self._history_layout: IndexedHistoryLayout | None = indexed_history_layout(
+            schema
+        )
+        self._history_mask_cache: dict[int, NDArray[np.bool_]] = {}
         #: Whole-dataset domains carried from the PREVIOUS revision's view.
         #: A domain is a fact about the coordinate plane alone -- np.unique
         #: over a million-point x column costs ~60 ms and its input rarely
@@ -791,14 +803,7 @@ class DataView:
 
     @property
     def has_primary_index(self) -> bool:
-        return any(
-            column.coordinate_id == PRIMARY_INDEX_AXIS_ID
-            for column in self._schema.point_table.columns
-        )
-
-    @staticmethod
-    def _primary_index_ref() -> AxisRef:
-        return AxisRef.point(PRIMARY_INDEX_AXIS_ID.value)
+        return self._history_layout is not None
 
     def coordinate(self, ref: AxisRef) -> CoordinateArray:
         return self._resolve(ref).coordinate
@@ -3056,36 +3061,21 @@ class DataView:
     def _history_point_mask(self, window: int) -> NDArray[np.bool_]:
         """The indexed-history selection, as a plane over the sample shape."""
 
+        layout = self._history_layout
+        assert layout is not None
+        window = _history_window(window)
+        cached = self._history_mask_cache.get(window)
+        if cached is None:
+            cached = self._spread_rows(layout.row_mask(window))
+            self._history_mask_cache[window] = cached
+        return cached
+
+    def _spread_rows(self, plane: NDArray[Any]) -> NDArray[Any]:
+        """One value per point row, broadcast over the whole sample tensor."""
+
         values = self._samples.value.canonical
-        column = self._schema.point_table.column(PRIMARY_INDEX_AXIS_ID)
-        ordered: list[int] = []
-        seen: set[int] = set()
-        for value in column.values:
-            if isinstance(value, bool) or not isinstance(value, Integral):
-                raise TypeError(
-                    "primary-index coordinates must be integer relative offsets"
-                )
-            source_index = int(value)
-            if not ordered or ordered[-1] != source_index:
-                if source_index in seen or (
-                    ordered and source_index < ordered[-1]
-                ):
-                    raise ValueError(
-                        "primary-index offsets must form ordered cells"
-                    )
-                ordered.append(source_index)
-                seen.add(source_index)
-        if ordered and ordered[-1] != 0:
-            raise ValueError(
-                "relative primary-index coordinates must end at latest offset 0"
-            )
-        source_indices = tuple(ordered[-window:])
-        selected = np.isin(
-            np.asarray(column.values, dtype=object),
-            np.asarray(source_indices, dtype=object),
-        )
         return np.broadcast_to(
-            np.reshape(selected, (1, selected.size, *([1] * (values.ndim - 2)))),
+            np.reshape(plane, (1, plane.size, *([1] * (values.ndim - 2)))),
             values.shape,
         )
 
@@ -3494,10 +3484,15 @@ class DataView:
     ) -> RollingHistory:
         """Reduce every authored primary-index cell without arrival history."""
 
+        layout = self._history_layout
+        assert layout is not None
         self.validate_rolling(group)
         aggregation = _validate_aggregation(aggregation)
         positions = self._all_positions()
-        primary = self._domain(self._primary_index_ref(), positions)
+        # The shot each sample belongs to is the layout's per-row code,
+        # spread over the tensor exactly as the window mask is: one reading
+        # of the history's structure for the trace and for the mask.
+        shot_codes = self._spread_rows(layout.codes()).reshape(-1)[positions]
         if group is None:
             codes = np.zeros(positions.size, dtype=np.int64)
             domain_size = 1
@@ -3509,10 +3504,10 @@ class DataView:
             keys = tuple((value,) for value in grouped.values)
         flat_values = self._samples.value.canonical.reshape(-1)
         flat_valid = self._samples.valid_mask.reshape(-1)
-        usable = flat_valid[positions] & (codes >= 0) & (primary.codes >= 0)
+        usable = flat_valid[positions] & (codes >= 0)
         position_values = flat_values[positions]
-        history_count = len(primary.values)
-        combined = primary.codes * domain_size + codes
+        history_count = layout.shot_count
+        combined = shot_codes * domain_size + codes
         bucket_count = history_count * domain_size
         values, counts = _aggregate_by_codes(
             position_values,
@@ -3552,11 +3547,7 @@ class DataView:
             valid=valid,
             counts=counts,
             group_keys=keys,
-            source_indices=np.fromiter(
-                (int(source.canonical) for source in primary.values),
-                dtype=np.int64,
-                count=history_count,
-            ),
+            source_indices=layout.cells,
             sem=sem,
         )
 
@@ -4355,7 +4346,13 @@ class DataView:
             display_values = resolved.domain_display[used_indices]
         else:
             used_indices = None
-            canonical_values, inverse = np.unique(selected[valid_local], return_inverse=True)
+            canonical_values, first_local, inverse = np.unique(
+                selected[valid_local], return_index=True, return_inverse=True
+            )
+            # A distinct value's label is read off the first row that
+            # carries it: the labels are one per coordinate entry, and that
+            # row names the entry, so no walk over every entry is needed.
+            label_indices = selected_indices[valid_local][first_local]
             display_values = resolved.coordinate.canonical_unit.convert_value_to(
                 canonical_values, resolved.coordinate.display_unit
             )
@@ -4381,20 +4378,14 @@ class DataView:
                 )
             else:
                 indices = (None,) * int(canonical_values.size)
-                if resolved.coordinate_labels is None:
-                    coordinate_labels = (None,) * int(canonical_values.size)
-                else:
-                    label_by_coordinate = dict(
-                        zip(
-                            map(_python_scalar, resolved.domain_canonical),
-                            resolved.coordinate_labels,
-                            strict=True,
-                        )
+                coordinate_labels = (
+                    (None,) * int(canonical_values.size)
+                    if resolved.coordinate_labels is None
+                    else tuple(
+                        resolved.coordinate_labels[int(index)]
+                        for index in label_indices
                     )
-                    coordinate_labels = tuple(
-                        label_by_coordinate[_python_scalar(value)]
-                        for value in canonical_values
-                    )
+                )
             return tuple(
                 AxisValue(
                     ref=ref,

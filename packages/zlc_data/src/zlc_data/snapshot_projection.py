@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -39,7 +39,9 @@ from .value import (
 
 __all__ = [
     "PRIMARY_INDEX_AXIS_ID",
+    "IndexedHistoryLayout",
     "axis_catalog",
+    "indexed_history_layout",
     "indexed_schemas_compatible",
     "materialize_derived_dataset",
     "restrict_snapshot",
@@ -57,100 +59,170 @@ __all__ = [
 PRIMARY_INDEX_AXIS_ID = AxisId("zlc_data.primary-index")
 
 
-def _indexed_layout(schema: DatasetSchema) -> tuple[object, ...] | None:
-    """Return the invariant event layout below a growing primary-index axis."""
+_NOT_INDEXED = object()
 
+
+@dataclass(frozen=True, eq=False)
+class IndexedHistoryLayout:
+    """The one reading of a Runtime indexed history's point table.
+
+    Its rows are ``shots x event rows``: the primary-index column holds each
+    shot's relative offset (oldest first, the latest is 0) repeated once per
+    event row, and every other column -- and the topology -- repeats the
+    event's own rows under each shot.  That structure is derived here ONCE
+    per schema and read by every consumer: the plot's window mask and shot
+    codes, the compatibility gate that lets a sliding window keep its host,
+    and the title's shot count.  None of them walks the rows again -- the
+    walk that was done four times, twice per shot in Python, over a hundred
+    thousand rows.
+    """
+
+    #: Each shot's relative offset, oldest first; the last is 0.  Holes are
+    #: legal: a shot the history never received is simply absent.
+    cells: np.ndarray
+    #: Event rows under every shot.
+    inner_count: int
+    #: What does not change as the window slides -- the repeat axis, the
+    #: cell schema, the event's own point columns and topology -- and so
+    #: what two windows of one history must share.
+    event: tuple[object, ...]
+
+    def __post_init__(self) -> None:
+        cells = np.asarray(self.cells, dtype=np.int64)
+        cells.setflags(write=False)
+        object.__setattr__(self, "cells", cells)
+
+    @property
+    def shot_count(self) -> int:
+        return int(self.cells.size)
+
+    @property
+    def row_count(self) -> int:
+        return int(self.cells.size) * int(self.inner_count)
+
+    def codes(self) -> np.ndarray:
+        """Each point row's shot position, oldest shot first."""
+
+        return np.repeat(
+            np.arange(self.cells.size, dtype=np.int64), int(self.inner_count)
+        )
+
+    def row_mask(self, window: int) -> np.ndarray:
+        """Which point rows the last ``window`` shots occupy."""
+
+        keep = min(max(int(window), 1), int(self.cells.size))
+        return self.codes() >= int(self.cells.size) - keep
+
+
+def indexed_history_layout(schema: DatasetSchema) -> IndexedHistoryLayout | None:
+    """The indexed-history layout of ``schema``, or None without a shot index.
+
+    A schema that names the primary index but breaks its contract -- a
+    non-integer or unordered offset, a latest offset other than 0, shots of
+    unequal size, an event column or topology that does not repeat under
+    every shot -- is a producer error and is refused, not read leniently.
+    """
+
+    if not isinstance(schema, DatasetSchema):
+        raise TypeError("indexed history layout requires DatasetSchema")
+    cached = schema._indexed_layout
+    if cached is not None:
+        return None if cached is _NOT_INDEXED else cached
     columns = tuple(schema.point_table.columns)
     primary = next(
         (column for column in columns if column.coordinate_id == PRIMARY_INDEX_AXIS_ID),
         None,
     )
     if primary is None:
+        object.__setattr__(schema, "_indexed_layout", _NOT_INDEXED)
         return None
     if primary.role != PRIMARY_INDEX:
-        return None
-    coordinates = tuple(primary.values)
-    if any(type(value) is not int for value in coordinates):
-        return None
-    unique: list[int] = []
-    counts: list[int] = []
-    for coordinate in coordinates:
-        if not unique or coordinate != unique[-1]:
-            if unique and coordinate <= unique[-1]:
-                return None
-            unique.append(coordinate)
-            counts.append(1)
-        else:
-            counts[-1] += 1
-    if not counts or len(set(counts)) != 1:
-        return None
-    if unique[-1] != 0:
-        return None
-    inner_count = counts[0]
+        raise ValueError("the primary-index coordinate must carry the primary-index role")
+    offsets = np.asarray(primary.values)
+    if (
+        offsets.ndim != 1
+        or offsets.size == 0
+        or not issubclass(offsets.dtype.type, np.integer)
+    ):
+        raise ValueError("primary-index coordinates must be integer relative offsets")
+    offsets = offsets.astype(np.int64, copy=False)
+    steps = np.diff(offsets)
+    if np.any(steps < 0):
+        raise ValueError("primary-index offsets must form ordered cells")
+    starts = np.concatenate(([0], np.flatnonzero(steps > 0) + 1))
+    cells = offsets[starts]
+    if int(cells[-1]) != 0:
+        raise ValueError("relative primary-index coordinates must end at latest offset 0")
+    counts = np.diff(np.concatenate((starts, [offsets.size])))
+    inner_count = int(counts[0])
+    if np.any(counts != inner_count):
+        raise ValueError("every shot of an indexed history holds the same event rows")
+    shots = int(cells.size)
 
-    column_layout: list[object] = []
+    def repeats_under_every_shot(entries: tuple[object, ...]) -> bool:
+        plane = np.empty(len(entries), dtype=object)
+        plane[:] = entries
+        plane = plane.reshape(shots, inner_count)
+        return shots == 1 or bool(np.all(plane[1:] == plane[0]))
+
+    event_columns: list[tuple[object, ...]] = []
     for column in columns:
-        if column.coordinate_id == PRIMARY_INDEX_AXIS_ID:
+        if column is primary:
             continue
-        values = tuple(column.values[:inner_count])
-        labels = (
-            None
-            if column.coordinate_labels is None
-            else tuple(column.coordinate_labels[:inner_count])
-        )
-        if any(
-            tuple(column.values[offset : offset + inner_count]) != values
-            for offset in range(inner_count, len(coordinates), inner_count)
+        values = tuple(column.values)
+        labels = column.coordinate_labels
+        if not repeats_under_every_shot(values) or (
+            labels is not None and not repeats_under_every_shot(tuple(labels))
         ):
-            return None
-        if column.coordinate_labels is not None and any(
-            tuple(column.coordinate_labels[offset : offset + inner_count]) != labels
-            for offset in range(inner_count, len(coordinates), inner_count)
-        ):
-            return None
-        column_layout.append(
+            raise ValueError(
+                "an indexed history repeats the event's point columns under every shot"
+            )
+        event_columns.append(
             (
                 column.coordinate_id,
                 column.name,
                 column.role,
                 column.value_kind,
-                values,
+                values[:inner_count],
                 column.unit,
                 column.coordinate_frame,
-                labels,
+                None if labels is None else tuple(labels[:inner_count]),
             )
         )
 
     topology = schema.grid_topology
-    topology_layout: object = None
+    topology_event: object = None
     if topology is not None:
         if (
             not topology.dimension_ids
             or topology.dimension_ids[0] != PRIMARY_INDEX_AXIS_ID
-            or tuple(topology.coordinate_domains[0]) != tuple(unique)
+            or tuple(topology.coordinate_domains[0]) != tuple(cells.tolist())
         ):
-            return None
-        base = tuple(cell[1:] for cell in topology.row_to_cell[:inner_count])
-        for group, offset in enumerate(
-            range(0, len(topology.row_to_cell), inner_count)
+            raise ValueError("an indexed history's topology leads with its shot index")
+        mapping = np.asarray(topology.row_to_cell, dtype=np.int64).reshape(
+            shots, inner_count, -1
+        )
+        if np.any(mapping[:, :, 0] != np.arange(shots, dtype=np.int64)[:, None]) or (
+            shots > 1 and np.any(mapping[1:, :, 1:] != mapping[0, :, 1:])
         ):
-            block = topology.row_to_cell[offset : offset + inner_count]
-            if any(cell[0] != group for cell in block):
-                return None
-            if tuple(cell[1:] for cell in block) != base:
-                return None
-        topology_layout = (
+            raise ValueError(
+                "an indexed history repeats the event's topology under every shot"
+            )
+        topology_event = (
             topology.dimension_ids[1:],
             topology.coordinate_domains[1:],
-            base,
+            tuple(tuple(int(index) for index in cell) for cell in mapping[0, :, 1:]),
+            None
+            if topology.coordinate_labels is None
+            else topology.coordinate_labels[1:],
         )
-    return (
-        schema.repeat_axis,
-        schema.cell_schema,
+    layout = IndexedHistoryLayout(
+        cells,
         inner_count,
-        tuple(column_layout),
-        topology_layout,
+        (schema.repeat_axis, schema.cell_schema, tuple(event_columns), topology_event),
     )
+    object.__setattr__(schema, "_indexed_layout", layout)
+    return layout
 
 
 def indexed_schemas_compatible(
@@ -161,8 +233,14 @@ def indexed_schemas_compatible(
 
     if not isinstance(left, DatasetSchema) or not isinstance(right, DatasetSchema):
         raise TypeError("indexed schema compatibility requires DatasetSchema values")
-    left_layout = _indexed_layout(left)
-    return left_layout is not None and left_layout == _indexed_layout(right)
+    left_layout = indexed_history_layout(left)
+    right_layout = indexed_history_layout(right)
+    return (
+        left_layout is not None
+        and right_layout is not None
+        and left_layout.inner_count == right_layout.inner_count
+        and left_layout.event == right_layout.event
+    )
 
 
 def _derived_reference(

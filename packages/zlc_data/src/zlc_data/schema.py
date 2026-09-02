@@ -479,6 +479,12 @@ class DatasetSchema:
     _axis_catalog: tuple | None = field(
         init=False, repr=False, compare=False, default=None
     )
+    #: The indexed-history layout, read once per schema by
+    #: ``zlc_data.snapshot_projection.indexed_history_layout`` and cached
+    #: here like the catalog: every consumer of a Runtime history -- the
+    #: window mask, the shot codes, the compatibility gate, the title's
+    #: shot count -- reads this one object instead of walking the rows.
+    _indexed_layout: Any = field(init=False, repr=False, compare=False, default=None)
 
     def __post_init__(self) -> None:
         if not isinstance(self.repeat_axis, AxisSpec) or self.repeat_axis.role != REPEAT:
@@ -515,6 +521,7 @@ class DatasetSchema:
         object.__setattr__(self, "_fingerprint", None)
         object.__setattr__(self, "_structure_fingerprint", None)
         object.__setattr__(self, "_axis_catalog", None)
+        object.__setattr__(self, "_indexed_layout", None)
 
     @property
     def physical_shape(self) -> tuple[int, ...]:

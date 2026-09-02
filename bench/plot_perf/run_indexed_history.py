@@ -27,7 +27,7 @@ import numpy as np
 from .common import stats, write_result
 
 
-def _build_plane(sites: int, *, bimodal: bool = False):
+def _build_plane(sites: int, *, bimodal: bool = False, site_axis: str = "cell"):
     import zou_lab_control  # noqa: F401 - current checkout owns every package
     from zlc_data import (
         AxisId,
@@ -39,10 +39,13 @@ def _build_plane(sites: int, *, bimodal: bool = False):
         DatasetSchema,
         PointColumn,
         PointTable,
+        READOUT_EVENT,
         REPEAT,
         SITE,
         StreamGenerationId,
+        ValidityContract,
         ValueSchema,
+        owned_snapshot_from_arrays,
     )
     from zlc_runtime.dataset import MonitorCoverage
     from zlc_runtime.dataset_output import (
@@ -99,20 +102,56 @@ def _build_plane(sites: int, *, bimodal: bool = False):
             return None
 
     repeat = AxisSpec(AxisId("bench.repeat"), "repeat", REPEAT, 1, (0,))
-    site_column = PointColumn(
-        AxisId("bench.site"),
-        "site",
-        SITE,
-        PointColumn.NUMERIC,
-        tuple(range(sites)),
-        coordinate_labels=tuple(f"site-{index:02d}" for index in range(sites)),
-    )
-    event_schema = DatasetSchema(
-        repeat,
-        PointTable(sites, (site_column,)),
-        None,
-        ValueSchema.scalar(np.dtype(np.float64), "count"),
-    )
+    site_labels = tuple(f"site-{index:02d}" for index in range(sites))
+    if site_axis == "point":
+        # A site per point row: the shape of a scan's per-site table, and
+        # the shape whose history rows multiply by the site count.
+        site_column = PointColumn(
+            AxisId("bench.site"),
+            "site",
+            SITE,
+            PointColumn.NUMERIC,
+            tuple(range(sites)),
+            coordinate_labels=site_labels,
+        )
+        event_schema = DatasetSchema(
+            repeat,
+            PointTable(sites, (site_column,)),
+            None,
+            ValueSchema.scalar(np.dtype(np.float64), "count"),
+        )
+        counts_shape = (1, sites, 1)
+        validity_shape = (1, sites, 1)
+    elif site_axis == "cell":
+        # The occupancy processor's own geometry: the camera cycle's frame
+        # row stays the point table and the sites are the cell payload.
+        frame_column = PointColumn(
+            AxisId("bench.frame"), "frame", READOUT_EVENT, PointColumn.NUMERIC, (0,)
+        )
+        site_spec = AxisSpec(
+            AxisId("bench.site"),
+            "site",
+            SITE,
+            sites,
+            tuple(range(sites)),
+            coordinate_labels=site_labels,
+        )
+        event_schema = DatasetSchema(
+            repeat,
+            PointTable(1, (frame_column,)),
+            None,
+            ValueSchema(
+                (site_spec,),
+                ValidityContract.components(AxisId("bench.site")),
+                np.dtype(np.float64),
+                "count",
+            ),
+        )
+        counts_shape = (1, 1, sites)
+        validity_shape = (1, 1, sites)
+    else:
+        raise ValueError("site_axis must be 'point' or 'cell'")
+    event_rows = event_schema.point_table.row_count
 
     def source_event(revision: int):
         source_point = PointColumn(
@@ -144,30 +183,25 @@ def _build_plane(sites: int, *, bimodal: bool = False):
     rng = np.random.default_rng(7)
 
     def counts_event(revision: int):
-        from zlc_data import OwnedSnapshot
-
         if bimodal:
             # What a readout histogram actually looks like: a dark and a
             # bright population, so a bimodal fit converges as it would on
             # the bench instead of thrashing on uniform noise.
-            bright = rng.random(size=(1, sites, 1)) < 0.5
+            bright = rng.random(size=counts_shape) < 0.5
             values = np.where(
                 bright,
-                rng.normal(40.0, 6.0, size=(1, sites, 1)),
-                rng.normal(8.0, 3.0, size=(1, sites, 1)),
+                rng.normal(40.0, 6.0, size=counts_shape),
+                rng.normal(8.0, 3.0, size=counts_shape),
             )
             values = np.clip(values, 0.0, None).astype(np.float64)
         else:
-            values = rng.uniform(0.0, 40.0, size=(1, sites, 1)).astype(np.float64)
-        block = DataBlock(
-            BlockId(f"counts-{revision}"),
-            DatasetRevision(revision),
-            values,
-            CellValidity(np.ones((1, sites), dtype=np.bool_)),
+            values = rng.uniform(0.0, 40.0, size=counts_shape).astype(np.float64)
+        return owned_snapshot_from_arrays(
             event_schema,
-        )
-        return OwnedSnapshot(
-            block.ref(StreamGenerationId("bench-generation")), block
+            values,
+            revision,
+            validity=np.ones(validity_shape, dtype=np.bool_),
+            stream_generation=StreamGenerationId("bench-generation"),
         )
 
     plane = SignalDataPlane()
@@ -195,7 +229,7 @@ def _build_plane(sites: int, *, bimodal: bool = False):
                 "counts": LiveDatasetOutput(
                     counts_declaration,
                     counts_event(revision),
-                    MonitorCoverage(sites, sites),
+                    MonitorCoverage(event_rows, event_rows),
                 )
             },
             source_publication=publication,
@@ -216,8 +250,10 @@ def _build_plane(sites: int, *, bimodal: bool = False):
     return plane, commit
 
 
-def run_plane_layer(*, sites: int, window: int, steady: int) -> dict:
-    plane, commit = _build_plane(sites)
+def run_plane_layer(
+    *, sites: int, window: int, steady: int, site_axis: str = "cell"
+) -> dict:
+    plane, commit = _build_plane(sites, site_axis=site_axis)
     signal = "bench-occupancy/counts"
     lease = plane.acquire_indexed_history(signal, window)
     del lease  # held for the plane's life; the bench never shrinks it
@@ -239,7 +275,8 @@ def run_plane_layer(*, sites: int, window: int, steady: int) -> dict:
             del snapshot
         last = plane.current_dataset(signal)
         rows = last.block.schema.point_table.row_count
-        assert rows == window * sites, (rows, window, sites)
+        event_rows = sites if site_axis == "point" else 1
+        assert rows == window * event_rows, (rows, window, event_rows)
     finally:
         plane.close()
     return {
@@ -257,6 +294,7 @@ def run_session_layer(
     kind: str = "rolling",
     fit: str = "",
     size: str = "2x2",
+    site_axis: str = "cell",
 ) -> dict:
     """One PlotSession fed the plane-materialized history, per shot.
 
@@ -264,7 +302,9 @@ def run_session_layer(
     is the occupancy-counts grid an operator opens on a qCMOS run -- one
     histogram cell per site over the whole window, with an optional live
     bimodal fit that re-solves every cell on every shot, exactly as the
-    console's live fit does.
+    console's live fit does.  ``site_axis`` says where the sites live:
+    ``cell`` is the occupancy processor's geometry, ``point`` a per-site
+    point table whose history rows multiply by the site count.
     """
 
     import matplotlib
@@ -280,7 +320,9 @@ def run_session_layer(
         RollingPlot,
     )
 
-    plane, commit = _build_plane(sites, bimodal=kind == "facet_histogram")
+    plane, commit = _build_plane(
+        sites, bimodal=kind == "facet_histogram", site_axis=site_axis
+    )
     signal = "bench-occupancy/counts"
     plane.acquire_indexed_history(signal, window)
     revision = 1
@@ -291,14 +333,17 @@ def run_session_layer(
     def materialized():
         return plane.current_dataset(signal)
 
+    site_ref = (
+        AxisRef.point("bench.site") if site_axis == "point" else AxisRef.data("bench.site")
+    )
     if kind == "rolling":
         spec = RollingPlot(
-            group=AxisRef.point("bench.site"),
+            group=site_ref,
             labels=PlotLabels("occupancy history", "shots", "counts"),
         )
     elif kind == "facet_histogram":
         spec = FacetGridPlot(
-            AxisRef.point("bench.site"),
+            site_ref,
             HistogramPlot(),
             labels=PlotLabels("occupancy counts", "counts", "shots"),
         )
@@ -379,13 +424,21 @@ def main() -> int:
         help="live fit model armed on the session, e.g. bimodal_gaussian",
     )
     parser.add_argument("--size", default="2x2")
+    parser.add_argument(
+        "--site-axis",
+        choices=("cell", "point"),
+        default="cell",
+        help="where the sites live: the cell payload (occupancy) or point rows",
+    )
     arguments = parser.parse_args()
     label = (
-        f"indexed_history_{arguments.kind}_s{arguments.sites}_w{arguments.window}"
+        f"indexed_history_{arguments.kind}_{arguments.site_axis}"
+        f"_s{arguments.sites}_w{arguments.window}"
         + (f"_{arguments.fit}" if arguments.fit else "")
     )
     payload: dict = {
         "sites": arguments.sites,
+        "site_axis": arguments.site_axis,
         "window": arguments.window,
         "steady": arguments.steady,
         "kind": arguments.kind,
@@ -397,6 +450,7 @@ def main() -> int:
             sites=arguments.sites,
             window=arguments.window,
             steady=arguments.steady,
+            site_axis=arguments.site_axis,
         )
         print("plane:", payload["plane"])
     if arguments.layer in ("session", "both"):
@@ -407,6 +461,7 @@ def main() -> int:
             kind=arguments.kind,
             fit=arguments.fit,
             size=arguments.size,
+            site_axis=arguments.site_axis,
         )
         print("session:", payload["session"])
     print("wrote", write_result(payload, label))
