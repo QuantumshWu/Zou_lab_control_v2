@@ -1582,7 +1582,6 @@ class MatplotlibRenderer:
         self._fit_axis: Any | None = None
         self._fit_family: str | None = None
         self._fit_model_id: str | None = None
-        self._fit_mathtext_masks: dict[tuple[object, ...], np.ndarray] = {}
         self._data_revision: int | None = None
         #: Cached Agg chrome region (everything except renderer-owned dynamic
         #: artists) and the canvas signature it was captured for.  Payload-only
@@ -3544,197 +3543,6 @@ class MatplotlibRenderer:
         )
         return True, frozenset(artist_ids)
 
-    def _raster_facet_fit_annotations(self, canvas: Any) -> bool:
-        """Paint overview labels from Matplotlib's own final MathText masks.
-
-        The Text artists remain the formatting, font, colour, position and
-        clipping authority.  Their live numeric suffix makes forty separate
-        MathText parses miss Matplotlib's small cache every revision, though;
-        parse the same forty authoritative strings as one spaced run, split
-        only the resulting alpha mask, and cache each final mask for rounded
-        values that recur.  No formula is simplified and no second glyph
-        grammar exists here.
-        """
-
-        if not (
-            kernels.engaged()
-            and isinstance(self.spec, FacetGridPlot)
-            and self._facet_focus_index is None
-        ):
-            return False
-        from matplotlib.colors import to_rgba
-        from matplotlib.text import Text
-
-        annotations = tuple(
-            artist
-            for artist in self._fit_artists
-            if isinstance(artist, Text)
-            and artist.get_visible()
-            and artist.axes is not None
-            and artist.axes.get_visible()
-            and "\n" not in artist.get_text()
-            and float(artist.get_rotation()) == 0.0
-            and artist.get_horizontalalignment() == "left"
-            and artist.get_verticalalignment() == "top"
-            and not artist.get_path_effects()
-            and not artist.get_usetex()
-        )
-        if not annotations:
-            return False
-        canvas_rgba = np.asarray(canvas.buffer_rgba())
-        if (
-            canvas_rgba.dtype != np.uint8
-            or canvas_rgba.ndim != 3
-            or canvas_rgba.shape[2] != 4
-            or not canvas_rgba.flags.c_contiguous
-            or not canvas_rgba.flags.writeable
-        ):
-            return False
-
-        renderer = canvas.get_renderer()
-        parser = getattr(renderer, "mathtext_parser", None)
-        if parser is None:
-            return False
-        first = annotations[0]
-        font = first.get_fontproperties()
-        antialiased = bool(first.get_antialiased())
-        if any(
-            artist.get_fontproperties() != font
-            or bool(artist.get_antialiased()) != antialiased
-            for artist in annotations[1:]
-        ):
-            return False
-        font_key = font.get_fontconfig_pattern()
-        dpi = float(self._figure.dpi)
-        cached = self._fit_mathtext_masks
-        contents = tuple(artist.get_text() for artist in annotations)
-        keys = tuple((content, font_key, dpi, antialiased) for content in contents)
-        missing = tuple(
-            (key, content) for key, content in zip(keys, contents) if key not in cached
-        )
-        if missing:
-            missing_keys, missing_text = zip(*missing, strict=True)
-            separator = " " * 16
-            joined = separator.join(missing_text)
-            try:
-                with _MATHTEXT_DRAW_LOCK:
-                    parsed = parser.parse(
-                        joined,
-                        dpi,
-                        font,
-                        antialiased=antialiased,
-                    )
-                mask = np.asarray(parsed.image, dtype=np.uint8)
-                column_ink = np.any(mask != 0, axis=0)
-                zero = ~column_ink
-                transitions = np.diff(
-                    np.concatenate(
-                        (
-                            np.asarray((False,), dtype=bool),
-                            zero,
-                            np.asarray((False,), dtype=bool),
-                        )
-                    ).astype(np.int8)
-                )
-                starts = np.flatnonzero(transitions == 1)
-                stops = np.flatnonzero(transitions == -1)
-                internal = [
-                    (int(start), int(stop))
-                    for start, stop in zip(starts, stops, strict=True)
-                    if start > 0 and stop < mask.shape[1]
-                ]
-                separator_count = len(missing_text) - 1
-                if len(internal) < separator_count:
-                    raise ValueError("MathText run has no separable label gaps")
-                separators = sorted(
-                    sorted(
-                        internal,
-                        key=lambda pair: pair[1] - pair[0],
-                        reverse=True,
-                    )[:separator_count]
-                )
-                boundaries = [0]
-                boundaries.extend((start + stop) // 2 for start, stop in separators)
-                boundaries.append(mask.shape[1])
-                if len(boundaries) != len(missing_text) + 1:
-                    raise ValueError("MathText label count does not match its run")
-                for key, left, right in zip(
-                    missing_keys,
-                    boundaries[:-1],
-                    boundaries[1:],
-                    strict=True,
-                ):
-                    occupied = np.flatnonzero(column_ink[left:right])
-                    if not occupied.size:
-                        raise ValueError("MathText label has no visible pixels")
-                    crop_left = left + int(occupied[0])
-                    crop_right = left + int(occupied[-1]) + 1
-                    image = np.array(
-                        mask[:, crop_left:crop_right],
-                        dtype=np.uint8,
-                        order="C",
-                        copy=True,
-                    )
-                    image.setflags(write=False)
-                    cached[key] = image
-            except Exception:
-                # A draw refusal must retain the exact Text path rather than
-                # publish a frame missing only some cell labels.
-                for key in missing_keys:
-                    cached.pop(key, None)
-                return False
-            while len(cached) > 512:
-                cached.pop(next(iter(cached)))
-
-        height, width = canvas_rgba.shape[:2]
-        for artist, key in zip(annotations, keys, strict=True):
-            mask = cached.get(key)
-            if not isinstance(mask, np.ndarray):
-                return False
-            anchor = artist.get_transform().transform(artist.get_position())
-            x0 = int(round(float(anchor[0])))
-            y0 = int(round(float(height) - float(anchor[1]))) + 1
-            box = artist.axes.bbox
-            clip_left = max(0, int(math.floor(float(box.x0))))
-            clip_top = max(0, int(math.floor(float(height) - float(box.y1))))
-            clip_right = min(width, int(math.ceil(float(box.x1))))
-            clip_bottom = min(height, int(math.ceil(float(height) - float(box.y0))))
-            left = max(x0, clip_left)
-            top = max(y0, clip_top)
-            right = min(x0 + mask.shape[1], clip_right)
-            bottom = min(y0 + mask.shape[0], clip_bottom)
-            if right <= left or bottom <= top:
-                continue
-            coverage = mask[
-                top - y0 : bottom - y0,
-                left - x0 : right - x0,
-            ].astype(np.float64)
-            rgba = np.asarray(to_rgba(artist.get_color()), dtype=np.float64)
-            alpha = artist.get_alpha()
-            if alpha is not None:
-                rgba[3] *= float(alpha)
-            coverage *= rgba[3] / 255.0
-            target = canvas_rgba[top:bottom, left:right]
-            inverse = 1.0 - coverage
-            for channel in range(3):
-                target[..., channel] = np.clip(
-                    np.rint(
-                        rgba[channel] * 255.0 * coverage
-                        + target[..., channel].astype(np.float64) * inverse
-                    ),
-                    0,
-                    255,
-                ).astype(np.uint8)
-            target[..., 3] = np.clip(
-                np.rint(
-                    255.0 * coverage
-                    + target[..., 3].astype(np.float64) * inverse
-                ),
-                0,
-                255,
-            ).astype(np.uint8)
-        return True
-
     def _chrome_meets_data(self, artist: Any, axes: Any) -> bool:
         """Whether this chrome artist shares pixels with its data region.
 
@@ -3975,16 +3783,6 @@ class MatplotlibRenderer:
             if split is None and not native_image and not curve_fallback
             else None
         )
-        from matplotlib.text import Text
-
-        facet_annotation_ids = {
-            id(artist)
-            for artist in self._fit_artists
-            if isinstance(artist, Text)
-            and artist.get_visible()
-            and isinstance(self.spec, FacetGridPlot)
-            and self._facet_focus_index is None
-        }
         facet_ellipse_ids = {
             id(artist)
             for _axis, family, _model, slots, _artists in self._facet_fit_topologies.values()
@@ -4054,7 +3852,6 @@ class MatplotlibRenderer:
             for _key, artist in ordered:
                 if (
                     id(artist) not in native_image_ids
-                    and id(artist) not in facet_annotation_ids
                     and id(artist) not in forward_ids
                     and id(artist) not in color_overlay_ids
                     and (not ellipses_drawn or id(artist) not in facet_ellipse_ids)
@@ -4064,10 +3861,7 @@ class MatplotlibRenderer:
             used_native = True
         if native_curve_command and native_lines is None:
             for _key, artist in ordered:
-                if (
-                    id(artist) not in facet_annotation_ids
-                    and artist.get_visible()
-                ):
+                if artist.get_visible():
                     self._draw_dynamic_artist(artist, renderer, canvas)
             used_native = True
         if native_lines is not None:
@@ -4101,20 +3895,10 @@ class MatplotlibRenderer:
                         if (
                             id(artist) not in native_ids
                             and id(artist) not in boundary_ids
-                            and id(artist) not in facet_annotation_ids
                             and artist.get_visible()
                         ):
                             self._draw_dynamic_artist(artist, renderer, canvas)
                     used_native = True
-        if used_native and facet_annotation_ids:
-            annotations_drawn = self._raster_facet_fit_annotations(canvas)
-            if not annotations_drawn:
-                for _key, artist in ordered:
-                    if (
-                        id(artist) in facet_annotation_ids
-                        and artist.get_visible()
-                    ):
-                        self._draw_dynamic_artist(artist, renderer, canvas)
         if used_native and color_overlay:
             self._gesture_region = capture(self._figure.bbox)
             self._gesture_overlay = color_overlay
@@ -9668,29 +9452,40 @@ class MatplotlibRenderer:
         return "\n".join(lines)
 
     @staticmethod
-    def _fit_parameter_line(parameter: Any) -> str:
+    def _fit_parameter_parts(parameter: Any) -> tuple[str, str]:
+        """The catalogue's symbol, and the live value that follows it.
+
+        Two pieces on purpose.  The symbol is the catalogue's own mathtext
+        and does not change while the parameter is chosen; the value is
+        plain text that changes every shot.  A cell label draws them as two
+        artists, so a shot re-parses no MathText -- one Text carrying the
+        whole live line parsed it on every shot, thirty-five pyparsing runs
+        a frame in a grid of histogram cells, half of the whole update --
+        and the full annotation joins them into one line.
+        """
+
         uncertainty = (
             "n/a"
             if parameter.standard_error is None
             else _compact_engineering(parameter.standard_error)
         )
-        # The label is the catalogue's own mathtext; validate that stable
-        # fragment once, not the whole value-bearing line on every fit
-        # revision.  Numeric values and units cannot alter the math grammar,
-        # while validating the complete line made the cache key include the
-        # live fit result and laid out MathText once here and again at draw.
-        label = _drawable_text(parameter.label)
         unit = f" {_literal_text(parameter.unit)}" if parameter.unit else ""
         return (
-            f"{label} = {_fit_parameter_value_text(parameter)} "
-            f"± {uncertainty}{unit}"
+            _drawable_text(parameter.label),
+            f" = {_fit_parameter_value_text(parameter)} ± {uncertainty}{unit}",
         )
 
-    def _fit_headline_annotation_text(
-        self,
+    @classmethod
+    def _fit_parameter_line(cls, parameter: Any) -> str:
+        return "".join(cls._fit_parameter_parts(parameter))
+
+    @staticmethod
+    def _fit_headline_parameter(
         overlay: FitOverlay,
         parameter_name: str | None = None,
-    ) -> str:
+    ) -> Any | None:
+        """The parameter a cell's one-line label shows, or None for no label."""
+
         parameter = overlay.headline_parameter
         if parameter_name is not None:
             parameter = next(
@@ -9701,7 +9496,26 @@ class MatplotlibRenderer:
                 ),
                 parameter,
             )
-        return "" if parameter is None else self._fit_parameter_line(parameter)
+        return parameter
+
+    def _transform_after(self, text: Any) -> Any:
+        """The anchor transform of a Text set immediately after ``text``."""
+
+        from matplotlib import cbook  # noqa: PLC0415
+        from matplotlib.transforms import offset_copy  # noqa: PLC0415
+
+        content = text.get_text()
+        renderer = _prepare_renderer(self._figure.canvas.get_renderer())
+        width, _height, _descent = renderer.get_text_width_height_descent(
+            content, text.get_fontproperties(), cbook.is_math_text(content)
+        )
+        return offset_copy(
+            text.get_transform(),
+            fig=self._figure,
+            x=float(width) * 72.0 / float(self._figure.dpi),
+            y=0.0,
+            units="points",
+        )
 
     def _restore_fit_source_lines(self) -> None:
         for line, was_visible in self._fit_hidden_source_lines:
@@ -9955,25 +9769,35 @@ class MatplotlibRenderer:
             self._fit_artists.append(line)
         if annotation is _FitAnnotationDetail.NONE:
             return
-        annotation = axis.text(
-            self.style.render.axes_text_inset_fraction,
-            1.0 - self.style.render.axes_text_inset_fraction,
-            "",
-            transform=axis.transAxes,
-            ha="left",
-            va="top",
-            clip_on=True,
-            zorder=self.style.artists.fit_annotation_zorder,
-            fontsize=(
-                self.style.fonts.facet_fit_annotation_pt
-                if annotation is _FitAnnotationDetail.HEADLINE
-                else self.style.fonts.fit_annotation_pt
-            ),
-            color=self.style.palette.fit_text,
-        )
-        annotation.set_visible(False)
-        self._fit_slots["annotation"] = annotation
-        self._fit_artists.append(annotation)
+        headline = annotation is _FitAnnotationDetail.HEADLINE
+
+        def label_text() -> Any:
+            artist = axis.text(
+                self.style.render.axes_text_inset_fraction,
+                1.0 - self.style.render.axes_text_inset_fraction,
+                "",
+                transform=axis.transAxes,
+                ha="left",
+                va="top",
+                clip_on=True,
+                zorder=self.style.artists.fit_annotation_zorder,
+                fontsize=(
+                    self.style.fonts.facet_fit_annotation_pt
+                    if headline
+                    else self.style.fonts.fit_annotation_pt
+                ),
+                color=self.style.palette.fit_text,
+            )
+            artist.set_visible(False)
+            self._fit_artists.append(artist)
+            return artist
+
+        self._fit_slots["annotation"] = label_text()
+        if headline:
+            # The symbol and the value are two artists; see
+            # _fit_parameter_parts for why.  The value's anchor follows
+            # the symbol's width, set when the symbol is.
+            self._fit_slots["annotation_value"] = label_text()
 
     def _update_fit_annotation(
         self,
@@ -9989,10 +9813,20 @@ class MatplotlibRenderer:
         overlay: FitOverlay,
         parameter_name: str | None = None,
     ) -> None:
-        annotation = self._fit_slots["annotation"]
-        content = self._fit_headline_annotation_text(overlay, parameter_name)
-        annotation.set_text(content)
-        annotation.set_visible(bool(content))
+        symbol_artist = self._fit_slots["annotation"]
+        value_artist = self._fit_slots["annotation_value"]
+        parameter = self._fit_headline_parameter(overlay, parameter_name)
+        if parameter is None:
+            symbol_artist.set_visible(False)
+            value_artist.set_visible(False)
+            return
+        symbol, value = self._fit_parameter_parts(parameter)
+        if symbol_artist.get_text() != symbol:
+            symbol_artist.set_text(symbol)
+            value_artist.set_transform(self._transform_after(symbol_artist))
+        value_artist.set_text(value)
+        symbol_artist.set_visible(True)
+        value_artist.set_visible(True)
 
     def _set_fit_line(self, line: Any, polyline: FitPolyline) -> None:
         order = np.argsort(polyline.x)
