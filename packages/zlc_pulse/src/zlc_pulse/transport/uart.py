@@ -12,20 +12,6 @@ from . import uart_frame as framing
 from .base import UART_OBSERVER_INTERVAL, TransportAborted
 
 
-#: How long a frame that has BEGUN may pause between bytes before it is judged
-#: lost.  The board's bridge holds the mirror image of this number
-#: (``FRAME_TIMEOUT_CYCLES`` in ``zlc_uart_bridge.v``: 50 ms at 50 MHz) for a
-#: request that stops arriving; the host had no such judgement for a reply, so
-#: a reply missing its final CRC byte -- 12 of 13 bytes, every field valid --
-#: sat in the buffer as "not finished yet" until the whole transaction deadline
-#: ran out, 4.88 s spent waiting for a byte the line will never deliver.  A
-#: complete reply crosses the wire in tens of microseconds and a USB serial
-#: adapter delivers what it holds within a few milliseconds (the CH340C on the
-#: board, every millisecond poll; an FTDI at most its 16 ms latency timer), so
-#: fifty milliseconds of silence inside a frame is a lost byte, not a slow one.
-FRAME_STALL = 0.05
-
-
 class UartError(RuntimeError):
     pass
 
@@ -138,31 +124,36 @@ class PySerialLink:
             ) from error
 
     def _read_replies(self, count: int, *, deadline: float, stop: threading.Event | None) -> list[bytes]:
-        """Collect replies until there are ``count``, the deadline passes, or
-        a frame that began stops arriving (``FRAME_STALL``).
+        """Collect replies until there are ``count`` or the deadline passes.
 
-        The stall is judged only while unconsumed bytes sit in the buffer --
-        a frame has begun and not finished.  Between complete frames the
-        buffer is empty and the deadline alone governs: replies to a batch
-        arrive spaced by the board's handling of each request, and that
-        spacing is not a stall.
+        The deadline is the ONLY judgement of a reply that has not arrived,
+        and it is the attempt budget the transport above derives from the
+        bytes in flight (``_attempt_budget``): a complete reply crosses the
+        wire in tens of microseconds and the adapter hands it over within
+        milliseconds, so a reply still incomplete when that budget ends --
+        12 of 13 bytes, every field valid -- is a lost byte, not a slow one.
+        There is deliberately no second, earlier judgement of a frame that
+        began and stopped: the transport charges every attempt its budget
+        before the next one goes out, so ending an attempt sooner would save
+        nothing, and a stray byte that reached the buffer before a merely
+        late reply would look like a frame that stopped, cutting the window
+        for the real reply short.  What was in the buffer when the budget
+        ended is reported (``_describe_shortfall``); it is not judged twice.
         """
 
         serial_port = self._require_open()
         buffer = bytearray()
         replies: list[bytes] = []
-        last_byte_at = time.monotonic()
         read_bytes = 0
         while len(replies) < count:
             now = time.monotonic()
-            if now >= deadline or (buffer and now - last_byte_at >= FRAME_STALL):
+            if now >= deadline:
                 break
             if stop is not None and stop.is_set():
                 raise TransportAborted("UART read cancelled")
             available = serial_port.in_waiting
             if available:
                 chunk = serial_port.read(available)
-                last_byte_at = time.monotonic()
                 read_bytes += len(chunk)
                 buffer.extend(chunk)
                 while len(replies) < count:
@@ -319,6 +310,15 @@ class UartRegisterTransport:
 
         def attempt(attempt_deadline: float) -> str | None:
             nonlocal outstanding, rejected
+            # A verdict belongs to the attempt that earned it.  The refusal
+            # that lifts the no-resend ban is "the board answered THIS and
+            # rejected it"; an attempt that timed out in the write or got no
+            # reply answered nothing, and the previous attempt's refusal must
+            # not speak for it -- a strobe refused once and then unanswered
+            # would otherwise be sent a third time into exactly the ambiguity
+            # the ban exists for.  The read path clears its verdict the same
+            # way (``_read_with_retry``).
+            rejected = set()
             try:
                 replies = self._link.write_batch(
                     outstanding, deadline=attempt_deadline, stop=stop
@@ -348,6 +348,7 @@ class UartRegisterTransport:
             resend=resend,
             refused=lambda: all(frame[3] in rejected for frame in outstanding),
             what=f"write of {len(frames)} frame(s)",
+            stop=stop,
         )
 
     def _until_answered(
@@ -359,6 +360,7 @@ class UartRegisterTransport:
         resend: bool,
         refused: "Callable[[], bool]",
         what: str,
+        stop: threading.Event | None,
     ) -> None:
         """THE retry law -- reads and writes alike run their attempts here.
 
@@ -375,6 +377,22 @@ class UartRegisterTransport:
         reply arrived one byte short three times spent 4.88 s waiting for
         that byte instead of asking sixty more times.
 
+        EVERY attempt is charged its budget, however it ended.  A refusal
+        (the board answered within a round trip: "that arrived damaged") or
+        a reply that decoded as noise ends the attempt early, and asking
+        again in the same millisecond is not a retry, it is a storm: a
+        board refusing everything was asked 324,338 times inside one
+        half-second deadline, ``resends`` -- the operator's one view of a
+        quietly degrading line -- said 324,337, and a corrupting cable got
+        thousands of chances at a frame in the time a lost one gets sixty.
+        The budget is also the length of the burst the next attempt is kept
+        out of: corruption on a serial line comes in bursts (a USB hiccup, a
+        moment of interference), and sending the same bytes back into one
+        earns the same refusal.  So the next attempt waits for the budget to
+        elapse -- ``stop``-aware, because that wait is where a cancelled
+        transaction now sits -- and the deadline divides into the same
+        number of attempts whether the line is silent or refusing.
+
         ``attempt(deadline)`` returns None when the transaction is complete,
         otherwise how that try failed.  EVERY failure is kept and reported:
         the previous law raised the last attempt's words only, and what the
@@ -383,30 +401,39 @@ class UartRegisterTransport:
 
         ``resend=False`` is the command-strobe contract: a strobe whose
         acknowledgement went missing may have run, so it is never sent again
-        blindly.  ``refused()`` -- the board answered and rejected what is
-        outstanding as damaged (ST_CRC_FAIL), so nothing ran -- lifts that
-        ban, and when the deadline ends on refusals the error says CRC, not
-        timeout: that verdict about the host-to-board direction is what
-        separates a corrupting cable from a dead one.
+        blindly.  ``refused()`` -- the board answered THIS attempt and
+        rejected what is outstanding as damaged (ST_CRC_FAIL), so nothing
+        ran -- lifts that ban for the next attempt only, and when the
+        deadline ends on refusals the error says CRC, not timeout: that
+        verdict about the host-to-board direction is what separates a
+        corrupting cable from a dead one.
 
         Resends are counted when a frame is actually SENT again, not when it
         is found missing: a link that gives up is not a link that retried.
         """
 
         started = time.monotonic()
-        # (first attempt, last attempt, how it failed): runs, not a list of
-        # every string -- a board refusing every request answers within a
-        # round trip, and a deadline holds thousands of those.
+        # (first attempt, last attempt, how it failed): runs, so the record
+        # of a whole deadline of the same failure is one entry.
         failures: list[tuple[int, int, str]] = []
         attempts = 0
+        next_at = started
         while True:
             now = time.monotonic()
             if now >= absolute or (failures and not (resend or refused())):
                 break
+            if now < next_at:
+                pause = min(next_at, absolute) - now
+                if stop is None:
+                    time.sleep(pause)
+                elif stop.wait(pause):
+                    raise TransportAborted("UART request cancelled")
+                continue
             if failures:
                 self.resends += len(outstanding())
             attempts += 1
-            failure = attempt(min(absolute, now + self._attempt_budget(outstanding())))
+            next_at = now + self._attempt_budget(outstanding())
+            failure = attempt(min(absolute, next_at))
             if failure is None:
                 return
             if failures and failures[-1][2] == failure:
@@ -540,6 +567,7 @@ class UartRegisterTransport:
             resend=True,
             refused=lambda: refused,
             what=f"read of word {int.from_bytes(request[4:8], 'little')}",
+            stop=stop,
         )
         assert value is not None
         return value
