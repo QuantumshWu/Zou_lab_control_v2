@@ -60,6 +60,9 @@ class _OwnerSampler:
         self._thread = threading.Thread(target=self._run, name="owner-sampler", daemon=True)
 
     def __enter__(self) -> "_OwnerSampler":
+        # Threads alive now are the live panels' and the runtime's; one that
+        # appears later belongs to the action (a new host's raster worker).
+        self._known = frozenset(self._sys._current_frames())
         self._thread.start()
         return self
 
@@ -99,7 +102,7 @@ class _OwnerSampler:
                 if ident == self._main or self._ours(other) is None:
                     continue
                 code = other.f_code
-                busy.append((code.co_filename, code.co_name))
+                busy.append((code.co_filename, code.co_name, ident in self._known))
             charged = own or ("idle", "event pump")
             self.log.append((time.perf_counter(), charged, tuple(busy)))
             self.frames[charged] += 1
@@ -134,13 +137,24 @@ class _OwnerSampler:
         busy_samples = sum(
             1
             for _stamp, _charged, others in inside
-            if any(pathlib.Path(name).name not in self._WAITING for name, _func in others)
+            if any(pathlib.Path(name).name not in self._WAITING for name, _func, _old in others)
         )
         elsewhere: collections.Counter = collections.Counter(
             f"{pathlib.Path(name).name}:{func}"
             for _stamp, _charged, others in inside
-            for name, func in others
+            for name, func, _old in others
             if pathlib.Path(name).name not in self._WAITING
+        )
+        new_threads: collections.Counter = collections.Counter(
+            f"{pathlib.Path(name).name}:{func}"
+            for _stamp, _charged, others in inside
+            for name, func, old in others
+            if not old and pathlib.Path(name).name not in self._WAITING
+        )
+        new_samples = sum(
+            1
+            for _stamp, _charged, others in inside
+            if any(not old for _name, _func, old in others)
         )
         return [
             (f"{pathlib.Path(name).name}:{func}", count)
@@ -150,6 +164,11 @@ class _OwnerSampler:
         ] + [
             (f"other thread in {name}", count)
             for name, count in elsewhere.most_common(top_others)
+        ] + [
+            (f"samples with the action's own new threads alive: {new_samples}/{len(inside)}", 0)
+        ] + [
+            (f"new thread in {name}", count)
+            for name, count in new_threads.most_common(top_others)
         ]
 
     def summary(self, top: int = 12) -> dict:
@@ -172,6 +191,152 @@ class _OwnerSampler:
                 for stack, count in self.stacks.most_common(6)
             ],
         }
+
+
+class _HostTimeline:
+    """Every raster operation submitted while active, per host, with when it
+    was submitted, started on the worker, and ended.
+
+    Hosts that existed before the window opened are the live panels'; the
+    ones that appear inside it are the action's own -- the Edit surface, an
+    export host -- and their chain of operations, with the gaps between
+    them, is where a wall time goes that no thread is busy for.
+    """
+
+    def __init__(self) -> None:
+        self.records: list[dict] = []
+        self._known: frozenset = frozenset()
+        self._original = None
+
+    def __enter__(self) -> "_HostTimeline":
+        from zlc_plot import raster
+
+        self._raster = raster
+        self._original = raster.RasterPlotHost._submit
+        timeline = self
+        original = self._original
+
+        def submit(host, callback, **kwargs):
+            record = {
+                "host": id(host),
+                "name": str(kwargs.get("coalesce_key") or getattr(callback, "__qualname__", repr(callback)))[:60],
+                "mode": getattr(kwargs.get("mode"), "name", "?"),
+                "submitted": time.perf_counter(),
+                "started": None,
+                "ended": None,
+                "done": None,
+            }
+            timeline.records.append(record)
+
+            def timed():
+                record["started"] = time.perf_counter()
+                try:
+                    return callback()
+                finally:
+                    record["ended"] = time.perf_counter()
+
+            future = original(host, timed, **kwargs)
+            add = getattr(future, "add_done_callback", None)
+            if callable(add):
+                add(lambda _f: record.__setitem__("done", time.perf_counter()))
+            return future
+
+        raster.RasterPlotHost._submit = submit
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self._raster.RasterPlotHost._submit = self._original
+
+    def new_hosts(self, since: float) -> list[int]:
+        seen: list[int] = []
+        for record in self.records:
+            if record["submitted"] >= since and record["host"] not in seen:
+                seen.append(record["host"])
+        return seen
+
+    def rows(self, host: int, origin: float) -> list[str]:
+        """This host's operations in order, as ``+ms  mode  name  start run gap``."""
+
+        out = []
+        last_end = None
+        for record in self.records:
+            if record["host"] != host:
+                continue
+            sub = (record["submitted"] - origin) * 1000.0
+            start = None if record["started"] is None else (record["started"] - origin) * 1000.0
+            end = None if record["ended"] is None else (record["ended"] - origin) * 1000.0
+            gap = "" if last_end is None or start is None else f" gap {start - last_end:6.1f}"
+            if end is not None:
+                last_end = end
+            run = "" if start is None or end is None else f" run {end - start:6.1f}"
+            out.append(
+                f"      +{sub:7.1f} ms  {record['mode']:<12} {record['name']:<40}"
+                f"{' start +%.1f' % start if start is not None else ' (never ran)'}{run}{gap}"
+            )
+        return out
+
+
+class _EventWatch:
+    """The slowest Qt events delivered while installed, by type and receiver.
+
+    A stack sample of the owner thread inside ``processEvents`` says only
+    "Qt".  An application event filter sees every delivered event enter and
+    leave (``eventFilter`` runs before the receiver; the time until the
+    next event enters is that event's cost, to within the filter's own
+    work), so the turn can be charged to a paint of a particular widget, a
+    timer, a queued method call.
+    """
+
+    def __init__(self, app) -> None:
+        from PyQt5 import QtCore
+
+        self._QtCore = QtCore
+        self._app = app
+        self.slowest: list[tuple[float, str, str]] = []
+        self._filter = None
+
+    def __enter__(self) -> "_EventWatch":
+        QtCore = self._QtCore
+        watch = self
+
+        class Filter(QtCore.QObject):
+            def __init__(self):
+                super().__init__()
+                self._open = None
+
+            def eventFilter(self, receiver, event):  # noqa: N802 - Qt API
+                now = time.perf_counter()
+                if self._open is not None:
+                    began, kind, who = self._open
+                    watch._record(now - began, kind, who)
+                try:
+                    kind = str(event.type())
+                    who = f"{type(receiver).__name__}:{receiver.objectName() or ''}"
+                except Exception:
+                    kind, who = "?", "?"
+                self._open = (now, kind, who)
+                return False
+
+        self._filter = Filter()
+        self._app.installEventFilter(self._filter)
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        if self._filter is not None:
+            self._app.removeEventFilter(self._filter)
+            self._filter = None
+
+    def _record(self, cost: float, kind: str, who: str) -> None:
+        if cost < 0.004:
+            return
+        self.slowest.append((cost, kind, who))
+        if len(self.slowest) > 400:
+            self.slowest.sort(reverse=True)
+            del self.slowest[200:]
+
+    def summary(self, top: int = 8) -> list[str]:
+        self.slowest.sort(reverse=True)
+        return [f"{cost * 1000.0:6.1f} ms  {kind}  {who}" for cost, kind, who in self.slowest[:top]]
 
 
 class _LoopClock:
@@ -246,6 +411,130 @@ def _editor_view(bench: ConsoleBench, panel):
     return bench.view._panel_editors[str(panel.panel_id)]
 
 
+def _host_label(bench: ConsoleBench, host_id: int, index: int) -> str:
+    """Which panel a raster host belongs to, and whether it is the card or Edit."""
+
+    for panel in bench.presenter.panels.values():
+        label = bench._labels.get(panel.panel_id, panel.panel_id)
+        if id(panel.host) == host_id:
+            return f"{label} (live card)"
+        if id(panel.editor_host) == host_id:
+            return f"{label} (Edit surface)"
+        entry = panel.editor_configuration
+        if entry is not None and id(entry[0]) == host_id:
+            return f"{label} (Edit surface, staging)"
+    return f"host {index} (retired or export)"
+
+
+def _profile_session_build(bench: ConsoleBench, panel, label: str) -> dict:
+    """Build the Edit surface's PlotSession on this thread, profiled.
+
+    The raster worker builds it before its first operation runs -- the
+    whole of the wait between the trigger and the surface's first frame --
+    and a profile taken there is every thread's.  Built here, from the same
+    frozen input through the same spec projection, its self times are its
+    own.
+    """
+
+    import cProfile
+    import io
+    import pstats
+
+    import zlc_plot as plot
+    from zlc_plot.session import PlotSession
+    from zlc_workbench.panel_catalog import task_console_fitting_spec
+    from zlc_workbench.panel_state import project_panel_state
+
+    frozen = panel.frozen_data
+    plot_input = frozen.plot_input
+    snapshot = getattr(plot_input, "snapshot", plot_input)
+    state = panel.state
+    spec = task_console_fitting_spec(snapshot.block.schema, state.kind, state.cell_kind)
+    projection = project_panel_state(snapshot.block.schema, spec, state)
+    profile = cProfile.Profile()
+    began = time.perf_counter()
+    profile.enable()
+    session = PlotSession(
+        plot_input,
+        projection.spec,
+        size=state.size,
+        parameters=dict(projection.parameters),
+        device_pixel_ratio=bench.app.devicePixelRatio() if hasattr(bench.app, "devicePixelRatio") else 1.0,
+    )
+    profile.disable()
+    built = time.perf_counter() - began
+    text = io.StringIO()
+    pstats.Stats(profile, stream=text).sort_stats("tottime").print_stats(40)
+    cumulative = io.StringIO()
+    pstats.Stats(profile, stream=cumulative).sort_stats("cumulative").print_stats("zlc_", 30)
+    session.close()
+    return {
+        "what": f"{label}: session build (main thread, profiled)",
+        "wall_ms": round(built * 1000.0, 1),
+        "trigger_ms": round(built * 1000.0, 1),
+        "build_profile": text.getvalue(),
+        "build_profile_cumulative": cumulative.getvalue(),
+    }
+
+
+def _steady_state(bench: ConsoleBench, seconds: float) -> dict:
+    """The live cards' per-shot pipeline at depth, with no action in flight.
+
+    Every raster operation of every host over ``seconds`` of pumping,
+    reduced per host to the number of data frames, the median and worst
+    prepare and commit run times, and the median gap a committed frame
+    waits before the next begins -- the cadence each card actually
+    sustains, which is what an operator sees as a laggy panel.
+    """
+
+    import statistics
+
+    clock = _LoopClock(bench.app)
+    # The console beats on its own timer in the product; the bench stands
+    # that timer up for the window, or nothing is staged at all.
+    with guards.ProductBeat(bench.app, bench.presenter), _OwnerSampler() as sampler, _HostTimeline() as timeline:
+        began = time.perf_counter()
+        while time.perf_counter() - began < seconds:
+            clock.pump()
+        finished = time.perf_counter()
+    hosts: dict = {}
+    for index, host in enumerate(timeline.new_hosts(began)):
+        label = _host_label(bench, host, index)
+        prepares = []
+        commits = []
+        starts = []
+        for record in timeline.records:
+            if record["host"] != host or record["started"] is None or record["ended"] is None:
+                continue
+            run = (record["ended"] - record["started"]) * 1000.0
+            if "stage_prepare" in record["name"]:
+                prepares.append(run)
+                starts.append(record["started"])
+            elif "stage_commit" in record["name"]:
+                commits.append(run)
+        if not commits:
+            continue
+        cadence = (
+            [(b - a) * 1000.0 for a, b in zip(starts, starts[1:])] if len(starts) > 1 else []
+        )
+        hosts[label] = {
+            "frames": len(commits),
+            "prepare_ms_median": round(statistics.median(prepares), 1) if prepares else None,
+            "commit_ms_median": round(statistics.median(commits), 1),
+            "commit_ms_max": round(max(commits), 1),
+            "frame_interval_ms_median": round(statistics.median(cadence), 1) if cadence else None,
+        }
+    return {
+        "what": f"steady state ({seconds:.0f} s, no action)",
+        "trigger_ms": 0.0,
+        "wall_ms": round((finished - began) * 1000.0, 1),
+        **clock.summary(),
+        "owner": sampler.summary(),
+        "longest_turn_frames": sampler.during(clock.longest),
+        "hosts": hosts,
+    }
+
+
 def _timed_action(bench: ConsoleBench, what: str, trigger, predicate, *, timeout: float = 120.0) -> dict:
     """Time one action; with ZLC_EDIT_PROFILE set, profile the owner thread too."""
 
@@ -258,7 +547,7 @@ def _timed_action(bench: ConsoleBench, what: str, trigger, predicate, *, timeout
         profile = cProfile.Profile()
         if mode != "trigger":
             profile.enable()
-    with _OwnerSampler() as sampler:
+    with _OwnerSampler() as sampler, _HostTimeline() as timeline, _EventWatch(bench.app) as events:
         began = time.perf_counter()
         # "trigger" profiles the synchronous call alone: it runs on the
         # owner with the workers mostly waiting, so its self times are the
@@ -283,6 +572,11 @@ def _timed_action(bench: ConsoleBench, what: str, trigger, predicate, *, timeout
         "longest_turn_frames": sampler.during(clock.longest),
         "trigger_frames": sampler.during((began, triggered)),
         "action_frames": sampler.during((began, finished), top_others=12),
+        "host_timelines": {
+            _host_label(bench, host, index): timeline.rows(host, began)
+            for index, host in enumerate(timeline.new_hosts(began))
+        },
+        "slowest_events": events.summary(),
     }
     if mode == "trigger":
         import io
@@ -431,6 +725,7 @@ def run(
         payload["density"] = {bench.label(p): bench.density(p) for p in (camera, histogram, grid, curve)}
 
         actions = payload["actions"]
+        actions.append(_steady_state(bench, 6.0))
         presenter = bench.presenter
         for label, panel in (("grid", grid), ("histogram", histogram)):
             actions.append(_timed_action(
@@ -440,6 +735,8 @@ def run(
             ))
             editor = _editor_view(bench, panel)
             bench._pump(1.0)
+            if os.environ.get("ZLC_EDIT_PROFILE") == "build":
+                actions.append(_profile_session_build(bench, panel, label))
             if screenshots:
                 shot = save_dir / f"{label}-editor.png"
                 editor.grab().save(str(shot))
@@ -522,6 +819,24 @@ def _print(payload: dict) -> None:
     if payload.get("problems"):
         print("problems:", payload["problems"])
     for row in payload["actions"]:
+        if row.get("hosts"):
+            print("")
+            print(f"==== {row['what']}: per-host pipeline")
+            print("   %-38s %7s %9s %9s %9s %11s" % ("host", "frames", "prep med", "commit md", "commit mx", "interval md"))
+            for label, stats in row["hosts"].items():
+                print("   %-38s %7d %9s %9s %9s %11s" % (
+                    label[:38], stats["frames"], stats["prepare_ms_median"],
+                    stats["commit_ms_median"], stats["commit_ms_max"],
+                    stats["frame_interval_ms_median"],
+                ))
+        if row.get("trigger_profile"):
+            print(f"   ---- {row['what']}: trigger profile ({row.get('trigger_ms')} ms, tottime)")
+            print("\n".join(row["trigger_profile"].splitlines()[:60]))
+        if row.get("build_profile"):
+            print(f"   ---- {row['what']} ({row.get('wall_ms')} ms, tottime)")
+            print("\n".join(row["build_profile"].splitlines()[:55]))
+            print("   ---- cumulative, this repository")
+            print("\n".join(row["build_profile_cumulative"].splitlines()[:45]))
         owner = row.get("owner")
         if owner:
             print("")
@@ -539,9 +854,14 @@ def _print(payload: dict) -> None:
                 print(f"   synchronous trigger ({row.get('trigger_ms')} ms) ran:", row["trigger_frames"])
             if row.get("action_frames"):
                 print(f"   whole action ({row.get('wall_ms')} ms), other threads worked in:", row["action_frames"][-13:])
-            if row.get("trigger_profile"):
-                print(f"   ---- trigger profile ({row.get('trigger_ms')} ms, tottime)")
-                print("\n".join(row["trigger_profile"].splitlines()[:60]))
+            if row.get("slowest_events"):
+                print("   slowest Qt events delivered during the action:")
+                for line in row["slowest_events"]:
+                    print("     ", line)
+            for index, rows in (row.get("host_timelines") or {}).items():
+                print(f"   new host {index}: {len(rows)} operations (ms after the trigger)")
+                for line in rows[:40]:
+                    print(line)
     for row in payload["actions"]:
         if "owner_profile" in row:
             print("")
