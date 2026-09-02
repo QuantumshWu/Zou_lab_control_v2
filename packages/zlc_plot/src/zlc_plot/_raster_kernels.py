@@ -84,20 +84,33 @@ def configure_worker_threads() -> int:
     return selected
 
 
+#: The most column bands one stroke lane is cut into.  The pool is not one
+#: panel's: a four-panel console launches from four workers at once, each
+#: masked to the whole pool by default, and cutting a lone lane into all
+#: sixteen bands moved the four-panel critical path from 83 to 105 ms --
+#: every panel's work inflated under the oversubscription.  Four bands
+#: left the critical path where it was (84 ms) and still took the curve
+#: panel's compose from 15.1 to 11.9 ms; in isolation a forty-series
+#: curve's error bars go 6.0 -> 1.9 ms at four bands against 0.9 at
+#: sixteen, a floor not worth the console's ceiling.
+_STROKE_BAND_LIMIT = 4
+
+
 def stroke_bands(lane_count: int) -> int:
     """How many column bands each stroke lane is cut into for this pool.
 
     Lanes already run in parallel; a lane with fewer peers than the pool has
-    threads is split so the pool still has work.  The count is decided
-    HERE, in Python, and handed to the kernel: asking numba for its thread
-    count inside a kernel makes that kernel uncacheable (a "dynamic
-    global"), and an uncacheable stroke kernel is recompiled on every
-    process start -- seconds before the first curve.
+    threads is split so the pool still has work, up to
+    ``_STROKE_BAND_LIMIT`` per lane.  The count is decided HERE, in Python,
+    and handed to the kernel: asking numba for its thread count inside a
+    kernel makes that kernel uncacheable (a "dynamic global"), and an
+    uncacheable stroke kernel is recompiled on every process start --
+    seconds before the first curve.
     """
 
     threads = int(get_num_threads()) if HAVE_NUMBA else 1
     if 0 < lane_count < threads:
-        return threads // lane_count
+        return min(_STROKE_BAND_LIMIT, threads // lane_count)
     return 1
 
 

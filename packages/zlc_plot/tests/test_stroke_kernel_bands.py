@@ -270,13 +270,13 @@ def test_disjoint_lanes_paint_their_own_boxes_only() -> None:
         np.testing.assert_array_equal(out, expected, err_msg=f"bands={bands}")
 
 
-def test_stroke_bands_fill_the_pool_without_a_kernel_thread_query() -> None:
-    """One lane gets the pool's threads as bands; a full pool of lanes gets one."""
+def test_stroke_bands_share_the_pool_without_a_kernel_thread_query() -> None:
+    """A lone lane gets the pool's threads as bands, capped; a full pool of lanes gets one."""
 
     from numba import get_num_threads
 
     threads = int(get_num_threads())
-    assert kernels.stroke_bands(1) == max(1, threads)
+    assert kernels.stroke_bands(1) == max(1, min(kernels._STROKE_BAND_LIMIT, threads))
     assert kernels.stroke_bands(threads) == 1
     assert kernels.stroke_bands(threads + 5) == 1
     assert kernels.stroke_bands(0) == 1
