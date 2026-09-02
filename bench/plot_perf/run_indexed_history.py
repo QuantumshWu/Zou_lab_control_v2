@@ -27,7 +27,7 @@ import numpy as np
 from .common import stats, write_result
 
 
-def _build_plane(sites: int):
+def _build_plane(sites: int, *, bimodal: bool = False):
     import zou_lab_control  # noqa: F401 - current checkout owns every package
     from zlc_data import (
         AxisId,
@@ -146,7 +146,19 @@ def _build_plane(sites: int):
     def counts_event(revision: int):
         from zlc_data import OwnedSnapshot
 
-        values = rng.uniform(0.0, 40.0, size=(1, sites, 1)).astype(np.float64)
+        if bimodal:
+            # What a readout histogram actually looks like: a dark and a
+            # bright population, so a bimodal fit converges as it would on
+            # the bench instead of thrashing on uniform noise.
+            bright = rng.random(size=(1, sites, 1)) < 0.5
+            values = np.where(
+                bright,
+                rng.normal(40.0, 6.0, size=(1, sites, 1)),
+                rng.normal(8.0, 3.0, size=(1, sites, 1)),
+            )
+            values = np.clip(values, 0.0, None).astype(np.float64)
+        else:
+            values = rng.uniform(0.0, 40.0, size=(1, sites, 1)).astype(np.float64)
         block = DataBlock(
             BlockId(f"counts-{revision}"),
             DatasetRevision(revision),
@@ -237,14 +249,38 @@ def run_plane_layer(*, sites: int, window: int, steady: int) -> dict:
     }
 
 
-def run_session_layer(*, sites: int, window: int, steady: int) -> dict:
+def run_session_layer(
+    *,
+    sites: int,
+    window: int,
+    steady: int,
+    kind: str = "rolling",
+    fit: str = "",
+    size: str = "2x2",
+) -> dict:
+    """One PlotSession fed the plane-materialized history, per shot.
+
+    ``rolling`` is the trace that first exposed the window cost; ``facet_histogram``
+    is the occupancy-counts grid an operator opens on a qCMOS run -- one
+    histogram cell per site over the whole window, with an optional live
+    bimodal fit that re-solves every cell on every shot, exactly as the
+    console's live fit does.
+    """
+
     import matplotlib
 
     matplotlib.use("Agg", force=True)
     import zou_lab_control  # noqa: F401
-    from zlc_plot import AxisRef, PlotLabels, PlotSession, RollingPlot
+    from zlc_plot import (
+        AxisRef,
+        FacetGridPlot,
+        HistogramPlot,
+        PlotLabels,
+        PlotSession,
+        RollingPlot,
+    )
 
-    plane, commit = _build_plane(sites)
+    plane, commit = _build_plane(sites, bimodal=kind == "facet_histogram")
     signal = "bench-occupancy/counts"
     plane.acquire_indexed_history(signal, window)
     revision = 1
@@ -255,19 +291,47 @@ def run_session_layer(*, sites: int, window: int, steady: int) -> dict:
     def materialized():
         return plane.current_dataset(signal)
 
-    session = PlotSession(
-        materialized(),
-        RollingPlot(
+    if kind == "rolling":
+        spec = RollingPlot(
             group=AxisRef.point("bench.site"),
             labels=PlotLabels("occupancy history", "shots", "counts"),
-        ),
-        parameters={"window": window},
-    )
+        )
+    elif kind == "facet_histogram":
+        spec = FacetGridPlot(
+            AxisRef.point("bench.site"),
+            HistogramPlot(),
+            labels=PlotLabels("occupancy counts", "counts", "shots"),
+        )
+    else:
+        raise ValueError("kind must be rolling or facet_histogram")
+    session = PlotSession(materialized(), spec, parameters={"window": window})
     update_ms: list[float] = []
     render_ms: list[float] = []
+    fit_ms: list[float] = []
+    fit_cells: list[int] = []
+    first_fit_ms = None
     try:
-        session.set_size("2x2")
+        session.set_size(size)
         session.rgba()
+        if fit:
+            # The console's live fit: solved once now, then again on every
+            # data revision.  The batch seam is timed in place so the fit's
+            # share of a shot is read off the same call the product makes.
+            batch = session._fit_facet_batch
+
+            def timed_batch(*args, **kwargs):
+                begin = time.perf_counter()
+                try:
+                    return batch(*args, **kwargs)
+                finally:
+                    fit_ms.append(time.perf_counter() - begin)
+
+            session._fit_facet_batch = timed_batch
+            begin = time.perf_counter()
+            result = session.fit(fit)
+            first_fit_ms = round((time.perf_counter() - begin) * 1000.0, 2)
+            fit_ms.clear()
+            fit_cells.append(len(tuple(getattr(result, "results", ()))))
         for _ in range(steady):
             revision += 1
             commit(revision)
@@ -278,13 +342,24 @@ def run_session_layer(*, sites: int, window: int, steady: int) -> dict:
             begin = time.perf_counter()
             session.rgba()
             render_ms.append(time.perf_counter() - begin)
+            if fit:
+                last = session.last_fit
+                fit_cells.append(len(tuple(getattr(last, "results", ()))))
     finally:
         session.close()
         plane.close()
-    return {
+    payload = {
+        "kind": kind,
         "update_ms": stats(update_ms),
         "render_ms": stats(render_ms),
     }
+    if fit:
+        payload["fit"] = fit
+        payload["first_fit_ms"] = first_fit_ms
+        payload["live_fit_batch_ms"] = stats(fit_ms) if fit_ms else None
+        payload["live_fit_batches"] = len(fit_ms)
+        payload["fit_cells"] = sorted(set(fit_cells))
+    return payload
 
 
 def main() -> int:
@@ -295,12 +370,27 @@ def main() -> int:
     parser.add_argument(
         "--layer", choices=("plane", "session", "both"), default="both"
     )
+    parser.add_argument(
+        "--kind", choices=("rolling", "facet_histogram"), default="rolling"
+    )
+    parser.add_argument(
+        "--fit",
+        default="",
+        help="live fit model armed on the session, e.g. bimodal_gaussian",
+    )
+    parser.add_argument("--size", default="2x2")
     arguments = parser.parse_args()
-    label = f"indexed_history_s{arguments.sites}_w{arguments.window}"
+    label = (
+        f"indexed_history_{arguments.kind}_s{arguments.sites}_w{arguments.window}"
+        + (f"_{arguments.fit}" if arguments.fit else "")
+    )
     payload: dict = {
         "sites": arguments.sites,
         "window": arguments.window,
         "steady": arguments.steady,
+        "kind": arguments.kind,
+        "fit": arguments.fit,
+        "size": arguments.size,
     }
     if arguments.layer in ("plane", "both"):
         payload["plane"] = run_plane_layer(
@@ -314,6 +404,9 @@ def main() -> int:
             sites=arguments.sites,
             window=arguments.window,
             steady=arguments.steady,
+            kind=arguments.kind,
+            fit=arguments.fit,
+            size=arguments.size,
         )
         print("session:", payload["session"])
     print("wrote", write_result(payload, label))
