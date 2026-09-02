@@ -96,6 +96,167 @@ def _lock_renderer_mathtext(renderer: Any) -> None:
         parser._zlc_locked_parse = True
 
 
+#: Distinct text rasters one renderer remembers before forgetting them all.
+#: A colour scale in TIGHT mode mints two new endpoint labels per frame, so
+#: the memo would otherwise grow with the run; five hundred entries is a few
+#: hundred frames of churn between rewarms of the labels that never change.
+_TEXT_RASTER_MEMO_LIMIT = 512
+
+
+def _prepare_renderer(renderer: Any) -> Any:
+    """The one place a drawing renderer is fitted for this package.
+
+    Both fittings are idempotent per renderer object, so every path that
+    obtains the canvas renderer for a draw calls this and none has to
+    know whether another path got there first.
+    """
+
+    _lock_renderer_mathtext(renderer)
+    _install_text_raster_memo(renderer)
+    return renderer
+
+
+def _install_text_raster_memo(renderer: Any) -> None:
+    """Remember what a string rasterizes to, per renderer, and blit it back.
+
+    Agg rasterizes every text on every draw: it lays the string out, renders
+    its glyphs, and -- for a rotated string -- resamples the whole bitmap
+    through a bilinear filter, which is where a colour scale's vertical
+    label spent a millisecond a frame saying the same three words.  The
+    pixels a string produces are a function of the string, its font, its
+    angle and the antialiasing flag alone; the position only decides which
+    integer pixel the raster lands on, through the same rounding Agg does.
+    So the raster is taken once per key, through Agg's own machinery, and
+    blitted back at every later position by the unrotated fast path.
+
+    Bit-exact by construction: an unrotated raster IS the glyph bitmap Agg
+    would blit; a rotated one is the coverage Agg's own rotation produced,
+    captured off a scratch buffer, and the unrotated blit composites a
+    coverage mask with the same per-pixel blend as the direct draw.  One
+    caveat decides the rotated case: Agg's rotated path quantizes the
+    colour's alpha against the glyph coverage and then against the edge
+    coverage, two 8-bit roundings, where the blit rounds once -- the two
+    agree exactly only for an OPAQUE colour, so a translucent rotated
+    string keeps the original route, as does any text the fast path cannot
+    reproduce verbatim: mathtext, a clipped string.
+    """
+
+    if getattr(renderer, "_zlc_text_rasters", None) is not None:
+        return
+    backend = getattr(renderer, "_renderer", None)
+    prepare_font = getattr(renderer, "_prepare_font", None)
+    original = getattr(renderer, "draw_text", None)
+    if (
+        backend is None
+        or not hasattr(backend, "draw_text_image")
+        or not callable(prepare_font)
+        or not callable(original)
+    ):
+        return
+    memo: dict[tuple[Any, ...], tuple[Any, ...] | None] = {}
+    renderer._zlc_text_rasters = memo
+
+    def memoized_draw_text(
+        gc: Any,
+        x: float,
+        y: float,
+        s: str,
+        prop: Any,
+        angle: float,
+        ismath: bool = False,
+        mtext: Any = None,
+    ) -> Any:
+        if (
+            ismath
+            or not s
+            or gc.get_clip_rectangle() is not None
+            or gc.get_clip_path()[0] is not None
+        ):
+            return original(gc, x, y, s, prop, angle, ismath=ismath, mtext=mtext)
+        angle = float(angle)
+        if angle != 0.0 and not _opaque_stroke(gc):
+            return original(gc, x, y, s, prop, angle, ismath=ismath, mtext=mtext)
+        antialiased = bool(gc.get_antialiased())
+        key = (s, prop, angle, antialiased)
+        try:
+            entry = memo[key]
+        except KeyError:
+            entry = _text_raster_entry(renderer, s, prop, angle, antialiased)
+            if len(memo) >= _TEXT_RASTER_MEMO_LIMIT:
+                memo.clear()
+            # The font properties are the artist's live object; the key
+            # keeps its own copy so a later edit of the artist cannot
+            # rewrite a stored key underneath the dictionary.
+            memo[(s, prop.copy(), angle, antialiased)] = entry
+        if entry is None:
+            return None
+        mask, offset_x, offset_y, shift_x, shift_y = entry
+        column = round(x + offset_x) + shift_x
+        row = round(y + offset_y) + 1 + shift_y
+        backend.draw_text_image(mask, column, row, 0.0, gc)
+        return None
+
+    renderer.draw_text = memoized_draw_text
+
+
+def _opaque_stroke(gc: Any) -> bool:
+    """Whether this graphics context paints with no translucency at all.
+
+    The context's RGB carries the effective alpha: a forced alpha is folded
+    into it by ``set_alpha``, and that folded colour is the one Agg blends.
+    """
+
+    rgba = tuple(gc.get_rgb())
+    return len(rgba) < 4 or float(rgba[3]) == 1.0
+
+
+def _text_raster_entry(
+    renderer: Any, s: str, prop: Any, angle: float, antialiased: bool
+) -> tuple[Any, ...] | None:
+    """One memo entry: the coverage mask and where it sits against the anchor.
+
+    ``offset_x``/``offset_y`` are Agg's own bitmap offset and angled
+    descent, which it adds to the requested position before rounding to the
+    anchor pixel; ``shift_x``/``shift_y`` place the mask against that
+    anchor.  For an unrotated string the mask is the glyph bitmap and the
+    shifts are zero.  For a rotated one the string is drawn once at a known
+    anchor on a scratch buffer, and the mask is the ink that draw left.
+    """
+
+    from matplotlib.backends.backend_agg import RendererAgg, get_hinting_flag
+
+    font = renderer._prepare_font(prop)
+    font.set_text(s, 0, flags=get_hinting_flag())
+    font.draw_glyphs_to_bitmap(antialiased=antialiased)
+    descent = font.get_descent() / 64.0
+    offset_x, offset_y = font.get_bitmap_offset()
+    offset_x = offset_x / 64.0 + descent * math.sin(math.radians(angle))
+    offset_y = offset_y / 64.0 + descent * math.cos(math.radians(angle))
+    glyphs = np.array(font.get_image(), dtype=np.uint8, copy=True)
+    if glyphs.size == 0:
+        return None
+    if angle == 0.0:
+        return (glyphs, offset_x, offset_y, 0, 0)
+    rows, columns = glyphs.shape
+    reach = int(math.ceil(math.hypot(rows, columns))) + 4
+    side = 2 * reach
+    scratch = RendererAgg(side, side, renderer.dpi)
+    scratch.clear()
+    probe = scratch.new_gc()
+    probe.set_foreground((1.0, 1.0, 1.0, 1.0))
+    probe.set_antialiased(antialiased)
+    scratch._renderer.draw_text_image(font, reach, reach + 1, angle, probe)
+    coverage = np.asarray(scratch.buffer_rgba())[..., 3]
+    inked_rows = np.flatnonzero(coverage.any(axis=1))
+    inked_columns = np.flatnonzero(coverage.any(axis=0))
+    if inked_rows.size == 0:
+        return None
+    top, bottom = int(inked_rows[0]), int(inked_rows[-1]) + 1
+    left, right = int(inked_columns[0]), int(inked_columns[-1]) + 1
+    mask = np.ascontiguousarray(coverage[top:bottom, left:right])
+    return (mask, offset_x, offset_y, left - reach, bottom - (reach + 1))
+
+
 @dataclass(frozen=True, slots=True)
 class _PreparedSeries:
     x: np.ndarray
@@ -3575,7 +3736,7 @@ class MatplotlibRenderer:
             self._background_signature = signature
             self._chrome_dirty_axes.clear()
         restore(self._background_region)
-        renderer = get_renderer()
+        renderer = _prepare_renderer(get_renderer())
         prepared_image_command = isinstance(
             self._artists.get("image:prepared"), dict
         )
@@ -3822,7 +3983,7 @@ class MatplotlibRenderer:
         ):
             return False
         restore(self._gesture_region)
-        renderer = get_renderer()
+        renderer = _prepare_renderer(get_renderer())
         for _key, artist in self._gesture_overlay:
             if artist.get_visible():
                 self._draw_dynamic_artist(artist, renderer, canvas)
@@ -3848,7 +4009,7 @@ class MatplotlibRenderer:
         native, _image_ids = self._raster_prepared_images(canvas)
         if not native:
             return False
-        renderer = get_renderer()
+        renderer = _prepare_renderer(get_renderer())
         for _key, artist in self._gesture_overlay:
             if artist.get_visible():
                 self._draw_dynamic_artist(artist, renderer, canvas)
@@ -4003,7 +4164,7 @@ class MatplotlibRenderer:
             raise RuntimeError("the native canvas has no callable draw method")
         get_renderer = getattr(canvas, "get_renderer", None)
         if callable(get_renderer):
-            _lock_renderer_mathtext(get_renderer())
+            _prepare_renderer(get_renderer())
         draw()
 
     @contextmanager
