@@ -3860,11 +3860,39 @@ def _prepare_bimodal(coords, observations, valid, seeds, lower, upper, context):
     return 1
 
 
+READ_NOISE_FLOOR = 1e-3
+
+
+@njit(cache=True, inline="always")
+def _read_noise_floor(rate, step):
+    """The width floor is on the TOTAL width ``sqrt(rate + sigma^2)``, half a
+    bin; below that only a numerical floor on ``1/sigma^2``."""
+
+    return max(math.sqrt(max(0.25 * step * step - rate, 0.0)), READ_NOISE_FLOOR)
+
+
+@njit(cache=True, inline="always")
+def _read_noise_seed(excess_variance, rate, floor):
+    """A width seed with curvature in it: the moment estimate, but never
+    under ``sqrt(rate)/3`` (a tenth of the variance), twice the floor, or
+    half a photon.  Mirrors ``fit._read_noise_seed``."""
+
+    return max(
+        math.sqrt(max(excess_variance, 0.0)),
+        math.sqrt(rate) / 3.0,
+        2.0 * floor,
+        0.5,
+    )
+
+
 @njit(cache=True, inline="always")
 def _poisson_moments(x, values, split, side, step):
-    """(amplitude, rate, sigma, mass) of one Poisson-Gaussian component from
-    the quartiles of the bins on one ``side`` of ``split`` (0: every bin);
-    ``x`` is sorted.  Mirrors ``fit._poisson_moments``."""
+    """(amplitude, rate, sigma, mass, sigma floor) of one Poisson-Gaussian
+    component from the quartiles of the bins on one ``side`` of ``split``
+    (0: every bin); ``x`` is sorted.  The same arithmetic as
+    ``fit._poisson_moments``: the rate is the mass-weighted mean of the bins
+    between the quartiles, the width the quartile range over 1.349, and no
+    seed sits on a bound."""
 
     total = 0.0
     maximum = 0.0
@@ -3877,10 +3905,9 @@ def _poisson_moments(x, values, split, side, step):
         total += value
         maximum = max(maximum, value)
     if total <= 0.0:
-        return 0.0, 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0, READ_NOISE_FLOOR
     cumulative = 0.0
     lower = x[0]
-    median = x[0]
     upper = x[0]
     quartile = 0
     for index in range(x.size):
@@ -3892,16 +3919,27 @@ def _poisson_moments(x, values, split, side, step):
         while quartile < 3 and cumulative >= 0.25 * (quartile + 1) * total:
             if quartile == 0:
                 lower = x[index]
-            elif quartile == 1:
-                median = x[index]
-            else:
+            elif quartile == 2:
                 upper = x[index]
             quartile += 1
-    rate = max(median, 0.0)
+    core_mass = 0.0
+    core_moment = 0.0
+    for index in range(x.size):
+        if side < 0 and x[index] > split:
+            continue
+        if side > 0 and x[index] <= split:
+            continue
+        if x[index] < lower or x[index] > upper:
+            continue
+        value = max(values[index], 0.0)
+        core_mass += value
+        core_moment += x[index] * value
+    rate = max(core_moment / core_mass, 0.25 * step)
     width = (upper - lower) / 1.349
-    sigma = math.sqrt(max(width * width - rate, 0.25 * step * step))
+    floor = _read_noise_floor(rate, step)
+    sigma = _read_noise_seed(width * width - rate, rate, floor)
     amplitude = maximum * math.sqrt(rate + sigma * sigma) / sigma
-    return amplitude, rate, sigma, total
+    return amplitude, rate, sigma, total, floor
 
 
 @njit(cache=True)
@@ -3914,15 +3952,16 @@ def _prepare_poisson_histogram(coords, observations, valid, seeds, lower, upper,
     values = raw_values[order]
     step = _unique_step(x)
     span = _array_span(x)
-    amplitude, rate, sigma, total = _poisson_moments(x, values, 0.0, 0, step)
+    amplitude, rate, sigma, total, floor = _poisson_moments(x, values, 0.0, 0, step)
     if total <= 0.0:
         amplitude = 0.0
-        rate = max(np.mean(x), 0.0)
-        sigma = max(span / 6.0, 0.5 * step)
+        rate = max(np.mean(x), 0.25 * step)
+        floor = _read_noise_floor(rate, step)
+        sigma = _read_noise_seed(span * span / 36.0, rate, floor)
     seeds[0, 0] = amplitude
     seeds[0, 1] = rate
     seeds[0, 2] = sigma
-    lower[2] = max(lower[2], 0.5 * step); upper[2] = min(upper[2], span)
+    lower[2] = max(lower[2], floor); upper[2] = min(upper[2], span)
     return 1
 
 
@@ -3954,10 +3993,12 @@ def _poisson_bimodal_score(x, counts, seed):
 
 @njit(cache=True, inline="always")
 def _try_poisson_split(x, counts, split_value, step, output):
-    left_amplitude, left_rate, left_sigma, left_mass = _poisson_moments(
+    """Six seed parameters and, in ``output[6:8]``, the two width floors."""
+
+    left_amplitude, left_rate, left_sigma, left_mass, left_floor = _poisson_moments(
         x, counts, split_value, -1, step
     )
-    right_amplitude, right_rate, right_sigma, right_mass = _poisson_moments(
+    right_amplitude, right_rate, right_sigma, right_mass, right_floor = _poisson_moments(
         x, counts, split_value, 1, step
     )
     if left_mass <= 0.0 or right_mass <= 0.0 or not right_rate > left_rate:
@@ -3968,6 +4009,8 @@ def _try_poisson_split(x, counts, split_value, step, output):
     output[3] = left_sigma
     output[4] = right_amplitude
     output[5] = right_sigma
+    output[6] = left_floor
+    output[7] = right_floor
     return _poisson_bimodal_score(x, counts, output)
 
 
@@ -3988,39 +4031,40 @@ def _prepare_poisson_bimodal(coords, observations, valid, seeds, lower, upper, c
         value = max(values[index], 0.0)
         total += value
         maximum = max(maximum, value)
-    lower[3] = max(lower[3], 0.5 * step); upper[3] = min(upper[3], span)
-    lower[5] = max(lower[5], 0.5 * step); upper[5] = min(upper[5], span)
+    upper[3] = min(upper[3], span)
+    upper[5] = min(upper[5], span)
     midpoint = 0.5 * (x[0] + x[count - 1])
-    if count < 3 or total <= 0.0:
-        seeds[0, 0] = max(midpoint - span / 4.0, 0.0)
-        seeds[0, 1] = span / 2.0
-        seeds[0, 2] = maximum
-        seeds[0, 3] = span / 10.0
-        seeds[0, 4] = maximum
-        seeds[0, 5] = span / 10.0
-        return 1
-    split_values = np.empty(10, dtype=np.float64)
-    split_count = _two_state_cuts(x, values, total, split_values)
-    trial = np.empty(6, dtype=np.float64)
-    best = np.empty(6, dtype=np.float64)
-    best_score = math.inf
+    trial = np.empty(8, dtype=np.float64)
+    best = np.empty(8, dtype=np.float64)
     found = False
-    for split in range(split_count):
-        score = _try_poisson_split(x, values, split_values[split], step, trial)
-        if score < best_score:
-            best_score = score
-            for parameter in range(6):
-                best[parameter] = trial[parameter]
-            found = True
+    if count >= 3 and total > 0.0:
+        split_values = np.empty(10, dtype=np.float64)
+        split_count = _two_state_cuts(x, values, total, split_values)
+        best_score = math.inf
+        for split in range(split_count):
+            score = _try_poisson_split(x, values, split_values[split], step, trial)
+            if score < best_score:
+                best_score = score
+                for parameter in range(8):
+                    best[parameter] = trial[parameter]
+                found = True
     if not found:
-        best[0] = max(midpoint - span / 4.0, 0.0)
+        left_rate = max(midpoint - span / 4.0, 0.25 * step)
+        right_rate = left_rate + span / 2.0
+        left_floor = _read_noise_floor(left_rate, step)
+        right_floor = _read_noise_floor(right_rate, step)
+        best[0] = left_rate
         best[1] = span / 2.0
         best[2] = maximum
-        best[3] = span / 10.0
+        best[3] = _read_noise_seed(span * span / 100.0, left_rate, left_floor)
         best[4] = maximum
-        best[5] = span / 10.0
+        best[5] = _read_noise_seed(span * span / 100.0, right_rate, right_floor)
+        best[6] = left_floor
+        best[7] = right_floor
     for parameter in range(6):
         seeds[0, parameter] = best[parameter]
+    lower[3] = max(lower[3], best[6])
+    lower[5] = max(lower[5], best[7])
     return 1
 
 

@@ -3544,106 +3544,163 @@ def _histogram_cuts(x: np.ndarray, counts: np.ndarray) -> tuple[float, ...]:
     return tuple(dict.fromkeys(splits))
 
 
+#: The read-noise width may go this small: a numerical floor for ``1/sigma^2``,
+#: not a resolution claim.  What the histogram resolves is the TOTAL width,
+#: ``sqrt(rate + sigma^2)``, which the seeder holds to half a bin.
+_READ_NOISE_FLOOR = 1e-3
+
+
 def _poisson_moments(
     x: np.ndarray, counts: np.ndarray, step: float
-) -> tuple[float, float, float]:
-    """(amplitude, rate, sigma) of one Poisson-Gaussian component, from the
-    quartiles of a histogram sorted by ``x``.
+) -> tuple[float, float, float, float]:
+    """(amplitude, rate, sigma, sigma floor) of one Poisson-Gaussian
+    component, from the quartiles of a histogram sorted by ``x``.
 
     The mean of a Poisson-Gaussian is its rate and its variance the rate plus
     the read-noise variance, so the histogram's location and width seed both
-    -- read as the mass-weighted median and the quartile range over 1.349
-    rather than as moments: a photon-count histogram carries hot-pixel and
-    cosmic-ray spikes far from its peak, and the moments of that put the
-    seed in a flat valley (rate on its zero bound under a ten-photon-wide
-    bump) from which neither solver finds the peak.  The width cannot go
-    under half a bin.  The amplitude is the tallest bin scaled by the peak
-    of the unit shape, ``sigma / sqrt(rate + sigma^2)``.
+    -- the rate as the mass-weighted mean of the bins between the quartiles,
+    the total width as the quartile range over 1.349, never as raw moments:
+    a photon-count histogram carries hot-pixel and cosmic-ray spikes far from
+    its peak, and the moments of that put the seed in a flat valley (rate on
+    its zero bound under a ten-photon-wide bump) from which neither solver
+    finds the peak.
+
+    The floor is on the total width: ``rate + sigma^2`` may not go under a
+    quarter of a bin squared, which is nothing at sixty photons in a
+    one-photon bin and half a bin at a fraction of a photon.  The old rule
+    floored the read noise itself at half a bin, and at a thousand photons
+    in a sixteen-photon bin that forced sigma = 8 onto a 0.3-photon camera
+    and fitted worse than a Gaussian.  A seed NEVER sits on a bound: a
+    trust-region solver scales its step by the distance to the bound, so a
+    width seeded on its floor while the rate seed was still a bin off
+    stayed there for good (deviance 1.75 where 1.22 was one photon away).
+    And a width seed sits where the objective has CURVATURE in it: at
+    least ``sqrt(rate)/3``, a tenth of the variance.  Seeded at half a
+    photon under 210 photons the width was 0.1% of the variance, the
+    solver saw no gradient, reported convergence and left the width there
+    with a small error bar, while the deviance kept falling to sigma = 4.
+    The amplitude is the tallest bin scaled by the peak of the unit shape,
+    ``sigma / sqrt(rate + sigma^2)``.
     """
 
     total = float(counts.sum())
+    span = _span(x)
     if total <= 0.0:
-        return 0.0, max(float(np.mean(x)), 0.0), max(_span(x) / 6.0, 0.5 * step)
+        rate = max(float(np.mean(x)), 0.25 * step)
+        floor = _read_noise_floor(rate, step)
+        return 0.0, rate, _read_noise_seed(span / 36.0, rate, floor), floor
     cumulative = np.cumsum(counts)
-    lower, median, upper = (
+    lower, upper = (
         float(x[min(int(np.searchsorted(cumulative, fraction * total)), x.size - 1)])
-        for fraction in (0.25, 0.5, 0.75)
+        for fraction in (0.25, 0.75)
     )
-    rate = max(median, 0.0)
+    core = (x >= lower) & (x <= upper)
+    rate = max(float(np.sum(x[core] * counts[core]) / float(counts[core].sum())), 0.25 * step)
     width = (upper - lower) / 1.349
-    sigma = math.sqrt(max(width * width - rate, 0.25 * step * step))
+    floor = _read_noise_floor(rate, step)
+    sigma = _read_noise_seed(width * width - rate, rate, floor)
     amplitude = max(float(np.max(counts)), 0.0) * math.sqrt(rate + sigma * sigma) / sigma
-    return amplitude, rate, sigma
+    return amplitude, rate, sigma, floor
 
 
-def _init_poisson_histogram(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
+def _read_noise_floor(rate: float, step: float) -> float:
+    return max(math.sqrt(max(0.25 * step * step - rate, 0.0)), _READ_NOISE_FLOOR)
+
+
+def _read_noise_seed(excess_variance: float, rate: float, floor: float) -> float:
+    return max(
+        math.sqrt(max(excess_variance, 0.0)),
+        math.sqrt(rate) / 3.0,
+        2.0 * floor,
+        0.5,
+    )
+
+
+def _sorted_histogram(coords: ArrayTuple, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     x = np.asarray(coords[0], dtype=np.float64).reshape(-1)
     counts = np.asarray(y, dtype=np.float64).reshape(-1)
     order = np.argsort(x, kind="stable")
-    x, counts = x[order], np.clip(counts[order], 0.0, None)
-    return _poisson_moments(x, counts, _histogram_step(x))
+    return x[order], np.clip(counts[order], 0.0, None)
+
+
+def _init_poisson_histogram(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
+    x, counts = _sorted_histogram(coords, y)
+    return _poisson_moments(x, counts, _histogram_step(x))[:3]
 
 
 def _poisson_histogram_bounds(
     coords: ArrayTuple, y: np.ndarray
 ) -> Mapping[str, tuple[float | None, float | None]]:
-    x = np.asarray(coords[0], dtype=np.float64).reshape(-1)
-    return {"sigma": (0.5 * _histogram_step(x), _span(x))}
+    x, counts = _sorted_histogram(coords, y)
+    floor = _poisson_moments(x, counts, _histogram_step(x))[3]
+    return {"sigma": (floor, _span(x))}
 
 
-def _poisson_bimodal_candidates(
+def _poisson_bimodal_seed(
     coords: ArrayTuple,
     y: np.ndarray,
-) -> Sequence[Sequence[float]]:
-    """Seed a two-state Poisson-Gaussian fit from the same cuts as the
-    Gaussian one; each side's quartiles give its rate and read-noise width.
-    Like ``_bimodal_candidates`` the closest seed is the one solved from --
-    the compiled seeder returns that one alone."""
+) -> tuple[tuple[float, ...], float, float]:
+    """The two-state Poisson-Gaussian seed and its two width floors, from the
+    same cuts as the Gaussian seed: each side's quartiles give its rate and
+    read-noise width, and the closest cut (``_poisson_seed_distance``) is the
+    one solved from, as the compiled seeder does."""
 
-    x = np.asarray(coords[0], dtype=np.float64).reshape(-1)
-    counts = np.asarray(y, dtype=np.float64).reshape(-1)
-    order = np.argsort(x, kind="stable")
-    x, counts = x[order], np.clip(counts[order], 0.0, None)
+    x, counts = _sorted_histogram(coords, y)
     span = _span(x)
     step = _histogram_step(x)
     total = float(counts.sum())
 
-    def fallback() -> tuple[tuple[float, ...], ...]:
+    def fallback() -> tuple[tuple[float, ...], float, float]:
         midpoint = float((np.min(x) + np.max(x)) / 2.0) if x.size else 0.0
         height = max(float(np.max(counts)) if counts.size else 0.0, 0.0)
-        return ((
-            max(midpoint - span / 4.0, 0.0), span / 2.0,
-            height, span / 10.0, height, span / 10.0,
-        ),)
+        left_rate = max(midpoint - span / 4.0, 0.25 * step)
+        right_rate = left_rate + span / 2.0
+        left_floor = _read_noise_floor(left_rate, step)
+        right_floor = _read_noise_floor(right_rate, step)
+        return (
+            (
+                left_rate,
+                span / 2.0,
+                height,
+                _read_noise_seed(span * span / 100.0, left_rate, left_floor),
+                height,
+                _read_noise_seed(span * span / 100.0, right_rate, right_floor),
+            ),
+            left_floor,
+            right_floor,
+        )
 
     if x.size < 3 or total <= 0.0:
         return fallback()
-    seeds: list[tuple[float, ...]] = []
+    seeds: list[tuple[tuple[float, ...], float, float]] = []
     for split in _histogram_cuts(x, counts):
         left = x <= split
         right = ~left
         if float(counts[left].sum()) <= 0.0 or float(counts[right].sum()) <= 0.0:
             continue
-        left_amplitude, left_rate, left_sigma = _poisson_moments(
+        left_amplitude, left_rate, left_sigma, left_floor = _poisson_moments(
             x[left], counts[left], step
         )
-        right_amplitude, right_rate, right_sigma = _poisson_moments(
+        right_amplitude, right_rate, right_sigma, right_floor = _poisson_moments(
             x[right], counts[right], step
         )
         if not right_rate > left_rate:
             continue
         seeds.append((
-            left_rate,
-            right_rate - left_rate,
-            left_amplitude,
-            left_sigma,
-            right_amplitude,
-            right_sigma,
+            (
+                left_rate,
+                right_rate - left_rate,
+                left_amplitude,
+                left_sigma,
+                right_amplitude,
+                right_sigma,
+            ),
+            left_floor,
+            right_floor,
         ))
     if not seeds:
         return fallback()
-    seeds.sort(key=lambda seed: _poisson_seed_distance(x, counts, seed))
-    return tuple(seeds)
+    return min(seeds, key=lambda item: _poisson_seed_distance(x, counts, item[0]))
 
 
 def _poisson_seed_distance(x: np.ndarray, counts: np.ndarray, seed: Sequence[float]) -> float:
@@ -3668,15 +3725,16 @@ def _poisson_seed_distance(x: np.ndarray, counts: np.ndarray, seed: Sequence[flo
 
 
 def _init_poisson_bimodal(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
-    return _poisson_bimodal_candidates(coords, y)[0]
+    return _poisson_bimodal_seed(coords, y)[0]
 
 
 def _poisson_bimodal_bounds(
     coords: ArrayTuple, y: np.ndarray
 ) -> Mapping[str, tuple[float | None, float | None]]:
     x = np.asarray(coords[0], dtype=np.float64).reshape(-1)
-    width = (0.5 * _histogram_step(x), _span(x))
-    return {"left_sigma": width, "right_sigma": width}
+    _seed, left_floor, right_floor = _poisson_bimodal_seed(coords, y)
+    span = _span(x)
+    return {"left_sigma": (left_floor, span), "right_sigma": (right_floor, span)}
 
 
 def _init_doublet(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
@@ -4123,8 +4181,12 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
                     display_label=r"$\lambda$",
                     affine_point=True,
                 ),
+                # NONNEGATIVE, not POSITIVE: the histogram floor on positive
+                # widths is half a bin, which is right for a Gaussian's width
+                # and wrong for read noise under a Poisson count; the seeder
+                # floors the TOTAL width instead (see ``_poisson_moments``).
                 FitParameterSpec(
-                    "sigma", AXIS_0, POSITIVE, display_label=r"$\sigma$"
+                    "sigma", AXIS_0, NONNEGATIVE, display_label=r"$\sigma$"
                 ),
             ),
             "rate",
@@ -4163,13 +4225,13 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
                     "left_amplitude", VALUE, NONNEGATIVE, display_label=r"$A_L$"
                 ),
                 FitParameterSpec(
-                    "left_sigma", AXIS_0, POSITIVE, display_label=r"$\sigma_L$"
+                    "left_sigma", AXIS_0, NONNEGATIVE, display_label=r"$\sigma_L$"
                 ),
                 FitParameterSpec(
                     "right_amplitude", VALUE, NONNEGATIVE, display_label=r"$A_R$"
                 ),
                 FitParameterSpec(
-                    "right_sigma", AXIS_0, POSITIVE, display_label=r"$\sigma_R$"
+                    "right_sigma", AXIS_0, NONNEGATIVE, display_label=r"$\sigma_R$"
                 ),
             ),
             "rate_splitting",

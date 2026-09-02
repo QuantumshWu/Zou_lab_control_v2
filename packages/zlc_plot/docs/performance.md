@@ -767,9 +767,22 @@ window with the rate's own window (`rate - 10 sqrt(rate) - 10` to
 `rate + 12 sqrt(rate) + 20`, outside which a term is under e^-50 of the
 mode).  The SciPy path and the overlays call the same kernel; the frozen
 anchors hold it to independent arithmetic.  Seeds come from the histogram's
-weighted median and quartile range, not its moments: a hot-pixel spike far
-from the peak put the moment seed in a flat valley (rate on its zero bound
-under a ten-photon-wide bump).
+quartiles -- the rate as the mass-weighted mean between them, the width from
+their range -- not from its moments: a hot-pixel spike far from the peak put
+the moment seed in a flat valley (rate on its zero bound under a
+ten-photon-wide bump).  A width seed never sits on a bound and never under
+`sqrt(rate)/3`: seeded at half a photon under 210 photons the width was 0.1%
+of the variance, the solver saw no gradient and reported convergence there
+with a small error bar while the deviance kept falling to sigma = 4.  The
+half-bin floor is on the TOTAL width `sqrt(rate + sigma^2)`, not on the read
+noise: at a thousand photons in a sixteen-photon bin the old floor forced
+sigma = 8 onto a 0.3-photon camera and fitted worse than a Gaussian.
+Recovery on synthetic Poisson + Gaussian histograms (64 bins, 5000 samples):
+rate and read noise within errors from 0.1 photons with half the samples
+negative (0.0998 +- 0.006 / 0.301 +- 0.004 for 0.1 / 0.3) up to 60 photons
+(2.59 +- 0.26 for sigma 3); above ~200 photons the read noise is a few percent
+of the variance and its error bar says so, while the rate and the bimodal
+splitting are as precise as the Gaussian's centre and splitting.
 
 `python -m bench.plot_perf.run_fit_models --rounds 8`, `session.fit` wall
 on the sweep's own two-normal histogram (states at 8 +- 2 and 30 +- 4, so

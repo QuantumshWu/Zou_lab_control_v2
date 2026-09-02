@@ -1173,3 +1173,39 @@ def test_small_curves_never_compress() -> None:
         "gaussian_offset", (x,), y, options=FitOptions(max_exact_points=None)
     )
     assert tuple(default.parameter_values) == tuple(exact.parameter_values)
+
+
+def test_poisson_gaussian_read_noise_is_recovered_under_bright_counts() -> None:
+    """Two ways the Poisson-Gaussian fit came back worse than a Gaussian.
+
+    A width seeded at half a photon under 210 photons is 0.1% of the
+    variance: the solver saw no gradient, reported convergence and left
+    sigma = 0.47 +- 0.06 where the truth was 3 and the deviance kept
+    falling.  And a half-bin floor on the read noise itself forced sigma = 8
+    onto a 0.3-photon camera in sixteen-photon bins, wider than the data.
+    The seed now carries curvature (sqrt(rate)/3) and the floor is on the
+    total width.
+    """
+
+    engine = FitEngine()
+    rng = np.random.default_rng(7)
+    n = 5000
+    loaded = rng.random(n) < 0.5
+    bright = np.where(loaded, rng.poisson(210.0, n), rng.poisson(60.0, n))
+    counts, edges = np.histogram(bright + rng.normal(0.0, 3.0, n), bins=64)
+    centres = 0.5 * (edges[1:] + edges[:-1])
+    result = engine.fit("bimodal_poisson_gaussian", (centres,), counts.astype(float))
+    assert result.success
+    assert 148.0 < result.parameters["rate_splitting"] < 152.0
+    assert 2.0 < result.parameters["left_sigma"] < 4.5
+    assert 1.5 < result.parameters["right_sigma"] < 5.0
+
+    wide = np.where(loaded, rng.poisson(1000.0, n), rng.poisson(100.0, n))
+    counts, edges = np.histogram(wide + rng.normal(0.0, 0.3, n), bins=64)
+    centres = 0.5 * (edges[1:] + edges[:-1])
+    assert float(np.median(np.diff(centres))) > 12.0
+    poisson = engine.fit("bimodal_poisson_gaussian", (centres,), counts.astype(float))
+    gaussian = engine.fit("bimodal_gaussian", (centres,), counts.astype(float))
+    assert poisson.success and gaussian.success
+    assert poisson.reduced_chi_square <= gaussian.reduced_chi_square + 0.05
+    assert poisson.parameters["left_sigma"] < 7.0
