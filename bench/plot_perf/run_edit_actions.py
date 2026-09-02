@@ -694,6 +694,111 @@ def _steady_state(bench: ConsoleBench, seconds: float) -> dict:
     }
 
 
+def _front_of(bench: ConsoleBench, panel):
+    surface = bench.surface(panel)
+    return None if surface is None else surface.presented_front
+
+
+def _flows(bench: ConsoleBench, actions: list, *, grid, histogram, roi_signal: str, window: int) -> None:
+    """The other things an operator does to a deep-history board.
+
+    Each is one state change through the view's signal -- the path the
+    Setting form and the card's own controls take -- timed until the
+    panel's picture has changed to match, with the longest owner turn on
+    the way.  Every change is made and then undone, so the board ends as
+    it began and the two directions are both measured.
+    """
+
+    presenter = bench.presenter
+    view = bench.view
+
+    def state_change(panel, patch: dict, holds) -> None:
+        before = _front_of(bench, panel)
+        label = bench._labels.get(panel.panel_id, panel.panel_id)
+        short = {
+            key: {name: value for name, value in val.items() if name in ("window", "uncertainty")}
+            if isinstance(val, dict) else val
+            for key, val in patch.items()
+        }
+        cursor = bench.report_cursor()
+        try:
+            actions.append(_timed_action(
+                bench,
+                f"flow: {label} {short}",
+                lambda: view.panel_state_changed.emit(panel.panel_id, dict(patch)),
+                lambda: holds(panel.state) and _front_of(bench, panel) is not before,
+                timeout=30.0,
+            ))
+        except guards.HarnessError as error:
+            # One refused or stuck flow is a finding, not the end of the run.
+            actions.append({
+                "what": f"flow: {label} {short}",
+                "trigger_ms": 0.0,
+                "wall_ms": None,
+                "failed": str(error)[:200],
+                "reports": [f"{severity}: {text[:120]}" for severity, text in bench.reports_since(cursor)][-8:],
+                "state_after": {key: getattr(panel.state, key, None) if not isinstance(val, dict) else {n: dict(getattr(panel.state, key, {}) or {}).get(n) for n in val} for key, val in short.items()},
+            })
+
+    display = dict(histogram.state.display)
+    state_change(
+        histogram, {"display": {**display, "window": 3 * window}},
+        lambda state: state.display.get("window") == 3 * window,
+    )
+    state_change(
+        histogram, {"display": {**display, "window": window}},
+        lambda state: state.display.get("window") == window,
+    )
+    grid_display = dict(grid.state.display)
+    if "uncertainty" in grid_display:
+        state_change(
+            grid, {"display": {**grid_display, "uncertainty": not grid_display["uncertainty"]}},
+            lambda state, want=not grid_display["uncertainty"]: state.display.get("uncertainty") == want,
+        )
+        state_change(
+            grid, {"display": dict(grid_display)},
+            lambda state, want=grid_display["uncertainty"]: state.display.get("uncertainty") == want,
+        )
+    state_change(
+        grid, {"cell_kind": "histogram"},
+        lambda state: state.cell_kind == "histogram",
+    )
+    state_change(
+        grid, {"cell_kind": "curve"},
+        lambda state: state.cell_kind == "curve",
+    )
+    state_change(
+        histogram, {"size": "1x2"},
+        lambda state: state.size == "1x2",
+    )
+    state_change(
+        histogram, {"size": "2x2"},
+        lambda state: state.size == "2x2",
+    )
+    added: list = []
+
+    def add_panel():
+        binding = presenter.add_selected_panel("histogram")
+        added.append(binding)
+        view.panel_state_changed.emit(
+            binding.panel_id, {"signal": roi_signal, "size": "2x2"}
+        )
+        return binding is not None
+
+    actions.append(_timed_action(
+        bench, "flow: add histogram panel on the ROI",
+        add_panel,
+        lambda: bool(added) and added[0].host is not None and _front_of(bench, added[0]) is not None,
+    ))
+    if added:
+        panel_id = added[0].panel_id
+        actions.append(_timed_action(
+            bench, "flow: remove that panel",
+            lambda: presenter.remove_panel(panel_id) or True,
+            lambda: panel_id not in presenter.panels,
+        ))
+
+
 def _timed_action(bench: ConsoleBench, what: str, trigger, predicate, *, timeout: float = 120.0) -> dict:
     """Time one action; with ZLC_EDIT_PROFILE set, profile the owner thread too."""
 
@@ -964,12 +1069,21 @@ def run(
                 lambda p=panel: presenter.close_panel_editor(p.panel_id),
                 lambda p=panel: p.editor_host is None,
             ))
+        _flows(bench, actions, grid=grid, histogram=histogram, roi_signal=roi_signal, window=window)
         payload["problems"] = bench.problems()
     return payload
 
 
 def _print(payload: dict) -> None:
     print(f"history fill: {payload.get('history_fill_s')} s")
+    payload = dict(payload)
+    failed = [row for row in payload["actions"] if row.get("failed")]
+    payload["actions"] = [row for row in payload["actions"] if not row.get("failed")]
+    for row in failed:
+        print(f"==== {row['what']}: FAILED -- {row['failed']}")
+        print("   state after:", row.get("state_after"))
+        for line in row.get("reports", []):
+            print("   report:", line)
     print(f"{'action':28s} {'trigger':>8s} {'wall':>9s} {'longest turn':>13s} {'stalls>100ms':>13s}")
     for row in payload["actions"]:
         print(
