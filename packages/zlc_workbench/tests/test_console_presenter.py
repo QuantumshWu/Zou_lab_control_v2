@@ -1072,6 +1072,88 @@ def test_changing_the_cell_kind_rebuilds_the_plot_host(
     assert binding.editor_host.startup_failure is None
 
 
+def test_a_limit_does_not_follow_a_panel_across_cell_kinds(
+    presenter, session
+) -> None:
+    """Appearance crosses a cell-kind change; a LIMIT does not.
+
+    A curve cell that inherited an image cell's TIGHT colour re-fit
+    re-fitted its y axis on every shot: the value survived only because the
+    two vocabularies happened to share a name.  A limit describes the
+    quantity the old kind plotted, the spec that declares it says so, and
+    the record drops it with the projection and the fit.
+    """
+
+    from zlc_plot import DEFAULTS, PlotKind
+    from zlc_plot.specs import (
+        non_portable_display_names,
+        parameter_schema_for_kind,
+    )
+
+    session.load_pulse(PULSE_NAME)
+    node = CameraMeasurementNode(
+        camera=session.camera,
+        request=CameraMeasurementRequest("camera", 0.02, None, 2, CAMERA_WINDOWS),
+        signal_plane=session.signal_plane,
+        producer="cm",
+    )
+    capture = node.prepare()
+    session.fire(shots=2)
+    capture.collect()
+    session.nodes = [node]
+
+    binding = presenter.add_selected_panel("facet_grid")
+    assert presenter.update_panel_state(
+        binding.panel_id, {"signal": node.signal_key("frames")}
+    ) is True
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.accepted_display is not None
+        and bool(binding.state.display),
+    )
+    # The data decided image cells (a picture is the densest structure);
+    # the record keeps the empty "data decides" cell kind.
+    assert binding.accepted_display.spec.cell.kind is PlotKind.IMAGE
+    image_cells = parameter_schema_for_kind(
+        "facet_grid", style=DEFAULTS.style, facet_cell_kind="image"
+    )
+    curve_cells = parameter_schema_for_kind(
+        "facet_grid", style=DEFAULTS.style, facet_cell_kind="curve"
+    )
+    # Non-vacuous: both vocabularies declare relim_mode, and the value set
+    # here is not what curve cells start from.
+    foreign = next(
+        value
+        for value in image_cells["relim_mode"].choices
+        if value != curve_cells["relim_mode"].default
+    )
+    assert presenter.update_panel_state(
+        binding.panel_id,
+        {"display": {"relim_mode": foreign, "title": "kept"}},
+    ) is True
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.configuration is None
+        and binding.state.display.get("relim_mode") == foreign,
+    )
+
+    assert presenter.update_panel_state(
+        binding.panel_id, {"cell_kind": "curve"}
+    ) is True
+    # The record itself, before any host has described the new cells.
+    assert binding.state.display.get("title") == "kept"
+    assert "relim_mode" not in binding.state.display
+    assert not set(binding.state.display) & non_portable_display_names()
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.accepted_display is not None
+        and binding.state.display.get("relim_mode") is not None,
+    )
+    assert not binding.reported_condition, binding.reported_condition
+    assert binding.state.display["relim_mode"] == curve_cells["relim_mode"].default
+    assert binding.state.display["title"] == "kept"
+
+
 def test_a_blank_panel_can_be_wired_after_a_signal_publishes(
     presenter, session, monkeypatch
 ) -> None:
