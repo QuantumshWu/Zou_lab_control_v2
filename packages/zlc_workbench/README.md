@@ -147,9 +147,11 @@ intermediate shot.
   recipe, overlay, viewport and causal lineage. The `zlc.figure` NPZ is primary;
   its same-stem PNG is a preview. It does not include another panel or the whole
   monitor board. A dedicated composition-owned worker publishes the archive
-  first and then renders through the same Plot host/configure path used by
-  TaskConsole and FigureViewer. The Qt beat and Stop remain live; a second Save
-  for the same panel is rejected rather than queued.
+  first and then renders the preview through the Edit surface's own plot host
+  when it already shows that exact freeze; otherwise through the same Plot
+  host/configure path used by TaskConsole and FigureViewer. The Qt beat and
+  Stop remain live; a second Save for the same panel is rejected rather than
+  queued.
 
 Domain final JSON/NPZ files remain separate Task artifacts inside their run
 folders. A Figure records their actual lineage/path where relevant without
