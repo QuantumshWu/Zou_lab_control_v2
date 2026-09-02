@@ -61,6 +61,7 @@ __all__ = [
     "PlotSelectionSource",
     "PlotSelectionObservation",
     "panel_selection_document",
+    "panel_selection_from_plot",
     "panel_selection_from_document",
     "panel_selection_matches_subject",
     "panel_selection_binds_a_revision",
@@ -250,6 +251,16 @@ def _rolling_ranges(
 #: population every point belongs to, and with it the fractions and the
 #: fidelity both of a panel's surfaces report.
 _POINT_SELECTOR_KINDS = {"crosshair", "threshold"}
+
+
+def panel_selection_from_plot(selector: object, subject: object) -> SelectionState:
+    """Translate one accepted Plot selector through the shared panel contract."""
+
+    from types import SimpleNamespace
+
+    return PlotSelectionSource._translate(
+        SimpleNamespace(selector=selector, subject=subject),
+    )
 
 
 def panel_selection_document(selection: SelectionState | None) -> dict[str, Any]:
@@ -790,7 +801,13 @@ class PlotSelectionSource:
             self._last_error = None
             self._deliver(callback, value)
 
-        return self._install(self._host.subscribe_fit, _on_fit)
+        return self._install(
+            lambda listener: self._host.subscribe_fit(
+                listener,
+                replay_current=True,
+            ),
+            _on_fit,
+        )
 
     def _deliver(self, callback: Callable[..., object], *payload: object) -> None:
         """Hand one translated event downstream, keeping its failure visible.
@@ -898,7 +915,8 @@ class PlotSelectionSource:
             subscribed(answer)
         return _once
 
-    def _translate(self, event: object) -> SelectionState:
+    @staticmethod
+    def _translate(event: object) -> SelectionState:
         """One plot selection event, as the runtime's numbers."""
 
         selector = event.selector

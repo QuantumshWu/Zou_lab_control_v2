@@ -22,22 +22,30 @@ def populate(viewer) -> None:
     viewer.panel_state_changed.connect(remember("panel_state_changed"))
     viewer.save_image_requested.connect(remember("save_image_requested"))
     viewer.close_requested.connect(remember("close_requested"))
-    # What a host puts on the page: an archive's datasets and its info tabs.
+    # What the shared panel owner projects: Runtime signals and archive info.
     viewer.set_title("FigureViewer - run.npz")
     viewer.set_path("D:/data/2026_08_05/run.npz")
     viewer.set_panel_sizes(("2x2", "4x4"), "2x2")
     viewer.set_grid_cell_kinds(("curve", "image", "histogram"))
     viewer.set_panel_kinds((("image", "Image"), ("curve", "Curve")))
-    viewer.add_panel("saved-panel-1", "camera · frame")
-    viewer.set_panel_datasets(
-        "saved-panel-1",
-        (("panel-1", "camera · frame"), ("panel-2", "fit · centre")),
+    viewer.add_panel("panel-1", "camera · frame")
+    viewer.set_panel_signal_choices(
         "panel-1",
+        (
+            (
+                "this archive",
+                (
+                    ("camera · frame", "@figure/1/data"),
+                    ("fit · centre", "@figure/1/fit"),
+                ),
+            ),
+        ),
+        current="@figure/1/data",
     )
     viewer.set_panel_projection(
-        "saved-panel-1",
+        "panel-1",
         {
-            "signal": "panel-1", "kind": "image", "cell_kind": "",
+            "signal": "@figure/1/data", "kind": "image", "cell_kind": "",
             "size": "2x2", "interval_ms": 400, "title": "camera · frame",
             "semantic": {}, "display": {}, "fit": {}, "overlay_signal": "",
         },
@@ -70,7 +78,7 @@ def populate(viewer) -> None:
         },
     )
     viewer.set_status("fake archive: nothing was read from disk")
-    print("filled: 2 datasets, 1 info tab, listening on 5 signals", flush=True)
+    print("filled: 2 signals, 1 info tab, listening on 5 signals", flush=True)
 
 
 def create_window(

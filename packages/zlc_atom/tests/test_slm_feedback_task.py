@@ -1551,6 +1551,7 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
         ] == slm.command_revision
         signal = "@logic/slm_feedback/camera/frames"
         raw = plane.current_dataset(signal)
+        first_camera_generation = raw.ref.stream_generation
         assert raw.block.values.shape == (10, 1, 5, 7)
         np.testing.assert_allclose(
             raw.block.values[:, 0],
@@ -1599,6 +1600,9 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
         partial_samples, _saturated, partial_missing, _mean = task._measure(
             pulse, _Context(), 1
         )
+        second_camera = plane.current_dataset(signal)
+        assert second_camera.ref.stream_generation != first_camera_generation
+        assert second_camera.block.revision.value == task.shots
         assert partial_missing == (0,)
         assert np.all(np.isfinite(partial_samples[:2, 0]))
         assert np.all(np.isnan(partial_samples[2:, 0]))

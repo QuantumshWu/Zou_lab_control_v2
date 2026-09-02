@@ -1446,18 +1446,20 @@ def test_a_wedged_display_state_cannot_lock_the_editor_that_repairs_it(
         "a dead plot surface closed the editor whose form repairs it"
     )
     assert binding.editor_open is True
-    # The mount may refuse synchronously (no host) or die on its worker (a
-    # host whose startup_failure is the reason); either way the editor is
-    # open and surface-less in substance.
-    _settle_panel_hosts(
-        presenter,
-        lambda: binding.editor_host is None
-        or binding.editor_host.startup_failure is not None,
-    )
-    assert any(
-        "must be smaller" in text
-        for severity, text in presenter.view.status
-        if severity == "error"
+    # ``editor_host is None`` is also the ordinary state BEFORE the async
+    # mount worker starts, so it cannot prove a refusal has settled.  Wait for
+    # the owner-visible refusal itself; only then inspect whether the mount
+    # refused synchronously or left a host carrying startup_failure.
+    def mount_refused() -> bool:
+        return any(
+            "must be smaller" in text
+            for severity, text in presenter.view.status
+            if severity == "error"
+        )
+
+    _settle_panel_hosts(presenter, mount_refused)
+    assert binding.editor_host is None or (
+        binding.editor_host.startup_failure is not None
     )
 
     assert presenter.update_panel_state(
@@ -1595,6 +1597,31 @@ def test_selector_interaction_does_not_disconnect_panel_signals(
     presenter.view.selectors_toggled.emit(False)
     assert binding.bridge is bridge
     assert presenter.view.selectors is False
+
+
+def test_first_visible_panel_host_already_owns_its_derivation_bridge(
+    presenter,
+    session,
+) -> None:
+    """No owner turn may expose interactive pixels before their Bridge."""
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(
+        node.signal_key("frames"),
+        snapshot,
+        kind="image",
+    )
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        presenter.beat()
+        if binding.host is not None:
+            assert binding.accepted_display is not None
+            assert binding.bridge is not None
+            assert binding.selections is not None
+            break
+        time.sleep(0.005)
+    else:
+        raise AssertionError("panel host did not become visible")
 
 
 def test_panel_publisher_edit_owns_stable_output_selection(

@@ -63,7 +63,8 @@ def _viewport_signature(spec: PlotSpec) -> tuple[object, ...]:
     for name in ("x", "y"):
         result.append(getattr(semantic, name, None))
     if isinstance(spec, FacetGridPlot):
-        result.append(spec.facet)
+        if spec.facet is not None:
+            result.append(spec.facet)
     return tuple(result)
 
 

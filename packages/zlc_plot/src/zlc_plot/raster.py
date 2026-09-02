@@ -896,12 +896,19 @@ class RasterPlotHost:
     def subscribe_fit(
         self,
         callback: Callable[["FitEvent"], object],
+        *,
+        replay_current: bool = False,
     ) -> Future[RasterOperation[Callable[[], Future[RasterOperation[None]]]]]:
         """Install a fit callback on the raster worker."""
 
+        if type(replay_current) is not bool:
+            raise TypeError("replay_current must be bool")
         return self._subscribe_session_event(
             callback,
-            lambda session, listener: session.subscribe_fit(listener),
+            lambda session, listener: session.subscribe_fit(
+                listener,
+                replay_current=replay_current,
+            ),
         )
 
     def subscribe_selection(

@@ -205,8 +205,11 @@ the current grammar; formats have no alias or numeric version.
 
 A Figure NPZ is the primary artifact and contains typed Dataset data, exact Plot
 recipe, overlay, viewport and causal lineage. PNG is only its preview.
-FigureViewer reopens that recipe through the same Plot host path as TaskConsole;
-it never guesses plot semantics from array shape.
+FigureViewer publishes the archive's typed Datasets as sealed Runtime signals
+and reopens the default recipe through the same Panel/SelectionBridge/Plot host
+path as TaskConsole; it never guesses plot semantics from array shape. Additional
+fixed-kind panels select those archive signals or Viewer-created derived signals
+through ordinary Setting controls.
 
 The only supported tutorial is
 `packages/zlc_workbench/notebooks/usage.ipynb`. It uses the installed product, a

@@ -43,6 +43,27 @@ def _spec() -> FacetGridPlot:
     )
 
 
+def test_facet_grid_without_facet_is_one_full_cell_and_one_fit() -> None:
+    session = PlotSession(
+        _facet_snapshot(),
+        FacetGridPlot(None, CurvePlot(AxisRef.point("x"))),
+    )
+    try:
+        assert len(session._payload.cells) == 1
+        assert session._payload.cells[0].label == "Facet 1"
+        result = session.fit(
+            "gaussian_offset",
+            live=False,
+            fit_all_facets=True,
+        )
+        assert isinstance(result, FacetFitBatchResult)
+        assert result.facet is None
+        assert len(result.results) == 1
+        assert len(result.overlays) == 1
+    finally:
+        session.close()
+
+
 def test_facet_live_fit_paints_every_cell_and_focus_keeps_annotation() -> None:
     session = PlotSession(_facet_snapshot(), _spec())
     try:

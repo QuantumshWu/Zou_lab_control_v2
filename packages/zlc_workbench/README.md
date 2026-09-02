@@ -157,12 +157,14 @@ embedding them or adding fingerprint/hash.
 
 ## Qt and owner shutdown
 
-Figure Viewer reads and fully prepares a candidate off the Qt owner, atomically
-mounts only a successful candidate, and keeps the previous accepted figure on
-failure. It accepts only the current exact Figure recipe, reconstructs the typed
-plot input without shape inference, and projects the saved direct-parent lineage
-as one node-edge Flow of unique Logic and Device nodes. Its resize/save/host
-retirement are likewise asynchronous. TaskConsole
+Figure Viewer reads and fully prepares a candidate off the Qt owner, publishes
+each saved typed Dataset as a sealed signal in its private Runtime plane, and
+keeps the previous accepted archive on failure. The default card restores the
+exact Figure recipe without shape inference; every later blank fixed-kind card,
+signal choice, derived ROI/Fit signal, resize and edit uses the same
+ConsolePresenter/SelectionBridge/Plot host path as TaskConsole. It projects the
+saved direct-parent lineage as one node-edge Flow of unique Logic and Device
+nodes. Save and shutdown are asynchronous. TaskConsole
 keeps its lifecycle beat running while nodes, projections, plot hosts or Panel
 Save retire; the window stays visible until every owner is actually stopped.
 Session/device shutdown runs on the one flow-owned serial device worker used by

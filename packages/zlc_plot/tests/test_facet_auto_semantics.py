@@ -75,12 +75,15 @@ def test_a_two_dimension_heatmap_does_not_automatically_facet_repeat() -> None:
     """The heatmap consumes both scan dimensions; repeat remains reduced.
 
     Having many repeats must not turn acquisition history into a layout axis.
-    With no non-repeat dimension left there is no automatic FacetGrid spec.
+    With no non-repeat dimension left the FacetGrid is one heatmap cell.
     """
 
     for repeats in (1, 5):
         schema = _scan_schema({"a": 3, "b": 4}, repeats=repeats)
-        assert facet_default(schema) is None
+        spec = facet_default(schema)
+        assert isinstance(spec, FacetGridPlot)
+        assert spec.facet is None
+        assert isinstance(spec.cell, ImagePlot)
         image = image_default(schema)
         assert isinstance(image, ImagePlot)
         assert image.x == AxisRef.point_dimension("b")
@@ -103,7 +106,9 @@ def test_a_degenerate_data_axis_still_counts_as_a_scalar_point() -> None:
     spec = facet_default(
         _scan_schema({"a": 3, "b": 4}, repeats=5, data_axes=pairs)
     )
-    assert spec is None
+    assert isinstance(spec, FacetGridPlot)
+    assert spec.facet is None
+    assert isinstance(spec.cell, ImagePlot)
 
 
 def test_frame_cells_facet_the_scan_and_leave_repeats_to_the_reduction() -> None:
@@ -150,7 +155,10 @@ def test_frame_cells_facet_the_scan_and_leave_repeats_to_the_reduction() -> None
     frames_repeated_only = _scan_schema(
         {"a": 1}, repeats=4, data_axes=_frame_axes()
     )
-    assert facet_default(frames_repeated_only) is None
+    spec = facet_default(frames_repeated_only)
+    assert isinstance(spec, FacetGridPlot)
+    assert spec.facet is None
+    assert isinstance(spec.cell, ImagePlot)
 
 
 def test_a_camera_cycle_facets_its_frames_from_the_point_axis() -> None:

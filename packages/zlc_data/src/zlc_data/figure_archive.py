@@ -10,8 +10,11 @@ from collections.abc import Mapping
 import json
 import math
 from typing import Any, BinaryIO
+import zipfile
+import zlib
 
 import numpy as np
+from numpy.lib.format import write_array
 
 from .io import manifest_array_keys, snapshot_from_manifest, snapshot_manifest
 from .validity import CellValidity, DatasetComponentValidity
@@ -29,6 +32,13 @@ __all__ = [
 FIGURE_SCHEMA = "zlc.figure"
 _INFO_KEY = "info"
 _ROOT_KEYS = {"schema", "name", "members", "sections"}
+
+# Deflate is valuable for structured scientific arrays and disastrously slow
+# for large camera noise it barely shrinks.  Probe at most one MiB; a large
+# member must save at least 20% before it earns whole-member Deflate.  Small
+# metadata/arrays stay compressed because their bounded cost is negligible.
+_COMPRESSION_PROBE_BYTES = 1 << 20
+_COMPRESSION_MIN_SAVINGS = 0.20
 
 
 def _jsonable(value: Any, path: str = "metadata") -> Any:
@@ -96,6 +106,56 @@ def _member_descriptor(array: np.ndarray) -> dict[str, Any]:
     if array.dtype.hasobject or array.dtype.fields is not None:
         raise TypeError("figure arrays cannot use object or structured dtype")
     return {"dtype": array.dtype.str, "shape": list(array.shape)}
+
+
+def _compression_sample(array: np.ndarray) -> bytes:
+    """A bounded, spread sample of one member's physical bytes."""
+
+    wanted = min(int(array.nbytes), _COMPRESSION_PROBE_BYTES)
+    if wanted <= 0:
+        return b""
+    if array.flags.c_contiguous:
+        raw = memoryview(array).cast("B")
+    elif array.flags.f_contiguous:
+        raw = memoryview(array.ravel(order="K")).cast("B")
+    else:
+        count = min(
+            int(array.size),
+            max(1, wanted // max(1, int(array.dtype.itemsize))),
+        )
+        indices = np.linspace(0, max(0, array.size - 1), count, dtype=np.intp)
+        return np.take(array, indices).tobytes(order="C")
+    if len(raw) <= wanted:
+        return bytes(raw)
+    chunk = max(1, wanted // 3)
+    last = len(raw) - chunk
+    starts = (0, max(0, last // 2), max(0, last))
+    return b"".join(bytes(raw[start : start + chunk]) for start in starts)
+
+
+def _member_compression(array: np.ndarray) -> int:
+    if array.nbytes <= _COMPRESSION_PROBE_BYTES:
+        return zipfile.ZIP_DEFLATED
+    sample = _compression_sample(array)
+    if not sample:
+        return zipfile.ZIP_DEFLATED
+    compressed = zlib.compress(sample, level=1)
+    worthwhile = len(compressed) <= len(sample) * (1.0 - _COMPRESSION_MIN_SAVINGS)
+    return zipfile.ZIP_DEFLATED if worthwhile else zipfile.ZIP_STORED
+
+
+def _write_npz_members(
+    stream: BinaryIO,
+    members: Mapping[str, np.ndarray],
+) -> None:
+    """Write one standard NPZ with compression chosen per array member."""
+
+    with zipfile.ZipFile(stream, mode="w", allowZip64=True) as archive:
+        for key, array in members.items():
+            member = zipfile.ZipInfo(f"{key}.npy")
+            member.compress_type = _member_compression(array)
+            with archive.open(member, mode="w", force_zip64=True) as target:
+                write_array(target, array, allow_pickle=False)
 
 
 def write_figure_archive(
@@ -167,7 +227,7 @@ def write_figure_archive(
         sort_keys=True,
     )
 
-    np.savez_compressed(stream, **{_INFO_KEY: np.asarray(info), **stored})
+    _write_npz_members(stream, {_INFO_KEY: np.asarray(info), **stored})
 
 
 def _metadata_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

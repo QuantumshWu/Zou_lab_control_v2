@@ -592,6 +592,11 @@ def show_fit(event):
 unsubscribe = session.subscribe_fit(show_fit)
 ```
 
+`subscribe_fit(..., replay_current=True)` additionally delivers the currently
+accepted immutable `FitEvent` once at subscription time. This is for a late
+consumer such as FigureViewer's Runtime bridge; it does not run the solver or
+renderer again. The default remains future events only.
+
 Live data pair的event在solve结果通过request/projection identity检查后发布，因此Rolling可以与main raster并行准备；此时主图仍保持旧front，直到owner把`data@N + fit@N`一起commit/present。显式manual `fit()`则仍在accepted overlay transaction之后通知。两种路径都只发布一次同一source revision；event callback不得被当成“像素已呈现”的信号。
 
 Histogram fit 使用 count projection；`density=True` 或 `cumulative=True` 时会明确拒绝 fit，切回两者均为 `False` 后再调用。Threshold classifier 同样要求 `cumulative=False`，但不依赖普通 fit 的启停或 model choice。

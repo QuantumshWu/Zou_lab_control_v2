@@ -456,10 +456,10 @@ def _axis_label(schema: DatasetSchema, ref: AxisRef) -> str:
 #: repair the operator never asked for.
 FATE_PREFIX = "fate:"
 ROLE_FATES = ("x", "y", "group", "facet")
-#: The one role a plot can do without.  Vacating it means there is nothing to
-#: split by; vacating a required one means SOMETHING has to be drawn along, so
-#: the kind's own default steps in.
-OPTIONAL_ROLES = frozenset({"group"})
+#: Roles a plot can do without.  No group means one series; no FacetGrid facet
+#: means one cell.  X/Y remain required because their cell would otherwise
+#: have no coordinate surface to draw.
+OPTIONAL_ROLES = frozenset({"group", "facet"})
 
 
 class SemanticVacancy(ValueError):

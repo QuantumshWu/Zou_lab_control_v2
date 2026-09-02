@@ -29,6 +29,7 @@ __all__ = [
     "panel_kind_choices",
     "task_console_fitting_spec",
     "task_console_panel_identity",
+    "task_console_panel_identity_for_spec",
     "task_console_panel_kind",
 ]
 
@@ -108,6 +109,19 @@ def task_console_panel_identity(
     if PlotKind(cell_key) not in GRID_CELL_KINDS:
         raise ValueError(f"a grid cell cannot be a {cell_key}")
     return definition
+
+
+def task_console_panel_identity_for_spec(spec: object) -> tuple[str, str]:
+    """The complete TaskConsole identity of one accepted Plot specification."""
+
+    definition = task_console_panel_kind(getattr(spec, "kind", None))
+    cell_key = (
+        semantic_spec(spec).kind.value
+        if definition.kind is PlotKind.FACET_GRID
+        else ""
+    )
+    task_console_panel_identity(definition.kind, cell_key)
+    return definition.key, cell_key
 
 
 def task_console_fitting_spec(

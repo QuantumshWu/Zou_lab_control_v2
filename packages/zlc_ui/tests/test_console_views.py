@@ -209,6 +209,8 @@ assert isinstance(popup, FluentOverlayFrame)
 assert not popup.isWindow()
 assert popup.parentWidget() is card.window()
 assert shown_top_levels == []
+assert card._settings_drag_handle.text() == 'Setting · panel-1'
+assert card._settings_close_button.toolTip() == 'Close settings'
 assert {
     widget for widget in app.topLevelWidgets() if widget.isVisible()
 } == top_levels
@@ -228,6 +230,7 @@ assert scroll.verticalScrollBar().maximum() == overflow
 title = card._settings_form.widget_for('title')
 title.setText('Card changed')
 title.editingFinished.emit()
+assert card._settings_drag_handle.text() == 'Setting · panel-1'
 interval = card._settings_form.widget_for('interval_ms')
 interval.setCurrentIndex(interval.findData(800))
 interval.activated.emit(interval.currentIndex())
@@ -261,7 +264,13 @@ QtWidgets.QApplication.sendEvent(
 )
 app.processEvents()
 assert popup.pos() != start
-popup.hide()  # Qt.Popup's outside-click dismissal reaches the same hide path.
+QtTest.QTest.mouseClick(card._settings_close_button, QtCore.Qt.LeftButton)
+app.processEvents()
+assert not popup.isVisible()
+QtTest.QTest.qWait(300)
+QtTest.QTest.mouseClick(card.settings_button, QtCore.Qt.LeftButton)
+app.processEvents()
+popup.hide()  # The page owner may hide it while switching views.
 app.processEvents()
 assert not popup.isVisible()
 QtTest.QTest.qWait(300)

@@ -969,7 +969,17 @@ def _device_run(
     bench = None
     host = None
     if tunables is None:
-        tunables = {"rf": virtual_rf_source(VaunixLmsConfig(serial=1001))}
+        tunables = {
+            "rf": virtual_rf_source(
+                VaunixLmsConfig(
+                    serial=1001,
+                    frequency_low_hz=500e6,
+                    frequency_high_hz=8e9,
+                    power_low_dbm=-40.0,
+                    power_high_dbm=10.0,
+                )
+            )
+        }
     try:
         bench = ScriptedScanBench(
             installation.device("sequencer"),

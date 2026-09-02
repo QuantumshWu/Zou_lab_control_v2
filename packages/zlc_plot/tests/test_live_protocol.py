@@ -141,6 +141,16 @@ def test_unsuccessful_exact_retry_does_not_invalidate_public_fit_event() -> None
         assert result.reduced_chi_square == pytest.approx(
             reference.reduced_chi_square, rel=0.0, abs=1e-9
         )
+        late_events = []
+        release_late = session.subscribe_fit(
+            late_events.append,
+            replay_current=True,
+        )
+        try:
+            assert len(late_events) == 1
+            assert late_events[0].result is session.last_fit
+        finally:
+            release_late()
     finally:
         release()
         session.close()

@@ -23,6 +23,7 @@
   由各自domain owner保存精选artifact，并通过ExecutionContext注册已完成文件。
 - Figure NPZ是primary typed artifact，PNG只是preview。Figure保存exact Plot recipe、overlay、
   viewport、selectors、facet focus和causal lineage graph；FigureViewer与TaskConsole使用同一个Plot host路径。
+- Figure NPZ唯一writer现按member做有界1MiB可压缩性probe：结构化/平滑数据继续Deflate，低收益大camera数组使用标准ZIP Stored。20×1200×1920 uint16 noise的Panel Save实测`4.23s→0.73s`，archive阶段`3.63s→0.18s`；92.16MB原始数据原压至79.12MB，现为92.16MB，明确以13MB换约3.45s。平滑1200×1920 float32仍Deflate为2.98MB、总时约0.33s。
 - Plot axis/semantic identity已收口为`AxisRef(domain, axis_id)`稳定key；scope只接受tagged
   latest或tagged typed coordinate value，不再让display label或裸文本控制字进入truth。
 - Fate Setting不再预跑candidate render/layout feasibility：所有axis始终列出plot kind声明的全部roles；
@@ -49,6 +50,7 @@
   264.37→58.85 ms、P90为286.34→66.89 ms；70组reduction/validity/group矩阵满足
   既有浮点数值等价与结构精确contract，聚焦回归63项通过。
 - Facet/Single规则tensor投影已收敛到同一retained-axis reduction：一次保留`facet/x/y/group`真实tensor axes、一次归约其它轴，Curve/Image只包装不同payload；Histogram继续共用其批量分箱terminal。Curve/Image/Fit/SEM的native raster快路保留，并继续以完整差异像素而非阈值子集评价其Agg接近度；不得通过回退Agg把差异人为归零。RegularImage即使有完整warm seed也保留cold proxy竞争；Board的active-fit staging保持不变。
+- FacetGrid现允许facet fate为空：DataView发布一个`Facet 1`完整cell，不创建phantom axis；真实facet被归约/移走时仍可画、fit和保存，重新赋予Facet fate后恢复普通多cell路径。
 - 当前Render coherence Goal按以下顺序根修，全部在现有owner内完成且允许证据驱动调整实现细节：
   1. clim move合并为`candidate+clim mutation+compose+front`一次原子preview；
   2. indexed history旧publication改为正常expired cancellation，Panel保留最后完整front与Fit/Setting vocabulary；Edit拆开`data advanced`和真正configuration incompatibility，并让PanelState/frozen target原子同步；
@@ -120,9 +122,11 @@
 - 公共Figure API严格编码/解码PlotSpec、parameters、size、viewport、selectors、facet focus、classifier、fit与
   typed image overlay；archive先发布，preview后渲染。
 - Panel Save只是公共Figure API的adapter，不再维护第二套writer或restore grammar。
-- FigureViewer必须从archive exact recipe恢复typed input，不按shape推断plot kind。
+- FigureViewer把archive typed Dataset发布为sealed Runtime signals，默认panel从archive exact recipe恢复，且不按shape推断plot kind；保存spec的`kind + cell_kind`在Panel创建前经同一个catalog identity owner解析，semantic vocabulary随后才投影。Add Panel只建立空的fixed-kind `panel-N`，Signal/ROI/Fit派生及后续compose全部走与TaskConsole相同的ConsolePresenter、SelectionBridge和Plot host，不再保留static panel owner。静态host在Bridge订阅前已有accepted fit时，Fit subscription只replay该immutable FitEvent，不重复solve/render；因此ROI与Fit参数都继续发布给后续Panel。
 - FigureViewer与TaskConsole Live/Frozen使用同一个accepted PlotSpec、parameter、selector/
-  viewport capability contract；Viewer semantic edit同样只在host accept后更新surface。
+  viewport capability contract；Viewer semantic edit同样只在host accept后更新surface，文件选择默认定位workspace当天data目录。
+- `board.commit`首次接受Panel host后在同一owner turn幂等挂载Selection/Fit Bridge；真实Qt首个drag/release已验证可立即发布ROI，不等待下一display beat。
+- SLM Feedback camera preview第一轮后停更的根因是`holds_live_revision`只识别裸`OwnedSnapshot`，带site overlay的`ImageFrame`把第二generation的revision 10误判为旧run的`10<=10`并cancel。现统一解包snapshot；真实两轮Camera Measurement→Panel从generation A前进至B、同host复用、无busy/error，Plot/Workbench seam各有回归。
 - Lineage保存root、event nodes和direct parent IDs；Viewer验证引用、reachability和cycle后
   投影为tree。
 - 显式消费Dataset的Measurement worker在每次保留值时将exact source publication随同一次Runtime commit提交；Scan Flow因此从Scan event沿真实parent回到Measurement/Processor，Save与Viewer不得按signal名查latest。Device tab从node run record显示baseline working point，并另列event ranges实际引用的active override epoch。
@@ -153,6 +157,7 @@
 ### 2.5 Device Control与settings provenance
 
 - Generic Device Control只消费adapter的`TunableField` contract，显示Current、Desired、Live apply、Apply、Status、Refresh及active owners；已删除旧的edit-immediate `field_committed/read_values/set_form`路径和demo残余。
+- RF frequency/power四个policy edge已进入Rigol、Vaunix及Virtual RF的optional Init schema并复用同一Control tunable；空值表示无该侧policy、可随时清回空值。只有完整有限的low/high pair才形成Scan port范围，单侧edge只约束直接tune；全空Init不归一化或改写硬件当前值。
 - Pylon公开`gain_db`的SDK bounds/current与grabbing-safe write；Virtual camera公开`exposure_seconds`。成功且effective实际改变才推进session-local epoch；Stepped Scan严格使用effective return，不能把hardware未接受的值写成Dataset coordinate。
 - Logic静态requirements与Stepped Scan运行时选择的device ports都形成field claim。DeviceUse按device-specific owner revision原子核风险授权、dependency closure与pending write；字段命令期间不能进入新Logic，owner变化取消尚未执行的write。
 - Device I/O只在现有串行worker/adapter command lane执行。Refresh去重合并且属于close guard；75 ms live input在相同policy projection及in-flight write期间保留每字段latest-only值，Qt owner只处理plain projection和已完成readback。
@@ -189,6 +194,7 @@
 - FigureViewer此前以formal launcher和`zlc_ui.capture_window`在真实Windows屏幕完成四条1152×653验收：current archive默认Image Monitor、点击Add panel新增Curve、从Setting点击Edit进入共享Fluent `PanelEditorView`、以及多层Flow展开树；四次均保持shared 90% window尺寸和固定左栏。右侧复用TaskConsole `ConsoleBoardView + PanelCardView`并置于白色work surface，支持每panel切saved dataset、alternate plot kind、Setting/remove/order与closable Edit；static Edit只保留Panel/Semantic/Display/Fit。用户当前重新裁决Info readout必须统一multiline并按实际visual layout紧包；旧的无换行单行分支会cutoff长内容且不能作为phantom inner-scroll的替代修复。固定Plot kind从Setting删除，动态Signal keyed-choice在reconcile写值前更新choice domain。
 - FigureViewer Info readout当前根修：旧实现以单行控件掩盖multiline少算Qt block高度的问题，长无换行值因此cutoff，而multiline内部仍保留`maximum=1`的phantom scroll。InfoPane现统一复用`FluentReadoutMultiline`，唯一高度owner逐block读取`QTextLayout`实际像素并加document/widget margins；未设cap时horizontal/vertical range均为0，短值、显式两行和长无换行值实测为26/45/349 px且原文逐字符不变。现有UI用例扩展后相关文件`12 passed`；formal `capture_window`以1152×653真实FigureViewer重开Camera Figure，左栏一行readout保持紧凑。
 - FigureViewer Logic/Devices/Flow当前根修：archive内部`event-N`只作parent引用，Logic页以真实Logic identity显示递归去除device字段后的run参数；Devices页用run record的stable role→instance映射解释run/event snapshots，按实际device聚合并给每项保留Logic、sequence与scope，缺映射/identity/device key一律拒绝而不猜。Flow原位删除QTree owner，Workbench只投影唯一Logic/Device nodes和causal/device edges；Qt以layered+barycentric布局、独立edge ports与long-edge lane绘制，典型100 nodes同步构建约6.5 ms，3-device、diamond、真实DFS汇合及10-node长链均无edge穿node，长链horizontal range为0。Calibration/Temperature normal与partial report、SLM candidate/report、Seamless/Stepped/Temperature live均保存实际用到的device facts；Feedback pre-shot只记录SLM，post-shot冻结同candidate三设备，failure rollback不改变已存candidate provenance；Stepped tunable以完整scan values及逐点readback等值contract记录，不复制event history。聚焦回归`67 passed`，另Console Logic`34 passed`；formal Windows real-screen capture为1152×653、DPR 3、3-device Flow无横向scroll且节点/箭头无重叠。
+- 公共Panel Setting现复用master的page-local `FluentOverlayFrame` owner，并以固定identity（`Setting · panel-N`）作为可拖header，不读取可编辑title/signal/structure；右上角紧凑`×`只隐藏Setting。TaskConsole与FigureViewer因复用PanelCard同时获得该行为，Panel删除仍是card header的受保护命令。
 - Exact Scan Panel恢复当前证据：真实event chunk为`1×1×3×5`、canonical为`2×(65×2×2)×3×5`的Signal经实际SignalPlane与Plot host由真实`field.x=65`触发>64拒绝；拒绝前后Setting均保留`field.x/y/z` fate且不再出现phantom `point`，独立Curve Panel title保持canonical axes，Fluent form在`fit_unavailable`同时仍含三个Semantic controls。精确目标`20×(10×10×10)×3×35`的title authority输出`(20)×(10×10×10)×(3×35)`。多维FacetGrid默认最外层真实scan axis，不再以flattened point rows制造1000 cells或phantom point-row restriction。相同live projection与仅title metadata变化均不reconcile Setting form；固定Plot kind不再进入Setting，FacetGrid只保留可编辑Cell kind；Facet默认、feasibility、真实拒绝与Fluent Setting聚焦证据`22 passed`。
 - Exact Scan terminal/Frozen根修当前证据：真实`20×(10×10×10)×(3×35)`canonical Dataset从partial Live publication开始，原子提交`field.x→Facet, field.y→Y, field.z→X, pair/site→Reduced`后，Live、运行中Frozen及terminal seal后重新创建的Frozen host均保持同一schema fingerprint、物理shape `(20,1000,3,35)`、resolved roles和`[-0.5,9.5]×[-0.5,9.5]` limits。根因三处均删除：multi-fate逐行修复导致回退默认35×3、host accept后以1×1×3×35 event schema覆盖canonical surface、以及histogram threshold/shape-only viewport无条件重放到image。当前实现使用atomic fate assignment、canonical accept metadata、resolved capability interaction和schema/spec view identity；Plot semantic/feasibility/facet/threshold聚焦`52 passed`，Workbench canonical/Frozen/retarget/save交叉聚焦`10 passed`。
 - Plot/Runtime/Workbench当前candidate直接回归：Plot `534 passed`、Runtime `107 passed`、Workbench `435 passed`；Atom对Figure/hosted-node新contract的direct用例`1 passed`。这些结果来自当前tree，不复用旧Exact Scan cut的计数。

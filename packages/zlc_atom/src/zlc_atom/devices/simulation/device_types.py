@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from zlc_atom.authoring import AuthoringField, AuthoringSchema
 from zlc_atom.devices.camera.binding import bind_camera
+from zlc_atom.devices.rf.contract import (
+    WINDOW_AUTHORING_FIELDS,
+    validate_window_values,
+)
 from zlc_atom.devices.sequencer.binding import bind_sequencer, open_sequencer_control
 from zlc_atom.devices.slm import bind_slm, open_slm_control
 from zlc_atom.install.descriptors import DeviceTypeDescriptor, InstalledLeaf
@@ -63,13 +67,14 @@ VIRTUAL_SEQUENCER_SCHEMA = AuthoringSchema(())
 # The virtual panel geometry belongs to its one SimulationWorld.
 VIRTUAL_SLM_SCHEMA = AuthoringSchema(())
 
-#: The virtual brick reuses the REAL Vaunix schema minus its DLL path: the
-#: bounds and serial mean the same thing, and a scan rehearsed here carries
-#: the same authored window to the real bench.
+#: The virtual brick reuses the REAL RF policy fields: an absent edge and an
+#: authored edge mean exactly the same thing on simulation and hardware.
 VIRTUAL_RF_SCHEMA = AuthoringSchema(
     (
         AuthoringField("serial", "int", "Serial number", 1001, minimum=1),
-    )
+        *WINDOW_AUTHORING_FIELDS,
+    ),
+    validator=validate_window_values,
 )
 
 VIRTUAL_MOT_CAMERA_SCHEMA = AuthoringSchema(
@@ -203,6 +208,10 @@ def _rf_factory(context, key: str, values: dict) -> InstalledLeaf:
     authored = VIRTUAL_RF_SCHEMA.project_values(values)
     config = VaunixLmsConfig(
         serial=int(authored["serial"]),
+        frequency_low_hz=authored["frequency_low_hz"],
+        frequency_high_hz=authored["frequency_high_hz"],
+        power_low_dbm=authored["power_low_dbm"],
+        power_high_dbm=authored["power_high_dbm"],
     )
     return bind_rf_source(
         context,

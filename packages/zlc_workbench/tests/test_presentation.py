@@ -18,6 +18,7 @@ from dataclasses import replace
 from threading import Event
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 from zlc_data import StreamGenerationId, owned_snapshot_from_arrays
 
@@ -1125,6 +1126,59 @@ def test_a_new_generation_replaces_the_host_only_when_the_geometry_moved(
         first.close()
         for host in replacements:
             host.close()
+
+
+def test_same_geometry_image_frame_generation_restart_updates_in_place(
+    live_bench,
+) -> None:
+    """An overlay wrapper cannot turn a new run's reset revision into stale flow."""
+
+    plot = pytest.importorskip("zlc_plot")
+    from zlc_plot.primitives import ImageFrame, ImagePointOverlay
+
+    plane, node, _sequencer, _monitor = live_bench
+    signal = node.signal_key("frames")
+    front = plane.freeze()
+    value = front.value(signal)
+    publication = front.publication(signal)
+    assert value is not None and publication is not None
+    spec = _camera_image_spec(plot, value)
+    overlay = ImagePointOverlay(0, np.empty((0, 2), dtype=float))
+    first = plot.RasterPlotHost.from_plot(
+        ImageFrame(value.snapshot, overlay),
+        spec,
+    )
+    port = PlotPanelPort(
+        "panel-1",
+        signal,
+        display_interval_ms=100,
+        project_input=lambda item, pub, _front, _target: (
+            ImageFrame(item.snapshot, overlay),
+            ((pub, item.event_record),),
+        ),
+        submit_projection=_submit_now,
+        replace_host=_initial_then(first),
+    )
+    try:
+        _mount(port, value, publication, front)
+        restarted_value, restarted, restarted_front = _regenerated(
+            value,
+            publication,
+            signal,
+            "same-geometry-image-frame-run",
+            reshaped=False,
+        )
+        update = port.prepare(restarted_value, restarted, restarted_front)
+        assert update is not None
+        operation = update.future.result(timeout=10)
+        assert port.accept(update, operation)
+        assert _accepted(port, "host") is first
+        assert _accepted(port, "publication") is restarted
+        assert not port.surface_busy
+        assert port.last_error is None
+    finally:
+        port.close()
+        first.close(timeout=10)
 
 
 def test_atomic_surface_advances_only_after_its_front_is_presented(

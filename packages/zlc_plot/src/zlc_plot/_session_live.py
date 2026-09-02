@@ -44,9 +44,10 @@ class LiveSessionMixin:
         catching the refusal, and the two cannot drift apart.
         """
 
+        snapshot = getattr(data, "snapshot", data)
         generation_changed = (
-            isinstance(data, OwnedSnapshot)
-            and str(snapshot_generation(data)) != str(self.data_generation)
+            isinstance(snapshot, OwnedSnapshot)
+            and str(snapshot_generation(snapshot)) != str(self.data_generation)
         )
         return (not generation_changed) and int(revision) <= int(
             self.data_revision

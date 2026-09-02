@@ -55,6 +55,27 @@ WINDOW_FIELDS = (
     ("power_high_dbm", "Power high (dBm)", "dBm"),
 )
 
+#: The same optional policy fields are authored at Init and exposed again by
+#: Device Control.  ``None`` has one meaning everywhere: this bench has not
+#: imposed that edge.  Keeping the declarations here prevents real and
+#: virtual RF families from inventing different defaults or units.
+WINDOW_AUTHORING_FIELDS = tuple(
+    AuthoringField(name, "float", label, None, unit=unit)
+    for name, label, unit in WINDOW_FIELDS
+)
+
+
+def validate_window_values(values: Mapping[str, object]) -> None:
+    """Validate the optional RF policy edges in any device authoring schema."""
+
+    for prefix in ("frequency", "power"):
+        low = values[f"{prefix}_low_{'hz' if prefix == 'frequency' else 'dbm'}"]
+        high = values[f"{prefix}_high_{'hz' if prefix == 'frequency' else 'dbm'}"]
+        if low is not None and high is not None and float(low) >= float(high):
+            raise ValueError(
+                f"{prefix} low must be below {prefix} high when both are set"
+            )
+
 #: Interactions narrate HERE, in the contract, so every path that moves a
 #: knob -- a scan's device axis, the control panel, a notebook, a remote
 #: client -- leaves the same trace.  Each line ends with ``device=<identity>``
@@ -121,23 +142,21 @@ class RfSourceBase:
         *,
         identity: str,
         channels: tuple[str, ...] = ("",),
-        frequency_low_hz: float,
-        frequency_high_hz: float,
-        power_low_dbm: float,
-        power_high_dbm: float,
+        frequency_low_hz: float | None,
+        frequency_high_hz: float | None,
+        power_low_dbm: float | None,
+        power_high_dbm: float | None,
     ) -> None:
-        if not (
-            math.isfinite(frequency_low_hz)
-            and math.isfinite(frequency_high_hz)
-            and frequency_low_hz < frequency_high_hz
-        ):
-            raise ValueError("frequency bounds must be finite and ordered")
-        if not (
-            math.isfinite(power_low_dbm)
-            and math.isfinite(power_high_dbm)
-            and power_low_dbm < power_high_dbm
-        ):
-            raise ValueError("power bounds must be finite and ordered")
+        frequency_bounds = self._policy_window(
+            frequency_low_hz,
+            frequency_high_hz,
+            name="frequency",
+        )
+        power_bounds = self._policy_window(
+            power_low_dbm,
+            power_high_dbm,
+            name="power",
+        )
         names = tuple(str(channel) for channel in channels)
         if not names or len(set(names)) != len(names):
             raise ValueError("rf channels must be non-empty and unique")
@@ -145,8 +164,8 @@ class RfSourceBase:
             raise ValueError("a multi-channel source names every channel")
         self._identity = str(identity)
         self._channels = names
-        self._frequency_bounds = (float(frequency_low_hz), float(frequency_high_hz))
-        self._power_bounds = (float(power_low_dbm), float(power_high_dbm))
+        self._frequency_bounds = frequency_bounds
+        self._power_bounds = power_bounds
         self._condition = threading.Condition()
         self._settings_epoch = 0
         #: field name -> (channel, kind); the ONE table tune() resolves by,
@@ -155,26 +174,15 @@ class RfSourceBase:
         for channel in names:
             for kind in (FREQUENCY_FIELD, POWER_FIELD, OUTPUT_FIELD):
                 self._routing[channel_field(channel, kind)] = (channel, kind)
-        # OPENING BRINGS THE KNOBS INTO THE BENCH'S WINDOW.  The authored
-        # bounds are bench policy for what a scan may command, and
-        # TunableField refuses to describe a current value that stands
-        # outside them -- rightly, a form cannot offer a range the truth is
-        # not in.  A fresh instrument idles wherever it likes (a Lab Brick
-        # register at 0 Hz, a bench generator at its power-on default), so
-        # the open drives any out-of-window knob to the nearest bound, per
-        # channel.  The OUTPUT switches are never touched: policy may move
-        # a silent knob, never un-silence one.
+        # Opening enforces only edges the operator actually authored.  A
+        # fresh instrument may idle outside one such policy edge, so it is
+        # moved to the nearest declared edge per channel.  With both edges
+        # absent, opening is read-only.  Output switches are never touched:
+        # policy may move a silent knob, never un-silence one.
         for channel in names:
             frequency = float(self._read_frequency(channel))
-            if not (
-                self._frequency_bounds[0]
-                <= frequency
-                <= self._frequency_bounds[1]
-            ):
-                bounded = min(
-                    max(frequency, self._frequency_bounds[0]),
-                    self._frequency_bounds[1],
-                )
+            bounded = self._bounded_value(frequency, self._frequency_bounds)
+            if bounded != frequency:
                 self._write_frequency(channel, bounded)
                 _LOG.info(
                     "OPEN NORMALIZED field=%s from=%r to=%r device=%s",
@@ -184,10 +192,8 @@ class RfSourceBase:
                     self._identity,
                 )
             power = float(self._read_power(channel))
-            if not (self._power_bounds[0] <= power <= self._power_bounds[1]):
-                bounded = min(
-                    max(power, self._power_bounds[0]), self._power_bounds[1]
-                )
+            bounded = self._bounded_value(power, self._power_bounds)
+            if bounded != power:
                 self._write_power(channel, bounded)
                 _LOG.info(
                     "OPEN NORMALIZED field=%s from=%r to=%r device=%s",
@@ -196,6 +202,44 @@ class RfSourceBase:
                     bounded,
                     self._identity,
                 )
+
+    @staticmethod
+    def _optional_edge(value: object, *, name: str) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            raise TypeError(f"{name} must be a finite number or None")
+        edge = float(value)
+        if not math.isfinite(edge):
+            raise ValueError(f"{name} must be finite or None")
+        return edge
+
+    @classmethod
+    def _policy_window(
+        cls,
+        low: object,
+        high: object,
+        *,
+        name: str,
+    ) -> tuple[float | None, float | None]:
+        lower = cls._optional_edge(low, name=f"{name} low")
+        upper = cls._optional_edge(high, name=f"{name} high")
+        if lower is not None and upper is not None and lower >= upper:
+            raise ValueError(f"{name} bounds must be ordered when both are set")
+        return lower, upper
+
+    @staticmethod
+    def _bounded_value(
+        value: float,
+        window: tuple[float | None, float | None],
+    ) -> float:
+        low, high = window
+        bounded = value
+        if low is not None:
+            bounded = max(bounded, low)
+        if high is not None:
+            bounded = min(bounded, high)
+        return bounded
 
     # ------------------------------------------------------- transport verbs
     def _write_frequency(self, channel: str, value_hz: float) -> float:
@@ -230,36 +274,38 @@ class RfSourceBase:
         with self._condition:
             for channel in self._channels:
                 label = self._channel_label(channel)
+                frequency = float(self._read_frequency(channel))
                 fields.append(
                     TunableField(
                         metadata=AuthoringField(
                             channel_field(channel, FREQUENCY_FIELD),
                             "float",
                             f"{label}Frequency (Hz)",
-                            frequency_low,
+                            frequency,
                             minimum=frequency_low,
                             maximum=frequency_high,
                             unit="Hz",
                         ),
-                        current=float(self._read_frequency(channel)),
+                        current=frequency,
                         live_write=True,
                         dependency_group=(
                             channel_field(channel, FREQUENCY_FIELD),
                         ),
                     )
                 )
+                power = float(self._read_power(channel))
                 fields.append(
                     TunableField(
                         metadata=AuthoringField(
                             channel_field(channel, POWER_FIELD),
                             "float",
                             f"{label}Power (dBm)",
-                            power_low,
+                            power,
                             minimum=power_low,
                             maximum=power_high,
                             unit="dBm",
                         ),
-                        current=float(self._read_power(channel)),
+                        current=power,
                         live_write=True,
                         dependency_group=(channel_field(channel, POWER_FIELD),),
                     )
@@ -282,11 +328,11 @@ class RfSourceBase:
                     )
                 )
             for name, label, unit in WINDOW_FIELDS:
-                current = float(self._window_value(name))
+                current = self._window_value(name)
                 fields.append(
                     TunableField(
                         metadata=AuthoringField(
-                            name, "float", label, current, unit=unit
+                            name, "float", label, None, unit=unit
                         ),
                         current=current,
                         live_write=False,
@@ -309,7 +355,7 @@ class RfSourceBase:
                     self._read_output(channel)
                 )
             for name, _label, _unit in WINDOW_FIELDS:
-                values[name] = float(self._window_value(name))
+                values[name] = self._window_value(name)
             return values
 
     @property
@@ -347,7 +393,7 @@ class RfSourceBase:
         )
         return effective
 
-    def _window_value(self, name: str) -> float:
+    def _window_value(self, name: str) -> float | None:
         return {
             "frequency_low_hz": self._frequency_bounds[0],
             "frequency_high_hz": self._frequency_bounds[1],
@@ -355,7 +401,7 @@ class RfSourceBase:
             "power_high_dbm": self._power_bounds[1],
         }[name]
 
-    def _tune_window(self, selected: str, value: Any) -> float:
+    def _tune_window(self, selected: str, value: Any) -> float | None:
         """Move one edge of the bench's window, never a knob under it.
 
         A change that would strand a channel's CURRENT value outside the
@@ -364,9 +410,7 @@ class RfSourceBase:
         change nobody commanded.  Move the knob first, then the fence.
         """
 
-        requested = float(value)
-        if not math.isfinite(requested):
-            raise ValueError(f"{selected} must be finite")
+        requested = self._optional_edge(value, name=selected)
         with self._condition:
             frequency_low, frequency_high = self._frequency_bounds
             power_low, power_high = self._power_bounds
@@ -381,10 +425,10 @@ class RfSourceBase:
             elif selected == "power_high_dbm":
                 window[selected] = (power_low, requested)
             low, high = window[selected]
-            if not low < high:
+            if low is not None and high is not None and low >= high:
                 raise ValueError(
-                    f"{selected}={requested:g} would leave an empty window "
-                    f"[{low:g}, {high:g}]"
+                    f"{selected}={requested!r} would leave an empty window "
+                    f"[{low!r}, {high!r}]"
                 )
             frequency_window = selected.startswith("frequency")
             for channel in self._channels:
@@ -393,20 +437,24 @@ class RfSourceBase:
                     if frequency_window
                     else self._read_power(channel)
                 )
-                if not (low <= current <= high):
+                below = low is not None and current < low
+                above = high is not None and current > high
+                if below or above:
                     kind = FREQUENCY_FIELD if frequency_window else POWER_FIELD
                     knob = channel_field(channel, kind)
                     raise ValueError(
-                        f"{selected}={requested:g} would strand {knob} at "
+                        f"{selected}={requested!r} would strand {knob} at "
                         f"{current:g}; move the knob inside the new window "
                         "first"
                     )
+            previous = self._window_value(selected)
             if frequency_window:
                 self._frequency_bounds = (low, high)
             else:
                 self._power_bounds = (low, high)
-            self._settings_epoch += 1
-            self._condition.notify_all()
+            if requested != previous:
+                self._settings_epoch += 1
+                self._condition.notify_all()
             return requested
 
     def _resolve_tune(self, name: str, value: Any) -> Any:
@@ -425,17 +473,21 @@ class RfSourceBase:
             if kind == FREQUENCY_FIELD:
                 requested = float(value)
                 low, high = self._frequency_bounds
-                if not (low <= requested <= high):
+                if (low is not None and requested < low) or (
+                    high is not None and requested > high
+                ):
                     raise ValueError(
-                        f"{selected} must lie in [{low:g}, {high:g}] Hz"
+                        f"{selected} must lie in [{low!r}, {high!r}] Hz"
                     )
                 effective = float(self._write_frequency(channel, requested))
             elif kind == POWER_FIELD:
                 requested = float(value)
                 low, high = self._power_bounds
-                if not (low <= requested <= high):
+                if (low is not None and requested < low) or (
+                    high is not None and requested > high
+                ):
                     raise ValueError(
-                        f"{selected} must lie in [{low:g}, {high:g}] dBm"
+                        f"{selected} must lie in [{low!r}, {high!r}] dBm"
                     )
                 effective = float(self._write_power(channel, requested))
             else:
@@ -452,6 +504,8 @@ __all__ = [
     "OUTPUT_FIELD",
     "POWER_FIELD",
     "WINDOW_FIELDS",
+    "WINDOW_AUTHORING_FIELDS",
+    "validate_window_values",
     "RfSource",
     "RfSourceBase",
     "channel_field",

@@ -910,7 +910,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             sources["x_display_unit"] = self._projected._coordinate(x_ref)
         if isinstance(y_ref, AxisRef):
             sources["y_display_unit"] = self._projected._coordinate(y_ref)
-        if isinstance(self._spec, FacetGridPlot):
+        if isinstance(self._spec, FacetGridPlot) and self._spec.facet is not None:
             sources["facet_display_unit"] = self._projected._coordinate(
                 self._spec.facet
             )
@@ -2842,7 +2842,11 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             target_name = "x_display_unit"
         elif getattr(semantic, "y", None) == axis:
             target_name = "y_display_unit"
-        elif isinstance(self._spec, FacetGridPlot) and axis == self._spec.facet:
+        elif (
+            isinstance(self._spec, FacetGridPlot)
+            and self._spec.facet is not None
+            and axis == self._spec.facet
+        ):
             target_name = "facet_display_unit"
         if target_name is None:
             raise ValueError("axis is not a displayed x, y or facet axis in this plot")

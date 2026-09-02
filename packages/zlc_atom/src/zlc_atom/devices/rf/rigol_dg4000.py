@@ -62,21 +62,21 @@ class VisaScpiLink:
 
 @dataclass(frozen=True)
 class RigolDg4000Config:
-    """Where the instrument is and what this bench allows of it.
+    """Where the instrument is and any policy window this bench imposes.
 
-    Bounds are AUTHORED, not probed: the add-axis form has to offer a
-    finite range before anything is open, and the bench's own safe window
-    is usually narrower than the instrument's -- a DG4162 goes to 160 MHz,
-    an AOM driver should not.  The channel count is a fact about the
-    SERIES -- every DG4000 has two -- so it is not authored at all: one
-    instrument is one installed instance, its channels are its own knobs.
+    Every edge is optional.  ``None`` delegates only to the instrument's own
+    physical limits; setting an edge adds a bench policy limit and also gives
+    the scan authoring surface that side of its finite range.  The channel
+    count is a fact about the SERIES -- every DG4000 has two -- so it is not
+    authored at all: one instrument is one installed instance, its channels
+    are its own knobs.
     """
 
     resource: str
-    frequency_low_hz: float = 1e3
-    frequency_high_hz: float = 160e6
-    power_low_dbm: float = -30.0
-    power_high_dbm: float = 10.0
+    frequency_low_hz: float | None = None
+    frequency_high_hz: float | None = None
+    power_low_dbm: float | None = None
+    power_high_dbm: float | None = None
     timeout_seconds: float = 5.0
 
 

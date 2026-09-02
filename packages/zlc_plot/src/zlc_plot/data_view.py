@@ -936,16 +936,17 @@ class DataView:
             selected_index = int(facet_index)
             if not 0 <= selected_index < len(payload.cells):
                 raise ValueError("facet_index is outside the accepted facet payload")
-            coordinate = canonical_coordinate_scalar(
-                payload.cells[selected_index].facet_value_canonical,
-                "selection subject facet coordinate",
-            )
-            if spec.facet.domain is AxisDomain.REPEAT:
-                repeat_index = self._coordinate_index(
-                    original, spec.facet, coordinate
+            if spec.facet is not None:
+                coordinate = canonical_coordinate_scalar(
+                    payload.cells[selected_index].facet_value_canonical,
+                    "selection subject facet coordinate",
                 )
-            else:
-                scope.append((spec.facet, coordinate))
+                if spec.facet.domain is AxisDomain.REPEAT:
+                    repeat_index = self._coordinate_index(
+                        original, spec.facet, coordinate
+                    )
+                else:
+                    scope.append((spec.facet, coordinate))
 
         return SelectionSubject(
             semantic.kind,
@@ -3604,6 +3605,18 @@ class DataView:
         cell = spec.cell
         if not isinstance(cell, HistogramPlot):
             raise TypeError("facet histogram pools require a Histogram cell")
+        if spec.facet is None:
+            values, valid = (
+                self.history_values(window)
+                if self.has_primary_index or _history_window(window) > 1
+                else (None, None)
+            )
+            return self.histogram_pool(
+                values=values,
+                valid=valid,
+                reduce_axes=tuple(cell.reduced),
+                aggregation=cell.reduction,
+            )
         if not cell.reduced:
             validity = (
                 self.history_validity(window)
@@ -3861,7 +3874,8 @@ class DataView:
 
         if not isinstance(spec, FacetGridPlot):
             raise TypeError("spec must be FacetGridPlot")
-        self._resolve(spec.facet)
+        if spec.facet is not None:
+            self._resolve(spec.facet)
         cell = spec.cell
         if isinstance(cell, CurvePlot):
             self._validate_curve_shape(
@@ -3872,7 +3886,7 @@ class DataView:
         elif isinstance(cell, HistogramPlot):
             for ref in cell.reduced:
                 self._resolve(ref)
-            if any(
+            if spec.facet is not None and any(
                 ref.physical_identity == spec.facet.physical_identity
                 for ref in cell.reduced
             ):
@@ -3902,6 +3916,8 @@ class DataView:
         coordinates, NaN declared coordinates).
         """
 
+        if spec.facet is None:
+            return 1
         resolved = self._resolve(spec.facet)
         if (
             self._samples.value.canonical.size
@@ -3948,6 +3964,45 @@ class DataView:
             shared_bins = aligned_histogram_edges(values, int(bins))
         if isinstance(cell, HistogramPlot) and bins is None:
             raise DataViewError("histogram facet cells require explicit bins")
+        if spec.facet is None:
+            if isinstance(cell, CurvePlot):
+                payload: FacetPayload = self.curve(
+                    cell.x,
+                    group_by=(() if cell.group is None else (cell.group,)),
+                    aggregation=cell.reduction,
+                    uncertainty=uncertainty,
+                )
+            elif isinstance(cell, ImagePlot):
+                payload = self.image(
+                    cell.x,
+                    cell.y,
+                    aggregation=cell.reduction,
+                )
+            else:
+                assert shared_bins is not None
+                pool, pool_valid = self.facet_histogram_pool(
+                    spec,
+                    window=window,
+                )
+                payload = self._histogram_from_values(
+                    shared_bins,
+                    pool,
+                    valid=pool_valid,
+                )
+            return FacetData(
+                revision=self._samples.revision,
+                generation=self._samples.generation,
+                spec=spec,
+                cells=(
+                    FacetCell(
+                        facet_index=0,
+                        facet_value_canonical=1,
+                        facet_value_display=1,
+                        label="Facet 1",
+                        payload=payload,
+                    ),
+                ),
+            )
         if isinstance(cell, HistogramPlot) and cell.reduced:
             # A reducing cell needs a per-sample bucket identity, which the
             # slab paths below have no shape for; and one pass over the whole

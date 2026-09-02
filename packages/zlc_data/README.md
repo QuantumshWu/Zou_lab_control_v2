@@ -24,6 +24,10 @@ fields. Existing workspace files are not converted; there is no alternate alias.
 The Figure NPZ is the primary typed artifact. Exact Plot recipe, overlay,
 viewport and lineage metadata travel beside its Dataset members; PNG rendering
 is a derived preview owned by `zlc_plot`.
+Each member remains an ordinary NPZ `.npy` entry. The single Figure writer
+Deflates small or materially compressible members and stores large camera-like
+noise members when Deflate would save less than 20%; readers need no alternate
+format or compatibility path.
 
 Likewise, `save_npz(stream, snapshot)` only encodes a Dataset to caller-owned
 writable binary IO. A path consumer publishes it with

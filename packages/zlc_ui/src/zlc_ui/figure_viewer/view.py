@@ -34,10 +34,11 @@ class FigureViewerView(QtWidgets.QWidget):
     panel_edit_requested = QtCore.pyqtSignal(str)
     panel_order_committed = QtCore.pyqtSignal(tuple)
     panel_editor_closed = QtCore.pyqtSignal(str)
+    panel_plot_error = QtCore.pyqtSignal(str, str)
     save_image_requested = QtCore.pyqtSignal()
     close_requested = QtCore.pyqtSignal()
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, *, path_base_dir: str = "") -> None:
         super().__init__(parent)
         self.setObjectName("FigureViewerView")
         self.setStyleSheet("background: transparent;")
@@ -45,6 +46,8 @@ class FigureViewerView(QtWidgets.QWidget):
         self._editors: dict[str, QtWidgets.QWidget] = {}
         self._panel_sizes: tuple[str, ...] = ()
         self._panel_default_size = ""
+        self._panel_intervals: tuple[int, ...] = ()
+        self._panel_default_interval = 0
         self._grid_cell_kinds: tuple[str, ...] = ()
         self._closing = False
         self._info_tabs: tuple = ()
@@ -71,6 +74,7 @@ class FigureViewerView(QtWidgets.QWidget):
             path_label="File",
             path_caption="Open a saved figure archive (.npz)",
             file_filter="Saved figure archives (*.npz)",
+            path_base_dir=str(path_base_dir),
             initial_status="Open a current saved Figure (.npz).",
             graph_tabs=("Flow",),
             parent=self,
@@ -89,16 +93,16 @@ class FigureViewerView(QtWidgets.QWidget):
         )
         self._surface_layout.setSpacing(window_pad(0.5))
 
-        self._dataset_bar = QtWidgets.QWidget(holder)
-        self._dataset_bar.setStyleSheet("background: transparent;")
-        self._dataset_bar.setSizePolicy(
+        self._panel_bar = QtWidgets.QWidget(holder)
+        self._panel_bar.setStyleSheet("background: transparent;")
+        self._panel_bar.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding,
             QtWidgets.QSizePolicy.Fixed,
         )
-        bar_layout = QtWidgets.QHBoxLayout(self._dataset_bar)
+        bar_layout = QtWidgets.QHBoxLayout(self._panel_bar)
         bar_layout.setContentsMargins(0, 0, 0, 0)
         bar_layout.setSpacing(window_pad(0.5))
-        bar_layout.addWidget(FluentSectionLabel("Saved panels"))
+        bar_layout.addWidget(FluentSectionLabel("Panels"))
         self.kind_combo = FluentComboBox()
         self.kind_combo.setMinimumContentsLength(12)
         bar_layout.addWidget(self.kind_combo)
@@ -111,7 +115,7 @@ class FigureViewerView(QtWidgets.QWidget):
         self.save_image_button.clicked.connect(self.save_image_requested)
         self.save_image_button.setEnabled(False)
         bar_layout.addWidget(self.save_image_button)
-        self._surface_layout.addWidget(self._dataset_bar)
+        self._surface_layout.addWidget(self._panel_bar)
 
         self.tabs = FluentTabWidget(holder)
         self.tabs.tab_close_requested.connect(self._editor_close_clicked)
@@ -167,7 +171,7 @@ class FigureViewerView(QtWidgets.QWidget):
         ))
         self.info_pane.set_graph("Flow", self._flow_graph)
 
-    def set_panel_kinds(self, kinds: object) -> None:
+    def set_panel_kinds(self, kinds: object, default_kind: str = "") -> None:
         rows = tuple((str(key), str(label or key)) for key, label in tuple(kinds))
         current = self.kind_combo.currentData()
         self.kind_combo.clear()
@@ -177,6 +181,10 @@ class FigureViewerView(QtWidgets.QWidget):
             index = self.kind_combo.findData(current)
             if index >= 0:
                 self.kind_combo.setCurrentIndex(index)
+        if self.kind_combo.currentIndex() < 0 and default_kind:
+            index = self.kind_combo.findData(str(default_kind))
+            if index >= 0:
+                self.kind_combo.setCurrentIndex(index)
         self.add_panel_button.setEnabled(bool(rows))
 
     def set_panel_sizes(self, sizes: object, default_size: str) -> None:
@@ -184,6 +192,17 @@ class FigureViewerView(QtWidgets.QWidget):
         self._panel_default_size = str(default_size)
         for card in self._cards.values():
             card.set_size_choices(self._panel_sizes, self._panel_default_size)
+
+    def set_panel_intervals(
+        self, intervals: object, default_interval: int
+    ) -> None:
+        self._panel_intervals = tuple(int(value) for value in tuple(intervals))
+        self._panel_default_interval = int(default_interval)
+        for card in self._cards.values():
+            card.set_interval_choices(
+                self._panel_intervals,
+                self._panel_default_interval,
+            )
 
     def set_grid_cell_kinds(self, kinds: object) -> None:
         self._grid_cell_kinds = tuple(str(value) for value in tuple(kinds))
@@ -203,6 +222,11 @@ class FigureViewerView(QtWidgets.QWidget):
             raise RuntimeError("FigureViewer panel sizes were not projected")
         card = PanelCardView(key, str(title))
         card.set_size_choices(self._panel_sizes, self._panel_default_size)
+        if self._panel_intervals:
+            card.set_interval_choices(
+                self._panel_intervals,
+                self._panel_default_interval,
+            )
         if self._grid_cell_kinds:
             card.set_cell_kind_choices(self._grid_cell_kinds)
         card.remove_requested.connect(
@@ -213,6 +237,9 @@ class FigureViewerView(QtWidgets.QWidget):
         )
         card.state_changed.connect(
             lambda patch, pid=key: self.panel_state_changed.emit(pid, patch)
+        )
+        card.plot_error.connect(
+            lambda message, pid=key: self.panel_plot_error.emit(pid, str(message))
         )
         self._cards[key] = card
         self.board.set_cards(tuple(self._cards.values()))
@@ -231,19 +258,38 @@ class FigureViewerView(QtWidgets.QWidget):
         self._cards = {key: self._cards[key] for key in wanted}
         self.board.set_cards(tuple(self._cards.values()))
 
-    def set_panel_datasets(
+    def set_panel_signal_choices(
         self,
         panel_id: str,
-        datasets: tuple[tuple[str, str], ...],
+        groups: object,
+        *,
         current: str = "",
+        overlay_groups: object = (),
+        overlay_current: str = "",
     ) -> None:
-        incoming = tuple((str(key), str(label or key)) for key, label in datasets)
         self._cards[str(panel_id)].set_signal_choices(
-            (("this archive", tuple((label, key) for key, label in incoming)),)
-            if incoming
-            else (),
+            groups,
             current=str(current),
+            overlay_groups=overlay_groups,
+            overlay_current=str(overlay_current),
         )
+
+    def set_panel_publishers(self, _publishers: object) -> None:
+        """FigureViewer has no Logic-row chrome; signals remain in Setting."""
+
+    def panel_ids(self) -> tuple[str, ...]:
+        return tuple(self._cards)
+
+    def set_panel_selectors_enabled(self, panel_id: str, enabled: bool) -> None:
+        self._cards[str(panel_id)].set_selectors_enabled(bool(enabled))
+
+    def set_panel_mutation_enabled(self, panel_id: str, enabled: bool) -> None:
+        self._cards[str(panel_id)].set_editing_enabled(bool(enabled))
+
+    def present_panel_front(self, panel_id: str, front: object) -> bool:
+        surface = self._cards[str(panel_id)].surface
+        present = getattr(surface, "present_front", None)
+        return bool(callable(present) and present(front))
 
     def set_panel_projection(
         self, panel_id: str, state: object, surface: object
@@ -276,6 +322,7 @@ class FigureViewerView(QtWidgets.QWidget):
             return
         incoming = dict(projection)
         incoming["size_choices"] = self._panel_sizes
+        incoming["interval_choices"] = self._panel_intervals
         editor = PanelEditorView(key, incoming)
         editor.state_changed.connect(
             lambda patch, pid=key: self.panel_state_changed.emit(pid, patch)
@@ -301,11 +348,26 @@ class FigureViewerView(QtWidgets.QWidget):
             return False
         incoming = dict(projection)
         incoming["size_choices"] = self._panel_sizes
+        incoming["interval_choices"] = self._panel_intervals
         editor.update_projection(incoming)
         return True
 
     def has_panel_editor(self, panel_id: str) -> bool:
         return str(panel_id) in self._editors
+
+    def show_panel_editor(
+        self, panel_id: str, widget: QtWidgets.QWidget | None
+    ) -> None:
+        editor = self._editors[str(panel_id)]
+        assert isinstance(editor, PanelEditorView)
+        editor.set_surface(widget)
+
+    def focus_panel_editor(self, panel_id: str) -> bool:
+        editor = self._editors.get(str(panel_id))
+        if editor is None:
+            return False
+        self.tabs.setCurrentWidget(editor)
+        return True
 
     def _editor_close_clicked(self, editor: QtWidgets.QWidget) -> None:
         panel_id = next(
