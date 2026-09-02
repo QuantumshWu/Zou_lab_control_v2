@@ -4017,6 +4017,47 @@ class FluentCheckBox(QtWidgets.QCheckBox):
         )
 
 
+class FluentPageBody(QtWidgets.QWidget):
+    """A scrolled page body that paints the page colour and tells Qt so.
+
+    The scrolled content used to be transparent, showing the same colour
+    through from the page.  A scrolled widget Qt can see through is
+    repainted whole on every step of the wheel -- an Edit page's plot
+    surface, a 10 ms frame at three device pixels per point, forty times a
+    scroll -- where one Qt knows to be opaque is moved by blitting the
+    backing store and only the exposed strip is painted.  Qt learns opacity
+    from ``WA_OpaquePaintEvent``, which also stops it painting any styled
+    background, so this widget paints the page colour itself.
+    """
+
+    _REASSERT = (
+        QtCore.QEvent.ParentChange,
+        QtCore.QEvent.StyleChange,
+        QtCore.QEvent.Polish,
+    )
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._promise_opaque()
+
+    def _promise_opaque(self) -> None:
+        self.setAttribute(QtCore.Qt.WA_OpaquePaintEvent, True)
+        self.setAttribute(QtCore.Qt.WA_StyledBackground, False)
+
+    def event(self, event) -> bool:
+        # QScrollArea.setWidget and stylesheet polish both reset the
+        # attribute; the promise outlives them.
+        handled = super().event(event)
+        if event.type() in self._REASSERT:
+            self._promise_opaque()
+        return handled
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt API
+        painter = QtGui.QPainter(self)
+        painter.fillRect(event.rect(), QtGui.QColor(BG))
+        painter.end()
+
+
 class FluentScrollArea(QtWidgets.QScrollArea):
     def __init__(self, parent=None):
         super().__init__(parent)
