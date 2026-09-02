@@ -224,23 +224,36 @@ def point_table_from_tree(tree: Any) -> PointTable:
 def grid_topology_to_tree(topology: GridTopology) -> dict[str, Any]:
     if not isinstance(topology, GridTopology):
         raise TypeError("topology must be GridTopology")
-    return {
+    tree: dict[str, Any] = {
         "schema": GRID_TOPOLOGY_SCHEMA,
         "dimension_ids": [axis_id.value for axis_id in topology.dimension_ids],
         "coordinate_domains": [list(domain) for domain in topology.coordinate_domains],
         "row_to_cell": [list(cell) for cell in topology.row_to_cell],
     }
+    if topology.coordinate_labels is not None:
+        # Emitted only when declared: a topology without labels encodes as
+        # it always has, and every archive already on disk still reads.
+        tree["coordinate_labels"] = [
+            None if labels is None else list(labels)
+            for labels in topology.coordinate_labels
+        ]
+    return tree
 
 
 def grid_topology_from_tree(tree: Any) -> GridTopology:
-    data = _exact_map(
-        tree,
-        {"schema", "dimension_ids", "coordinate_domains", "row_to_cell"},
-        GRID_TOPOLOGY_SCHEMA,
-    )
+    fields = {"schema", "dimension_ids", "coordinate_domains", "row_to_cell"}
+    if isinstance(tree, dict) and "coordinate_labels" in tree:
+        fields.add("coordinate_labels")
+    data = _exact_map(tree, fields, GRID_TOPOLOGY_SCHEMA)
     dimensions = data["dimension_ids"]
     domains = data["coordinate_domains"]
     mapping = data["row_to_cell"]
+    labels = data.get("coordinate_labels")
+    if labels is not None and (
+        not isinstance(labels, list)
+        or any(item is not None and not isinstance(item, list) for item in labels)
+    ):
+        raise ValueError("GridTopology coordinate_labels must be lists or null")
     if not isinstance(dimensions, list):
         raise ValueError("GridTopology dimension_ids must be a list")
     if not isinstance(domains, list) or any(not isinstance(item, list) for item in domains):
@@ -251,6 +264,9 @@ def grid_topology_from_tree(tree: Any) -> GridTopology:
         dimension_ids=tuple(AxisId(item) for item in dimensions),
         coordinate_domains=tuple(tuple(item) for item in domains),
         row_to_cell=tuple(tuple(item) for item in mapping),
+        coordinate_labels=None
+        if labels is None
+        else tuple(None if item is None else tuple(item) for item in labels),
     )
     if _encode(grid_topology_to_tree(topology)) != _encode(tree):
         raise ValueError("GridTopology tree is typed but non-canonical")

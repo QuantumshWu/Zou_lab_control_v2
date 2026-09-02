@@ -277,7 +277,14 @@ def resolve_axis(schema: DatasetSchema, ref: AxisRef) -> ResolvedAxis:
         name = str(axis_id)
         unit: str | None = None
         frame: str | None = None
-        labels: tuple[str, ...] | None = None
+        # The labels are the domain's own: a cropped view keeps every domain
+        # coordinate but only the surviving rows, so joining them through
+        # the matching column's rows lost the labels of every row cropped.
+        labels = (
+            None
+            if topology.coordinate_labels is None
+            else topology.coordinate_labels[position]
+        )
         try:
             column = schema.point_table.column(axis_id)
         except KeyError:
@@ -290,14 +297,6 @@ def resolve_axis(schema: DatasetSchema, ref: AxisRef) -> ResolvedAxis:
                 if column.coordinate_frame is None
                 else str(column.coordinate_frame)
             )
-            if column.coordinate_labels is not None:
-                label_by_coordinate = dict(
-                    zip(column.values, column.coordinate_labels, strict=True)
-                )
-                labels = tuple(
-                    label_by_coordinate[value]
-                    for value in topology.coordinate_domains[position]
-                )
         return ResolvedAxis(
             axis_id,
             name,
