@@ -112,8 +112,17 @@ class _OwnerSampler:
             )[:7]
             self.stacks[trimmed] += 1
 
-    def during(self, window: tuple[float, float]) -> list[tuple[str, int]]:
-        """What the owner ran inside one time window, busiest first."""
+    _WAITING = ("threading.py", "_base.py", "queue.py", "selectors.py", "socket.py")
+
+    def during(
+        self, window: tuple[float, float], *, top_others: int = 6
+    ) -> list[tuple[str, int]]:
+        """What the owner ran inside one time window, busiest first.
+
+        The other threads' innermost frames are ranked too, with the
+        frames of a thread that is merely waiting left out: what is left
+        is work that competed for the interpreter during the window.
+        """
 
         import collections
 
@@ -122,19 +131,25 @@ class _OwnerSampler:
         counts: collections.Counter = collections.Counter(
             charged for _stamp, charged, _others in inside
         )
-        busy_samples = sum(1 for _stamp, _charged, others in inside if others)
+        busy_samples = sum(
+            1
+            for _stamp, _charged, others in inside
+            if any(pathlib.Path(name).name not in self._WAITING for name, _func in others)
+        )
         elsewhere: collections.Counter = collections.Counter(
             f"{pathlib.Path(name).name}:{func}"
             for _stamp, _charged, others in inside
             for name, func in others
+            if pathlib.Path(name).name not in self._WAITING
         )
         return [
             (f"{pathlib.Path(name).name}:{func}", count)
             for (name, func), count in counts.most_common(8)
         ] + [
-            (f"samples with other threads in our Python: {busy_samples}/{len(inside)}", 0)
+            (f"samples with other threads working in our Python: {busy_samples}/{len(inside)}", 0)
         ] + [
-            (f"other thread in {name}", count) for name, count in elsewhere.most_common(6)
+            (f"other thread in {name}", count)
+            for name, count in elsewhere.most_common(top_others)
         ]
 
     def summary(self, top: int = 12) -> dict:
@@ -236,19 +251,29 @@ def _timed_action(bench: ConsoleBench, what: str, trigger, predicate, *, timeout
 
     clock = _LoopClock(bench.app)
     profile = None
-    if os.environ.get("ZLC_EDIT_PROFILE"):
+    mode = os.environ.get("ZLC_EDIT_PROFILE", "")
+    if mode:
         import cProfile
 
         profile = cProfile.Profile()
-        profile.enable()
+        if mode != "trigger":
+            profile.enable()
     with _OwnerSampler() as sampler:
         began = time.perf_counter()
+        # "trigger" profiles the synchronous call alone: it runs on the
+        # owner with the workers mostly waiting, so its self times are the
+        # owner's own -- Qt's C++ included, as PyQt method entries.
+        if mode == "trigger":
+            profile.enable()
         result = trigger()
+        if mode == "trigger":
+            profile.disable()
         triggered = time.perf_counter()
         trigger_ms = (triggered - began) * 1000.0
         if result is False:
             raise guards.HarnessError(f"{what} was refused")
         wall = _wait(bench, clock, predicate, what, timeout)
+        finished = time.perf_counter()
     row = {
         "what": what,
         "trigger_ms": round(trigger_ms, 1),
@@ -257,7 +282,16 @@ def _timed_action(bench: ConsoleBench, what: str, trigger, predicate, *, timeout
         "owner": sampler.summary(),
         "longest_turn_frames": sampler.during(clock.longest),
         "trigger_frames": sampler.during((began, triggered)),
+        "action_frames": sampler.during((began, finished), top_others=12),
     }
+    if mode == "trigger":
+        import io
+        import pstats
+
+        text = io.StringIO()
+        pstats.Stats(profile, stream=text).sort_stats("tottime").print_stats(45)
+        row["trigger_profile"] = text.getvalue()
+        profile = None
     if profile is not None:
         import io
         import pstats
@@ -332,7 +366,9 @@ def _scroll(bench: ConsoleBench, editor, steps: int = 20, *, hide: str = "") -> 
     }
 
 
-def run(*, window: int, exposure: float, save_dir: pathlib.Path) -> dict:
+def run(
+    *, window: int, exposure: float, save_dir: pathlib.Path, screenshots: bool = False
+) -> dict:
     bench = ConsoleBench()
     payload: dict = {
         "scenario": "edit-actions-on-deep-history-grid",
@@ -404,6 +440,10 @@ def run(*, window: int, exposure: float, save_dir: pathlib.Path) -> dict:
             ))
             editor = _editor_view(bench, panel)
             bench._pump(1.0)
+            if screenshots:
+                shot = save_dir / f"{label}-editor.png"
+                editor.grab().save(str(shot))
+                print(f"editor page: {shot}")
             scrolled = _scroll(bench, editor)
             scrolled["what"] = f"{label}: scroll"
             actions.append(scrolled)
@@ -497,6 +537,11 @@ def _print(payload: dict) -> None:
                 print(f"   longest turn ({row.get('longest_turn_ms')} ms) ran:", row["longest_turn_frames"])
             if row.get("trigger_frames"):
                 print(f"   synchronous trigger ({row.get('trigger_ms')} ms) ran:", row["trigger_frames"])
+            if row.get("action_frames"):
+                print(f"   whole action ({row.get('wall_ms')} ms), other threads worked in:", row["action_frames"][-13:])
+            if row.get("trigger_profile"):
+                print(f"   ---- trigger profile ({row.get('trigger_ms')} ms, tottime)")
+                print("\n".join(row["trigger_profile"].splitlines()[:60]))
     for row in payload["actions"]:
         if "owner_profile" in row:
             print("")
@@ -510,10 +555,17 @@ def main() -> int:
     parser.add_argument("--window", type=int, default=1000)
     parser.add_argument("--exposure", type=float, default=0.02)
     parser.add_argument("--save-dir", default="")
+    parser.add_argument("--screenshots", action="store_true",
+                        help="save each editor page as PNG in the save dir")
     arguments = parser.parse_args()
     save_dir = pathlib.Path(arguments.save_dir or tempfile.mkdtemp(prefix="edit-actions-"))
     save_dir.mkdir(parents=True, exist_ok=True)
-    payload = run(window=arguments.window, exposure=arguments.exposure, save_dir=save_dir)
+    payload = run(
+        window=arguments.window,
+        exposure=arguments.exposure,
+        save_dir=save_dir,
+        screenshots=arguments.screenshots,
+    )
     _print(payload)
     print("wrote", write_result(payload, f"edit_actions_w{arguments.window}"))
     return 0
