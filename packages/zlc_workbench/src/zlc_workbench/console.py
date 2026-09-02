@@ -1426,6 +1426,7 @@ class ConsolePresenter:
                 self._publish_panel_state(binding)
             return
         binding.refresh_requested = False
+        previous = binding.frozen_data
         binding.frozen_data = self._panel_frozen_data(
             binding,
             publication=publication,
@@ -1437,7 +1438,7 @@ class ConsolePresenter:
         self._publish_panel_state(binding)
         if binding.editor_open:
             try:
-                self._replace_panel_editor_host(binding)
+                self._advance_panel_editor_host(binding, previous)
             except Exception as error:
                 self._report(
                     f"cannot refresh {binding.state.title} plot editor: "
@@ -3496,7 +3497,9 @@ class ConsolePresenter:
                             self._publish_panel_state(binding)
                     if old_selections is not None:
                         old_selections.close()
-                    if old_host is not None:
+                    # An advanced host is the one just mounted: it took the
+                    # newer freeze in place.  Only a replaced one retires.
+                    if old_host is not None and old_host is not editor_host:
                         self._retire_plot_host(old_host)
                 except Exception as error:
                     if editor_host is not binding.editor_host:
@@ -3777,6 +3780,51 @@ class ConsolePresenter:
         )
         return host
 
+    def _advance_panel_editor_host(
+        self,
+        binding: PanelBinding,
+        previous: PanelFrozenData | None,
+    ) -> None:
+        """Show a newer freeze on the editor's own host, as the card shows a shot.
+
+        Refresh used to tear the Edit surface down and build another: a new
+        PlotSession over the frozen history, its projection, its fit, its
+        first paint -- 1.2 s on a 40-cell grid over a thousand shots, for a
+        picture the card beside it had just drawn incrementally in a tenth
+        of that.  The editor host takes the new data the way the live host
+        does, through the same prepare/solve/commit pair, and keeps its
+        artists, caches and configuration.  The pending operation settles
+        through the one editor-configuration path, so the frozen
+        description is the host's own.  A host that cannot take the data --
+        the target moved, the geometry changed -- is replaced, as before.
+        """
+
+        host = binding.editor_host
+        entry = binding.editor_configuration
+        if (
+            host is None
+            or previous is None
+            or (entry is not None and entry[0] is not host)
+            or not _same_panel_plot_target(previous.target, binding.state)
+        ):
+            # No surface yet, a replacement already being built, or a
+            # moved target: stage a complete host, as before.
+            self._replace_panel_editor_host(binding)
+            return
+        frozen = binding.frozen_data
+        assert frozen is not None
+        try:
+            pending = host.update_data(frozen.plot_input)
+        except Exception:
+            self._replace_panel_editor_host(binding)
+            return
+        # A freeze still on its way to this host is superseded, not failed:
+        # the host keeps only the latest waiting frame and cancels the rest
+        # itself, and the entry simply points at the newest.  A live source
+        # makes this the common case -- every owed presentation while the
+        # previous adoption is still painting.
+        binding.editor_configuration = (host, pending, True, binding.state, frozen)
+
     def _refresh_panel_editor_selection(self, binding: PanelBinding) -> None:
         """Rebind one unchanged editor host to a replaced frozen record."""
 
@@ -3965,7 +4013,7 @@ class ConsolePresenter:
                     if previous is not None and previous.plot_input is shown_input:
                         self._refresh_panel_editor_selection(binding)
                     else:
-                        self._replace_panel_editor_host(binding)
+                        self._advance_panel_editor_host(binding, previous)
                 except Exception as error:
                     # Frozen record and Frozen pixels are one transaction.
                     # Restore the previous record if its replacement host
