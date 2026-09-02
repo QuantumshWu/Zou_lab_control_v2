@@ -6269,3 +6269,156 @@ def test_an_unbound_refused_value_keeps_the_kind_vocabulary(
     surface = presenter._unbound_panel_parameters(poisoned)
     assert _setting_field_sets(surface)["display"] == clean["display"]
     assert surface["display_unavailable"]
+
+
+def test_opening_edit_names_todays_folder_without_making_it(
+    presenter, session
+) -> None:
+    """Every Edit projection used to create the day folder and flush its
+    directory entry to disk -- on the GUI thread, once per publication while
+    the tab was open.  Naming is a question; making it is the save's job."""
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(node.signal_key("frames"), snapshot, kind="image")
+    _settle_panel_hosts(presenter, lambda: binding.host is not None)
+    assert presenter.edit_panel(binding.panel_id)
+    projection = presenter.panel_editor_projection(binding.panel_id)
+    named = Path(projection["save_directory"])
+    assert named == session.day_folder_path()
+    assert not named.exists(), "naming the folder made it"
+    assert session.day_folder() == named and named.is_dir()
+
+
+def test_refresh_advances_the_editors_own_host(presenter, session) -> None:
+    """Refresh shows the newer freeze on the host Edit already has.
+
+    It used to build a second host over the whole frozen history -- a
+    session, a projection, a fit and a first paint -- for a picture the card
+    had just drawn incrementally.  The editor host takes the data through
+    the live pair and keeps its artists; only a moved target replaces it.
+    """
+
+    node, snap = _one_shot(session)
+    panel = presenter.add_panel(node.signal_key("frames"), snap, kind="image")
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.host is not None and panel.accepted_surface is not None,
+    )
+    assert presenter.edit_panel(panel.panel_id)
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.editor_host is not None
+        and panel.editor_configuration is None
+        and panel.frozen_data is not None
+        and panel.frozen_data.description is not None,
+    )
+    host = panel.editor_host
+    opened = panel.frozen_data
+    _one_shot(session, producer="cm")
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.accepted_surface is not None
+        and panel.accepted_surface.publication is not opened.publication,
+    )
+    card = panel.accepted_surface
+    assert presenter.refresh_panel_snapshot(panel.panel_id) is True
+    assert panel.frozen_data is not opened
+    assert panel.frozen_data.publication is card.publication
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.editor_configuration is None
+        and panel.frozen_data.description is not opened.description,
+    )
+    assert panel.editor_host is host, "Refresh rebuilt the editor host"
+    assert not host.closing, "settling the advanced host retired it"
+    shown = getattr(card.plot_input, "snapshot", card.plot_input)
+    assert panel.frozen_data.snapshot.ref == shown.ref
+    assert panel.editor_selections is not None
+    assert not [
+        text for severity, text in presenter.view.status if severity == "error"
+    ]
+
+
+def test_refreshes_in_flight_supersede_on_the_same_host(
+    presenter, session
+) -> None:
+    """A second Refresh before the first has painted supersedes it silently.
+
+    With a live source every owed presentation arrives while the previous
+    adoption is still on its way.  The host retains only the latest waiting
+    frame and cancels the rest -- flow control, which must neither rebuild
+    the surface nor surface as a panel error.
+    """
+
+    node, snap = _one_shot(session)
+    panel = presenter.add_panel(node.signal_key("frames"), snap, kind="image")
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.host is not None and panel.accepted_surface is not None,
+    )
+    assert presenter.edit_panel(panel.panel_id)
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.editor_host is not None
+        and panel.editor_configuration is None
+        and panel.frozen_data is not None
+        and panel.frozen_data.description is not None,
+    )
+    host = panel.editor_host
+    opened = panel.frozen_data
+    for _ in range(2):
+        before = panel.frozen_data.publication
+        _one_shot(session, producer="cm")
+        _settle_panel_hosts(
+            presenter,
+            lambda: panel.accepted_surface is not None
+            and panel.accepted_surface.publication is not before,
+        )
+        assert presenter.refresh_panel_snapshot(panel.panel_id) is True
+    latest = panel.accepted_surface
+    assert panel.frozen_data.publication is latest.publication
+    _settle_panel_hosts(
+        presenter,
+        lambda: panel.editor_configuration is None
+        and panel.frozen_data.description is not opened.description,
+    )
+    assert panel.editor_host is host and not host.closing
+    assert panel.frozen_data.publication is latest.publication
+    assert not [
+        text for severity, text in presenter.view.status if severity == "error"
+    ]
+
+
+def test_save_renders_through_the_settled_editor_host(
+    presenter, session, tmp_path, monkeypatch
+) -> None:
+    """Save Fig draws the export on the Edit surface it already has.
+
+    A fresh host per save cost a session, a projection, a fit and a first
+    paint over the frozen history before the one draw the file needed.
+    """
+
+    import zlc_plot.figure_artifact as artifact
+
+    node, snapshot = _one_shot(session)
+    binding = presenter.add_panel(node.signal_key("frames"), snapshot, kind="image")
+    assert presenter.edit_panel(binding.panel_id)
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.editor_host is not None
+        and binding.editor_configuration is None
+        and not binding.frozen_configuration_incompatible,
+    )
+    host = binding.editor_host
+
+    def refused(*_args, **_kwargs):
+        raise AssertionError("Save built a second host beside the settled editor")
+
+    monkeypatch.setattr(artifact, "build_figure_host", refused)
+    target = tmp_path / "through-editor.png"
+    assert presenter.save_panel_figure(binding.panel_id, str(target)) is True
+    _wait_for_panel_save(presenter, target)
+    assert target.with_suffix(".npz").exists()
+    assert binding.editor_host is host and not host.closing, (
+        "the editor's host must survive the save it rendered"
+    )

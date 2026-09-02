@@ -428,7 +428,16 @@ def save_figure_artifact(
     fit: Mapping[str, object] | None = None, lineage: Mapping[str, object] | None = None,
     selectors: object = (),
     source: Mapping[str, object] | None = None,
+    host: object | None = None,
 ) -> tuple[Path, Path]:
+    """Write the archive-first pair: the NPZ that reproduces the figure, then the image.
+
+    With ``host`` -- a raster host already configured to exactly these
+    arguments -- the recipe is read off its accepted description and the
+    image is rendered through it; the host is the caller's and stays open.
+    Without one, a host is built, configured and closed here.
+    """
+
     selected = Path(base_path).expanduser().resolve()
     image_path = selected if selected.suffix else selected.with_suffix(".png")
     if image_path.suffix.lower() not in {".png", ".pdf", ".svg"}:
@@ -441,21 +450,26 @@ def save_figure_artifact(
     if not isinstance(snapshot, OwnedSnapshot):
         raise TypeError("data-backed figure requires an OwnedSnapshot")
     overlay_arrays, overlay = _overlay_payload(plot_input, "data.overlay")
-    host = build_figure_host(
-        plot_input,
-        spec,
-        parameters=parameters,
-        size=size,
-    )
-    try:
-        configured = host.configure(
-            viewport=viewport,
-            classifier_thresholds=classifier_thresholds,
-            facet_focus=facet_focus,
-            selectors=selectors,
-            fit={} if fit is None else fit,
-            fit_live=False,
+    owned = host is None
+    if owned:
+        host = build_figure_host(
+            plot_input,
+            spec,
+            parameters=parameters,
+            size=size,
         )
+    try:
+        if owned:
+            configured = host.configure(
+                viewport=viewport,
+                classifier_thresholds=classifier_thresholds,
+                facet_focus=facet_focus,
+                selectors=selectors,
+                fit={} if fit is None else fit,
+                fit_live=False,
+            )
+        else:
+            configured = host.describe_display()
         operation = configured.result() if hasattr(configured, "result") else configured
         description = operation.value
         recipe = encode_plot_recipe(
@@ -470,7 +484,8 @@ def save_figure_artifact(
             overlay=overlay,
         )
     except BaseException:
-        host.close()
+        if owned:
+            host.close()
         raise
     source_document = dict(source or {})
     title = getattr(getattr(description.spec, "labels", None), "title", None)
@@ -505,7 +520,8 @@ def save_figure_artifact(
                 f"rendering failed: {error}"
             ) from error
     finally:
-        host.close()
+        if owned:
+            host.close()
     return image_path, archive_path
 
 

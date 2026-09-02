@@ -4089,11 +4089,22 @@ class ConsolePresenter:
         # reads the live binding again, so Refresh/Edit cannot change a save
         # that is already archive-first in flight.
         state = binding.state
+        # The Edit surface already IS this freeze, configured and painted;
+        # rendering the export through it costs one draw at export scale,
+        # where a fresh host cost a session, a projection, a fit and a
+        # first paint over the whole frozen history before the same draw.
+        host = (
+            binding.editor_host
+            if binding.editor_configuration is None
+            and binding.editor_host is not None
+            else None
+        )
         def work() -> object:
             return _save_panel_figure(
                 selected,
                 state=state,
                 frozen=frozen,
+                host=host,
             )
 
         title = state.title

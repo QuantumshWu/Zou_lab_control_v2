@@ -113,8 +113,14 @@ def save_panel_figure(
     *,
     state: PanelState,
     frozen: PanelFrozenData,
+    host: object | None = None,
 ) -> PanelFigureFiles:
-    """Adapt one frozen panel to the shared archive-first Figure writer."""
+    """Adapt one frozen panel to the shared archive-first Figure writer.
+
+    ``host`` is a plot host already showing exactly this freeze -- the Edit
+    surface -- and renders the image; without one the writer builds a host
+    of its own from the frozen description.
+    """
 
     if state.signal != frozen.signal:
         raise ValueError("Panel Save target differs from its frozen surface")
@@ -136,5 +142,6 @@ def save_panel_figure(
             "title": state.title,
             **dict(frozen.overlay),
         },
+        host=host,
     )
     return PanelFigureFiles(image, archive)
