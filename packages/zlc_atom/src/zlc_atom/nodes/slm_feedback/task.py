@@ -515,14 +515,49 @@ def _bic_gain(samples: object, fit: object) -> float:
     )
 
 
+#: Two populations are accepted only on DECISIVE evidence: a BIC gain over
+#: ten (Kass and Raftery's "very strong").  A loaded site clears it by
+#: hundreds -- four bright shots in a hundred, the fitter's own population
+#: floor, at the archived run's contrast already do -- while a dark site
+#: whose one Gaussian the fitter split in two
+#: 1.7 sigma apart came in at +4.6 and was reported to the loop as loaded
+#: with a contrast of 10.9 photoelectrons, one hundred times under its
+#: neighbours: the uniformity ratio read 116 and the observable count 33.
+_DECISIVE_BIC_GAIN = 10.0
+
+#: A loaded site whose bright fraction is under this share of the lattice's
+#: typical one is ON ITS LOADING RAMP: loading probability rises from zero
+#: over the last few percent of depth above the loading threshold, so half
+#: the typical loading means the site's edge is within about one resolution
+#: below it.  The bright fraction is the loading-margin observable the
+#: binary loaded/dark verdict throws away; it is what tells the controller
+#: which loaded sites have no share to give.
+_LOADING_EDGE_FRACTION = 0.5
+
+
+def _loading_edge(bright_fraction: object, observable: object) -> np.ndarray:
+    """The loaded sites on their loading ramp (see ``_LOADING_EDGE_FRACTION``)."""
+
+    fraction = np.asarray(bright_fraction, dtype=float)
+    loaded = np.asarray(observable, dtype=bool)
+    if fraction.shape != loaded.shape:
+        raise ValueError("bright fraction and observable shapes differ")
+    known = loaded & np.isfinite(fraction)
+    if not np.any(known):
+        return np.zeros(loaded.shape, dtype=bool)
+    typical = float(np.median(fraction[known]))
+    return known & (fraction < _LOADING_EDGE_FRACTION * typical)
+
+
 def _fit_contrasts(samples: object) -> dict[str, np.ndarray]:
     """Classify each site's one user-authored shot batch.
 
-    A resolved two-population fit supplies the bright-minus-dark feedback
-    observable.  Evidence for one Gaussian is a different, useful physical
-    result: this feedback mode treats it as a site which did not load.  Bad
-    samples or a numerically undecidable model remain invalid and therefore
-    cannot create a control action.
+    A decisively resolved two-population fit (see ``_DECISIVE_BIC_GAIN``)
+    supplies the bright-minus-dark feedback observable.  Evidence for one
+    Gaussian is a different, useful physical result: this feedback mode
+    treats it as a site which did not load.  Bad samples or a numerically
+    undecidable model remain invalid and therefore cannot create a control
+    action.
     """
 
     values = np.asarray(samples, dtype=float)
@@ -593,7 +628,7 @@ def _fit_contrasts(samples: object) -> dict[str, np.ndarray]:
         )
         if not finite_pair:
             continue
-        if fit.ok and bic_gain[site] > 0.0:
+        if fit.ok and bic_gain[site] > _DECISIVE_BIC_GAIN:
             contrast[site], error[site] = estimate, sem
             separated[site] = True
         else:
@@ -698,6 +733,7 @@ _CANDIDATE_VECTOR_FIELDS = (
     "bic_gain",
     "fit_valid",
     "observable_valid",
+    "loading_edge",
     "single_population",
     "fit_invalid",
     "single_mean",
@@ -774,6 +810,83 @@ def _allocate_requested_shares(
     decrease_scale = 0.0 if decrease_total == 0.0 else transfer / decrease_total
     allocated = current + increase_scale * increase - decrease_scale * decrease
     return allocated, transfer, increase_scale, decrease_scale
+
+
+def _funded_shares(
+    shares: np.ndarray,
+    allocated: np.ndarray,
+    directed: np.ndarray,
+    desired: np.ndarray,
+    compensators: np.ndarray,
+    *,
+    lower: np.ndarray,
+    upper: np.ndarray,
+) -> np.ndarray:
+    """Fund the directed sites' unmet share from the loaded sites in common.
+
+    ``allocated`` is the ordinary allocation; what the directed sites still
+    lack of ``desired`` is taken from (or, for a directed decrease, given
+    to) every compensating site by ONE common factor, each compensator held
+    inside ONE RESOLUTION STEP (``_PLANT_EXCITATION_LOG_STEP``) of its
+    current share and inside its own bracket bound.  When the compensators
+    cannot cover the whole request within those bounds they give
+    everything the bounds allow and the directed sites receive that, pro
+    rata, in their own direction.
+
+    The resolution, not ``maximum_weight_change``, bounds a compensator: a
+    loaded site's own loading margin is unknown until it has shown an edge,
+    and the clamp meant for a site's OWN correction (a third of its share)
+    is many times the margin a marginally loaded array has.  Measured on
+    the virtual lattice, where that margin is ~4%: funding ten dark sites
+    under the clamp pressed twenty-two loaded ones dark in one candidate
+    and the run crawled back at one bracket bisection per candidate; at
+    the resolution twenty-five loaded sites still hand over half a site's
+    share per candidate -- a dark site is lifted in a few candidates --
+    and none of them crosses its edge.
+    """
+
+    current = np.asarray(shares, dtype=float)
+    result = np.array(allocated, dtype=float, copy=True)
+    wants = np.asarray(directed, dtype=bool)
+    pays = np.asarray(compensators, dtype=bool)
+    unmet = np.where(wants, np.asarray(desired, dtype=float) - result, 0.0)
+    need = float(np.sum(unmet))
+    if need == 0.0 or not np.any(pays):
+        return result
+    cap = _PLANT_EXCITATION_LOG_STEP
+    floor = np.maximum(np.asarray(lower, dtype=float), current * np.exp(-cap))[pays]
+    ceiling = np.minimum(np.asarray(upper, dtype=float), current * np.exp(cap))[pays]
+    base = result[pays]
+    goal = float(np.sum(base)) - need
+
+    def total(log_factor: float) -> float:
+        return float(np.sum(np.clip(base * np.exp(log_factor), floor, ceiling)))
+
+    if need > 0.0:
+        reachable = float(np.sum(floor))
+        low, high = float(np.min(np.log(floor / base))), 0.0
+        short = reachable > goal
+        limit = floor
+    else:
+        reachable = float(np.sum(ceiling))
+        low, high = 0.0, float(np.max(np.log(ceiling / base)))
+        short = reachable < goal
+        limit = ceiling
+    if short:
+        paid = limit
+        scale = (float(np.sum(base)) - reachable) / need
+    else:
+        for _ in range(200):
+            middle = 0.5 * (low + high)
+            if total(middle) < goal:
+                low = middle
+            else:
+                high = middle
+        paid = np.clip(base * np.exp(0.5 * (low + high)), floor, ceiling)
+        scale = 1.0
+    result[pays] = paid
+    result[wants] += scale * unmet[wants]
+    return result
 
 
 def _support(
@@ -879,27 +992,46 @@ def _relative_probe_target(
     return validate_target(updated), next_shares / shares
 
 
-def _selected_probe_target(
-    target: np.ndarray,
+def _probe_verdict(
     probe_sites: np.ndarray,
+    baseline_weights: np.ndarray,
     baseline_contrast: np.ndarray,
     baseline_valid: np.ndarray,
     measurements: list[tuple[float, np.ndarray, np.ndarray, np.ndarray]],
-    rows: np.ndarray,
-    columns: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    maximum_weight_change: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Turn a two-sided probe episode into each probe site's direction.
+
+    THE DIRECTION OF A DARK SITE IS DECIDED BY EVIDENCE.  The side of the
+    episode on which the site loaded is the side it goes to; when both sides
+    loaded, the one whose contrast is closer to the loaded sites' reference
+    (closer to the baseline share when there is no reference).  When neither
+    side loaded the physical prior takes over: loading needs a deeper trap,
+    so the site extrapolates one ``maximum_weight_change`` step beyond the
+    deepest share the episode has already shown dark, instead of standing
+    still at a baseline that is known not to load.  Standing still was a
+    stall ("baseline restored") that left a dark site dark forever.
+
+    Returns, for every site (zeros/NaN off the probe sites): the requested
+    log step from the baseline share, the bracket direction, the share known
+    single, the share known loaded, and the decision text.
+    """
+
     probe = np.asarray(probe_sites, dtype=bool)
+    baseline = np.asarray(baseline_weights, dtype=float)
     values = np.asarray(baseline_contrast, dtype=float)
     valid = np.asarray(baseline_valid, dtype=bool)
-    shape = (len(rows),)
-    reasonable = (
-        valid & np.isfinite(values) & (values > 0.0)
-    )
+    shape = baseline.shape
+    reasonable = valid & np.isfinite(values) & (values > 0.0)
     reference = (
         float(np.exp(np.mean(np.log(values[reasonable]))))
         if np.any(reasonable) else float("nan")
     )
-    selected = np.ones(shape, dtype=float)
+    cap = np.log1p(float(maximum_weight_change))
+    step = np.zeros(shape, dtype=float)
+    direction = np.zeros(shape, dtype=float)
+    single_bound = np.full(shape, np.nan, dtype=float)
+    observable_bound = np.full(shape, np.nan, dtype=float)
     decisions = np.full(shape, "not_probed", dtype="<U32")
     for site in np.flatnonzero(probe):
         options: list[tuple[bool, float, float, float]] = []
@@ -917,28 +1049,33 @@ def _selected_probe_target(
                 (
                     factor < 1.0,
                     abs(float(np.log(value / reference)))
-                    if np.isfinite(reference) else float("inf"),
+                    if np.isfinite(reference)
+                    else abs(float(np.log(factor))),
                     uncertainty / value,
                     factor,
                 )
             )
         sides = {option[0] for option in options}
         if not options:
-            decisions[site] = "probe_hold_unobservable"
-        elif len(sides) == 2 and not np.isfinite(reference):
-            decisions[site] = "probe_hold_no_reference"
-        else:
-            chosen = min(options, key=lambda item: (item[1], item[2]))
-            selected[site] = chosen[3]
-            side = "lower" if chosen[0] else "upper"
-            decisions[site] = f"probe_choose_{side}_{'closest' if len(sides) == 2 else 'only'}"
-    observed_factors = np.array(selected, copy=True)
-    updated, effective = _relative_probe_target(
-        target, selected, probe, rows, columns
-    )
-    selected_effective = np.ones(shape, dtype=float)
-    selected_effective[probe] = effective[probe]
-    return updated, selected_effective, decisions, observed_factors
+            deepest = max(
+                [1.0] + [float(factor) for factor, *_rest in measurements]
+            )
+            direction[site] = 1.0
+            single_bound[site] = baseline[site] * deepest
+            step[site] = float(np.log(deepest)) + cap
+            decisions[site] = "probe_extrapolate_upper"
+            continue
+        chosen = min(options, key=lambda item: (item[1], item[2]))
+        factor = chosen[3]
+        direction[site] = float(np.sign(np.log(factor)))
+        single_bound[site] = baseline[site]
+        observable_bound[site] = baseline[site] * factor
+        step[site] = float(np.log(factor))
+        side = "lower" if chosen[0] else "upper"
+        decisions[site] = (
+            f"probe_choose_{side}_{'closest' if len(sides) == 2 else 'only'}"
+        )
+    return step, direction, single_bound, observable_bound, decisions
 
 
 def _probe_boundary(
@@ -954,73 +1091,169 @@ def _probe_boundary(
     return boundary
 
 
-def _updated_single_bracket(
+def _updated_brackets(
     current: object,
-    active_single: object,
+    dark: object,
+    observable: object,
+    previous_weights: object,
     single_bound: object,
     observable_bound: object,
     direction: object,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Record what this candidate proved about every site's loading edge.
+
+    A bracket is one site's evidence about where its loading edge lies: the
+    share it was last seen single at, the share it was last seen loaded at,
+    and the direction from the first to the second.  EVERY measured
+    candidate is evidence -- a diagnostic probe as much as a formal one --
+    and THE LATEST OBSERVATION WINS: the edge drifts with the rest of the
+    lattice (the solver redistributes, the reference mean moves; on the
+    virtual lattice by ~5% over ten candidates), so a bound is the most
+    recent share the site showed that state at, never the tightest ever
+    seen.  A loaded site pressed dark by the compensation for somebody
+    else's share is exactly a site that has just shown where its edge is:
+    that goes into its bracket and its next step goes back towards the
+    share it was loaded at.
+
+    The direction is the probe verdict's (or, seeded here, the prior's:
+    deeper loads) and ONLY a verdict changes it.  A dark observation cannot
+    say which side of its loading window a site is on, and the rule that
+    turned a site round whenever it was dark beyond its loaded bound sent
+    three virtual sites ping-ponging between two shares for the rest of
+    the run: "loaded at 1.05" was a marginal loading the ramp had since
+    moved past, and the flip made it a ceiling.
+
+    Rules, in order:
+    - a loaded site records the share as its loaded bound; a single bound
+      on the loaded side of it is stale and dropped;
+    - a dark site with no bracket seeds one from the last share it was
+      loaded at (see ``previous_weights``);
+    - a dark site beyond its loaded bound by more than the resolution has
+      contradicted that bound: it is dropped, and the site records the
+      share as its single bound and keeps creeping in its direction
+      (``_single_bracket_step``);
+    - otherwise a dark site records the share as its single bound; dark
+      within a resolution of the loaded share it has FOUND the edge and
+      steps one resolution past it.
+
+    The resolution is the identification excitation
+    (``_PLANT_EXCITATION_LOG_STEP``): the SLM Target is wiggled by that much
+    while the plant is identified, so no bracket can be resolved finer.
+    """
+
     present = np.asarray(current, dtype=float)
-    active = np.asarray(active_single, dtype=bool)
+    single_now = np.asarray(dark, dtype=bool)
+    loaded_now = np.asarray(observable, dtype=bool)
+    previous = np.asarray(previous_weights, dtype=float)
     single = np.asarray(single_bound, dtype=float).copy()
-    observable = np.asarray(observable_bound, dtype=float).copy()
+    loaded = np.asarray(observable_bound, dtype=float).copy()
     sign = np.asarray(direction, dtype=float).copy()
     if not all(
         value.shape == present.shape
-        for value in (active, single, observable, sign)
+        for value in (single_now, loaded_now, previous, single, loaded, sign)
     ):
         raise ValueError("single bracket shapes differ")
-    crossed = (
-        active
-        & np.isfinite(observable)
-        & (((sign > 0.0) & (present > observable))
-           | ((sign < 0.0) & (present < observable)))
-    )
-    sign[crossed] = np.sign(observable[crossed] - present[crossed])
-    single[crossed] = present[crossed]
-    up = sign > 0.0
-    down = sign < 0.0
-    single[active & up] = np.fmax(single[active & up], present[active & up])
-    single[active & down] = np.fmin(single[active & down], present[active & down])
-    return single, observable, sign, crossed
+    resolution = _PLANT_EXCITATION_LOG_STEP
+
+    loaded[loaded_now] = present[loaded_now]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        toward_single = np.where(
+            loaded_now & np.isfinite(single), sign * np.log(single / present), 0.0
+        )
+    stale = loaded_now & np.isfinite(single) & (toward_single >= 0.0)
+    single[stale] = np.nan
+
+    seed = single_now & (sign == 0.0) & np.isfinite(previous) & (previous > 0.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        gap = np.where(seed, np.log(previous / present), 0.0)
+    sign[seed] = np.where(np.abs(gap[seed]) <= resolution, 1.0, np.sign(gap[seed]))
+    single[seed] = present[seed]
+    loaded[seed] = previous[seed]
+
+    bracketed = single_now & ~seed & (sign != 0.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        beyond = np.where(
+            bracketed & np.isfinite(loaded), sign * np.log(present / loaded), 0.0
+        )
+    contradicted = bracketed & np.isfinite(loaded) & (beyond > resolution)
+    loaded[contradicted] = np.nan
+    single[bracketed] = present[bracketed]
+    return single, loaded, sign
 
 
 def _single_bracket_step(
     current: np.ndarray,
-    boundary: np.ndarray,
+    dark: np.ndarray,
+    single_bound: np.ndarray,
+    observable_bound: np.ndarray,
     direction: np.ndarray,
     maximum_weight_change: float,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
+    """The step a dark site asks for from its bracket, and its name.
+
+    With a bracket wider than the resolution the site bisects towards its
+    loaded share (the geometric midpoint, capped at
+    ``maximum_weight_change``): ``single_bracket_midpoint``.  Otherwise it
+    CREEPS: one resolution past its single bound in its direction --
+    ``single_edge_step`` with a loaded share on record (the edge is found,
+    or the bracket is inverted), ``single_extrapolate`` without one.  The
+    prior is applied one resolution at a time, never a whole
+    ``maximum_weight_change``: a site jumping a third of its share is funded
+    by every loaded site at once, and on the virtual lattice, at a 4%
+    loading margin, that pressed the neighbours dark in turn
+    (29->23->26->25->32->22 observable sites).  The one large step a
+    never-loaded site gets is the probe verdict's own, informed by both
+    probe sides (``_probe_verdict``).
+    """
+
     present = np.asarray(current, dtype=float)
-    midpoint = np.asarray(boundary, dtype=float)
+    single_now = np.asarray(dark, dtype=bool)
+    single = np.asarray(single_bound, dtype=float)
+    loaded = np.asarray(observable_bound, dtype=float)
     sign = np.asarray(direction, dtype=float)
-    active = (
-        np.isfinite(present) & (present > 0.0)
-        & np.isfinite(midpoint) & (midpoint > 0.0)
-        & (((sign > 0.0) & (midpoint > present))
-           | ((sign < 0.0) & (midpoint < present)))
-    )
-    step = np.zeros(present.shape, dtype=float)
     cap = np.log1p(float(maximum_weight_change))
-    step[active] = np.clip(
-        np.log(midpoint[active] / present[active]), -cap, cap
+    resolution = _PLANT_EXCITATION_LOG_STEP
+    step = np.zeros(present.shape, dtype=float)
+    kind = np.full(present.shape, "", dtype="<U32")
+    active = (
+        single_now & (sign != 0.0) & np.isfinite(present) & (present > 0.0)
+        & np.isfinite(single) & (single > 0.0)
     )
-    return step
+    known = active & np.isfinite(loaded) & (loaded > 0.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        span = np.log(loaded / single)
+        midpoint = np.sqrt(single * loaded)
+        toward = np.log(midpoint / present)
+        past_single = np.log(single / present)
+    bisect = known & (np.sign(span) == sign) & (np.abs(span) > resolution)
+    step[bisect] = np.clip(toward[bisect], -cap, cap)
+    kind[bisect] = "single_bracket_midpoint"
+    creep = active & ~bisect
+    step[creep] = past_single[creep] + sign[creep] * resolution
+    kind[creep & known] = "single_edge_step"
+    kind[creep & ~known] = "single_extrapolate"
+    return step, kind
 
 
 def _needs_probe(
     single: np.ndarray,
     observable: np.ndarray,
     acquisition_invalid: np.ndarray,
+    direction: np.ndarray,
     previous_weights: np.ndarray,
     previous_contrast: np.ndarray,
 ) -> np.ndarray:
+    """A dark site with no evidence at all -- no bracket, never loaded."""
+
     has_history = (
         np.isfinite(previous_weights) & (previous_weights > 0.0)
         & np.isfinite(previous_contrast) & (previous_contrast > 0.0)
     )
-    return _unobservable_single(single, observable, acquisition_invalid) & ~has_history
+    return (
+        _unobservable_single(single, observable, acquisition_invalid)
+        & (np.asarray(direction, dtype=float) == 0.0)
+        & ~has_history
+    )
 
 
 def _unobservable_single(
@@ -1050,8 +1283,17 @@ def _updated_target(
     directed_log_step: np.ndarray | None = None,
     control_boundary: np.ndarray | None = None,
     control_direction: np.ndarray | None = None,
+    loading_edge: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Update observable sites relatively while holding all others.
+    """Update observable sites relatively; fund the dark sites' directions.
+
+    A loaded site on its loading ramp (``loading_edge``, see
+    ``_loading_edge``) has no share to give: its own step is held at zero
+    when it points shallower (``hold_loading_edge``) and neither the
+    ordinary trades nor the funding may take it below its current share.
+    The site that ping-ponged for twenty candidates on the virtual lattice
+    was one loaded at a 15% bright fraction and then handed 2% to a dark
+    neighbour: dark the next candidate, and back on the probe treadmill.
 
     ``feedback_gain`` is the LOOP gain: the fraction of each site's log
     residual the next candidate is asked to remove.  Dividing by the
@@ -1061,6 +1303,24 @@ def _updated_target(
     quality, clamped to ``maximum_weight_change`` and passed through the
     share-conserving allocator, so the recorded correction is what was
     actually applied.
+
+    A dark site with a direction (``directed_log_step``: a probe verdict, a
+    bracket bisection or an extrapolation) asks for that share outright --
+    the request is not the loop's, so neither gain nor clamp applies to it.
+    THE LOADED SITES FUND IT, TOGETHER AND BOUNDED: whatever the ordinary
+    trades leave unmet is drawn from every loaded site by one common factor,
+    each site giving at most one resolution step in this candidate and never
+    past its own bracket boundary (``control_boundary``; see
+    ``_funded_shares``).  Total power
+    is the hard constraint; how fast a dark site gets there is not.  Direct
+    adoption of a winning probe share used to rescale the loaded sites by
+    whatever it took (-40% at once), which pressed every one of them past
+    its loading edge at 4% margin; and a bracket step with nobody assigned
+    to pay for it moved ~1% per candidate, the crumbs of the loop's own
+    residual trades.  What cannot be funded this candidate is scaled back
+    towards the current share, never reversed, and asked for again next
+    candidate.  Without a directed site this is exactly the ordinary
+    allocation, arithmetic untouched.
     """
 
     values = np.asarray(contrast, dtype=float)
@@ -1092,6 +1352,10 @@ def _updated_target(
         np.zeros(site_shape, dtype=float)
         if control_direction is None else np.asarray(control_direction, dtype=float)
     )
+    edge = (
+        np.zeros(site_shape, dtype=bool)
+        if loading_edge is None else np.asarray(loading_edge, dtype=bool)
+    )
     if (
         values.shape != site_shape
         or errors.shape != site_shape
@@ -1100,6 +1364,8 @@ def _updated_target(
         or direction.shape != site_shape
         or boundary.shape != site_shape
         or boundary_direction.shape != site_shape
+        or edge.shape != site_shape
+        or np.any(edge & ~control_valid)
         or np.any(references & ~control_valid)
         or np.any(~np.isfinite(direction))
         or not np.isfinite(gain)
@@ -1132,14 +1398,11 @@ def _updated_target(
                     np.log1p(maximum_change),
                 )
             )
+            if edge[site] and log_correction[site] < 0.0:
+                log_correction[site] = 0.0
+                decision[site] = "hold_loading_edge"
         elif direction[site] != 0.0:
-            log_correction[site] = float(
-                np.clip(
-                    direction[site],
-                    -np.log1p(maximum_change),
-                    np.log1p(maximum_change),
-                )
-            )
+            log_correction[site] = float(direction[site])
             decision[site] = (
                 "probe_direction_lower"
                 if log_correction[site] < 0.0
@@ -1154,6 +1417,7 @@ def _updated_target(
         boundary_share,
         0.0,
     )
+    lower = np.where(edge, np.maximum(lower, shares), lower)
     upper = np.where(
         (boundary_direction < 0.0) & np.isfinite(boundary_share),
         boundary_share,
@@ -1167,6 +1431,17 @@ def _updated_target(
             upper=upper,
         )
     )
+    directed = (direction != 0.0) & ~control_valid
+    if np.any(directed):
+        next_shares = _funded_shares(
+            shares,
+            next_shares,
+            directed,
+            shares * np.exp(log_correction),
+            control_valid & ~directed,
+            lower=lower,
+            upper=upper,
+        )
     log_correction = np.log(next_shares / shares)
     updated = np.array(target, dtype=np.float32, copy=True)
     updated[rows, columns] = (
@@ -2087,6 +2362,7 @@ class SlmFeedbackTask:
         bool_fields = {
             "fit_valid",
             "observable_valid",
+            "loading_edge",
             "single_population",
             "fit_invalid",
         }
@@ -3137,7 +3413,6 @@ class SlmFeedbackTask:
             convergence_streak = 0
             probe_sites = np.zeros(self._site_count, dtype=bool)
             probe_episode_used = np.zeros(self._site_count, dtype=bool)
-            probe_adoption_pending = np.zeros(self._site_count, dtype=bool)
             probe_baseline_target: np.ndarray | None = None
             probe_baseline_pattern: np.ndarray | None = None
             probe_baseline_optimizer_state: dict[str, object] | None = None
@@ -3151,15 +3426,8 @@ class SlmFeedbackTask:
             probe_baseline_reference_valid = np.zeros(
                 self._site_count, dtype=bool
             )
-            probe_baseline_directed_step = np.zeros(
-                self._site_count, dtype=float
-            )
-            probe_baseline_control_boundary = np.full(
-                self._site_count, np.nan, dtype=float
-            )
-            probe_baseline_control_direction = np.zeros(
-                self._site_count, dtype=float
-            )
+            probe_baseline_dark = np.zeros(self._site_count, dtype=bool)
+            probe_baseline_edge = np.zeros(self._site_count, dtype=bool)
             pending_probes: list[
                 tuple[float, float, np.ndarray, np.ndarray]
             ] = []
@@ -3170,8 +3438,11 @@ class SlmFeedbackTask:
             active_probe_effective: float | None = None
             active_probe_site_factors: np.ndarray | None = None
             probe_selected_factors = np.ones(self._site_count, dtype=float)
-            probe_direction_log_step = np.zeros(self._site_count, dtype=float)
-            probe_direction_sign = np.zeros(self._site_count, dtype=float)
+            # Every site's bracket: the direction its loading edge lies in,
+            # a share it was single at and a share it was loaded at (see
+            # ``_updated_brackets``).  Kept across the whole run; a probe
+            # episode only ever seeds it for sites that had none.
+            bracket_direction = np.zeros(self._site_count, dtype=float)
             probe_single_bound = np.full(
                 self._site_count, np.nan, dtype=float
             )
@@ -3257,6 +3528,9 @@ class SlmFeedbackTask:
                 contrast = np.asarray(fitted["contrast"], dtype=float)
                 error = np.asarray(fitted["standard_error"], dtype=float)
                 observable_valid = fit_valid
+                loading_edge = _loading_edge(
+                    fitted["bright_fraction"], observable_valid
+                )
                 odd_contrast = np.asarray(fitted["odd_contrast"], dtype=float).copy()
                 even_contrast = np.asarray(fitted["even_contrast"], dtype=float).copy()
                 odd_contrast[~observable_valid] = np.nan
@@ -3273,12 +3547,10 @@ class SlmFeedbackTask:
                     expected_noise_ratio = _expected_noise_ratio(
                         error / contrast, observable_valid
                     )
-                needs_probe_sites = _needs_probe(
+                unobservable_single = _unobservable_single(
                     fit_single,
                     observable_valid,
                     acquisition_invalid,
-                    previous_weights,
-                    previous_contrast,
                 )
                 valid = bool(np.all(observable_valid))
                 observable_contrast = contrast[observable_valid]
@@ -3351,132 +3623,55 @@ class SlmFeedbackTask:
                 )
                 if candidate_kind != "probe":
                     convergence_streak = convergence_streak + 1 if converged else 0
-                bracket_recovery = np.zeros(self._site_count, dtype=bool)
+                # Bracket bookkeeping runs on every measured candidate: a
+                # probe's non-probe sites are evidence too.  The probe sites
+                # of an episode in flight are the verdict's to seed.
+                bookkept = (
+                    ~probe_sites if candidate_kind == "probe" else
+                    np.ones(self._site_count, dtype=bool)
+                )
+                (
+                    probe_single_bound,
+                    probe_observable_bound,
+                    bracket_direction,
+                ) = _updated_brackets(
+                    current_control_weights,
+                    unobservable_single & bookkept,
+                    observable_valid & bookkept,
+                    previous_weights,
+                    probe_single_bound,
+                    probe_observable_bound,
+                    bracket_direction,
+                )
+                probe_control_boundary[:] = _probe_boundary(
+                    probe_single_bound,
+                    probe_observable_bound,
+                    bracket_direction,
+                )
+                bracket_step, bracket_kind = _single_bracket_step(
+                    current_control_weights,
+                    unobservable_single,
+                    probe_single_bound,
+                    probe_observable_bound,
+                    bracket_direction,
+                    self.maximum_weight_change,
+                )
                 episode_probe_sites = np.zeros(self._site_count, dtype=bool)
                 starts_probe_episode = False
                 if candidate_kind != "probe":
-                    probe_direction_log_step[fit_valid] = 0.0
-                    unobservable_single = _unobservable_single(
-                        fit_single,
-                        observable_valid,
-                        acquisition_invalid,
-                    )
-                    contradicted_probe = (
-                        unobservable_single
-                        & (candidate_kind == "probe_combined")
-                        & (
-                            probe_adoption_pending
-                            | probe_baseline_reference_valid
-                        )
-                    )
-                    probe_adoption_pending[fit_valid | acquisition_invalid] = False
-                    if np.any(contradicted_probe):
-                        probe_episode_used[contradicted_probe] = False
-                        probe_adoption_pending[contradicted_probe] = False
-                        probe_selected_factors[contradicted_probe] = 1.0
-                        probe_direction_log_step[contradicted_probe] = 0.0
-                        probe_direction_sign[contradicted_probe] = 0.0
-                        probe_single_bound[contradicted_probe] = np.nan
-                        probe_observable_bound[contradicted_probe] = np.nan
-                        probe_control_boundary[contradicted_probe] = np.nan
-                    has_double_history = (
-                        unobservable_single
-                        & np.isfinite(previous_weights)
-                        & (previous_weights > 0.0)
-                        & np.isfinite(previous_contrast)
-                        & (previous_contrast > 0.0)
-                    )
-                    new_history_branch = (
-                        has_double_history & (probe_direction_sign == 0.0)
-                    )
-                    history_direction = np.zeros(self._site_count, dtype=float)
-                    history_direction[new_history_branch] = np.sign(np.log(
-                        previous_weights[new_history_branch]
-                        / current_control_weights[new_history_branch]
-                    ))
-                    new_history_branch &= history_direction != 0.0
-                    probe_direction_sign[new_history_branch] = history_direction[
-                        new_history_branch
-                    ]
-                    probe_single_bound[new_history_branch] = (
-                        current_control_weights[new_history_branch]
-                    )
-                    probe_observable_bound[new_history_branch] = previous_weights[
-                        new_history_branch
-                    ]
-                    (
-                        probe_single_bound,
-                        probe_observable_bound,
-                        probe_direction_sign,
-                        _crossed_bracket,
-                    ) = _updated_single_bracket(
-                        current_control_weights,
-                        unobservable_single,
-                        probe_single_bound,
-                        probe_observable_bound,
-                        probe_direction_sign,
-                    )
-                    up = probe_direction_sign > 0.0
-                    down = probe_direction_sign < 0.0
-                    probe_observable_bound[observable_valid & up] = np.fmin(
-                        probe_observable_bound[observable_valid & up], current_control_weights[observable_valid & up]
-                    )
-                    probe_observable_bound[observable_valid & down] = np.fmax(
-                        probe_observable_bound[observable_valid & down], current_control_weights[observable_valid & down]
-                    )
-                    probe_direction_log_step[observable_valid] = 0.0
-                    probe_control_boundary[:] = _probe_boundary(
-                        probe_single_bound,
-                        probe_observable_bound,
-                        probe_direction_sign,
-                    )
-                    midpoint_step = _single_bracket_step(
-                        current_control_weights,
-                        probe_control_boundary,
-                        probe_direction_sign,
-                        self.maximum_weight_change,
-                    )
-                    bracket_recovery = unobservable_single & (midpoint_step != 0.0)
-                    probe_direction_log_step[bracket_recovery] = midpoint_step[
-                        bracket_recovery
-                    ]
-                    relative_move = np.full(
-                        self._site_count, np.inf, dtype=float
-                    )
-                    relative_move[has_double_history] = np.abs(np.log(
-                        current_control_weights[has_double_history]
-                        / previous_weights[has_double_history]
-                    ))
-                    has_probe_direction = probe_direction_sign != 0.0
-                    recovery_probe = (
-                        has_double_history
-                        & ~_crossed_bracket
-                        & ~has_probe_direction
-                        & (
-                            (relative_move < 0.02)
-                            | (probe_direction_sign == 0.0)
-                            | (
-                                np.isfinite(probe_observable_bound)
-                                & ~np.isfinite(probe_control_boundary)
-                            )
-                        )
-                    )
                     episode_probe_sites = (
-                        (
-                            (needs_probe_sites & ~has_probe_direction)
-                            | recovery_probe
-                            | contradicted_probe
+                        _needs_probe(
+                            fit_single,
+                            observable_valid,
+                            acquisition_invalid,
+                            bracket_direction,
+                            previous_weights,
+                            previous_contrast,
                         )
                         & ~probe_episode_used
                         & (formal_updates < self.max_updates)
                     )
                     starts_probe_episode = bool(np.any(episode_probe_sites))
-                    if starts_probe_episode:
-                        probe_direction_log_step[episode_probe_sites] = 0.0
-                        probe_direction_sign[episode_probe_sites] = 0.0
-                        probe_single_bound[episode_probe_sites] = np.nan
-                        probe_observable_bound[episode_probe_sites] = np.nan
-                        probe_control_boundary[episode_probe_sites] = np.nan
                 feedback_valid = observable_valid
                 if starts_probe_episode:
                     probe_sites = np.array(episode_probe_sites, copy=True)
@@ -3484,7 +3679,6 @@ class SlmFeedbackTask:
                     pending_probes.clear()
                     probe_measurements.clear()
                     probe_selected_factors[probe_sites] = 1.0
-                    probe_adoption_pending[probe_sites] = False
                     probe_decisions[probe_sites] = "not_probed"
                     probe_baseline_candidate = None
                     probe_baseline_target = np.array(
@@ -3500,6 +3694,8 @@ class SlmFeedbackTask:
                     probe_baseline_error[:] = error
                     probe_baseline_valid[:] = observable_valid
                     probe_baseline_reference_valid[:] = fit_valid
+                    probe_baseline_dark[:] = unobservable_single
+                    probe_baseline_edge[:] = loading_edge
                     for requested_factor in self.probe_factors:
                         requested = np.ones(self._site_count, dtype=float)
                         requested[probe_sites] = requested_factor
@@ -3552,13 +3748,9 @@ class SlmFeedbackTask:
                         self._site_count, "hold_for_probe", dtype="<U32"
                     )
                 else:
-                    directed_step = np.array(
-                        probe_direction_log_step, copy=True
-                    )
-                    directed_step[acquisition_invalid] = 0.0
-                    allocation_boundary = np.array(
-                        probe_control_boundary, copy=True
-                    )
+                    directed_step = np.array(bracket_step, copy=True)
+                    if starts_probe_episode:
+                        directed_step[probe_sites] = 0.0
                     proposed_target, log_correction, decisions = (
                         _updated_target(
                             current_target,
@@ -3572,18 +3764,15 @@ class SlmFeedbackTask:
                             plant_slope=plant_slope_magnitude,
                             maximum_weight_change=self.maximum_weight_change,
                             directed_log_step=directed_step,
-                            control_boundary=allocation_boundary,
-                            control_direction=probe_direction_sign,
+                            control_boundary=probe_control_boundary,
+                            control_direction=bracket_direction,
+                            loading_edge=loading_edge,
                         )
                     )
-                    decisions[bracket_recovery] = "single_bracket_midpoint"
+                    stepped = unobservable_single & (directed_step != 0.0)
+                    decisions[stepped] = bracket_kind[stepped]
                     if starts_probe_episode:
                         decisions[probe_sites] = "hold_for_probe"
-                        probe_baseline_directed_step[:] = directed_step
-                        probe_baseline_control_boundary[:] = allocation_boundary
-                        probe_baseline_control_direction[:] = (
-                            probe_direction_sign
-                        )
                 measured_device_record = self._device_event_record(
                     include_measurement=True,
                     candidate=candidate_number,
@@ -3681,6 +3870,7 @@ class SlmFeedbackTask:
                     "observable_valid": [
                         bool(value) for value in observable_valid
                     ],
+                    "loading_edge": [bool(value) for value in loading_edge],
                     "single_population": [bool(value) for value in fit_single],
                     "fit_invalid": [bool(value) for value in fit_invalid],
                     "single_mean": _json_floats(fitted["single_mean"]),
@@ -3849,46 +4039,54 @@ class SlmFeedbackTask:
                         next_kind = "probe"
                     else:
                         assert probe_baseline_target is not None
-                        (
-                            selected_probe_target,
-                            selected_factors,
-                            selected_decisions,
-                            probe_observed_factors,
-                        ) = _selected_probe_target(
-                            probe_baseline_target,
-                            probe_sites,
-                            probe_baseline_contrast,
-                            probe_baseline_valid,
-                            probe_measurements,
-                            self._rows,
-                            self._columns,
-                        )
-                        probe_direction_log_step[probe_sites] = 0.0
-                        probe_selected_factors[probe_sites] = selected_factors[
-                            probe_sites
-                        ]
-                        probe_decisions[probe_sites] = selected_decisions[probe_sites]
-                        probe_direction_sign[probe_sites] = np.sign(
-                            np.log(probe_observed_factors[probe_sites])
-                        )
-                        probe_adoption_pending[probe_sites] = (
-                            probe_selected_factors[probe_sites] != 1.0
-                        )
                         baseline_control = _control_weights(
                             probe_baseline_target[self._rows, self._columns]
                         )
-                        directed_probe = probe_sites & (
-                            probe_direction_sign != 0.0
+                        (
+                            verdict_step,
+                            verdict_direction,
+                            verdict_single,
+                            verdict_observable,
+                            verdict_decisions,
+                        ) = _probe_verdict(
+                            probe_sites,
+                            baseline_control,
+                            probe_baseline_contrast,
+                            probe_baseline_valid,
+                            probe_measurements,
+                            self.maximum_weight_change,
                         )
-                        probe_single_bound[directed_probe] = baseline_control[
-                            directed_probe
+                        probe_decisions[probe_sites] = verdict_decisions[probe_sites]
+                        bracket_direction[probe_sites] = verdict_direction[probe_sites]
+                        probe_single_bound[probe_sites] = verdict_single[probe_sites]
+                        probe_observable_bound[probe_sites] = verdict_observable[
+                            probe_sites
                         ]
-                        combined_directed_step = np.array(
-                            probe_baseline_directed_step, copy=True
+                        probe_control_boundary[:] = _probe_boundary(
+                            probe_single_bound,
+                            probe_observable_bound,
+                            bracket_direction,
                         )
-                        combined_directed_step[probe_sites] = 0.0
+                        # The combined Target is the baseline's own formal
+                        # update plus every dark site's direction -- the
+                        # probe verdict for the probed sites, the bracket
+                        # step (now holding what the probes showed) for the
+                        # rest -- funded by the loaded sites within a
+                        # resolution step and their bracket floors (see
+                        # ``_updated_target``).
+                        combined_directed_step, _combined_kind = _single_bracket_step(
+                            baseline_control,
+                            probe_baseline_dark & ~probe_sites,
+                            probe_single_bound,
+                            probe_observable_bound,
+                            bracket_direction,
+                            self.maximum_weight_change,
+                        )
+                        combined_directed_step[probe_sites] = verdict_step[
+                            probe_sites
+                        ]
                         combined_target, *_formal_details = _updated_target(
-                            selected_probe_target,
+                            probe_baseline_target,
                             probe_baseline_contrast,
                             probe_baseline_error,
                             probe_baseline_valid,
@@ -3899,12 +4097,9 @@ class SlmFeedbackTask:
                             plant_slope=plant_slope_magnitude,
                             maximum_weight_change=self.maximum_weight_change,
                             directed_log_step=combined_directed_step,
-                            control_boundary=(
-                                probe_baseline_control_boundary
-                            ),
-                            control_direction=(
-                                probe_baseline_control_direction
-                            ),
+                            control_boundary=probe_control_boundary,
+                            control_direction=bracket_direction,
+                            loading_edge=probe_baseline_edge,
                         )
                         combined_control = _control_weights(
                             combined_target[self._rows, self._columns]
@@ -3913,9 +4108,6 @@ class SlmFeedbackTask:
                             combined_control[probe_sites]
                             / baseline_control[probe_sites]
                         )
-                        probe_adoption_pending[probe_sites] &= (
-                            probe_selected_factors[probe_sites] != 1.0
-                        )
                         if np.array_equal(
                             combined_target, probe_baseline_target
                         ):
@@ -3923,8 +4115,8 @@ class SlmFeedbackTask:
                             continue_feedback = False
                             history[-1]["next_phase_changed"] = False
                             termination_reason = (
-                                "two-sided SLM probes supplied no observable "
-                                "direction; baseline restored"
+                                "the loaded sites could fund no share for the "
+                                "probed sites' direction; baseline restored"
                             )
                             forced_terminal_candidate = probe_baseline_candidate
                         else:
@@ -3959,9 +4151,12 @@ class SlmFeedbackTask:
                     assert next_target is not None
                     # The identification excitation rides on the first
                     # ordinary updates only; a probe's Target is the probe's
-                    # own statement and carries none.
+                    # own statement and carries none, and a site on its
+                    # loading ramp is not wiggled 2% towards dark.
                     next_excitation = (
-                        _excitation_pattern(excitation_rng, feedback_valid)
+                        _excitation_pattern(
+                            excitation_rng, feedback_valid & ~loading_edge
+                        )
                         if next_kind == "ordinary"
                         and formal_updates <= _PLANT_EXCITATION_CANDIDATES
                         else np.zeros(self._site_count, dtype=float)

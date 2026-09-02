@@ -148,11 +148,11 @@
   的per-site bimodal Gaussian fit，不加入Monitor preview。normal或Stop只产生一个final Science Context。
 - Feedback Monitor固定自动打开四张图：canonical Camera Measurement逐帧publication经mean reduction得到的带编号site map实时图、observable
   uniformity、site signal evolution和Target share evolution；phase保留为信号和最终Figure但不自动开panel。
-- Feedback每site只在完整shot batch上做受约束双高斯与full-data ΔBIC判定。winning probe effective share由`probe_combined`直接采用，普通gain/max-change不再缩小它；其余double共同补偿总功率并保留内部相对修正。direct-adopted site仍single或补偿后原double变single时，才从新baseline re-probe这些矛盾site；两侧无double且baseline未变不重复。formal-double gain从authored `feedback_gain`起步，连续两次显著改善乘1.25、显著变差乘0.5、不确定性内保持；diagnostic probe/single不参与adaptive。`probe_combined`计入`maximum feedback updates`，diagnostic candidates不计。
+- Feedback每site只在完整shot batch上做受约束双高斯与full-data ΔBIC>10判定。dark site按bracket（最新观测优先）向loaded share二分或沿方向逐分辨率爬行，由loaded sites以公共因子出资、每site每candidate至多一个分辨率；bright fraction低于全阵中位数一半的loaded site视为在loading ramp上：hold、不出资、不被识别excitation扰动；probe episode每site一次，方向只由verdict改变。formal-double使用loop gain除以实测plant slope（前6个ordinary update携带±2%零和excitation识别），无adaptive scalar。`probe_combined`计入`maximum feedback updates`，diagnostic candidates不计。
 - Grouped Curve与Grouped Rolling共用hover/lock/wheel contract：hover仅轻微加粗，lock才压暗其它lines；无框标签固定axes右上角，lock加`* `并接管滚轮逐series移动。standalone/Facet Curve的孤立valid点使用同一Line2D短横线glyph；invalid仍断线。
 - ImagePlot与FacetGrid image cell不再暴露interpolation参数；schema/style/Panel Setting/Edit均删除该字段，renderer唯一固定值为`nearest`。
-- Feedback failure记录last complete candidate与rollback receipt；Stop只从完整测量candidate
-  选择结果，未测phase不得成为final。
+- Feedback failure与normal/Stop封存同一选择（最佳已完整测量candidate到SLM与`final/`），summary
+  记录错误；只有封存写不出时才restore起始phase。未测phase不得成为final。
 
 ### 2.5 Device Control与settings provenance
 
@@ -184,6 +184,7 @@
 - Calibration七张report Figure都经FigureViewer current reader重开；SLM Feedback六张Figure
   均经formal `zlc figure_viewer --check`读取。上述证据属于此前冻结tree；本次Feedback/Curve
   最近一次pre-adaptive controller实测为6个probe candidate、22个总candidate、最佳34/35与ratio 1.1337。
+  当前bracket/loading-edge controller在同一virtual lattice（25/35起始可见、4%loading余量）实测：2个probe candidate、20次formal update共23个candidate，第11次formal update起35/35并保持到结束，observable ratio 1.384→1.12；此前版本在32/35停滞，三个site在两个share间乒乓。
 - Calibration weighted Gaussian/Empirical threshold当前worktree聚焦证据为`11 passed`：已知真值、label-invariance、窄bright＋尾部噪声、Empirical/fallback、Figure archive同模型重放、population-weighted Plot classifier、coordinate roundtrip与warm refresh。另对500组随机Gaussian参数核对解析交点，383组存在两均值间相关根，最大加权log-curve交点误差`3.37e-13`、相对数值最优误差`8.95e-17`。本cut未重跑正式Runtime/Workbench vertical。
 - Calibration site review当前聚焦证据：Runtime精确operator request/response与Stop、saved-frame完整review链及全descriptor virtual Calibration保持通过。正式`zlc task_console --template virtual`science路径以8 samples检测24 sites，排除`site_0000`后最终Calibration为23 sites、terminal移除全部自动preview；`site_review.npz`42,208 bytes、PNG 145,791 bytes，FigureViewer current reader成功重开。此前`parent=None`测试遗漏了真实parent会把frameless QWidget降为child的错误；当前`FluentDialogWindow`以`Qt.Window + WindowModal`保留Fluent顶层身份，真实parent测试核对active modal、确认响应及title-bar关闭，QTimer/TaskConsole同类回调中的nested loop正常退出。`zlc_ui.capture_window`取得精确1152×653 shared-screen capture，Fluent title/body边界为32/32、无native dialog chrome，35-site状态与controls完整显示。
 - SiteMap detector真实red为8帧50%-loading site在0/2/4/6出现：旧实现full-average `702.04σ`仍被split veto漏掉；新实现记录7个相邻变化、最大change `355.67σ`，定位误差0.030 pixel且同一35-site阵列全部找回。20个随机seed覆盖698个至少加载一次的sites，漏检0、spurious 0；完整site-detection `7 passed`，saved-frame review＋Workbench vertical chain `2 passed`。

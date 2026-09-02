@@ -322,9 +322,10 @@ observed reads with the uniform PSF kernel, as the Calibration itself does for
 a site whose atoms it could not measure -- and fits the two Gaussian
 populations of empty (`dark`) and loaded (`bright`) shots. The metric is
 `bright_mean - dark_mean`; loading probability is reported as the mixture
-fraction but is not multiplied into that metric. Penalized likelihood selects
-the single- or double-Gaussian result; every finite selected fit is valid, and
-only a numerical/non-finite fit failure holds that site.
+fraction but is not multiplied into that metric. Two populations are accepted
+only on decisive evidence -- a BIC gain over ten against one Gaussian; a batch
+that resolves one population is a site that did not load, and only a
+numerical/non-finite fit failure holds that site.
 
 The controller records every site's normalized Target intensity share,
 contrast, fit choice and action, and ONE plant slope for the whole array: the
@@ -344,10 +345,28 @@ the residual times `feedback_gain` divided by the measured slope magnitude
 (held to 0.3-5); until three candidates exist and the slope is resolved to
 30%, the step assumes unit slope at half gain. Steps are scaled by fit
 quality, clamped to `maximum_weight_change` and pass through the
-share-conserving allocator. Dark-only sites receive the exact feasible
-normalized share increase; invalid sites keep their share. The feedback
+share-conserving allocator; invalid sites keep their share. The feedback
 re-solve holds the solver to a support ratio of 1.002 and at least five
 passes.
+
+A site that did not load keeps a bracket: its direction, the share it was
+last seen single at and the share it was last seen loaded at -- the latest
+observation wins, because the loading edge drifts with the rest of the
+lattice. A dark site with no evidence at all is probed once on both sides
+(`probe_factors`); the verdict fixes its direction (the side it loaded on, the
+closer side when both did, one clamp past the deepest dark share when
+neither), and a probed site is never probed again. Each candidate a dark site
+with a direction asks for one step: the geometric midpoint towards its loaded
+share while the bracket is wider than the 2% resolution, otherwise one
+resolution along its direction -- never a whole clamp. The loaded sites fund
+that step together by one common factor, each giving at most one resolution
+per candidate and never crossing its own bracket floor; what they cannot fund
+is scaled back, never reversed. Dark beyond its loaded share by more than a
+resolution retires that loaded share. The bright fraction is the
+loading-margin observable: a loaded site under half the lattice's typical
+fraction is on its loading ramp (`loading_edge`), so a step of its own that
+points shallower is held (`hold_loading_edge`), it funds nobody, and the
+identification excitation leaves it alone.
 
 Every candidate splits its shots into odd and even halves and reports the
 true between-site dispersion (the cross-covariance of the two halves' log
