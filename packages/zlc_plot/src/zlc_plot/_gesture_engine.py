@@ -206,6 +206,11 @@ class _PointerGestureBase:
 @dataclass(slots=True)
 class _SelectorGesture(_PointerGestureBase):
     kind: SelectorKind
+    state: SelectorState
+    handle: DragHandle
+    origin: CrosshairPoint
+    origin_px: tuple[float, float]
+    started: bool = False
 
 
 @dataclass(slots=True)

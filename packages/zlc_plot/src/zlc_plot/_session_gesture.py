@@ -196,6 +196,12 @@ class GestureSessionMixin:
                     (float(event.x), float(event.y)),
                 )
             return
+        if button == 1 and is_double:
+            # A double click is its own gesture.  In particular, the second
+            # press must never open an Area rubber band on an ordinary 2-D
+            # surface; Facet focus/overview consumed its double-click meaning
+            # above, and other surfaces simply have no left-double action.
+            return
         if button == 2:
             if event_axes is not active_axes:
                 return
@@ -255,40 +261,15 @@ class GestureSessionMixin:
         selector_axes = self._selector_axes(state)
         if selector_axes is None:
             return
-        try:
-            self._selector_controller.state(state.kind)
-        except KeyError:
-            draft = state
-        else:
-            draft = None
-        self._selector_controller.pointer_down(
-            state.kind,
-            point.x,
-            point.y,
-            handle=handle,
-            draft=draft,
-        )
         self._gesture = _SelectorGesture(
             selector_axes,
             interaction_transform,
             state.kind,
+            state,
+            handle,
+            point,
+            (float(event.x), float(event.y)),
         )
-        with self._renderer.raster_transaction():
-            # INSTALL, THEN COMPOSE ONCE.  The install used to come second,
-            # so the render above could not compose under the gesture it was
-            # starting and ``begin_selector_gesture`` composed again behind
-            # it: two frames' work at the press, for one picture.
-            if hit is None:
-                self._renderer.begin_selector_gesture(state.kind, compose=False)
-                # ONE compose, and it is this one.  Adding the explicit
-                # capture the view gestures need made this WORSE -- 26 ms
-                # to 47 on the first move -- because a selector press
-                # already composes here, and the press and the move that
-                # follows it run back to back on one worker: work added at
-                # the press is work the first move waits for.
-                self._render_current(RenderEffect.OVERLAY)
-            else:
-                self._renderer.begin_selector_gesture(state.kind)
 
 
     def _start_pointer_selection(
@@ -788,6 +769,31 @@ class GestureSessionMixin:
             with self._renderer.raster_transaction():
                 self._renderer.preview_color_limit_candidate(candidate)
             return
+        if isinstance(gesture, _SelectorGesture) and not gesture.started:
+            # Press only arms the selector.  Native double-click delivery
+            # necessarily contains an ordinary press/release first, so any
+            # controller candidate or compose here would flash an Area even
+            # when the hand never moved.  Exact pixel inequality is the sole
+            # activation edge; there is deliberately no arbitrary drag
+            # threshold.
+            if (
+                float(event.x),
+                float(event.y),
+            ) == gesture.origin_px:
+                return
+            draft = gesture.state if gesture.handle is DragHandle.NEW else None
+            self._selector_controller.pointer_down(
+                gesture.kind,
+                gesture.origin.x,
+                gesture.origin.y,
+                handle=gesture.handle,
+                draft=draft,
+            )
+            gesture.started = True
+            self._renderer.begin_selector_gesture(
+                gesture.kind,
+                compose=False,
+            )
         if self._selector_controller.active_gesture is None:
             self._cancel_gesture()
             return
@@ -919,6 +925,19 @@ class GestureSessionMixin:
         event: Any,
         gesture: _SelectorGesture,
     ) -> None:
+        if not gesture.started:
+            self._clear_gesture(gesture)
+            # Preserve the established single-click grammar: clicking blank
+            # plot space removes the committed selector of the same kind.
+            # This is a click action, not a zero-size Area gesture, so it
+            # creates no candidate and never ran the preview renderer.
+            if gesture.handle is DragHandle.NEW:
+                committed = self._projected._selector_state_or_none(
+                    gesture.kind
+                )
+                if committed is not None:
+                    self.remove_selector(committed.kind)
+            return
         if self._selector_controller.active_gesture is None:
             self._cancel_gesture()
             return
@@ -1051,7 +1070,8 @@ class GestureSessionMixin:
             # is composed with the whole figure back in play.
             self._renderer.set_view_dragging(None)
             return
-        self._renderer.end_selector_gesture()
+        if not isinstance(gesture, _SelectorGesture) or gesture.started:
+            self._renderer.end_selector_gesture()
 
     def _cancel_gesture(self) -> SelectorState | None:
         gesture = self._gesture
@@ -1059,7 +1079,7 @@ class GestureSessionMixin:
             return None
         cancelled = None
         try:
-            if isinstance(gesture, _SelectorGesture):
+            if isinstance(gesture, _SelectorGesture) and gesture.started:
                 cancelled = self._selector_controller.lost_pointer_capture()
             elif isinstance(gesture, _OrbitGesture):
                 assert self._renderer is not None

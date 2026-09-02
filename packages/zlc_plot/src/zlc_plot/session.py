@@ -4473,9 +4473,13 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
         active_pan = isinstance(
             gesture, (_PanGesture, _OrbitGesture, _PickGesture)
         )
+        armed_selector = isinstance(gesture, _SelectorGesture) and not (
+            gesture.started
+        )
         axis = (
             gesture.axes
-            if gesture is not None and (candidate is not None or active_pan)
+            if gesture is not None
+            and (candidate is not None or active_pan or armed_selector)
             else None
         )
         if axis is None:
@@ -4484,6 +4488,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
                 None,
                 None,
                 active_pan,
+                armed_selector,
                 publish_front,
             )
         role, separator, suffix = str(axis.get_gid() or "main").partition(":")
@@ -4493,6 +4498,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             role or "main",
             cell_index,
             active_pan,
+            armed_selector,
             publish_front,
         )
 

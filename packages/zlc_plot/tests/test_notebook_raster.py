@@ -494,8 +494,10 @@ def test_raster_pointer_motion_bakes_candidate_into_published_fronts() -> None:
             identity=front.identity,
             axes=axis,
             interaction=front.interaction,
-        ).result().front
-        assert pressed.identity.sequence > front.identity.sequence
+        ).result()
+        assert pressed.front is front
+        assert pressed.value.candidate is None
+        assert not pressed.value.publish_front
         moved = host._pointer_event(
             "move",
             0.7,
@@ -504,7 +506,7 @@ def test_raster_pointer_motion_bakes_candidate_into_published_fronts() -> None:
             identity=front.identity,
             axes=axis,
         ).result()
-        assert moved.front.identity.sequence > pressed.identity.sequence
+        assert moved.front.identity.sequence > front.identity.sequence
         assert not hasattr(moved.value, "scene")
         committed = host._pointer_event(
             "release",
@@ -519,6 +521,109 @@ def test_raster_pointer_motion_bakes_candidate_into_published_fronts() -> None:
             SelectorKind.AREA,
         )
     finally:
+        host.close(timeout=5.0)
+
+
+def test_an_unmoved_area_press_or_double_click_never_becomes_a_gesture() -> None:
+    """Press only arms Area; motion is the sole edge that starts it.
+
+    Qt delivers the first half of a double click as an ordinary
+    press/release.  Starting the rubber band on press therefore flashed a
+    zero-size Area even when the pointer never moved, and grabbing an existing
+    Area handle needlessly repainted and revised the selector on a click.
+    The backend-neutral host path is shared by Qt and Notebook, so prove the
+    contract here once.
+    """
+
+    session = _session()
+    host = RasterPlotHost.from_session(session)
+    events = []
+    unsubscribe = session.subscribe_selection(events.append)
+    try:
+        front = host.wait_for_front(timeout=5.0)
+        axis = front.interaction.axes[0]
+
+        def pointer(action, x, y, *, double=False):
+            return host._pointer_event(
+                action,
+                x,
+                y,
+                button=1,
+                double=double,
+                identity=front.identity,
+                axes=axis,
+                interaction=front.interaction if action == "press" else None,
+            ).result(timeout=5.0)
+
+        for double in (False, True):
+            pressed = pointer("press", 0.4, 0.4, double=double)
+            released = pointer("release", 0.4, 0.4)
+            assert pressed.front is front and released.front is front
+            assert not pressed.value.publish_front
+            assert not released.value.publish_front
+            assert pressed.value.candidate is None
+            assert released.value.candidate is None
+            assert session.selectors == ()
+            assert events == []
+
+        session.set_area_selector(
+            NumericRange(2.0, 6.0), NumericRange(1.0, 5.0)
+        )
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and host.front is front:
+            time.sleep(0.01)
+        area_front = host.front
+        assert area_front is not None and area_front is not front
+        area_axis = area_front.interaction.axes[0]
+        nx, ny = area_axis.display_to_normalized(4.0, 3.0)
+        before = session.selectors
+        events.clear()
+
+        pressed = host._pointer_event(
+            "press",
+            nx,
+            ny,
+            button=1,
+            identity=area_front.identity,
+            axes=area_axis,
+            interaction=area_front.interaction,
+        ).result(timeout=5.0)
+        released = host._pointer_event(
+            "release",
+            nx,
+            ny,
+            button=1,
+            identity=area_front.identity,
+            axes=area_axis,
+        ).result(timeout=5.0)
+        assert pressed.front is area_front and released.front is area_front
+        assert not pressed.value.publish_front
+        assert not released.value.publish_front
+        assert session.selectors == before
+        assert events == []
+
+        blank_x, blank_y = area_axis.display_to_normalized(8.0, 8.0)
+        host._pointer_event(
+            "press",
+            blank_x,
+            blank_y,
+            button=1,
+            identity=area_front.identity,
+            axes=area_axis,
+            interaction=area_front.interaction,
+        ).result(timeout=5.0)
+        host._pointer_event(
+            "release",
+            blank_x,
+            blank_y,
+            button=1,
+            identity=area_front.identity,
+            axes=area_axis,
+        ).result(timeout=5.0)
+        assert session.selectors == ()
+        assert len(events) == 1
+    finally:
+        unsubscribe()
         host.close(timeout=5.0)
 
 
