@@ -27,6 +27,7 @@ from .paths import resolve_under
 __all__ = [
     "DAY_FOLDER_PATTERN",
     "day_folder",
+    "day_folder_path",
     "day_folder_name",
     "unique_path",
 ]
@@ -50,18 +51,36 @@ def day_folder_name(when: _date) -> str:
     return f"{when.year:04d}_{when.month:02d}_{when.day:02d}"
 
 
+def day_folder_path(save_root: str | os.PathLike[str], when: _date) -> Path:
+    """Where ``<save_root>/<YYYY_MM_DD>`` is, whether or not it exists yet.
+
+    Pure: no directory is created, stat'ed or resolved.  A form that shows
+    today's folder, a dialog that opens there, a title that names it, ask
+    WHERE -- asking used to create the folder and flush its directory entry
+    to disk, then merely to resolve it three times over, once per question,
+    on the GUI thread, for every state the panel published.  The day name
+    is a fixed token, so nothing can escape the root the caller owns.
+    """
+
+    root = Path(save_root).expanduser()
+    if not root.is_absolute():
+        raise ValueError(f"save root must be absolute: {root}")
+    return root / day_folder_name(when)
+
+
 def day_folder(save_root: str | os.PathLike[str], when: _date) -> Path:
     """Return ``<save_root>/<YYYY_MM_DD>``, creating it durably.
 
-    The caller owns ``save_root``; this creates only the day folder beneath it,
-    and refuses a root that does not exist so a typo cannot silently scatter
-    data into a new tree.
+    The write-side twin of :func:`day_folder_path`: the same answer, made to
+    exist with the durability evidence a run root needs.  A root that does
+    not exist is refused so a typo cannot silently scatter data into a new
+    tree.
     """
 
-    root = Path(save_root).expanduser().resolve()
-    if not root.is_dir():
-        raise NotADirectoryError(f"save root does not exist: {root}")
-    return durable_makedirs(resolve_under(root, day_folder_name(when)))
+    folder = day_folder_path(save_root, when)
+    if not folder.parent.is_dir():
+        raise NotADirectoryError(f"save root does not exist: {folder.parent}")
+    return durable_makedirs(folder)
 
 
 def unique_path(

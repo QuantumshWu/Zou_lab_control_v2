@@ -22,7 +22,7 @@ from .durability import (  # noqa: E402
     atomic_write_text,
     durable_makedirs,
 )
-from .workspace import day_folder, unique_path  # noqa: E402
+from .workspace import day_folder, day_folder_path, unique_path  # noqa: E402
 
 # The whole public surface. A caller writes bytes, creates a directory tree, or
 # asks where durable work should land -- implementation primitives stay owned
@@ -35,6 +35,7 @@ __all__ = [
     "readable_json_bytes",
     "write_readable_json",
     "day_folder",
+    "day_folder_path",
     "durable_makedirs",
     "unique_path",
 ]

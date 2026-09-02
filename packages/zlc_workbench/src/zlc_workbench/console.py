@@ -3555,7 +3555,7 @@ class ConsolePresenter:
             "stale": bool(binding.frozen_configuration_incompatible),
             "data_advanced": bool(binding.frozen_data_advanced),
             "producer_node_id": producer_node_id,
-            "save_directory": str(self.session.day_folder()),
+            "save_directory": str(self.session.day_folder_path()),
         }
 
     def refresh_panel_editor(self, panel_id: str) -> bool:
@@ -4230,7 +4230,7 @@ class ConsolePresenter:
         if self._open_saved is None:
             self._report("this console cannot open saved figures", severity="warning")
             return None
-        return self._open_saved(str(self.session.day_folder()))
+        return self._open_saved(str(self.session.day_folder_path()))
 
     def offered_signals(
         self, *, include_shown: bool = False
@@ -4642,7 +4642,7 @@ class ConsolePresenter:
             # A name, not an empty box: a board is a thing you keep and
             # reload, so it is named plainly and the dialog warns before it
             # replaces one.
-            str(Path(self.session.day_folder()) / "layout.json"),
+            str(Path(self.session.day_folder_path()) / "layout.json"),
             "Layouts (*.json)",
         )
         if not path:
@@ -4661,7 +4661,7 @@ class ConsolePresenter:
         """Restore a layout as stopped drafts without building devices."""
 
         path = self.view.ask_open_path(
-            "Load TaskConsole layout", str(self.session.day_folder()), "Layouts (*.json)"
+            "Load TaskConsole layout", str(self.session.day_folder_path()), "Layouts (*.json)"
         )
         if not path:
             return False
@@ -4679,7 +4679,7 @@ class ConsolePresenter:
 
         path = self.view.ask_save_path(
             "Save TaskConsole screenshot",
-            str(Path(self.session.day_folder()) / "console.png"),
+            str(Path(self.session.day_folder_path()) / "console.png"),
             "PNG images (*.png)",
         )
         if not path:

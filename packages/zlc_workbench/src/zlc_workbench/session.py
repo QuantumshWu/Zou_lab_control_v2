@@ -24,7 +24,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
-from zlc_durable import atomic_write_bytes, day_folder, readable_json_bytes
+from zlc_durable import atomic_write_bytes, day_folder, day_folder_path, readable_json_bytes
 from zlc_durable.paths import resolve_under
 
 from .device_use import DeviceClaim, DeviceUseCoordinator
@@ -908,13 +908,21 @@ class ExperimentSession:
     # ---------------------------------------------------------------- keeping
 
     def day_folder(self) -> Path:
-        """Where today's saved work lands.
+        """Where today's saved work lands, made to exist durably.
 
         Asked, not computed: zlc_durable owns the rule that a day is the
         organising key, and a second place deciding it is a second answer.
+        This is the WRITE side -- a run root, a save -- and creates the
+        folder with durability evidence; anything that only needs to name
+        the folder asks :meth:`day_folder_path`.
         """
 
         return day_folder(self.workspace.data, _date.today())
+
+    def day_folder_path(self) -> Path:
+        """Where today's saved work lands, without touching the disk."""
+
+        return day_folder_path(self.workspace.data, _date.today())
 
     # ----------------------------------------------------------------- closing
 

@@ -15,7 +15,7 @@ from zlc_data import (
     snapshot_manifest,
 )
 from zlc_data.figure_archive import read_dataset, write_figure_archive
-from zlc_durable import atomic_write_file
+from zlc_durable import atomic_write_file, durable_makedirs
 
 from .config import DEFAULTS
 from .kinds import AxisDomain, AxisRef, PlotKind
@@ -433,7 +433,9 @@ def save_figure_artifact(
     image_path = selected if selected.suffix else selected.with_suffix(".png")
     if image_path.suffix.lower() not in {".png", ".pdf", ".svg"}:
         raise ValueError("figure image format must be PNG, PDF, or SVG")
-    image_path.parent.mkdir(parents=True, exist_ok=True)
+    # The write creates its folder, durably: the day folder used to be made
+    # as a side effect of every form that merely NAMED it.
+    durable_makedirs(image_path.parent)
     archive_path = image_path.with_suffix(".npz")
     snapshot = plot_input.snapshot if isinstance(plot_input, ImageFrame) else plot_input
     if not isinstance(snapshot, OwnedSnapshot):
