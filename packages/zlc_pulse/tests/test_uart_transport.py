@@ -323,6 +323,103 @@ def test_the_attempt_budget_scales_with_the_transfer() -> None:
     )
 
 
+class _TailDroppingPort:
+    """A serial port whose board answers every READ, dropping the reply's
+    last byte on the first ``drops`` exchanges.
+
+    The archived slm_feedback failure, byte for byte: a 13-byte READ reply
+    (seq 0x71, ST_OK, CURSOR=85) arriving as its first 12 bytes -- every
+    field valid, only the final CRC byte missing.
+    """
+
+    write_timeout = None
+
+    def __init__(self, drops: int) -> None:
+        self.drops = drops
+        self.exchanges = 0
+        self._pending = b""
+
+    def reset_input_buffer(self) -> None:
+        self._pending = b""
+
+    def write(self, payload: bytes) -> None:
+        from zlc_pulse.transport import uart_frame as framing
+
+        self.exchanges += 1
+        reply = framing.encode_reply(payload[3], framing.ST_OK, (85,))
+        self._pending = reply[:-1] if self.exchanges <= self.drops else reply
+
+    def flush(self) -> None: ...
+
+    @property
+    def in_waiting(self) -> int:
+        return len(self._pending)
+
+    def read(self, size: int) -> bytes:
+        chunk, self._pending = self._pending[:size], self._pending[size:]
+        return chunk
+
+
+def test_a_reply_one_byte_short_is_asked_again_within_milliseconds() -> None:
+    """The lost byte is never coming; the next request is.
+
+    Three replies in a row arrived one byte short and the read spent 4.88 s
+    waiting for the third one's last byte -- the whole transaction deadline,
+    because the frame parser saw "not finished yet" and the retry law gave
+    its final attempt the patience owed to a slow link.  The line loses
+    bytes, it does not delay them: a frame that stops arriving is judged
+    lost after FRAME_STALL and the request goes again, for as many attempts
+    as the deadline holds.
+    """
+
+    import time
+
+    from zlc_pulse.transport.uart import FRAME_STALL, PySerialLink, UartRegisterTransport
+
+    link = PySerialLink("COM-TEST")
+    link._serial = _TailDroppingPort(drops=3)
+    transport = UartRegisterTransport(link=link)
+    transport.start()
+
+    started = time.monotonic()
+    assert transport.read_word(15) == 85
+    elapsed = time.monotonic() - started
+
+    assert link._serial.exchanges == 4
+    assert transport.resends == 3
+    assert elapsed < 4 * FRAME_STALL + 0.2, f"{elapsed:.3f}s for three lost bytes"
+
+
+def test_a_read_that_never_completes_reports_every_attempt_by_shape() -> None:
+    """What each attempt saw is the diagnosis; the last one alone is not.
+
+    "incomplete frame: 12 of 13 bytes" is a byte lost on the board-to-host
+    direction; "no bytes" is a request lost on the way out or a board that
+    did not answer; bytes that formed no frame are noise.  A record that
+    keeps only the final attempt cannot tell a run of dropped bytes from a
+    line that died -- and the archived failure kept only the final attempt.
+    """
+
+    import pytest
+
+    from zlc_pulse.transport.uart import PySerialLink, UartRegisterTransport
+
+    link = PySerialLink("COM-TEST")
+    link._serial = _TailDroppingPort(drops=10_000)
+    transport = UartRegisterTransport(link=link, action_timeout=0.3)
+    transport.start()
+
+    with pytest.raises(TimeoutError) as caught:
+        transport.read_word(15)
+    message = str(caught.value)
+    attempts = link._serial.exchanges
+    assert attempts >= 4, message
+    assert f"after {attempts} attempt(s)" in message
+    assert f"#1-{attempts}: 0 of 1 replies, incomplete frame: 12 of 13 bytes (count=1)" in message
+    assert "unparsed" not in message
+    assert transport.resends == attempts - 1
+
+
 def test_a_slow_write_is_a_timeout_this_layer_can_retry() -> None:
     """pyserial's write timeout is an OSError; the link translates it.
 
