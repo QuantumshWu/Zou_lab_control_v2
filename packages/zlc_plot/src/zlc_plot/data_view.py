@@ -4697,10 +4697,10 @@ def _facet_kernel_counts(
     use_valid = not (
         _stride_zero_all_true(valid) or bool(np.asarray(valid).all())
     )
-    marks = (
-        kernels.readable(
-            np.asarray(np.broadcast_to(valid, source.shape), dtype=np.bool_)
-        ).reshape(-1)
+    # Sealed either way: the unused placeholder must carry the same
+    # mutability as a real mask, or the kernel compiles twice.
+    marks = kernels.readable(
+        np.asarray(np.broadcast_to(valid, source.shape), dtype=np.bool_).reshape(-1)
         if use_valid
         else np.zeros(1, dtype=np.bool_)
     )

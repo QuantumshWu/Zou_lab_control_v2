@@ -670,7 +670,9 @@ def masked_centred_square_sums(values: Any, offset: float, valid: Any) -> Any:
     else:
         marks = readable(np.zeros((1, 1, 1), dtype=np.bool_))
     out = np.empty(view.shape[1], dtype=np.float64)
-    centred_square_sums(view, np.float64(offset), marks, use_valid, out)
+    # The plane is an input like the mask: sealed, so a writable copy from
+    # upstream and a published read-only snapshot are one signature.
+    centred_square_sums(readable(view), np.float64(offset), marks, use_valid, out)
     return out
 
 
