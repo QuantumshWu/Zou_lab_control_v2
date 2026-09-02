@@ -114,22 +114,35 @@ def pickle_error() -> type[Exception]:
     return pickle.UnpicklingError
 
 
-def _mutability_erased(signature: Any) -> tuple[Any, ...]:
-    """The signature with every array's read-only flag forgotten.
+def _argument_types(signature: Any) -> tuple[Any, ...]:
+    """The argument types of an overload, whichever way it was listed.
 
     A dispatcher lists a lazily compiled overload as a tuple of argument
     types and an exactly compiled one (the fit callbacks, compiled to their
-    ABI up front) as a ``Signature`` object; both carry the same arguments.
+    ABI up front) as a ``Signature`` object; the disk index lists every
+    overload as the tuple.  One overload can therefore appear in two
+    spellings, and only its argument types say whether two entries are one.
     """
+
+    return tuple(getattr(signature, "args", signature))
+
+
+def _exact(signature: Any) -> tuple[str, ...]:
+    """One overload's identity: its argument types, mutability included."""
+
+    return tuple(str(kind) for kind in _argument_types(signature))
+
+
+def _mutability_erased(signature: Any) -> tuple[Any, ...]:
+    """The signature with every array's read-only flag forgotten."""
 
     from numba import types  # noqa: PLC0415
 
-    arguments = getattr(signature, "args", signature)
     return tuple(
         (str(kind.dtype), int(kind.ndim), str(kind.layout))
         if isinstance(kind, types.Array)
         else str(kind)
-        for kind in arguments
+        for kind in _argument_types(signature)
     )
 
 
@@ -153,10 +166,10 @@ def duplicate_signatures(
 
     named: list[str] = []
     for name, kernel in (dispatchers or kernel_dispatchers()).items():
-        exact_by_shape: dict[tuple[Any, ...], set[str]] = {}
+        exact_by_shape: dict[tuple[Any, ...], set[tuple[str, ...]]] = {}
         for signature in cached_signatures(kernel):
             exact_by_shape.setdefault(_mutability_erased(signature), set()).add(
-                str(signature)
+                _exact(signature)
             )
         if any(len(exact) > 1 for exact in exact_by_shape.values()):
             named.append(name)

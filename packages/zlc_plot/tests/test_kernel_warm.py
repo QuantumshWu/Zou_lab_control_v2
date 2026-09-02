@@ -155,12 +155,20 @@ def test_a_mutability_twin_is_named_even_when_only_the_disk_remembers_it() -> No
 
 
 def test_distinct_dtypes_and_a_repeated_exact_signature_are_not_twins() -> None:
-    """Two dtypes are two kernels' worth of code; the same signature twice is one."""
+    """Two dtypes are two kernels' worth of code; the same signature twice is one.
+
+    The repeat comes in the two spellings one overload really has: the
+    process lists an exactly compiled callback as a Signature object, the
+    disk index lists the same overload as a tuple of its argument types.
+    Counting those as two named every fit kernel a twin on the first run.
+    """
+
+    from numba import types
 
     narrow = (_plane("uint8", readonly=True),)
     wide = (_plane("uint16", readonly=True),)
     kernel = _FakeKernel(
-        signatures=(narrow, wide),
+        signatures=(types.float64(*narrow), wide),
         on_disk={(narrow, ()): "x.1.nbc", (wide, ()): "x.2.nbc"},
     )
     assert _kernel_warm.duplicate_signatures({"promote": kernel}) == ()
