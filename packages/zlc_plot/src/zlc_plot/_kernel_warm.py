@@ -84,7 +84,52 @@ def kernel_dispatchers() -> dict[str, Any]:
     return found
 
 
-def duplicate_signatures() -> tuple[str, ...]:
+def cached_signatures(kernel: Any) -> tuple[tuple[Any, ...], ...]:
+    """Every signature of ``kernel``: this process's, and the disk cache's.
+
+    A dispatcher only knows the signatures it compiled or loaded ITSELF, and
+    a cache directory is written by many processes -- an experiment sealed
+    its planes, a notebook did not, and each left its own machine code
+    behind.  A check that looks only at the process in hand is blind to the
+    pair on disk, which is exactly the pair that matters.  The index numba
+    keeps beside its machine code lists what is cached for the current
+    source; a stale index (the source moved on) lists nothing.
+    """
+
+    found: list[tuple[Any, ...]] = list(kernel.signatures)
+    cache_file = getattr(getattr(kernel, "_cache", None), "_cache_file", None)
+    load_index = getattr(cache_file, "_load_index", None)
+    if callable(load_index):
+        try:
+            overloads = load_index()
+        except (OSError, EOFError, ValueError, pickle_error()):
+            overloads = {}
+        found.extend(key[0] for key in overloads)
+    return tuple(found)
+
+
+def pickle_error() -> type[Exception]:
+    import pickle  # noqa: PLC0415
+
+    return pickle.UnpicklingError
+
+
+def _mutability_erased(signature: tuple[Any, ...]) -> tuple[Any, ...]:
+    """The signature with every array's read-only flag forgotten."""
+
+    from numba import types  # noqa: PLC0415
+
+    return tuple(
+        (str(kind.dtype), int(kind.ndim), str(kind.layout))
+        if isinstance(kind, types.Array)
+        else str(kind)
+        for kind in signature
+    )
+
+
+def duplicate_signatures(
+    dispatchers: dict[str, Any] | None = None,
+) -> tuple[str, ...]:
     """Kernels compiled more than once for one type, by name.
 
     Numba types an array's MUTABILITY, so a kernel handed a writable plane
@@ -92,25 +137,23 @@ def duplicate_signatures() -> tuple[str, ...]:
     piece of code -- and which one a plane is, is an accident of whether
     something upstream had to copy it.  Sealing every input at the boundary
     is what makes this list empty; see ``_raster_kernels.readable``.
+
+    Judged on every signature the kernel has, in this process or on disk
+    (:func:`cached_signatures`): the regular-image promotion sat in the
+    cache twice per dtype for as long as only the warmer's own process was
+    consulted, because the warmer's inputs were all writable and the
+    experiment's all sealed, and no single process ever saw both.
     """
 
-    import re  # noqa: PLC0415
-
-    flags = re.compile(
-        r"Array\((\w+), (\d+), '(\w)', (?:True|False), aligned=(?:True|False)\)"
-    )
     named: list[str] = []
-    for name, kernel in kernel_dispatchers().items():
-        seen: set[str] = set()
-        for signature in kernel.signatures:
-            shape = flags.sub(
-                lambda match: f"Array({match.group(1)},{match.group(2)},{match.group(3)})",
-                str(signature),
+    for name, kernel in (dispatchers or kernel_dispatchers()).items():
+        exact_by_shape: dict[tuple[Any, ...], set[str]] = {}
+        for signature in cached_signatures(kernel):
+            exact_by_shape.setdefault(_mutability_erased(signature), set()).add(
+                str(signature)
             )
-            if shape in seen:
-                named.append(name)
-                break
-            seen.add(shape)
+        if any(len(exact) > 1 for exact in exact_by_shape.values()):
+            named.append(name)
     return tuple(sorted(named))
 
 
