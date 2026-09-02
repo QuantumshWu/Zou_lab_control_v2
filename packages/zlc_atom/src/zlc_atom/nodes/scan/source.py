@@ -40,8 +40,8 @@ def check_cancelled(context: object) -> None:
         raise RuntimeError("the scan was cancelled")
 
 
-def wait_for_board(sequencer: object, context: object) -> None:
-    """Wait for the board to finish playing, and stay stoppable while waiting.
+def wait_for_report(sequencer: object, context: object) -> object:
+    """Wait for the board's own report of the shot, and stay stoppable meanwhile.
 
     Stop is a cooperative flag; a wait that cannot see it is a wait an operator
     cannot end.  So the bench is asked in slices and the flag is read between
@@ -53,16 +53,25 @@ def wait_for_board(sequencer: object, context: object) -> None:
     stopped seamless scan run to the end of its table (measured: Stop at
     4.018 s, terminal at 8.469 s, the whole difference asleep inside the
     streamer), while its sibling had this loop written out beside it.
+
+    The report comes back whole, fault and all: what a fault MEANS for the
+    data is the caller's question (a scan point is lost; a Task that counted
+    its own camera frames may know better), and only the waiting is shared.
     """
 
     while True:
         check_cancelled(context)
         report = sequencer.wait_done(0.1)
-        if report is None:
-            continue
-        if report.fault:
-            raise RuntimeError(f"the pulse failed: {report.fault}")
-        return
+        if report is not None:
+            return report
+
+
+def wait_for_board(sequencer: object, context: object) -> None:
+    """Wait for the board and refuse any shot it reports as faulted."""
+
+    report = wait_for_report(sequencer, context)
+    if report.fault:
+        raise RuntimeError(f"the pulse failed: {report.fault}")
 
 
 def watched_signal_source(

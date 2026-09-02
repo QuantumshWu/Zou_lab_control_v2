@@ -39,11 +39,6 @@ from .wire import (
 LOAD_TIMEOUT = 5.0
 SAFE_TIMEOUT = 5.0
 SAFE_RETRY_AFTER = 0.05
-#: How long a VERIFIED strobe waits for its acknowledgement before asking the
-#: status register instead.  Short on purpose: the read is the arbiter, the
-#: acknowledgement is a courtesy, and waiting the full action timeout for a
-#: courtesy stalled every lost FIRE ack for five seconds.
-STROBE_VERIFY_AFTER = 0.3
 SAFE_POLL_INTERVAL = 0.001
 MAXIMUM_CYCLE_COUNT = (1 << 32) - 1
 _MIN_SEAM_SPAN_TICKS = 3
@@ -69,6 +64,13 @@ class DoneReport:
     status_reads: tuple[int, int] = ()
     cursor_reads: tuple[int, int] = ()
     observer_error: str = ""
+    #: How many status/cursor polls failed during this shot, and how many
+    #: frames the line had to send again for it.  A shot that finished clean
+    #: over a line that was quietly dropping bytes must say so -- a run that
+    #: dies four hours in is diagnosed from the shots before it, not from the
+    #: one that died.
+    poll_failures: int = 0
+    resent_frames: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "status", int(self.status))
@@ -78,7 +80,8 @@ class DoneReport:
         object.__setattr__(self, "status_reads", tuple(int(value) for value in self.status_reads))
         object.__setattr__(self, "cursor_reads", tuple(int(value) for value in self.cursor_reads))
         object.__setattr__(self, "observer_error", str(self.observer_error))
-
+        object.__setattr__(self, "poll_failures", int(self.poll_failures))
+        object.__setattr__(self, "resent_frames", int(self.resent_frames))
 
     @property
     def fault(self) -> str:
@@ -96,6 +99,11 @@ class DoneReport:
         reasons = []
         if self.observer_error:
             reasons.append(f"pulse observer failed: {self.observer_error}")
+            if self.poll_failures or self.resent_frames:
+                reasons.append(
+                    f"the line failed {self.poll_failures} poll(s) and resent "
+                    f"{self.resent_frames} frame(s) during this shot"
+                )
         elif self.status & STATUS_ERROR:
             reasons.append("the board reported an error")
         if self.status & STATUS_UNDERFLOW or self.underflow:
@@ -287,6 +295,8 @@ class PulseStreamer:
         self._terminal_status_reads: tuple[int, int] = ()
         self._terminal_cursor_reads: tuple[int, int] = ()
         self._observer_error = ""
+        self._poll_failures = 0
+        self._resends_at_fire = 0
         self._worker: threading.Thread | None = None
         self._fire_gate: threading.Event | None = None
         self._stop = threading.Event()
@@ -468,6 +478,8 @@ class PulseStreamer:
             self._terminal_status_reads = ()
             self._terminal_cursor_reads = ()
             self._observer_error = ""
+            self._poll_failures = 0
+            self._resends_at_fire = int(getattr(self.transport, "resends", 0) or 0)
             self._terminal_status = STATUS_RUNNING
             self._fire_started = time.monotonic()
             self._clear_safe_readback_locked()
@@ -508,6 +520,10 @@ class PulseStreamer:
         with self._lock:
             status_reads = self._terminal_status_reads
             cursor_reads = self._terminal_cursor_reads
+            poll_failures = self._poll_failures
+            resent_frames = (
+                int(getattr(self.transport, "resends", 0) or 0) - self._resends_at_fire
+            )
         if len(status_reads) != 2 or len(cursor_reads) != 2:
             raise RuntimeError("observer completed without terminal readback")
         report = DoneReport(
@@ -518,6 +534,8 @@ class PulseStreamer:
             status_reads=status_reads,
             cursor_reads=cursor_reads,
             observer_error=self._observer_error,
+            poll_failures=poll_failures,
+            resent_frames=resent_frames,
         )
         with self._lock:
             self._firing = False
@@ -587,11 +605,41 @@ class PulseStreamer:
         with self._lock:
             return self._applied
     def _observe(self) -> None:
+        """Poll STATUS/CURSOR until the board reports a terminal state.
+
+        A poll that fails is a WARNING, not a verdict.  STATUS and CURSOR are
+        idempotent reads and DONE is a level the board holds until SAFE, so
+        nothing is lost by asking again: the answer the next poll gets is the
+        same answer.  One failed poll used to end the observation with a
+        fabricated ERROR, and the shot it condemned -- the board playing all
+        200 cycles, the camera collecting all 200 frames, SAFE acknowledged
+        afterwards -- was thrown away over a single dropped byte.
+
+        The transport's own transaction deadline is the grace: a poll fails
+        only after the line has been asked again for that long without one
+        good answer (``UartRegisterTransport._until_answered``).  The
+        observation ends in error only when the poll that FOLLOWS such a
+        failure fails too -- the same read-twice rule the terminal readback
+        applies -- because two whole deadlines without an answer is a line
+        that is down, not a byte that was lost.  One good poll in between
+        restores the observation completely; the failure stays counted on
+        the report.
+
+        Two deadlines is therefore the longest the observation stays quiet
+        on a dead line (about ten seconds at the default) -- twice what one
+        verdict cost, by design, and no second knob.  A streamed scan does
+        not wait that long to find out: its bank refill (``_refill``) is
+        outside this grace, and a refill write that fails ends the
+        observation at once, where a board starved of its next chunk would
+        report UNDERFLOW on its own anyway.
+        """
+
         try:
             gate = self._fire_gate
             while gate is not None and not gate.wait(self._observer_interval):
                 if self._stop.is_set():
                     return
+            consecutive_failures = 0
             while not self._stop.is_set():
                 try:
                     status = self._read(CtrlWords.STATUS, stop=self._stop)
@@ -599,9 +647,15 @@ class PulseStreamer:
                 except Exception as error:
                     if self._stop.is_set():
                         return
-                    self._record_observer_failure(error)
-                    self._done.set()
-                    return
+                    consecutive_failures += 1
+                    with self._lock:
+                        self._poll_failures += 1
+                    if consecutive_failures >= 2:
+                        self._record_observer_failure(error)
+                        self._done.set()
+                        return
+                    continue
+                consecutive_failures = 0
                 with self._lock:
                     self._cursor_value = cursor
                     self._underflow = self._underflow or bool(status & STATUS_UNDERFLOW)
@@ -635,6 +689,8 @@ class PulseStreamer:
         except Exception:
             second_status = first_status
             second_cursor = first_cursor
+            with self._lock:
+                self._poll_failures += 1
         with self._lock:
             self._terminal_status_reads = (first_status, second_status)
             self._terminal_cursor_reads = (first_cursor, second_cursor)
@@ -1080,6 +1136,14 @@ class PulseStreamer:
 
         * Neither -- an unanswered strobe stays fatal, because guessing is
           the one thing this path must never do.
+
+        How long the acknowledgement is waited for is the line's business,
+        not this method's: a non-resending strobe is one attempt, and the
+        line budgets an attempt by the bytes in flight
+        (``UartRegisterTransport._attempt_budget``).  This method once handed
+        the line a 0.3 s window of its own for the verified case -- the same
+        claim owned twice, and the second owner dead, because the line's
+        budget was already the shorter of the two.
         """
 
         rows = self._command(code)
@@ -1097,10 +1161,6 @@ class PulseStreamer:
             options: dict = {} if deadline is None else {"deadline": deadline}
             if stop is not None:
                 options["stop"] = stop
-            if verified and deadline is None:
-                # The acknowledgement gets a short window, because it is not
-                # the authority -- the status read below is.
-                options["deadline"] = time.monotonic() + STROBE_VERIFY_AFTER
             try:
                 self.transport.write_words(rows, resend=repeatable, **options)
                 return

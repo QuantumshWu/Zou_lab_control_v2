@@ -54,10 +54,12 @@ from zlc_atom.devices.slm.solver import (
     validate_target,
 )
 from zlc_atom.nodes.calibration import (
+    ReadoutModel,
     ReadoutModelKind,
     SiteMap,
     TrapCalibration,
     extract_box_signals,
+    extract_psf_signals,
     fit_bimodal,
 )
 from zlc_atom.nodes.calibration.calibration import (
@@ -71,7 +73,7 @@ from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementRequest,
     _finite_cycle_output,
 )
-from zlc_atom.nodes.scan.source import wait_for_board
+from zlc_atom.nodes.scan.source import wait_for_report
 
 
 SLM_PHASE_ARTIFACT_CONTRACT = SCIENCE_CONTEXT_ARTIFACT_CONTRACT
@@ -94,11 +96,55 @@ TARGET_SHARE_HISTORY_OUTPUT = DatasetOutputDeclaration(
 )
 _CONTROLLER_CONTRACT = "slm-feedback.qcmos-bright-dark"
 READOUT_FRAME_COORDINATE = 0
+#: Formal candidates in a row whose split-half dispersion is within its own
+#: standard error of zero before the run declares itself converged.
+_CONVERGENCE_CANDIDATES = 3
+#: The feedback re-solve is a small perturbation of a converged phase, so it
+#: is held to a far tighter support gate than an editor solve: the default
+#: 1% early stop left a fresh ~0.2% rms site-intensity pattern each candidate,
+#: three times the loop's own step (see ``solve_phase``).
+_FEEDBACK_SOLVE_SUPPORT_TOLERANCE = 1.002
+_FEEDBACK_SOLVE_MINIMUM_ITERATIONS = 5
 
 
 def _check_cancelled(context: object) -> None:
     if context.cancel_requested():
         raise RuntimeError("SLM feedback was cancelled")
+
+
+def _accepted_pulse_fault(
+    report: object, *, delivered_cycles: int, requested_cycles: int
+) -> bool:
+    """Whether a shot batch the board REPORTED as faulted is still a good batch.
+
+    The rule: keep the batch when the only thing that failed is the host's
+    OBSERVATION of the board -- the pulse observer's own UART poll -- and the
+    camera delivered every requested cycle.  Every cycle plays exactly one
+    trigger edge and yields exactly one frame, so a full frame count is the
+    board's own proof that the whole batch played; an underflow the observer
+    saw before it died is a board fact and keeps the batch refused.
+
+    The failure this fixes: one CURSOR poll lost its last byte at shot 85 of
+    200, the observer thread died and stamped the report with a fabricated
+    ERROR status, the board played the remaining 115 shots on its own and the
+    camera handed over all 200 frames -- and the whole batch, then the whole
+    four-hour run, was thrown away on that one poll.
+
+    Only the fault text and the ``observer_error``/``underflow`` fields are
+    read: the observer clause must be the whole fault (no second ``;``-joined
+    reason next to it), so a report that learns to say more is refused rather
+    than misread.
+    """
+
+    observer_error = str(getattr(report, "observer_error", "") or "")
+    fault = str(report.fault or "")
+    if not observer_error or observer_error not in fault:
+        return False
+    if ";" in fault.replace(observer_error, ""):
+        return False
+    if bool(getattr(report, "underflow", False)):
+        return False
+    return int(delivered_cycles) == int(requested_cycles)
 
 
 def _readout_frames(snapshot: object, *, shots: int) -> np.ndarray:
@@ -163,91 +209,264 @@ def _ratio_interval(
     return estimate, max(1.0, lower), upper, float(np.max(relative))
 
 
-def _adapt_double_gain(
-    previous_contrast: object,
-    previous_error: object,
-    previous_valid: object,
-    current_contrast: object,
-    current_error: object,
-    current_valid: object,
-    *,
-    gain: float,
-    improvement_streak: int,
-) -> tuple[float, int, str, int, float | None, float | None]:
-    """Adapt one scalar double-site gain from comparable formal candidates."""
+def _half_contrasts(
+    samples: object, threshold: object
+) -> tuple[np.ndarray, np.ndarray]:
+    """Bright-minus-dark of the odd shots and of the even shots, per site.
 
-    before = np.asarray(previous_contrast, dtype=float)
-    before_error = np.asarray(previous_error, dtype=float)
-    before_valid = np.asarray(previous_valid, dtype=bool)
-    after = np.asarray(current_contrast, dtype=float)
-    after_error = np.asarray(current_error, dtype=float)
-    after_valid = np.asarray(current_valid, dtype=bool)
-    if not (
-        before.shape
-        == before_error.shape
-        == before_valid.shape
-        == after.shape
-        == after_error.shape
-        == after_valid.shape
+    Both halves classify their shots with the WHOLE batch's fitted threshold,
+    so they are two independent readings of the same quantity the full fit
+    reports.  Their agreement is the only thing in a shot batch that can tell
+    real site-to-site dispersion from estimator noise: noise is independent
+    between the halves, true dispersion is shared by both.  A half with fewer
+    than two shots on either side of the threshold gives NaN.
+    """
+
+    values = np.asarray(samples, dtype=float)
+    cut = np.asarray(threshold, dtype=float).reshape(-1)
+    if values.ndim != 2 or values.shape[1] != cut.shape[0]:
+        raise ValueError("half-batch contrasts need (shots, sites) samples")
+    halves = []
+    for start in (0, 1):
+        half = values[start::2]
+        finite = np.isfinite(half)
+        bright = finite & (half > cut[None, :])
+        dark = finite & ~bright
+        bright_count = np.count_nonzero(bright, axis=0)
+        dark_count = np.count_nonzero(dark, axis=0)
+        usable = (bright_count >= 2) & (dark_count >= 2) & np.isfinite(cut)
+        contrast = np.full(cut.shape, np.nan, dtype=float)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            bright_mean = np.sum(np.where(bright, half, 0.0), axis=0) / bright_count
+            dark_mean = np.sum(np.where(dark, half, 0.0), axis=0) / dark_count
+        contrast[usable] = bright_mean[usable] - dark_mean[usable]
+        halves.append(contrast)
+    return halves[0], halves[1]
+
+
+def _split_half_dispersion(
+    odd_contrast: object, even_contrast: object, valid: object
+) -> tuple[float, float]:
+    """The TRUE between-site variance of log contrast, and its standard error.
+
+    ``max/min`` of N noisy estimates never reaches 1: with 35 sites at 1.2%
+    relative error its expectation is 1.054 when the array is perfectly
+    uniform, so a controller judged by it keeps chasing noise for ever.  The
+    cross-covariance of the two half-batch residuals is unbiased for the real
+    dispersion, because the halves share the truth and not the noise; it can
+    come out negative, and a value within its own standard error of zero is
+    the honest statement "no dispersion is resolved by this batch".
+    """
+
+    odd = np.asarray(odd_contrast, dtype=float)
+    even = np.asarray(even_contrast, dtype=float)
+    usable = (
+        np.asarray(valid, dtype=bool)
+        & np.isfinite(odd) & np.isfinite(even)
+        & (odd > 0.0) & (even > 0.0)
+    )
+    count = int(np.count_nonzero(usable))
+    if count < 3:
+        return float("nan"), float("nan")
+    first = np.log(odd[usable])
+    second = np.log(even[usable])
+    products = (first - np.mean(first)) * (second - np.mean(second))
+    variance = float(np.sum(products) / (count - 1))
+    error = float(np.std(products, ddof=1) * np.sqrt(count) / (count - 1))
+    return variance, error
+
+
+def _expected_noise_ratio(
+    relative_error: object, valid: object, *, draws: int = 4096
+) -> float:
+    """The max/min a perfectly uniform array would show with these errors."""
+
+    sigma = np.asarray(relative_error, dtype=float)[np.asarray(valid, dtype=bool)]
+    sigma = sigma[np.isfinite(sigma) & (sigma >= 0.0)]
+    if sigma.size < 2:
+        return float("nan")
+    noise = np.random.default_rng(0).standard_normal((int(draws), sigma.size)) * sigma
+    return float(np.mean(np.exp(np.max(noise, axis=1) - np.min(noise, axis=1))))
+
+
+_PLANT_SLOPE_LAGS = 3
+_PLANT_SLOPE_MINIMUM_CANDIDATES = 3
+_PLANT_SLOPE_RELATIVE_ERROR = 0.3
+_PLANT_SLOPE_BOUNDS = (0.3, 5.0)
+#: The identification excitation: the first this many formal updates after
+#: the baseline carry a fresh zero-sum +-2% log-weight pattern on top of the
+#: controller's own step, and that pattern is the only instrument the plant
+#: slope is read through.  Six at 2% resolve a unit-slope plant to under 30%
+#: in 95% of simulated runs at the archived run's 1.2% read noise; the
+#: archived plant itself (-3.3) needs three.  A fixed count, never "until
+#: trusted": stopping on the estimate's own size selects the runs where it
+#: came out large (12-16% bias in simulation).
+_PLANT_EXCITATION_CANDIDATES = 6
+_PLANT_EXCITATION_LOG_STEP = 0.02
+
+
+def _excitation_pattern(
+    rng: np.random.Generator, excitable: np.ndarray
+) -> np.ndarray:
+    """One excited candidate's zero-sum +-δ log-weight pattern on the
+    ``excitable`` sites; a held site (invalid, unobservable) gets none, as it
+    would answer with no usable row and its share is to stay where it is.
+
+    Fresh random signs every candidate: the three lag columns are then driven
+    at every frequency and can be told apart.  A pattern that merely flipped
+    each candidate would excite only the alternating response and measure
+    ``s0 - s1 + s2`` -- 0.7 for the archived plant whose static slope is 3.3.
+    """
+
+    mask = np.asarray(excitable, dtype=bool)
+    pattern = np.zeros(mask.shape, dtype=float)
+    count = int(np.count_nonzero(mask))
+    if count >= 2:
+        signs = np.where(np.arange(count) % 2 == 0, 1.0, -1.0)
+        values = _PLANT_EXCITATION_LOG_STEP * rng.permutation(signs)
+        pattern[mask] = values - float(np.mean(values))
+    return pattern
+
+
+def _excited_target(
+    target: np.ndarray,
+    excitation: np.ndarray,
+    rows: np.ndarray,
+    columns: np.ndarray,
+) -> np.ndarray:
+    """The Target the phase is solved for: the control Target times ``exp``
+    of this candidate's excitation on its sites.
+
+    The control Target stays the integrator the controller updates; the
+    excitation is applied on top for one candidate and is gone from the next
+    one's Target unless a new pattern is drawn, so it is never integrated.
+    """
+
+    updated = np.array(target, dtype=np.float32, copy=True)
+    updated[rows, columns] = (
+        np.asarray(target[rows, columns], dtype=float)
+        * np.exp(np.asarray(excitation, dtype=float))
+    ).astype(np.float32)
+    return validate_target(updated)
+
+
+def _plant_slope(
+    log_weights: list[np.ndarray],
+    log_contrast: list[np.ndarray],
+    excitation: list[np.ndarray],
+) -> tuple[float, float, int]:
+    """Pool every site's response to the EXCITATION into ONE plant slope.
+
+    Model: ``Δlog C_t = s0 Δlog w_t + s1 Δlog w_{t-1} + s2 Δlog w_{t-2}``
+    per site, with common-mode drift removed by centring each candidate's
+    rows across sites; the static slope is ``s0 + s1 + s2``.  The old
+    per-site rule needed a single site to move by 2% before it would look,
+    which a 0.35% typical step never did, and read a slope of -1 into a plant
+    that actually answers with about -3.3 spread over two candidates.
+
+    The three lag regressors are instrumented by the excitation differences
+    at the same lags.  Nothing else in a closed loop is exogenous: the
+    controller's step is its reaction to the previous batch, and that batch
+    carries not only estimator noise but the plant's own per-candidate wander
+    (1.1-1.5% between archived candidates, gone again the next one).  The
+    half-batch instrument this replaces was blind to exactly that wander --
+    both halves share it -- and in simulation read -2.6 into a unit plant
+    and -5.4 into the archived one while reporting a standard error of 0.2.
+    The excitation is drawn by the task itself, so it shares nothing with
+    the plant but the response.
+
+    A transition no excitation touches contributes nothing and is left out,
+    so the estimate is frozen once the excitation ends and the residual
+    variance is that of the excited rows.  Returns the signed slope, its
+    standard error and the row count; NaN slope when nothing is estimable.
+    Steps before the first candidate are zero, which is the physical truth
+    of a settled baseline, not a fill.
+    """
+
+    count = len(log_weights)
+    if count < 2:
+        return float("nan"), float("nan"), 0
+    outcomes: list[np.ndarray] = []
+    regressors: list[np.ndarray] = []
+    instruments: list[np.ndarray] = []
+    for index in range(1, count):
+        outcome = log_contrast[index] - log_contrast[index - 1]
+        lagged = [
+            log_weights[index - lag] - log_weights[index - lag - 1]
+            if index - lag >= 1
+            else np.zeros_like(outcome)
+            for lag in range(_PLANT_SLOPE_LAGS)
+        ]
+        excited = [
+            excitation[index - lag] - excitation[index - lag - 1]
+            if index - lag >= 1
+            else np.zeros_like(outcome)
+            for lag in range(_PLANT_SLOPE_LAGS)
+        ]
+        usable = np.isfinite(outcome) & np.all(
+            np.isfinite(np.stack(lagged)), axis=0
+        )
+        if np.count_nonzero(usable) < 2 or not np.any(
+            np.stack(excited)[:, usable] != 0.0
+        ):
+            continue
+        design = np.column_stack([column[usable] for column in lagged])
+        design -= np.mean(design, axis=0, keepdims=True)
+        rows = np.column_stack([column[usable] for column in excited])
+        rows -= np.mean(rows, axis=0, keepdims=True)
+        outcomes.append(outcome[usable] - np.mean(outcome[usable]))
+        regressors.append(design)
+        instruments.append(rows)
+    if not outcomes:
+        return float("nan"), float("nan"), 0
+    y = np.concatenate(outcomes)
+    x = np.concatenate(regressors)
+    z = np.concatenate(instruments)
+    rows_used = int(len(y))
+    if rows_used <= _PLANT_SLOPE_LAGS:
+        return float("nan"), float("nan"), rows_used
+    # The pseudo-inverse keeps the estimate defined while a lag column is
+    # still identically zero (no step that old has been applied yet): that
+    # coefficient is zero and the static sum is the estimable part.  The
+    # cut-off is far above float noise so a direction the data has not
+    # excited reads as zero rather than as a 1e29 with a 1e42 error.
+    cross = z.T @ x
+    inverse = np.linalg.pinv(cross, rcond=1e-6)
+    beta = inverse @ (z.T @ y)
+    residual = y - x @ beta
+    sigma_squared = float(residual @ residual) / (rows_used - _PLANT_SLOPE_LAGS)
+    covariance = sigma_squared * inverse @ (z.T @ z) @ inverse.T
+    ones = np.ones(_PLANT_SLOPE_LAGS)
+    slope = float(ones @ beta)
+    error = float(np.sqrt(max(float(ones @ covariance @ ones), 0.0)))
+    if not np.isfinite(slope) or not np.isfinite(error):
+        return float("nan"), float("nan"), rows_used
+    return slope, error, rows_used
+
+
+def _usable_plant_slope(
+    candidates: int, slope: float, error: float
+) -> float | None:
+    """The step divisor the controller may use, or None for the assumed plant.
+
+    An estimate is trusted once at least three candidates exist, it has the
+    physical sign (more weight, deeper trap, less contrast) and its standard
+    error is under 30% of it; the magnitude is then held to [0.3, 5].  Without
+    one the controller assumes unit slope at HALF the authored loop gain --
+    the archived run showed the real plant answering three times harder than
+    assumed, and the safe side of not knowing is the small step.
+    """
+
+    if (
+        candidates < _PLANT_SLOPE_MINIMUM_CANDIDATES
+        or not np.isfinite(slope)
+        or not np.isfinite(error)
+        or slope >= 0.0
+        or error >= _PLANT_SLOPE_RELATIVE_ERROR * abs(slope)
     ):
-        raise ValueError("adaptive double-gain histories differ in shape")
-    common = (
-        before_valid
-        & after_valid
-        & np.isfinite(before)
-        & np.isfinite(before_error)
-        & np.isfinite(after)
-        & np.isfinite(after_error)
-        & (before > 0.0)
-        & (after > 0.0)
-        & (before_error >= 0.0)
-        & (after_error >= 0.0)
-    )
-    common_count = int(np.count_nonzero(common))
-    if common_count < 2:
-        return float(gain), 0, "hold_insufficient_common_double", common_count, None, None
-
-    previous_ratio, previous_lower, previous_upper, _ = _ratio_interval(
-        before[common], before_error[common]
-    )
-    current_ratio, current_lower, current_upper, _ = _ratio_interval(
-        after[common], after_error[common]
-    )
-    previous_uncertainty = max(
-        np.log(previous_ratio / previous_lower),
-        np.log(previous_upper / previous_ratio),
-    )
-    current_uncertainty = max(
-        np.log(current_ratio / current_lower),
-        np.log(current_upper / current_ratio),
-    )
-    noise = float(np.hypot(previous_uncertainty, current_uncertainty))
-    improvement = float(np.log(previous_ratio / current_ratio))
-    selected_gain = float(gain)
-    streak = int(improvement_streak)
-    if improvement > noise:
-        streak += 1
-        if streak >= 2:
-            selected_gain *= 1.25
-            streak = 1
-            action = "increase_after_continuous_improvement"
-        else:
-            action = "hold_first_significant_improvement"
-    elif improvement < -noise:
-        selected_gain *= 0.5
-        streak = 0
-        action = "decrease_after_worsening"
-    else:
-        streak = 0
-        action = "hold_within_uncertainty"
-    return (
-        selected_gain,
-        streak,
-        action,
-        common_count,
-        previous_ratio,
-        current_ratio,
-    )
+        return None
+    lower, upper = _PLANT_SLOPE_BOUNDS
+    return float(np.clip(abs(slope), lower, upper))
 
 
 def _bic_gain(samples: object, fit: object) -> float:
@@ -296,14 +515,49 @@ def _bic_gain(samples: object, fit: object) -> float:
     )
 
 
+#: Two populations are accepted only on DECISIVE evidence: a BIC gain over
+#: ten (Kass and Raftery's "very strong").  A loaded site clears it by
+#: hundreds -- four bright shots in a hundred, the fitter's own population
+#: floor, at the archived run's contrast already do -- while a dark site
+#: whose one Gaussian the fitter split in two
+#: 1.7 sigma apart came in at +4.6 and was reported to the loop as loaded
+#: with a contrast of 10.9 photoelectrons, one hundred times under its
+#: neighbours: the uniformity ratio read 116 and the observable count 33.
+_DECISIVE_BIC_GAIN = 10.0
+
+#: A loaded site whose bright fraction is under this share of the lattice's
+#: typical one is ON ITS LOADING RAMP: loading probability rises from zero
+#: over the last few percent of depth above the loading threshold, so half
+#: the typical loading means the site's edge is within about one resolution
+#: below it.  The bright fraction is the loading-margin observable the
+#: binary loaded/dark verdict throws away; it is what tells the controller
+#: which loaded sites have no share to give.
+_LOADING_EDGE_FRACTION = 0.5
+
+
+def _loading_edge(bright_fraction: object, observable: object) -> np.ndarray:
+    """The loaded sites on their loading ramp (see ``_LOADING_EDGE_FRACTION``)."""
+
+    fraction = np.asarray(bright_fraction, dtype=float)
+    loaded = np.asarray(observable, dtype=bool)
+    if fraction.shape != loaded.shape:
+        raise ValueError("bright fraction and observable shapes differ")
+    known = loaded & np.isfinite(fraction)
+    if not np.any(known):
+        return np.zeros(loaded.shape, dtype=bool)
+    typical = float(np.median(fraction[known]))
+    return known & (fraction < _LOADING_EDGE_FRACTION * typical)
+
+
 def _fit_contrasts(samples: object) -> dict[str, np.ndarray]:
     """Classify each site's one user-authored shot batch.
 
-    A resolved two-population fit supplies the bright-minus-dark feedback
-    observable.  Evidence for one Gaussian is a different, useful physical
-    result: this feedback mode treats it as a site which did not load.  Bad
-    samples or a numerically undecidable model remain invalid and therefore
-    cannot create a control action.
+    A decisively resolved two-population fit (see ``_DECISIVE_BIC_GAIN``)
+    supplies the bright-minus-dark feedback observable.  Evidence for one
+    Gaussian is a different, useful physical result: this feedback mode
+    treats it as a site which did not load.  Bad samples or a numerically
+    undecidable model remain invalid and therefore cannot create a control
+    action.
     """
 
     values = np.asarray(samples, dtype=float)
@@ -374,14 +628,19 @@ def _fit_contrasts(samples: object) -> dict[str, np.ndarray]:
         )
         if not finite_pair:
             continue
-        if fit.ok and bic_gain[site] > 0.0:
+        if fit.ok and bic_gain[site] > _DECISIVE_BIC_GAIN:
             contrast[site], error[site] = estimate, sem
             separated[site] = True
         else:
             single_population[site] = True
+    odd_contrast, even_contrast = _half_contrasts(values, threshold)
+    odd_contrast[~separated] = np.nan
+    even_contrast[~separated] = np.nan
     return {
         "contrast": contrast,
         "standard_error": error,
+        "odd_contrast": odd_contrast,
+        "even_contrast": even_contrast,
         "dark_mean": dark_mean,
         "dark_sigma": dark_sigma,
         "dark_standard_error": dark_standard_error,
@@ -460,6 +719,7 @@ def _write_npz(
 _CANDIDATE_VECTOR_FIELDS = (
     "target_weight",
     "control_weight",
+    "excitation_log_step",
     "dark_mean",
     "dark_sigma",
     "dark_standard_error",
@@ -473,13 +733,15 @@ _CANDIDATE_VECTOR_FIELDS = (
     "bic_gain",
     "fit_valid",
     "observable_valid",
+    "loading_edge",
     "single_population",
     "fit_invalid",
     "single_mean",
     "single_sigma",
+    "odd_shot_bright_minus_dark",
+    "even_shot_bright_minus_dark",
     "decision",
     "requested_log_correction",
-    "response_log_slope",
     "previous_double_control_weight",
     "previous_double_bright_minus_dark",
     "probe_effective_factor",
@@ -550,19 +812,101 @@ def _allocate_requested_shares(
     return allocated, transfer, increase_scale, decrease_scale
 
 
+def _funded_shares(
+    shares: np.ndarray,
+    allocated: np.ndarray,
+    directed: np.ndarray,
+    desired: np.ndarray,
+    compensators: np.ndarray,
+    *,
+    lower: np.ndarray,
+    upper: np.ndarray,
+) -> np.ndarray:
+    """Fund the directed sites' unmet share from the loaded sites in common.
+
+    ``allocated`` is the ordinary allocation; what the directed sites still
+    lack of ``desired`` is taken from (or, for a directed decrease, given
+    to) every compensating site by ONE common factor, each compensator held
+    inside ONE RESOLUTION STEP (``_PLANT_EXCITATION_LOG_STEP``) of its
+    current share and inside its own bracket bound.  When the compensators
+    cannot cover the whole request within those bounds they give
+    everything the bounds allow and the directed sites receive that, pro
+    rata, in their own direction.
+
+    The resolution, not ``maximum_weight_change``, bounds a compensator: a
+    loaded site's own loading margin is unknown until it has shown an edge,
+    and the clamp meant for a site's OWN correction (a third of its share)
+    is many times the margin a marginally loaded array has.  Measured on
+    the virtual lattice, where that margin is ~4%: funding ten dark sites
+    under the clamp pressed twenty-two loaded ones dark in one candidate
+    and the run crawled back at one bracket bisection per candidate; at
+    the resolution twenty-five loaded sites still hand over half a site's
+    share per candidate -- a dark site is lifted in a few candidates --
+    and none of them crosses its edge.
+    """
+
+    current = np.asarray(shares, dtype=float)
+    result = np.array(allocated, dtype=float, copy=True)
+    wants = np.asarray(directed, dtype=bool)
+    pays = np.asarray(compensators, dtype=bool)
+    unmet = np.where(wants, np.asarray(desired, dtype=float) - result, 0.0)
+    need = float(np.sum(unmet))
+    if need == 0.0 or not np.any(pays):
+        return result
+    cap = _PLANT_EXCITATION_LOG_STEP
+    floor = np.maximum(np.asarray(lower, dtype=float), current * np.exp(-cap))[pays]
+    ceiling = np.minimum(np.asarray(upper, dtype=float), current * np.exp(cap))[pays]
+    base = result[pays]
+    goal = float(np.sum(base)) - need
+
+    def total(log_factor: float) -> float:
+        return float(np.sum(np.clip(base * np.exp(log_factor), floor, ceiling)))
+
+    if need > 0.0:
+        reachable = float(np.sum(floor))
+        low, high = float(np.min(np.log(floor / base))), 0.0
+        short = reachable > goal
+        limit = floor
+    else:
+        reachable = float(np.sum(ceiling))
+        low, high = 0.0, float(np.max(np.log(ceiling / base)))
+        short = reachable < goal
+        limit = ceiling
+    if short:
+        paid = limit
+        scale = (float(np.sum(base)) - reachable) / need
+    else:
+        for _ in range(200):
+            middle = 0.5 * (low + high)
+            if total(middle) < goal:
+                low = middle
+            else:
+                high = middle
+        paid = np.clip(base * np.exp(0.5 * (low + high)), floor, ceiling)
+        scale = 1.0
+    result[pays] = paid
+    result[wants] += scale * unmet[wants]
+    return result
+
+
 def _support(
     target: np.ndarray,
     calibration: TrapCalibration,
+    model: ReadoutModel,
     *,
     science_context_path: str | Path,
     command_receipt: Mapping[str, object],
-) -> tuple[np.ndarray, np.ndarray, SiteMap]:
-    """Register only the Calibration's site boxes to this Feedback Target."""
+) -> tuple[np.ndarray, np.ndarray, SiteMap, np.ndarray]:
+    """Register the Calibration's sites to this Feedback Target.
 
-    model = calibration.select_model(ReadoutModelKind.BOX)
+    Returns the Target rows and columns, the registered roster, and for every
+    roster site the index of the Calibration site it was matched to (``-1``
+    for a site the Calibration never observed, whose centre is predicted).
+    """
+
     usable = np.asarray(calibration.site_map.valid_sites, dtype=bool)
     if not np.any(usable):
-        raise ValueError("SLM Feedback requires at least one calibrated BOX site")
+        raise ValueError("SLM Feedback requires at least one calibrated site")
     source_indices = np.flatnonzero(usable)
     source_map = SiteMap(
         tuple(calibration.site_map.site_ids[index] for index in source_indices),
@@ -582,20 +926,41 @@ def _support(
             "command_receipt": dict(command_receipt),
         },
         frame_shape=calibration.frame_contract.image_shape,
-        measurement_radius=model.integration_half_width,
+        measurement_radius=_readout_window_half_width(model),
     )
     support, provenance = validate_target_registration(
         registered,
         frame_shape=calibration.frame_contract.image_shape,
-        box_half_width=model.integration_half_width,
+        box_half_width=_readout_window_half_width(model),
     )
     rows, columns = support.T
     if not np.array_equal(support, np.column_stack(np.nonzero(target > 0.0))):
         raise ValueError("registered Calibration support differs from Science Context")
     if provenance["command_receipt"] != dict(command_receipt):
         raise RuntimeError("Feedback registration lost its Science Context receipt")
+    observed = np.asarray(registered.topology["observed_sites"], dtype=bool)
+    lookup = {
+        tuple(center): int(source)
+        for center, source in zip(
+            np.asarray(source_map.centers_xy, dtype=float).tolist(),
+            source_indices.tolist(),
+            strict=True,
+        )
+    }
+    source_index = np.full(len(rows), -1, dtype=int)
+    for site in np.flatnonzero(observed):
+        source_index[site] = lookup[
+            tuple(np.asarray(registered.centers_xy, dtype=float)[site].tolist())
+        ]
+    return rows, columns, registered, source_index
 
-    return rows, columns, registered
+
+def _readout_window_half_width(model: ReadoutModel) -> int:
+    """Every pixel the model's readout touches around a site centre."""
+
+    if model.kind is ReadoutModelKind.BOX or model.background != "annulus":
+        return int(model.integration_half_width)
+    return int(model.integration_half_width) + int(model.psf_padding)
 
 
 def _relative_probe_target(
@@ -627,27 +992,46 @@ def _relative_probe_target(
     return validate_target(updated), next_shares / shares
 
 
-def _selected_probe_target(
-    target: np.ndarray,
+def _probe_verdict(
     probe_sites: np.ndarray,
+    baseline_weights: np.ndarray,
     baseline_contrast: np.ndarray,
     baseline_valid: np.ndarray,
     measurements: list[tuple[float, np.ndarray, np.ndarray, np.ndarray]],
-    rows: np.ndarray,
-    columns: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    maximum_weight_change: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Turn a two-sided probe episode into each probe site's direction.
+
+    THE DIRECTION OF A DARK SITE IS DECIDED BY EVIDENCE.  The side of the
+    episode on which the site loaded is the side it goes to; when both sides
+    loaded, the one whose contrast is closer to the loaded sites' reference
+    (closer to the baseline share when there is no reference).  When neither
+    side loaded the physical prior takes over: loading needs a deeper trap,
+    so the site extrapolates one ``maximum_weight_change`` step beyond the
+    deepest share the episode has already shown dark, instead of standing
+    still at a baseline that is known not to load.  Standing still was a
+    stall ("baseline restored") that left a dark site dark forever.
+
+    Returns, for every site (zeros/NaN off the probe sites): the requested
+    log step from the baseline share, the bracket direction, the share known
+    single, the share known loaded, and the decision text.
+    """
+
     probe = np.asarray(probe_sites, dtype=bool)
+    baseline = np.asarray(baseline_weights, dtype=float)
     values = np.asarray(baseline_contrast, dtype=float)
     valid = np.asarray(baseline_valid, dtype=bool)
-    shape = (len(rows),)
-    reasonable = (
-        valid & np.isfinite(values) & (values > 0.0)
-    )
+    shape = baseline.shape
+    reasonable = valid & np.isfinite(values) & (values > 0.0)
     reference = (
         float(np.exp(np.mean(np.log(values[reasonable]))))
         if np.any(reasonable) else float("nan")
     )
-    selected = np.ones(shape, dtype=float)
+    cap = np.log1p(float(maximum_weight_change))
+    step = np.zeros(shape, dtype=float)
+    direction = np.zeros(shape, dtype=float)
+    single_bound = np.full(shape, np.nan, dtype=float)
+    observable_bound = np.full(shape, np.nan, dtype=float)
     decisions = np.full(shape, "not_probed", dtype="<U32")
     for site in np.flatnonzero(probe):
         options: list[tuple[bool, float, float, float]] = []
@@ -665,28 +1049,33 @@ def _selected_probe_target(
                 (
                     factor < 1.0,
                     abs(float(np.log(value / reference)))
-                    if np.isfinite(reference) else float("inf"),
+                    if np.isfinite(reference)
+                    else abs(float(np.log(factor))),
                     uncertainty / value,
                     factor,
                 )
             )
         sides = {option[0] for option in options}
         if not options:
-            decisions[site] = "probe_hold_unobservable"
-        elif len(sides) == 2 and not np.isfinite(reference):
-            decisions[site] = "probe_hold_no_reference"
-        else:
-            chosen = min(options, key=lambda item: (item[1], item[2]))
-            selected[site] = chosen[3]
-            side = "lower" if chosen[0] else "upper"
-            decisions[site] = f"probe_choose_{side}_{'closest' if len(sides) == 2 else 'only'}"
-    observed_factors = np.array(selected, copy=True)
-    updated, effective = _relative_probe_target(
-        target, selected, probe, rows, columns
-    )
-    selected_effective = np.ones(shape, dtype=float)
-    selected_effective[probe] = effective[probe]
-    return updated, selected_effective, decisions, observed_factors
+            deepest = max(
+                [1.0] + [float(factor) for factor, *_rest in measurements]
+            )
+            direction[site] = 1.0
+            single_bound[site] = baseline[site] * deepest
+            step[site] = float(np.log(deepest)) + cap
+            decisions[site] = "probe_extrapolate_upper"
+            continue
+        chosen = min(options, key=lambda item: (item[1], item[2]))
+        factor = chosen[3]
+        direction[site] = float(np.sign(np.log(factor)))
+        single_bound[site] = baseline[site]
+        observable_bound[site] = baseline[site] * factor
+        step[site] = float(np.log(factor))
+        side = "lower" if chosen[0] else "upper"
+        decisions[site] = (
+            f"probe_choose_{side}_{'closest' if len(sides) == 2 else 'only'}"
+        )
+    return step, direction, single_bound, observable_bound, decisions
 
 
 def _probe_boundary(
@@ -702,73 +1091,169 @@ def _probe_boundary(
     return boundary
 
 
-def _updated_single_bracket(
+def _updated_brackets(
     current: object,
-    active_single: object,
+    dark: object,
+    observable: object,
+    previous_weights: object,
     single_bound: object,
     observable_bound: object,
     direction: object,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Record what this candidate proved about every site's loading edge.
+
+    A bracket is one site's evidence about where its loading edge lies: the
+    share it was last seen single at, the share it was last seen loaded at,
+    and the direction from the first to the second.  EVERY measured
+    candidate is evidence -- a diagnostic probe as much as a formal one --
+    and THE LATEST OBSERVATION WINS: the edge drifts with the rest of the
+    lattice (the solver redistributes, the reference mean moves; on the
+    virtual lattice by ~5% over ten candidates), so a bound is the most
+    recent share the site showed that state at, never the tightest ever
+    seen.  A loaded site pressed dark by the compensation for somebody
+    else's share is exactly a site that has just shown where its edge is:
+    that goes into its bracket and its next step goes back towards the
+    share it was loaded at.
+
+    The direction is the probe verdict's (or, seeded here, the prior's:
+    deeper loads) and ONLY a verdict changes it.  A dark observation cannot
+    say which side of its loading window a site is on, and the rule that
+    turned a site round whenever it was dark beyond its loaded bound sent
+    three virtual sites ping-ponging between two shares for the rest of
+    the run: "loaded at 1.05" was a marginal loading the ramp had since
+    moved past, and the flip made it a ceiling.
+
+    Rules, in order:
+    - a loaded site records the share as its loaded bound; a single bound
+      on the loaded side of it is stale and dropped;
+    - a dark site with no bracket seeds one from the last share it was
+      loaded at (see ``previous_weights``);
+    - a dark site beyond its loaded bound by more than the resolution has
+      contradicted that bound: it is dropped, and the site records the
+      share as its single bound and keeps creeping in its direction
+      (``_single_bracket_step``);
+    - otherwise a dark site records the share as its single bound; dark
+      within a resolution of the loaded share it has FOUND the edge and
+      steps one resolution past it.
+
+    The resolution is the identification excitation
+    (``_PLANT_EXCITATION_LOG_STEP``): the SLM Target is wiggled by that much
+    while the plant is identified, so no bracket can be resolved finer.
+    """
+
     present = np.asarray(current, dtype=float)
-    active = np.asarray(active_single, dtype=bool)
+    single_now = np.asarray(dark, dtype=bool)
+    loaded_now = np.asarray(observable, dtype=bool)
+    previous = np.asarray(previous_weights, dtype=float)
     single = np.asarray(single_bound, dtype=float).copy()
-    observable = np.asarray(observable_bound, dtype=float).copy()
+    loaded = np.asarray(observable_bound, dtype=float).copy()
     sign = np.asarray(direction, dtype=float).copy()
     if not all(
         value.shape == present.shape
-        for value in (active, single, observable, sign)
+        for value in (single_now, loaded_now, previous, single, loaded, sign)
     ):
         raise ValueError("single bracket shapes differ")
-    crossed = (
-        active
-        & np.isfinite(observable)
-        & (((sign > 0.0) & (present > observable))
-           | ((sign < 0.0) & (present < observable)))
-    )
-    sign[crossed] = np.sign(observable[crossed] - present[crossed])
-    single[crossed] = present[crossed]
-    up = sign > 0.0
-    down = sign < 0.0
-    single[active & up] = np.fmax(single[active & up], present[active & up])
-    single[active & down] = np.fmin(single[active & down], present[active & down])
-    return single, observable, sign, crossed
+    resolution = _PLANT_EXCITATION_LOG_STEP
+
+    loaded[loaded_now] = present[loaded_now]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        toward_single = np.where(
+            loaded_now & np.isfinite(single), sign * np.log(single / present), 0.0
+        )
+    stale = loaded_now & np.isfinite(single) & (toward_single >= 0.0)
+    single[stale] = np.nan
+
+    seed = single_now & (sign == 0.0) & np.isfinite(previous) & (previous > 0.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        gap = np.where(seed, np.log(previous / present), 0.0)
+    sign[seed] = np.where(np.abs(gap[seed]) <= resolution, 1.0, np.sign(gap[seed]))
+    single[seed] = present[seed]
+    loaded[seed] = previous[seed]
+
+    bracketed = single_now & ~seed & (sign != 0.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        beyond = np.where(
+            bracketed & np.isfinite(loaded), sign * np.log(present / loaded), 0.0
+        )
+    contradicted = bracketed & np.isfinite(loaded) & (beyond > resolution)
+    loaded[contradicted] = np.nan
+    single[bracketed] = present[bracketed]
+    return single, loaded, sign
 
 
 def _single_bracket_step(
     current: np.ndarray,
-    boundary: np.ndarray,
+    dark: np.ndarray,
+    single_bound: np.ndarray,
+    observable_bound: np.ndarray,
     direction: np.ndarray,
     maximum_weight_change: float,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
+    """The step a dark site asks for from its bracket, and its name.
+
+    With a bracket wider than the resolution the site bisects towards its
+    loaded share (the geometric midpoint, capped at
+    ``maximum_weight_change``): ``single_bracket_midpoint``.  Otherwise it
+    CREEPS: one resolution past its single bound in its direction --
+    ``single_edge_step`` with a loaded share on record (the edge is found,
+    or the bracket is inverted), ``single_extrapolate`` without one.  The
+    prior is applied one resolution at a time, never a whole
+    ``maximum_weight_change``: a site jumping a third of its share is funded
+    by every loaded site at once, and on the virtual lattice, at a 4%
+    loading margin, that pressed the neighbours dark in turn
+    (29->23->26->25->32->22 observable sites).  The one large step a
+    never-loaded site gets is the probe verdict's own, informed by both
+    probe sides (``_probe_verdict``).
+    """
+
     present = np.asarray(current, dtype=float)
-    midpoint = np.asarray(boundary, dtype=float)
+    single_now = np.asarray(dark, dtype=bool)
+    single = np.asarray(single_bound, dtype=float)
+    loaded = np.asarray(observable_bound, dtype=float)
     sign = np.asarray(direction, dtype=float)
-    active = (
-        np.isfinite(present) & (present > 0.0)
-        & np.isfinite(midpoint) & (midpoint > 0.0)
-        & (((sign > 0.0) & (midpoint > present))
-           | ((sign < 0.0) & (midpoint < present)))
-    )
-    step = np.zeros(present.shape, dtype=float)
     cap = np.log1p(float(maximum_weight_change))
-    step[active] = np.clip(
-        np.log(midpoint[active] / present[active]), -cap, cap
+    resolution = _PLANT_EXCITATION_LOG_STEP
+    step = np.zeros(present.shape, dtype=float)
+    kind = np.full(present.shape, "", dtype="<U32")
+    active = (
+        single_now & (sign != 0.0) & np.isfinite(present) & (present > 0.0)
+        & np.isfinite(single) & (single > 0.0)
     )
-    return step
+    known = active & np.isfinite(loaded) & (loaded > 0.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        span = np.log(loaded / single)
+        midpoint = np.sqrt(single * loaded)
+        toward = np.log(midpoint / present)
+        past_single = np.log(single / present)
+    bisect = known & (np.sign(span) == sign) & (np.abs(span) > resolution)
+    step[bisect] = np.clip(toward[bisect], -cap, cap)
+    kind[bisect] = "single_bracket_midpoint"
+    creep = active & ~bisect
+    step[creep] = past_single[creep] + sign[creep] * resolution
+    kind[creep & known] = "single_edge_step"
+    kind[creep & ~known] = "single_extrapolate"
+    return step, kind
 
 
 def _needs_probe(
     single: np.ndarray,
     observable: np.ndarray,
     acquisition_invalid: np.ndarray,
+    direction: np.ndarray,
     previous_weights: np.ndarray,
     previous_contrast: np.ndarray,
 ) -> np.ndarray:
+    """A dark site with no evidence at all -- no bracket, never loaded."""
+
     has_history = (
         np.isfinite(previous_weights) & (previous_weights > 0.0)
         & np.isfinite(previous_contrast) & (previous_contrast > 0.0)
     )
-    return _unobservable_single(single, observable, acquisition_invalid) & ~has_history
+    return (
+        _unobservable_single(single, observable, acquisition_invalid)
+        & (np.asarray(direction, dtype=float) == 0.0)
+        & ~has_history
+    )
 
 
 def _unobservable_single(
@@ -792,23 +1277,66 @@ def _updated_target(
     columns: np.ndarray,
     *,
     reference_valid: np.ndarray,
-    previous_weights: np.ndarray,
-    previous_contrast: np.ndarray,
     feedback_gain: float,
+    plant_slope: float | None,
     maximum_weight_change: float,
     directed_log_step: np.ndarray | None = None,
     control_boundary: np.ndarray | None = None,
     control_direction: np.ndarray | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Update observable sites relatively while holding all others."""
+    loading_edge: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Update observable sites relatively; fund the dark sites' directions.
+
+    A loaded site on its loading ramp (``loading_edge``, see
+    ``_loading_edge``) has no share to give: its own step is held at zero
+    when it points shallower (``hold_loading_edge``) and neither the
+    ordinary trades nor the funding may take it below its current share.
+    The site that ping-ponged for twenty candidates on the virtual lattice
+    was one loaded at a 15% bright fraction and then handed 2% to a dark
+    neighbour: dark the next candidate, and back on the probe treadmill.
+
+    ``feedback_gain`` is the LOOP gain: the fraction of each site's log
+    residual the next candidate is asked to remove.  Dividing by the
+    measured ``plant_slope`` magnitude turns that into the weight step which
+    does it; with no trusted slope the step assumes unit slope at half gain
+    (see ``_usable_plant_slope``).  Every step is then scaled by the fit
+    quality, clamped to ``maximum_weight_change`` and passed through the
+    share-conserving allocator, so the recorded correction is what was
+    actually applied.
+
+    A dark site with a direction (``directed_log_step``: a probe verdict, a
+    bracket bisection or an extrapolation) asks for that share outright --
+    the request is not the loop's, so neither gain nor clamp applies to it.
+    THE LOADED SITES FUND IT, TOGETHER AND BOUNDED: whatever the ordinary
+    trades leave unmet is drawn from every loaded site by one common factor,
+    each site giving at most one resolution step in this candidate and never
+    past its own bracket boundary (``control_boundary``; see
+    ``_funded_shares``).  Total power
+    is the hard constraint; how fast a dark site gets there is not.  Direct
+    adoption of a winning probe share used to rescale the loaded sites by
+    whatever it took (-40% at once), which pressed every one of them past
+    its loading edge at 4% margin; and a bracket step with nobody assigned
+    to pay for it moved ~1% per candidate, the crumbs of the loop's own
+    residual trades.  What cannot be funded this candidate is scaled back
+    towards the current share, never reversed, and asked for again next
+    candidate.  Without a directed site this is exactly the ordinary
+    allocation, arithmetic untouched.
+    """
 
     values = np.asarray(contrast, dtype=float)
     errors = np.asarray(standard_error, dtype=float)
     control_valid = np.asarray(valid, dtype=bool)
     references = np.asarray(reference_valid, dtype=bool)
-    prior_weights = np.asarray(previous_weights, dtype=float)
-    prior_values = np.asarray(previous_contrast, dtype=float)
     gain = float(feedback_gain)
+    if plant_slope is None:
+        step_gain = 0.5 * gain
+        feedback_decision = "feedback_assumed_slope"
+    else:
+        slope = float(plant_slope)
+        if not np.isfinite(slope) or slope <= 0.0:
+            raise ValueError("plant_slope must be a positive magnitude or None")
+        step_gain = gain / slope
+        feedback_decision = "feedback_estimated_slope"
     maximum_change = float(maximum_weight_change)
     site_shape = (len(rows),)
     direction = (
@@ -824,16 +1352,20 @@ def _updated_target(
         np.zeros(site_shape, dtype=float)
         if control_direction is None else np.asarray(control_direction, dtype=float)
     )
+    edge = (
+        np.zeros(site_shape, dtype=bool)
+        if loading_edge is None else np.asarray(loading_edge, dtype=bool)
+    )
     if (
         values.shape != site_shape
         or errors.shape != site_shape
         or control_valid.shape != site_shape
         or references.shape != site_shape
-        or prior_weights.shape != site_shape
-        or prior_values.shape != site_shape
         or direction.shape != site_shape
         or boundary.shape != site_shape
         or boundary_direction.shape != site_shape
+        or edge.shape != site_shape
+        or np.any(edge & ~control_valid)
         or np.any(references & ~control_valid)
         or np.any(~np.isfinite(direction))
         or not np.isfinite(gain)
@@ -851,50 +1383,26 @@ def _updated_target(
     else:
         reference = float(np.exp(np.mean(np.log(values[references]))))
     raw_weights = np.asarray(target[rows, columns], dtype=float)
-    current_weights = _control_weights(raw_weights)
     log_correction = np.zeros(site_shape, dtype=float)
-    response_slope = np.full(site_shape, np.nan, dtype=float)
     decision = np.full(site_shape, "hold_invalid", dtype="<U32")
     for site in range(len(rows)):
         if control_valid[site] and np.isfinite(reference):
             residual = float(np.log(values[site] / reference))
             relative_error = max(float(errors[site]), 0.0) / values[site]
             quality = float(np.clip(1.0 - 4.0 * relative_error, 0.1, 1.0))
-            correction = quality * residual
-            if (
-                np.isfinite(prior_weights[site])
-                and prior_weights[site] > 0.0
-                and np.isfinite(prior_values[site])
-                and prior_values[site] > 0.0
-            ):
-                moved = float(np.log(current_weights[site] / prior_weights[site]))
-                if abs(moved) >= 0.02:
-                    slope = float(np.log(values[site] / prior_values[site]) / moved)
-                    if -4.0 <= slope <= -0.20:
-                        response_slope[site] = slope
-                        correction = -quality * residual / slope
-                        decision[site] = "feedback_history_slope"
-                    else:
-                        decision[site] = "feedback_assumed_slope"
-                else:
-                    decision[site] = "feedback_assumed_slope"
-            else:
-                decision[site] = "feedback_assumed_slope"
+            decision[site] = feedback_decision
             log_correction[site] = float(
                 np.clip(
-                    gain * correction,
+                    step_gain * quality * residual,
                     -np.log1p(maximum_change),
                     np.log1p(maximum_change),
                 )
             )
+            if edge[site] and log_correction[site] < 0.0:
+                log_correction[site] = 0.0
+                decision[site] = "hold_loading_edge"
         elif direction[site] != 0.0:
-            log_correction[site] = float(
-                np.clip(
-                    direction[site],
-                    -np.log1p(maximum_change),
-                    np.log1p(maximum_change),
-                )
-            )
+            log_correction[site] = float(direction[site])
             decision[site] = (
                 "probe_direction_lower"
                 if log_correction[site] < 0.0
@@ -909,6 +1417,7 @@ def _updated_target(
         boundary_share,
         0.0,
     )
+    lower = np.where(edge, np.maximum(lower, shares), lower)
     upper = np.where(
         (boundary_direction < 0.0) & np.isfinite(boundary_share),
         boundary_share,
@@ -922,12 +1431,23 @@ def _updated_target(
             upper=upper,
         )
     )
+    directed = (direction != 0.0) & ~control_valid
+    if np.any(directed):
+        next_shares = _funded_shares(
+            shares,
+            next_shares,
+            directed,
+            shares * np.exp(log_correction),
+            control_valid & ~directed,
+            lower=lower,
+            upper=upper,
+        )
     log_correction = np.log(next_shares / shares)
     updated = np.array(target, dtype=np.float32, copy=True)
     updated[rows, columns] = (
         next_shares * float(np.sum(raw_weights))
     ).astype(np.float32)
-    return validate_target(updated), log_correction, response_slope, decision
+    return validate_target(updated), log_correction, decision
 
 
 class SlmFeedbackTask:
@@ -991,15 +1511,22 @@ class SlmFeedbackTask:
         receipt = science_context.get("command_receipt")
         if not isinstance(receipt, Mapping):
             raise TypeError("Science Context command receipt must be a mapping")
-        model = calibration.select_model(ReadoutModelKind.BOX)
+        # The readout is the Calibration's DEFAULT model -- the same matched
+        # filter (or box) that occupancy reads with, at the registered site
+        # centres.  The task no longer sums its own 3x3 box: that box caught
+        # 66% of a site's light and lost 1.25% of signal per quarter pixel
+        # of drift, the same size as the residuals the loop was correcting.
+        model = calibration.select_model()
         context_path = Path(science_context_path).expanduser().resolve()
         (
             self._rows,
             self._columns,
             self._registered_site_map,
+            source_index,
         ) = _support(
             frozen_target,
             calibration,
+            model,
             science_context_path=context_path,
             command_receipt=receipt,
         )
@@ -1008,6 +1535,35 @@ class SlmFeedbackTask:
             self._registered_site_map.centers_xy, dtype=float
         ).copy()
         self._site_centers_xy.setflags(write=False)
+        self._site_kernels: np.ndarray | None = None
+        if model.kind is not ReadoutModelKind.BOX:
+            observed = source_index >= 0
+            kernels = np.empty(
+                (self._site_count, *model.psf_weights.shape[1:]), dtype=float
+            )
+            kernels[observed] = model.psf_weights[source_index[observed]]
+            if not np.all(observed):
+                # A site the Calibration never saw has no measured shape; it
+                # reads with the shape the other sites agreed on, exactly as
+                # the Calibration itself treats a site whose atoms it could
+                # not measure.
+                try:
+                    uniform = calibration.select_model(ReadoutModelKind.UNIFORM_PSF)
+                except KeyError:
+                    raise ValueError(
+                        "predicted Target sites need the Calibration's uniform "
+                        "PSF model to read with"
+                    ) from None
+                if (
+                    uniform.psf_weights.shape[1:] != kernels.shape[1:]
+                    or uniform.integration_half_width != model.integration_half_width
+                ):
+                    raise ValueError(
+                        "Calibration uniform PSF differs in size from its default model"
+                    )
+                kernels[~observed] = uniform.psf_weights[0]
+            kernels.setflags(write=False)
+            self._site_kernels = kernels
         self.camera, self.sequencer, self.slm = camera, sequencer, slm
         self.camera_key, self.sequencer_key, self.slm_key = camera_key, sequencer_key, slm_key
         self.signal_plane, self.calibration, self.model = signal_plane, calibration, model
@@ -1126,7 +1682,28 @@ class SlmFeedbackTask:
             "probe_factors": list(self.probe_factors),
             "feedback_gain": self.feedback_gain,
             "maximum_weight_change": self.maximum_weight_change,
+            "readout_model_kind": self.model.kind.value,
+            "readout_half_width": int(self.model.integration_half_width),
         }
+
+    def _site_signals(self, image: np.ndarray) -> np.ndarray:
+        """One frame read with the Calibration's default model at every site."""
+
+        model = self.model
+        if self._site_kernels is None:
+            return extract_box_signals(
+                image,
+                self._site_centers_xy,
+                radius=model.integration_half_width,
+            )
+        return extract_psf_signals(
+            image,
+            self._site_centers_xy,
+            kernels=self._site_kernels,
+            background=model.background,
+            radius=model.integration_half_width,
+            padding=model.psf_padding,
+        )
 
     def _device_event_record(
         self,
@@ -1479,7 +2056,26 @@ class SlmFeedbackTask:
         tuple[int, ...],
         tuple[int, ...],
         np.ndarray,
+        str,
     ]:
+        """Shoot one candidate and return its samples plus the pulse verdict.
+
+        The fifth value is the pulse warning the candidate carries: "" for a
+        clean shot, else the fault the batch was ACCEPTED with (see
+        ``_accepted_pulse_fault``) and/or the fault a first batch was REPEATED
+        after -- both spelled out, because a run whose first attempt's
+        failure is not written down cannot be understood afterwards (the
+        UART transport already lost its first two attempts' shortfalls that
+        way).  A fault the batch cannot be accepted with -- the board
+        reporting an error or an underflow, whether it played every trigger
+        or stopped so that the camera timed out (``_shoot`` asks the board
+        then) -- repeats the whole batch once (safe, arm, fire, collect); a
+        second fault is the candidate's, and names both.  The unchanged-phase
+        guard below is checked once per CANDIDATE: a repeat inside this call
+        is the same candidate being measured, not a second batch at the same
+        phase.
+        """
+
         contract = self.calibration.frame_contract
         requested = self.shots
         if requested < 4:
@@ -1496,6 +2092,93 @@ class SlmFeedbackTask:
             )
         self._last_measured_phase = np.array(phase, copy=True)
         camera_owner = f"{context.instance_id}/camera"
+        repeated_after = ""
+        while True:
+            result, saturation_value, report = self._shoot(
+                pulse, context, iteration, camera_owner=camera_owner
+            )
+            delivered = 0 if result is None else int(result.cycle_count)
+            fault = str(report.fault or "")
+            if not fault:
+                accepted_with = ""
+            elif _accepted_pulse_fault(
+                report, delivered_cycles=delivered, requested_cycles=requested
+            ):
+                accepted_with = fault
+            elif not repeated_after:
+                repeated_after = fault
+                context.report_progress(
+                    f"Repeating the shot batch of candidate {iteration + 1} "
+                    f"after a pulse fault: {fault}"
+                )
+                continue
+            else:
+                raise RuntimeError(
+                    "the pulse failed twice for one candidate: first "
+                    f"{repeated_after}; then {fault}"
+                )
+            break
+        pulse_warning = "; ".join(
+            text
+            for text in (
+                f"batch repeated after a pulse fault: {repeated_after}"
+                if repeated_after else "",
+                f"batch accepted with a pulse fault: {accepted_with}"
+                if accepted_with else "",
+            )
+            if text
+        )
+        context.report_progress(
+            f"Reading mean qCMOS brightness for candidate {iteration + 1}",
+            current=requested,
+            total=requested,
+        )
+
+        frames = _readout_frames(result.snapshot, shots=requested)
+
+        saturated_sites: set[int] = set()
+        for image in frames:
+            saturated_sites.update(
+                self._saturated_sites(image, saturation_value)
+            )
+        site_samples = np.asarray(
+            [self._site_signals(image) for image in frames],
+            dtype=float,
+        )
+        complete = np.all(np.isfinite(site_samples), axis=0)
+        missing_sites = set(int(index) for index in np.flatnonzero(~complete))
+        mean_frame = np.asarray(np.mean(frames, axis=0), dtype=np.float32)
+        return (
+            site_samples,
+            tuple(sorted(saturated_sites)),
+            tuple(sorted(missing_sites)),
+            mean_frame,
+            pulse_warning,
+        )
+
+    def _shoot(
+        self,
+        pulse: object,
+        context: object,
+        iteration: int,
+        *,
+        camera_owner: str,
+    ) -> tuple[object, object, object]:
+        """One shot batch: safe, arm, fire, collect, and the board's report.
+
+        The program is loaded once per run, not once per candidate: after
+        DONE or SAFE the board keeps the program resident and ``fire`` replays
+        its own mini-loader, so a LOAD per candidate only re-sent the whole
+        image over a lossy line 68 times for nothing.  What decides is the
+        board's own answer -- the digest it reports holding -- never a memory
+        of having loaded, so a program somebody else loaded in between is
+        replaced and a reopened board is loaded afresh.  ``safe()`` before
+        arming the camera stays: the camera must be armed while no trigger
+        edge can play, and on a board already safe it costs no traffic.
+        """
+
+        contract = self.calibration.frame_contract
+        requested = self.shots
         node = CameraMeasurementNode(
             camera=self.camera,
             request=CameraMeasurementRequest(
@@ -1512,13 +2195,17 @@ class SlmFeedbackTask:
         capture = None
         try:
             self.sequencer.safe()
-            arm_sequencer(self.sequencer, pulse)
-            if "sequencer" not in self._actual_device_snapshots:
-                raw_sequencer_snapshot = self.sequencer.snapshot()
-                if not isinstance(raw_sequencer_snapshot, Mapping):
+            board_state = self.sequencer.snapshot()
+            if not isinstance(board_state, Mapping):
+                raise TypeError("sequencer snapshot must be a mapping")
+            if board_state.get("applied_digest") != pulse.program.digest:
+                arm_sequencer(self.sequencer, pulse)
+                board_state = self.sequencer.snapshot()
+                if not isinstance(board_state, Mapping):
                     raise TypeError("sequencer snapshot must be a mapping")
+            if "sequencer" not in self._actual_device_snapshots:
                 self._actual_device_snapshots["sequencer"] = (
-                    sequencer_archive_snapshot(state=raw_sequencer_snapshot)
+                    sequencer_archive_snapshot(state=board_state)
                 )
             capture = node.prepare(should_stop=context.cancel_requested)
             actual = node.actual_working_point
@@ -1584,53 +2271,37 @@ class SlmFeedbackTask:
                     )
                 node._commit_direct_outputs({CAMERA_FRAMES_OUTPUT.name: output})
 
-            result = capture.collect(
-                commit_cycle=commit_camera_cycle,
-                retain_cycles=False,
-            )
-            _check_cancelled(context)
-            wait_for_board(self.sequencer, context)
-            if result is None or result.cycle_count != requested:
-                raise RuntimeError("canonical Camera Measurement ended before all shots")
-            context.report_progress(
-                f"Reading mean qCMOS brightness for candidate {iteration + 1}",
-                current=requested,
-                total=requested,
-            )
+            try:
+                result = capture.collect(
+                    commit_cycle=commit_camera_cycle,
+                    retain_cycles=False,
+                )
+            except Exception:
+                # THE BOARD IS ASKED BEFORE THE CAMERA IS BLAMED.  A board
+                # that errs or underruns mid-batch stops playing triggers,
+                # and the first thing to notice is the camera's frame
+                # timeout -- which used to leave here as the candidate's
+                # failure before the board's report was ever read, so the
+                # one-repeat rule of ``_measure`` never saw a mid-batch
+                # board fault.  One poll, no wait: a board still playing
+                # (a genuine camera fault) reports nothing and the camera's
+                # complaint stands; a board that has faulted hands its
+                # report back and the batch is the board's fault, with no
+                # frames to keep.
+                report = self.sequencer.wait_done(0.0)
+                if report is None or not report.fault:
+                    raise
+                result = None
+            else:
+                _check_cancelled(context)
+                report = wait_for_report(self.sequencer, context)
         finally:
             try:
                 self.sequencer.safe()
             finally:
                 if capture is not None and not capture.closed:
                     capture.close()
-
-        frames = _readout_frames(result.snapshot, shots=requested)
-
-        saturated_sites: set[int] = set()
-        for image in frames:
-            saturated_sites.update(
-                self._saturated_sites(image, saturation_value)
-            )
-        box_samples = np.asarray(
-            [
-                extract_box_signals(
-                    image,
-                    self._site_centers_xy,
-                    radius=self.model.integration_half_width,
-                )
-                for image in frames
-            ],
-            dtype=float,
-        )
-        complete = np.all(np.isfinite(box_samples), axis=0)
-        missing_sites = set(int(index) for index in np.flatnonzero(~complete))
-        mean_frame = np.asarray(np.mean(frames, axis=0), dtype=np.float32)
-        return (
-            box_samples,
-            tuple(sorted(saturated_sites)),
-            tuple(sorted(missing_sites)),
-            mean_frame,
-        )
+        return result, saturation_value, report
 
     def _prepare_artifacts(self, context: object) -> dict[str, Path]:
         root = Path(context.run_directory).expanduser().resolve()
@@ -1662,7 +2333,8 @@ class SlmFeedbackTask:
             },
             metadata={
                 "format": "zlc.slm.feedback-sites",
-                "box_half_width": int(self.model.integration_half_width),
+                "readout_model_kind": self.model.kind.value,
+                "readout_half_width": int(self.model.integration_half_width),
                 "calibration_path": str(self.calibration_path),
                 "science_context_path": str(self.science_context_path),
             },
@@ -1685,11 +2357,12 @@ class SlmFeedbackTask:
         history: list[dict[str, object]],
     ) -> Path:
         arrays: dict[str, object] = {
-            "box_samples": np.asarray(samples, dtype="<f8"),
+            "site_samples": np.asarray(samples, dtype="<f8"),
         }
         bool_fields = {
             "fit_valid",
             "observable_valid",
+            "loading_edge",
             "single_population",
             "fit_invalid",
         }
@@ -1852,7 +2525,7 @@ class SlmFeedbackTask:
             HistogramPlot(
                 labels=PlotLabels(
                     title=f"Candidate {candidate} ({kind}) site histograms and fits",
-                    x="box signal",
+                    x="site signal",
                     y="shots",
                 ),
             ),
@@ -1952,17 +2625,21 @@ class SlmFeedbackTask:
             AxisId("slm_feedback.uniformity.metric"),
             "metric",
             COMPONENT,
-            2,
-            (0, 1),
-            coordinate_labels=("all sites", "observable sites"),
+            3,
+            (0, 1, 2),
+            coordinate_labels=(
+                "all sites", "observable sites", "expected noise floor"
+            ),
         )
         uniformity = np.asarray(
             [
                 [
-                    np.nan if item["uniformity_ratio"] is None else item["uniformity_ratio"],
-                    np.nan
-                    if item["observable_uniformity_ratio"] is None
-                    else item["observable_uniformity_ratio"],
+                    np.nan if item[field] is None else item[field]
+                    for field in (
+                        "uniformity_ratio",
+                        "observable_uniformity_ratio",
+                        "expected_noise_ratio",
+                    )
                 ]
                 for item in history
             ],
@@ -2058,7 +2735,7 @@ class SlmFeedbackTask:
                 HistogramPlot(
                     labels=PlotLabels(
                         title="Selected candidate site distributions",
-                        x="box signal",
+                        x="site signal",
                         y="shots",
                     )
                 ),
@@ -2187,6 +2864,7 @@ class SlmFeedbackTask:
         outcome: Mapping[str, object] | None = None,
         error: BaseException | None = None,
         rollback: Mapping[str, object] | None = None,
+        figures_error: BaseException | None = None,
     ) -> None:
         initial = None if not history else history[0]
         formal_history = [
@@ -2238,19 +2916,12 @@ class SlmFeedbackTask:
             "candidate_count": len(history),
             "settings": self._run_record(),
             "outcome": None if outcome is None else dict(outcome),
-            "final_double_feedback_gain": (
-                None
-                if not formal_history
-                else formal_history[-1]["double_feedback_gain"]
-            ),
-            "double_gain_history": [
+            "plant_slope_history": [
                 {
                     "candidate": item["iteration"],
-                    "gain": item["double_feedback_gain"],
-                    "action": item["adaptive_gain_action"],
-                    "common_double_sites": item["adaptive_gain_common_sites"],
-                    "previous_ratio": item["adaptive_gain_previous_ratio"],
-                    "current_ratio": item["adaptive_gain_current_ratio"],
+                    "estimate": item["plant_slope_estimate"],
+                    "standard_error": item["plant_slope_se"],
+                    "source": item["plant_slope_source"],
                 }
                 for item in formal_history
             ],
@@ -2321,6 +2992,12 @@ class SlmFeedbackTask:
                 if selected is None
                 else selected["maximum_relative_standard_error"]
             ),
+            "selected_true_uniformity_cv": (
+                None if selected is None else selected["true_uniformity_cv"]
+            ),
+            "selected_expected_noise_ratio": (
+                None if selected is None else selected["expected_noise_ratio"]
+            ),
             "common_observable_sites": common_site_count,
             "selected_common_site_total_bright_minus_dark": selected_common_total,
             "uniformity_history": [
@@ -2333,8 +3010,11 @@ class SlmFeedbackTask:
                         "total_observable_bright_minus_dark"
                     ],
                     "common_site_total_bright_minus_dark": common_total,
-                    "double_feedback_gain": item["double_feedback_gain"],
-                    "adaptive_gain_action": item["adaptive_gain_action"],
+                    "true_uniformity_cv": item["true_uniformity_cv"],
+                    "expected_noise_ratio": item["expected_noise_ratio"],
+                    "converged": item["converged"],
+                    "plant_slope_estimate": item["plant_slope_estimate"],
+                    "plant_slope_source": item["plant_slope_source"],
                 }
                 for item, common_total in zip(history, common_totals, strict=True)
             ],
@@ -2347,15 +3027,37 @@ class SlmFeedbackTask:
                     "message": str(error),
                 }
             ),
+            "figures_error": (
+                None
+                if figures_error is None
+                else {
+                    "type": (
+                        f"{type(figures_error).__module__}."
+                        f"{type(figures_error).__qualname__}"
+                    ),
+                    "message": str(figures_error),
+                }
+            ),
         }
         json_path = write_readable_json(
             paths["root"] / "summary.json", _plain_json(document)
+        )
+        final_slope = (
+            document["plant_slope_history"][-1]
+            if document["plant_slope_history"]
+            else None
         )
         lines = [
             f"SLM feedback status: {status}",
             f"Candidates measured: {len(history)}",
             f"Selected candidate: {selected_candidate if selected_candidate is not None else 'none'}",
-            f"Final double feedback gain: {document['final_double_feedback_gain']}",
+            "Final plant slope: "
+            + (
+                "none"
+                if final_slope is None
+                else f"{final_slope['estimate']} +/- {final_slope['standard_error']} "
+                f"({final_slope['source']})"
+            ),
         ]
         if outcome is not None and outcome.get("reason"):
             lines.append(f"Outcome: {outcome['reason']}")
@@ -2384,12 +3086,21 @@ class SlmFeedbackTask:
                     "Simultaneous 95% interval: "
                     f"[{selected['uniformity_confidence_lower']}, "
                     f"{selected['uniformity_confidence_upper']}]",
+                    "True between-site contrast CV (split-half): "
+                    f"{selected['true_uniformity_cv']}",
+                    "Expected max/min of a uniform array at this noise: "
+                    f"{selected['expected_noise_ratio']}",
                 )
             )
         if rollback is not None:
             lines.append(f"Rollback: {rollback.get('status')}")
         if error is not None:
             lines.append(f"Error: {type(error).__name__}: {error}")
+        if figures_error is not None:
+            lines.append(
+                "Figures not written: "
+                f"{type(figures_error).__name__}: {figures_error}"
+            )
         text_path = atomic_write_text(
             paths["root"] / "summary.txt", "\n".join(lines) + "\n"
         )
@@ -2408,7 +3119,28 @@ class SlmFeedbackTask:
         candidate_reports: list[tuple[Mapping[str, object], np.ndarray]],
         status: str,
         republish: bool,
+        error: BaseException | None = None,
     ) -> dict[str, object]:
+        """Seal one candidate as the run's result: SLM, artifact, figures, summary.
+
+        Every way a run ends -- completed, stalled, stopped, FAILED -- passes
+        through here with the candidate it keeps, so ``final/`` and the SLM
+        never disagree about what was chosen.  The failure path used to skip
+        this and restore the incoming phase instead: a run that had selected
+        candidate 66 of 68 died on one pulse poll with an empty ``final/``
+        and the SLM showing the phase it started from.
+
+        The artifact is the deliverable, the figures are the report, and a
+        report that fails must not take the deliverable with it: the figures
+        are written after the artifact, and a figure writer that raises does
+        not raise out of the seal.  It is recorded in the summary, told to
+        the operator, and noted on the run's error when there is one.
+        Letting it out of here made the failure handler seal the same
+        candidate a second time, fail at the same figures, and then restore
+        the incoming phase -- ``final/`` claiming candidate 3 with the SLM on
+        the phase the run started from, and a summary saying "restored".
+        """
+
         expected = canonical_phase(candidate["phase"], self.slm.shape_yx)
         observed = self.slm.last_commanded_phase
         applied = (
@@ -2449,22 +3181,6 @@ class SlmFeedbackTask:
                 device_event_record=device_record,
             )
         retained_history = candidate.get("history")
-        if (
-            history
-            and isinstance(retained_history, Mapping)
-            and candidate.get("samples") is not None
-            and candidate.get("mean_frame") is not None
-            and initial_mean_frame is not None
-        ):
-            self._save_figures(
-                context,
-                paths,
-                history=history,
-                selected=candidate,
-                initial_phase=initial_phase,
-                initial_mean_frame=initial_mean_frame,
-                candidate_reports=candidate_reports,
-            )
         artifact_path = paths["final"] / "science-context.npz"
         metadata = self._candidate_metadata(
             candidate=(candidate_number if isinstance(retained_history, Mapping) else 0),
@@ -2496,6 +3212,35 @@ class SlmFeedbackTask:
             role="final",
             contract_id=SLM_PHASE_ARTIFACT_CONTRACT,
         )
+        figures_error: BaseException | None = None
+        if (
+            history
+            and isinstance(retained_history, Mapping)
+            and candidate.get("samples") is not None
+            and candidate.get("mean_frame") is not None
+            and initial_mean_frame is not None
+        ):
+            try:
+                self._save_figures(
+                    context,
+                    paths,
+                    history=history,
+                    selected=candidate,
+                    initial_phase=initial_phase,
+                    initial_mean_frame=initial_mean_frame,
+                    candidate_reports=candidate_reports,
+                )
+            except Exception as figure_error:
+                figures_error = figure_error
+                context.report_progress(
+                    "Feedback figures were not written: "
+                    f"{type(figure_error).__name__}: {figure_error}"
+                )
+                if error is not None:
+                    error.add_note(
+                        "Feedback figures were not written: "
+                        f"{type(figure_error).__name__}: {figure_error}"
+                    )
         self._write_summary(
             context,
             paths,
@@ -2505,6 +3250,8 @@ class SlmFeedbackTask:
                 candidate_number if isinstance(retained_history, Mapping) else None
             ),
             outcome=metadata["outcome"],
+            error=error,
+            figures_error=figures_error,
         )
         terminal_uniformity = (
             retained_history.get("uniformity_ratio")
@@ -2531,49 +3278,21 @@ class SlmFeedbackTask:
                 if isinstance(retained_history, Mapping)
                 else None
             ),
+            "true_uniformity_cv": (
+                retained_history.get("true_uniformity_cv")
+                if isinstance(retained_history, Mapping)
+                else None
+            ),
+            "expected_noise_ratio": (
+                retained_history.get("expected_noise_ratio")
+                if isinstance(retained_history, Mapping)
+                else None
+            ),
             "updates": len(history),
             "feedback_mode": self.feedback_mode,
             "requested_exposure_seconds": self.exposure_seconds,
             "actual_exposure_seconds": self._actual_exposure_seconds,
         }
-
-    def _save_failure_figures(
-        self,
-        context: object,
-        paths: Mapping[str, Path],
-        *,
-        history: list[dict[str, object]],
-        selected: Mapping[str, object] | None,
-        initial_phase: np.ndarray,
-        initial_mean_frame: np.ndarray | None,
-        candidate_reports: list[tuple[Mapping[str, object], np.ndarray]],
-        error: BaseException,
-    ) -> None:
-        """Save the report supported by completed data without masking failure."""
-
-        if (
-            not history
-            or selected is None
-            or selected.get("samples") is None
-            or selected.get("mean_frame") is None
-            or initial_mean_frame is None
-        ):
-            return
-        try:
-            self._save_figures(
-                context,
-                paths,
-                history=history,
-                selected=selected,
-                initial_phase=initial_phase,
-                initial_mean_frame=initial_mean_frame,
-                candidate_reports=candidate_reports,
-            )
-        except BaseException as figure_error:
-            error.add_note(
-                "Feedback partial figures could not be saved: "
-                f"{type(figure_error).__name__}: {figure_error}"
-            )
 
     def execute(self, context: object) -> dict[str, object]:
         self._actual_device_snapshots = {}
@@ -2593,22 +3312,6 @@ class SlmFeedbackTask:
         initial_mean_frame: np.ndarray | None = None
         stalled = False
         termination_reason = "all authored feedback updates completed"
-        context.register_partial_exit_writer(
-            lambda _status, error: self._save_failure_figures(
-                context,
-                paths,
-                history=history,
-                selected=(
-                    retained_valid
-                    or most_visible_observed
-                    or last_completed_candidate
-                ),
-                initial_phase=incoming,
-                initial_mean_frame=initial_mean_frame,
-                candidate_reports=candidate_reports,
-                error=error,
-            )
-        )
         try:
             _check_cancelled(context)
             # Science Context is the requested starting CONTENT, not proof of
@@ -2625,6 +3328,12 @@ class SlmFeedbackTask:
             )
             _check_cancelled(context)
             current_target = self.target
+            # The Target on the SLM is the control Target with this
+            # candidate's identification excitation on its sites (see
+            # ``_excited_target``); the baseline is the Context's own.
+            current_solved_target = self.target
+            current_excitation = np.zeros(self._site_count, dtype=float)
+            excitation_rng = np.random.default_rng(0)
             spot_optimizer_state: dict[str, object] = {}
             current_pattern = incoming_pattern
             current_phase = incoming
@@ -2694,14 +3403,16 @@ class SlmFeedbackTask:
             candidate_number = 0
             candidate_kind = "baseline"
             formal_updates = 0
-            double_feedback_gain = self.feedback_gain
-            adaptive_improvement_streak = 0
-            previous_formal_contrast: np.ndarray | None = None
-            previous_formal_error: np.ndarray | None = None
-            previous_formal_valid: np.ndarray | None = None
+            # The plant record: every candidate's weights as the SLM saw them
+            # (excitation included), the excitation itself, and the contrasts
+            # they produced.  The slope estimate pools all of it; a new run
+            # starts without one.
+            plant_log_weights: list[np.ndarray] = []
+            plant_log_contrast: list[np.ndarray] = []
+            plant_excitation: list[np.ndarray] = []
+            convergence_streak = 0
             probe_sites = np.zeros(self._site_count, dtype=bool)
             probe_episode_used = np.zeros(self._site_count, dtype=bool)
-            probe_adoption_pending = np.zeros(self._site_count, dtype=bool)
             probe_baseline_target: np.ndarray | None = None
             probe_baseline_pattern: np.ndarray | None = None
             probe_baseline_optimizer_state: dict[str, object] | None = None
@@ -2715,21 +3426,8 @@ class SlmFeedbackTask:
             probe_baseline_reference_valid = np.zeros(
                 self._site_count, dtype=bool
             )
-            probe_baseline_previous_weights = np.full(
-                self._site_count, np.nan, dtype=float
-            )
-            probe_baseline_previous_contrast = np.full(
-                self._site_count, np.nan, dtype=float
-            )
-            probe_baseline_directed_step = np.zeros(
-                self._site_count, dtype=float
-            )
-            probe_baseline_control_boundary = np.full(
-                self._site_count, np.nan, dtype=float
-            )
-            probe_baseline_control_direction = np.zeros(
-                self._site_count, dtype=float
-            )
+            probe_baseline_dark = np.zeros(self._site_count, dtype=bool)
+            probe_baseline_edge = np.zeros(self._site_count, dtype=bool)
             pending_probes: list[
                 tuple[float, float, np.ndarray, np.ndarray]
             ] = []
@@ -2740,8 +3438,11 @@ class SlmFeedbackTask:
             active_probe_effective: float | None = None
             active_probe_site_factors: np.ndarray | None = None
             probe_selected_factors = np.ones(self._site_count, dtype=float)
-            probe_direction_log_step = np.zeros(self._site_count, dtype=float)
-            probe_direction_sign = np.zeros(self._site_count, dtype=float)
+            # Every site's bracket: the direction its loading edge lies in,
+            # a share it was single at and a share it was loaded at (see
+            # ``_updated_brackets``).  Kept across the whole run; a probe
+            # episode only ever seeds it for sites that had none.
+            bracket_direction = np.zeros(self._site_count, dtype=float)
             probe_single_bound = np.full(
                 self._site_count, np.nan, dtype=float
             )
@@ -2800,9 +3501,13 @@ class SlmFeedbackTask:
                         candidate=candidate_number,
                     ),
                 )
-                samples, saturated_sites, missing_sites, mean_frame = self._measure(
-                    pulse, context, iteration
-                )
+                (
+                    samples,
+                    saturated_sites,
+                    missing_sites,
+                    mean_frame,
+                    pulse_warning,
+                ) = self._measure(pulse, context, iteration)
                 if initial_mean_frame is None:
                     initial_mean_frame = np.array(mean_frame, copy=True)
                 fitted = _fit_contrasts(samples)
@@ -2823,44 +3528,29 @@ class SlmFeedbackTask:
                 contrast = np.asarray(fitted["contrast"], dtype=float)
                 error = np.asarray(fitted["standard_error"], dtype=float)
                 observable_valid = fit_valid
-                adaptive_gain_action = "ignored_diagnostic_probe"
-                adaptive_gain_common_sites = 0
-                adaptive_gain_previous_ratio: float | None = None
-                adaptive_gain_current_ratio: float | None = None
-                if candidate_kind != "probe":
-                    if (
-                        previous_formal_contrast is None
-                        or previous_formal_error is None
-                        or previous_formal_valid is None
-                    ):
-                        adaptive_gain_action = "initialize_formal_double_history"
-                    else:
-                        (
-                            double_feedback_gain,
-                            adaptive_improvement_streak,
-                            adaptive_gain_action,
-                            adaptive_gain_common_sites,
-                            adaptive_gain_previous_ratio,
-                            adaptive_gain_current_ratio,
-                        ) = _adapt_double_gain(
-                            previous_formal_contrast,
-                            previous_formal_error,
-                            previous_formal_valid,
-                            contrast,
-                            error,
-                            observable_valid,
-                            gain=double_feedback_gain,
-                            improvement_streak=adaptive_improvement_streak,
-                        )
-                    previous_formal_contrast = np.array(contrast, copy=True)
-                    previous_formal_error = np.array(error, copy=True)
-                    previous_formal_valid = np.array(observable_valid, copy=True)
-                needs_probe_sites = _needs_probe(
+                loading_edge = _loading_edge(
+                    fitted["bright_fraction"], observable_valid
+                )
+                odd_contrast = np.asarray(fitted["odd_contrast"], dtype=float).copy()
+                even_contrast = np.asarray(fitted["even_contrast"], dtype=float).copy()
+                odd_contrast[~observable_valid] = np.nan
+                even_contrast[~observable_valid] = np.nan
+                true_variance, true_variance_error = _split_half_dispersion(
+                    odd_contrast, even_contrast, observable_valid
+                )
+                true_uniformity_cv = (
+                    float(np.sqrt(max(true_variance, 0.0)))
+                    if np.isfinite(true_variance)
+                    else float("nan")
+                )
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    expected_noise_ratio = _expected_noise_ratio(
+                        error / contrast, observable_valid
+                    )
+                unobservable_single = _unobservable_single(
                     fit_single,
                     observable_valid,
                     acquisition_invalid,
-                    previous_weights,
-                    previous_contrast,
                 )
                 valid = bool(np.all(observable_valid))
                 observable_contrast = contrast[observable_valid]
@@ -2896,135 +3586,92 @@ class SlmFeedbackTask:
                     else float(np.min(visible_margin))
                 )
                 current_weights = np.asarray(
-                    current_target[self._rows, self._columns], dtype=float
+                    current_solved_target[self._rows, self._columns], dtype=float
                 )
-                current_control_weights = _control_weights(current_weights)
-                bracket_recovery = np.zeros(self._site_count, dtype=bool)
+                current_control_weights = _control_weights(
+                    np.asarray(current_target[self._rows, self._columns], dtype=float)
+                )
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    plant_log_weights.append(
+                        np.log(_control_weights(current_weights))
+                    )
+                    plant_log_contrast.append(
+                        np.where(observable_valid, np.log(contrast), np.nan)
+                    )
+                    plant_excitation.append(np.array(current_excitation, copy=True))
+                plant_slope_estimate, plant_slope_se, plant_slope_rows = _plant_slope(
+                    plant_log_weights,
+                    plant_log_contrast,
+                    plant_excitation,
+                )
+                plant_slope_magnitude = _usable_plant_slope(
+                    len(plant_log_weights), plant_slope_estimate, plant_slope_se
+                )
+                plant_slope_source = (
+                    "assumed" if plant_slope_magnitude is None else "estimated"
+                )
+                # CONVERGED means: every site loaded and resolved, and the two
+                # half batches agree that whatever dispersion is left is
+                # within this batch's own power to see.  Three formal
+                # candidates in a row saying so end the run; a diagnostic
+                # probe neither counts nor breaks the streak.
+                converged = bool(
+                    valid
+                    and np.isfinite(true_variance)
+                    and np.isfinite(true_variance_error)
+                    and true_variance <= true_variance_error
+                )
+                if candidate_kind != "probe":
+                    convergence_streak = convergence_streak + 1 if converged else 0
+                # Bracket bookkeeping runs on every measured candidate: a
+                # probe's non-probe sites are evidence too.  The probe sites
+                # of an episode in flight are the verdict's to seed.
+                bookkept = (
+                    ~probe_sites if candidate_kind == "probe" else
+                    np.ones(self._site_count, dtype=bool)
+                )
+                (
+                    probe_single_bound,
+                    probe_observable_bound,
+                    bracket_direction,
+                ) = _updated_brackets(
+                    current_control_weights,
+                    unobservable_single & bookkept,
+                    observable_valid & bookkept,
+                    previous_weights,
+                    probe_single_bound,
+                    probe_observable_bound,
+                    bracket_direction,
+                )
+                probe_control_boundary[:] = _probe_boundary(
+                    probe_single_bound,
+                    probe_observable_bound,
+                    bracket_direction,
+                )
+                bracket_step, bracket_kind = _single_bracket_step(
+                    current_control_weights,
+                    unobservable_single,
+                    probe_single_bound,
+                    probe_observable_bound,
+                    bracket_direction,
+                    self.maximum_weight_change,
+                )
                 episode_probe_sites = np.zeros(self._site_count, dtype=bool)
                 starts_probe_episode = False
                 if candidate_kind != "probe":
-                    probe_direction_log_step[fit_valid] = 0.0
-                    unobservable_single = _unobservable_single(
-                        fit_single,
-                        observable_valid,
-                        acquisition_invalid,
-                    )
-                    contradicted_probe = (
-                        unobservable_single
-                        & (candidate_kind == "probe_combined")
-                        & (
-                            probe_adoption_pending
-                            | probe_baseline_reference_valid
-                        )
-                    )
-                    probe_adoption_pending[fit_valid | acquisition_invalid] = False
-                    if np.any(contradicted_probe):
-                        probe_episode_used[contradicted_probe] = False
-                        probe_adoption_pending[contradicted_probe] = False
-                        probe_selected_factors[contradicted_probe] = 1.0
-                        probe_direction_log_step[contradicted_probe] = 0.0
-                        probe_direction_sign[contradicted_probe] = 0.0
-                        probe_single_bound[contradicted_probe] = np.nan
-                        probe_observable_bound[contradicted_probe] = np.nan
-                        probe_control_boundary[contradicted_probe] = np.nan
-                    has_double_history = (
-                        unobservable_single
-                        & np.isfinite(previous_weights)
-                        & (previous_weights > 0.0)
-                        & np.isfinite(previous_contrast)
-                        & (previous_contrast > 0.0)
-                    )
-                    new_history_branch = (
-                        has_double_history & (probe_direction_sign == 0.0)
-                    )
-                    history_direction = np.zeros(self._site_count, dtype=float)
-                    history_direction[new_history_branch] = np.sign(np.log(
-                        previous_weights[new_history_branch]
-                        / current_control_weights[new_history_branch]
-                    ))
-                    new_history_branch &= history_direction != 0.0
-                    probe_direction_sign[new_history_branch] = history_direction[
-                        new_history_branch
-                    ]
-                    probe_single_bound[new_history_branch] = (
-                        current_control_weights[new_history_branch]
-                    )
-                    probe_observable_bound[new_history_branch] = previous_weights[
-                        new_history_branch
-                    ]
-                    (
-                        probe_single_bound,
-                        probe_observable_bound,
-                        probe_direction_sign,
-                        _crossed_bracket,
-                    ) = _updated_single_bracket(
-                        current_control_weights,
-                        unobservable_single,
-                        probe_single_bound,
-                        probe_observable_bound,
-                        probe_direction_sign,
-                    )
-                    up = probe_direction_sign > 0.0
-                    down = probe_direction_sign < 0.0
-                    probe_observable_bound[observable_valid & up] = np.fmin(
-                        probe_observable_bound[observable_valid & up], current_control_weights[observable_valid & up]
-                    )
-                    probe_observable_bound[observable_valid & down] = np.fmax(
-                        probe_observable_bound[observable_valid & down], current_control_weights[observable_valid & down]
-                    )
-                    probe_direction_log_step[observable_valid] = 0.0
-                    probe_control_boundary[:] = _probe_boundary(
-                        probe_single_bound,
-                        probe_observable_bound,
-                        probe_direction_sign,
-                    )
-                    midpoint_step = _single_bracket_step(
-                        current_control_weights,
-                        probe_control_boundary,
-                        probe_direction_sign,
-                        self.maximum_weight_change,
-                    )
-                    bracket_recovery = unobservable_single & (midpoint_step != 0.0)
-                    probe_direction_log_step[bracket_recovery] = midpoint_step[
-                        bracket_recovery
-                    ]
-                    relative_move = np.full(
-                        self._site_count, np.inf, dtype=float
-                    )
-                    relative_move[has_double_history] = np.abs(np.log(
-                        current_control_weights[has_double_history]
-                        / previous_weights[has_double_history]
-                    ))
-                    has_probe_direction = probe_direction_sign != 0.0
-                    recovery_probe = (
-                        has_double_history
-                        & ~_crossed_bracket
-                        & ~has_probe_direction
-                        & (
-                            (relative_move < 0.02)
-                            | (probe_direction_sign == 0.0)
-                            | (
-                                np.isfinite(probe_observable_bound)
-                                & ~np.isfinite(probe_control_boundary)
-                            )
-                        )
-                    )
                     episode_probe_sites = (
-                        (
-                            (needs_probe_sites & ~has_probe_direction)
-                            | recovery_probe
-                            | contradicted_probe
+                        _needs_probe(
+                            fit_single,
+                            observable_valid,
+                            acquisition_invalid,
+                            bracket_direction,
+                            previous_weights,
+                            previous_contrast,
                         )
                         & ~probe_episode_used
                         & (formal_updates < self.max_updates)
                     )
                     starts_probe_episode = bool(np.any(episode_probe_sites))
-                    if starts_probe_episode:
-                        probe_direction_log_step[episode_probe_sites] = 0.0
-                        probe_direction_sign[episode_probe_sites] = 0.0
-                        probe_single_bound[episode_probe_sites] = np.nan
-                        probe_observable_bound[episode_probe_sites] = np.nan
-                        probe_control_boundary[episode_probe_sites] = np.nan
                 feedback_valid = observable_valid
                 if starts_probe_episode:
                     probe_sites = np.array(episode_probe_sites, copy=True)
@@ -3032,7 +3679,6 @@ class SlmFeedbackTask:
                     pending_probes.clear()
                     probe_measurements.clear()
                     probe_selected_factors[probe_sites] = 1.0
-                    probe_adoption_pending[probe_sites] = False
                     probe_decisions[probe_sites] = "not_probed"
                     probe_baseline_candidate = None
                     probe_baseline_target = np.array(
@@ -3048,8 +3694,8 @@ class SlmFeedbackTask:
                     probe_baseline_error[:] = error
                     probe_baseline_valid[:] = observable_valid
                     probe_baseline_reference_valid[:] = fit_valid
-                    probe_baseline_previous_weights[:] = previous_weights
-                    probe_baseline_previous_contrast[:] = previous_contrast
+                    probe_baseline_dark[:] = unobservable_single
+                    probe_baseline_edge[:] = loading_edge
                     for requested_factor in self.probe_factors:
                         requested = np.ones(self._site_count, dtype=float)
                         requested[probe_sites] = requested_factor
@@ -3098,21 +3744,14 @@ class SlmFeedbackTask:
                         current_target, dtype=np.float32, copy=True
                     )
                     log_correction = np.zeros(self._site_count, dtype=float)
-                    response_slope = np.full(
-                        self._site_count, np.nan, dtype=float
-                    )
                     decisions = np.full(
                         self._site_count, "hold_for_probe", dtype="<U32"
                     )
                 else:
-                    directed_step = np.array(
-                        probe_direction_log_step, copy=True
-                    )
-                    directed_step[acquisition_invalid] = 0.0
-                    allocation_boundary = np.array(
-                        probe_control_boundary, copy=True
-                    )
-                    proposed_target, log_correction, response_slope, decisions = (
+                    directed_step = np.array(bracket_step, copy=True)
+                    if starts_probe_episode:
+                        directed_step[probe_sites] = 0.0
+                    proposed_target, log_correction, decisions = (
                         _updated_target(
                             current_target,
                             contrast,
@@ -3121,23 +3760,19 @@ class SlmFeedbackTask:
                             self._rows,
                             self._columns,
                             reference_valid=fit_valid,
-                            previous_weights=previous_weights,
-                            previous_contrast=previous_contrast,
-                            feedback_gain=double_feedback_gain,
+                            feedback_gain=self.feedback_gain,
+                            plant_slope=plant_slope_magnitude,
                             maximum_weight_change=self.maximum_weight_change,
                             directed_log_step=directed_step,
-                            control_boundary=allocation_boundary,
-                            control_direction=probe_direction_sign,
+                            control_boundary=probe_control_boundary,
+                            control_direction=bracket_direction,
+                            loading_edge=loading_edge,
                         )
                     )
-                    decisions[bracket_recovery] = "single_bracket_midpoint"
+                    stepped = unobservable_single & (directed_step != 0.0)
+                    decisions[stepped] = bracket_kind[stepped]
                     if starts_probe_episode:
                         decisions[probe_sites] = "hold_for_probe"
-                        probe_baseline_directed_step[:] = directed_step
-                        probe_baseline_control_boundary[:] = allocation_boundary
-                        probe_baseline_control_direction[:] = (
-                            probe_direction_sign
-                        )
                 measured_device_record = self._device_event_record(
                     include_measurement=True,
                     candidate=candidate_number,
@@ -3173,12 +3808,33 @@ class SlmFeedbackTask:
                     "maximum_relative_standard_error": (
                         None if not valid else relative_sem
                     ),
-                    "authored_feedback_gain": self.feedback_gain,
-                    "double_feedback_gain": double_feedback_gain,
-                    "adaptive_gain_action": adaptive_gain_action,
-                    "adaptive_gain_common_sites": adaptive_gain_common_sites,
-                    "adaptive_gain_previous_ratio": adaptive_gain_previous_ratio,
-                    "adaptive_gain_current_ratio": adaptive_gain_current_ratio,
+                    "true_uniformity_variance": (
+                        None if not np.isfinite(true_variance) else true_variance
+                    ),
+                    "true_uniformity_variance_error": (
+                        None
+                        if not np.isfinite(true_variance_error)
+                        else true_variance_error
+                    ),
+                    "true_uniformity_cv": (
+                        None if not np.isfinite(true_uniformity_cv) else true_uniformity_cv
+                    ),
+                    "expected_noise_ratio": (
+                        None
+                        if not np.isfinite(expected_noise_ratio)
+                        else expected_noise_ratio
+                    ),
+                    "converged": converged,
+                    "convergence_streak": convergence_streak,
+                    "feedback_gain": self.feedback_gain,
+                    "plant_slope_estimate": (
+                        None if not np.isfinite(plant_slope_estimate) else plant_slope_estimate
+                    ),
+                    "plant_slope_se": (
+                        None if not np.isfinite(plant_slope_se) else plant_slope_se
+                    ),
+                    "plant_slope_rows": plant_slope_rows,
+                    "plant_slope_source": plant_slope_source,
                     "formal_updates_applied": formal_updates,
                     "maximum_weight_change": self.maximum_weight_change,
                     "candidate_kind": candidate_kind,
@@ -3194,6 +3850,7 @@ class SlmFeedbackTask:
                     "effective_count_unit": self._effective_count_unit,
                     "target_weight": _json_floats(current_weights),
                     "control_weight": _json_floats(current_control_weights),
+                    "excitation_log_step": _json_floats(current_excitation),
                     "dark_mean": _json_floats(fitted["dark_mean"]),
                     "dark_sigma": _json_floats(fitted["dark_sigma"]),
                     "dark_standard_error": _json_floats(
@@ -3204,6 +3861,8 @@ class SlmFeedbackTask:
                     "fit_threshold": _json_floats(fitted["threshold"]),
                     "bright_minus_dark": _json_floats(contrast),
                     "contrast_standard_error": _json_floats(error),
+                    "odd_shot_bright_minus_dark": _json_floats(odd_contrast),
+                    "even_shot_bright_minus_dark": _json_floats(even_contrast),
                     "bright_fraction": _json_floats(fitted["bright_fraction"]),
                     "fit_fidelity": _json_floats(fitted["fidelity"]),
                     "bic_gain": _json_floats(fitted["bic_gain"]),
@@ -3211,13 +3870,13 @@ class SlmFeedbackTask:
                     "observable_valid": [
                         bool(value) for value in observable_valid
                     ],
+                    "loading_edge": [bool(value) for value in loading_edge],
                     "single_population": [bool(value) for value in fit_single],
                     "fit_invalid": [bool(value) for value in fit_invalid],
                     "single_mean": _json_floats(fitted["single_mean"]),
                     "single_sigma": _json_floats(fitted["single_sigma"]),
                     "decision": [str(value) for value in decisions],
                     "requested_log_correction": _json_floats(log_correction),
-                    "response_log_slope": _json_floats(response_slope),
                     "previous_double_control_weight": _json_floats(
                         previous_weights
                     ),
@@ -3241,6 +3900,7 @@ class SlmFeedbackTask:
                         probe_control_boundary
                     ),
                     "missing_sites": list(missing_sites),
+                    "pulse_warning": pulse_warning or None,
                     "single_population_sites": [
                         int(value) for value in np.flatnonzero(fit_single)
                     ],
@@ -3267,10 +3927,25 @@ class SlmFeedbackTask:
                     "candidate": candidate_number,
                     "phase": np.array(applied, copy=True),
                     "pattern_phase": np.array(current_pattern, copy=True),
-                    "target": np.array(current_target, copy=True),
+                    "target": np.array(current_solved_target, copy=True),
                     "solver": candidate_solver,
                     "history": history[-1],
-                    "score": observed_score,
+                    # The candidate's rank is the dispersion it can PROVE it
+                    # is under -- the split-half variance plus its own
+                    # standard error -- never the max/min of one noisy batch:
+                    # that number's minimum over 68 candidates was a sampling
+                    # extreme, and picking it was the winner's curse.  Nor
+                    # the variance clipped at zero: a single low draw of a
+                    # noisy estimate then tied at "zero" with the genuinely
+                    # uniform candidates (archived candidate 41, whose
+                    # neighbours both resolved 1.7% CV, tied with 62 and 65).
+                    # Ties go to the most recent candidate.
+                    "score": (
+                        true_variance + true_variance_error
+                        if np.isfinite(true_variance)
+                        and np.isfinite(true_variance_error)
+                        else float("inf")
+                    ),
                     "contrast": np.array(contrast, copy=True),
                     "standard_error": np.array(error, copy=True),
                     "samples": np.array(samples, copy=True),
@@ -3292,12 +3967,14 @@ class SlmFeedbackTask:
                 if valid and candidate_kind != "probe":
                     if (
                         retained_valid is None
-                        or float(completed["score"]) < float(retained_valid["score"])
+                        or float(completed["score"]) <= float(retained_valid["score"])
                     ):
                         retained_valid = completed
                     context.report_progress(
-                        f"qCMOS bright-dark ratio {score:.5f}; "
-                        f"simultaneous 95% upper {confidence_upper:.5f}"
+                        f"qCMOS bright-dark ratio {score:.5f} "
+                        f"(uniform-array floor {expected_noise_ratio:.5f}); "
+                        f"true site CV {true_uniformity_cv:.4f}; "
+                        f"plant slope {plant_slope_source}"
                     )
                 elif candidate_kind == "probe":
                     context.report_progress(
@@ -3362,63 +4039,67 @@ class SlmFeedbackTask:
                         next_kind = "probe"
                     else:
                         assert probe_baseline_target is not None
-                        (
-                            selected_probe_target,
-                            selected_factors,
-                            selected_decisions,
-                            probe_observed_factors,
-                        ) = _selected_probe_target(
-                            probe_baseline_target,
-                            probe_sites,
-                            probe_baseline_contrast,
-                            probe_baseline_valid,
-                            probe_measurements,
-                            self._rows,
-                            self._columns,
-                        )
-                        probe_direction_log_step[probe_sites] = 0.0
-                        probe_selected_factors[probe_sites] = selected_factors[
-                            probe_sites
-                        ]
-                        probe_decisions[probe_sites] = selected_decisions[probe_sites]
-                        probe_direction_sign[probe_sites] = np.sign(
-                            np.log(probe_observed_factors[probe_sites])
-                        )
-                        probe_adoption_pending[probe_sites] = (
-                            probe_selected_factors[probe_sites] != 1.0
-                        )
                         baseline_control = _control_weights(
                             probe_baseline_target[self._rows, self._columns]
                         )
-                        directed_probe = probe_sites & (
-                            probe_direction_sign != 0.0
+                        (
+                            verdict_step,
+                            verdict_direction,
+                            verdict_single,
+                            verdict_observable,
+                            verdict_decisions,
+                        ) = _probe_verdict(
+                            probe_sites,
+                            baseline_control,
+                            probe_baseline_contrast,
+                            probe_baseline_valid,
+                            probe_measurements,
+                            self.maximum_weight_change,
                         )
-                        probe_single_bound[directed_probe] = baseline_control[
-                            directed_probe
+                        probe_decisions[probe_sites] = verdict_decisions[probe_sites]
+                        bracket_direction[probe_sites] = verdict_direction[probe_sites]
+                        probe_single_bound[probe_sites] = verdict_single[probe_sites]
+                        probe_observable_bound[probe_sites] = verdict_observable[
+                            probe_sites
                         ]
-                        combined_directed_step = np.array(
-                            probe_baseline_directed_step, copy=True
+                        probe_control_boundary[:] = _probe_boundary(
+                            probe_single_bound,
+                            probe_observable_bound,
+                            bracket_direction,
                         )
-                        combined_directed_step[probe_sites] = 0.0
+                        # The combined Target is the baseline's own formal
+                        # update plus every dark site's direction -- the
+                        # probe verdict for the probed sites, the bracket
+                        # step (now holding what the probes showed) for the
+                        # rest -- funded by the loaded sites within a
+                        # resolution step and their bracket floors (see
+                        # ``_updated_target``).
+                        combined_directed_step, _combined_kind = _single_bracket_step(
+                            baseline_control,
+                            probe_baseline_dark & ~probe_sites,
+                            probe_single_bound,
+                            probe_observable_bound,
+                            bracket_direction,
+                            self.maximum_weight_change,
+                        )
+                        combined_directed_step[probe_sites] = verdict_step[
+                            probe_sites
+                        ]
                         combined_target, *_formal_details = _updated_target(
-                            selected_probe_target,
+                            probe_baseline_target,
                             probe_baseline_contrast,
                             probe_baseline_error,
                             probe_baseline_valid,
                             self._rows,
                             self._columns,
                             reference_valid=probe_baseline_reference_valid,
-                            previous_weights=probe_baseline_previous_weights,
-                            previous_contrast=probe_baseline_previous_contrast,
-                            feedback_gain=double_feedback_gain,
+                            feedback_gain=self.feedback_gain,
+                            plant_slope=plant_slope_magnitude,
                             maximum_weight_change=self.maximum_weight_change,
                             directed_log_step=combined_directed_step,
-                            control_boundary=(
-                                probe_baseline_control_boundary
-                            ),
-                            control_direction=(
-                                probe_baseline_control_direction
-                            ),
+                            control_boundary=probe_control_boundary,
+                            control_direction=bracket_direction,
+                            loading_edge=probe_baseline_edge,
                         )
                         combined_control = _control_weights(
                             combined_target[self._rows, self._columns]
@@ -3427,9 +4108,6 @@ class SlmFeedbackTask:
                             combined_control[probe_sites]
                             / baseline_control[probe_sites]
                         )
-                        probe_adoption_pending[probe_sites] &= (
-                            probe_selected_factors[probe_sites] != 1.0
-                        )
                         if np.array_equal(
                             combined_target, probe_baseline_target
                         ):
@@ -3437,8 +4115,8 @@ class SlmFeedbackTask:
                             continue_feedback = False
                             history[-1]["next_phase_changed"] = False
                             termination_reason = (
-                                "two-sided SLM probes supplied no observable "
-                                "direction; baseline restored"
+                                "the loaded sites could fund no share for the "
+                                "probed sites' direction; baseline restored"
                             )
                             forced_terminal_candidate = probe_baseline_candidate
                         else:
@@ -3446,7 +4124,15 @@ class SlmFeedbackTask:
                             next_kind = "probe_combined"
                             formal_updates += 1
                 else:
-                    if formal_updates >= self.max_updates:
+                    if convergence_streak >= _CONVERGENCE_CANDIDATES:
+                        continue_feedback = False
+                        history[-1]["next_phase_changed"] = None
+                        termination_reason = (
+                            "true between-site contrast dispersion indistinguishable "
+                            f"from zero for {_CONVERGENCE_CANDIDATES} consecutive "
+                            "candidates"
+                        )
+                    elif formal_updates >= self.max_updates:
                         continue_feedback = False
                         history[-1]["next_phase_changed"] = None
                     elif np.array_equal(proposed_target, current_target):
@@ -3463,6 +4149,28 @@ class SlmFeedbackTask:
                         formal_updates += 1
                 if continue_feedback:
                     assert next_target is not None
+                    # The identification excitation rides on the first
+                    # ordinary updates only; a probe's Target is the probe's
+                    # own statement and carries none, and a site on its
+                    # loading ramp is not wiggled 2% towards dark.
+                    next_excitation = (
+                        _excitation_pattern(
+                            excitation_rng, feedback_valid & ~loading_edge
+                        )
+                        if next_kind == "ordinary"
+                        and formal_updates <= _PLANT_EXCITATION_CANDIDATES
+                        else np.zeros(self._site_count, dtype=float)
+                    )
+                    next_solved_target = (
+                        _excited_target(
+                            next_target,
+                            next_excitation,
+                            self._rows,
+                            self._columns,
+                        )
+                        if np.any(next_excitation != 0.0)
+                        else next_target
+                    )
                     if next_kind == "probe":
                         context.report_progress(
                             "Solving SLM probe "
@@ -3477,7 +4185,7 @@ class SlmFeedbackTask:
                             if probe_solve else spot_optimizer_state
                         )
                         next_pattern, solver_metadata = solve_phase(
-                            next_target,
+                            next_solved_target,
                             pupil_amplitude=self._pupil_amplitude,
                             initial_phase=(
                                 probe_baseline_pattern
@@ -3487,6 +4195,8 @@ class SlmFeedbackTask:
                             iterations=None,
                             stop_requested=context.cancel_requested,
                             spot_optimizer_state=solve_state,
+                            support_tolerance=_FEEDBACK_SOLVE_SUPPORT_TOLERANCE,
+                            minimum_iterations=_FEEDBACK_SOLVE_MINIMUM_ITERATIONS,
                         )
                         next_pattern = freeze_pattern_phase(
                             next_pattern, self.slm.shape_yx
@@ -3525,6 +4235,8 @@ class SlmFeedbackTask:
                             spot_optimizer_state.update(solve_state)
                         history[-1]["next_phase_changed"] = True
                         current_target = next_target
+                        current_solved_target = next_solved_target
+                        current_excitation = next_excitation
                         current_pattern = next_pattern
                         current_phase = next_phase
                         candidate_kind = next_kind
@@ -3621,6 +4333,40 @@ class SlmFeedbackTask:
                 or most_visible_observed
                 or last_completed_candidate
             )
+            if failure_selected is not None:
+                # A FAILED RUN KEEPS WHAT IT MEASURED.  The candidate the
+                # run would have selected is sealed exactly as a completed
+                # run seals it -- on the SLM, in final/, in the summary --
+                # and the failure travels with it in the outcome and the
+                # summary.  Only when even that cannot be done is the
+                # incoming phase the one known-good state left.
+                failure_selected["outcome"] = {
+                    "status": "failed",
+                    "reason": f"{type(error).__name__}: {error}",
+                    "selected_candidate": int(failure_selected["candidate"]),
+                    "shots_per_candidate": self.shots,
+                    "candidates_measured": len(history),
+                }
+                try:
+                    self._finish_candidate(
+                        context,
+                        failure_selected,
+                        history,
+                        paths=paths,
+                        initial_phase=incoming,
+                        initial_mean_frame=initial_mean_frame,
+                        candidate_reports=candidate_reports,
+                        status="failed",
+                        republish=True,
+                        error=error,
+                    )
+                except BaseException as seal_error:
+                    error.add_note(
+                        "Feedback could not seal the selected candidate after "
+                        f"failure: {type(seal_error).__name__}: {seal_error}"
+                    )
+                else:
+                    raise
             try:
                 self._apply_exact(incoming)
             except BaseException as restore_error:

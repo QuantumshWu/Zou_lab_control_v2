@@ -47,6 +47,7 @@ def test_source_imports_only_the_package_and_allowed_dependencies() -> None:
         "tempfile",
         "contextlib",
         "io",
+        "logging",
         "warnings",
         "abc",
         "types",

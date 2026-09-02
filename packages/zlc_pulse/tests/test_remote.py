@@ -653,7 +653,9 @@ def test_real_uart_crc_status_exception_maps_to_crc_category(tmp_path) -> None:
         def write_batch(self, requests, *, deadline, stop=None):
             return [framing.encode_reply(request[3], framing.ST_CRC_FAIL) for request in requests]
 
-    transport = transport_module.UartRegisterTransport(link=CrcLink())
+    # The retry law asks a refusing board again, one attempt budget apart,
+    # until the deadline: keep that deadline short here.
+    transport = transport_module.UartRegisterTransport(link=CrcLink(), action_timeout=0.2)
     transport.start()
     try:
         with pytest.raises(UartError) as failure:

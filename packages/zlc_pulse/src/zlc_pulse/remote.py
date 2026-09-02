@@ -1078,6 +1078,11 @@ class PulseRemoteServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                                 status_reads=result.status_reads,
                                 cursor_reads=result.cursor_reads,
                                 observer_error=result.observer_error or None,
+                                # Quiet while zero, like resent_frames on LOAD:
+                                # a line that is degrading shows up here shot
+                                # by shot before it fails one.
+                                poll_failures=result.poll_failures or None,
+                                resent_frames=result.resent_frames or None,
                             ),
                         )
                     else:

@@ -685,15 +685,16 @@ def test_safe_and_load_strobes_ride_the_resending_line() -> None:
     assert fire_flags and not any(fire_flags)
 
 
-def test_a_verified_strobe_waits_briefly_for_courtesy_then_asks_the_board() -> None:
+def test_a_verified_strobe_leaves_the_acknowledgement_window_to_the_line() -> None:
     """The acknowledgement is a courtesy; the status read is the authority.
 
-    Waiting the full action timeout for the courtesy stalled every lost FIRE
-    acknowledgement for five seconds before the verification that settles it
-    in one read.  The acknowledgement window is pinned short here.
+    How long the courtesy is waited for is the line's attempt budget (pinned
+    in test_uart_transport: one non-resending attempt, milliseconds).  The
+    device once handed the line a 0.3 s window of its own for the verified
+    strobe -- the same claim owned twice, and the second owner dead, because
+    the line's budget was already shorter.  The FIRE strobe therefore
+    carries no deadline of its own.
     """
-
-    import time as _time
 
     geom = StreamerParams()
 
@@ -704,15 +705,15 @@ def test_a_verified_strobe_waits_briefly_for_courtesy_then_asks_the_board() -> N
 
         def __init__(self, **kwargs) -> None:
             super().__init__(**kwargs)
-            self.fire_windows: list[float] = []
+            self.fire_deadlines: list[object] = []
 
         def write_words(self, words, **kwargs):  # type: ignore[override]
             fire = any(
                 address == CtrlWords.COMMAND and value == CMD_FIRE
                 for address, value in words
             )
-            if fire and kwargs.get("deadline") is not None:
-                self.fire_windows.append(kwargs["deadline"] - _time.monotonic())
+            if fire:
+                self.fire_deadlines.append(kwargs.get("deadline"))
             return super().write_words(words, **kwargs)
 
     transport = _DeadlineRecorder(geom=geom, auto_done=True)
@@ -725,8 +726,8 @@ def test_a_verified_strobe_waits_briefly_for_courtesy_then_asks_the_board() -> N
     streamer.fire(cycles=1)
     assert streamer.wait_done(1.0) is not None
 
-    assert transport.fire_windows, "the FIRE strobe must carry its short window"
-    assert all(window < 1.0 for window in transport.fire_windows), transport.fire_windows
+    assert transport.fire_deadlines, "the FIRE strobe must have reached the line"
+    assert all(deadline is None for deadline in transport.fire_deadlines), transport.fire_deadlines
 
 
 def test_a_transport_that_never_loses_anything_gets_no_verify_machinery() -> None:

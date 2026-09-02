@@ -769,6 +769,82 @@ def test_observer_refill_failure_becomes_terminal_error() -> None:
     assert streamer.snapshot()["firing"] is False
 
 
+class _PollFailingTransport(MemoryRegisterTransport):
+    """The observer's STATUS polls fail ``failures`` times in a row, the way
+    a UART read that exhausted its retries fails: with a TimeoutError."""
+
+    lossy_line = True
+
+    def __init__(self, *, failures: int, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.failures = failures
+        self.failed = 0
+        self.resends = 0
+
+    def read_word(self, word_offset, **kwargs):
+        if (
+            threading.current_thread().name == "zlc-pulse-observer"
+            and int(word_offset) == CtrlWords.STATUS
+            and self.failed < self.failures
+        ):
+            self.failed += 1
+            self.resends += 60
+            raise TimeoutError("UART reply timed out after 60 attempt(s) (simulated)")
+        return super().read_word(word_offset, **kwargs)
+
+
+def test_one_failed_poll_is_a_warning_and_the_shot_still_reports_done() -> None:
+    """STATUS and CURSOR are idempotent reads and DONE is a level: a poll
+    that fails is asked again, not turned into a fabricated ERROR.
+
+    The archived run: one CURSOR reply one byte short at shot 85 of 200, the
+    board played on to 200, the camera collected 200 frames, SAFE
+    acknowledged -- and the candidate was thrown away as "pulse observer
+    failed".  The failure stays on the report, so a degrading line is
+    visible shot by shot.
+    """
+
+    geom = replace(StreamerParams(), max_edges=8, bank_size=2)
+    program = compile_sequence(_sequence(), geom, 50e6)
+    transport = _PollFailingTransport(failures=1, geom=geom, auto_done=True)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
+    streamer.open()
+    streamer.load(program)
+    streamer.fire()
+    report = streamer.wait_done(1.0)
+    assert report is not None
+    assert report.fault == ""
+    assert report.status == STATUS_DONE
+    assert report.status_reads == (STATUS_DONE, STATUS_DONE)
+    assert report.observer_error == ""
+    assert report.poll_failures == 1
+    assert report.resent_frames == 60
+
+
+def test_two_consecutive_failed_polls_end_the_observation_in_error() -> None:
+    """Two whole transaction deadlines without one good answer is a line
+    that is down; the report says how the line behaved before it went."""
+
+    geom = replace(StreamerParams(), max_edges=8, bank_size=2)
+    program = compile_sequence(_sequence(), geom, 50e6)
+    transport = _PollFailingTransport(failures=2, geom=geom, auto_done=True)
+    streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
+    streamer.open()
+    streamer.load(program)
+    streamer.fire()
+    report = streamer.wait_done(1.0)
+    assert report is not None
+    assert report.status == STATUS_ERROR
+    assert report.observer_error.startswith("TimeoutError: UART reply timed out")
+    assert report.poll_failures == 2
+    assert report.resent_frames == 120
+    assert report.fault == (
+        f"pulse observer failed: {report.observer_error}; "
+        "the line failed 2 poll(s) and resent 120 frame(s) during this shot"
+    )
+    assert streamer.snapshot()["firing"] is False
+
+
 def test_recovered_link_error_is_visible_but_not_an_engine_fault() -> None:
     report = DoneReport(
         STATUS_DONE | STATUS_LINK_ERROR,
