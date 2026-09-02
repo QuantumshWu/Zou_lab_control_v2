@@ -72,7 +72,7 @@ def test_real_batch_wrapper_forwards_exact_modes_without_inner_argument(tmp_path
     )
     assert layers, "packages/ must hold at least one layer with a src tree"
     for layer in layers:
-        assert f"%ZLC_TOOL_REPO_ROOT%\packages\{layer}\src" in resolver, layer
+        assert rf"%ZLC_TOOL_REPO_ROOT%\packages\{layer}\src" in resolver, layer
     assert 'set "PYTHONPATH=%ZLC_CHECKOUT_PYTHONPATH%;%PYTHONPATH%"' in resolver
     assert 'set "PYTHONPATH=%ZLC_CHECKOUT_PYTHONPATH%"' in resolver
     assert "PYTHONPATH=" not in shared
