@@ -96,6 +96,287 @@ def _lock_renderer_mathtext(renderer: Any) -> None:
         parser._zlc_locked_parse = True
 
 
+#: Distinct text rasters one renderer remembers before forgetting them all.
+#: A colour scale in TIGHT mode mints two new endpoint labels per frame, so
+#: the memo would otherwise grow with the run; five hundred entries is a few
+#: hundred frames of churn between rewarms of the labels that never change.
+_TEXT_RASTER_MEMO_LIMIT = 512
+
+
+def _prepare_renderer(renderer: Any) -> Any:
+    """The one place a drawing renderer is fitted for this package.
+
+    Both fittings are idempotent per renderer object, so every path that
+    obtains the canvas renderer for a draw calls this and none has to
+    know whether another path got there first.
+    """
+
+    _lock_renderer_mathtext(renderer)
+    _install_text_raster_memo(renderer)
+    return renderer
+
+
+def _install_text_raster_memo(renderer: Any) -> None:
+    """Remember what a string rasterizes to, per renderer, and blit it back.
+
+    Agg rasterizes every text on every draw: it lays the string out, renders
+    its glyphs, and -- for a rotated string -- resamples the whole bitmap
+    through a bilinear filter, which is where a colour scale's vertical
+    label spent a millisecond a frame saying the same three words.  The
+    pixels a string produces are a function of the string, its font, its
+    angle and the antialiasing flag alone; the position only decides which
+    integer pixel the raster lands on, through the same rounding Agg does.
+    So the raster is taken once per key, through Agg's own machinery, and
+    blitted back at every later position by the unrotated fast path.
+
+    Bit-exact by construction: an unrotated raster IS the glyph bitmap Agg
+    would blit; a rotated one is the coverage Agg's own rotation produced,
+    captured off a scratch buffer, and the unrotated blit composites a
+    coverage mask with the same per-pixel blend as the direct draw.  One
+    caveat decides the rotated case: Agg's rotated path quantizes the
+    colour's alpha against the glyph coverage and then against the edge
+    coverage, two 8-bit roundings, where the blit rounds once -- and it
+    clips through the rasterizer where the blit clips a whole-pixel
+    rectangle -- so a rotated string is replayed only when opaque and
+    unclipped.  An unrotated string's replay IS the call Agg makes,
+    clipping included, and needs neither condition.  Mathtext keeps the
+    original route.
+    """
+
+    if getattr(renderer, "_zlc_text_rasters", None) is not None:
+        return
+    backend = getattr(renderer, "_renderer", None)
+    prepare_font = getattr(renderer, "_prepare_font", None)
+    original = getattr(renderer, "draw_text", None)
+    if (
+        backend is None
+        or not hasattr(backend, "draw_text_image")
+        or not callable(prepare_font)
+        or not callable(original)
+    ):
+        return
+    memo: dict[tuple[Any, ...], tuple[Any, ...] | None] = {}
+    renderer._zlc_text_rasters = memo
+
+    def memoized_draw_text(
+        gc: Any,
+        x: float,
+        y: float,
+        s: str,
+        prop: Any,
+        angle: float,
+        ismath: bool = False,
+        mtext: Any = None,
+    ) -> Any:
+        if ismath or not s:
+            return original(gc, x, y, s, prop, angle, ismath=ismath, mtext=mtext)
+        angle = float(angle)
+        if angle != 0.0 and (
+            not _opaque_stroke(gc)
+            or gc.get_clip_rectangle() is not None
+            or gc.get_clip_path()[0] is not None
+        ):
+            return original(gc, x, y, s, prop, angle, ismath=ismath, mtext=mtext)
+        antialiased = bool(gc.get_antialiased())
+        key = (s, prop, angle, antialiased)
+        try:
+            entry = memo[key]
+        except KeyError:
+            entry = _text_raster_entry(renderer, s, prop, angle, antialiased)
+            if len(memo) >= _TEXT_RASTER_MEMO_LIMIT:
+                memo.clear()
+            # The font properties are the artist's live object; the key
+            # keeps its own copy so a later edit of the artist cannot
+            # rewrite a stored key underneath the dictionary.
+            memo[(s, prop.copy(), angle, antialiased)] = entry
+        if entry is None:
+            return None
+        mask, offset_x, offset_y, shift_x, shift_y = entry
+        column = round(x + offset_x) + shift_x
+        row = round(y + offset_y) + 1 + shift_y
+        backend.draw_text_image(mask, column, row, 0.0, gc)
+        return None
+
+    renderer.draw_text = memoized_draw_text
+
+
+def _opaque_stroke(gc: Any) -> bool:
+    """Whether this graphics context paints with no translucency at all.
+
+    The context's RGB carries the effective alpha: a forced alpha is folded
+    into it by ``set_alpha``, and that folded colour is the one Agg blends.
+    """
+
+    rgba = tuple(gc.get_rgb())
+    return len(rgba) < 4 or float(rgba[3]) == 1.0
+
+
+def _text_raster_entry(
+    renderer: Any, s: str, prop: Any, angle: float, antialiased: bool
+) -> tuple[Any, ...] | None:
+    """One memo entry: the coverage mask and where it sits against the anchor.
+
+    ``offset_x``/``offset_y`` are Agg's own bitmap offset and angled
+    descent, which it adds to the requested position before rounding to the
+    anchor pixel; ``shift_x``/``shift_y`` place the mask against that
+    anchor.  For an unrotated string the mask is the glyph bitmap and the
+    shifts are zero.  For a rotated one the string is drawn once at a known
+    anchor on a scratch buffer, and the mask is the ink that draw left.
+    """
+
+    from matplotlib.backends.backend_agg import RendererAgg, get_hinting_flag
+
+    font = renderer._prepare_font(prop)
+    font.set_text(s, 0, flags=get_hinting_flag())
+    font.draw_glyphs_to_bitmap(antialiased=antialiased)
+    descent = font.get_descent() / 64.0
+    offset_x, offset_y = font.get_bitmap_offset()
+    offset_x = offset_x / 64.0 + descent * math.sin(math.radians(angle))
+    offset_y = offset_y / 64.0 + descent * math.cos(math.radians(angle))
+    glyphs = np.array(font.get_image(), dtype=np.uint8, copy=True)
+    if glyphs.size == 0:
+        return None
+    if angle == 0.0:
+        return (glyphs, offset_x, offset_y, 0, 0)
+    rows, columns = glyphs.shape
+    reach = int(math.ceil(math.hypot(rows, columns))) + 4
+    side = 2 * reach
+    scratch = RendererAgg(side, side, renderer.dpi)
+    scratch.clear()
+    probe = scratch.new_gc()
+    probe.set_foreground((1.0, 1.0, 1.0, 1.0))
+    probe.set_antialiased(antialiased)
+    scratch._renderer.draw_text_image(font, reach, reach + 1, angle, probe)
+    coverage = np.asarray(scratch.buffer_rgba())[..., 3]
+    inked_rows = np.flatnonzero(coverage.any(axis=1))
+    inked_columns = np.flatnonzero(coverage.any(axis=0))
+    if inked_rows.size == 0:
+        return None
+    top, bottom = int(inked_rows[0]), int(inked_rows[-1]) + 1
+    left, right = int(inked_columns[0]), int(inked_columns[-1]) + 1
+    mask = np.ascontiguousarray(coverage[top:bottom, left:right])
+    return (mask, offset_x, offset_y, left - reach, bottom - (reach + 1))
+
+
+#: One recorded renderer call: the method, a frozen graphics context, and
+#: the positional and keyword arguments it was given.
+_RecordedDraw = tuple[tuple[str, Any, tuple[Any, ...], dict[str, Any]], ...]
+
+#: The renderer methods a recorded draw may consist of, and the ones whose
+#: appearance voids a recording: replaying a subset of what an artist drew
+#: would silently drop pixels.
+_RECORDED_DRAW_METHODS = (
+    "draw_path",
+    "draw_markers",
+    "draw_path_collection",
+    "draw_text",
+)
+_UNRECORDED_DRAW_METHODS = (
+    "draw_image",
+    "draw_quad_mesh",
+    "draw_gouraud_triangles",
+    "draw_tex",
+)
+#: Stands in the dynamic-axis table for a draw that could not be recorded.
+_UNRECORDABLE: Any = ()
+
+
+def _record_artist_draw(artist: Any, renderer: Any) -> _RecordedDraw | None:
+    """Draw ``artist`` on ``renderer`` and return the renderer calls it made.
+
+    The calls are taken on the renderer the artist actually draws on -- no
+    scratch buffer and no second draw -- by shadowing the renderer's draw
+    methods for the duration and restoring whatever was there before,
+    which may itself be an instance-level fitting such as the text memo.
+    An artist that asks for a method the recorder does not keep yields
+    ``None``: nothing partial is ever replayed.
+    """
+
+    active: list[tuple[str, Any, tuple[Any, ...], dict[str, Any]]] = []
+    complete = [True]
+    saved: dict[str, Any] = {}
+    names = (*_RECORDED_DRAW_METHODS, *_UNRECORDED_DRAW_METHODS)
+    try:
+        for method_name in _RECORDED_DRAW_METHODS:
+            original = getattr(renderer, method_name)
+
+            def record(
+                gc: Any,
+                *args: Any,
+                _name: str = method_name,
+                _original: Any = original,
+                **kwargs: Any,
+            ) -> Any:
+                frozen = renderer.new_gc()
+                frozen.copy_properties(gc)
+                active.append((_name, frozen, args, dict(kwargs)))
+                return _original(gc, *args, **kwargs)
+
+            if method_name in vars(renderer):
+                saved[method_name] = vars(renderer)[method_name]
+            setattr(renderer, method_name, record)
+        for method_name in _UNRECORDED_DRAW_METHODS:
+            original = getattr(renderer, method_name, None)
+            if original is None:
+                continue
+
+            def refuse(*args: Any, _original: Any = original, **kwargs: Any) -> Any:
+                complete[0] = False
+                return _original(*args, **kwargs)
+
+            if method_name in vars(renderer):
+                saved[method_name] = vars(renderer)[method_name]
+            setattr(renderer, method_name, refuse)
+        artist.draw(renderer)
+    finally:
+        for method_name in names:
+            if method_name in saved:
+                setattr(renderer, method_name, saved[method_name])
+            elif method_name in vars(renderer):
+                delattr(renderer, method_name)
+    return tuple(active) if complete[0] else None
+
+
+def _replay_draw(commands: _RecordedDraw, renderer: Any) -> None:
+    for method_name, gc, args, kwargs in commands:
+        getattr(renderer, method_name)(gc, *args, **kwargs)
+
+
+def _axis_draw_key(axis: Any) -> tuple[Any, ...]:
+    """The facts an ``Axis.draw`` is a function of, as one comparable value.
+
+    Tick positions come from the locator applied to the view interval and
+    the axes box; their labels from the formatter applied to those; the
+    label text and pad place the axis label; the tick parameters say which
+    marks and labels exist.  A fixed locator or formatter carries its own
+    values, so a colour scale whose endpoint ticks moved is a different
+    key at an unchanged view.  Font and style are the renderer's constants
+    and are not part of it.
+    """
+
+    from matplotlib.ticker import FixedFormatter, FixedLocator
+
+    axes = axis.axes
+    locator = axis.get_major_locator()
+    formatter = axis.get_major_formatter()
+    return (
+        tuple(axes.bbox.bounds),
+        tuple(axes.viewLim.bounds),
+        axis.get_visible(),
+        axis.get_scale(),
+        type(locator),
+        tuple(map(float, locator.locs)) if isinstance(locator, FixedLocator) else None,
+        type(formatter),
+        tuple(formatter.seq) if isinstance(formatter, FixedFormatter) else None,
+        type(axis.get_minor_locator()),
+        axis.label.get_text(),
+        float(axis.labelpad),
+        axis.get_label_position(),
+        tuple(sorted(axis.get_tick_params(which="major").items())),
+        tuple(sorted(axis.get_tick_params(which="minor").items())),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _PreparedSeries:
     x: np.ndarray
@@ -1363,6 +1644,10 @@ class MatplotlibRenderer:
         self._planned_ratio: dict[int, float | None] = {}
         #: The whole-pixel box this renderer last applied per axes.
         self._quantized_bounds: dict[int, tuple[float, ...]] = {}
+        #: Memo for _pixel_quantized_bounds: the ulp searches are a pure
+        #: function of (plan box, figure size, ratio), and a 64-cell grid
+        #: re-ran all of them on every frame of an unchanged layout.
+        self._quantized_box_cache: dict[int, tuple] = {}
         #: One settled opacity answer per composed front, kept beside
         #: the array so its identity cannot be recycled underneath.
         self._front_opacity: dict[int, tuple[weakref.ref, bool]] = {}
@@ -1371,6 +1656,14 @@ class MatplotlibRenderer:
         ] = {}
         self._boundary_chrome_commands: dict[
             int, tuple[tuple[str, Any, tuple[Any, ...], dict[str, Any]], ...]
+        ] = {}
+        #: The DYNAMIC axes -- a colour scale's, a distribution rail's, whose
+        #: ticks move with the data -- keyed by the facts their draw is a
+        #: function of.  A key seen once is drawn plainly; seen twice
+        #: running it is recorded while drawn; from then on it is replayed.
+        #: A key that changes every frame is therefore never recorded.
+        self._dynamic_axis_commands: dict[
+            int, tuple[tuple[Any, ...], _RecordedDraw | None]
         ] = {}
         self._boundary_chrome_signature: tuple[object, ...] | None = None
         #: Canonical raw data behind each displayed line.  The artist may hold
@@ -1634,7 +1927,7 @@ class MatplotlibRenderer:
         self._series_hit_cache.clear()
         self._series_hover = self._series_locked = self._series_press = None
         self._boundary_chrome_cache.clear()
-        self._boundary_chrome_commands.clear()
+        self._forget_chrome_commands()
         self._boundary_chrome_signature = None
         self._selector_artists.clear()
         self._selector_topologies.clear()
@@ -1998,7 +2291,7 @@ class MatplotlibRenderer:
         self._background_signature = None
         self._chrome_churn = 0
         self._boundary_chrome_cache.clear()
-        self._boundary_chrome_commands.clear()
+        self._forget_chrome_commands()
         self._boundary_chrome_signature = None
         self._forget_gesture_region()
 
@@ -2008,18 +2301,25 @@ class MatplotlibRenderer:
 
         return self._raster_generation
 
+    #: The commands under which a scene is painted by the kernels instead of
+    #: by artists.  Matplotlib's own draw sees none of them, so anything that
+    #: wants a complete picture asks :meth:`_has_prepared_scene` and composes
+    #: -- the one place the question is answered.
+    _PREPARED_SCENE_KEYS = ("image:prepared", "curve:prepared", "facet:fit_native")
+
+    def _has_prepared_scene(self) -> bool:
+        """Whether any part of the picture exists only as a kernel command."""
+
+        return any(
+            isinstance(self._artists.get(key), dict)
+            for key in self._PREPARED_SCENE_KEYS
+        )
+
     def draw(self) -> None:
         """Compose one complete Agg frame from the current artist state."""
 
         with style_context(self.style):
-            if any(
-                isinstance(self._artists.get(key), dict)
-                for key in (
-                    "image:prepared",
-                    "curve:prepared",
-                    "facet:fit_native",
-                )
-            ):
+            if self._has_prepared_scene():
                 self._background_region = None
                 self._background_signature = None
                 self._chrome_churn = 0
@@ -2168,7 +2468,7 @@ class MatplotlibRenderer:
         )
         if signature != self._boundary_chrome_signature:
             self._boundary_chrome_cache.clear()
-            self._boundary_chrome_commands.clear()
+            self._forget_chrome_commands()
             self._boundary_chrome_signature = signature
         commands_to_record: list[Any] = []
         facet_overview_axes = (
@@ -2259,6 +2559,17 @@ class MatplotlibRenderer:
             self._record_boundary_chrome_commands(commands_to_record)
         return collected
 
+    def _forget_chrome_commands(self) -> None:
+        """Drop every recorded draw.
+
+        A recording is only trusted between frames that changed nothing it
+        depends on, and the compose knows one such change collectively: a
+        background it could not reuse.  Both recorded families go together.
+        """
+
+        self._boundary_chrome_commands.clear()
+        self._dynamic_axis_commands.clear()
+
     def _record_boundary_chrome_commands(self, artists: Sequence[Any]) -> None:
         """Freeze Agg path commands for stable tick marks and spines."""
 
@@ -2267,32 +2578,10 @@ class MatplotlibRenderer:
         width = int(round(float(self._figure.bbox.width)))
         height = int(round(float(self._figure.bbox.height)))
         recorder = RendererAgg(width, height, self._figure.dpi)
-        active: list[tuple[str, Any, tuple[Any, ...], dict[str, Any]]] = []
-        for method_name in (
-            "draw_path",
-            "draw_markers",
-            "draw_path_collection",
-        ):
-            original = getattr(recorder, method_name)
-
-            def record(
-                gc: Any,
-                *args: Any,
-                _name: str = method_name,
-                _original: Any = original,
-                **kwargs: Any,
-            ) -> Any:
-                frozen = recorder.new_gc()
-                frozen.copy_properties(gc)
-                active.append((_name, frozen, args, dict(kwargs)))
-                return _original(gc, *args, **kwargs)
-
-            setattr(recorder, method_name, record)
         for artist in artists:
-            active = []
-            artist.draw(recorder)
-            if active:
-                self._boundary_chrome_commands[id(artist)] = tuple(active)
+            commands = _record_artist_draw(artist, recorder)
+            if commands:
+                self._boundary_chrome_commands[id(artist)] = commands
 
     def _draw_dynamic_artist(
         self,
@@ -2302,8 +2591,26 @@ class MatplotlibRenderer:
     ) -> None:
         commands = self._boundary_chrome_commands.get(id(artist))
         if commands is not None:
-            for method_name, gc, args, kwargs in commands:
-                getattr(renderer, method_name)(gc, *args, **kwargs)
+            _replay_draw(commands, renderer)
+            return
+        from matplotlib.axis import Axis
+
+        if isinstance(artist, Axis):
+            key = _axis_draw_key(artist)
+            seen = self._dynamic_axis_commands.get(id(artist))
+            if seen is not None and seen[0] == key:
+                if seen[1] is _UNRECORDABLE:
+                    artist.draw(renderer)
+                elif seen[1] is not None:
+                    _replay_draw(seen[1], renderer)
+                else:
+                    self._dynamic_axis_commands[id(artist)] = (
+                        key,
+                        _record_artist_draw(artist, renderer),
+                    )
+                return
+            self._dynamic_axis_commands[id(artist)] = (key, None)
+            artist.draw(renderer)
             return
         if not self._blit_exact_rgba_image(artist, canvas):
             artist.draw(renderer)
@@ -2370,6 +2677,63 @@ class MatplotlibRenderer:
             return None
         return bars, data, fit
 
+    @staticmethod
+    def _polyline_lane_offsets(clips: np.ndarray) -> np.ndarray:
+        """Contiguous lane boundaries whose clip boxes cannot share a pixel.
+
+        The polyline kernel strokes lanes in parallel, so two lanes must
+        never write the same canvas pixel.  Lines arrive in painter order,
+        cell by cell; a lane extends while boxes overlap its union, and a
+        new lane opens only for a box disjoint from EVERY earlier lane.
+        One overlap with a non-adjacent lane and the whole batch collapses
+        to a single lane -- the old serial behaviour, always safe.
+        """
+
+        total = int(clips.shape[0])
+        serial = np.asarray([0, total], dtype=np.int64)
+        if total <= 1:
+            return serial
+
+        def overlaps(one, other) -> bool:
+            return bool(
+                one[0] < other[2]
+                and other[0] < one[2]
+                and one[1] < other[3]
+                and other[1] < one[3]
+            )
+
+        finished: list[tuple[int, int, int, int]] = []
+        boundaries = [0]
+        current = (
+            int(clips[0, 0]),
+            int(clips[0, 1]),
+            int(clips[0, 2]),
+            int(clips[0, 3]),
+        )
+        for index in range(1, total):
+            box = (
+                int(clips[index, 0]),
+                int(clips[index, 1]),
+                int(clips[index, 2]),
+                int(clips[index, 3]),
+            )
+            if overlaps(box, current):
+                current = (
+                    min(current[0], box[0]),
+                    min(current[1], box[1]),
+                    max(current[2], box[2]),
+                    max(current[3], box[3]),
+                )
+                continue
+            for earlier in finished:
+                if overlaps(box, earlier):
+                    return serial
+            finished.append(current)
+            boundaries.append(index)
+            current = box
+        boundaries.append(total)
+        return np.asarray(boundaries, dtype=np.int64)
+
     def _raster_grouped_curve_command(
         self,
         series: Sequence[_PreparedSeries],
@@ -2434,25 +2798,15 @@ class MatplotlibRenderer:
             max(1.0, line_policy.linewidth * float(self._figure.dpi) / 72.0),
             dtype=np.float64,
         )
-        scratch_shape = (len(series), width)
-        scratch = self._artists.get("curve:grouped_envelope")
-        if (
-            not isinstance(scratch, tuple)
-            or scratch[0].shape != scratch_shape
-        ):
-            scratch = (
-                np.empty(scratch_shape, dtype=np.float64),
-                np.empty(scratch_shape, dtype=np.float64),
-            )
-            self._artists["curve:grouped_envelope"] = scratch
         kernels.raster_polylines(
             kernels.readable(geometry.reshape(-1, 2)),
             kernels.readable(offsets),
             kernels.readable(np.asarray(line_colours, dtype=np.uint8)),
             kernels.readable(line_widths),
             kernels.readable(clips),
-            scratch[0],
-            scratch[1],
+            # One axes: every line may overlap, one sequential lane.
+            kernels.readable(np.asarray([0, len(series)], dtype=np.int64)),
+            kernels.stroke_bands(1),
             canvas_rgba,
         )
         return True
@@ -2567,19 +2921,18 @@ class MatplotlibRenderer:
                 valid &= np.isfinite(low)
                 valid &= np.isfinite(high)
                 valid &= high > low
-                shape = low.shape + (2,)
+                # Low and high edges ride ONE kernel launch as one stack:
+                # the transform is per row, so rows (S..2S) are the high
+                # edges of rows (0..S), bit-identically.
+                lanes = low.shape[0]
+                stack_shape = (2 * lanes,) + low.shape[1:] + (2,)
                 geometry = self._artists.get("curve:grouped_band_geometry")
                 if (
                     len(surfaces) != 1
-                    or not isinstance(geometry, tuple)
-                    or len(geometry) != 2
-                    or geometry[0].shape != shape
-                    or geometry[1].shape != shape
+                    or not isinstance(geometry, np.ndarray)
+                    or geometry.shape != stack_shape
                 ):
-                    geometry = (
-                        np.empty(shape, dtype=np.float64),
-                        np.empty(shape, dtype=np.float64),
-                    )
+                    geometry = np.empty(stack_shape, dtype=np.float64)
                     if len(surfaces) == 1:
                         self._artists["curve:grouped_band_geometry"] = geometry
                 affine = np.asarray(
@@ -2588,22 +2941,21 @@ class MatplotlibRenderer:
                 x = kernels.readable(
                     np.asarray(band_items[0].x, dtype=np.float64)
                 )
-                for values, output in zip((low, high), geometry, strict=True):
-                    kernels.transform_curve_batch(
-                        x,
-                        kernels.readable(values),
-                        kernels.readable(valid),
-                        kernels.readable(affine),
-                        np.float64(height),
-                        output,
-                    )
-                low_y = geometry[0][..., 1]
-                high_y = geometry[1][..., 1]
+                kernels.transform_curve_batch(
+                    x,
+                    kernels.readable(np.concatenate((low, high), axis=0)),
+                    kernels.readable(np.concatenate((valid, valid), axis=0)),
+                    kernels.readable(affine),
+                    np.float64(height),
+                    geometry,
+                )
+                low_y = geometry[:lanes, ..., 1]
+                high_y = geometry[lanes:, ..., 1]
                 for row, item in enumerate(band_items):
                     if bool(np.any(valid[row])):
                         append_group(
                             item,
-                            geometry[0][row, :, 0],
+                            geometry[row, :, 0],
                             low_y[row],
                             high_y[row],
                             clip,
@@ -2660,6 +3012,7 @@ class MatplotlibRenderer:
                 kernels.readable(np.asarray(cap_widths, dtype=np.float64)),
                 kernels.readable(np.asarray(clips, dtype=np.int32)),
                 kernels.readable(np.asarray(lane_offsets, dtype=np.int64)),
+                kernels.stroke_bands(len(lane_offsets) - 1),
                 canvas_rgba,
             )
         finally:
@@ -2694,6 +3047,11 @@ class MatplotlibRenderer:
         clips: list[tuple[int, int, int, int]] = []
         cycle = self.style.palette.line_cycle
         line_policy = self.style.artists.curve
+        line_width = max(
+            1.0,
+            float(line_policy.linewidth) * float(self._figure.dpi) / 72.0,
+        )
+        slot_colours: dict[int, np.ndarray] = {}
         for (_key, axes, _index), cell_series in zip(
             surfaces, series_by_cell, strict=True
         ):
@@ -2704,52 +3062,58 @@ class MatplotlibRenderer:
                 min(width, int(math.ceil(float(box.x1)))),
                 min(height, int(math.ceil(float(height) - float(box.y0)))),
             )
+            # A linear cell's transData IS one affine; applying it directly
+            # skips matplotlib's per-series Python transform stack -- with
+            # matplotlib's own operand order (a*x + c*y + e), so the pixels
+            # are the ones transform() produces.  A log cell keeps the
+            # stack.
+            transform = axes.transData
+            affine = (
+                transform.get_affine().to_values()
+                if transform.is_affine
+                else None
+            )
             for item in cell_series:
                 plotted_y = np.where(item.valid, item.y, np.nan)
-                points = axes.transData.transform(
-                    np.column_stack((item.x, plotted_y))
-                )
-                display = np.asarray(points, dtype=np.float64)
-                display[:, 1] = float(height) - display[:, 1]
+                if affine is not None:
+                    a, b, c, d, e, f = affine
+                    display = np.empty((item.x.shape[0], 2), dtype=np.float64)
+                    display[:, 0] = a * item.x + c * plotted_y + e
+                    display[:, 1] = float(height) - (
+                        b * item.x + d * plotted_y + f
+                    )
+                else:
+                    points = transform.transform(
+                        np.column_stack((item.x, plotted_y))
+                    )
+                    display = np.asarray(points, dtype=np.float64)
+                    display[:, 1] = float(height) - display[:, 1]
                 vertices.append(display)
                 offsets.append(offsets[-1] + display.shape[0])
-                colour = cycle[_series_slot(item.identity, len(cycle))]
-                rgba = np.asarray(to_rgba(colour), dtype=float)
-                rgba[3] *= float(line_policy.alpha)
-                colours.append(
-                    np.clip(np.rint(rgba * 255.0), 0, 255).astype(np.uint8)
-                )
-                widths.append(
-                    max(
-                        1.0,
-                        float(line_policy.linewidth)
-                        * float(self._figure.dpi)
-                        / 72.0,
-                    )
-                )
+                slot = _series_slot(item.identity, len(cycle))
+                packed_colour = slot_colours.get(slot)
+                if packed_colour is None:
+                    rgba = np.asarray(to_rgba(cycle[slot]), dtype=float)
+                    rgba[3] *= float(line_policy.alpha)
+                    packed_colour = np.clip(
+                        np.rint(rgba * 255.0), 0, 255
+                    ).astype(np.uint8)
+                    slot_colours[slot] = packed_colour
+                colours.append(packed_colour)
+                widths.append(line_width)
                 clips.append(clip)
         if not vertices:
             return False
-        shape = (len(vertices), width)
-        cache = self._artists.get("facet:curve_command_envelope")
-        if (
-            not isinstance(cache, tuple)
-            or cache[0].shape != shape
-            or cache[1].shape != shape
-        ):
-            cache = (
-                np.empty(shape, dtype=np.float64),
-                np.empty(shape, dtype=np.float64),
-            )
-            self._artists["facet:curve_command_envelope"] = cache
+        clip_boxes = np.asarray(clips, dtype=np.int32)
+        lane_offsets = self._polyline_lane_offsets(clip_boxes)
         kernels.raster_polylines(
             kernels.readable(np.concatenate(vertices)),
             kernels.readable(np.asarray(offsets, dtype=np.int64)),
             kernels.readable(np.asarray(colours, dtype=np.uint8)),
             kernels.readable(np.asarray(widths, dtype=np.float64)),
-            kernels.readable(np.asarray(clips, dtype=np.int32)),
-            cache[0],
-            cache[1],
+            kernels.readable(clip_boxes),
+            kernels.readable(lane_offsets),
+            kernels.stroke_bands(lane_offsets.size - 1),
             canvas_rgba,
         )
         return True
@@ -2877,6 +3241,7 @@ class MatplotlibRenderer:
             kernels.readable(np.asarray(cap_widths, dtype=np.float64)),
             kernels.readable(np.asarray(clips, dtype=np.int32)),
             kernels.readable(np.asarray(lane_offsets, dtype=np.int64)),
+            kernels.stroke_bands(len(lane_offsets) - 1),
             canvas_rgba,
         )
         return True
@@ -2937,27 +3302,15 @@ class MatplotlibRenderer:
                 min(height, int(math.ceil(float(height) - float(box.y0)))),
             )
         packed = np.concatenate(vertices, axis=0)
-        cache = self._artists.get("curve:native_envelope")
-        shape = (len(lines), width)
-        if (
-            not isinstance(cache, tuple)
-            or len(cache) != 2
-            or cache[0].shape != shape
-            or cache[1].shape != shape
-        ):
-            cache = (
-                np.empty(shape, dtype=np.float64),
-                np.empty(shape, dtype=np.float64),
-            )
-            self._artists["curve:native_envelope"] = cache
+        lane_offsets = self._polyline_lane_offsets(clips)
         kernels.raster_polylines(
             kernels.readable(packed),
             kernels.readable(np.asarray(offsets, dtype=np.int64)),
             kernels.readable(colours),
             kernels.readable(widths),
             kernels.readable(clips),
-            cache[0],
-            cache[1],
+            kernels.readable(lane_offsets),
+            kernels.stroke_bands(lane_offsets.size - 1),
             canvas_rgba,
         )
         return True
@@ -3458,7 +3811,7 @@ class MatplotlibRenderer:
             # not see.  The boundary cache is only ever trusted between two
             # consecutive reusable frames.
             self._boundary_chrome_cache.clear()
-            self._boundary_chrome_commands.clear()
+            self._forget_chrome_commands()
         dynamics = self._dynamic_artists()
         ordered = sorted(dynamics, key=lambda entry: entry[0])
         # Where the gesture's own artists begin, in the one z-order a full
@@ -3467,29 +3820,6 @@ class MatplotlibRenderer:
         # rather than partitioning by ownership is what keeps the compose
         # full-draw-exact: anything that legitimately draws above a selector
         # stays above it, and is simply repainted with it.
-        if (
-            not reusable
-            and self._chrome_churn > 1
-            and self._selector_gesture_kind is None
-        ):
-            # A cache that keeps missing is not a cache, it is a tax.  The
-            # capture path draws the scene once with the dynamics hidden,
-            # copies the whole figure, restores it, and paints the dynamics
-            # again -- worth it only if the NEXT frame can reuse that copy.
-            # A panel whose tick labels are re-laid on every revision makes
-            # the copy dead on arrival: it pays eighteen megabytes of
-            # capture and a restore, every frame, to avoid a draw it does
-            # anyway.  Two consecutive misses is the evidence; the churn
-            # counter goes back to zero the moment a frame is reusable, so a
-            # panel that settles returns to the fast path by itself.
-            self._native_draw(canvas)
-            self._chrome_dirty_axes.clear()
-            self._background_region = None
-            self._background_signature = None
-            self._forget_gesture_region()
-            self._raster_generation += 1
-            self._composed_generation = self._raster_generation
-            return
         selector_ids = self._selector_artist_ids()
         split = None
         if (
@@ -3521,11 +3851,34 @@ class MatplotlibRenderer:
             finally:
                 for artist, visible in visibility:
                     artist.set_visible(visible)
-            self._background_region = capture(self._figure.bbox)
-            self._background_signature = signature
             self._chrome_dirty_axes.clear()
-        restore(self._background_region)
-        renderer = get_renderer()
+            if self._chrome_churn > 1 and self._selector_gesture_kind is None:
+                # A copy that keeps missing is not a cache, it is a tax: a
+                # panel whose tick labels are re-laid on every revision
+                # (a curve whose limits re-fit each shot) would pay eighteen
+                # megabytes of capture and restore per frame for a copy no
+                # frame ever reuses.  Two consecutive misses is the
+                # evidence, so the chrome just drawn is composed over in
+                # place and no copy is kept; the churn counter returns to
+                # zero the moment a frame is reusable, and a panel that
+                # settles returns to the cached path by itself.
+                #
+                # What is NOT skipped is the compose.  This used to be a
+                # bare full draw with every artist visible, which is a
+                # complete frame only for a scene made of artists: a kind
+                # whose data is a prepared scene -- a Curve stroked by the
+                # kernels, a Facet grid's cells -- has no artist for it,
+                # and the full draw painted an empty axes.  A curve in
+                # TIGHT mode went blank from its second frame on.
+                self._background_region = None
+                self._background_signature = None
+                self._forget_gesture_region()
+            else:
+                self._background_region = capture(self._figure.bbox)
+                self._background_signature = signature
+        else:
+            restore(self._background_region)
+        renderer = _prepare_renderer(get_renderer())
         prepared_image_command = isinstance(
             self._artists.get("image:prepared"), dict
         )
@@ -3772,7 +4125,7 @@ class MatplotlibRenderer:
         ):
             return False
         restore(self._gesture_region)
-        renderer = get_renderer()
+        renderer = _prepare_renderer(get_renderer())
         for _key, artist in self._gesture_overlay:
             if artist.get_visible():
                 self._draw_dynamic_artist(artist, renderer, canvas)
@@ -3798,7 +4151,7 @@ class MatplotlibRenderer:
         native, _image_ids = self._raster_prepared_images(canvas)
         if not native:
             return False
-        renderer = get_renderer()
+        renderer = _prepare_renderer(get_renderer())
         for _key, artist in self._gesture_overlay:
             if artist.get_visible():
                 self._draw_dynamic_artist(artist, renderer, canvas)
@@ -3953,7 +4306,7 @@ class MatplotlibRenderer:
             raise RuntimeError("the native canvas has no callable draw method")
         get_renderer = getattr(canvas, "get_renderer", None)
         if callable(get_renderer):
-            _lock_renderer_mathtext(get_renderer())
+            _prepare_renderer(get_renderer())
         draw()
 
     @contextmanager
@@ -7800,11 +8153,9 @@ class MatplotlibRenderer:
             return
         # Overview/focus is a new surface geometry, not evidence that a
         # stable background cache keeps missing.  Retire the entire previous
-        # composition epoch here, before axes are removed/created.  Leaving
-        # ``_chrome_churn`` from the overview made the first focused frame hit
-        # the repeated-miss escape hatch and full-draw a different picture;
-        # the next revision then returned to native compose, producing the
-        # visible one-frame geometry/style jump reported by the operator.
+        # composition epoch here, before axes are removed/created, so the
+        # first frame of the new surface starts from no background and a
+        # zero churn count rather than inheriting the old surface's.
         self._retire_composition_epoch()
         if previous is not None:
             key = f"facet:{previous}"
@@ -7899,6 +8250,17 @@ class MatplotlibRenderer:
         height = float(figure_box.height)
         if width <= 1.0 or height <= 1.0:
             return bounds
+        ratio = (
+            planned_ratio
+            if planned_ratio is not None
+            else self._drawn_box_ratio(axis)
+        )
+        key = (tuple(bounds), width, height, ratio)
+        cached = self._quantized_box_cache.get(id(axis))
+        if cached is not None and cached[0] == key:
+            self._planned_ratio[id(axis)] = ratio
+            self._box_exact[id(axis)] = cached[2]
+            return cached[1]
         # Grow-only snapping: the box floor/ceils outward into the grid
         # gap, so the tick policy never sees LESS room than the plan gave
         # it (a half-pixel shrink at a pricing threshold dropped a cell
@@ -7908,12 +8270,8 @@ class MatplotlibRenderer:
         x1 = math.ceil((bounds[0] + bounds[2]) * width)
         y1 = math.ceil((bounds[1] + bounds[3]) * height)
         if x1 - x0 < 2 or y1 - y0 < 2:
+            self._quantized_box_cache[id(axis)] = (key, bounds, False)
             return bounds
-        ratio = (
-            planned_ratio
-            if planned_ratio is not None
-            else self._drawn_box_ratio(axis)
-        )
         self._planned_ratio[id(axis)] = ratio
         if ratio is not None:
             # The layout settles the box ITSELF, on whole pixels and on the
@@ -7922,6 +8280,7 @@ class MatplotlibRenderer:
             # yet, and a focus round trip came back with a different picture.
             sized = _box_on_aspect(x1 - x0, y1 - y0, ratio)
             if sized is None:
+                self._quantized_box_cache[id(axis)] = (key, bounds, False)
                 return bounds
             fraction_x, fraction_y = _ANCHOR_FRACTIONS.get(
                 str(self.style.render.image_anchor), (0.5, 0.5)
@@ -7933,8 +8292,11 @@ class MatplotlibRenderer:
         # Exactly integral, not nearly: see ``_exact_box_fractions``.
         left, span_x, exact_x = _exact_box_fractions(x0, x1, width)
         bottom, span_y, exact_y = _exact_box_fractions(y0, y1, height)
-        self._box_exact[id(axis)] = bool(exact_x and exact_y)
-        return (left, bottom, span_x, span_y)
+        exact = bool(exact_x and exact_y)
+        self._box_exact[id(axis)] = exact
+        snapped = (left, bottom, span_x, span_y)
+        self._quantized_box_cache[id(axis)] = (key, snapped, exact)
+        return snapped
 
     def _settle_owned_boxes(self) -> None:
         """Decide, once the surfaces have spoken, whose box each axes is.

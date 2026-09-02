@@ -42,6 +42,7 @@ from zlc_ui import STATUS_SEVERITIES
 from zlc_plot.semantics import FATE_REDUCE, ROLE_FATES
 from zlc_plot.specs import semantic_spec, validate_authored_display
 from zlc_plot.ui import parameter_controls_for_kind
+from zlc_plot.specs import GRID_CELL_KINDS, non_portable_display_names
 from zlc_runtime import (
     DatasetCoverage,
     IndexedHistoryLease,
@@ -80,7 +81,6 @@ from .panel_save import (
     save_panel_figure as _save_panel_figure,
 )
 from .panel_catalog import (
-    GRID_CELL_KINDS,
     TASK_CONSOLE_PANEL_CATALOG,
     panel_kind_choices,
     task_console_fitting_spec,
@@ -2428,13 +2428,20 @@ class ConsolePresenter:
             # signal/cell vocabulary.  Carrying either into another and
             # silently filtering whatever no longer fits made a typo and an
             # old configuration indistinguishable.  Appearance remains
-            # reusable across kinds; scientific projection and fitting start
-            # from the new vocabulary's defaults.
-            values = (
-                {}
-                if name in {"semantic", "fit"} and projection_identity_changed
-                else dict(getattr(current, name))
-            )
+            # reusable across kinds; a LIMIT is not appearance -- it
+            # describes the quantity the old kind plotted, and the spec
+            # that declares it says so -- so it starts over with the
+            # projection and the fit.
+            if name in {"semantic", "fit"} and projection_identity_changed:
+                values = {}
+            elif name == "display" and projection_identity_changed:
+                values = {
+                    key: value
+                    for key, value in dict(current.display).items()
+                    if key not in non_portable_display_names()
+                }
+            else:
+                values = dict(getattr(current, name))
             if name in changes:
                 try:
                     if name == "fit":

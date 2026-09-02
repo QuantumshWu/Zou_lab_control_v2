@@ -164,6 +164,7 @@ def scan_dataset_schema(
     if source_topology is None and source_points == 1:
         source_ids: tuple[AxisId, ...] = ()
         source_domains: tuple[tuple[object, ...], ...] = ()
+        source_labels: tuple[tuple[str, ...] | None, ...] = ()
         source_cells: tuple[tuple[int, ...], ...] = ((),)
     elif source_topology is None:
         # The source's point axis keeps its IDENTITY as a scan dimension --
@@ -184,13 +185,22 @@ def scan_dataset_schema(
         ):
             source_ids = (column.coordinate_id,)
             source_domains = (values,)
+            # Distinct values in row order ARE the domain, so the column's
+            # per-row labels are the domain's per-coordinate labels.
+            source_labels = (column.coordinate_labels,)
         else:
             source_ids = (free_axis_id("scan.source_point"),)
             source_domains = (tuple(range(source_points)),)
+            source_labels = (None,)
         source_cells = tuple((index,) for index in range(source_points))
     else:
         source_ids = source_topology.dimension_ids
         source_domains = source_topology.coordinate_domains
+        source_labels = (
+            (None,) * len(source_ids)
+            if source_topology.coordinate_labels is None
+            else source_topology.coordinate_labels
+        )
         source_cells = source_topology.row_to_cell
 
     row_to_cell = tuple(
@@ -202,6 +212,7 @@ def scan_dataset_schema(
         (*source_ids, *axis_ids),
         (*source_domains, *axis_domains),
         row_to_cell,
+        coordinate_labels=(*source_labels, *((None,) * len(axis_ids))),
     )
     source_repeat = source_schema.repeat_axis
     repeat_axis = (

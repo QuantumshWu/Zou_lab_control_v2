@@ -15,6 +15,9 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 from zlc_data import (
+    PRIMARY_INDEX,
+    READOUT_EVENT,
+    SCAN_POINT,
     SPATIAL_X,
     SPATIAL_Y,
     AxisId,
@@ -125,24 +128,192 @@ def image_axes(schema: DatasetSchema) -> tuple[Any, Any] | None:
     return significant[-1], significant[-2]
 
 
-def live_grid_dimensions(schema: DatasetSchema) -> tuple[str, ...]:
-    """Scan dimensions with more than one value, slowest-first.
+def rows_are_named(schema: DatasetSchema) -> bool:
+    """Whether something the producer declared identifies each point row.
 
-    A degenerate dimension (one value) is real provenance but not structure:
-    nothing can facet or image over it, so kind inference treats it as
-    invisible.  This is the one place that says so -- every default_spec
-    that reads the grid reads it through here.
+    A declared topology does (the rows are its grid, in order), and so does
+    any point column whose values are distinct -- a camera cycle's frame
+    number, a scan's swept parameter.  When one of those exists, the rows ARE
+    it, and offering a generic ordinal beside it puts the same axis in the
+    table twice: an operator saw "point row (3)" and "frame (3)" and had to
+    guess which of the two was the frames.
     """
 
     if not isinstance(schema, DatasetSchema):
         raise TypeError("schema must be zlc_data.DatasetSchema")
+    if schema.grid_topology is not None:
+        return True
+    for column in schema.point_table.columns:
+        values = tuple(column.values)
+        if values and len(set(values)) == len(values):
+            return True
+    return False
+
+
+#: One axis reference with the number of distinct positions it spans.
+AxisEntry = tuple[AxisRef, int]
+
+
+@dataclass(frozen=True)
+class AxisFamilies:
+    """One dataset's axes grouped by what they ARE, each with its size.
+
+    The grouping is by declared role and place, never by name:
+
+    ``repeat``   the repeat axis (R).
+    ``history``  the Runtime's shot index (a PRIMARY_INDEX point axis).
+    ``scan``     authored scan dimensions (SCAN_POINT), slowest first.
+    ``events``   event sequences inside one cycle (READOUT_EVENT: frames,
+                 frame pairs), and any topology dimension no column names.
+    ``picture``  the two cell axes that ARE an image, as (x, y), when the
+                 dataset declares one (:func:`image_axes`).
+    ``content``  every other content axis -- sites, components, a point
+                 column of sites -- slowest first, point axes first.
+    ``data``     ``content`` and the picture together, in declaration order.
+    ``rows``     the bare point-row ordinal, when nothing names the rows.
+
+    ``topology`` says whether the points are a declared grid; a plot's
+    defaults treat an unscanned cycle's point column as its authored cell
+    identity even at one value, and a scan's degenerate dimension as
+    invisible, which is why the two are told apart here rather than by
+    every reader.
+    """
+
+    repeat: AxisEntry
+    history: AxisEntry | None
+    scan: tuple[AxisEntry, ...]
+    events: tuple[AxisEntry, ...]
+    picture: tuple[AxisEntry, AxisEntry] | None
+    content: tuple[AxisEntry, ...]
+    data: tuple[AxisEntry, ...]
+    rows: AxisEntry | None
+    topology: bool
+    has_point_columns: bool
+
+    def live_scan(self) -> tuple[AxisEntry, ...]:
+        return tuple(entry for entry in self.scan if entry[1] > 1)
+
+    def live_events(self) -> tuple[AxisEntry, ...]:
+        return tuple(entry for entry in self.events if entry[1] > 1)
+
+    def live_content(self) -> tuple[AxisEntry, ...]:
+        return tuple(entry for entry in self.content if entry[1] > 1)
+
+    def live_data(self) -> tuple[AxisEntry, ...]:
+        return tuple(entry for entry in self.data if entry[1] > 1)
+
+    def live_rows(self) -> AxisRef | None:
+        return None if self.rows is None or self.rows[1] <= 1 else self.rows[0]
+
+    def first_data_axis(self) -> AxisRef | None:
+        return self.data[0][0] if self.data else None
+
+    def rows_or_none(self) -> AxisRef | None:
+        return None if self.rows is None else self.rows[0]
+
+
+def _value_changes(column: PointColumn) -> int:
+    """How many times a column's value changes from one row to the next."""
+
+    values = tuple(column.values)
+    return sum(1 for before, after in zip(values, values[1:]) if before != after)
+
+
+def classify_axes(schema: DatasetSchema) -> AxisFamilies:
+    """Group a dataset's axes into :class:`AxisFamilies`.
+
+    A topology dimension takes the role of the point column that shares its
+    id -- a scan axis is a SCAN_POINT column, a cycle's frames a
+    READOUT_EVENT column -- and a dimension no column names (the anonymous
+    source-point fallback) is an event sequence.  A point column that is
+    not a dimension is classified the same way by its own role.
+    """
+
+    if not isinstance(schema, DatasetSchema):
+        raise TypeError("schema must be zlc_data.DatasetSchema")
+    columns = tuple(schema.point_table.columns)
+    role_of = {str(column.coordinate_id): column.role for column in columns}
+    entries: list[tuple[AxisRef, int, object]] = []
     topology = schema.grid_topology
-    if topology is None:
-        return ()
-    return tuple(
-        str(dimension)
-        for dimension, size in zip(topology.dimension_ids, topology.logical_shape)
-        if size > 1
+    dimension_ids: set[str] = set()
+    if topology is not None:
+        for dimension, size in zip(topology.dimension_ids, topology.logical_shape):
+            dimension_ids.add(str(dimension))
+            entries.append(
+                (
+                    AxisRef.point_dimension(str(dimension)),
+                    int(size),
+                    role_of.get(str(dimension)),
+                )
+            )
+    bare = [
+        column
+        for column in columns
+        if str(column.coordinate_id) not in dimension_ids
+    ]
+    # A topology says which dimension is outermost.  Bare columns say so
+    # with their rows: the column whose value changes least often down the
+    # table is the slowest loop, so it comes first.  At a tie the LATER
+    # declared column is taken as the slower, which leaves the first
+    # declared as the sweep a curve walks.
+    for _index, column in sorted(
+        enumerate(bare), key=lambda item: (_value_changes(item[1]), -item[0])
+    ):
+        entries.append(
+            (
+                AxisRef.point(str(column.coordinate_id)),
+                len(set(column.values)),
+                column.role,
+            )
+        )
+    history: AxisEntry | None = None
+    scan: list[AxisEntry] = []
+    events: list[AxisEntry] = []
+    point_content: list[AxisEntry] = []
+    for ref, size, role in entries:
+        if role == PRIMARY_INDEX:
+            if history is None:
+                history = (ref, size)
+        elif role == SCAN_POINT:
+            scan.append((ref, size))
+        elif role == READOUT_EVENT or role is None:
+            events.append((ref, size))
+        else:
+            point_content.append((ref, size))
+    pair = image_axes(schema)
+    picture: tuple[AxisEntry, AxisEntry] | None = None
+    if pair is not None:
+        x_axis, y_axis = pair
+        picture = (
+            (AxisRef.data(str(x_axis.axis_id)), int(x_axis.size)),
+            (AxisRef.data(str(y_axis.axis_id)), int(y_axis.size)),
+        )
+    picture_ids = (
+        set() if pair is None else {str(axis.axis_id) for axis in pair}
+    )
+    cell_axes = tuple(
+        (AxisRef.data(str(axis.axis_id)), int(axis.size))
+        for axis in schema.cell_schema.data_axes
+    )
+    content = tuple(point_content) + tuple(
+        entry for entry in cell_axes if entry[0].axis_id not in picture_ids
+    )
+    rows = (
+        None
+        if rows_are_named(schema)
+        else (AxisRef.point_rows(), int(schema.point_table.row_count))
+    )
+    return AxisFamilies(
+        repeat=(AxisRef.repeat(), int(schema.repeat_axis.size)),
+        history=history,
+        scan=tuple(scan),
+        events=tuple(events),
+        picture=picture,
+        content=content,
+        data=tuple(point_content) + cell_axes,
+        rows=rows,
+        topology=topology is not None,
+        has_point_columns=bool(columns),
     )
 
 
@@ -277,7 +448,14 @@ def resolve_axis(schema: DatasetSchema, ref: AxisRef) -> ResolvedAxis:
         name = str(axis_id)
         unit: str | None = None
         frame: str | None = None
-        labels: tuple[str, ...] | None = None
+        # The labels are the domain's own: a cropped view keeps every domain
+        # coordinate but only the surviving rows, so joining them through
+        # the matching column's rows lost the labels of every row cropped.
+        labels = (
+            None
+            if topology.coordinate_labels is None
+            else topology.coordinate_labels[position]
+        )
         try:
             column = schema.point_table.column(axis_id)
         except KeyError:
@@ -290,14 +468,6 @@ def resolve_axis(schema: DatasetSchema, ref: AxisRef) -> ResolvedAxis:
                 if column.coordinate_frame is None
                 else str(column.coordinate_frame)
             )
-            if column.coordinate_labels is not None:
-                label_by_coordinate = dict(
-                    zip(column.values, column.coordinate_labels, strict=True)
-                )
-                labels = tuple(
-                    label_by_coordinate[value]
-                    for value in topology.coordinate_domains[position]
-                )
         return ResolvedAxis(
             axis_id,
             name,
@@ -318,6 +488,8 @@ def resolve_axis(schema: DatasetSchema, ref: AxisRef) -> ResolvedAxis:
 
 
 __all__ = [
+    "AxisEntry",
+    "AxisFamilies",
     "ResolvedAxis",
     "AxisId",
     "AxisSpec",
@@ -329,8 +501,10 @@ __all__ = [
     "PointTable",
     "Unit",
     "UnitRegistry",
-    "live_grid_dimensions",
+    "classify_axes",
+    "image_axes",
     "resolve_unit",
+    "rows_are_named",
     "resolve_axis",
     "schema_equal",
     "schema_repeat_count",

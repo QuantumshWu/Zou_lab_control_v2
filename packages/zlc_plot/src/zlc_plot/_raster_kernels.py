@@ -37,13 +37,16 @@ from . import _kernel_cache
 _kernel_cache.install()
 
 try:  # pragma: no cover - absence is exercised by the dispatch fallback
-    from numba import config, njit, prange, set_num_threads
+    from numba import config, get_num_threads, njit, prange, set_num_threads
 
     HAVE_NUMBA = True
 except Exception:  # pragma: no cover
     HAVE_NUMBA = False
     config = None
     set_num_threads = None
+
+    def get_num_threads() -> int:  # type: ignore[misc]
+        return 1
 
     def njit(*args, **kwargs):  # type: ignore[misc]
         def wrap(fn):
@@ -79,6 +82,36 @@ def configure_worker_threads() -> int:
     selected = max(1, min(requested, maximum))
     set_num_threads(selected)
     return selected
+
+
+#: The most column bands one stroke lane is cut into.  The pool is not one
+#: panel's: a four-panel console launches from four workers at once, each
+#: masked to the whole pool by default, and cutting a lone lane into all
+#: sixteen bands moved the four-panel critical path from 83 to 105 ms --
+#: every panel's work inflated under the oversubscription.  Four bands
+#: left the critical path where it was (84 ms) and still took the curve
+#: panel's compose from 15.1 to 11.9 ms; in isolation a forty-series
+#: curve's error bars go 6.0 -> 1.9 ms at four bands against 0.9 at
+#: sixteen, a floor not worth the console's ceiling.
+_STROKE_BAND_LIMIT = 4
+
+
+def stroke_bands(lane_count: int) -> int:
+    """How many column bands each stroke lane is cut into for this pool.
+
+    Lanes already run in parallel; a lane with fewer peers than the pool has
+    threads is split so the pool still has work, up to
+    ``_STROKE_BAND_LIMIT`` per lane.  The count is decided HERE, in Python,
+    and handed to the kernel: asking numba for its thread count inside a
+    kernel makes that kernel uncacheable (a "dynamic global"), and an
+    uncacheable stroke kernel is recompiled on every process start --
+    seconds before the first curve.
+    """
+
+    threads = int(get_num_threads()) if HAVE_NUMBA else 1
+    if 0 < lane_count < threads:
+        return min(_STROKE_BAND_LIMIT, threads // lane_count)
+    return 1
 
 
 def readable(array: Any) -> Any:
@@ -155,12 +188,20 @@ def block_sum_unsigned(values, row_starts, column_starts, out):
 
 
 @njit(cache=True, parallel=True, nogil=True)
-def block_sum_float(values, row_starts, column_starts, out):
-    """Sum each block of a floating plane into ``out``, accumulating wide.
+def block_sum_valid(values, valid, use_valid, row_starts, column_starts, out, counts):
+    """Sum each block, accumulating wide -- and count, when there is a mask.
 
     ``np.add.reduceat`` books a segment per output cell -- two million of
     them, one or two samples wide -- and that bookkeeping, not the addition,
     is the cost: 9.2 ms for a 1200x1920 float32 plane where this is 0.25.
+    The masked path this also owns used to materialise a whole
+    ``np.where(valid, values, 0)`` plane and reduce twice more.
+
+    One kernel for both faces because the mask test is loop-invariant --
+    the compiler unswitches it, and the merged loop measured FASTER than
+    the dedicated whole-plane kernel it replaced (0.22 vs 0.33 ms on a
+    1200x1920 float32 plane), bit-identical on both paths.  With
+    ``use_valid`` false, ``valid`` and ``counts`` are untouched dummies.
 
     It accumulates in float64 whatever the plane's dtype, which for a
     float32 plane is not a looser answer than the one it replaces but a
@@ -178,38 +219,17 @@ def block_sum_float(values, row_starts, column_starts, out):
         for j in range(column_count):
             column_stop = column_starts[j + 1] if j + 1 < column_count else columns
             total = np.float64(0.0)
-            for r in range(row_starts[i], row_stop):
-                for c in range(column_starts[j], column_stop):
-                    total += np.float64(values[r, c])
-            out[i, j] = total
-
-
-@njit(cache=True, parallel=True, nogil=True)
-def block_sum_valid(values, valid, row_starts, column_starts, out, counts):
-    """Sum the valid samples of each block, and count them, in one pass.
-
-    The path this replaces materialises ``np.where(valid, values, 0)`` --
-    a whole extra plane -- and then reduces twice, once for the sum and
-    once for the count.  Three passes over the pixels and an allocation
-    become one pass and none.
-    """
-
-    row_count = row_starts.size
-    column_count = column_starts.size
-    rows, columns = values.shape
-    for i in prange(row_count):
-        row_stop = row_starts[i + 1] if i + 1 < row_count else rows
-        for j in range(column_count):
-            column_stop = column_starts[j + 1] if j + 1 < column_count else columns
-            total = np.float64(0.0)
             seen = np.int64(0)
             for r in range(row_starts[i], row_stop):
                 for c in range(column_starts[j], column_stop):
-                    if valid[r, c]:
-                        total += np.float64(values[r, c])
+                    if use_valid:
+                        if not valid[r, c]:
+                            continue
                         seen += 1
+                    total += np.float64(values[r, c])
             out[i, j] = total
-            counts[i, j] = seen
+            if use_valid:
+                counts[i, j] = seen
 
 
 # ------------------------------------------------------------------- colour
@@ -691,6 +711,7 @@ def raster_error_bars(
     cap_widths,
     clips,
     lane_offsets,
+    band_count,
     out,
 ):
     """Raster independent stem/cap error bars with subpixel coverage.
@@ -700,17 +721,43 @@ def raster_error_bars(
     overlap on screen, but they never become one invented min/max envelope.
     Axis-aligned rectangle coverage is analytic, so a fractional-DPR or small
     Facet cell retains antialiasing without a supersampled temporary atlas.
+
+    One lane owns one axes.  Facet axes are disjoint and therefore run in
+    parallel; grouped series on the same axes remain sequential inside one
+    lane, preserving their alpha-composition order without races.  A lane
+    with fewer peers than the pool has threads is cut into column BANDS
+    that run in parallel too: every band replays every primitive in the
+    same painter order, restricted to its own columns, so the sequence of
+    blends any one pixel sees is unchanged -- forty grouped series on one
+    axes used to stroke on a single core while the pool idled.  The band
+    count is the caller's (:func:`stroke_bands`), never a thread query in
+    here, which would cost the kernel its on-disk cache.  The cost
+    is the blend arithmetic itself: walking a rectangle row-first instead
+    of column-first, or short-cutting its unit-coverage interior, measured
+    the same on the same frames, so neither is here.
     """
 
     height, width = out.shape[:2]
-    # One lane owns one axes.  Facet axes are disjoint and therefore run in
-    # parallel; grouped series on the same axes remain sequential inside one
-    # lane, preserving their alpha-composition order without races.
-    for lane in prange(lane_offsets.size - 1):
+    lane_count = lane_offsets.size - 1
+    for task in prange(lane_count * band_count):
+        lane = task // band_count
+        band = task - lane * band_count
+        lane_left = width
+        lane_right = 0
         for group in range(lane_offsets[lane], lane_offsets[lane + 1]):
-            clip_left = max(0, clips[group, 0])
+            lane_left = min(lane_left, max(0, clips[group, 0]))
+            lane_right = max(lane_right, min(width, clips[group, 2]))
+        if lane_right <= lane_left:
+            continue
+        span = lane_right - lane_left
+        band_left = lane_left + (span * band) // band_count
+        band_right = lane_left + (span * (band + 1)) // band_count
+        if band_right <= band_left:
+            continue
+        for group in range(lane_offsets[lane], lane_offsets[lane + 1]):
+            clip_left = max(band_left, clips[group, 0])
             clip_top = max(0, clips[group, 1])
-            clip_right = min(width, clips[group, 2])
+            clip_right = min(band_right, clips[group, 2])
             clip_bottom = min(height, clips[group, 3])
             if clip_right <= clip_left or clip_bottom <= clip_top:
                 continue
@@ -784,107 +831,158 @@ def raster_error_bars(
                             out[row, column, 3] = np.uint8(255)
 
 
-@njit(cache=True, nogil=True)
-def raster_polylines(vertices, offsets, colours, widths, clips, low, high, out):
-    """Stroke monotonic display curves as one antialiased column envelope."""
+@njit(cache=True, parallel=True, nogil=True)
+def raster_polylines(
+    vertices, offsets, colours, widths, clips, lane_offsets, band_count, out
+):
+    """Stroke monotonic display curves as one antialiased column envelope.
+
+    One lane owns one axes-worth of lines, exactly as the error-bar kernel
+    groups its stems: a Facet grid's cells are disjoint pixel boxes, so its
+    lanes stroke in parallel without a write race, while the lines INSIDE a
+    lane keep their sequential painter order -- overlapping translucent
+    strokes accumulate the way the artist scene composes them.  Callers
+    prove disjointness (``_polyline_lane_offsets``); anything they cannot
+    prove arrives as one lane, which is the old serial behaviour.
+
+    A lane with fewer peers than the pool has threads is cut into column
+    bands, each stroking every line of the lane in order over its own
+    columns; a column's envelope reads its neighbours up to the stroke
+    reach, so each band samples that margin beyond its edge and paints
+    none of it.  The column envelopes are the band's own scratch, sized to
+    the canvas width, not a per-line plane the caller had to keep.
+
+    The half-thickness the envelope adds at each column offset is the
+    same square root for every column of a line; it is taken once per
+    offset and read back, not recomputed per pair -- a fifth of the
+    serial time, measured.
+    """
 
     height, width = out.shape[:2]
-    for line in range(offsets.size - 1):
-        start = offsets[line]
-        stop = offsets[line + 1]
-        if stop - start < 2:
+    lane_count = lane_offsets.size - 1
+    for task in prange(lane_count * band_count):
+        lane = task // band_count
+        band = task - lane * band_count
+        lane_left = width
+        lane_right = 0
+        for line in range(lane_offsets[lane], lane_offsets[lane + 1]):
+            lane_left = min(lane_left, max(0, clips[line, 0]))
+            lane_right = max(lane_right, min(width, clips[line, 2]))
+        if lane_right <= lane_left:
             continue
-        clip_left = max(0, clips[line, 0])
-        clip_top = max(0, clips[line, 1])
-        clip_right = min(width, clips[line, 2])
-        clip_bottom = min(height, clips[line, 3])
-        if clip_right <= clip_left or clip_bottom <= clip_top:
+        span = lane_right - lane_left
+        band_left = lane_left + (span * band) // band_count
+        band_right = lane_left + (span * (band + 1)) // band_count
+        if band_right <= band_left:
             continue
-        for column in range(clip_left, clip_right):
-            low[line, column] = np.inf
-            high[line, column] = -np.inf
-
-        for point in range(start, stop - 1):
-            x0 = vertices[point, 0]
-            y0 = vertices[point, 1]
-            x1 = vertices[point + 1, 0]
-            y1 = vertices[point + 1, 1]
-            if not (
-                np.isfinite(x0)
-                and np.isfinite(y0)
-                and np.isfinite(x1)
-                and np.isfinite(y1)
-            ):
+        low = np.empty(width, dtype=np.float64)
+        high = np.empty(width, dtype=np.float64)
+        for line in range(lane_offsets[lane], lane_offsets[lane + 1]):
+            start = offsets[line]
+            stop = offsets[line + 1]
+            if stop - start < 2:
                 continue
-            dx = x1 - x0
-            if abs(dx) < np.float64(1.0e-12):
-                column = int(np.floor(np.float64(0.5) * (x0 + x1)))
-                if clip_left <= column < clip_right:
-                    low[line, column] = min(low[line, column], y0, y1)
-                    high[line, column] = max(high[line, column], y0, y1)
+            clip_left = max(0, clips[line, 0])
+            clip_top = max(0, clips[line, 1])
+            clip_right = min(width, clips[line, 2])
+            clip_bottom = min(height, clips[line, 3])
+            if clip_right <= clip_left or clip_bottom <= clip_top:
                 continue
-            first = max(clip_left, int(np.floor(min(x0, x1))))
-            last = min(clip_right, int(np.ceil(max(x0, x1))) + 1)
-            for column in range(first, last):
-                px = np.float64(column) + np.float64(0.5)
-                along = (px - x0) / dx
-                if along < 0.0 or along > 1.0:
-                    continue
-                y = y0 + along * (y1 - y0)
-                low[line, column] = min(low[line, column], y)
-                high[line, column] = max(high[line, column], y)
+            paint_left = max(clip_left, band_left)
+            paint_right = min(clip_right, band_right)
+            if paint_right <= paint_left:
+                continue
+            radius = max(np.float64(0.5), np.float64(widths[line]) * 0.5)
+            reach = int(np.ceil(radius + np.float64(0.5)))
+            fill_left = max(clip_left, paint_left - reach)
+            fill_right = min(clip_right, paint_right + reach + 1)
+            for column in range(fill_left, fill_right):
+                low[column] = np.inf
+                high[column] = -np.inf
 
-        radius = max(np.float64(0.5), np.float64(widths[line]) * 0.5)
-        reach = int(np.ceil(radius + np.float64(0.5)))
-        alpha_code = np.float64(colours[line, 3]) / np.float64(255.0)
-        for column in range(clip_left, clip_right):
-            envelope_low = np.inf
-            envelope_high = -np.inf
-            for source_column in range(
-                max(clip_left, column - reach),
-                min(clip_right, column + reach + 1),
-            ):
-                if not np.isfinite(low[line, source_column]):
+            for point in range(start, stop - 1):
+                x0 = vertices[point, 0]
+                y0 = vertices[point, 1]
+                x1 = vertices[point + 1, 0]
+                y1 = vertices[point + 1, 1]
+                if not (
+                    np.isfinite(x0)
+                    and np.isfinite(y0)
+                    and np.isfinite(x1)
+                    and np.isfinite(y1)
+                ):
                     continue
-                distance = abs(source_column - column)
+                dx = x1 - x0
+                if abs(dx) < np.float64(1.0e-12):
+                    column = int(np.floor(np.float64(0.5) * (x0 + x1)))
+                    if fill_left <= column < fill_right:
+                        low[column] = min(low[column], y0, y1)
+                        high[column] = max(high[column], y0, y1)
+                    continue
+                first = max(fill_left, int(np.floor(min(x0, x1))))
+                last = min(fill_right, int(np.ceil(max(x0, x1))) + 1)
+                for column in range(first, last):
+                    px = np.float64(column) + np.float64(0.5)
+                    along = (px - x0) / dx
+                    if along < 0.0 or along > 1.0:
+                        continue
+                    y = y0 + along * (y1 - y0)
+                    low[column] = min(low[column], y)
+                    high[column] = max(high[column], y)
+
+            verticals = np.empty(reach + 1, dtype=np.float64)
+            for distance in range(reach + 1):
                 squared = (
                     (radius + np.float64(0.5))
                     * (radius + np.float64(0.5))
                     - np.float64(distance * distance)
                 )
-                if squared <= 0.0:
-                    continue
-                vertical = np.sqrt(squared)
-                envelope_low = min(
-                    envelope_low, low[line, source_column] - vertical
+                verticals[distance] = (
+                    np.sqrt(squared) if squared > 0.0 else np.float64(-1.0)
                 )
-                envelope_high = max(
-                    envelope_high, high[line, source_column] + vertical
-                )
-            if not np.isfinite(envelope_low):
-                continue
-            first_row = max(clip_top, int(np.floor(envelope_low - 0.5)))
-            last_row = min(clip_bottom, int(np.ceil(envelope_high + 0.5)))
-            for row in range(first_row, last_row):
-                py = np.float64(row) + np.float64(0.5)
-                amount = min(
-                    np.float64(1.0),
-                    py - envelope_low + np.float64(0.5),
-                    envelope_high - py + np.float64(0.5),
-                )
-                if amount <= 0.0:
-                    continue
-                alpha = alpha_code * amount
-                inverse = np.float64(1.0) - alpha
-                for channel in range(3):
-                    value = (
-                        np.float64(colours[line, channel]) * alpha
-                        + np.float64(out[row, column, channel]) * inverse
+            alpha_code = np.float64(colours[line, 3]) / np.float64(255.0)
+            for column in range(paint_left, paint_right):
+                envelope_low = np.inf
+                envelope_high = -np.inf
+                for source_column in range(
+                    max(clip_left, column - reach),
+                    min(clip_right, column + reach + 1),
+                ):
+                    if not np.isfinite(low[source_column]):
+                        continue
+                    vertical = verticals[abs(source_column - column)]
+                    if vertical < 0.0:
+                        continue
+                    envelope_low = min(
+                        envelope_low, low[source_column] - vertical
                     )
-                    out[row, column, channel] = np.uint8(
-                        min(np.float64(255.0), np.floor(value + np.float64(0.5)))
+                    envelope_high = max(
+                        envelope_high, high[source_column] + vertical
                     )
-                out[row, column, 3] = np.uint8(255)
+                if not np.isfinite(envelope_low):
+                    continue
+                first_row = max(clip_top, int(np.floor(envelope_low - 0.5)))
+                last_row = min(clip_bottom, int(np.ceil(envelope_high + 0.5)))
+                for row in range(first_row, last_row):
+                    py = np.float64(row) + np.float64(0.5)
+                    amount = min(
+                        np.float64(1.0),
+                        py - envelope_low + np.float64(0.5),
+                        envelope_high - py + np.float64(0.5),
+                    )
+                    if amount <= 0.0:
+                        continue
+                    alpha = alpha_code * amount
+                    inverse = np.float64(1.0) - alpha
+                    for channel in range(3):
+                        value = (
+                            np.float64(colours[line, channel]) * alpha
+                            + np.float64(out[row, column, channel]) * inverse
+                        )
+                        out[row, column, channel] = np.uint8(
+                            min(np.float64(255.0), np.floor(value + np.float64(0.5)))
+                        )
+                    out[row, column, 3] = np.uint8(255)
 
 
 @njit(cache=True, parallel=True, nogil=True)

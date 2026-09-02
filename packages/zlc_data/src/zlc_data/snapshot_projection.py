@@ -267,12 +267,20 @@ def axis_catalog(
             if dimension_id in column_ids:
                 continue  # the matching column above already catalogs it
             domain = topology.coordinate_domains[position]
+            labels = (
+                None
+                if topology.coordinate_labels is None
+                else topology.coordinate_labels[position]
+            )
             axis = AxisSpec(
                 dimension_id,
                 dimension_id.value,
                 SCAN_POINT,
                 schema.point_table.row_count,
                 tuple(domain[cell[position]] for cell in topology.row_to_cell),
+                coordinate_labels=None
+                if labels is None
+                else tuple(labels[cell[position]] for cell in topology.row_to_cell),
             )
             catalog.append((dimension_id.value, dimension_id, axis, "point"))
     for axis in schema.cell_schema.data_axes:
@@ -445,6 +453,7 @@ def restricted_schema(
             grid_topology.dimension_ids,
             grid_topology.coordinate_domains,
             tuple(grid_topology.row_to_cell[index] for index in point_indices),
+            coordinate_labels=grid_topology.coordinate_labels,
         )
     return DatasetSchema(repeat_axis, point_table, grid_topology, cell_schema)
 

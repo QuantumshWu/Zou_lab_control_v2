@@ -561,3 +561,125 @@ Rolling session construction fell from 44.24/44.53 to 31.97/34.00 ms. Four
 1200×1920 Histogram facet cells now pass their contiguous values and validity
 views directly: projection fell from 50.43/51.13 to 40.15/41.26 ms and peak
 allocation from 19.79 MiB to 17.59 MiB, with exact edges and counts.
+
+## Facet, fit and kernel round (September 2026)
+
+Session-layer medians at 2x2, offscreen (`bench/plot_perf/run_session`),
+before -> after: facet64_curve 29.3 -> 17.8, facet64_histogram 45.6 -> 34.2,
+facet64_image 22.6 -> 17.2, facet34_mixed 48.1 -> 37.1, rolling_2M
+18.6 -> 14.4, image_camera_4M 16.2 -> 14.7, fit_facet10 solve 20.3 -> 13.7 ms;
+deep indexed rolling (35 sites x 5000 window) update 34.9 -> 27.9 ms.
+Isolated MOT-ROI cases (`run_mot_roi_isolated`): camera-grid render
+29.1 -> 18.2, facet-curve-fit-40 total 47.6 -> 34.2, facet-curve-40
+10.9 -> 6.5 ms.
+
+What changed: `raster_polylines` strokes disjoint clip lanes in parallel
+(the error-bar kernel's own grouping), and the facet caller applies a
+linear cell's transData as the affine it is; the whole-pixel cell-box
+searches are memoized on (plan box, figure size, ratio); the centred
+square-sum kernel accepts size-1 axes inside its kept block, which had
+been sending every facet-curve sem down a full centred-copy einsum;
+`block_sum_float` folded into `block_sum_valid` behind a loop-invariant
+flag (measured faster on both faces); the uncertainty band's two edges
+ride one `transform_curve_batch` launch; batch fit proves each shared
+coordinate object once (digest and finiteness).  The damped-sine seeder's
+frequency scan swapped its per-sample trig calls for Goertzel
+(60.6 -> 31.9 ms solve; a measured-phase seed was tried and reverted --
+it made the solve basin-sensitive).  Refused with numbers:
+`uniform_histogram` into `uniform_facet_histograms` (+18% on the single
+histogram hot loop even with a hoisted single-facet branch).
+
+Four-panel contention, measured on the MOT-ROI chain: worker-thread
+masks 2/4/8 move the causal critical path 90.0/84.5/79.2 ms (mild
+under-parallelization, no oversubscription); `OMP_WAIT_POLICY=ACTIVE`
+is not faster (wake latency is not the wall-cpu gap); with
+`ZLC_PLOT_KERNELS=numpy` the same chain's composes inflate ~6-10x with
+cpu~wall -- the nogil kernels are what keep four panels affordable.
+The residual console/isolated render ratio (camera-grid ~2x) is
+scheduler-level sharing among four worker threads, their kernel teams
+and the GUI thread; it shrinks only by making composes cheaper.
+
+## Compose and stroke round (September 2026, second pass)
+
+The question was what the four-panel chain still paid per panel after the
+facet/fit/kernel round, measured on the same MOT-ROI chain
+(`run_mot_roi_chain`), the isolated same-source cases
+(`run_mot_roi_isolated`) and the 2x2 layout (`run_console`), all at DPR 3.
+Archives: `bench/results/final_dceb240` (before) and `bench/results/round2`
+(after, plus the band A/B runs).
+
+What the probes found, per frame of the focused camera cell (isolated
+compose 10.6 ms): 29 dynamic artists repainted through matplotlib, of
+which three whole Axis objects -- the colour scale's long axis (2.7 ms)
+and the distribution rail's two axes (1.3 each) -- and the ROI annotation
+text (0.8) were 5.3 ms; inside the colour scale's axis, one rotated label
+cost 1.04 ms, 0.8 of it Agg's bilinear rotation of a bitmap that never
+changes.  The curve panel's forty grouped series stroked on one serial
+lane: 6 ms of error bars and 3.3 ms of lines while the pool idled.  The
+isolated facet-curve case had been drawn without uncertainty bars while
+the console draws them by default, so its "same source" number was not
+the same picture (fixed in the harness; its before/after is therefore not
+comparable).
+
+What changed:
+
+* Text raster memo on the Agg renderer (`_prepare_renderer`): a string's
+  raster is a function of string, font, angle and antialiasing; it is
+  taken once through Agg's own machinery and blitted back at every later
+  position with Agg's rounding to the anchor pixel.  The rotated label
+  went 1.04 -> 0.04 ms.  Rotated strings replay only when opaque and
+  unclipped -- Agg's rotated path quantizes alpha twice and clips through
+  the rasterizer, which the blit does not reproduce -- and mathtext keeps
+  the original route.
+* Dynamic axes replay their recorded renderer calls while the facts their
+  draw is a function of hold (axes box, view limits, locator and formatter
+  with fixed values, label, pad, tick parameters); a key seen twice
+  running is recorded, from then on replayed, and a key that changes every
+  frame (a colour scale under TIGHT re-fitting per shot) is drawn plainly
+  and never recorded.  Recordings are forgotten with the background.
+* The two stroke kernels cut a lane with fewer peers than the pool has
+  threads into column bands, every band replaying every primitive in
+  painter order over its own columns -- bit-identical to the serial
+  kernel on 64 captured product frames at every band count; the polyline
+  envelope's square roots are one table per line; the band count comes
+  from Python (`stroke_bands`), because a thread query inside the kernel
+  made it uncacheable.
+
+Refused or reverted, with numbers: walking a rectangle row-first (same
+time as column-first: the blend arithmetic is the cost, not the cache
+line); a unit-coverage interior fast path (same time); the text memo for
+translucent rotated strings (one channel off by one: Agg rounds alpha
+twice on that path); full-pool bands in the console (see below).
+
+Results.  Isolated render medians: camera-grid 18.2 -> 16.5,
+standalone-image 17.6 -> 15.3, curve-40 13.5 -> 6.6 ms; facet-curve-fit-40
+now measures 27.3 render / 46.0 total with its bars on.  Layout, four
+panels at 9.1 fps, render per frame: image 34.6 -> 25.8 wall (17.6 ->
+11.7 cpu), rolling 14.6 -> 9.2, curve 12.0 -> 5.9, histogram 3.0 -> 3.7
+(noise).  Chain, per source revision: camera-grid commit 47.6 -> 29.7
+wall (compose 27.3 -> 7.0), curve-40 commit 16.7 -> 13.0, histogram
+unchanged, facet-curve-fit-40 37.6 -> 35.6; source 7.5/s, no stalls.
+
+The four-panel critical path did not move: 82.7 -> 83.1 ms median.  It
+is the facet-curve-fit panel end to end (route 1.6 + projection 12.3 +
+fit 25.2 + commit 35.6), and nothing in this round touched its floors:
+the batch fit itself (21.6 ms of numeric solve for forty cells), twenty
+thousand error bars whose caps at 0.3 px spacing are 9.9 Mpx of blending
+per frame (a presentation fact -- caps at every point -- not a kernel
+fact), and forty mathtext annotations parsed per frame under the GIL
+(5-10 ms).  The other three panels now finish well inside it.
+
+Band count is a shared-pool decision, measured: the default worker mask
+is the whole pool (16 threads here), and cutting a lone lane into sixteen
+bands from four workers at once moved the critical path from 83 to
+105 ms -- every panel's projection, fit and compose inflated under the
+oversubscription.  Bands forced to one restored 83; four bands held 84
+and still took the curve panel's compose from 15.1 to 11.9 ms.  The cap
+is four.  The previous round's mask sweep (2/4/8 -> 90/84.5/79.2 ms)
+suggests a smaller default worker mask would help the chain; that is a
+product decision and was not taken here.
+
+Two measurement lessons worth keeping: kernel inputs captured by
+reference belong to a later frame (the renderer reuses its geometry
+buffers), so a golden capture copies at capture time; and a same-source
+comparison is only a comparison when both sides ask for the same picture.

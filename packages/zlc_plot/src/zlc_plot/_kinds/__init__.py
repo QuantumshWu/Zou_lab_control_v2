@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Any
 
 from ..kinds import PlotKind
 from .base import KindHandler
 from .curve import HANDLER as CURVE_HANDLER
-from .facet_grid import HANDLER as FACET_GRID_HANDLER, cell_within_one_cell
+from .facet_grid import HANDLER as FACET_GRID_HANDLER
 from .histogram import HANDLER as HISTOGRAM_HANDLER
 from .image import HANDLER as IMAGE_HANDLER
 from .pulse_timeline import HANDLER as PULSE_TIMELINE_HANDLER
@@ -93,26 +92,15 @@ def fitting_spec(schema: Any, kind: Any = None, *, cell: Any = None) -> Any:
 
     if cell is not None and kind is not PlotKind.FACET_GRID:
         raise ValueError("only a facet grid has a cell kind")
-    if kind is not None:
-        grid = default_spec(schema, kind)
-        if grid is None and kind is PlotKind.FACET_GRID:
-            # The operator NAMED this kind, so the answer is not "this
-            # dataset has no obvious grid" -- that was the defaulting
-            # question.  A grid it can host is built from what one cell
-            # would show, faceted by an axis that cell leaves free; the
-            # fate table is where the operator says what it should face.
-            from .facet_grid import chosen_spec
-
-            grid = chosen_spec(schema, None)
-        if cell is None or grid is None:
-            return grid
+    if kind is PlotKind.FACET_GRID:
         # Naming a cell kind changes the KIND of the cell, never the rule
-        # for what one cell shows: that stays with the grid that composed it.
-        inner = default_spec(schema, cell)
-        if inner is None:
-            return None
-        inner = cell_within_one_cell(schema, grid.facet, inner)
-        return None if inner is None else replace(grid, cell=inner)
+        # for what one cell shows or what the grid faces: both come from
+        # the one table, which refuses (None) a cell the data cannot fill.
+        from .defaults import default_spec as table_default
+
+        return table_default(schema, kind, cell_kind=cell)
+    if kind is not None:
+        return default_spec(schema, kind)
     for handler in _INFERENCE_ORDER:
         candidate = handler.default_spec(schema)
         if candidate is not None:

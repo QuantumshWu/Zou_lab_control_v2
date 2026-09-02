@@ -13,7 +13,7 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping, TypeAlias
 
 from ._kinds import HANDLERS, default_spec, handler_for
-from .data_contract import resolve_axis
+from .data_contract import resolve_axis, rows_are_named
 from zlc_data import (
     LATEST_COORDINATE,
     CoordinateScalar,
@@ -263,26 +263,6 @@ class SemanticDescription:
         return MappingProxyType({field.name: field.value for field in self.fields})
 
 
-def _rows_are_already_named(schema: DatasetSchema) -> bool:
-    """Whether something the producer declared identifies each point row.
-
-    A declared topology does (the rows are its grid, in order), and so does
-    any point column whose values are distinct -- a camera cycle's frame
-    number, a scan's swept parameter.  When one of those exists, the rows ARE
-    it, and offering a generic ordinal beside it puts the same axis in the
-    table twice: an operator saw "point row (3)" and "frame (3)" and had to
-    guess which of the two was the frames.
-    """
-
-    if schema.grid_topology is not None:
-        return True
-    for column in schema.point_table.columns:
-        values = tuple(column.values)
-        if values and len(set(values)) == len(values):
-            return True
-    return False
-
-
 def axis_choices_for_schema(schema: DatasetSchema) -> tuple[AxisRef, ...]:
     """Return every declared axis reference, one identity per physical axis.
 
@@ -303,7 +283,7 @@ def axis_choices_for_schema(schema: DatasetSchema) -> tuple[AxisRef, ...]:
         else set()
     )
     refs: list[AxisRef] = [AxisRef.repeat()]
-    if not _rows_are_already_named(schema):
+    if not rows_are_named(schema):
         refs.append(AxisRef.point_rows())
     refs.extend(
         AxisRef.point(str(axis.coordinate_id))
@@ -570,7 +550,7 @@ def _chosen_spec(
     """
 
     if kind is PlotKind.FACET_GRID:
-        from ._kinds.facet_grid import chosen_spec
+        from ._kinds.defaults import chosen_spec
 
         return chosen_spec(schema, semantic_spec(current))
     return default_spec(schema, kind)

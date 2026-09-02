@@ -86,3 +86,49 @@ def test_point_topology_is_explicit_and_readonly() -> None:
     assert schema.grid_topology is topology
     with pytest.raises(ValueError):
         GridTopology((AxisId("bx"),), ((0.0,),), ((2,),))
+
+
+
+def test_a_dimension_resolves_its_labels_on_a_cropped_view() -> None:
+    """The labels are the domain's: cropping the rows must not lose them."""
+
+    import numpy as np
+    from zlc_data import (
+        READOUT_EVENT,
+        REPEAT,
+        SITE,
+        AxisId,
+        AxisSpec,
+        DatasetSchema,
+        GridTopology,
+        PointColumn,
+        PointTable,
+        ValidityContract,
+        ValueSchema,
+    )
+    from zlc_data.snapshot_projection import restricted_schema
+    from zlc_plot.data_contract import resolve_axis
+    from zlc_plot.kinds import AxisRef
+
+    labels = ("0-1", "0-2", "1-2")
+    pair = PointColumn(
+        AxisId("pair"), "pair", READOUT_EVENT, PointColumn.NUMERIC, (0, 1, 2),
+        coordinate_labels=labels,
+    )
+    site = AxisSpec(AxisId("site"), "site", SITE, 2, (0, 1))
+    schema = DatasetSchema(
+        AxisSpec(AxisId("repeat"), "repeat", REPEAT, 1, (0,)),
+        PointTable(3, (pair,)),
+        GridTopology(
+            (AxisId("pair"),), ((0, 1, 2),), ((0,), (1,), (2,)),
+            coordinate_labels=(labels,),
+        ),
+        ValueSchema(
+            (site,), ValidityContract.components(AxisId("site")), np.dtype("<f8"), "1"
+        ),
+    )
+    cropped = restricted_schema(schema, range(1), (2,), {AxisId("site"): range(2)})
+    resolved = resolve_axis(cropped, AxisRef.point_dimension("pair"))
+    assert tuple(resolved.coordinates) == (0, 1, 2)
+    assert resolved.coordinate_labels == labels
+    assert resolved.name == "pair"

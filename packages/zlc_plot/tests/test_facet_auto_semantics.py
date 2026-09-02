@@ -12,7 +12,7 @@ import numpy as np
 
 from zlc_plot._kinds.facet_grid import default_spec as facet_default
 from zlc_plot._kinds.image import default_spec as image_default
-from zlc_plot.data_contract import live_grid_dimensions
+from zlc_plot.data_contract import classify_axes
 from zlc_plot.kinds import AxisRef
 from zlc_plot.specs import CurvePlot, FacetGridPlot, ImagePlot, Reduction
 
@@ -51,7 +51,9 @@ def _frame_axes(height: int = 4, width: int = 6):
 
 def test_degenerate_dimensions_are_invisible_to_inference() -> None:
     schema = _scan_schema({"a": 1, "b": 4, "c": 5})
-    assert live_grid_dimensions(schema) == ("b", "c")
+    families = classify_axes(schema)
+    assert [ref.axis_id for ref, _size in families.scan] == ["a", "b", "c"]
+    assert [ref.axis_id for ref, _size in families.live_scan()] == ["b", "c"]
 
 
 def test_a_scalar_multi_dimension_scan_cells_its_two_innermost_dims() -> None:
@@ -202,21 +204,30 @@ def test_a_camera_cycle_facets_its_frames_from_the_point_axis() -> None:
     assert spec.facet == AxisRef.point("frame")
 
 
-def test_a_site_resolved_scan_keeps_the_grouped_curve_cell() -> None:
-    """One live data axis is per-site structure, not a scalar: curves stay.
+def test_a_site_resolved_scan_spends_position_before_content() -> None:
+    """Two live scan dimensions are the heatmap; the sites are reduced.
 
-    Imaging the scan dimensions here would average the sites away inside
-    every pixel -- the exact information a site-resolved signal exists for.
+    Position is spent before content: a field map of a per-site quantity
+    opens as the scan's heatmap with the sites averaged, which is what the
+    scan was measured for.  The per-site view is one cell-kind switch away
+    -- a named curve cell walks the inner dimension and groups the sites.
     """
 
+    from zlc_plot import PlotKind, fitting_spec
+
     sites = (Axis.create("site", size=7),)
-    spec = facet_default(_scan_schema({"a": 3, "b": 4}, data_axes=sites))
+    schema = _scan_schema({"a": 3, "b": 4}, data_axes=sites)
+    spec = facet_default(schema)
     assert isinstance(spec, FacetGridPlot)
-    assert spec.facet == AxisRef.point_dimension("a")
+    assert spec.facet is None
     cell = spec.cell
-    assert isinstance(cell, CurvePlot)
+    assert isinstance(cell, ImagePlot)
     assert cell.x == AxisRef.point_dimension("b")
-    assert cell.group == AxisRef.data("site")
+    assert cell.y == AxisRef.point_dimension("a")
+    curves = fitting_spec(schema, PlotKind.FACET_GRID, cell=PlotKind.CURVE)
+    assert curves.facet == AxisRef.point_dimension("a")
+    assert curves.cell.x == AxisRef.point_dimension("b")
+    assert curves.cell.group == AxisRef.data("site")
 
 
 def test_the_image_kind_ignores_degenerate_grid_dimensions() -> None:

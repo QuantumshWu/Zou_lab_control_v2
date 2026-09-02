@@ -679,6 +679,11 @@ def _indexed_schema(
                 for index_position in range(len(indices))
                 for cell in topology.row_to_cell
             ),
+            coordinate_labels=(
+                None
+                if topology.coordinate_labels is None
+                else (None, *topology.coordinate_labels)
+            ),
         )
     return DatasetSchema(
         event_schema.repeat_axis,

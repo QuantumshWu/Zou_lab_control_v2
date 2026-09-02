@@ -106,3 +106,103 @@ def test_a_missing_numba_is_reported_not_raised() -> None:
         assert "numba is not installed" in _kernel_warm.warm()
     finally:
         _raster_kernels.HAVE_NUMBA = previous
+
+
+class _FakeIndex:
+    def __init__(self, overloads: dict) -> None:
+        self._overloads = overloads
+
+    def _load_index(self) -> dict:
+        return dict(self._overloads)
+
+
+class _FakeCache:
+    def __init__(self, overloads: dict) -> None:
+        self._cache_file = _FakeIndex(overloads)
+
+
+class _FakeKernel:
+    """What the detector reads off a dispatcher: its signatures and its index."""
+
+    def __init__(self, signatures: tuple, on_disk: dict | None = None) -> None:
+        self.signatures = signatures
+        self._cache = _FakeCache(on_disk or {})
+
+
+def _plane(dtype: str, *, readonly: bool):
+    from numba import types
+
+    return types.Array(getattr(types, dtype), 2, "C", readonly=readonly)
+
+
+def test_a_mutability_twin_is_named_even_when_only_the_disk_remembers_it() -> None:
+    """The process compiled the writable plane; an experiment left the sealed one.
+
+    Neither process alone ever held both, and the old check looked only at
+    the process in hand -- the promotion kernel sat in the cache twice per
+    dtype for as long as that was true.
+    """
+
+    from numba import types
+
+    # The process lists an exactly compiled overload as a Signature object
+    # (the fit callbacks are compiled to their ABI up front); the disk index
+    # lists the other as a tuple of argument types.  Same arguments, one twin.
+    writable = types.float64(_plane("uint8", readonly=False))
+    sealed = (_plane("uint8", readonly=True),)
+    kernel = _FakeKernel(signatures=(writable,), on_disk={(sealed, ()): "x.2.nbc"})
+    assert _kernel_warm.duplicate_signatures({"promote": kernel}) == ("promote",)
+
+
+def test_distinct_dtypes_and_a_repeated_exact_signature_are_not_twins() -> None:
+    """Two dtypes are two kernels' worth of code; the same signature twice is one.
+
+    The repeat comes in the two spellings one overload really has: the
+    process lists an exactly compiled callback as a Signature object, the
+    disk index lists the same overload as a tuple of its argument types.
+    Counting those as two named every fit kernel a twin on the first run.
+    """
+
+    from numba import types
+
+    narrow = (_plane("uint8", readonly=True),)
+    wide = (_plane("uint16", readonly=True),)
+    kernel = _FakeKernel(
+        signatures=(types.float64(*narrow), wide),
+        on_disk={(narrow, ()): "x.1.nbc", (wide, ()): "x.2.nbc"},
+    )
+    assert _kernel_warm.duplicate_signatures({"promote": kernel}) == ()
+
+
+def test_the_regular_image_promotion_is_sealed_at_its_boundary() -> None:
+    """A writable camera plane reaches the promotion kernel read-only.
+
+    The plane's mutability used to be whatever its origin made it: a
+    published snapshot sealed, a fresh copy writable, and numba compiled the
+    promotion twice per dtype for the difference.
+    """
+
+    import numpy as np
+
+    from zlc_plot import _fit_radial
+
+    seen: list[bool] = []
+    original = _fit_radial._promote_unsigned_summary
+
+    def spy(plane):
+        seen.append(bool(plane.flags.writeable))
+        return original(plane)
+
+    _fit_radial._promote_unsigned_summary = spy
+    try:
+        plane = np.arange(12, dtype=np.uint8).reshape(3, 4)  # writable, contiguous
+        data = _fit_radial.RegularImageFitInput(
+            np.arange(4, dtype=np.float64), np.arange(3, dtype=np.float64), plane
+        )
+        context = _fit_radial._ImageContext(data, lambda: None)
+        promoted = context.float_observations()
+    finally:
+        _fit_radial._promote_unsigned_summary = original
+    assert seen == [False], "the kernel must only ever see a sealed plane"
+    assert promoted.dtype == np.float64 and promoted.flags.c_contiguous
+    assert plane.flags.writeable, "sealing is a view, never a side effect on the caller"

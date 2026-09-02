@@ -70,6 +70,12 @@ class ParameterSpec(Generic[T]):
     minimum: float | None = None
     maximum: float | None = None
     step: float | None = None
+    #: Whether the value keeps its meaning when the panel's plot identity
+    #: changes.  Appearance does -- a title, a colormap, the grid -- and is
+    #: carried across kinds.  A limit describes one QUANTITY: colour limits
+    #: are not y limits, and a curve cell that inherited an image cell's
+    #: TIGHT colour re-fit re-fitted its y axis on every shot.
+    portable: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip():
@@ -97,6 +103,8 @@ class ParameterSpec(Generic[T]):
         object.__setattr__(self, "minimum", minimum)
         object.__setattr__(self, "maximum", maximum)
         object.__setattr__(self, "step", step)
+        if not isinstance(self.portable, bool):
+            raise TypeError("portable must be bool")
         prepared_choices = tuple(self._prepare_value(value) for value in self.choices)
         if any(value is None for value in prepared_choices):
             raise ValueError("parameter choices must not contain None")

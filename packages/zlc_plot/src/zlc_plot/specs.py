@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import partial
-from typing import ClassVar, TypeAlias
+from typing import ClassVar, get_args, TypeAlias
 
 from zlc_data import (
     CoordinateScalar,
@@ -339,6 +339,14 @@ class RollingPlot:
 
 CellPlot: TypeAlias = CurvePlot | ImagePlot | HistogramPlot
 
+#: The kinds one facet-grid cell can be, read off the cell type above.
+#: The spec's validation, the display contract, the default table and
+#: every product gate read this one tuple; nothing spells the names
+#: again.
+GRID_CELL_KINDS: tuple[PlotKind, ...] = tuple(
+    spec.kind for spec in get_args(CellPlot)
+)
+
 
 @dataclass(frozen=True, slots=True)
 class FacetGridPlot:
@@ -358,8 +366,11 @@ class FacetGridPlot:
     def __post_init__(self) -> None:
         if self.facet is not None and not isinstance(self.facet, AxisRef):
             raise TypeError("FacetGridPlot.facet must be AxisRef or None")
-        if not isinstance(self.cell, (CurvePlot, ImagePlot, HistogramPlot)):
-            raise TypeError("FacetGrid cells must be CurvePlot, ImagePlot or HistogramPlot")
+        if not isinstance(self.cell, get_args(CellPlot)):
+            raise TypeError(
+                "FacetGrid cells must be one of "
+                + ", ".join(spec.__name__ for spec in get_args(CellPlot))
+            )
         if not isinstance(self.labels, PlotLabels):
             raise TypeError("FacetGridPlot.labels must be PlotLabels")
         if self.cell.scope:
@@ -500,6 +511,7 @@ def _curve_parameters() -> tuple[ParameterSpec[object], ...]:
             default=RelimMode.NORMAL.value,
             normalizer=_relim_mode,
             label="Limits",
+            portable=False,
             choices=tuple(item.value for item in RelimMode),
         ),
         ParameterSpec(
@@ -510,6 +522,7 @@ def _curve_parameters() -> tuple[ParameterSpec[object], ...]:
             normalizer=_finite_or_none,
             allow_none=True,
             label="Y minimum",
+            portable=False,
         ),
         ParameterSpec(
             "y_max",
@@ -519,6 +532,7 @@ def _curve_parameters() -> tuple[ParameterSpec[object], ...]:
             normalizer=_finite_or_none,
             allow_none=True,
             label="Y maximum",
+            portable=False,
         ),
     )
 
@@ -593,6 +607,7 @@ def _histogram_parameters() -> tuple[ParameterSpec[object], ...]:
             default=RelimMode.NORMAL.value,
             normalizer=_relim_mode,
             label="Count limits",
+            portable=False,
             choices=tuple(item.value for item in RelimMode),
         ),
         ParameterSpec(
@@ -603,6 +618,7 @@ def _histogram_parameters() -> tuple[ParameterSpec[object], ...]:
             normalizer=_finite_or_none,
             allow_none=True,
             label="Count minimum",
+            portable=False,
         ),
         ParameterSpec(
             "y_max",
@@ -612,6 +628,7 @@ def _histogram_parameters() -> tuple[ParameterSpec[object], ...]:
             normalizer=_finite_or_none,
             allow_none=True,
             label="Count maximum",
+            portable=False,
         ),
         ParameterSpec(
             "log_y",
@@ -636,6 +653,7 @@ def _histogram_parameters() -> tuple[ParameterSpec[object], ...]:
             default=RelimMode.NORMAL.value,
             normalizer=_relim_mode,
             label="Value limits",
+            portable=False,
             choices=tuple(item.value for item in RelimMode),
         ),
         ParameterSpec(
@@ -646,6 +664,7 @@ def _histogram_parameters() -> tuple[ParameterSpec[object], ...]:
             normalizer=_finite_or_none,
             allow_none=True,
             label="Value minimum",
+            portable=False,
         ),
         ParameterSpec(
             "x_max",
@@ -655,6 +674,7 @@ def _histogram_parameters() -> tuple[ParameterSpec[object], ...]:
             normalizer=_finite_or_none,
             allow_none=True,
             label="Value maximum",
+            portable=False,
         ),
     )
 
@@ -692,6 +712,7 @@ def _image_parameters(style: PlotStyleConfig) -> tuple[ParameterSpec[object], ..
             default=RelimMode.TIGHT.value,
             normalizer=_relim_mode,
             label="Color limits",
+            portable=False,
             choices=tuple(item.value for item in RelimMode),
         ),
         ParameterSpec(
@@ -711,6 +732,7 @@ def _image_parameters(style: PlotStyleConfig) -> tuple[ParameterSpec[object], ..
             normalizer=_finite_or_none,
             allow_none=True,
             label="Color minimum",
+            portable=False,
         ),
         ParameterSpec(
             "color_max",
@@ -720,6 +742,7 @@ def _image_parameters(style: PlotStyleConfig) -> tuple[ParameterSpec[object], ..
             normalizer=_finite_or_none,
             allow_none=True,
             label="Color maximum",
+            portable=False,
         ),
     ]
     entries.append(
@@ -1147,6 +1170,29 @@ def parameter_schema_for(spec: PlotSpec, *, style: PlotStyleConfig) -> Parameter
     )
 
 
+def non_portable_display_names() -> frozenset[str]:
+    """The display names whose value must not follow a panel across kinds.
+
+    THE answer, derived from every kind's own declarations rather than
+    kept as a list beside them: a spec says whether it is portable, and
+    this reads the specs.
+    """
+
+    from .config import DEFAULTS  # noqa: PLC0415
+
+    names: set[str] = set()
+    for kind in PlotKind:
+        cells = (
+            GRID_CELL_KINDS if kind is PlotKind.FACET_GRID else (None,)
+        )
+        for cell in cells:
+            schema = parameter_schema_for_kind(
+                kind, style=DEFAULTS.style, facet_cell_kind=cell
+            )
+            names.update(name for name in schema if not schema[name].portable)
+    return frozenset(names)
+
+
 def parameter_schema_for_kind(
     kind: PlotKind | str,
     *,
@@ -1169,13 +1215,10 @@ def parameter_schema_for_kind(
                 "facet grid display parameters require a fixed cell kind"
             )
         semantic_kind = PlotKind(facet_cell_kind)
-        if semantic_kind not in {
-            PlotKind.CURVE,
-            PlotKind.IMAGE,
-            PlotKind.HISTOGRAM,
-        }:
+        if semantic_kind not in GRID_CELL_KINDS:
             raise ValueError(
-                "facet grid cell kind must be curve, image, or histogram"
+                "facet grid cell kind must be one of "
+                + ", ".join(kind.value for kind in GRID_CELL_KINDS)
             )
     elif facet_cell_kind is not None:
         raise ValueError("facet_cell_kind is only valid for a facet grid")

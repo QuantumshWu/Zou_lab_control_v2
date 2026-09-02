@@ -1,7 +1,7 @@
 """Frame survival: every forward pair, denominator in the validity.
 
 The processor consumes judged occupancy (cycles x frames x sites, bool)
-and publishes one dataset whose LABELLED pair cell axis carries the
+and publishes one dataset whose LABELLED pair point axis carries the
 forward frame pairs ("0-1", "0-2", "1-2"), one identity per pair.  The
 pinned identity is the one the design stands on: a MEAN over the
 published validity equals the pooled survival fraction computed from the
@@ -87,14 +87,14 @@ def test_pairing_identity_per_entry() -> None:
     survival = processor._pair(_occupied_snapshot(occupied))
     values = np.asarray(survival.block.values)
     validity = np.asarray(survival.expanded_validity())
-    assert values.shape == (40, 1, 3, 6)  # (cycles, 1 point, pairs, sites)
+    assert values.shape == (40, 3, 6)  # (cycles, pairs, sites)
     for entry, (condition, value) in enumerate(_forward_pairs(3)):
         eligible = occupied[:, condition, :]
-        np.testing.assert_array_equal(validity[:, 0, entry, :], eligible)
+        np.testing.assert_array_equal(validity[:, entry, :], eligible)
         np.testing.assert_array_equal(
-            values[:, 0, entry, :][eligible], occupied[:, value, :][eligible]
+            values[:, entry, :][eligible], occupied[:, value, :][eligible]
         )
-        assert np.all(np.isnan(values[:, 0, entry, :][~eligible]))
+        assert np.all(np.isnan(values[:, entry, :][~eligible]))
 
 
 def test_unjudgeable_frames_leave_the_denominator() -> None:
@@ -105,7 +105,7 @@ def test_unjudgeable_frames_leave_the_denominator() -> None:
     survival = FrameSurvivalProcessor()._pair(
         _occupied_snapshot(occupied, valid)
     )
-    validity = np.asarray(survival.expanded_validity())[:, 0, 0, :]
+    validity = np.asarray(survival.expanded_validity())[:, 0, :]
     assert not validity[1].any()
     assert not validity[2, 0]
     assert validity[0].all() and validity[3].all()
@@ -210,7 +210,7 @@ def test_mean_over_validity_is_the_pooled_survival() -> None:
         loaded = occupied[:, condition, :]
         pooled = (occupied[:, value, :] & loaded).sum() / loaded.sum()
         projected = np.nanmean(
-            values[:, 0, entry, :][validity[:, 0, entry, :]]
+            values[:, entry, :][validity[:, entry, :]]
         )
         np.testing.assert_allclose(projected, pooled, rtol=1e-12)
 
@@ -221,12 +221,13 @@ def test_pair_axis_carries_one_label_per_pair() -> None:
         _occupied_snapshot(occupied)
     )
     schema = survival.block.schema
-    assert schema.point_table.row_count == 1
-    assert schema.point_table.columns == ()
-    pair_axis, site_axis = schema.cell_schema.data_axes
-    assert pair_axis.axis_id == AxisId("fs.pair")
-    assert pair_axis.size == 3
-    assert pair_axis.coordinate_labels == ("0-1", "0-2", "1-2")
+    assert schema.point_table.row_count == 3
+    (pair_column,) = schema.point_table.columns
+    assert pair_column.coordinate_id == AxisId("fs.pair")
+    assert pair_column.role == READOUT_EVENT
+    assert pair_column.values == (0, 1, 2)
+    assert pair_column.coordinate_labels == ("0-1", "0-2", "1-2")
+    (site_axis,) = schema.cell_schema.data_axes
     assert site_axis.axis_id == AxisId("occupancy.site")
 
 
@@ -296,9 +297,9 @@ def test_evaluate_translates_exact_coverage_by_whole_cycles() -> None:
     )
     outputs = FrameSurvivalProcessor().evaluate(signal)
     survival = outputs["survival"]
-    assert survival.coverage == DatasetCoverage(2, 5)  # one cell per cycle
+    assert survival.coverage == DatasetCoverage(2 * 3, 5 * 3)  # cycles x pairs
     assert survival.cell_origin == (1, 0)
-    assert survival.canonical_schema.point_table.row_count == 1
+    assert survival.canonical_schema.point_table.row_count == 3
     assert survival.canonical_schema.repeat_axis.size == 5
 
 
@@ -324,9 +325,9 @@ def test_terminal_dataset_evaluates_frozen() -> None:
         SignalValue("@logic/occupancy/occupied", snapshot, None)
     )
     survival = outputs["survival"]
-    assert survival.coverage == DatasetCoverage(8, 8)  # one cell per cycle
+    assert survival.coverage == DatasetCoverage(8, 8)  # cycles x one pair
     values = np.asarray(survival.snapshot.block.values)
-    assert values.shape == (8, 1, 1, 3)  # (cycles, 1 point, 1 pair, sites)
+    assert values.shape == (8, 1, 3)  # (cycles, 1 pair, sites)
 
 
 def test_discovered_as_a_logic_node() -> None:
@@ -348,7 +349,7 @@ def test_plot_mean_projection_gives_pooled_rate_and_binomial_band() -> None:
     survival = FrameSurvivalProcessor()._pair(_occupied_snapshot(occupied))
     view = DataView(survival)
     series = view.curve(
-        AxisRef.data("frame_survival.pair"), uncertainty=True
+        AxisRef.point("frame_survival.pair"), uncertainty=True
     ).series[0]
     assert len(series.y.canonical) == 3  # one plotted point per pair
     for entry, (condition, value) in enumerate(_forward_pairs(3)):
@@ -368,7 +369,7 @@ def test_plot_mean_projection_gives_pooled_rate_and_binomial_band() -> None:
 def test_monitor_source_translates_coverage_to_own_geometry() -> None:
     """The real-bench failure: a camera-monitor chain hands MonitorCoverage
     counted in (cycles x frames); the published ledger must count THIS
-    output's geometry (one row per cycle) or the runtime refuses it."""
+    output's geometry (one pair row per cycle) or the runtime refuses it."""
 
     from zlc_runtime import MonitorCoverage
 
@@ -383,8 +384,8 @@ def test_monitor_source_translates_coverage_to_own_geometry() -> None:
     )
     survival = outputs["survival"]
     assert isinstance(survival.coverage, MonitorCoverage)
-    assert survival.coverage.total_cells == 4  # cycles x one point row
-    assert survival.coverage.written_cells == 4
+    assert survival.coverage.total_cells == 4 * 3  # cycles x pair rows
+    assert survival.coverage.written_cells == 4 * 3
     # The constructor itself validates ledger-vs-geometry, so constructing
     # the LiveDatasetOutput above IS the regression proof.
 
@@ -557,12 +558,16 @@ def test_live_monitor_chain_camera_occupancy_survival() -> None:
         values = np.asarray(survival_value.snapshot.block.values)
         cycles = values.shape[0]
         pairs = len(_forward_pairs(CALIBRATION_FRAMES_PER_CYCLE))
-        assert values.shape == (cycles, 1, pairs, 1)
+        assert values.shape == (cycles, pairs, 1)
         schema = survival_value.snapshot.block.schema
-        pair_axis = schema.cell_schema.data_axes[0]
-        assert pair_axis.coordinate_labels == ("0-1", "0-2", "1-2")
+        pair_column = next(
+            column
+            for column in schema.point_table.columns
+            if column.role == READOUT_EVENT
+        )
+        assert pair_column.coordinate_labels == ("0-1", "0-2", "1-2")
         coverage = survival_value.coverage
-        assert coverage.total_cells == cycles
+        assert coverage.total_cells == cycles * pairs
 
         # The declared source-index history is what lets a rolling panel
         # replay every retained shot when its projection changes: lease it,

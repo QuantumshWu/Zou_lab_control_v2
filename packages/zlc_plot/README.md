@@ -263,6 +263,8 @@ Pulse preview 或嵌套 scroll area 可调用 `widget.set_interaction_enabled(Fa
 `facet_row_display_unit` 和 `facet_col_display_unit`，因此两个 facet 轴不会被错误地
 强制共用单位。
 
+未经 authoring 时每种 kind 显示什么，由 `zlc_plot/_kinds/defaults.py` 一张表决定；每个 kind 的 `default_spec`、FacetGrid 的 cell kind 选择和「从当前 plot 要一个 grid」都只是对这张表的读取。表按 `classify_axes` 得到的 axis family 分组，从不按 axis 名字特判：R（repeat）是统计量，只被 reduce 或被 Histogram pool；H（Runtime 的 primary index）除 Rolling 自己走它之外也是统计量，只在其它轴都没有结构时作 curve 最后的 x；S（scan dimension，slowest first）是位置：最内层是 curve 的 x，两层是 heatmap，最外层是 grid 的 facet，无人认领的 scan 轴保持可编辑的 Reduced；E（`READOUT_EVENT` 或未命名的 event point column，如 camera frame、survival pair）是子测量的选择：grid 给每个 event 一个 cell，无 scan 的 curve 沿它走，其它情况显示 Latest scope；D（cell payload）是内容：声明的 picture 或两条 content 轴成 image，剩下的一条 content 在 palette 能分辨时成 group，否则 reduce。size 为 1 的 degenerate 轴是 provenance 不是结构，唯一例外是无 topology 时的 point column（一帧 cycle 仍标识 cell）。`tests/test_default_roles.py` 枚举全表。Limit 类 display 字段（relim 与 x/y/color 范围）声明为 `portable=False`：panel identity 改变时它们随 semantic/fit 一起从新 vocabulary 重新开始，只有外观字段跨 kind 携带。
+
 坐标标记不是单独的 plot kind。普通 Image 可叠加独立、可动态更新的
 `ImagePointOverlay`；`coordinates` 是 canonical x/y 的 `N×2` 数组，ID、label
 可选。手写或Calibration标记使用一个不可变的`static_statuses`向量：

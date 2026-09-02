@@ -5,9 +5,9 @@ from __future__ import annotations
 from typing import Any
 
 from ..kinds import PlotKind
-from zlc_data import DatasetSchema
 from ..specs import Reduction, RollingPlot
 from .base import KindHandler
+from . import defaults
 
 def render(renderer: Any, payload: Any, state: Any, *, axes: Any, key: str) -> None:
     renderer._update_rolling(axes, payload, state, key)
@@ -48,11 +48,14 @@ def label_roles(spec: Any) -> tuple[tuple[str, tuple], ...]:
 
 
 def default_spec(schema: Any) -> RollingPlot | None:
-    """Infer the ungrouped rolling reduction for any dataset schema."""
+    """The rolling view this dataset shows unasked: one reading of the table.
 
-    if not isinstance(schema, DatasetSchema):
-        return None
-    return RollingPlot(reduction=Reduction.MEAN)
+    Rolling walks the shot history itself; the table groups the one content
+    axis the palette can tell apart and shows the latest of any event
+    sequence.  See :mod:`zlc_plot._kinds.defaults`.
+    """
+
+    return defaults.default_spec(schema, PlotKind.ROLLING)
 
 
 HANDLER = KindHandler(

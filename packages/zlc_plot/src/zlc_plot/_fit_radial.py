@@ -27,6 +27,7 @@ from scipy.ndimage import median_filter
 from scipy.optimize import minimize
 
 from . import _fit_compiled as _compiled_fit
+from . import _raster_kernels
 from .fit import (
     ArrayTuple,
     FitCancelled,
@@ -749,14 +750,19 @@ class _ImageContext:
                 cached.dtype.kind == "u"
                 and cached.dtype.itemsize <= 2
             ):
-                cached = np.ascontiguousarray(cached)
+                # SEALED, not merely contiguous.  ``ascontiguousarray`` hands
+                # back whatever it was given when that is already contiguous,
+                # so the plane's mutability reached the kernel as an accident
+                # of its origin: a published snapshot is read-only, a warmer's
+                # or a notebook's fresh copy is writable, and numba compiled
+                # and cached the promotion twice per dtype for the difference.
                 (
                     cached,
                     minimum,
                     maximum,
                     total,
                     square_total,
-                ) = _promote_unsigned_summary(cached)
+                ) = _promote_unsigned_summary(_raster_kernels.readable(cached))
                 self._unsigned_summary = (
                     minimum,
                     maximum,

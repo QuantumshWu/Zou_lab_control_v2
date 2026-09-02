@@ -5,9 +5,9 @@ from __future__ import annotations
 from typing import Any
 
 from ..kinds import AxisRef, PlotKind
-from zlc_data import DatasetSchema
 from ..specs import CurvePlot, Reduction
 from .base import KindHandler
+from . import defaults
 
 
 def render(renderer: Any, payload: Any, state: Any, *, axes: Any, key: str, **pooled: Any) -> None:
@@ -44,84 +44,14 @@ def label_roles(spec: Any) -> tuple[tuple[str, tuple], ...]:
 
 
 def default_spec(schema: Any) -> CurvePlot | None:
-    """Infer one unambiguous curve projection from a dataset schema.
+    """The curve this dataset shows unasked: one reading of the table.
 
-    The fastest-varying scan coordinate is the per-trace x: in a Cartesian
-    topology the last dimension is the innermost loop, so it is the axis one
-    acquisition sweep actually walks.  If there is no scan topology, the
-    first point-table coordinate is used; the point-row axis is the final
-    fallback.  A single dense data axis is grouped so its structure stays
-    visible; several dense axes have no privileged one, so they all collapse
-    under the declared reduction — unambiguous, unlike picking a favourite.
+    A curve walks position -- the innermost scan loop, else the events of
+    a cycle, else its own data -- and groups the one content axis the
+    palette can tell apart.  See :mod:`zlc_plot._kinds.defaults`.
     """
 
-    if not isinstance(schema, DatasetSchema):
-        return None
-    candidates: list[tuple[Any, int]] = []
-    if schema.grid_topology is not None and schema.grid_topology.dimension_ids:
-        dimension = str(schema.grid_topology.dimension_ids[-1])
-        domain = schema.grid_topology.coordinate_domains[
-            len(schema.grid_topology.dimension_ids) - 1
-        ]
-        candidates.append((AxisRef.point_dimension(dimension), len(domain)))
-    for column in schema.point_table.columns:
-        # By coordinate ID, which is what AxisRef.point means and what the
-        # resolver looks up.  A column's NAME is what an operator reads, and
-        # the two are equal often enough that passing the name worked until a
-        # producer named a column something other than its coordinate -- then
-        # the spec named an axis the point table does not have, and the
-        # session raised on construction, leaving the host permanently closing.
-        candidates.append(
-            (
-                AxisRef.point(str(column.coordinate_id)),
-                len(set(column.values)),
-            )
-        )
-    # The cell's own structure, innermost first: a scalar measured per
-    # (pair, site) has no scan to walk, and the site axis IS the walk.
-    for axis in reversed(schema.cell_schema.data_axes):
-        candidates.append((AxisRef.data(str(axis.axis_id)), int(axis.size)))
-    candidates.append((AxisRef.point_rows(), int(schema.point_table.row_count)))
-    # The default x must have STRUCTURE.  Taking the first candidate
-    # whatever its size drew one invisible point whenever the natural
-    # candidate was degenerate -- a synthetic point row on a survival
-    # signal, a single-frame camera cycle -- and left the real structure
-    # collapsed under the reduction.
-    x = next(
-        (ref for ref, size in candidates if size > 1),
-        candidates[0][0],
-    )
-    data_axes = tuple(
-        axis
-        for axis in schema.cell_schema.data_axes
-        if axis.size > 1 and AxisRef.data(str(axis.axis_id)) != x
-    )
-    group = None
-    if len(data_axes) == 1 and _tellable_apart(data_axes[0].size):
-        group = AxisRef.data(str(data_axes[0].axis_id))
-    return CurvePlot(x, group=group, reduction=Reduction.MEAN)
-
-
-def _tellable_apart(count: int) -> bool:
-    """Can a picture show this many lines AS separate lines?
-
-    A group exists so its members can be told apart, and what tells them
-    apart is their colour: past the end of the line cycle the colours
-    repeat and the lines are a fog.  So the cycle is the bound, and it is
-    the palette's to state -- not a number invented here.
-
-    A camera frame is the case that made this matter: 1920 columns as x
-    leaves 1200 rows as the single dense axis, which the rule grouped.
-    Measured, Matplotlib draws one noisy 1920-point line in 46 ms, so
-    that default asked for a picture costing 24 SECONDS a frame and
-    showing 1200 indistinguishable lines.  Collapsed under the declared
-    reduction it is one line, which is what the reduction is for; an
-    operator who wants the rows apart still asks for them by name.
-    """
-
-    from ..config import DEFAULTS
-
-    return int(count) <= len(DEFAULTS.style.palette.line_cycle)
+    return defaults.default_spec(schema, PlotKind.CURVE)
 
 
 HANDLER = KindHandler(

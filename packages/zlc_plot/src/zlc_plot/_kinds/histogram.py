@@ -5,9 +5,9 @@ from __future__ import annotations
 from typing import Any
 
 from ..kinds import PlotKind
-from zlc_data import DatasetSchema
 from ..specs import HistogramPlot
 from .base import KindHandler
+from . import defaults
 
 
 def render(renderer: Any, payload: Any, state: Any, *, axes: Any, key: str, **pooled: Any) -> None:
@@ -67,11 +67,9 @@ def label_roles(spec: Any) -> tuple[tuple[str, tuple], ...]:
 
 
 def default_spec(schema: Any) -> HistogramPlot | None:
-    """A histogram needs no inference: it is the distribution of all values."""
+    """A histogram pools every value: the table's one pooling entry."""
 
-    if not isinstance(schema, DatasetSchema):
-        return None
-    return HistogramPlot()
+    return defaults.default_spec(schema, PlotKind.HISTOGRAM)
 
 
 HANDLER = KindHandler(

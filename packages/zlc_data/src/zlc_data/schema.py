@@ -237,6 +237,12 @@ class GridTopology:
     dimension_ids: tuple[AxisId, ...]
     coordinate_domains: tuple[tuple[CoordinateScalar, ...], ...]
     row_to_cell: tuple[tuple[int, ...], ...]
+    #: One label per domain coordinate, per dimension; None for a dimension
+    #: whose coordinates are their own labels.  Labels live WITH the domain:
+    #: a cropped view keeps every domain coordinate but only the surviving
+    #: rows, and a label joined through a point column's rows vanished with
+    #: them.  A matching column repeats them per row and must agree.
+    coordinate_labels: tuple[tuple[str, ...] | None, ...] | None = None
     #: Cached on first request, like the schema digest beside it.
     _cell_indices: Any = field(init=False, repr=False, compare=False, default=None)
 
@@ -275,9 +281,28 @@ class GridTopology:
             raise ValueError("row_to_cell must be non-empty")
         if len(set(mapping)) != len(mapping):
             raise ValueError("row_to_cell must be injective")
+        labels = self.coordinate_labels
+        if labels is not None:
+            labels = tuple(
+                None if entry is None else tuple(entry) for entry in labels
+            )
+            if len(labels) != len(dimensions):
+                raise ValueError("grid coordinate_labels must match dimension_ids")
+            for entry, domain in zip(labels, domains, strict=True):
+                if entry is None:
+                    continue
+                if len(entry) != len(domain) or any(
+                    not isinstance(label, str) for label in entry
+                ):
+                    raise ValueError(
+                        "grid coordinate labels must name every domain coordinate"
+                    )
+            if all(entry is None for entry in labels):
+                labels = None
         object.__setattr__(self, "dimension_ids", dimensions)
         object.__setattr__(self, "coordinate_domains", domains)
         object.__setattr__(self, "row_to_cell", tuple(mapping))
+        object.__setattr__(self, "coordinate_labels", labels)
         object.__setattr__(self, "_cell_indices", None)
 
     @property
@@ -319,6 +344,25 @@ def _validate_grid_topology(point_table: PointTable, topology: GridTopology) -> 
         ):
             raise ValueError(
                 "GridTopology cell values must match their PointTable columns"
+            )
+        if column.coordinate_labels is None:
+            continue
+        labels = (
+            None
+            if topology.coordinate_labels is None
+            else topology.coordinate_labels[position]
+        )
+        if labels is None:
+            raise ValueError(
+                "a labelled PointColumn on a GridTopology dimension needs the "
+                "topology to declare the same labels per coordinate"
+            )
+        if any(
+            column.coordinate_labels[ordinal] != labels[cell[position]]
+            for ordinal, cell in enumerate(topology.row_to_cell)
+        ):
+            raise ValueError(
+                "GridTopology coordinate labels must match their PointTable columns"
             )
 
 
