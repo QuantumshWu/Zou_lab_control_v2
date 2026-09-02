@@ -25,6 +25,7 @@ from typing import Any, Iterable, Iterator, Mapping, Sequence
 import weakref
 
 import numpy as np
+from matplotlib.collections import LineCollection
 
 from ._image_raster import ImageFrontStore, PreparedImageFront
 from ._fit_scene import FitOverlay, FitPolyline
@@ -375,6 +376,49 @@ def _axis_draw_key(axis: Any) -> tuple[Any, ...]:
         tuple(sorted(axis.get_tick_params(which="major").items())),
         tuple(sorted(axis.get_tick_params(which="minor").items())),
     )
+
+
+
+
+class _SegmentBuffered(LineCollection):
+    """A LineCollection whose segments live in one shared float buffer.
+
+    The native stroke reads ``_zlc_segment_buffer`` directly and never
+    draws the collection, so the matplotlib Paths -- one object per
+    segment -- are built only when something asks for them: a full draw,
+    an export, ``get_segments``.  A revision of the same size writes the
+    buffer in place, which the materialized Paths view; a resize replaces
+    the buffer and the Paths are rebuilt on the next request.
+    """
+
+    def __init__(self, **style: Any) -> None:
+        super().__init__([], **style)
+        self._zlc_segment_buffer: np.ndarray | None = None
+        self._zlc_segments_pending = False
+
+    def segment_buffer(self, shape: tuple[int, int, int]) -> np.ndarray:
+        """The buffer for ``shape`` segments, kept when the size is unchanged."""
+
+        buffer = self._zlc_segment_buffer
+        if buffer is None or buffer.shape != shape:
+            buffer = np.empty(shape, dtype=float)
+            self._zlc_segment_buffer = buffer
+            self._zlc_segments_pending = True
+        return buffer
+
+    def _materialize(self) -> None:
+        if self._zlc_segments_pending:
+            self._zlc_segments_pending = False
+            buffer = self._zlc_segment_buffer
+            self.set_segments(() if buffer is None else buffer)
+
+    def get_paths(self) -> list[Any]:
+        self._materialize()
+        return super().get_paths()
+
+    def get_segments(self) -> list[np.ndarray]:
+        self._materialize()
+        return super().get_segments()
 
 
 @dataclass(frozen=True, slots=True)
@@ -4621,16 +4665,21 @@ class MatplotlibRenderer:
         segments are (x, low)-(x, high), and two marker-only Line2Ds.  All
         three take new data in place, so a revision is a data change --
         which is what it is -- rather than a teardown and a rebuild.
+
+        The artists are built directly.  ``axes.errorbar`` cost, per
+        series per build, masked-array copies of every bound, a Path per
+        segment, three ``plot`` calls with their transform trees, a datalim
+        update and a container to remove again -- most of a second on a
+        40-cell grid's first paint, for artists the native stroke reads
+        straight off ``_zlc_segment_buffer`` and never asks matplotlib to
+        draw.  :class:`_SegmentBuffered` builds its Paths only when
+        something asks for them.
         """
 
         policy = self.style.render
+
         def update_segments(collection: Any) -> None:
-            shape = (x.size, 2, 2)
-            segments = getattr(collection, "_zlc_segment_buffer", None)
-            if not isinstance(segments, np.ndarray) or segments.shape != shape:
-                segments = np.empty(shape, dtype=float)
-                collection.set_segments(segments)
-                collection._zlc_segment_buffer = segments
+            segments = collection.segment_buffer((x.size, 2, 2))
             segments[:, 0, 0] = x
             segments[:, 1, 0] = x
             segments[:, 0, 1] = low
@@ -4652,28 +4701,35 @@ class MatplotlibRenderer:
                 return reused
             for artist in reused:
                 artist.remove()
-        container = axes.errorbar(
-            x,
-            y,
-            # Asymmetric on purpose: the bounds were converted to display
-            # units, and an affine display unit makes the two arms differ.
-            yerr=(y - low, high - y),
-            fmt="none",
-            ecolor=colour,
+        from matplotlib.lines import Line2D
+
+        collection = _SegmentBuffered(
+            colors=(colour,),
+            linewidths=policy.uncertainty_bar_linewidth,
             alpha=policy.uncertainty_bar_alpha,
-            elinewidth=policy.uncertainty_bar_linewidth,
-            capsize=policy.uncertainty_bar_capsize_pt,
-            capthick=policy.uncertainty_bar_linewidth,
             zorder=zorder,
         )
-        _marker, caplines, barlinecols = container.lines
-        # Keep the artists on the axes; drop only the container bookkeeping
-        # so revisions do not accumulate.
-        if container in axes.containers:
-            axes.containers.remove(container)
-        for collection in barlinecols:
-            update_segments(collection)
-        return (*caplines, *barlinecols)
+        axes.add_collection(collection, autolim=False)
+        update_segments(collection)
+        caplines: list[Any] = []
+        if capped:
+            # The cap ``errorbar`` draws: a ``_`` marker whose size is
+            # twice the cap length and whose edge is the bar's thickness.
+            for edge in (low, high):
+                cap = Line2D(
+                    x,
+                    edge,
+                    linestyle="none",
+                    marker="_",
+                    markersize=2.0 * policy.uncertainty_bar_capsize_pt,
+                    markeredgewidth=policy.uncertainty_bar_linewidth,
+                    color=colour,
+                    alpha=policy.uncertainty_bar_alpha,
+                    zorder=zorder,
+                )
+                axes.add_line(cap)
+                caplines.append(cap)
+        return (*caplines, collection)
 
     def _mutate_series_artists(
         self,
