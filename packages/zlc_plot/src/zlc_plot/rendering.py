@@ -2495,17 +2495,6 @@ class MatplotlibRenderer:
             max(1.0, line_policy.linewidth * float(self._figure.dpi) / 72.0),
             dtype=np.float64,
         )
-        scratch_shape = (len(series), width)
-        scratch = self._artists.get("curve:grouped_envelope")
-        if (
-            not isinstance(scratch, tuple)
-            or scratch[0].shape != scratch_shape
-        ):
-            scratch = (
-                np.empty(scratch_shape, dtype=np.float64),
-                np.empty(scratch_shape, dtype=np.float64),
-            )
-            self._artists["curve:grouped_envelope"] = scratch
         kernels.raster_polylines(
             kernels.readable(geometry.reshape(-1, 2)),
             kernels.readable(offsets),
@@ -2514,8 +2503,7 @@ class MatplotlibRenderer:
             kernels.readable(clips),
             # One axes: every line may overlap, one sequential lane.
             kernels.readable(np.asarray([0, len(series)], dtype=np.int64)),
-            scratch[0],
-            scratch[1],
+            kernels.stroke_bands(1),
             canvas_rgba,
         )
         return True
@@ -2721,6 +2709,7 @@ class MatplotlibRenderer:
                 kernels.readable(np.asarray(cap_widths, dtype=np.float64)),
                 kernels.readable(np.asarray(clips, dtype=np.int32)),
                 kernels.readable(np.asarray(lane_offsets, dtype=np.int64)),
+                kernels.stroke_bands(len(lane_offsets) - 1),
                 canvas_rgba,
             )
         finally:
@@ -2812,28 +2801,16 @@ class MatplotlibRenderer:
                 clips.append(clip)
         if not vertices:
             return False
-        shape = (len(vertices), width)
-        cache = self._artists.get("facet:curve_command_envelope")
-        if (
-            not isinstance(cache, tuple)
-            or cache[0].shape != shape
-            or cache[1].shape != shape
-        ):
-            cache = (
-                np.empty(shape, dtype=np.float64),
-                np.empty(shape, dtype=np.float64),
-            )
-            self._artists["facet:curve_command_envelope"] = cache
         clip_boxes = np.asarray(clips, dtype=np.int32)
+        lane_offsets = self._polyline_lane_offsets(clip_boxes)
         kernels.raster_polylines(
             kernels.readable(np.concatenate(vertices)),
             kernels.readable(np.asarray(offsets, dtype=np.int64)),
             kernels.readable(np.asarray(colours, dtype=np.uint8)),
             kernels.readable(np.asarray(widths, dtype=np.float64)),
             kernels.readable(clip_boxes),
-            kernels.readable(self._polyline_lane_offsets(clip_boxes)),
-            cache[0],
-            cache[1],
+            kernels.readable(lane_offsets),
+            kernels.stroke_bands(lane_offsets.size - 1),
             canvas_rgba,
         )
         return True
@@ -2961,6 +2938,7 @@ class MatplotlibRenderer:
             kernels.readable(np.asarray(cap_widths, dtype=np.float64)),
             kernels.readable(np.asarray(clips, dtype=np.int32)),
             kernels.readable(np.asarray(lane_offsets, dtype=np.int64)),
+            kernels.stroke_bands(len(lane_offsets) - 1),
             canvas_rgba,
         )
         return True
@@ -3021,28 +2999,15 @@ class MatplotlibRenderer:
                 min(height, int(math.ceil(float(height) - float(box.y0)))),
             )
         packed = np.concatenate(vertices, axis=0)
-        cache = self._artists.get("curve:native_envelope")
-        shape = (len(lines), width)
-        if (
-            not isinstance(cache, tuple)
-            or len(cache) != 2
-            or cache[0].shape != shape
-            or cache[1].shape != shape
-        ):
-            cache = (
-                np.empty(shape, dtype=np.float64),
-                np.empty(shape, dtype=np.float64),
-            )
-            self._artists["curve:native_envelope"] = cache
+        lane_offsets = self._polyline_lane_offsets(clips)
         kernels.raster_polylines(
             kernels.readable(packed),
             kernels.readable(np.asarray(offsets, dtype=np.int64)),
             kernels.readable(colours),
             kernels.readable(widths),
             kernels.readable(clips),
-            kernels.readable(self._polyline_lane_offsets(clips)),
-            cache[0],
-            cache[1],
+            kernels.readable(lane_offsets),
+            kernels.stroke_bands(lane_offsets.size - 1),
             canvas_rgba,
         )
         return True
