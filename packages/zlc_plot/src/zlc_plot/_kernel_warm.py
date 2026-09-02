@@ -114,16 +114,22 @@ def pickle_error() -> type[Exception]:
     return pickle.UnpicklingError
 
 
-def _mutability_erased(signature: tuple[Any, ...]) -> tuple[Any, ...]:
-    """The signature with every array's read-only flag forgotten."""
+def _mutability_erased(signature: Any) -> tuple[Any, ...]:
+    """The signature with every array's read-only flag forgotten.
+
+    A dispatcher lists a lazily compiled overload as a tuple of argument
+    types and an exactly compiled one (the fit callbacks, compiled to their
+    ABI up front) as a ``Signature`` object; both carry the same arguments.
+    """
 
     from numba import types  # noqa: PLC0415
 
+    arguments = getattr(signature, "args", signature)
     return tuple(
         (str(kind.dtype), int(kind.ndim), str(kind.layout))
         if isinstance(kind, types.Array)
         else str(kind)
-        for kind in signature
+        for kind in arguments
     )
 
 

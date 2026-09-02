@@ -143,7 +143,12 @@ def test_a_mutability_twin_is_named_even_when_only_the_disk_remembers_it() -> No
     dtype for as long as that was true.
     """
 
-    writable = (_plane("uint8", readonly=False),)
+    from numba import types
+
+    # The process lists an exactly compiled overload as a Signature object
+    # (the fit callbacks are compiled to their ABI up front); the disk index
+    # lists the other as a tuple of argument types.  Same arguments, one twin.
+    writable = types.float64(_plane("uint8", readonly=False))
     sealed = (_plane("uint8", readonly=True),)
     kernel = _FakeKernel(signatures=(writable,), on_disk={(sealed, ()): "x.2.nbc"})
     assert _kernel_warm.duplicate_signatures({"promote": kernel}) == ("promote",)
