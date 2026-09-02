@@ -47,16 +47,20 @@ from zlc_atom.nodes.slm_feedback.task import (
     _excited_target,
     _expected_noise_ratio,
     _fit_contrasts,
+    _funded_shares,
     _half_contrasts,
+    _DECISIVE_BIC_GAIN,
+    _PLANT_EXCITATION_LOG_STEP,
+    _loading_edge,
     _needs_probe,
     _plant_slope,
     _probe_boundary,
+    _probe_verdict,
     _relative_probe_target,
     _ratio_interval,
-    _selected_probe_target,
     _single_bracket_step,
     _split_half_dispersion,
-    _updated_single_bracket,
+    _updated_brackets,
     _updated_target,
     _usable_plant_slope,
 )
@@ -835,8 +839,13 @@ def test_single_population_classification_and_baseline_relative_probe_selection(
     assert 1.0 < crowded_effective[0] < 2.0
     assert np.all(crowded_effective[crowded] == crowded_effective[0])
 
+    # A two-sided probe episode becomes each probe site's DIRECTION, decided
+    # by evidence: the side it loaded on; the closer side when both loaded;
+    # and, when neither loaded, one clamp step beyond the deepest share the
+    # episode already showed dark -- never a hold at a baseline known dark.
     selected_sites = np.zeros(35, dtype=bool)
     selected_sites[:4] = True
+    baseline_weights = np.ones(35)
     baseline_contrast = np.ones(35)
     baseline_valid = ~selected_sites
     lower_contrast = np.full(35, np.nan)
@@ -847,31 +856,31 @@ def test_single_population_classification_and_baseline_relative_probe_selection(
     upper_contrast[[1, 2]] = (1.1, 1.3)
     upper_valid = np.zeros(35, dtype=bool)
     upper_valid[[1, 2]] = True
-    combined, selected, decisions, observed_factors = _selected_probe_target(
-        target,
+    step, direction, single_bound, observable_bound, decisions = _probe_verdict(
         selected_sites,
+        baseline_weights,
         baseline_contrast,
         baseline_valid,
         [
             (0.5, lower_contrast, np.full(35, 0.01), lower_valid),
             (2.0, upper_contrast, np.full(35, 0.01), upper_valid),
         ],
-        rows,
-        columns,
+        0.5,
     )
     np.testing.assert_allclose(
-        selected[:4], (0.5, 2.0, 0.5, 1.0)
+        step[:4], (np.log(0.5), np.log(2.0), np.log(0.5), np.log(2.0) + np.log1p(0.5))
     )
-    np.testing.assert_allclose(observed_factors[:4], (0.5, 2.0, 0.5, 1.0))
+    np.testing.assert_allclose(direction[:4], (-1.0, 1.0, -1.0, 1.0))
+    np.testing.assert_allclose(single_bound[:4], (1.0, 1.0, 1.0, 2.0))
+    np.testing.assert_allclose(observable_bound[:3], (0.5, 2.0, 0.5))
+    assert np.isnan(observable_bound[3])
     assert decisions[:4].tolist() == [
         "probe_choose_lower_only",
         "probe_choose_upper_only",
         "probe_choose_lower_closest",
-        "probe_hold_unobservable",
+        "probe_extrapolate_upper",
     ]
-    assert not np.array_equal(combined, target)
-
-
+    assert np.all(step[4:] == 0.0) and np.all(direction[4:] == 0.0)
 
     np.testing.assert_allclose(
         _probe_boundary(
@@ -881,60 +890,104 @@ def test_single_population_classification_and_baseline_relative_probe_selection(
         )[:2],
         (np.sqrt(2.0), np.sqrt(2.0)),
     )
-    tightened = _probe_boundary(
-        np.asarray((1.2, 1.8)),
-        np.asarray((1.8, 1.2)),
-        np.asarray((1.0, -1.0)),
-    )
-    np.testing.assert_allclose(tightened, np.sqrt((2.16, 2.16)))
 
-    first_midpoint = _probe_boundary(
+    # A bracket bisects towards its loaded share, one clamp at most.
+    dark = np.ones(2, dtype=bool)
+    first_step, first_kind = _single_bracket_step(
+        np.asarray((1.0, 2.0)),
+        dark,
         np.asarray((1.0, 2.0)),
         np.asarray((2.0, 1.0)),
         np.asarray((1.0, -1.0)),
+        0.5,
     )
-    first_step = _single_bracket_step(
+    np.testing.assert_allclose(
+        first_step, (np.log(np.sqrt(2.0)), -np.log(np.sqrt(2.0)))
+    )
+    assert first_kind.tolist() == ["single_bracket_midpoint"] * 2
+    # With no loaded share at all it CREEPS one resolution past its single
+    # bound in its direction: the prior, one resolution at a time -- never
+    # a whole clamp, which is funded by every loaded site at once.
+    resolution = _PLANT_EXCITATION_LOG_STEP
+    never_loaded, never_kind = _single_bracket_step(
         np.asarray((1.0, 2.0)),
-        first_midpoint,
+        dark,
+        np.asarray((1.0, 2.0)),
+        np.asarray((np.nan, np.nan)),
         np.asarray((1.0, -1.0)),
         0.5,
     )
-    np.testing.assert_allclose(first_step, (np.log(np.sqrt(2.0)), -np.log(np.sqrt(2.0))))
-    second_midpoint = _probe_boundary(
-        first_midpoint,
-        np.asarray((2.0, 1.0)),
-        np.asarray((1.0, -1.0)),
-    )
-    second_step = _single_bracket_step(
-        first_midpoint,
-        second_midpoint,
-        np.asarray((1.0, -1.0)),
+    np.testing.assert_allclose(never_loaded, (resolution, -resolution))
+    assert never_kind.tolist() == ["single_extrapolate"] * 2
+    # A found edge (bracket at the resolution) steps one resolution past
+    # its single bound instead of bisecting in place.
+    found, found_kind = _single_bracket_step(
+        np.asarray((1.0,)),
+        np.ones(1, dtype=bool),
+        np.asarray((1.0,)),
+        np.asarray((1.0 * np.exp(0.5 * resolution),)),
+        np.asarray((1.0,)),
         0.5,
     )
-    assert second_step[0] > 0.0 > second_step[1]
-    flipped_single, flipped_observable, flipped_direction, crossed = (
-        _updated_single_bracket(
-            np.asarray((2.5, 0.5)),
-            np.ones(2, dtype=bool),
-            np.asarray((1.0, 2.0)),
-            np.asarray((2.0, 1.0)),
-            np.asarray((1.0, -1.0)),
-        )
+    np.testing.assert_allclose(found, (resolution,))
+    assert found_kind.tolist() == ["single_edge_step"]
+
+    # Every measured candidate is bracket evidence and THE LATEST WINS.  A
+    # dark site beyond its loaded share by more than the resolution has
+    # contradicted that bound: it is dropped and the site keeps its
+    # direction (the old rule turned the site round and made a marginal,
+    # stale loading a ceiling to ping-pong under).  A loaded site records
+    # the share as its loaded bound; found on the single side of its own
+    # single bound, that bound is stale and dropped, the direction kept.
+    single, loaded, sign = _updated_brackets(
+        np.asarray((2.5, 0.5, 1.2, 0.9)),
+        np.asarray((True, True, False, False)),
+        np.asarray((False, False, True, True)),
+        np.full(4, np.nan),
+        np.asarray((1.0, 2.0, 1.0, 1.0)),
+        np.asarray((2.0, 1.0, 2.0, 2.0)),
+        np.asarray((1.0, -1.0, 1.0, 1.0)),
     )
-    assert crossed.tolist() == [True, True]
-    np.testing.assert_allclose(flipped_single, (2.5, 0.5))
-    np.testing.assert_allclose(flipped_observable, (2.0, 1.0))
-    np.testing.assert_allclose(flipped_direction, (-1.0, 1.0))
-    flipped_midpoint = _probe_boundary(
-        flipped_single, flipped_observable, flipped_direction
+    np.testing.assert_allclose(sign, (1.0, -1.0, 1.0, 1.0))
+    np.testing.assert_allclose(single[:3], (2.5, 0.5, 1.0))
+    assert np.isnan(single[3])
+    assert np.isnan(loaded[0]) and np.isnan(loaded[1])
+    np.testing.assert_allclose(loaded[2:], (1.2, 0.9))
+    # Dark within a resolution of the loaded share: the edge is FOUND, the
+    # loaded bound stays, and the next step is one resolution past it.
+    edge_single, edge_loaded, edge_sign = _updated_brackets(
+        np.asarray((1.01,)),
+        np.ones(1, dtype=bool),
+        np.zeros(1, dtype=bool),
+        np.asarray((np.nan,)),
+        np.asarray((0.9,)),
+        np.asarray((1.0,)),
+        np.asarray((1.0,)),
     )
-    flipped_step = _single_bracket_step(
-        np.asarray((2.5, 0.5)),
-        flipped_midpoint,
-        flipped_direction,
-        0.5,
+    np.testing.assert_allclose(
+        (edge_single[0], edge_loaded[0], edge_sign[0]), (1.01, 1.0, 1.0)
     )
-    assert flipped_step[0] < 0.0 < flipped_step[1]
+    edge_step, edge_kind = _single_bracket_step(
+        np.asarray((1.01,)), np.ones(1, dtype=bool),
+        edge_single, edge_loaded, edge_sign, 0.5,
+    )
+    np.testing.assert_allclose(edge_step, (resolution,))
+    assert edge_kind.tolist() == ["single_edge_step"]
+    # A dark site with no bracket seeds one from the last share it was
+    # loaded at -- pressed dark by somebody else's compensation, it now
+    # knows its edge and heads back.
+    seeded_single, seeded_loaded, seeded_sign = _updated_brackets(
+        np.asarray((0.8,)),
+        np.ones(1, dtype=bool),
+        np.zeros(1, dtype=bool),
+        np.asarray((1.0,)),
+        np.asarray((np.nan,)),
+        np.asarray((np.nan,)),
+        np.asarray((0.0,)),
+    )
+    np.testing.assert_allclose(seeded_sign, (1.0,))
+    np.testing.assert_allclose(seeded_single, (0.8,))
+    np.testing.assert_allclose(seeded_loaded, (1.0,))
 
 
 def test_direction_preserving_share_allocator_moves_only_balanced_requested_power() -> None:
@@ -1019,19 +1072,213 @@ def test_direction_preserving_share_allocator_moves_only_balanced_requested_powe
         np.testing.assert_array_equal(result[steps == 0.0], current[steps == 0.0])
 
 
+def test_a_loaded_site_on_its_loading_ramp_is_held_and_gives_nothing() -> None:
+    """THE BRIGHT FRACTION IS THE LOADING-MARGIN OBSERVABLE.
+
+    A loaded site whose bright fraction is under half the lattice's typical
+    one is on its loading ramp: its own step is held when it points
+    shallower, and neither the ordinary trades nor the funding may take it
+    below its current share.  The virtual site loaded at a 15% bright
+    fraction and then handed 2% to a dark neighbour was dark the next
+    candidate and on the treadmill for the rest of the run.
+    """
+
+    fraction = np.asarray((0.45, 0.50, 0.40, 0.15, 0.55, np.nan))
+    observable = np.asarray((True, True, True, True, False, True))
+    edge = _loading_edge(fraction, observable)
+    assert edge.tolist() == [False, False, False, True, False, False]
+    assert not np.any(_loading_edge(fraction, np.zeros(6, dtype=bool)))
+
+    target = _grid_target((17, 23))
+    rows, columns = np.nonzero(target)
+    valid = np.ones(35, dtype=bool)
+    contrast = np.ones(35)
+    contrast[3] = 0.8   # too dim: the loop would send it shallower
+    contrast[4] = 1.25  # too bright: deeper
+    loading_edge = np.zeros(35, dtype=bool)
+    loading_edge[3] = True
+    held, held_step, held_decision = _updated_target(
+        target,
+        contrast,
+        np.zeros(35),
+        valid,
+        rows,
+        columns,
+        reference_valid=valid,
+        feedback_gain=0.5,
+        plant_slope=1.0,
+        maximum_weight_change=0.5,
+        loading_edge=loading_edge,
+    )
+    free, free_step, free_decision = _updated_target(
+        target,
+        contrast,
+        np.zeros(35),
+        valid,
+        rows,
+        columns,
+        reference_valid=valid,
+        feedback_gain=0.5,
+        plant_slope=1.0,
+        maximum_weight_change=0.5,
+    )
+    assert free_step[3] < 0.0 and free_decision[3] == "feedback_estimated_slope"
+    assert held_step[3] >= 0.0 and held_decision[3] == "hold_loading_edge"
+    assert free_decision[4] == held_decision[4] == "feedback_estimated_slope"
+    # With no directed site the funding never ran; the ramp site's floor
+    # holds through the ordinary trades alone.
+    assert (
+        _control_weights(held[rows, columns])[3]
+        >= _control_weights(target[rows, columns])[3] - 1e-6
+    )
+    # A ramp site does not fund a dark neighbour either.
+    directed = np.zeros(35)
+    directed[0] = np.log(2.0)
+    dark_valid = np.array(valid, copy=True)
+    dark_valid[0] = False
+    dark_contrast = np.array(contrast, copy=True)
+    dark_contrast[0] = np.nan
+    funded, _step, _decision = _updated_target(
+        target,
+        dark_contrast,
+        np.zeros(35),
+        dark_valid,
+        rows,
+        columns,
+        reference_valid=dark_valid,
+        feedback_gain=0.5,
+        plant_slope=1.0,
+        maximum_weight_change=0.5,
+        directed_log_step=directed,
+        loading_edge=loading_edge,
+    )
+    before = _control_weights(target[rows, columns])
+    after = _control_weights(funded[rows, columns])
+    assert after[0] > before[0]
+    # Through the float32 Target: the floor holds to the Target's precision.
+    assert after[3] >= before[3] - 1e-6
+    assert np.all(after[[1, 2, 5]] < before[[1, 2, 5]] - 1e-3)
+    with pytest.raises(ValueError):
+        wrong = np.zeros(35, dtype=bool)
+        wrong[0] = True
+        _updated_target(
+            target, dark_contrast, np.zeros(35), dark_valid, rows, columns,
+            reference_valid=dark_valid, feedback_gain=0.5, plant_slope=1.0,
+            maximum_weight_change=0.5, loading_edge=wrong,
+        )
+
+
+def test_two_populations_need_decisive_evidence() -> None:
+    """A dark site's one Gaussian split in two is not a loaded site.
+
+    Four bright shots in a hundred (the fitter's population floor) at the
+    archived contrast clear the decisive BIC gain by hundreds; a single
+    Gaussian the fitter split 1.7 sigma apart came in at +4.6 and was
+    reported as loaded with a contrast of 10.9 (the uniformity ratio read
+    116).
+    """
+
+    rng = np.random.default_rng(3)
+    dark = rng.normal(38.0, 6.4, 100)
+    few_bright = np.array(dark, copy=True)
+    few_bright[[10, 35, 60, 85]] = rng.normal(1300.0, 40.0, 4)
+    fitted = _fit_contrasts(np.column_stack((few_bright, dark)))
+    assert fitted["valid"].tolist() == [True, False]
+    assert fitted["bic_gain"][0] > 10.0 * _DECISIVE_BIC_GAIN
+    assert fitted["single_population"][1]
+    assert _DECISIVE_BIC_GAIN == 10.0
+
+
+def test_funding_a_dark_site_never_presses_a_loaded_one_past_its_edge() -> None:
+    """THE LOADED SITES FUND IT, TOGETHER AND BOUNDED.
+
+    A directed dark site asks for its share outright; what the ordinary
+    trades leave unmet is drawn from every loaded site by one common
+    factor, each held inside ONE RESOLUTION STEP of its current share and
+    inside its own bracket floor.  What cannot be funded is scaled back
+    pro rata, never reversed.  Direct adoption at the clamp (-40% at once)
+    pressed twenty-two loaded sites dark on the virtual lattice; this is
+    the law that replaced it.
+    """
+
+    resolution = _PLANT_EXCITATION_LOG_STEP
+    shares = np.ones(6)
+    allocated = np.array(shares, copy=True)
+    directed = np.asarray((True, False, False, False, False, False))
+    desired = np.array(shares, copy=True)
+    desired[0] = 2.0
+    compensators = ~directed
+    lower = np.zeros(6)
+    upper = np.full(6, np.inf)
+    funded = _funded_shares(
+        shares, allocated, directed, desired, compensators, lower=lower, upper=upper
+    )
+    assert np.sum(funded) == pytest.approx(np.sum(shares))
+    given = np.log(shares[compensators] / funded[compensators])
+    np.testing.assert_allclose(given, resolution)
+    # Five compensators at one resolution step: that is all the dark site
+    # gets this candidate, and it is what they handed over.
+    assert funded[0] == pytest.approx(1.0 + float(np.sum(shares[compensators] - funded[compensators])))
+    assert funded[0] < desired[0]
+
+    # A compensator on its bracket floor gives nothing; the others still
+    # give their step.
+    floored_lower = np.array(lower, copy=True)
+    floored_lower[1] = 1.0
+    floored = _funded_shares(
+        shares, allocated, directed, desired, compensators,
+        lower=floored_lower, upper=upper,
+    )
+    assert floored[1] == pytest.approx(1.0)
+    np.testing.assert_allclose(
+        np.log(shares[2:] / floored[2:]), resolution
+    )
+    assert floored[0] < funded[0]
+
+    # A request the compensators can cover inside the step is met exactly.
+    small = np.array(shares, copy=True)
+    small[0] = 1.02
+    met = _funded_shares(
+        shares, allocated, directed, small, compensators, lower=lower, upper=upper
+    )
+    assert met[0] == pytest.approx(1.02)
+    assert np.all(np.log(shares[compensators] / met[compensators]) < resolution)
+    assert np.sum(met) == pytest.approx(np.sum(shares))
+
+    # Nothing directed: the ordinary allocation is returned untouched.
+    untouched = _funded_shares(
+        shares, allocated, np.zeros(6, dtype=bool), desired, compensators,
+        lower=lower, upper=upper,
+    )
+    np.testing.assert_array_equal(untouched, allocated)
+
+
 def test_probe_admission_excludes_observable_invalid_and_formal_history_sites() -> None:
     single = np.ones(4, dtype=bool)
     observable = np.asarray((False, True, False, False))
     acquisition_invalid = np.asarray((False, False, True, False))
     previous_weight = np.asarray((np.nan, np.nan, np.nan, 1.0))
     previous_contrast = np.asarray((np.nan, np.nan, np.nan, 2.0))
+    direction = np.zeros(4)
     assert _needs_probe(
         single,
         observable,
         acquisition_invalid,
+        direction,
         previous_weight,
         previous_contrast,
     ).tolist() == [True, False, False, False]
+    # A dark site that already holds a bracket direction is evidence, not a
+    # question: it steps along its bracket instead of being probed again.
+    direction[0] = 1.0
+    assert _needs_probe(
+        single,
+        observable,
+        acquisition_invalid,
+        direction,
+        previous_weight,
+        previous_contrast,
+    ).tolist() == [False, False, False, False]
 
 
 def test_feedback_applies_science_context_then_measures_before_solving_update(
@@ -2138,17 +2385,28 @@ def test_single_population_sites_probe_both_sides_then_measure_combined_target(
             solved_targets[1][rows[[17, 18]], columns[[17, 18]]] / baseline[[17, 18]],
             (2.0, 2.0),
         )
-        requested = np.ones(35)
-        requested[[17, 18]] = (0.5, 2.0)
-        selected_target, _effective = _relative_probe_target(
-            target,
-            requested,
-            single,
-            rows,
-            columns,
+        # The combined Target is the baseline's own formal update plus each
+        # probe site's verdict direction, funded by the loaded sites within a
+        # resolution step each: 17 loaded on the lower side, 18 on the upper.
+        baseline_control = _control_weights(target[rows, columns])
+        verdict_step, verdict_direction, verdict_single, verdict_loaded, _ = (
+            _probe_verdict(
+                single,
+                baseline_control,
+                baseline_values,
+                valid,
+                [
+                    (0.5, lower_values, np.zeros(35), lower_valid),
+                    (2.0, upper_values, np.zeros(35), upper_valid),
+                ],
+                0.5,
+            )
+        )
+        np.testing.assert_allclose(
+            verdict_step[[17, 18]], (np.log(0.5), np.log(2.0))
         )
         expected, *_details = _updated_target(
-            selected_target,
+            target,
             baseline_values,
             np.zeros(35),
             valid,
@@ -2158,7 +2416,11 @@ def test_single_population_sites_probe_both_sides_then_measure_combined_target(
             feedback_gain=0.25,
             plant_slope=None,
             maximum_weight_change=0.5,
-            directed_log_step=np.zeros(35),
+            directed_log_step=verdict_step,
+            control_boundary=_probe_boundary(
+                verdict_single, verdict_loaded, verdict_direction
+            ),
+            control_direction=verdict_direction,
         )
         np.testing.assert_allclose(solved_targets[2], expected)
         history = _load_history(result["artifact_path"])
@@ -2300,7 +2562,7 @@ def test_baseline_single_with_formal_history_steps_to_bracket_midpoint_without_p
         plane.close()
 
 
-def test_probe_combined_counts_as_formal_update_and_reuses_episode_baseline(
+def test_probe_combined_counts_once_and_a_probed_site_is_never_probed_again(
     tmp_path: Path, monkeypatch
 ) -> None:
     target = _asymmetric_target()
@@ -2404,43 +2666,47 @@ def test_probe_combined_counts_as_formal_update_and_reuses_episode_baseline(
     try:
         result = task.execute(_Context(tmp_path))
         assert result["feedback_status"] == "completed"
+        # The episode's three solves (two probes and the combined Target)
+        # all start from the episode baseline's pattern and optimizer state.
         for initial_phase, state in solve_inputs[:3]:
             np.testing.assert_array_equal(
                 initial_phase, science_context["pattern_phase"]
             )
             assert state == {}
-        # THROUGH THE FREEZE, like every other expectation in this file.
-        # A solved pattern becomes the next episode's baseline only after it
-        # has been put on the device's 16-bit phase grid, so what comes back
-        # is 0.39998549, not 0.4 -- exactly representable, so this stays an
-        # equality and does not slacken into a tolerance.
-        for initial_phase, state in solve_inputs[3:6]:
+        # A PROBED SITE IS NEVER PROBED AGAIN.  Its verdict is a bracket
+        # direction; when it turns dark again after the combined Target it
+        # steps along that bracket as an ordinary formal update, so the
+        # remaining updates are ordinary and each starts from the previous
+        # candidate's frozen pattern and carried optimizer state.  Re-probing
+        # it from scratch, twice per episode, learned nothing it did not
+        # already know and spent two diagnostic candidates per update.
+        # THROUGH THE FREEZE, like every other expectation in this file: a
+        # solved pattern becomes the next start only after it has been put
+        # on the device's 16-bit phase grid (0.39998549, not 0.4 -- exactly
+        # representable, so this stays an equality).
+        for index, (initial_phase, state) in enumerate(solve_inputs[3:], start=3):
             np.testing.assert_array_equal(
                 initial_phase,
                 freeze_pattern_phase(
-                    np.full(target.shape, 0.4, dtype=np.float32), target.shape
+                    np.full(target.shape, 0.1 * (index + 1), dtype=np.float32),
+                    target.shape,
                 ),
             )
-            assert state == {"marker": 3}
-        for initial_phase, state in solve_inputs[6:9]:
-            np.testing.assert_array_equal(
-                initial_phase,
-                freeze_pattern_phase(
-                    np.full(target.shape, 0.7, dtype=np.float32), target.shape
-                ),
-            )
-            assert state == {"marker": 6}
+            assert state == {"marker": index}
         history = _load_history(result["artifact_path"])
         assert [item["candidate_kind"] for item in history] == [
-            "baseline", "probe", "probe", "probe_combined",
-            "probe", "probe", "probe_combined",
-            "probe", "probe", "probe_combined",
+            "baseline", "probe", "probe", "probe_combined", "ordinary", "ordinary"
         ]
         assert [item["formal_updates_applied"] for item in history] == [
-            0, 0, 0, 1, 1, 1, 2, 2, 2, 3
+            0, 0, 0, 1, 2, 3
         ]
-        assert sum(item["candidate_kind"] == "probe" for item in history) == 6
-        assert len(history) == 1 + task.max_updates * 3
+        assert sum(item["candidate_kind"] == "probe" for item in history) == 2
+        assert len(solve_inputs) == 5
+        assert history[3]["probe_decision"][17] == "probe_choose_upper_only"
+        assert history[4]["decision"][17] in {
+            "single_bracket_midpoint", "feedback_assumed_slope",
+            "feedback_estimated_slope",
+        }
     finally:
         plane.close()
 
@@ -2579,9 +2845,18 @@ def test_unchanged_solved_phase_stops_without_a_second_shot_batch(
         plane.close()
 
 
-def test_persistently_single_site_probes_both_sides_then_restores_baseline(
+def test_persistently_single_site_probes_both_sides_then_extrapolates_deeper(
     tmp_path: Path, monkeypatch
 ) -> None:
+    """Neither probe side loads: the physical prior takes over.
+
+    Loading needs a deeper trap, so a site dark at 0.5x, 1x and 2x of its
+    baseline share heads one clamp step past the deepest share it has been
+    seen dark at, and keeps stepping while it stays dark.  Restoring the
+    baseline -- the old answer -- parked the site at a share known not to
+    load, forever ("baseline restored" was a stall dressed as a verdict).
+    """
+
     target = _asymmetric_target()
     slm = _Slm(target.shape)
     calibration = _calibration_with_unresolved_site(
@@ -2640,30 +2915,51 @@ def test_persistently_single_site_probes_both_sides_then_restores_baseline(
         plane=plane,
         target=target,
         calibration=calibration,
-        updates=4,
+        updates=3,
     )
     try:
         result = task.execute(context)
-        artifact = load_science_context(result["artifact_path"])
-        metadata = artifact["pattern_metadata"]
-        assert result["feedback_status"] == "stalled"
-        assert len(measured_phases) == 3
+        assert result["feedback_status"] == "completed"
+        history = _load_history(result["artifact_path"])
+        assert [item["candidate_kind"] for item in history] == [
+            "baseline", "probe", "probe", "probe_combined", "ordinary", "ordinary"
+        ]
+        assert len(measured_phases) == len(history)
         assert all(
             not np.array_equal(left, right)
             for left, right in zip(measured_phases, measured_phases[1:])
         )
-        assert metadata["candidate"] == 1
-        np.testing.assert_array_equal(artifact["phase"], measured_phases[0])
-        np.testing.assert_array_equal(slm.last_commanded_phase, measured_phases[0])
-        np.testing.assert_array_equal(artifact["target_intensity"], target)
-        history = _load_history(result["artifact_path"])
-        assert [item["candidate_kind"] for item in history] == [
-            "baseline", "probe", "probe"
+        assert history[3]["probe_decision"][17] == "probe_extrapolate_upper"
+        rows, columns = np.nonzero(target > 0.0)
+        # The control integrator, not the excited Target the SLM sees: the
+        # identification excitation rides on top of it and is not funding.
+        shares = [
+            np.asarray(item["control_weight"], dtype=float) for item in history
         ]
-        assert metadata["outcome"]["reason"] == (
-            "two-sided SLM probes supplied no observable direction; "
-            "baseline restored"
-        )
+        baseline_share = _control_weights(target[rows, columns])[17]
+        # The verdict asks for the deepest dark share plus one clamp; the
+        # loaded sites fund it ONE RESOLUTION STEP each per candidate, so
+        # the dark site climbs monotonically -- by exactly what the others
+        # handed over, never more than a resolution from any one of them.
+        others = ~single
+        # The probes are authored Targets (0.5x / 2x of the baseline share);
+        # the funded steps are the combined Target (from the baseline) and
+        # every ordinary update after it.
+        funded_steps = [(shares[0], shares[3]), (shares[3], shares[4]), (shares[4], shares[5])]
+        for before, after in funded_steps:
+            assert after[17] > before[17]
+            given = np.log(before[others] / after[others])
+            assert np.all(given <= _PLANT_EXCITATION_LOG_STEP + 1e-9)
+            assert after[17] - before[17] == pytest.approx(
+                float(np.sum(before[others] - after[others]))
+            )
+        assert shares[3][17] > 1.5 * baseline_share
+        assert shares[4][17] > shares[3][17] > baseline_share
+        assert shares[5][17] > shares[4][17]
+        assert history[4]["decision"][17] == "single_extrapolate"
+        assert history[5]["decision"][17] == "single_extrapolate"
+        _phase, metadata = _load_candidate(result["artifact_path"])
+        assert metadata["candidate"] == 6
     finally:
         plane.close()
 
@@ -2728,7 +3024,7 @@ def test_virtual_feedback_recovers_missing_sites_and_retains_best_candidate(
             probe_factors=(0.5, 2.0),
             feedback_gain=0.25,
             maximum_weight_change=0.5,
-            max_updates=12,
+            max_updates=16,
         )
         result = task.execute(context)
         saved, metadata = _load_candidate(result["artifact_path"])
@@ -2748,6 +3044,13 @@ def test_virtual_feedback_recovers_missing_sites_and_retains_best_candidate(
             dtype=float,
         )
         assert max(item["observable_sites"] for item in history) == 35
+        # The recovered lattice STAYS recovered.  Twenty-five sites loaded at
+        # a 4% margin; the old bracket rules got to 32 and left three sites
+        # ping-ponging between two shares for the rest of the run, and a
+        # split single Gaussian counted as the 33rd.  Under the latest-
+        # observation brackets, the resolution creep and the loading-edge
+        # hold the lattice is full from the 11th formal update on.
+        assert [item["observable_sites"] for item in history[-3:]] == [35, 35, 35]
         assert float(progress[-1]) < float(progress[0])
         if len(finite):
             assert metadata["measurement"]["valid"]
