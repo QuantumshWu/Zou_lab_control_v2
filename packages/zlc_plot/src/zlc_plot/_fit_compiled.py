@@ -2888,16 +2888,9 @@ def _value_jacobian_poisson(coords: np.ndarray, parameters: np.ndarray):
     x = coords[0]
     output = np.empty(x.size, dtype=np.float64)
     jacobian = np.empty((x.size, 3), dtype=np.float64)
-    valid = np.ones(x.size, dtype=np.bool_)
-    table = np.empty(
-        _lattice_extent(coords, valid, parameters[1], parameters[2]), dtype=np.float64
-    )
-    _poisson_table(parameters[1], table)
-    floor, _ceiling = _poisson_rate_window(parameters[1])
+    grid = _poisson_grid(parameters[1], parameters[2])
     for point in range(x.size):
-        output[point] = _point_poisson(
-            coords, point, parameters, jacobian[point], table, floor
-        )
+        output[point] = _point_poisson(coords, point, parameters, jacobian[point], grid)
     return output, jacobian
 
 
@@ -2906,22 +2899,11 @@ def _value_jacobian_poisson_bimodal(coords: np.ndarray, parameters: np.ndarray):
     x = coords[0]
     output = np.empty(x.size, dtype=np.float64)
     jacobian = np.empty((x.size, 6), dtype=np.float64)
-    valid = np.ones(x.size, dtype=np.bool_)
-    right_rate = parameters[0] + parameters[1]
-    left = np.empty(
-        _lattice_extent(coords, valid, parameters[0], parameters[3]), dtype=np.float64
-    )
-    right = np.empty(
-        _lattice_extent(coords, valid, right_rate, parameters[5]), dtype=np.float64
-    )
-    _poisson_table(parameters[0], left)
-    _poisson_table(right_rate, right)
-    left_floor, _l = _poisson_rate_window(parameters[0])
-    right_floor, _r = _poisson_rate_window(right_rate)
+    left = _poisson_grid(parameters[0], parameters[3])
+    right = _poisson_grid(parameters[0] + parameters[1], parameters[5])
     for point in range(x.size):
         output[point] = _point_poisson_bimodal(
-            coords, point, parameters, jacobian[point],
-            left, left_floor, right, right_floor,
+            coords, point, parameters, jacobian[point], left, right
         )
     return output, jacobian
 
@@ -3107,151 +3089,234 @@ def _point_bimodal(coords, point, parameters, row):
     return left_amp * left_shape + right_amp * right_shape
 
 
-#: How many read-noise widths a Poisson-Gaussian lattice sum reaches from the
-#: bin: the dropped tail is under 2e-14 of the peak term, which keeps the
-#: model exact to the frozen anchors' 2e-12.
+#: A photon count is a Poisson variable on the integers; a histogram's bins
+#: are not.  The Poisson-Gaussian models use the Gamma extension of the
+#: Poisson law to a real photon number, ``p(u) = rate^u e^-rate / Gamma(u+1)``
+#: on ``u >= 0``, normalised to unit mass and convolved with the Gaussian
+#: read noise: a density, a smooth function of the bin centre, fitted like
+#: every other model in the catalogue.  The extended law's own mass is not
+#: one (it falls to zero with the rate); dividing by it keeps the amplitude
+#: the area under the model at every rate and keeps a dim state from
+#: running to zero photons with an unbounded amplitude, and at zero photons
+#: the density is the read-noise Gaussian itself.  The convolution has no
+#: closed form.  It is taken by the trapezoid rule on a
+#: grid of ``n`` nodes per photon, which is spectrally accurate for an
+#: entire integrand that vanishes at the far end, plus the Euler-Maclaurin
+#: end terms at ``u = 0``, the one edge where the integrand does not vanish
+#: (``h^2 F'(0)/12 - h^4 F'''(0)/720``, leaving O(h^6)).  ``n`` is twelve
+#: nodes per sigma and per scale of ``p`` (``sqrt(rate)`` above one photon,
+#: ``1/(1+|ln rate|)`` below, where ``p`` is the exponential ``rate^u``).
+#: Twelve, not six: the node count changes with the parameters, and where
+#: it changes the model steps by the quadrature error, which a finite
+#: difference divides by its step -- at twelve per sigma the end terms
+#: leave under 1e-9 and the interior nothing, so the step is invisible to a
+#: numerical derivative.  The Gaussian factor walks the grid by a
+#: two-multiply recursion and the table of ``p`` is filled by
+#: ``p(u+1) = p(u) rate/(u+1)`` from ``n`` direct values at the mode, so a
+#: bin costs a few multiplies per node and no transcendentals; a 64-bin
+#: evaluation is tens of microseconds in every regime.
 POISSON_GAUSSIAN_WINDOW = 8.0
-#: ...and never reaches lattice terms the Poisson factor itself has left:
-#: below ``rate - 10 sqrt(rate) - 10`` and above ``rate + 12 sqrt(rate) + 20``
-#: the term is under e^-50 of the mode at every rate, so a wide read noise
-#: (a pixel-value histogram, a misfit) does not sum hundreds of zeros.
-POISSON_RATE_WINDOW_BELOW = 10.0
-POISSON_RATE_WINDOW_BELOW_MARGIN = 10.0
-POISSON_RATE_WINDOW_ABOVE = 12.0
-POISSON_RATE_WINDOW_ABOVE_MARGIN = 20.0
-TINY = float(np.finfo(np.float64).tiny)
+POISSON_NODES_PER_SCALE = 12.0
+POISSON_MAX_NODES_PER_UNIT = 4096
+POISSON_TAIL = 50.0
+#: Under this rate the extended law is a spike narrower than the finest
+#: grid (``1/|ln rate|`` photons against ``1/4096``): the density is taken
+#: as the zero-photon Gaussian, which it is to a few thousandths of a photon.
+POISSON_ZERO_RATE = 1e-150
+EULER_GAMMA = 0.5772156649015329
+ZETA_2 = 1.6449340668482264
+ZETA_3 = 1.2020569031595943
+SQRT_TWO_PI = 2.5066282746310002
 
 
 @njit(cache=True, inline="always")
-def _poisson_rate_window(rate):
-    root = math.sqrt(max(rate, 0.0))
-    lowest = int(math.floor(rate - POISSON_RATE_WINDOW_BELOW * root - POISSON_RATE_WINDOW_BELOW_MARGIN))
-    highest = int(math.ceil(rate + POISSON_RATE_WINDOW_ABOVE * root + POISSON_RATE_WINDOW_ABOVE_MARGIN))
-    return max(lowest, 0), highest
+def _poisson_support(rate):
+    """``(low, high)`` outside which ``p`` is under e^-50 of its mode."""
+
+    root = math.sqrt(rate)
+    high = rate + 12.0 * root + 20.0
+    if rate < 1.0:
+        high = min(high, POISSON_TAIL / (-math.log(rate)) + 1.0)
+    return max(rate - 10.0 * root - 10.0, 0.0), high
 
 
 @njit(cache=True, inline="always")
-def _lattice_extent(coords, valid, rate, sigma):
-    """How many lattice terms ``0..K`` the bins can reach: the largest bin
-    plus the window, and no further than the rate's own window.  At least
-    one term, so an empty cell still has a table."""
-
-    half = int(math.ceil(POISSON_GAUSSIAN_WINDOW * sigma))
-    largest = -math.inf
-    for point in range(coords.shape[1]):
-        if valid[point] and coords[0, point] > largest:
-            largest = coords[0, point]
-    if not math.isfinite(largest):
-        return 1
-    _lowest, highest = _poisson_rate_window(rate)
-    return max(min(int(np.rint(largest)) + half, highest) + 1, 1)
+def _poisson_nodes_per_unit(rate, sigma):
+    scale = math.sqrt(rate) if rate >= 1.0 else 1.0 / (1.0 + abs(math.log(rate)))
+    nodes = POISSON_NODES_PER_SCALE / min(sigma, scale)
+    return min(max(int(math.ceil(nodes)), 1), POISSON_MAX_NODES_PER_UNIT)
 
 
 @njit(cache=True, inline="always")
-def _poisson_table(rate, table):
-    """``table[k] = P(k | rate)`` for every lattice term the bins can reach.
+def _poisson_grid(rate, sigma):
+    """``(table, first, n, mass, mean)``: ``table[m - first] = p(m/n | rate)``
+    over the support of ``p``, with the extended law's mass ``int p du``
+    and mean, both by the same trapezoid rule (an empty table at zero
+    photons: the density is then the Gaussian itself)."""
 
-    Exact at the mode, walked outward on both sides by the ratio of
-    neighbouring terms -- each step is a multiply and the terms only shrink,
-    so nothing overflows and a far tail underflows to the zero it is.  Filled
-    once per objective evaluation; the per-bin lattice sums then only read it.
-    """
-
-    size = table.size
-    if rate <= 0.0:
-        for k in range(size):
-            table[k] = 0.0
-        table[0] = 1.0
-        return
-    mode = min(int(rate), size - 1)
-    centre = math.exp(mode * math.log(rate) - rate - math.lgamma(mode + 1.0))
-    table[mode] = centre
-    value = centre
-    for k in range(mode, size - 1):
-        value *= rate / (k + 1.0)
-        table[k + 1] = value
-    value = centre
-    for k in range(mode, 0, -1):
-        value *= k / rate
-        table[k - 1] = value
+    empty = np.empty(0, dtype=np.float64)
+    if not (rate >= POISSON_ZERO_RATE) or not (sigma > 0.0):
+        return empty, 0, 1, 1.0, 0.0
+    n = _poisson_nodes_per_unit(rate, sigma)
+    low, high = _poisson_support(rate)
+    first = int(math.floor(low * n))
+    last = int(math.ceil(high * n))
+    table = np.empty(last - first + 1, dtype=np.float64)
+    h = 1.0 / n
+    log_rate = math.log(rate)
+    # n direct values at the mode, then p(u+1) = p(u) rate/(u+1) outward:
+    # every step away from the mode shrinks, so nothing overflows and a
+    # far tail underflows to the zero it is.
+    start = max(min(int(math.floor(rate * n + 0.5)), last - n + 1), first)
+    stop = min(start + n - 1, last)
+    for m in range(start, stop + 1):
+        u = m * h
+        table[m - first] = math.exp(u * log_rate - rate - math.lgamma(u + 1.0))
+    for m in range(stop + 1, last + 1):
+        table[m - first] = table[m - n - first] * rate / (m * h)
+    for m in range(start - 1, first - 1, -1):
+        table[m - first] = table[m + n - first] * (m * h + 1.0) / rate
+    # The mass and its first moment over the support; the u = 0 end terms
+    # when the support starts there (otherwise p is e^-50 of its mode at
+    # the edge and the trapezoid rule is already exact).
+    mass = 0.0
+    moment = 0.0
+    for m in range(first, last + 1):
+        weight = table[m - first]
+        if m == 0:
+            weight *= 0.5
+        mass += weight
+        moment += weight * (m * h)
+    mass *= h
+    moment *= h
+    if first == 0:
+        a = log_rate + EULER_GAMMA
+        p2 = a * a - ZETA_2
+        p3 = a * a * a - 3.0 * a * ZETA_2 + 2.0 * ZETA_3
+        c2 = h * h / 12.0 * table[0]
+        c4 = h * h * h * h / 720.0 * table[0]
+        mass += c2 * a - c4 * p3
+        moment += c2 - 3.0 * c4 * p2
+    return table, first, n, mass, moment / mass
 
 
 @njit(cache=True, inline="always")
-def _poisson_lattice(x, sigma, table, k_floor):
-    """``sum_k P_k g_k``, ``sum_k P_k g_k k`` and ``sum_k P_k g_k (x-k)^2``
-    over the lattice window around one bin, ``P_k`` read from ``table``;
-    ``k_floor`` is the rate window's lower edge, its upper edge the table's.
+def _poisson_convolution(x, rate, sigma, table, first, n):
+    """``(I0, I1, I2) = int p(u) g(x-u) {1, u, (x-u)^2} du`` over the bin's
+    +-8 sigma window on the grid, ``g`` the unnormalised Gaussian; the end
+    terms at ``u = 0`` come in when the window reaches it."""
 
-    Three exponentials per bin and none per lattice term: the Gaussian
-    factor walks the lattice as ``g(k+1) = g(k) exp((d_k - 1/2)/sigma^2)``,
-    whose own ratio is the constant ``exp(-1/sigma^2)``.  Per term that is
-    five multiplies and a table read, which keeps this model within a small
-    factor of the plain Gaussian at read-noise widths.  A width so small
-    that the running ratio would overflow falls back to the direct
-    exponential.
-    """
-
-    half = int(math.ceil(POISSON_GAUSSIAN_WINDOW * sigma))
-    centre = int(np.rint(x))
-    k_low = centre - half
-    if k_low < k_floor:
-        k_low = k_floor
-    k_high = centre + half
-    if k_high > table.size - 1:
-        k_high = table.size - 1
-    if k_high < k_low:
+    if table.size == 0:
+        return 0.0, 0.0, 0.0
+    h = 1.0 / n
+    reach = POISSON_GAUSSIAN_WINDOW * sigma
+    m_a = max(first, int(math.ceil((x - reach) * n)))
+    m_b = min(first + table.size - 1, int(math.floor((x + reach) * n)))
+    if m_b < m_a:
         return 0.0, 0.0, 0.0
     inverse = 1.0 / (sigma * sigma)
-    delta = x - k_low
-    direct = inverse * (half + 1.0) > 300.0
+    delta = x - m_a * h
     shape = math.exp(-0.5 * delta * delta * inverse)
-    ratio = math.exp((delta - 0.5) * inverse)
-    decay = math.exp(-inverse)
+    ratio = math.exp((delta - 0.5 * h) * h * inverse)
+    decay = math.exp(-h * h * inverse)
     s0 = 0.0
     s1 = 0.0
     s2 = 0.0
-    for k in range(k_low, k_high + 1):
-        weight = table[k] * shape
-        s0 += weight
-        s1 += weight * k
-        s2 += weight * delta * delta
-        delta -= 1.0
-        if direct:
+    for m in range(m_a, m_b + 1):
+        if (m - m_a) & 63 == 63:
+            # Re-anchor the recursion: its rounding grows with the walk, and
+            # a finite difference of the value divides that by its step.
             shape = math.exp(-0.5 * delta * delta * inverse)
-        else:
-            shape *= ratio
-            ratio *= decay
-    return s0, s1, s2
+            ratio = math.exp((delta - 0.5 * h) * h * inverse)
+        weight = table[m - first] * shape
+        if m == 0:
+            weight *= 0.5
+        s0 += weight
+        s1 += weight * (m * h)
+        s2 += weight * delta * delta
+        delta -= h
+        shape *= ratio
+        ratio *= decay
+    i0 = h * s0
+    i1 = h * s1
+    i2 = h * s2
+    if m_a == 0:
+        # F = p g and its derivatives at u = 0 from the log-derivatives of p
+        # there (digamma, trigamma and tetragamma at one) and of g; the
+        # integrands u F and (x-u)^2 F follow by Leibniz.
+        a = math.log(rate) + EULER_GAMMA
+        p2 = a * a - ZETA_2
+        p3 = a * a * a - 3.0 * a * ZETA_2 + 2.0 * ZETA_3
+        t = x / sigma
+        g1 = t / sigma
+        g2 = (t * t - 1.0) * inverse
+        g3 = (t * t * t - 3.0 * t) * inverse / sigma
+        d1 = a + g1
+        d2 = p2 + 2.0 * a * g1 + g2
+        d3 = p3 + 3.0 * p2 * g1 + 3.0 * a * g2 + g3
+        f0 = table[0] * math.exp(-0.5 * t * t)
+        c2 = h * h / 12.0 * f0
+        c4 = h * h * h * h / 720.0 * f0
+        i0 += c2 * d1 - c4 * d3
+        i1 += c2 - 3.0 * c4 * d2
+        i2 += c2 * (d1 * x * x - 2.0 * x) - c4 * (
+            d3 * x * x - 6.0 * x * d2 + 6.0 * d1
+        )
+    return i0, i1, i2
 
 
 @njit(cache=True, inline="always")
-def _point_poisson(coords, point, parameters, row, table, k_floor):
+def _poisson_component(x, amplitude, rate, sigma, grid):
+    """``(shape, d/d rate, d/d sigma)`` of one population at ``x``: the model
+    is ``amplitude * shape`` with ``shape = I0 / (mass sigma sqrt(2 pi))``,
+    the density of a photon number under the extended law plus read noise."""
+
+    if not (sigma > 0.0):
+        return 0.0, 0.0, 0.0
+    norm = 1.0 / (sigma * SQRT_TWO_PI)
+    if not (rate >= POISSON_ZERO_RATE):
+        t = x / sigma
+        shape = norm * math.exp(-0.5 * t * t)
+        return shape, 0.0, amplitude * shape * (t * t - 1.0) / sigma
+    table, first, n, mass, mean = grid
+    i0, i1, i2 = _poisson_convolution(x, rate, sigma, table, first, n)
+    norm /= mass
+    shape = i0 * norm
+    # d/d rate of p is p (u/rate - 1) and of the mass is mass (mean/rate - 1).
+    rate_derivative = amplitude * norm * (i1 - i0 * mean) / rate
+    sigma_derivative = amplitude * norm * (i2 / (sigma * sigma) - i0) / sigma
+    return shape, rate_derivative, sigma_derivative
+
+
+@njit(cache=True, inline="always")
+def _point_poisson(coords, point, parameters, row, grid):
     amplitude, rate, sigma = parameters
-    s0, s1, s2 = _poisson_lattice(coords[0, point], sigma, table, k_floor)
-    row[0] = s0
-    row[1] = amplitude * (s1 / max(rate, TINY) - s0)
-    row[2] = amplitude * s2 / (sigma * sigma * sigma)
-    return amplitude * s0
+    shape, rate_d, sigma_d = _poisson_component(
+        coords[0, point], amplitude, rate, sigma, grid
+    )
+    row[0] = shape
+    row[1] = rate_d
+    row[2] = sigma_d
+    return amplitude * shape
 
 
 @njit(cache=True, inline="always")
-def _point_poisson_bimodal(
-    coords, point, parameters, row, left_table, left_floor, right_table, right_floor
-):
+def _point_poisson_bimodal(coords, point, parameters, row, left, right):
     left_rate, splitting, left_amp, left_sigma, right_amp, right_sigma = parameters
     x = coords[0, point]
-    right_rate = left_rate + splitting
-    l0, l1, l2 = _poisson_lattice(x, left_sigma, left_table, left_floor)
-    r0, r1, r2 = _poisson_lattice(x, right_sigma, right_table, right_floor)
-    left_rate_d = left_amp * (l1 / max(left_rate, TINY) - l0)
-    right_rate_d = right_amp * (r1 / max(right_rate, TINY) - r0)
+    left_shape, left_rate_d, left_sigma_d = _poisson_component(
+        x, left_amp, left_rate, left_sigma, left
+    )
+    right_shape, right_rate_d, right_sigma_d = _poisson_component(
+        x, right_amp, left_rate + splitting, right_sigma, right
+    )
     row[0] = left_rate_d + right_rate_d
     row[1] = right_rate_d
-    row[2] = l0
-    row[3] = left_amp * l2 / (left_sigma * left_sigma * left_sigma)
-    row[4] = r0
-    row[5] = right_amp * r2 / (right_sigma * right_sigma * right_sigma)
-    return left_amp * l0 + right_amp * r0
+    row[2] = left_shape
+    row[3] = left_sigma_d
+    row[4] = right_shape
+    row[5] = right_sigma_d
+    return left_amp * left_shape + right_amp * right_shape
 
 
 @njit(cache=True, inline="always")
@@ -3404,12 +3469,10 @@ def _objective_bimodal(coords, obs, valid, params, free, weights, use_w, poisson
 def _objective_poisson(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives):
     if derivatives: compiled_reset_accumulators(gradient, info)
     cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
-    table=np.empty(_lattice_extent(coords, valid, params[1], params[2]), dtype=np.float64)
-    _poisson_table(params[1], table)
-    floor, _ceiling=_poisson_rate_window(params[1])
+    grid=_poisson_grid(params[1], params[2])
     for point in range(obs.size):
         if not valid[point]: continue
-        predicted=_point_poisson(coords, point, params, full, table, floor)
+        predicted=_point_poisson(coords, point, params, full, grid)
         pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point], use_w, poisson, loss, gradient, info, row, derivatives)
         if not ok: return math.inf, math.inf, False
         cost+=pc; rss+=pr
@@ -3421,15 +3484,11 @@ def _objective_poisson(coords, obs, valid, params, free, weights, use_w, poisson
 def _objective_poisson_bimodal(coords, obs, valid, params, free, weights, use_w, poisson, loss, gradient, info, row, derivatives):
     if derivatives: compiled_reset_accumulators(gradient, info)
     cost=0.0; rss=0.0; full=np.empty(params.size, dtype=np.float64)
-    left=np.empty(_lattice_extent(coords, valid, params[0], params[3]), dtype=np.float64)
-    right=np.empty(_lattice_extent(coords, valid, params[0] + params[1], params[5]), dtype=np.float64)
-    _poisson_table(params[0], left)
-    _poisson_table(params[0] + params[1], right)
-    left_floor, _l=_poisson_rate_window(params[0])
-    right_floor, _r=_poisson_rate_window(params[0] + params[1])
+    left=_poisson_grid(params[0], params[3])
+    right=_poisson_grid(params[0] + params[1], params[5])
     for point in range(obs.size):
         if not valid[point]: continue
-        predicted=_point_poisson_bimodal(coords, point, params, full, left, left_floor, right, right_floor)
+        predicted=_point_poisson_bimodal(coords, point, params, full, left, right)
         pc, pr, ok=_accumulate_model_point(predicted, obs[point], full, free, weights[point], use_w, poisson, loss, gradient, info, row, derivatives)
         if not ok: return math.inf, math.inf, False
         cost+=pc; rss+=pr
@@ -3860,53 +3919,25 @@ def _prepare_bimodal(coords, observations, valid, seeds, lower, upper, context):
     return 1
 
 
-READ_NOISE_FLOOR = 1e-3
-
-
-@njit(cache=True, inline="always")
-def _read_noise_floor(step):
-    """``bin / sqrt(12)``: the bin's own smoothing, under which a bin-centre
-    value no longer stands for the bin (see ``fit._poisson_moments``)."""
-
-    return max(step / math.sqrt(12.0), READ_NOISE_FLOOR)
-
-
-@njit(cache=True, inline="always")
-def _read_noise_seed(excess_variance, rate, floor):
-    """A width seed with curvature in it: the moment estimate, but never
-    under ``sqrt(rate)/3`` (a tenth of the variance), twice the floor, or
-    half a photon.  Mirrors ``fit._read_noise_seed``."""
-
-    return max(
-        math.sqrt(max(excess_variance, 0.0)),
-        math.sqrt(rate) / 3.0,
-        2.0 * floor,
-        0.5,
-    )
-
-
 @njit(cache=True, inline="always")
 def _poisson_moments(x, values, split, side, step):
-    """(amplitude, rate, sigma, mass, sigma floor) of one Poisson-Gaussian
-    component from the quartiles of the bins on one ``side`` of ``split``
-    (0: every bin); ``x`` is sorted.  The same arithmetic as
-    ``fit._poisson_moments``: the rate is the mass-weighted mean of the bins
-    between the quartiles, the width the quartile range over 1.349, and no
-    seed sits on a bound."""
+    """(amplitude, rate, sigma, mass) of one Poisson-Gaussian component from
+    the bins on one ``side`` of ``split`` (0: every bin); ``x`` is sorted.
+    The same arithmetic as ``fit._poisson_moments``: the rate is the
+    mass-weighted mean of the bins between the quartiles (a hot-pixel spike
+    far from the peak drags a plain moment into the valley), the read noise
+    the quartile width's excess over the rate, never under a bin, and the
+    amplitude the mass times the bin."""
 
     total = 0.0
-    maximum = 0.0
     for index in range(x.size):
         if side < 0 and x[index] > split:
             continue
         if side > 0 and x[index] <= split:
             continue
-        value = max(values[index], 0.0)
-        total += value
-        maximum = max(maximum, value)
-    floor = _read_noise_floor(step)
+        total += max(values[index], 0.0)
     if total <= 0.0:
-        return 0.0, 0.0, 0.0, 0.0, floor
+        return 0.0, 0.0, 0.0, 0.0
     cumulative = 0.0
     lower = x[0]
     upper = x[0]
@@ -3937,9 +3968,8 @@ def _poisson_moments(x, values, split, side, step):
         core_moment += x[index] * value
     rate = max(core_moment / core_mass, 0.25 * step)
     width = (upper - lower) / 1.349
-    sigma = _read_noise_seed(width * width - rate, rate, floor)
-    amplitude = maximum * math.sqrt(rate + sigma * sigma) / sigma
-    return amplitude, rate, sigma, total, floor
+    sigma = max(math.sqrt(max(width * width - rate, 0.0)), step)
+    return total * step, rate, sigma, total
 
 
 @njit(cache=True)
@@ -3951,16 +3981,14 @@ def _prepare_poisson_histogram(coords, observations, valid, seeds, lower, upper,
     x = compact[0, order]
     values = raw_values[order]
     step = _unique_step(x)
-    span = _array_span(x)
-    amplitude, rate, sigma, total, floor = _poisson_moments(x, values, 0.0, 0, step)
+    amplitude, rate, sigma, total = _poisson_moments(x, values, 0.0, 0, step)
     if total <= 0.0:
-        amplitude = 0.0
         rate = max(np.mean(x), 0.25 * step)
-        sigma = _read_noise_seed(span * span / 36.0, rate, floor)
+        sigma = max(_array_span(x) / 6.0, step)
     seeds[0, 0] = amplitude
     seeds[0, 1] = rate
     seeds[0, 2] = sigma
-    lower[2] = max(lower[2], floor); upper[2] = min(upper[2], span)
+    lower[2] = max(lower[2], 0.5 * step)
     return 1
 
 
@@ -3976,8 +4004,8 @@ def _poisson_bimodal_score(x, counts, seed):
     right_rate = seed[0] + seed[1]
     left_variance = left_rate + seed[3] * seed[3]
     right_variance = right_rate + seed[5] * seed[5]
-    left_height = seed[2] * seed[3] / math.sqrt(left_variance)
-    right_height = seed[4] * seed[5] / math.sqrt(right_variance)
+    left_height = seed[2] / (SQRT_TWO_PI * math.sqrt(left_variance))
+    right_height = seed[4] / (SQRT_TWO_PI * math.sqrt(right_variance))
     for index in range(x.size):
         left_delta = x[index] - left_rate
         right_delta = x[index] - right_rate
@@ -3992,12 +4020,10 @@ def _poisson_bimodal_score(x, counts, seed):
 
 @njit(cache=True, inline="always")
 def _try_poisson_split(x, counts, split_value, step, output):
-    """Six seed parameters and, in ``output[6:8]``, the two width floors."""
-
-    left_amplitude, left_rate, left_sigma, left_mass, left_floor = _poisson_moments(
+    left_amplitude, left_rate, left_sigma, left_mass = _poisson_moments(
         x, counts, split_value, -1, step
     )
-    right_amplitude, right_rate, right_sigma, right_mass, right_floor = _poisson_moments(
+    right_amplitude, right_rate, right_sigma, right_mass = _poisson_moments(
         x, counts, split_value, 1, step
     )
     if left_mass <= 0.0 or right_mass <= 0.0 or not right_rate > left_rate:
@@ -4008,8 +4034,6 @@ def _try_poisson_split(x, counts, split_value, step, output):
     output[3] = left_sigma
     output[4] = right_amplitude
     output[5] = right_sigma
-    output[6] = left_floor
-    output[7] = right_floor
     return _poisson_bimodal_score(x, counts, output)
 
 
@@ -4025,16 +4049,10 @@ def _prepare_poisson_bimodal(coords, observations, valid, seeds, lower, upper, c
     span = _array_span(x)
     step = _unique_step(x)
     total = 0.0
-    maximum = 0.0
     for index in range(count):
-        value = max(values[index], 0.0)
-        total += value
-        maximum = max(maximum, value)
-    upper[3] = min(upper[3], span)
-    upper[5] = min(upper[5], span)
-    midpoint = 0.5 * (x[0] + x[count - 1])
-    trial = np.empty(8, dtype=np.float64)
-    best = np.empty(8, dtype=np.float64)
+        total += max(values[index], 0.0)
+    trial = np.empty(6, dtype=np.float64)
+    best = np.empty(6, dtype=np.float64)
     found = False
     if count >= 3 and total > 0.0:
         split_values = np.empty(10, dtype=np.float64)
@@ -4044,25 +4062,21 @@ def _prepare_poisson_bimodal(coords, observations, valid, seeds, lower, upper, c
             score = _try_poisson_split(x, values, split_values[split], step, trial)
             if score < best_score:
                 best_score = score
-                for parameter in range(8):
+                for parameter in range(6):
                     best[parameter] = trial[parameter]
                 found = True
     if not found:
-        left_rate = max(midpoint - span / 4.0, 0.25 * step)
-        right_rate = left_rate + span / 2.0
-        floor = _read_noise_floor(step)
-        best[0] = left_rate
+        midpoint = 0.5 * (x[0] + x[count - 1])
+        best[0] = max(midpoint - span / 4.0, 0.25 * step)
         best[1] = span / 2.0
-        best[2] = maximum
-        best[3] = _read_noise_seed(span * span / 100.0, left_rate, floor)
-        best[4] = maximum
-        best[5] = _read_noise_seed(span * span / 100.0, right_rate, floor)
-        best[6] = floor
-        best[7] = floor
+        best[2] = 0.5 * total * step
+        best[3] = max(span / 10.0, step)
+        best[4] = 0.5 * total * step
+        best[5] = max(span / 10.0, step)
     for parameter in range(6):
         seeds[0, parameter] = best[parameter]
-    lower[3] = max(lower[3], best[6])
-    lower[5] = max(lower[5], best[7])
+    lower[3] = max(lower[3], 0.5 * step)
+    lower[5] = max(lower[5], 0.5 * step)
     return 1
 
 
@@ -4681,8 +4695,8 @@ def warm_production_cache() -> dict[str, Any]:
     )
 
     # Photon-count histograms: the values come from the compiled kernels
-    # themselves (their pure-Python twins would compile the inlined lattice
-    # helper on its own, which is not a production dispatcher).
+    # themselves (their pure-Python twins would compile the inlined grid
+    # helpers on their own, which are not production dispatchers).
     photons = np.linspace(-2.0, 14.0, 97, dtype=np.float64)
     photon_coords = np.ascontiguousarray(photons.reshape(1, -1))
     poisson_single = np.asarray((60.0, 1.5, 0.6), dtype=np.float64)

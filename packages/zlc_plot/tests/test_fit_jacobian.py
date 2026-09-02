@@ -11,9 +11,9 @@ from zlc_plot.fit import FitEngine, FitOptions, builtin_fit_models
 def _coordinates(model_id: str) -> tuple[np.ndarray, ...]:
     x = np.linspace(-1.3, 1.4, 41)
     if model_id == "histogram_poisson_gaussian":
-        # Photon counts on the integer lattice, over the bins the state
-        # occupies: a bin the model puts nothing in, perturbed below zero,
-        # is a kink no finite difference can differentiate across.
+        # Photon histograms over the bins the state occupies: a bin the
+        # model puts nothing in, perturbed below zero, is a kink no finite
+        # difference can differentiate across.
         return (np.linspace(-0.5, 6.5, 36),)
     if model_id == "bimodal_poisson_gaussian":
         return (np.linspace(-0.5, 10.5, 45),)
@@ -22,6 +22,19 @@ def _coordinates(model_id: str) -> tuple[np.ndarray, ...]:
         xx, yy = np.meshgrid(x, y)
         return xx.reshape(-1), yy.reshape(-1)
     return (x,)
+
+
+#: The Poisson-Gaussian models are a numerical integral: their values carry
+#: the grid recursions' rounding, which a finite difference divides by its
+#: step, so the comparison with numerical derivatives is held an order
+#: looser than the closed forms'.  A wrong derivative is off by far more.
+_QUADRATURE_MODELS = frozenset(
+    ("histogram_poisson_gaussian", "bimodal_poisson_gaussian")
+)
+
+
+def _tolerance(model_id: str) -> tuple[float, float]:
+    return (1e-5, 1e-7) if model_id in _QUADRATURE_MODELS else (1e-6, 1e-8)
 
 
 def _parameters(model_id: str) -> np.ndarray:
@@ -57,7 +70,8 @@ def test_declared_jacobians_match_five_numerical_derivatives() -> None:
                 parameters,
                 method="3-point",
             )
-            assert np.allclose(analytic, numeric, rtol=1e-6, atol=1e-8)
+            rtol, atol = _tolerance(model.model_id)
+            assert np.allclose(analytic, numeric, rtol=rtol, atol=atol), model.model_id
 
 
 def test_analytic_and_numeric_fit_results_are_equivalent() -> None:
@@ -83,12 +97,13 @@ def test_analytic_and_numeric_fit_results_are_equivalent() -> None:
             options=options,
         )
         assert analytic.success == numeric.success
+        rtol, atol = _tolerance(model.model_id)
         assert np.allclose(
             analytic.parameter_values,
             numeric.parameter_values,
-            rtol=1e-6,
-            atol=1e-8,
-        )
+            rtol=rtol,
+            atol=atol,
+        ), model.model_id
         # The errors come from the jacobian ITSELF, so they carry whatever
         # the numeric one's truncation error is.  A counted model minimises a
         # signed square root of the Poisson deviance, and a two-point

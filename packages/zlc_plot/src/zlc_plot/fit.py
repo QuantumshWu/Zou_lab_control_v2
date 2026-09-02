@@ -3166,22 +3166,25 @@ def _bimodal_gaussian_jacobian(
 
 def _poisson_kernel_input(x, values) -> tuple[np.ndarray, np.ndarray]:
     """Fresh, writable, C-contiguous arrays: the one array type the compiled
-    lattice kernels are specialised for (a read-only view would be a second
-    compilation of the same kernel)."""
+    Poisson-Gaussian kernels are specialised for (a read-only view would be
+    a second compilation of the same kernel)."""
 
     coords = np.array(np.reshape(x, (1, -1)), dtype=np.float64, order="C")
     return coords, np.array(values, dtype=np.float64)
 
 
 def _histogram_poisson_gaussian(x, amplitude, rate, sigma):
-    """A photon count is a Poisson variable on the integer lattice and the
-    camera adds Gaussian read noise, so the density of a value ``x`` is
-    ``A sum_k P(k | rate) exp(-(x-k)^2 / 2 sigma^2)``: an exact convolution,
-    which is what makes negative values (read noise below zero photons)
-    ordinary rather than impossible.  The lattice sum has ONE implementation,
-    the compiled kernel; the frozen anchors hold it to independent
-    arithmetic.  (A NumPy twin evaluated over a pixel-value histogram's
-    hundreds of lattice terms per bin cost forty cells' overlays 240 ms.)"""
+    """The Poisson law extended to a real photon number through the Gamma
+    function, ``p(u) = rate^u e^-rate / Gamma(u+1)`` on ``u >= 0``,
+    convolved with the camera's Gaussian read noise:
+    ``A / (sigma sqrt(2 pi)) int p(u) exp(-(x-u)^2 / 2 sigma^2) du``.  A
+    smooth function of the bin centre like every other model; negative
+    values (read noise below zero photons) are ordinary.  ``A`` is the
+    counts times the bin width once the extended law carries unit mass
+    (from about two photons up).  The quadrature has ONE implementation,
+    the compiled kernel; the frozen anchors hold it to an independent one.
+    (A NumPy twin evaluated over a pixel-value histogram cost forty cells'
+    overlays 240 ms.)"""
 
     coords, parameters = _poisson_kernel_input(x, (amplitude, rate, sigma))
     return _compiled_fit._value_jacobian_poisson(coords, parameters)[0]
@@ -3544,63 +3547,27 @@ def _histogram_cuts(x: np.ndarray, counts: np.ndarray) -> tuple[float, ...]:
     return tuple(dict.fromkeys(splits))
 
 
-#: The read-noise width may go this small: a numerical floor for ``1/sigma^2``.
-_READ_NOISE_FLOOR = 1e-3
-
-#: A Poisson-Gaussian model reads its x axis as photoelectrons: the lattice
-#: is the integer count.  A histogram in a camera's raw unit ("count", an
-#: ADU with an unknown gain) has no such lattice, and fitting it produced a
-#: 0.03-photon "read noise" comb under a 7-ADU background peak whose width
-#: was BELOW the Poisson width of 7 photons.  The plot offers these models
-#: only where the values carry no unit -- the product's photoelectron
-#: readout -- and refuses them, saying why, everywhere else.
-PHOTOELECTRON_AXIS = "photoelectron_axis"
-
-
 def _poisson_moments(
     x: np.ndarray, counts: np.ndarray, step: float
-) -> tuple[float, float, float, float]:
-    """(amplitude, rate, sigma, sigma floor) of one Poisson-Gaussian
-    component, from the quartiles of a histogram sorted by ``x``.
+) -> tuple[float, float, float]:
+    """(amplitude, rate, sigma) of one Poisson-Gaussian component from a
+    histogram sorted by ``x``.
 
     The mean of a Poisson-Gaussian is its rate and its variance the rate plus
-    the read-noise variance, so the histogram's location and width seed both
-    -- the rate as the mass-weighted mean of the bins between the quartiles,
-    the total width as the quartile range over 1.349, never as raw moments:
-    a photon-count histogram carries hot-pixel and cosmic-ray spikes far from
-    its peak, and the moments of that put the seed in a flat valley (rate on
-    its zero bound under a ten-photon-wide bump) from which neither solver
-    finds the peak.
-
-    The width floor is ``bin / sqrt(12)``: the model is evaluated at bin
-    centres, and a read noise narrower than that leaves the comb of integer
-    photon counts unsmoothed between the centres -- a 0.03-photon width put
-    every count of a 7-photon peak into the two bins whose centres happened
-    to fall on integers, with an amplitude of two million.  At bin/sqrt(12)
-    the width equals the bin's own smoothing (a box of width W has variance
-    W^2/12), so the bin-centre value stands for the bin's average and the
-    fitted width carries that smoothing, no more; half a bin, the Gaussian
-    models' floor, forced sigma = 8 onto a 0.3-photon camera at a thousand
-    photons in sixteen-photon bins and fitted worse than a Gaussian.  A
-    seed NEVER sits on a bound: a
-    trust-region solver scales its step by the distance to the bound, so a
-    width seeded on its floor while the rate seed was still a bin off
-    stayed there for good (deviance 1.75 where 1.22 was one photon away).
-    And a width seed sits where the objective has CURVATURE in it: at
-    least ``sqrt(rate)/3``, a tenth of the variance.  Seeded at half a
-    photon under 210 photons the width was 0.1% of the variance, the
-    solver saw no gradient, reported convergence and left the width there
-    with a small error bar, while the deviance kept falling to sigma = 4.
-    The amplitude is the tallest bin scaled by the peak of the unit shape,
-    ``sigma / sqrt(rate + sigma^2)``.
+    the read-noise variance, so the histogram's location and width seed
+    both: the rate as the mass-weighted mean of the bins between the
+    quartiles, the total width as the quartile range over 1.349 -- not raw
+    moments: a photon-count histogram carries hot-pixel and cosmic-ray
+    spikes far from its peak, and the moments of that put the seed in a flat
+    valley from which neither solver finds the peak.  The read noise is the
+    width's excess over the rate and never under a bin (the solver floors
+    it at half a bin, as it does every width on a histogram).  The
+    amplitude is the mass times the bin: the model is a density.
     """
 
     total = float(counts.sum())
-    span = _span(x)
-    floor = _read_noise_floor(step)
     if total <= 0.0:
-        rate = max(float(np.mean(x)), 0.25 * step)
-        return 0.0, rate, _read_noise_seed(span / 36.0, rate, floor), floor
+        return 0.0, max(float(np.mean(x)), 0.25 * step), max(_span(x) / 6.0, step)
     cumulative = np.cumsum(counts)
     lower, upper = (
         float(x[min(int(np.searchsorted(cumulative, fraction * total)), x.size - 1)])
@@ -3609,22 +3576,8 @@ def _poisson_moments(
     core = (x >= lower) & (x <= upper)
     rate = max(float(np.sum(x[core] * counts[core]) / float(counts[core].sum())), 0.25 * step)
     width = (upper - lower) / 1.349
-    sigma = _read_noise_seed(width * width - rate, rate, floor)
-    amplitude = max(float(np.max(counts)), 0.0) * math.sqrt(rate + sigma * sigma) / sigma
-    return amplitude, rate, sigma, floor
-
-
-def _read_noise_floor(step: float) -> float:
-    return max(step / math.sqrt(12.0), _READ_NOISE_FLOOR)
-
-
-def _read_noise_seed(excess_variance: float, rate: float, floor: float) -> float:
-    return max(
-        math.sqrt(max(excess_variance, 0.0)),
-        math.sqrt(rate) / 3.0,
-        2.0 * floor,
-        0.5,
-    )
+    sigma = max(math.sqrt(max(width * width - rate, 0.0)), step)
+    return total * step, rate, sigma
 
 
 def _sorted_histogram(coords: ArrayTuple, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -3636,89 +3589,66 @@ def _sorted_histogram(coords: ArrayTuple, y: np.ndarray) -> tuple[np.ndarray, np
 
 def _init_poisson_histogram(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
     x, counts = _sorted_histogram(coords, y)
-    return _poisson_moments(x, counts, _histogram_step(x))[:3]
+    return _poisson_moments(x, counts, _histogram_step(x))
 
 
-def _poisson_histogram_bounds(
-    coords: ArrayTuple, y: np.ndarray
-) -> Mapping[str, tuple[float | None, float | None]]:
-    x, counts = _sorted_histogram(coords, y)
-    floor = _poisson_moments(x, counts, _histogram_step(x))[3]
-    return {"sigma": (floor, _span(x))}
-
-
-def _poisson_bimodal_seed(
-    coords: ArrayTuple,
-    y: np.ndarray,
-) -> tuple[tuple[float, ...], float, float]:
-    """The two-state Poisson-Gaussian seed and its two width floors, from the
-    same cuts as the Gaussian seed: each side's quartiles give its rate and
-    read-noise width, and the closest cut (``_poisson_seed_distance``) is the
-    one solved from, as the compiled seeder does."""
+def _init_poisson_bimodal(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
+    """The two-state Poisson-Gaussian seed from the same cuts as the Gaussian
+    seed: each side's quartiles give its rate and read noise, and the
+    closest cut (``_poisson_seed_distance``) is the one solved from, as the
+    compiled seeder does."""
 
     x, counts = _sorted_histogram(coords, y)
     span = _span(x)
     step = _histogram_step(x)
     total = float(counts.sum())
 
-    def fallback() -> tuple[tuple[float, ...], float, float]:
+    def fallback() -> tuple[float, ...]:
         midpoint = float((np.min(x) + np.max(x)) / 2.0) if x.size else 0.0
-        height = max(float(np.max(counts)) if counts.size else 0.0, 0.0)
-        left_rate = max(midpoint - span / 4.0, 0.25 * step)
-        right_rate = left_rate + span / 2.0
-        floor = _read_noise_floor(step)
         return (
-            (
-                left_rate,
-                span / 2.0,
-                height,
-                _read_noise_seed(span * span / 100.0, left_rate, floor),
-                height,
-                _read_noise_seed(span * span / 100.0, right_rate, floor),
-            ),
-            floor,
-            floor,
+            max(midpoint - span / 4.0, 0.25 * step),
+            span / 2.0,
+            0.5 * total * step,
+            max(span / 10.0, step),
+            0.5 * total * step,
+            max(span / 10.0, step),
         )
 
     if x.size < 3 or total <= 0.0:
         return fallback()
-    seeds: list[tuple[tuple[float, ...], float, float]] = []
+    seeds: list[tuple[float, ...]] = []
     for split in _histogram_cuts(x, counts):
         left = x <= split
         right = ~left
         if float(counts[left].sum()) <= 0.0 or float(counts[right].sum()) <= 0.0:
             continue
-        left_amplitude, left_rate, left_sigma, left_floor = _poisson_moments(
+        left_amplitude, left_rate, left_sigma = _poisson_moments(
             x[left], counts[left], step
         )
-        right_amplitude, right_rate, right_sigma, right_floor = _poisson_moments(
+        right_amplitude, right_rate, right_sigma = _poisson_moments(
             x[right], counts[right], step
         )
         if not right_rate > left_rate:
             continue
         seeds.append((
-            (
-                left_rate,
-                right_rate - left_rate,
-                left_amplitude,
-                left_sigma,
-                right_amplitude,
-                right_sigma,
-            ),
-            left_floor,
-            right_floor,
+            left_rate,
+            right_rate - left_rate,
+            left_amplitude,
+            left_sigma,
+            right_amplitude,
+            right_sigma,
         ))
     if not seeds:
         return fallback()
-    return min(seeds, key=lambda item: _poisson_seed_distance(x, counts, item[0]))
+    return min(seeds, key=lambda seed: _poisson_seed_distance(x, counts, seed))
 
 
 def _poisson_seed_distance(x: np.ndarray, counts: np.ndarray, seed: Sequence[float]) -> float:
     """How far a two-state seed is from the histogram, by each component's
     Gaussian approximation (variance ``rate + sigma^2``): one exponential
-    per bin ranks the cuts as well as the lattice sums did and costs nothing
-    per cell.  The same arithmetic as ``_fit_compiled._poisson_bimodal_score``,
-    so both paths solve from the same cut."""
+    per bin ranks the cuts and costs nothing per cell.  The same arithmetic
+    as ``_fit_compiled._poisson_bimodal_score``, so both paths solve from
+    the same cut."""
 
     left_rate, splitting, left_amplitude, left_sigma, right_amplitude, right_sigma = seed
     predicted = np.zeros_like(counts)
@@ -3728,23 +3658,10 @@ def _poisson_seed_distance(x: np.ndarray, counts: np.ndarray, seed: Sequence[flo
     ):
         variance = rate + sigma * sigma
         predicted += (
-            amplitude * sigma / math.sqrt(variance)
+            amplitude / (math.sqrt(2.0 * math.pi) * math.sqrt(variance))
             * np.exp(-0.5 * (x - rate) ** 2 / variance)
         )
     return float(np.sum((predicted - counts) ** 2))
-
-
-def _init_poisson_bimodal(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
-    return _poisson_bimodal_seed(coords, y)[0]
-
-
-def _poisson_bimodal_bounds(
-    coords: ArrayTuple, y: np.ndarray
-) -> Mapping[str, tuple[float | None, float | None]]:
-    x = np.asarray(coords[0], dtype=np.float64).reshape(-1)
-    _seed, left_floor, right_floor = _poisson_bimodal_seed(coords, y)
-    span = _span(x)
-    return {"left_sigma": (left_floor, span), "right_sigma": (right_floor, span)}
 
 
 def _init_doublet(coords: ArrayTuple, y: np.ndarray) -> Sequence[float]:
@@ -4184,6 +4101,9 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
                 FitParameterSpec(
                     "amplitude", VALUE, NONNEGATIVE, display_label=r"$A$"
                 ),
+                # A rate is a position on the axis, not a width: zero photons
+                # is a value it may take (the model is then empty), and the
+                # histogram's half-bin floor on positive widths is not for it.
                 FitParameterSpec(
                     "rate",
                     AXIS_0,
@@ -4191,12 +4111,8 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
                     display_label=r"$\lambda$",
                     affine_point=True,
                 ),
-                # NONNEGATIVE, not POSITIVE: the histogram floor on positive
-                # widths is half a bin, which is right for a Gaussian's width
-                # and wrong for read noise under a Poisson count; the seeder
-                # floors the TOTAL width instead (see ``_poisson_moments``).
                 FitParameterSpec(
-                    "sigma", AXIS_0, NONNEGATIVE, display_label=r"$\sigma$"
+                    "sigma", AXIS_0, POSITIVE, display_label=r"$\sigma$"
                 ),
             ),
             "rate",
@@ -4204,12 +4120,11 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             _init_poisson_histogram,
             (FitTarget.HISTOGRAM,),
             formula=(
-                r"$f(x)=A\sum_{k\geq 0}\frac{\lambda^k e^{-\lambda}}{k!}"
-                r"\,e^{-\frac{1}{2}((x-k)/\sigma)^2}$"
+                r"$f(x)=\frac{A}{\sigma\sqrt{2\pi}}\int_0^{\infty}"
+                r"\frac{\lambda^u e^{-\lambda}}{\Gamma(u+1)}"
+                r"\,e^{-\frac{1}{2}((x-u)/\sigma)^2}\,du$"
             ),
             jacobian=_histogram_poisson_gaussian_jacobian,
-            bounds_initializer=_poisson_histogram_bounds,
-            capabilities=frozenset({PHOTOELECTRON_AXIS}),
             compiled_descriptor=(
                 _compiled_fit.histogram_poisson_gaussian_descriptor()
             ),
@@ -4236,13 +4151,13 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
                     "left_amplitude", VALUE, NONNEGATIVE, display_label=r"$A_L$"
                 ),
                 FitParameterSpec(
-                    "left_sigma", AXIS_0, NONNEGATIVE, display_label=r"$\sigma_L$"
+                    "left_sigma", AXIS_0, POSITIVE, display_label=r"$\sigma_L$"
                 ),
                 FitParameterSpec(
                     "right_amplitude", VALUE, NONNEGATIVE, display_label=r"$A_R$"
                 ),
                 FitParameterSpec(
-                    "right_sigma", AXIS_0, NONNEGATIVE, display_label=r"$\sigma_R$"
+                    "right_sigma", AXIS_0, POSITIVE, display_label=r"$\sigma_R$"
                 ),
             ),
             "rate_splitting",
@@ -4251,18 +4166,17 @@ def builtin_fit_models() -> tuple[FitModelSpec, ...]:
             (FitTarget.HISTOGRAM,),
             formula=(
                 r"$f(x)=A_L P(x;\lambda_L,\sigma_L)+A_R P(x;\lambda_L+\delta,\sigma_R),"
-                r"\ P(x;\lambda,\sigma)=\sum_{k\geq 0}\frac{\lambda^k e^{-\lambda}}{k!}"
-                r"\,e^{-\frac{1}{2}((x-k)/\sigma)^2}$"
+                r"\ P(x;\lambda,\sigma)=\frac{1}{\sigma\sqrt{2\pi}}\int_0^{\infty}"
+                r"\frac{\lambda^u e^{-\lambda}}{\Gamma(u+1)}"
+                r"\,e^{-\frac{1}{2}((x-u)/\sigma)^2}\,du$"
             ),
             jacobian=_bimodal_poisson_gaussian_jacobian,
-            bounds_initializer=_poisson_bimodal_bounds,
             presentation=FitPresentationSpec(
                 components=(
                     FitComponentSpec("left", _poisson_bimodal_left),
                     FitComponentSpec("right", _poisson_bimodal_right),
                 ),
             ),
-            capabilities=frozenset({PHOTOELECTRON_AXIS}),
             compiled_descriptor=(
                 _compiled_fit.bimodal_poisson_gaussian_descriptor()
             ),

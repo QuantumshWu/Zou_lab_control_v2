@@ -755,74 +755,108 @@ the p90 of any kind is dominated by the plane's ramp, not the plot.
 
 ## Poisson-Gaussian histogram models (2026-09-02)
 
-Two histogram models joined the catalogue: `histogram_poisson_gaussian` and
-`bimodal_poisson_gaussian`, the exact convolution of a Poisson photon count on
-the integer lattice with Gaussian read noise (parameters `A, lambda, sigma`
-per state; the bimodal is parameterised by `lambda_L` and the splitting
-`delta`, its headline).  The lattice sum has one implementation, the compiled
-kernel: one Poisson table per objective evaluation (exact at the mode, walked
-outward), three exponentials per bin, a five-multiply recursion per lattice
-term, and the sum restricted to the intersection of the +-8 sigma Gaussian
-window with the rate's own window (`rate - 10 sqrt(rate) - 10` to
-`rate + 12 sqrt(rate) + 20`, outside which a term is under e^-50 of the
-mode).  The SciPy path and the overlays call the same kernel; the frozen
-anchors hold it to independent arithmetic.  Seeds come from the histogram's
-quartiles -- the rate as the mass-weighted mean between them, the width from
-their range -- not from its moments: a hot-pixel spike far from the peak put
-the moment seed in a flat valley (rate on its zero bound under a
-ten-photon-wide bump).  A width seed never sits on a bound and never under
-`sqrt(rate)/3`: seeded at half a photon under 210 photons the width was 0.1%
-of the variance, the solver saw no gradient and reported convergence there
-with a small error bar while the deviance kept falling to sigma = 4.  The
-width floor is `bin / sqrt(12)`, the bin's own box smoothing: under it the
-integer-photon comb is not smoothed between bin centres and a 0.03-photon
-width put a whole peak into the two bins whose centres fell on integers;
-over it -- the Gaussian models' half bin -- a thousand photons in a
-sixteen-photon bin forced sigma = 8 onto a 0.3-photon camera and fitted
-worse than a Gaussian.  The models are offered only on histograms whose
-values carry no unit (the photoelectron readout); a raw camera `count` has
-no photon lattice and is refused with the reason.
-Recovery on synthetic Poisson + Gaussian histograms (64 bins, 5000 samples):
-rate and read noise within errors from 0.1 photons with half the samples
-negative (0.0998 +- 0.006 / 0.301 +- 0.004 for 0.1 / 0.3) up to 60 photons
-(2.59 +- 0.26 for sigma 3); above ~200 photons the read noise is a few percent
-of the variance and its error bar says so, while the rate and the bimodal
-splitting are as precise as the Gaussian's centre and splitting.
+Two histogram models: `histogram_poisson_gaussian` and
+`bimodal_poisson_gaussian`, the Poisson law extended to a real photon number
+through the Gamma function (`p(u) = lambda^u e^-lambda / Gamma(u+1)` on
+`u >= 0`), normalised to unit mass and convolved with Gaussian read noise
+(parameters `A, lambda, sigma` per state, `A` the area -- counts times bin;
+the bimodal is parameterised by `lambda_L` and the splitting `delta`, its
+headline).  A smooth density of the bin centre, fitted on the painted bins
+and counts like every other model, with the histogram's generic half-bin
+floor on widths and nothing of its own: no lattice, no floors, no
+capability, no look at where the values came from.  The first cut was the
+integer-lattice sum with a read-noise floor and a photoelectron-unit gate on
+top; each of those was a patch over the comb the lattice puts between bin
+centres, and the gate was the plot deciding what a fit may see.  All of it
+is gone.
+
+The convolution has no closed form.  The compiled kernel takes it by the
+trapezoid rule on a grid of `n` nodes per photon, `n` twelve per sigma and
+twelve per scale of `p` (`sqrt(lambda)` above one photon, `1/(1+|ln
+lambda|)` below).  The trapezoid rule is spectrally accurate for an entire
+integrand that vanishes at the far end; at `u = 0`, where it does not
+vanish, the Euler-Maclaurin end terms `h^2 F'(0)/12 - h^4 F'''(0)/720` take
+it to O(h^6), from the digamma, trigamma and tetragamma of one and the
+Gaussian's derivatives.  Twelve nodes rather than six because the node
+count changes with the parameters, and where it changes the model steps by
+the quadrature error, which a finite difference divides by its step: at six
+per sigma (with a grid that also changed at round rates) a 1e-8 step in the
+value read as a 1e-2 error in the numerical jacobian; at twelve the step is
+under 1e-9 and invisible.  A grid chosen from the bins instead, which
+would not move with the parameters, sampled an overlay's fine display grid
+at forty times the density the width needed and cost the forty-cell MOT
+panel 124 ms a call.  The table of `p` is filled from `n` direct values at
+the mode by `p(u+1) = p(u) lambda/(u+1)` (every step away from the mode
+shrinks), the Gaussian factor walks the grid by a two-multiply recursion
+re-anchored every 64 nodes, and the mass and mean come from the same table,
+so a bin costs a few multiplies per node and no transcendentals.  Against
+mpmath quadrature of the same integral the kernel is within 3e-7 relative
+wherever the model is above 1e-6 of its peak; the analytic jacobian matches
+mpmath differentiation to 1e-10.  The SciPy path and the overlays call the
+same kernel; the frozen anchors are mpmath's numbers and hold it to 1e-6.
+
+What the extension is not: the photon-counting law below a few photons.
+Its mean sits above `lambda` there, so a fitted rate under about three
+photons comes back low by some five percent, and under one photon the
+model is no longer the count it names (the recovery sweep below has the
+numbers).  A read noise narrower than half a bin stops on the floor, as a
+Gaussian width does; to measure read noise, bin no wider than it.
+
+Recovery on synthetic Poisson + Gaussian histograms (64 bins, 5000 shots,
+compiled path; the lattice model's numbers from the previous round in
+brackets where they differ):
+
+| truth | rate | read noise | deviance / dof |
+|---|---:|---:|---:|
+| 0.1 photons, sigma 0.3 | 0.0004 +- 0.0006 [0.0998] | 0.41 +- 0.02 [0.30] | 17.2 [1.2] |
+| 0.5, sigma 1 | 0.19 +- 0.02 [0.49] | 1.11 +- 0.02 [0.99] | 1.26 [1.10] |
+| 2, sigma 0.3 (0.16-photon bins) | 1.88 +- 0.06 [2.01] | 0.62 +- 0.07 [0.31] | 7.1 [1.2] |
+| 2, sigma 1 | 1.90 +- 0.03 [2.03] | 1.14 +- 0.02 [1.01] | 1.05 |
+| 5, sigma 1 | 5.05 +- 0.03 | 1.12 +- 0.04 | 0.80 |
+| 30, sigma 3 | 29.9 +- 0.09 | 3.06 +- 0.13 | 1.08 |
+| 60, sigma 3 | 59.9 +- 0.11 | 2.59 +- 0.26 | 0.99 |
+| 210, sigma 3 | 210 +- 0.23 | 3.95 +- 0.63 | 1.17 |
+| 1000, sigma 3 | 1000 +- 0.5 | 2.9 +- 3.9 | 1.18 |
+| two states 3 / 30, sigma 1 | 2.86 +- 0.04, splitting 27.2 +- 0.12 | 1.13 +- 0.04 / 1.63 +- 0.29 | 1.01 |
+| two states 60 / 210, sigma 3 | 60.1 +- 0.16, splitting 150 +- 0.33 | 3.15 +- 0.30 / 3.21 +- 0.95 | 0.92 |
+| two states 0.5 / 6, sigma 1 | 0.07 +- 0.03, splitting 5.6 +- 0.14 | 1.10 +- 0.02 / 1.4 +- 0.3 | 0.79 |
+| two states 100 / 1000, sigma 3, 16-photon bins | 99.2 +- 0.3, splitting 900 +- 0.7 | 8.2 / 8.8 (on the half-bin floor) | 0.90 (Gaussian bimodal 0.17) |
+
+From five photons up the two models agree; the rate and the splitting are
+as precise as a Gaussian's centre and splitting at every rate, and the read
+noise carries its honest error bar where it is a small share of the
+variance.  At two photons in bins finer than a photon the data shows the
+integer comb and this model cannot draw it (deviance 7 against the
+lattice's 1.2, read noise doubled); at half a photon and below the rate
+runs low and then to zero while the amplitude and read noise absorb the
+peak -- the extension's mass and mean are not the count's.  Sixteen-photon
+bins put the read noise on the eight-photon floor, wider than the state,
+and the Gaussian bimodal fits those bins better.
 
 `python -m bench.plot_perf.run_fit_models --rounds 8`, `session.fit` wall
-on the sweep's own two-normal histogram (states at 8 +- 2 and 30 +- 4, so
-the read-noise widths here are two and four lattice steps -- wide for this
-model, whose regime is under one), median ms:
+on the sweep's two-normal histogram (states at 8 +- 2 and 30 +- 4), median
+ms, today's run against the lattice round's:
 
-| Model | Before this round | After |
+| Model | lattice | continuous |
 |---|---:|---:|
-| histogram_gaussian | 3.03 | 3.04 |
-| bimodal_gaussian | 3.82 | 3.50 |
-| histogram_poisson_gaussian | -- | 5.45 |
-| bimodal_poisson_gaussian | -- | 3.91 |
-
-The single Poisson-Gaussian row is a misfit by construction (one state
-asked to cover two, so its width runs to twelve lattice steps and the solver
-iterates longer); the bimodal row is the model on data shaped for it, 1.1x
-the Gaussian bimodal.  On a photon-count histogram (states at 0.7 and 6
-photons, read noise 0.45, 64 bins) the compiled solves are 0.7 / 1.0 ms for
-the Poisson-Gaussian single / bimodal against 0.6 / 0.7 ms for the Gaussian
-pair, and the compiled and SciPy optima agree to 3e-15.
+| histogram_gaussian | 3.04 | 2.91 |
+| bimodal_gaussian | 3.50 | 3.50 |
+| histogram_poisson_gaussian | 5.45 | 5.43 |
+| bimodal_poisson_gaussian | 3.91 | 4.19 |
 
 `python -m bench.plot_perf.run_mot_roi_chain --panel3 histogram --fit-model
-<model> --seconds 12` (new `--panel3 histogram`: forty source-index
-Histogram cells of the 40x500 MOT ROI, live bimodal fit per cell; pixel
-values, so the read-noise widths are tens of lattice steps -- the worst
-regime for the lattice sum):
+<model> --seconds 12` (forty source-index Histogram cells of the MOT ROI,
+live bimodal fit per cell; pixel values, widths of tens of photons), the
+Gaussian bimodal measured in the same session:
 
 | panel3 facet-histogram-fit-40 | bimodal_gaussian | bimodal_poisson_gaussian |
 |---|---:|---:|
-| fit_total wall / cpu ms per call | 18.6 / 8.0 | 22.3 / 13.9 |
-| numeric_fit_batch wall / cpu | 13.7 / 3.7 | 13.0 / 4.3 |
-| four-panel critical path median | 94.4 ms | 97.2 ms |
-| all four panels | 7.7 fps | 7.6 fps |
+| fit_total wall / cpu ms per call | 16.4 / 5.8 | 29.8 / 18.7 |
+| numeric_fit_batch wall / cpu | 11.9 / 2.8 | 14.5 / 4.3 |
+| four-panel critical path median | 97.0 ms | 106.6 ms |
+| all four panels | 7.7 fps | 7.5 fps |
 
-The first Poisson-Gaussian cut measured 259 ms `fit_total` here: not the
-solve (15 ms) but forty cells' overlays evaluated through a NumPy twin of
-the lattice sum over hundreds of terms per bin.  Deleting the twin and
-routing the evaluator through the compiled kernel is what the table shows.
+The solve is within 3 ms of the Gaussian's; the rest of `fit_total` is
+forty overlays through the kernel at widths of tens of photons, where a
+bin's window is hundreds of nodes.  The lattice round measured 22.3 / 13.9
+here.
