@@ -39,11 +39,6 @@ from .wire import (
 LOAD_TIMEOUT = 5.0
 SAFE_TIMEOUT = 5.0
 SAFE_RETRY_AFTER = 0.05
-#: How long a VERIFIED strobe waits for its acknowledgement before asking the
-#: status register instead.  Short on purpose: the read is the arbiter, the
-#: acknowledgement is a courtesy, and waiting the full action timeout for a
-#: courtesy stalled every lost FIRE ack for five seconds.
-STROBE_VERIFY_AFTER = 0.3
 SAFE_POLL_INTERVAL = 0.001
 MAXIMUM_CYCLE_COUNT = (1 << 32) - 1
 _MIN_SEAM_SPAN_TICKS = 3
@@ -629,6 +624,14 @@ class PulseStreamer:
         that is down, not a byte that was lost.  One good poll in between
         restores the observation completely; the failure stays counted on
         the report.
+
+        Two deadlines is therefore the longest the observation stays quiet
+        on a dead line (about ten seconds at the default) -- twice what one
+        verdict cost, by design, and no second knob.  A streamed scan does
+        not wait that long to find out: its bank refill (``_refill``) is
+        outside this grace, and a refill write that fails ends the
+        observation at once, where a board starved of its next chunk would
+        report UNDERFLOW on its own anyway.
         """
 
         try:
@@ -1133,6 +1136,14 @@ class PulseStreamer:
 
         * Neither -- an unanswered strobe stays fatal, because guessing is
           the one thing this path must never do.
+
+        How long the acknowledgement is waited for is the line's business,
+        not this method's: a non-resending strobe is one attempt, and the
+        line budgets an attempt by the bytes in flight
+        (``UartRegisterTransport._attempt_budget``).  This method once handed
+        the line a 0.3 s window of its own for the verified case -- the same
+        claim owned twice, and the second owner dead, because the line's
+        budget was already the shorter of the two.
         """
 
         rows = self._command(code)
@@ -1150,10 +1161,6 @@ class PulseStreamer:
             options: dict = {} if deadline is None else {"deadline": deadline}
             if stop is not None:
                 options["stop"] = stop
-            if verified and deadline is None:
-                # The acknowledgement gets a short window, because it is not
-                # the authority -- the status read below is.
-                options["deadline"] = time.monotonic() + STROBE_VERIFY_AFTER
             try:
                 self.transport.write_words(rows, resend=repeatable, **options)
                 return
