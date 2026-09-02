@@ -60,10 +60,26 @@ def test_real_batch_wrapper_forwards_exact_modes_without_inner_argument(tmp_path
     assert "-m zou_lab_control pulse_editor" in no_args.stdout
     shared = SHARED_LAUNCHER.read_text(encoding="utf-8")
     resolver = TOOLS_RESOLVER.read_text(encoding="utf-8")
-    assert 'set "PYTHONPATH=%ZLC_TOOL_REPO_ROOT%;%PYTHONPATH%"' in resolver
-    assert 'set "PYTHONPATH=%ZLC_TOOL_REPO_ROOT%"' in resolver
+    # The resolver is the one owner of "a launched command imports THIS
+    # checkout": it injects the repository root and every layer's src.  The
+    # layer list is read from packages/ itself, so a new layer that the
+    # resolver forgets is a red test, not a silent import of whatever
+    # editable install the interpreter happens to carry.
+    layers = sorted(
+        path.name
+        for path in (ROOT.parents[1] / "packages").iterdir()
+        if (path / "src").is_dir()
+    )
+    assert layers, "packages/ must hold at least one layer with a src tree"
+    for layer in layers:
+        assert f"%ZLC_TOOL_REPO_ROOT%\packages\{layer}\src" in resolver, layer
+    assert 'set "PYTHONPATH=%ZLC_CHECKOUT_PYTHONPATH%;%PYTHONPATH%"' in resolver
+    assert 'set "PYTHONPATH=%ZLC_CHECKOUT_PYTHONPATH%"' in resolver
     assert "PYTHONPATH=" not in shared
-    assert str(ROOT.parents[1]) in no_args.stdout.split("FAKE_PYTHONPATH=", 1)[1]
+    seen = no_args.stdout.split("FAKE_PYTHONPATH=", 1)[1]
+    assert str(ROOT.parents[1]) in seen
+    for layer in layers:
+        assert str(ROOT.parents[1] / "packages" / layer / "src") in seen, layer
     installer = INSTALL_LAUNCHER.read_text(encoding="utf-8")
     assert "/installed" in installer
     assert installer.rfind(
