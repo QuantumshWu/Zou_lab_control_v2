@@ -14,11 +14,14 @@ pairing: its two probe windows are that task's semantics.  THIS processor
 is the frame-general pairing for any multi-frame cycle.
 
 WHAT IT PUBLISHES.  One dataset, ``survival``, holding EVERY forward frame
-pair at once as ONE labelled cell axis: a three-frame cycle carries pair
+pair at once as ONE labelled point axis: a three-frame cycle carries pair
 entries "0-1", "0-2", "1-2" straight from the data -- one identity per
 pair, the calibration model-axis pattern (numeric identity, readable
-labels).  A pair is derived structure INSIDE one acquisition cycle, not a
-scan step, so it is cell data and the point table degenerates to one row.
+labels).  A pair is WHICH sub-measurement of the cycle is being asked
+about, exactly as the frames it was derived from are: the frames sit on
+the point axis of the occupancy signal, and their pairs sit on the point
+axis here, so the panel structure reads ``(cycles) x (pairs) x (sites)``
+and a grid gives each pair its own cell without anyone naming an axis.
 Each pair's value is the later frame's occupancy as a float and its
 validity is that pair's OWN denominator: the earlier frame loaded AND
 both frames judgeable.  A panel's MEAN projection is therefore exactly
@@ -32,7 +35,7 @@ from __future__ import annotations
 
 import numpy as np
 from zlc_data import (
-    COMPONENT,
+    READOUT_EVENT,
     AxisId,
     AxisSpec,
     DatasetSchema,
@@ -136,28 +139,27 @@ class FrameSurvivalProcessor:
             "?" if value is None else f"{value:g}"
             for value in frame_column.values
         )
-        pair_axis = AxisSpec(
+        pair_column = PointColumn(
             AxisId(f"{self.instance_id}.pair"),
             "pair",
-            COMPONENT,
-            len(pairs),
+            READOUT_EVENT,
+            PointColumn.NUMERIC,
+            tuple(range(len(pairs))),
             coordinate_labels=tuple(
                 f"{frame_names[condition]}-{frame_names[value]}"
                 for condition, value in pairs
             ),
         )
-        # A pair is derived structure inside one cycle, not a scan step: the
-        # point table degenerates to one row, and any topology the source
-        # carried described its own rows, which no longer exist here.
+        # The pairs are this output's point rows, one per pair, and the
+        # source's own rows (its frames) do not exist here; any topology
+        # the source carried described those rows, so none is carried.
         return DatasetSchema(
             source.repeat_axis,
-            PointTable(1, ()),
+            PointTable(len(pairs), (pair_column,)),
             None,
             ValueSchema(
-                (pair_axis, site_axis),
-                ValidityContract.components(
-                    pair_axis.axis_id, site_axis.axis_id
-                ),
+                (site_axis,),
+                ValidityContract.components(site_axis.axis_id),
                 np.dtype("<f8"),
                 "1",
             ),
@@ -172,10 +174,8 @@ class FrameSurvivalProcessor:
         values = np.asarray(occupied.block.values, dtype=bool)
         valid = np.asarray(occupied.expanded_validity(), dtype=bool)
         cycles, _frames, sites = values.shape
-        survival = np.full(
-            (cycles, 1, len(pairs), sites), np.nan, dtype="<f8"
-        )
-        eligible = np.zeros((cycles, 1, len(pairs), sites), dtype=bool)
+        survival = np.full((cycles, len(pairs), sites), np.nan, dtype="<f8")
+        eligible = np.zeros((cycles, len(pairs), sites), dtype=bool)
         for entry, (condition, value) in enumerate(pairs):
             # Eligible = the earlier frame saw the site loaded AND both
             # frames were judgeable.  That set is the denominator, so it IS
@@ -185,8 +185,8 @@ class FrameSurvivalProcessor:
                 & valid[:, condition, :]
                 & valid[:, value, :]
             )
-            eligible[:, 0, entry, :] = entry_eligible
-            survival[:, 0, entry, :] = np.where(
+            eligible[:, entry, :] = entry_eligible
+            survival[:, entry, :] = np.where(
                 entry_eligible, values[:, value, :].astype("<f8"), np.nan
             )
         return owned_snapshot_from_arrays(
@@ -224,9 +224,9 @@ class FrameSurvivalProcessor:
                 raise ValueError("finite source event lacks canonical placement")
             canonical = self._output_schema(signal_value.canonical_schema)
             # The source ledger counts (cycles x frames) cells; this output
-            # is ONE cell per cycle -- the pairs live inside the cell.  A
-            # cycle publishes all of its frames together, so the translation
-            # is exact -- and refused loudly if it ever is not.
+            # counts (cycles x pairs).  A cycle publishes all of its frames
+            # together, so the translation is exact -- and refused loudly
+            # if it ever is not.
             source_coverage = signal_value.coverage
             if (
                 source_coverage.written_cells % frames
@@ -237,25 +237,25 @@ class FrameSurvivalProcessor:
                     "keep exact bookkeeping"
                 )
             coverage = DatasetCoverage(
-                source_coverage.written_cells // frames,
-                source_coverage.total_cells // frames,
+                source_coverage.written_cells // frames * pair_count,
+                source_coverage.total_cells // frames * pair_count,
             )
             origin = (signal_value.cell_origin[0], 0)
         elif signal_value.coverage is None:
             cycles = source_schema.repeat_axis.size
             canonical = self._output_schema(source_schema)
-            coverage = DatasetCoverage(cycles, cycles)
+            coverage = DatasetCoverage(cycles * pair_count, cycles * pair_count)
             origin = (0, 0)
         else:
             # A monitor source counts ITS geometry (cycles x frames); this
-            # output is one row per cycle, and the runtime checks the ledger
-            # against the snapshot actually published.
+            # output counts (cycles x pairs), and the runtime checks the
+            # ledger against the snapshot actually published.
             canonical = None
             cycles = survival.block.schema.repeat_axis.size
             monitor = signal_value.coverage
             coverage = MonitorCoverage(
-                min(cycles, monitor.written_cells // frames),
-                cycles,
+                min(cycles, monitor.written_cells // frames) * pair_count,
+                cycles * pair_count,
             )
             origin = None
         return {

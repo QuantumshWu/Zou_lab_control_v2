@@ -3460,10 +3460,12 @@ def test_task_console_layout_rejects_a_non_catalog_facet_cell(presenter) -> None
 
     assert presenter.apply_layout(document) is False
     assert presenter.panels == {}
-    assert any(
-        "cell kind must be curve, image, or histogram" in text
-        for _severity, text in presenter.view.status
+    from zlc_plot import GRID_CELL_KINDS
+
+    expected = "cell kind must be one of " + ", ".join(
+        kind.value for kind in GRID_CELL_KINDS
     )
+    assert any(expected in text for _severity, text in presenter.view.status)
 
 
 def test_a_board_naming_a_signal_nobody_publishes_keeps_the_blank_panel(
@@ -4665,6 +4667,7 @@ def test_a_panel_says_what_kind_of_data_it_is_drawing(presenter, session) -> Non
     sentence here that the strip would have to take apart again.
     """
 
+    from zlc_data import LATEST_COORDINATE
     from zlc_plot.semantics import (
         is_scope_fate,
         schema_structure,
@@ -4694,6 +4697,7 @@ def test_a_panel_says_what_kind_of_data_it_is_drawing(presenter, session) -> Non
         if str(field["key"]).startswith("fate:")
         for value, _label in tuple(field["cycle_choices"] or ())
         if is_scope_fate(value)
+        and scope_coordinate_from_fate(value) is not LATEST_COORDINATE
     )
     assert presenter.update_panel_state(
         binding.panel_id, {"semantic": {str(fate["key"]): pinned}}
@@ -4707,13 +4711,16 @@ def test_a_panel_says_what_kind_of_data_it_is_drawing(presenter, session) -> Non
         "the authored cycle value must not be replaced by the older accepted "
         "surface while its configuration is in flight"
     )
-    _settle_panel_hosts(
-        presenter,
-        lambda: bool(binding.parameter_surface.get("data_scope")),
-    )
     number = float(scope_coordinate_from_fate(pinned))
     pinned_text = (
         str(int(number)) if number.is_integer() else f"{number:g}"
+    )
+    # The strip already says "Latest" for the default scope, so settling
+    # on any scope proves nothing: wait for the PINNED one.
+    _settle_panel_hosts(
+        presenter,
+        lambda: binding.parameter_surface.get("data_scope")
+        == ((str(fate["label"]), pinned_text),),
     )
     assert binding.parameter_surface["data_scope"] == (
         (str(fate["label"]), pinned_text),
@@ -4728,6 +4735,7 @@ def test_restored_live_selector_answers_displayed_shot_before_plane_latest(
     """Bridge attachment must not replace the screen's first causal parent."""
 
     from zlc_runtime import SelectionRange, SelectionState
+    from zlc_runtime.selection_bridge import FacetCondition
     from zlc_workbench.selection import panel_selection_document
 
     session.load_pulse(PULSE_NAME)
@@ -4781,6 +4789,10 @@ def test_restored_live_selector_answers_displayed_shot_before_plane_latest(
             ),
         )
         y_axis, x_axis = value.snapshot.block.schema.cell_schema.data_axes
+        # A selection names the exact surface it was drawn on, scope
+        # included: the image shows the latest frame, and the subject
+        # freezes that into the frame coordinate a restore must carry.
+        subject = original.accepted_display.selection_subject
         selection = SelectionState(
             "image",
             "area",
@@ -4808,6 +4820,11 @@ def test_restored_live_selector_answers_displayed_shot_before_plane_latest(
                     ),
                 ),
             ),
+            facets=tuple(
+                FacetCondition(str(ref.axis_id), coordinate, ref.domain.value)
+                for ref, coordinate in subject.scope
+            ),
+            repeat_index=subject.repeat_index,
         )
         restored_state = replace(
             original.state,
@@ -5129,11 +5146,12 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     """A display reads the canonical scan, never its final one-point chunk."""
 
     from zlc_data import (
-        COMPONENT,
+        READOUT_EVENT,
         SITE,
         AxisId,
         AxisSpec,
         DatasetSchema,
+        PointColumn,
         PointTable,
         REPEAT,
         ValidityContract,
@@ -5157,22 +5175,26 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     cells = tuple(np.ndindex(*dimensions))
     repeat_id = AxisId("survival.repeat")
     event_repeat = AxisSpec(repeat_id, "repeat", REPEAT, 1, (0,))
-    pair = AxisSpec(
+    # Frame survival publishes its pairs as a READOUT_EVENT point column --
+    # a choice of sub-measurement, as a camera's frames are -- so the scan
+    # folds them in as its outermost dimension, ahead of the plan's axes.
+    pair = PointColumn(
         AxisId("survival.pair"),
         "pair",
-        COMPONENT,
-        3,
+        READOUT_EVENT,
+        PointColumn.NUMERIC,
+        (0, 1, 2),
         coordinate_labels=("0-1", "0-2", "1-2"),
     )
     site = AxisSpec(AxisId("survival.site"), "site", SITE, 5, tuple(range(5)))
     cell_schema = ValueSchema(
-        (pair, site),
-        ValidityContract.components(pair.axis_id, site.axis_id),
+        (site,),
+        ValidityContract.components(site.axis_id),
         np.dtype("<f8"),
         "1",
     )
     event_schema = DatasetSchema(
-        event_repeat, PointTable(1, ()), None, cell_schema
+        event_repeat, PointTable(3, (pair,)), None, cell_schema
     )
     canonical = scan_dataset_schema(
         event_schema,
@@ -5182,7 +5204,7 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     )
     event = owned_snapshot_from_arrays(
         event_schema,
-        np.ones((1, 1, pair.size, site.size)),
+        np.ones((1, 3, site.size)),
         1,
         stream_generation="exact-scan-panel",
     )
@@ -5202,7 +5224,10 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
             "survival": LiveDatasetOutput(
                 declaration,
                 event,
-                DatasetCoverage(1, canonical.repeat_axis.size * len(cells)),
+                DatasetCoverage(
+                    event_schema.point_table.row_count,
+                    canonical.repeat_axis.size * canonical.point_table.row_count,
+                ),
                 canonical_schema=canonical,
                 cell_origin=(0, 0),
             )
@@ -5212,8 +5237,13 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     expected = schema_structure(canonical)
     assert expected == (
         (("repeat", 2),),
-        (("scan.field.x", 65), ("scan.field.y", 2), ("scan.field.z", 2)),
-        (("pair", 3), ("site", 5)),
+        (
+            ("survival.pair", 3),
+            ("scan.field.x", 65),
+            ("scan.field.y", 2),
+            ("scan.field.z", 2),
+        ),
+        (("site", 5),),
     )
 
     refused = presenter.add_panel(
@@ -5252,8 +5282,8 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     ]["data_structure"] == expected
 
     # The real large-map geometry that exposed the second half of this bug:
-    # a dense 3x35 result is deliberately moved off the image axes so the
-    # three scan dimensions become facet/y/x.  The whole fate table must land
+    # the 35 sites and the three pair events are deliberately moved off the
+    # image axes so the three scan dimensions become facet/y/x.  The whole fate table must land
     # atomically and a terminal Frozen host must reproduce the same limits.
     map_dimensions = (10, 10, 10)
     map_cells = tuple(np.ndindex(*map_dimensions))
@@ -5261,13 +5291,13 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
         AxisId("map.site"), "site", SITE, 35, tuple(range(35))
     )
     map_cell_schema = ValueSchema(
-        (pair, map_site),
-        ValidityContract.components(pair.axis_id, map_site.axis_id),
+        (map_site,),
+        ValidityContract.components(map_site.axis_id),
         np.dtype("<f8"),
         "1",
     )
     map_event_schema = DatasetSchema(
-        event_repeat, PointTable(1, ()), None, map_cell_schema
+        event_repeat, PointTable(3, (pair,)), None, map_cell_schema
     )
     map_canonical = scan_dataset_schema(
         map_event_schema,
@@ -5279,7 +5309,7 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     )
     map_event = owned_snapshot_from_arrays(
         map_event_schema,
-        np.ones((1, 1, pair.size, map_site.size)),
+        np.ones((1, 3, map_site.size)),
         1,
         stream_generation="exact-map-panel",
     )
@@ -5297,8 +5327,9 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
                 declaration,
                 map_event,
                 DatasetCoverage(
-                    1,
-                    map_canonical.repeat_axis.size * len(map_cells),
+                    map_event_schema.point_table.row_count,
+                    map_canonical.repeat_axis.size
+                    * map_canonical.point_table.row_count,
                 ),
                 canonical_schema=map_canonical,
                 cell_origin=(0, 0),
@@ -5327,7 +5358,7 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     scan_fates = {
         fate_field_name(AxisRef.point_dimension("scan.field.y")): "y",
         fate_field_name(AxisRef.point_dimension("scan.field.z")): "x",
-        fate_field_name(AxisRef.data("survival.pair")): "reduce",
+        fate_field_name(AxisRef.point_dimension("survival.pair")): "reduce",
         fate_field_name(AxisRef.data("map.site")): "reduce",
     }
     offered_fates = {
@@ -5358,7 +5389,7 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
             ranges=(
                 SelectionRange("map.site", 0.0, 10.0, domain="data"),
                 SelectionRange(
-                    "survival.pair", 0.0, 2.0, domain="data"
+                    "survival.pair", 0.0, 2.0, domain="point_dimension"
                 ),
             ),
         )),
@@ -5392,7 +5423,7 @@ def test_exact_scan_panels_keep_axes_in_titles_and_refused_settings(
     )
     live_snapshot = _accepted(mapped.port, "plot_input")
     assert live_snapshot.block.schema.fingerprint == map_canonical.fingerprint
-    assert live_snapshot.block.values.shape == (20, 1000, 3, 35)
+    assert live_snapshot.block.values.shape == (20, 3000, 35)
     assert (
         mapped.frozen_data.snapshot.block.schema.fingerprint
         == map_canonical.fingerprint

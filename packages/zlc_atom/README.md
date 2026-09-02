@@ -279,7 +279,11 @@ compatible presenter join `occupied` to `frame_judged` without knowing the
 Occupancy plugin. The concrete Temperature Task reuses the occupied values and
 their expanded validity for its authored before/trap-off/after cycles: only a
 valid, initially occupied pair is a survival trial. It publishes the binary
-per-site `survival` dataset only. Its declared preview and artifact both pool
+per-site `survival` dataset only, with the frame pairs as a `READOUT_EVENT`
+point column of the cycle (one row per pair, the sites in the cell): a scan
+folds them in as an event dimension ahead of its own axes, and the default
+plots treat them as they treat camera frames -- a grid faces them, anything
+else shows the latest pair. Its declared preview and artifact both pool
 that same dataset and its validity into survival rate against trap-off time;
 there is no second rate history. It does not fit a temperature or lifetime and
 does not derive a 1/e crossing. Its run retains one final JSON, summary and a
