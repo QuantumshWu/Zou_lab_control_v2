@@ -442,3 +442,121 @@ def test_the_side_frames_stay_above_their_own_content() -> None:
         assert edge_dark("distribution", "left") > 0.9, "rail left spine missing"
     finally:
         session.close()
+
+
+def _side_axis_ids(renderer) -> dict[str, set[int]]:
+    """The colour scale's long axis and the rail's two axes, by role."""
+
+    roles: dict[str, set[int]] = {}
+    for role in ("colorbar", "distribution"):
+        roles[role] = {
+            id(axis)
+            for axes in renderer._axes.get(role, ())
+            for axis in (axes.xaxis, axes.yaxis)
+        }
+    return roles
+
+
+def _replayed_axis_ids(renderer) -> set[int]:
+    return {
+        axis_id
+        for axis_id, (_key, commands) in renderer._dynamic_axis_commands.items()
+        if commands
+    }
+
+
+def test_held_side_chrome_is_replayed_and_stays_full_draw_exact() -> None:
+    """Limits that hold: the colour scale and rail axes replay their draw.
+
+    Four revisions of the same picture under the default hysteresis keep
+    every side limit in place, so from the third frame on the colour scale's
+    long axis and the rail's axes are replayed rather than redrawn -- and
+    the replayed frame is still the full draw, pixel for pixel.
+    """
+
+    size = 128
+    schema = _image_contract(size)
+    session = PlotSession(
+        _snapshot(schema, size, 40000.0, 1, seed=31),
+        ImagePlot(
+            AxisRef.data("camera_x"),
+            AxisRef.data("camera_y"),
+            labels=PlotLabels("replay", "x", "y", value="Counts"),
+        ),
+        parameters={"relim_mode": "normal"},
+    )
+    try:
+        renderer = session._renderer
+        for revision, seed in ((2, 32), (3, 33), (4, 34), (5, 35)):
+            session.update_data(_snapshot(schema, size, 40000.0, revision, seed=seed))
+        roles = _side_axis_ids(renderer)
+        replayed = _replayed_axis_ids(renderer)
+        assert replayed & roles["colorbar"], "the held colour scale was never replayed"
+        assert replayed & roles["distribution"], "the held rail was never replayed"
+        assert replayed <= roles["colorbar"] | roles["distribution"]
+        assert _composed_matches_full_draw(session) == 0
+    finally:
+        session.close()
+
+
+def test_moving_colour_scale_is_never_recorded() -> None:
+    """A key that changes every frame is drawn plainly, never recorded.
+
+    TIGHT re-fits the colour scale to each revision of a range that moves,
+    so its endpoint labels are new every frame and the long axis' key never
+    repeats.  The frame stays full-draw exact either way.
+    """
+
+    size = 128
+    schema = _image_contract(size)
+    session = PlotSession(
+        _snapshot(schema, size, 40000.0, 1, seed=41),
+        ImagePlot(
+            AxisRef.data("camera_x"),
+            AxisRef.data("camera_y"),
+            labels=PlotLabels("tight-replay", "x", "y", value="Counts"),
+        ),
+        parameters={"relim_mode": "tight"},
+    )
+    try:
+        renderer = session._renderer
+        scales = (40000.0, 41000.0, 39500.0, 40500.0)
+        for revision, scale in enumerate(scales, start=2):
+            session.update_data(_snapshot(schema, size, scale, revision, seed=40 + revision))
+        roles = _side_axis_ids(renderer)
+        replayed = _replayed_axis_ids(renderer)
+        assert not (replayed & roles["colorbar"]), "a re-fitted scale must not replay"
+        assert _composed_matches_full_draw(session) == 0
+    finally:
+        session.close()
+
+
+def test_replayed_side_chrome_follows_a_limit_change_exactly() -> None:
+    """A replay that no longer matches its key is dropped, not reused.
+
+    After the side chrome has settled into replay, the value range collapses
+    a thousandfold: every key changes, the recorded draws are stale, and the
+    frame must come from a fresh draw -- full-draw exact, with no stale mark
+    or label from the replayed frames.
+    """
+
+    size = 128
+    schema = _image_contract(size)
+    session = PlotSession(
+        _snapshot(schema, size, 40000.0, 1, seed=51),
+        ImagePlot(
+            AxisRef.data("camera_x"),
+            AxisRef.data("camera_y"),
+            labels=PlotLabels("collapse", "x", "y", value="Counts"),
+        ),
+        parameters={"relim_mode": "normal"},
+    )
+    try:
+        renderer = session._renderer
+        for revision in (2, 3, 4):
+            session.update_data(_snapshot(schema, size, 40000.0, revision, seed=50 + revision))
+        assert _replayed_axis_ids(renderer), "the scene never settled into replay"
+        session.update_data(_snapshot(schema, size, 35.0, 5, seed=55))
+        assert _composed_matches_full_draw(session) == 0
+    finally:
+        session.close()

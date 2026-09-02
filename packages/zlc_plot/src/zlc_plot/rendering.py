@@ -257,6 +257,125 @@ def _text_raster_entry(
     return (mask, offset_x, offset_y, left - reach, bottom - (reach + 1))
 
 
+#: One recorded renderer call: the method, a frozen graphics context, and
+#: the positional and keyword arguments it was given.
+_RecordedDraw = tuple[tuple[str, Any, tuple[Any, ...], dict[str, Any]], ...]
+
+#: The renderer methods a recorded draw may consist of, and the ones whose
+#: appearance voids a recording: replaying a subset of what an artist drew
+#: would silently drop pixels.
+_RECORDED_DRAW_METHODS = (
+    "draw_path",
+    "draw_markers",
+    "draw_path_collection",
+    "draw_text",
+)
+_UNRECORDED_DRAW_METHODS = (
+    "draw_image",
+    "draw_quad_mesh",
+    "draw_gouraud_triangles",
+    "draw_tex",
+)
+#: Stands in the dynamic-axis table for a draw that could not be recorded.
+_UNRECORDABLE: Any = ()
+
+
+def _record_artist_draw(artist: Any, renderer: Any) -> _RecordedDraw | None:
+    """Draw ``artist`` on ``renderer`` and return the renderer calls it made.
+
+    The calls are taken on the renderer the artist actually draws on -- no
+    scratch buffer and no second draw -- by shadowing the renderer's draw
+    methods for the duration and restoring whatever was there before,
+    which may itself be an instance-level fitting such as the text memo.
+    An artist that asks for a method the recorder does not keep yields
+    ``None``: nothing partial is ever replayed.
+    """
+
+    active: list[tuple[str, Any, tuple[Any, ...], dict[str, Any]]] = []
+    complete = [True]
+    saved: dict[str, Any] = {}
+    names = (*_RECORDED_DRAW_METHODS, *_UNRECORDED_DRAW_METHODS)
+    try:
+        for method_name in _RECORDED_DRAW_METHODS:
+            original = getattr(renderer, method_name)
+
+            def record(
+                gc: Any,
+                *args: Any,
+                _name: str = method_name,
+                _original: Any = original,
+                **kwargs: Any,
+            ) -> Any:
+                frozen = renderer.new_gc()
+                frozen.copy_properties(gc)
+                active.append((_name, frozen, args, dict(kwargs)))
+                return _original(gc, *args, **kwargs)
+
+            if method_name in vars(renderer):
+                saved[method_name] = vars(renderer)[method_name]
+            setattr(renderer, method_name, record)
+        for method_name in _UNRECORDED_DRAW_METHODS:
+            original = getattr(renderer, method_name, None)
+            if original is None:
+                continue
+
+            def refuse(*args: Any, _original: Any = original, **kwargs: Any) -> Any:
+                complete[0] = False
+                return _original(*args, **kwargs)
+
+            if method_name in vars(renderer):
+                saved[method_name] = vars(renderer)[method_name]
+            setattr(renderer, method_name, refuse)
+        artist.draw(renderer)
+    finally:
+        for method_name in names:
+            if method_name in saved:
+                setattr(renderer, method_name, saved[method_name])
+            elif method_name in vars(renderer):
+                delattr(renderer, method_name)
+    return tuple(active) if complete[0] else None
+
+
+def _replay_draw(commands: _RecordedDraw, renderer: Any) -> None:
+    for method_name, gc, args, kwargs in commands:
+        getattr(renderer, method_name)(gc, *args, **kwargs)
+
+
+def _axis_draw_key(axis: Any) -> tuple[Any, ...]:
+    """The facts an ``Axis.draw`` is a function of, as one comparable value.
+
+    Tick positions come from the locator applied to the view interval and
+    the axes box; their labels from the formatter applied to those; the
+    label text and pad place the axis label; the tick parameters say which
+    marks and labels exist.  A fixed locator or formatter carries its own
+    values, so a colour scale whose endpoint ticks moved is a different
+    key at an unchanged view.  Font and style are the renderer's constants
+    and are not part of it.
+    """
+
+    from matplotlib.ticker import FixedFormatter, FixedLocator
+
+    axes = axis.axes
+    locator = axis.get_major_locator()
+    formatter = axis.get_major_formatter()
+    return (
+        tuple(axes.bbox.bounds),
+        tuple(axes.viewLim.bounds),
+        axis.get_visible(),
+        axis.get_scale(),
+        type(locator),
+        tuple(map(float, locator.locs)) if isinstance(locator, FixedLocator) else None,
+        type(formatter),
+        tuple(formatter.seq) if isinstance(formatter, FixedFormatter) else None,
+        type(axis.get_minor_locator()),
+        axis.label.get_text(),
+        float(axis.labelpad),
+        axis.get_label_position(),
+        tuple(sorted(axis.get_tick_params(which="major").items())),
+        tuple(sorted(axis.get_tick_params(which="minor").items())),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _PreparedSeries:
     x: np.ndarray
@@ -1537,6 +1656,14 @@ class MatplotlibRenderer:
         self._boundary_chrome_commands: dict[
             int, tuple[tuple[str, Any, tuple[Any, ...], dict[str, Any]], ...]
         ] = {}
+        #: The DYNAMIC axes -- a colour scale's, a distribution rail's, whose
+        #: ticks move with the data -- keyed by the facts their draw is a
+        #: function of.  A key seen once is drawn plainly; seen twice
+        #: running it is recorded while drawn; from then on it is replayed.
+        #: A key that changes every frame is therefore never recorded.
+        self._dynamic_axis_commands: dict[
+            int, tuple[tuple[Any, ...], _RecordedDraw | None]
+        ] = {}
         self._boundary_chrome_signature: tuple[object, ...] | None = None
         #: Canonical raw data behind each displayed line.  The artist may hold
         #: a display-resolution envelope, but fit-source presentation and any
@@ -1799,7 +1926,7 @@ class MatplotlibRenderer:
         self._series_hit_cache.clear()
         self._series_hover = self._series_locked = self._series_press = None
         self._boundary_chrome_cache.clear()
-        self._boundary_chrome_commands.clear()
+        self._forget_chrome_commands()
         self._boundary_chrome_signature = None
         self._selector_artists.clear()
         self._selector_topologies.clear()
@@ -2163,7 +2290,7 @@ class MatplotlibRenderer:
         self._background_signature = None
         self._chrome_churn = 0
         self._boundary_chrome_cache.clear()
-        self._boundary_chrome_commands.clear()
+        self._forget_chrome_commands()
         self._boundary_chrome_signature = None
         self._forget_gesture_region()
 
@@ -2333,7 +2460,7 @@ class MatplotlibRenderer:
         )
         if signature != self._boundary_chrome_signature:
             self._boundary_chrome_cache.clear()
-            self._boundary_chrome_commands.clear()
+            self._forget_chrome_commands()
             self._boundary_chrome_signature = signature
         commands_to_record: list[Any] = []
         facet_overview_axes = (
@@ -2424,6 +2551,17 @@ class MatplotlibRenderer:
             self._record_boundary_chrome_commands(commands_to_record)
         return collected
 
+    def _forget_chrome_commands(self) -> None:
+        """Drop every recorded draw.
+
+        A recording is only trusted between frames that changed nothing it
+        depends on, and the compose knows one such change collectively: a
+        background it could not reuse.  Both recorded families go together.
+        """
+
+        self._boundary_chrome_commands.clear()
+        self._dynamic_axis_commands.clear()
+
     def _record_boundary_chrome_commands(self, artists: Sequence[Any]) -> None:
         """Freeze Agg path commands for stable tick marks and spines."""
 
@@ -2432,32 +2570,10 @@ class MatplotlibRenderer:
         width = int(round(float(self._figure.bbox.width)))
         height = int(round(float(self._figure.bbox.height)))
         recorder = RendererAgg(width, height, self._figure.dpi)
-        active: list[tuple[str, Any, tuple[Any, ...], dict[str, Any]]] = []
-        for method_name in (
-            "draw_path",
-            "draw_markers",
-            "draw_path_collection",
-        ):
-            original = getattr(recorder, method_name)
-
-            def record(
-                gc: Any,
-                *args: Any,
-                _name: str = method_name,
-                _original: Any = original,
-                **kwargs: Any,
-            ) -> Any:
-                frozen = recorder.new_gc()
-                frozen.copy_properties(gc)
-                active.append((_name, frozen, args, dict(kwargs)))
-                return _original(gc, *args, **kwargs)
-
-            setattr(recorder, method_name, record)
         for artist in artists:
-            active = []
-            artist.draw(recorder)
-            if active:
-                self._boundary_chrome_commands[id(artist)] = tuple(active)
+            commands = _record_artist_draw(artist, recorder)
+            if commands:
+                self._boundary_chrome_commands[id(artist)] = commands
 
     def _draw_dynamic_artist(
         self,
@@ -2467,8 +2583,26 @@ class MatplotlibRenderer:
     ) -> None:
         commands = self._boundary_chrome_commands.get(id(artist))
         if commands is not None:
-            for method_name, gc, args, kwargs in commands:
-                getattr(renderer, method_name)(gc, *args, **kwargs)
+            _replay_draw(commands, renderer)
+            return
+        from matplotlib.axis import Axis
+
+        if isinstance(artist, Axis):
+            key = _axis_draw_key(artist)
+            seen = self._dynamic_axis_commands.get(id(artist))
+            if seen is not None and seen[0] == key:
+                if seen[1] is _UNRECORDABLE:
+                    artist.draw(renderer)
+                elif seen[1] is not None:
+                    _replay_draw(seen[1], renderer)
+                else:
+                    self._dynamic_axis_commands[id(artist)] = (
+                        key,
+                        _record_artist_draw(artist, renderer),
+                    )
+                return
+            self._dynamic_axis_commands[id(artist)] = (key, None)
+            artist.draw(renderer)
             return
         if not self._blit_exact_rgba_image(artist, canvas):
             artist.draw(renderer)
@@ -3669,7 +3803,7 @@ class MatplotlibRenderer:
             # not see.  The boundary cache is only ever trusted between two
             # consecutive reusable frames.
             self._boundary_chrome_cache.clear()
-            self._boundary_chrome_commands.clear()
+            self._forget_chrome_commands()
         dynamics = self._dynamic_artists()
         ordered = sorted(dynamics, key=lambda entry: entry[0])
         # Where the gesture's own artists begin, in the one z-order a full
