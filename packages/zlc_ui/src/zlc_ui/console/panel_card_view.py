@@ -1088,7 +1088,11 @@ class PanelCardView(FluentGroupBox):
             layout = QtWidgets.QVBoxLayout(popup)
             pad = max(1, scaled_px(10))
             layout.setContentsMargins(pad, pad, 0, pad)
-            layout.setSpacing(0)
+            # The title row sits in the same air above and below it.  With
+            # no gap under it the row hugged the first field, and its close
+            # button -- centred in the row -- read as sitting low in a blank
+            # that was all above it.
+            layout.setSpacing(pad)
             header = QtWidgets.QWidget(popup)
             header.setStyleSheet("background: transparent;")
             header_layout = QtWidgets.QHBoxLayout(header)
