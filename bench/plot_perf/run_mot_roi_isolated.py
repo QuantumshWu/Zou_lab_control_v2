@@ -291,12 +291,14 @@ def run(*, updates: int) -> dict:
             updates=updates,
             fit={"model": "anisotropic_gaussian_center", "fit_all_facets": True},
         ),
+        # The console's facet grid draws its curve cells with the product
+        # default -- uncertainty bars ON -- and the same-source comparison
+        # is only a comparison when this side asks for the same picture.
         _case(
             "panel3 facet-curve-fit-40",
             roi,
             specs["panel3 facet-curve-fit-40"],
             updates=updates,
-            parameters={"uncertainty": False},
             fit={"model": "gaussian_offset", "fit_all_facets": True},
         ),
         _case(
@@ -304,7 +306,6 @@ def run(*, updates: int) -> dict:
             roi,
             specs["panel3b facet-curve-40"],
             updates=updates,
-            parameters={"uncertainty": False},
         ),
         _case(
             "panel3c facet-histogram-40",
