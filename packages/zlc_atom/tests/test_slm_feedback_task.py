@@ -10,6 +10,8 @@ import numpy as np
 import pytest
 from zlc_data.figure_archive import read_archive
 from zlc_pulse import PulseSequence
+from zlc_pulse.device import DoneReport
+from zlc_pulse.wire import STATUS_DONE, STATUS_ERROR
 from zlc_plot import FacetGridPlot, HistogramPlot, Reduction, read_figure_plot
 from zlc_runtime import NodeHost, SignalDataPlane
 
@@ -492,13 +494,17 @@ def _task(
 
 
 def _measured(task: SlmFeedbackTask, result):
-    """Give a mocked shot batch the exact device facts the real path freezes."""
+    """Give a mocked shot batch the exact device facts the real path freezes.
+
+    A mocked batch is a clean shot: the pulse verdict the real path returns
+    fifth is "" here.
+    """
 
     task._actual_device_snapshots = {
         "camera": {"exposure_seconds": 0.020},
         "sequencer": {"state": {"loaded": True}},
     }
-    return result
+    return (*result, "")
 
 
 def test_descriptor_and_direct_update_keep_the_plugin_boundary() -> None:
@@ -1605,7 +1611,10 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
             return current_dataset(*args, **kwargs)
 
         monkeypatch.setattr(plane, "current_dataset", one_result_lookup)
-        samples, saturated, missing, _mean = task._measure(pulse, _Context(), 0)
+        samples, saturated, missing, _mean, pulse_warning = task._measure(
+            pulse, _Context(), 0
+        )
+        assert pulse_warning == ""
         assert lookup_count == 1
         monkeypatch.setattr(plane, "current_dataset", current_dataset)
         np.testing.assert_allclose(samples, np.broadcast_to(fluorescence, (10, 35)))
@@ -1683,8 +1692,8 @@ def test_measurement_streams_bounded_exact_grouped_qcmos_publications(
 
         monkeypatch.setattr(feedback_module, "extract_box_signals", partial_signals)
         slm.apply_phase(np.full(slm.shape_yx, 0.25, dtype=np.float32))
-        partial_samples, _saturated, partial_missing, _mean = task._measure(
-            pulse, _Context(), 1
+        partial_samples, _saturated, partial_missing, _mean, _warning = (
+            task._measure(pulse, _Context(), 1)
         )
         second_camera = plane.current_dataset(signal)
         assert second_camera.ref.stream_generation != first_camera_generation
@@ -1782,7 +1791,9 @@ def test_electron_measurement_uses_current_conversion_and_saturation(
             calibration=calibration(),
         )
         try:
-            _samples, saturated, missing, _mean = task._measure(pulse, _Context(), 0)
+            _samples, saturated, missing, _mean, _warning = task._measure(
+                pulse, _Context(), 0
+            )
             assert saturated == (17,) and not missing
             assert task._effective_photoelectrons is effective_photoelectrons
         finally:
@@ -1792,6 +1803,137 @@ def test_electron_measurement_uses_current_conversion_and_saturation(
     run(recorded_offset, recorded_scale, True)
     run(None, None, False)
     run(recorded_offset, 0.6, True)
+
+
+def test_measure_keeps_observer_only_faults_repeats_board_faults_and_loads_once(
+    tmp_path: Path,
+) -> None:
+    """The real-run failure: one lost UART poll byte at shot 85 of 200.
+
+    An observer-only fault with every frame delivered is a good batch; a
+    board fault repeats the batch once and the second fault is fatal; the
+    program is loaded once per run because the board reports still holding it.
+    """
+
+    def frame_source(ordinal: int, exposure: float) -> np.ndarray:
+        del ordinal, exposure
+        return np.full((5, 7), 3, dtype=np.uint16)
+
+    camera = VirtualCamera(
+        VirtualCameraConfig(frame_shape_yx=(5, 7), exposure_seconds=0.005),
+        frame_source=frame_source,
+    )
+    observer_error = (
+        "TimeoutError: UART reply timed out on COM10 at 3000000 baud: "
+        "0 of 1 replies in 4.88s (12 byte(s) read, 12 unparsed)"
+    )
+
+    def report(*, status: int, observer_error: str = "", underflow: bool = False):
+        return DoneReport(
+            status=status,
+            cursor=85,
+            underflow=underflow,
+            elapsed_seconds=1.0,
+            status_reads=(status, status),
+            cursor_reads=(85, 85),
+            observer_error=observer_error,
+        )
+
+    class Sequencer:
+        def __init__(self) -> None:
+            self.digest = None
+            self.loads = 0
+            self.fires: list[int | None] = []
+            self.reports: list[DoneReport] = []
+
+        def describe(self):
+            return object()
+
+        def load(self, program, *, source=None, rows=()) -> None:
+            del source, rows
+            self.loads += 1
+            self.digest = program.digest
+
+        def fire(self, *, cycles=1) -> None:
+            self.fires.append(cycles)
+            camera.trigger(int(cycles))
+
+        def wait_done(self, timeout=None):
+            del timeout
+            return self.reports.pop(0)
+
+        def safe(self):
+            return None
+
+        def snapshot(self):
+            return {"loaded": self.digest is not None, "applied_digest": self.digest}
+
+    sequencer = Sequencer()
+    plane = SignalDataPlane()
+    slm = _Slm((5, 7))
+    task = _task(
+        tmp_path,
+        slm=slm,
+        camera=camera,
+        sequencer=sequencer,
+        plane=plane,
+        target=np.ones((5, 7), dtype=np.float32),
+        calibration=_calibration(),
+    )
+    installation = create_installation("virtual")
+    try:
+        pulse = resolve_pulse(
+            FEEDBACK_PULSE_SEQUENCE,
+            path=IMAGING_PULSE_RESOURCE.path,
+            board=installation.device("sequencer").describe(),
+            api_values={},
+        )
+    finally:
+        installation.close()
+    try:
+        # Observer-only fault, all ten frames in hand: kept, with the fault
+        # recorded as the batch's warning, in one fire.
+        sequencer.reports = [
+            report(status=STATUS_ERROR, observer_error=observer_error)
+        ]
+        samples, _saturated, _missing, _mean, warning = task._measure(
+            pulse, _Context(), 0
+        )
+        assert samples.shape == (10, 35)
+        assert warning == f"pulse observer failed: {observer_error}"
+        assert sequencer.fires == [10]
+        assert sequencer.loads == 1
+
+        # The board itself reporting an error repeats the batch once; the
+        # clean repeat is the candidate's measurement, with no warning.
+        slm.apply_phase(np.full(slm.shape_yx, 0.25, dtype=np.float32))
+        sequencer.reports = [
+            report(status=STATUS_ERROR),
+            report(status=STATUS_DONE),
+        ]
+        _samples, _saturated, _missing, _mean, warning = task._measure(
+            pulse, _Context(), 1
+        )
+        assert warning == ""
+        assert sequencer.fires == [10, 10, 10]
+        # The board still holds the program: no second LOAD in this run.
+        assert sequencer.loads == 1
+
+        # An observer fault that also saw the bank underrun is a board fact;
+        # a second fault on the repeat is the candidate's failure.
+        slm.apply_phase(np.full(slm.shape_yx, 0.5, dtype=np.float32))
+        sequencer.reports = [
+            report(status=STATUS_ERROR, observer_error=observer_error, underflow=True),
+            report(status=STATUS_ERROR),
+        ]
+        with pytest.raises(RuntimeError, match="failed twice"):
+            task._measure(pulse, _Context(), 2)
+        assert sequencer.fires == [10, 10, 10, 10, 10]
+        assert not sequencer.reports
+        assert not camera.capture_state()
+    finally:
+        plane.close()
+        camera.close()
 
 
 def test_single_population_sites_probe_both_sides_then_measure_combined_target(
@@ -2930,7 +3072,9 @@ def test_failure_after_a_completed_candidate_saves_figures_and_context(
         assert info["sections"]["source"]["run_record"][
             "device_snapshot_context"
         ] == {"candidate": 1, "measurement_completed": True}
-        assert archived_slm["command_revision"] < slm.command_revision
+        # The phase measured for candidate 1 is the phase the failed run
+        # leaves on the SLM: no command follows the measurement.
+        assert archived_slm["command_revision"] == slm.command_revision
         _plot_input, recipe = read_figure_plot(info, arrays, "data")
         assert isinstance(recipe["spec"], FacetGridPlot)
         assert isinstance(recipe["spec"].cell, HistogramPlot)
@@ -2953,7 +3097,22 @@ def test_failure_after_a_completed_candidate_saves_figures_and_context(
         )
         assert summary["status"] == "failed"
         assert summary["selected_candidate"] == 1
+        assert summary["rollback"] is None
+        assert summary["error"]["message"] == "candidate solve failed"
+        # The measured candidate is sealed exactly as a completed run seals
+        # its result: in final/, with the failure in its outcome, and on the
+        # SLM (candidate 1 was measured at the incoming phase).
+        final_phase, final_metadata = _load_candidate(
+            run_root / "final" / "science-context.npz"
+        )
+        assert final_metadata["status"] == "failed"
+        assert final_metadata["candidate"] == 1
+        assert final_metadata["outcome"]["status"] == "failed"
+        assert final_metadata["outcome"]["selected_candidate"] == 1
+        assert "candidate solve failed" in final_metadata["outcome"]["reason"]
+        np.testing.assert_array_equal(final_phase, incoming)
         np.testing.assert_array_equal(slm.last_commanded_phase, incoming)
+        assert artifact_roles["artifact_path"] == "final"
     finally:
         host.shutdown()
         plane.close()
@@ -3127,7 +3286,10 @@ def test_terminal_save_failure_restores_incoming_and_fails_host(
     original_save = feedback_module.save_science_context
 
     def fail_terminal_save(path, phase, **kwargs):
-        if kwargs["pattern_metadata"]["status"] == "completed":
+        # final/ cannot be written at all: neither the completed seal nor
+        # the failed-run seal of the same candidate.  Only then does the
+        # incoming phase come back.
+        if kwargs["pattern_metadata"]["status"] in {"completed", "failed"}:
             raise OSError("terminal save failed")
         return original_save(path, phase, **kwargs)
 

@@ -73,7 +73,7 @@ from zlc_atom.nodes.camera_measurement.measurement import (
     CameraMeasurementRequest,
     _finite_cycle_output,
 )
-from zlc_atom.nodes.scan.source import wait_for_board
+from zlc_atom.nodes.scan.source import wait_for_report
 
 
 SLM_PHASE_ARTIFACT_CONTRACT = SCIENCE_CONTEXT_ARTIFACT_CONTRACT
@@ -110,6 +110,41 @@ _FEEDBACK_SOLVE_MINIMUM_ITERATIONS = 5
 def _check_cancelled(context: object) -> None:
     if context.cancel_requested():
         raise RuntimeError("SLM feedback was cancelled")
+
+
+def _accepted_pulse_fault(
+    report: object, *, delivered_cycles: int, requested_cycles: int
+) -> bool:
+    """Whether a shot batch the board REPORTED as faulted is still a good batch.
+
+    The rule: keep the batch when the only thing that failed is the host's
+    OBSERVATION of the board -- the pulse observer's own UART poll -- and the
+    camera delivered every requested cycle.  Every cycle plays exactly one
+    trigger edge and yields exactly one frame, so a full frame count is the
+    board's own proof that the whole batch played; an underflow the observer
+    saw before it died is a board fact and keeps the batch refused.
+
+    The failure this fixes: one CURSOR poll lost its last byte at shot 85 of
+    200, the observer thread died and stamped the report with a fabricated
+    ERROR status, the board played the remaining 115 shots on its own and the
+    camera handed over all 200 frames -- and the whole batch, then the whole
+    four-hour run, was thrown away on that one poll.
+
+    Only the fault text and the ``observer_error``/``underflow`` fields are
+    read: the observer clause must be the whole fault (no second ``;``-joined
+    reason next to it), so a report that learns to say more is refused rather
+    than misread.
+    """
+
+    observer_error = str(getattr(report, "observer_error", "") or "")
+    fault = str(report.fault or "")
+    if not observer_error or observer_error not in fault:
+        return False
+    if ";" in fault.replace(observer_error, ""):
+        return False
+    if bool(getattr(report, "underflow", False)):
+        return False
+    return int(delivered_cycles) == int(requested_cycles)
 
 
 def _readout_frames(snapshot: object, *, shots: int) -> np.ndarray:
@@ -1681,7 +1716,19 @@ class SlmFeedbackTask:
         tuple[int, ...],
         tuple[int, ...],
         np.ndarray,
+        str,
     ]:
+        """Shoot one candidate and return its samples plus the pulse verdict.
+
+        The fifth value is the pulse fault this batch was ACCEPTED with (see
+        ``_accepted_pulse_fault``), or "" for a clean shot.  A fault the batch
+        cannot be accepted with -- a board error, an underflow, a short frame
+        count -- repeats the whole batch once (safe, arm, fire, collect); the
+        second fault is the candidate's.  The unchanged-phase guard below is
+        checked once per CANDIDATE: a repeat inside this call is the same
+        candidate being measured, not a second batch at the same phase.
+        """
+
         contract = self.calibration.frame_contract
         requested = self.shots
         if requested < 4:
@@ -1698,6 +1745,84 @@ class SlmFeedbackTask:
             )
         self._last_measured_phase = np.array(phase, copy=True)
         camera_owner = f"{context.instance_id}/camera"
+        attempt = 0
+        while True:
+            attempt += 1
+            result, saturation_value, report = self._shoot(
+                pulse, context, iteration, camera_owner=camera_owner
+            )
+            delivered = 0 if result is None else int(result.cycle_count)
+            fault = str(report.fault or "")
+            if not fault:
+                pulse_warning = ""
+            elif _accepted_pulse_fault(
+                report, delivered_cycles=delivered, requested_cycles=requested
+            ):
+                pulse_warning = fault
+            elif attempt == 1:
+                context.report_progress(
+                    f"Repeating the shot batch of candidate {iteration + 1} "
+                    f"after a pulse fault: {fault}"
+                )
+                continue
+            else:
+                raise RuntimeError(
+                    f"the pulse failed twice for one candidate: {fault}"
+                )
+            if delivered != requested:
+                raise RuntimeError("canonical Camera Measurement ended before all shots")
+            break
+        context.report_progress(
+            f"Reading mean qCMOS brightness for candidate {iteration + 1}",
+            current=requested,
+            total=requested,
+        )
+
+        frames = _readout_frames(result.snapshot, shots=requested)
+
+        saturated_sites: set[int] = set()
+        for image in frames:
+            saturated_sites.update(
+                self._saturated_sites(image, saturation_value)
+            )
+        site_samples = np.asarray(
+            [self._site_signals(image) for image in frames],
+            dtype=float,
+        )
+        complete = np.all(np.isfinite(site_samples), axis=0)
+        missing_sites = set(int(index) for index in np.flatnonzero(~complete))
+        mean_frame = np.asarray(np.mean(frames, axis=0), dtype=np.float32)
+        return (
+            site_samples,
+            tuple(sorted(saturated_sites)),
+            tuple(sorted(missing_sites)),
+            mean_frame,
+            pulse_warning,
+        )
+
+    def _shoot(
+        self,
+        pulse: object,
+        context: object,
+        iteration: int,
+        *,
+        camera_owner: str,
+    ) -> tuple[object, object, object]:
+        """One shot batch: safe, arm, fire, collect, and the board's report.
+
+        The program is loaded once per run, not once per candidate: after
+        DONE or SAFE the board keeps the program resident and ``fire`` replays
+        its own mini-loader, so a LOAD per candidate only re-sent the whole
+        image over a lossy line 68 times for nothing.  What decides is the
+        board's own answer -- the digest it reports holding -- never a memory
+        of having loaded, so a program somebody else loaded in between is
+        replaced and a reopened board is loaded afresh.  ``safe()`` before
+        arming the camera stays: the camera must be armed while no trigger
+        edge can play, and on a board already safe it costs no traffic.
+        """
+
+        contract = self.calibration.frame_contract
+        requested = self.shots
         node = CameraMeasurementNode(
             camera=self.camera,
             request=CameraMeasurementRequest(
@@ -1714,13 +1839,17 @@ class SlmFeedbackTask:
         capture = None
         try:
             self.sequencer.safe()
-            arm_sequencer(self.sequencer, pulse)
-            if "sequencer" not in self._actual_device_snapshots:
-                raw_sequencer_snapshot = self.sequencer.snapshot()
-                if not isinstance(raw_sequencer_snapshot, Mapping):
+            board_state = self.sequencer.snapshot()
+            if not isinstance(board_state, Mapping):
+                raise TypeError("sequencer snapshot must be a mapping")
+            if board_state.get("applied_digest") != pulse.program.digest:
+                arm_sequencer(self.sequencer, pulse)
+                board_state = self.sequencer.snapshot()
+                if not isinstance(board_state, Mapping):
                     raise TypeError("sequencer snapshot must be a mapping")
+            if "sequencer" not in self._actual_device_snapshots:
                 self._actual_device_snapshots["sequencer"] = (
-                    sequencer_archive_snapshot(state=raw_sequencer_snapshot)
+                    sequencer_archive_snapshot(state=board_state)
                 )
             capture = node.prepare(should_stop=context.cancel_requested)
             actual = node.actual_working_point
@@ -1791,41 +1920,14 @@ class SlmFeedbackTask:
                 retain_cycles=False,
             )
             _check_cancelled(context)
-            wait_for_board(self.sequencer, context)
-            if result is None or result.cycle_count != requested:
-                raise RuntimeError("canonical Camera Measurement ended before all shots")
-            context.report_progress(
-                f"Reading mean qCMOS brightness for candidate {iteration + 1}",
-                current=requested,
-                total=requested,
-            )
+            report = wait_for_report(self.sequencer, context)
         finally:
             try:
                 self.sequencer.safe()
             finally:
                 if capture is not None and not capture.closed:
                     capture.close()
-
-        frames = _readout_frames(result.snapshot, shots=requested)
-
-        saturated_sites: set[int] = set()
-        for image in frames:
-            saturated_sites.update(
-                self._saturated_sites(image, saturation_value)
-            )
-        site_samples = np.asarray(
-            [self._site_signals(image) for image in frames],
-            dtype=float,
-        )
-        complete = np.all(np.isfinite(site_samples), axis=0)
-        missing_sites = set(int(index) for index in np.flatnonzero(~complete))
-        mean_frame = np.asarray(np.mean(frames, axis=0), dtype=np.float32)
-        return (
-            site_samples,
-            tuple(sorted(saturated_sites)),
-            tuple(sorted(missing_sites)),
-            mean_frame,
-        )
+        return result, saturation_value, report
 
     def _prepare_artifacts(self, context: object) -> dict[str, Path]:
         root = Path(context.run_directory).expanduser().resolve()
@@ -2625,7 +2727,20 @@ class SlmFeedbackTask:
         candidate_reports: list[tuple[Mapping[str, object], np.ndarray]],
         status: str,
         republish: bool,
+        error: BaseException | None = None,
     ) -> dict[str, object]:
+        """Seal one candidate as the run's result: SLM, artifact, figures, summary.
+
+        Every way a run ends -- completed, stalled, stopped, FAILED -- passes
+        through here with the candidate it keeps, so ``final/`` and the SLM
+        never disagree about what was chosen.  The failure path used to skip
+        this and restore the incoming phase instead: a run that had selected
+        candidate 66 of 68 died on one pulse poll with an empty ``final/``
+        and the SLM showing the phase it started from.  The artifact is
+        written before the figures: it is the deliverable, they are the
+        report, and a report that fails must not take the deliverable with it.
+        """
+
         expected = canonical_phase(candidate["phase"], self.slm.shape_yx)
         observed = self.slm.last_commanded_phase
         applied = (
@@ -2666,22 +2781,6 @@ class SlmFeedbackTask:
                 device_event_record=device_record,
             )
         retained_history = candidate.get("history")
-        if (
-            history
-            and isinstance(retained_history, Mapping)
-            and candidate.get("samples") is not None
-            and candidate.get("mean_frame") is not None
-            and initial_mean_frame is not None
-        ):
-            self._save_figures(
-                context,
-                paths,
-                history=history,
-                selected=candidate,
-                initial_phase=initial_phase,
-                initial_mean_frame=initial_mean_frame,
-                candidate_reports=candidate_reports,
-            )
         artifact_path = paths["final"] / "science-context.npz"
         metadata = self._candidate_metadata(
             candidate=(candidate_number if isinstance(retained_history, Mapping) else 0),
@@ -2713,6 +2812,22 @@ class SlmFeedbackTask:
             role="final",
             contract_id=SLM_PHASE_ARTIFACT_CONTRACT,
         )
+        if (
+            history
+            and isinstance(retained_history, Mapping)
+            and candidate.get("samples") is not None
+            and candidate.get("mean_frame") is not None
+            and initial_mean_frame is not None
+        ):
+            self._save_figures(
+                context,
+                paths,
+                history=history,
+                selected=candidate,
+                initial_phase=initial_phase,
+                initial_mean_frame=initial_mean_frame,
+                candidate_reports=candidate_reports,
+            )
         self._write_summary(
             context,
             paths,
@@ -2722,6 +2837,7 @@ class SlmFeedbackTask:
                 candidate_number if isinstance(retained_history, Mapping) else None
             ),
             outcome=metadata["outcome"],
+            error=error,
         )
         terminal_uniformity = (
             retained_history.get("uniformity_ratio")
@@ -2764,44 +2880,6 @@ class SlmFeedbackTask:
             "actual_exposure_seconds": self._actual_exposure_seconds,
         }
 
-    def _save_failure_figures(
-        self,
-        context: object,
-        paths: Mapping[str, Path],
-        *,
-        history: list[dict[str, object]],
-        selected: Mapping[str, object] | None,
-        initial_phase: np.ndarray,
-        initial_mean_frame: np.ndarray | None,
-        candidate_reports: list[tuple[Mapping[str, object], np.ndarray]],
-        error: BaseException,
-    ) -> None:
-        """Save the report supported by completed data without masking failure."""
-
-        if (
-            not history
-            or selected is None
-            or selected.get("samples") is None
-            or selected.get("mean_frame") is None
-            or initial_mean_frame is None
-        ):
-            return
-        try:
-            self._save_figures(
-                context,
-                paths,
-                history=history,
-                selected=selected,
-                initial_phase=initial_phase,
-                initial_mean_frame=initial_mean_frame,
-                candidate_reports=candidate_reports,
-            )
-        except BaseException as figure_error:
-            error.add_note(
-                "Feedback partial figures could not be saved: "
-                f"{type(figure_error).__name__}: {figure_error}"
-            )
-
     def execute(self, context: object) -> dict[str, object]:
         self._actual_device_snapshots = {}
         self._actual_exposure_seconds = None
@@ -2820,22 +2898,6 @@ class SlmFeedbackTask:
         initial_mean_frame: np.ndarray | None = None
         stalled = False
         termination_reason = "all authored feedback updates completed"
-        context.register_partial_exit_writer(
-            lambda _status, error: self._save_failure_figures(
-                context,
-                paths,
-                history=history,
-                selected=(
-                    retained_valid
-                    or most_visible_observed
-                    or last_completed_candidate
-                ),
-                initial_phase=incoming,
-                initial_mean_frame=initial_mean_frame,
-                candidate_reports=candidate_reports,
-                error=error,
-            )
-        )
         try:
             _check_cancelled(context)
             # Science Context is the requested starting CONTENT, not proof of
@@ -3024,9 +3086,13 @@ class SlmFeedbackTask:
                         candidate=candidate_number,
                     ),
                 )
-                samples, saturated_sites, missing_sites, mean_frame = self._measure(
-                    pulse, context, iteration
-                )
+                (
+                    samples,
+                    saturated_sites,
+                    missing_sites,
+                    mean_frame,
+                    pulse_warning,
+                ) = self._measure(pulse, context, iteration)
                 if initial_mean_frame is None:
                     initial_mean_frame = np.array(mean_frame, copy=True)
                 fitted = _fit_contrasts(samples)
@@ -3497,6 +3563,7 @@ class SlmFeedbackTask:
                         probe_control_boundary
                     ),
                     "missing_sites": list(missing_sites),
+                    "pulse_observer_warning": pulse_warning or None,
                     "single_population_sites": [
                         int(value) for value in np.flatnonzero(fit_single)
                     ],
@@ -3898,6 +3965,40 @@ class SlmFeedbackTask:
                 or most_visible_observed
                 or last_completed_candidate
             )
+            if failure_selected is not None:
+                # A FAILED RUN KEEPS WHAT IT MEASURED.  The candidate the
+                # run would have selected is sealed exactly as a completed
+                # run seals it -- on the SLM, in final/, in the summary --
+                # and the failure travels with it in the outcome and the
+                # summary.  Only when even that cannot be done is the
+                # incoming phase the one known-good state left.
+                failure_selected["outcome"] = {
+                    "status": "failed",
+                    "reason": f"{type(error).__name__}: {error}",
+                    "selected_candidate": int(failure_selected["candidate"]),
+                    "shots_per_candidate": self.shots,
+                    "candidates_measured": len(history),
+                }
+                try:
+                    self._finish_candidate(
+                        context,
+                        failure_selected,
+                        history,
+                        paths=paths,
+                        initial_phase=incoming,
+                        initial_mean_frame=initial_mean_frame,
+                        candidate_reports=candidate_reports,
+                        status="failed",
+                        republish=True,
+                        error=error,
+                    )
+                except BaseException as seal_error:
+                    error.add_note(
+                        "Feedback could not seal the selected candidate after "
+                        f"failure: {type(seal_error).__name__}: {seal_error}"
+                    )
+                else:
+                    raise
             try:
                 self._apply_exact(incoming)
             except BaseException as restore_error:
