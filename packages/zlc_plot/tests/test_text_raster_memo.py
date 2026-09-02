@@ -4,8 +4,8 @@ The memo replaces Agg's per-draw text rasterization with a blit of the
 raster it produced the first time.  That is only admissible if no pixel can
 tell -- unrotated and rotated strings, fractional anchors, translucent
 colours, strings half off the canvas, and the paths the memo must leave
-alone (mathtext, clipped text, translucent rotated text) -- and if a warm
-memo answers exactly what a cold one did.
+alone (mathtext, rotated text that is clipped or translucent) -- and if a
+warm memo answers exactly what a cold one did.
 """
 
 from __future__ import annotations
@@ -90,19 +90,35 @@ def test_memo_moves_with_the_anchor_by_integer_pixels() -> None:
 
 
 @pytest.mark.parametrize("angle", [0.0, 90.0])
-def test_clipped_and_math_text_take_the_original_route(angle: float) -> None:
+def test_clipped_text_is_exact_and_rotated_clipped_text_is_not_memoized(
+    angle: float,
+) -> None:
+    """A clip cutting through the string: unrotated replays it, rotated defers."""
+
     fitted = _prepare_renderer(_renderer())
     pristine = _renderer()
-    clip = Bbox.from_extents(20.0, 20.0, 120.0, 150.0)
+    clip = Bbox.from_extents(20.0, 20.0, 60.0, 150.0)
     for renderer in (fitted, pristine):
-        renderer.draw_text(
-            _gc(renderer, (0.0, 0.0, 0.0, 1.0), clip=clip),
-            30.0,
-            140.0,
-            "clipped",
-            _PROP,
-            angle,
-        )
+        for _pass in range(2):
+            renderer.draw_text(
+                _gc(renderer, (0.0, 0.0, 0.0, 1.0), clip=clip),
+                30.0,
+                140.0,
+                "clipped through",
+                _PROP,
+                angle,
+            )
+    np.testing.assert_array_equal(
+        np.asarray(fitted.buffer_rgba()), np.asarray(pristine.buffer_rgba())
+    )
+    assert bool(fitted._zlc_text_rasters) == (angle == 0.0)
+
+
+@pytest.mark.parametrize("angle", [0.0, 90.0])
+def test_math_text_takes_the_original_route(angle: float) -> None:
+    fitted = _prepare_renderer(_renderer())
+    pristine = _renderer()
+    for renderer in (fitted, pristine):
         renderer.draw_text(
             _gc(renderer, (0.0, 0.0, 0.0, 1.0)),
             160.0,
@@ -115,7 +131,7 @@ def test_clipped_and_math_text_take_the_original_route(angle: float) -> None:
     np.testing.assert_array_equal(
         np.asarray(fitted.buffer_rgba()), np.asarray(pristine.buffer_rgba())
     )
-    assert not fitted._zlc_text_rasters, "neither string may enter the memo"
+    assert not fitted._zlc_text_rasters, "mathtext may not enter the memo"
 
 
 def test_memo_is_bounded_and_forgets_rather_than_grows() -> None:

@@ -135,10 +135,12 @@ def _install_text_raster_memo(renderer: Any) -> None:
     coverage mask with the same per-pixel blend as the direct draw.  One
     caveat decides the rotated case: Agg's rotated path quantizes the
     colour's alpha against the glyph coverage and then against the edge
-    coverage, two 8-bit roundings, where the blit rounds once -- the two
-    agree exactly only for an OPAQUE colour, so a translucent rotated
-    string keeps the original route, as does any text the fast path cannot
-    reproduce verbatim: mathtext, a clipped string.
+    coverage, two 8-bit roundings, where the blit rounds once -- and it
+    clips through the rasterizer where the blit clips a whole-pixel
+    rectangle -- so a rotated string is replayed only when opaque and
+    unclipped.  An unrotated string's replay IS the call Agg makes,
+    clipping included, and needs neither condition.  Mathtext keeps the
+    original route.
     """
 
     if getattr(renderer, "_zlc_text_rasters", None) is not None:
@@ -166,15 +168,14 @@ def _install_text_raster_memo(renderer: Any) -> None:
         ismath: bool = False,
         mtext: Any = None,
     ) -> Any:
-        if (
-            ismath
-            or not s
+        if ismath or not s:
+            return original(gc, x, y, s, prop, angle, ismath=ismath, mtext=mtext)
+        angle = float(angle)
+        if angle != 0.0 and (
+            not _opaque_stroke(gc)
             or gc.get_clip_rectangle() is not None
             or gc.get_clip_path()[0] is not None
         ):
-            return original(gc, x, y, s, prop, angle, ismath=ismath, mtext=mtext)
-        angle = float(angle)
-        if angle != 0.0 and not _opaque_stroke(gc):
             return original(gc, x, y, s, prop, angle, ismath=ismath, mtext=mtext)
         antialiased = bool(gc.get_antialiased())
         key = (s, prop, angle, antialiased)
