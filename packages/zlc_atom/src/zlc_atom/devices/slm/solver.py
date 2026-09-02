@@ -511,6 +511,14 @@ def _unit_phase(values: np.ndarray, epsilon: float) -> np.ndarray:
         where=magnitude > epsilon,
     )
 
+#: The spots solve stops once the simulated support intensity, divided by the
+#: desired intensity site by site, has a max/min no larger than this.  One
+#: owner for the number: the loop's early-stop gate and the re-check of the
+#: canonical phase both read it, and a caller that needs a tighter answer
+#: passes ``support_tolerance`` to ``solve_phase`` instead of editing here.
+SPOT_SUPPORT_TOLERANCE = 1.01
+
+
 def _support_intensity_ratio(
     magnitude: np.ndarray,
     desired: np.ndarray,
@@ -758,12 +766,29 @@ def solve_phase(
     iterations: int | None = None,
     seed: int = 0,
     stop_requested: Callable[[], bool] | None = None,
+    support_tolerance: float = SPOT_SUPPORT_TOLERANCE,
+    minimum_iterations: int = 1,
 ) -> tuple[np.ndarray, dict[str, object]]:
     """Solve one target, optionally reusing caller-owned transient spot state.
 
     The caller clears that state whenever the authored input pupil changes.
+
+    ``support_tolerance`` and ``minimum_iterations`` govern the spots
+    early-stop gate only: the solve may declare itself done no earlier than
+    ``minimum_iterations`` passes and only once the support max/min intensity
+    ratio is within ``support_tolerance``.  A feedback loop that re-solves
+    every candidate from a hot start needs both, because the default 1%
+    gate let a 1-2 iteration solve leave a fresh ~0.2% rms intensity error
+    pattern on the sites each candidate -- three times the loop's own
+    per-step correction, injected as noise the controller then chased.
     """
 
+    tolerance = float(support_tolerance)
+    if not np.isfinite(tolerance) or tolerance < 1.0:
+        raise ValueError("support_tolerance must be a finite ratio >= 1")
+    if isinstance(minimum_iterations, bool) or int(minimum_iterations) < 1:
+        raise ValueError("minimum_iterations must be a positive integer")
+    minimum_passes = int(minimum_iterations)
     prepared_target = _prepared_cache_get(_PREPARED_TARGETS, target)
     if prepared_target is None:
         desired = validate_target(target)
@@ -1054,7 +1079,7 @@ def solve_phase(
             iterations_run += 1
             selected = None
 
-            gate_start = 1 if hot_start_used else 12
+            gate_start = max(1 if hot_start_used else 12, minimum_passes)
             if iterations is None and iterations_run >= gate_start:
                 if transform == "selected-dft":
                     selected_grid = (
@@ -1070,7 +1095,7 @@ def solve_phase(
                 )
                 checked_result = None
                 checked_selected = None
-                if support_ratio <= 1.01:
+                if support_ratio <= tolerance:
                     candidate_phase = _canonical_unshifted_phase(field)
                     candidate_field = np.empty(
                         desired.shape, dtype=np.complex64
@@ -1098,7 +1123,7 @@ def solve_phase(
                         desired_spots,
                         epsilon,
                     )
-                    if candidate_ratio <= 1.01:
+                    if candidate_ratio <= tolerance:
                         checked_result = _readonly(
                             fft.fftshift(candidate_phase)
                         )
@@ -1410,6 +1435,8 @@ def solve_phase(
         metadata["coarse_iterations"] = coarse_iterations
     if support_ratio is not None:
         metadata["support_intensity_ratio"] = support_ratio
+        metadata["support_tolerance"] = tolerance
+        metadata["minimum_iterations"] = minimum_passes
     else:
         relative_rms, roughness, background, fom = _image_metrics(
             final, desired_unshifted, support_unshifted, epsilon
