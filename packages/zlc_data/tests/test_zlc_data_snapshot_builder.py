@@ -192,3 +192,100 @@ def test_direct_constructor_rejects_numeric_truthiness_validity(validity):
 def test_snapshot_validity_expander_rejects_other_objects():
     with pytest.raises(TypeError, match="OwnedSnapshot"):
         expand_snapshot_validity(object())  # type: ignore[arg-type]
+
+
+def test_the_builder_stamps_where_a_window_sits_and_a_restriction_keeps_it() -> None:
+    """A block's window provenance travels with it, through a restriction too.
+
+    Which shots a block holds and since when they have been stable is a
+    fact only the producer knows; a consumer that keeps work across
+    revisions (the incremental window histogram) reads it off the block.
+    Restricting the block to some of its rows keeps the shots' numbers, so
+    the derived block keeps the stamp.
+    """
+
+    import numpy as np
+
+    from zlc_data import (
+        PRIMARY_INDEX,
+        REPEAT,
+        AxisId,
+        AxisSpec,
+        BlockId,
+        DataBlock,
+        DatasetRevisionRef,
+        DatasetSchema,
+        IndexedWindow,
+        PointColumn,
+        PointTable,
+        ValueSchema,
+        owned_snapshot_from_arrays,
+    )
+    from zlc_data.selection import IndexRangeSelection, Selection
+    from zlc_data.snapshot_projection import (
+        PRIMARY_INDEX_AXIS_ID,
+        restrict_snapshot,
+    )
+
+    schema = DatasetSchema(
+        AxisSpec(AxisId("cam.repeat"), "repeat", REPEAT, 1, (0,)),
+        PointTable(
+            3,
+            (
+                PointColumn(
+                    PRIMARY_INDEX_AXIS_ID,
+                    "source index",
+                    PRIMARY_INDEX,
+                    PointColumn.NUMERIC,
+                    (-2, -1, 0),
+                ),
+            ),
+        ),
+        None,
+        ValueSchema.scalar(np.dtype("uint16"), "count"),
+    )
+    window = IndexedWindow(5, 7, 3)
+    snapshot = owned_snapshot_from_arrays(
+        schema,
+        np.asarray([[[1], [2], [3]]], dtype=np.uint16),
+        4,
+        block_id="cam.indexed",
+        stream_generation="g",
+        window=window,
+    )
+    assert snapshot.block.window == window
+    assert snapshot.block.replacing(revision=snapshot.block.revision).window == window
+    assert owned_snapshot_from_arrays(
+        schema, np.zeros((1, 3, 1), dtype=np.uint16), 4
+    ).block.window is None
+
+    # The last two shots of three: the shot structure survives, so the
+    # shots' numbers do too.
+    derived = restrict_snapshot(
+        snapshot,
+        Selection((IndexRangeSelection(PRIMARY_INDEX_AXIS_ID, 1, 3),)),
+        reference_for=lambda derived_schema: DatasetRevisionRef(
+            block_id=BlockId("cam.restricted"),
+            stream_generation=snapshot.ref.stream_generation,
+            schema_fingerprint=derived_schema.fingerprint,
+            revision=snapshot.ref.revision,
+        ),
+    )
+    assert derived.block.values.shape == (1, 2, 1)
+    assert derived.block.window == window
+
+    with pytest.raises(ValueError, match="latest"):
+        IndexedWindow(7, 5, -1)
+    with pytest.raises(TypeError):
+        IndexedWindow(5.0, 7, -1)
+    with pytest.raises(TypeError, match="window"):
+        DataBlock(
+            snapshot.block.block_id,
+            snapshot.block.revision,
+            snapshot.block.values,
+            snapshot.block.validity,
+            schema,
+            None,
+            (5, 7, 3),
+        )
+

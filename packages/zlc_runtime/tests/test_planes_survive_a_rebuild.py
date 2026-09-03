@@ -29,6 +29,7 @@ from zlc_data import (
     DataBlock,
     DatasetRevision,
     DatasetSchema,
+    IndexedWindow,
     OwnedSnapshot,
     PointColumn,
     PointTable,
@@ -182,3 +183,31 @@ def test_the_exact_run_keeps_the_error_of_every_chunk() -> None:
     np.testing.assert_allclose(
         np.asarray(built.block.sigma).reshape(-1), (0.1, 0.2)
     )
+
+
+def test_an_indexed_materialization_is_stamped_with_its_window() -> None:
+    """Where the block sits in its history, in absolute shot numbers, on the block."""
+
+    schema = _schema("camera")
+    events = tuple(
+        (index, _shot(schema, float(index), None)) for index in range(5, 8)
+    )
+    built = _materialize_indexed_dataset(
+        _IndexedMaterialization(
+            "camera/frame",
+            GENERATION,
+            9,
+            schema,
+            None,
+            events,
+            5,
+            7,
+            None,
+            {},
+            {},
+            stable_since=4,
+        )
+    )
+    assert built.block.window == IndexedWindow(5, 7, 4)
+    assert built.block.revision == DatasetRevision(9)
+

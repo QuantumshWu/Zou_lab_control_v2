@@ -30,6 +30,7 @@ from .validity import (
     Valid,
 )
 from .value import (
+    IndexedWindow,
     DataBlock,
     DatasetRevisionRef,
     OwnedSnapshot,
@@ -272,12 +273,16 @@ def materialize_derived_dataset(
     validity: Valid | Invalid | CellValidity | DatasetComponentValidity,
     sigma: object | None = None,
     reference_for: Callable[[DatasetSchema], DatasetRevisionRef],
+    window: IndexedWindow | None = None,
 ) -> OwnedSnapshot:
     """Materialize one typed derived Dataset without interpreting its domain.
 
     ``sigma`` rides with the values because it belongs to them: a sample's
     own uncertainty survives every scope the operator can choose, which is
     exactly why it is not recomputed downstream the way a reduction's is.
+    ``window`` rides for the same reason: which shots a block holds is a
+    fact of the source, and a restriction that keeps the shot structure
+    keeps their numbers.
     """
 
     if not isinstance(schema, DatasetSchema):
@@ -292,8 +297,10 @@ def materialize_derived_dataset(
             validity,
             schema,
             None if sigma is None else np.asarray(sigma),
+            window,
         ),
     )
+
 
 def axis_catalog(
     schema: DatasetSchema,
@@ -672,4 +679,5 @@ def restrict_snapshot(
         validity=compact_dataset_validity(mask, derived),
         sigma=sigma,
         reference_for=reference_for,
+        window=snapshot.block.window,
     )
