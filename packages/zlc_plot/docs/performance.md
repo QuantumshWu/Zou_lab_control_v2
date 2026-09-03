@@ -945,3 +945,57 @@ design:
   refused by design: the default facet is the live history, 1000 cells
   exceeds `facet_max_cells`, and the revert inherits the same default.
   The bench records it as a finding; the auto-fate table decides it.
+
+## Window histogram from a carried frequency table (September 2026, fifth pass)
+
+A pixel-pool histogram over a deep window -- the ROI histogram card at
+window 1000 -- recounted every value of the window on every shot: a masked
+gather of seventeen million `uint16` samples and a bincount over them, plus
+a masked min/max pass for the domain, about 90 ms a shot on a 128 x 132
+ROI, for a picture that one shot's worth of pixels had changed by a
+thousandth.
+
+The count of each value is a sum over shots, so it is kept and moved rather
+than rebuilt.  Three pieces, each in the package that owns the fact:
+
+* **zlc_data** -- `IndexedWindow(start, latest, stable_since)` on
+  `DataBlock.window`: the absolute shot numbers a block holds and the last
+  sequence at which a retained shot was OVERWRITTEN.  A consumer may keep
+  work derived from an earlier revision of the same block exactly when that
+  revision is not older than `stable_since`; every shot the two revisions
+  share is then byte-equal.  `restrict_snapshot` keeps the stamp, because a
+  restriction that keeps the shot structure keeps the shots' numbers.
+* **zlc_runtime** -- every indexed materialization is stamped from the
+  history's `replaced_at`; a re-run for the same parent moves the fence.
+* **zlc_plot** -- `DataView.window_frequency(window)` keeps one table
+  (`counts[v - offset]`) per view, inherits the previous view's through the
+  same `inherit_domains_from` hand-over the coordinate domains use, and
+  advances it by the shots that entered and left (matched by absolute shot
+  number, so holes and window changes are ordinary).  A narrow integer
+  dtype gets its whole range (65 536 levels for 16-bit pixels); a wider one
+  its observed span up to `_FREQUENCY_LEVEL_LIMIT`, growing as values
+  arrive; floats and unindexed data get no table.  `_histogram_bins` reads
+  the extrema off the table's first and last occupied level, and the
+  aligned integer bins are summed from it (`_counts_from_frequency`, the
+  same summation the from-values path already used).  Anything the table
+  cannot answer -- non-aligned edges, a reduction, a replacement past the
+  carried revision, more than a quarter of the window changed -- falls back
+  to counting the values, so the answer is always the fresh count.
+
+Measured (`update_data` per shot, 128 x 132 uint16 ROI, window 1000,
+64 bins, thirty shots after the window is full):
+
+| path | median | p90 | max |
+| --- | --- | --- | --- |
+| count the window | 90.9 ms | 105.4 ms | 109.2 ms |
+| carried frequency table | 3.9 ms | 4.4 ms | 5.0 ms |
+
+Of the 3.9 ms, about 1.5 ms is the view itself (validity plane, layout,
+copying the 65 536-level table) and the rest the payload and the session's
+bookkeeping; the counting is one shot's bincount.  The contract is
+exactness -- `test_histogram_window_frequency.py` compares the moved table
+with a fresh count at every step through fill-up, rolling, a hole, an
+invalid shot, a replacement and window changes, and the session's payload
+with a count against its own edges -- and the cost is one reference: the
+previous revision's snapshot stays alive one revision longer, because the
+shots that leave are subtracted from it.
