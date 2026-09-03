@@ -41,6 +41,8 @@ class PulseEditorHandle(QtCore.QObject):
     clear_all_requested = QtCore.pyqtSignal()
     save_requested = QtCore.pyqtSignal()
     load_requested = QtCore.pyqtSignal()
+    values_save_requested = QtCore.pyqtSignal()
+    values_load_requested = QtCore.pyqtSignal()
 
     # -- the schedule ----------------------------------------------------
     port_label_committed = QtCore.pyqtSignal(str, str)
@@ -110,6 +112,7 @@ class PulseEditorHandle(QtCore.QObject):
             "visible_ports_committed", "clear_port_requested",
             "feedback_requested", "connection_requested", "stop_requested",
             "sync_requested", "save_requested", "load_requested",
+            "values_save_requested", "values_load_requested",
             "scan_array_load_requested",
         ):
             getattr(schedule, name).connect(getattr(self, name))

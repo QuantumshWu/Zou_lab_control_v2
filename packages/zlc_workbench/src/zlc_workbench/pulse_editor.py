@@ -48,8 +48,16 @@ from zlc_pulse import (
     TIME_UNIT_CHOICES,
     TIME_UNIT_TO_NS,
     align_to_grid,
+    apply_api_values,
+    authored_api_entries,
     resolve_api_parameters,
     resolve_scan_point,
+)
+from zlc_atom.pulse_values import (
+    API_VALUES_DIRECTORY,
+    CURRENT_API_VALUES,
+    read_api_values,
+    write_api_values,
 )
 from zlc_durable import unique_path
 from zlc_plot import PANEL_SIZE_NAMES
@@ -1125,6 +1133,8 @@ class PulseEditorPresenter:
         view.stop_requested.connect(self._guarded(self.stop))
         view.sync_requested.connect(self._guarded(self._sync_from_view))
         view.save_requested.connect(self._guarded(self.save_pulse))
+        view.values_load_requested.connect(self._guarded(self.load_api_values))
+        view.values_save_requested.connect(self._guarded(self.save_api_values))
         view.load_requested.connect(self._guarded(self.ask_for_pulse))
         view.preview_include_off_toggled.connect(self._guarded(self._on_include_off))
         view.preview_size_committed.connect(self._guarded(self.set_preview_size))
@@ -1159,10 +1169,116 @@ class PulseEditorPresenter:
         except Exception as error:
             self._warn(f"cannot open {Path(path).name}: {error}")
             return False
-        self._accept_state(candidate)
         self._saved_state = candidate
         self.path = str(path)
+        try:
+            candidate, _changed = self._with_current_values(candidate)
+        except Exception as error:
+            self._warn(f"cannot apply the current API values: {error}")
+        self._accept_state(candidate)
         self.refresh()
+        return True
+
+    def _api_values_directory(self) -> Path | None:
+        """Where saved sets of API values live for the workspace in play."""
+
+        base = Path(self.path).parent if self.path else Path(self.pulses_directory or "")
+        if not str(base) or str(base) == ".":
+            return None
+        return base.parent / API_VALUES_DIRECTORY
+
+    def _with_current_values(
+        self, state: PulseEditorState
+    ) -> tuple[PulseEditorState, tuple[str, ...]]:
+        """``state`` as the apparatus is set today, and what changed.
+
+        Silent when there is nothing to apply: an empty set, no file, or a set
+        naming only ids this pulse does not declare.  A set that contradicts
+        the pulse raises, because a bias code in milliseconds is a mistake
+        somebody has to see.
+        """
+
+        directory = self._api_values_directory()
+        if state.sequence is None or directory is None:
+            return state, ()
+        path = directory / CURRENT_API_VALUES
+        if not path.is_file():
+            return state, ()
+        _name, _source, entries = read_api_values(path)
+        if not entries:
+            return state, ()
+        before = authored_api_entries(state.sequence)
+        sequence, applied, _unknown = apply_api_values(state.sequence, entries)
+        after = authored_api_entries(sequence)
+        changed = tuple(name for name in applied if before[name] != after[name])
+        if not changed:
+            return state, ()
+        return replace(state, sequence=sequence), changed
+
+    def load_api_values(self) -> bool:
+        """Overwrite the API slots from one saved set of values.
+
+        What the slots hold, not whether they exist: the declarations survive,
+        so a scan table still overrides the ones it scans.  The set is applied
+        by name, and ids it carries that this pulse never declared are named
+        back rather than refused -- one set of bias codes is meant to be
+        carried across pulses that share a vocabulary.
+        """
+
+        if self.sequence is None:
+            self._warn("there is no pulse to load values into")
+            return False
+        directory = self._api_values_directory()
+        chosen = self.view.ask_open_path(
+            "Load API values",
+            str(directory / CURRENT_API_VALUES) if directory else "",
+            "ZLC API values (*.json);;All files (*)",
+        )
+        if not chosen:
+            return False
+        try:
+            _name, _source, entries = read_api_values(chosen)
+            sequence, applied, unknown = apply_api_values(self.sequence, entries)
+        except Exception as error:
+            self._warn(f"cannot load {Path(chosen).name}: {error}")
+            return False
+        self._apply(sequence)
+        report = f"applied {len(applied)} value(s)"
+        if unknown:
+            report += f"; not in this pulse: {', '.join(unknown)}"
+        self._done(report)
+        return True
+
+    def save_api_values(self) -> bool:
+        """Write what the API slots hold now as a set another pulse can load."""
+
+        if self.sequence is None:
+            self._warn("there is no pulse to save values from")
+            return False
+        entries = authored_api_entries(self.sequence)
+        if not entries:
+            self._warn("this pulse declares no API parameters")
+            return False
+        directory = self._api_values_directory()
+        chosen = self.view.ask_save_path(
+            "Save API values",
+            str(directory / CURRENT_API_VALUES) if directory else "",
+            "ZLC API values (*.json);;All files (*)",
+        )
+        if not chosen:
+            return False
+        target = Path(chosen).with_suffix(".json")
+        try:
+            write_api_values(
+                target,
+                entries,
+                name=target.stem,
+                source=self.sequence.name or Path(self.path).stem or "pulse editor",
+            )
+        except Exception as error:
+            self._warn(f"cannot save {target.name}: {error}")
+            return False
+        self._done(f"saved {len(entries)} value(s) to {target.name}")
         return True
 
     def start_new_pulse(self) -> bool:
@@ -2422,6 +2538,19 @@ class PulseEditorPresenter:
         if self.sequence is None:
             self._warn("no pulse is open")
             return False
+        # The set of API values first, then the scan table over it: a pulse
+        # runs what the apparatus is set to today, not what its file was
+        # saved with, so a task that measured a new bias reaches the next On
+        # Pulse without anyone reopening the pulse.  Before the board is even
+        # consulted, because this is a fact about the document.
+        try:
+            state, _changed = self._with_current_values(self._state)
+        except Exception as error:
+            self._warn(f"cannot apply the current API values: {error}")
+            return False
+        if state is not self._state:
+            self._accept_state(state)
+            self.refresh()
         if self.sequencer is None:
             self._warn("this editor is not connected to a sequencer")
             return False
