@@ -22,6 +22,7 @@ from ..qt import ensure_qt_app
 
 from .style import (
     ACCENT,
+    ACCENT_TINT,
     AUTO_SCALE_BASIS,
     AUTO_SCALE_MARGIN,
     BG,
@@ -4187,7 +4188,11 @@ class FluentTableView(QtWidgets.QTableView):
         self.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.setShowGrid(True)
         self.setGridStyle(QtCore.Qt.SolidLine)
-        self.setAlternatingRowColors(True)
+        # No banding.  Every other Fluent surface here -- a card, a form, a
+        # plot -- is one white ground separated by hairlines, and a table
+        # striped grey/white belongs to a different toolkit.  The grid lines
+        # already say where a cell ends.
+        self.setAlternatingRowColors(False)
         self.setWordWrap(False)
         self.setSortingEnabled(False)
         self.setCornerButtonEnabled(False)
@@ -4205,6 +4210,7 @@ class FluentTableView(QtWidgets.QTableView):
             QtWidgets.QAbstractItemView.DoubleClicked
             | QtWidgets.QAbstractItemView.EditKeyPressed
             | QtWidgets.QAbstractItemView.SelectedClicked
+            | QtWidgets.QAbstractItemView.AnyKeyPressed
         )
         self.horizontalHeader().setSectionsMovable(False)
         self.horizontalHeader().setStretchLastSection(False)
@@ -4220,13 +4226,12 @@ class FluentTableView(QtWidgets.QTableView):
             f"""
             QTableView {{
                 background: white;
-                alternate-background-color: {BG};
                 color: {TEXT};
                 border: 1px solid {DIVIDER};
                 border-radius: {_radius()}px;
                 gridline-color: {DIVIDER};
-                selection-background-color: {ACCENT};
-                selection-color: white;
+                selection-background-color: {ACCENT_TINT};
+                selection-color: {TEXT};
                 font: {fluent_font_size()}pt "{FONT}";
                 outline: none;
             }}
@@ -4234,13 +4239,19 @@ class FluentTableView(QtWidgets.QTableView):
                 padding: {scaled_px(3, minimum=2)}px {scaled_px(6, minimum=4)}px;
                 border: none;
             }}
-            QTableView::item:hover:!selected {{ background: {HOVER}; color: white; }}
+            QTableView::item:hover:!selected {{
+                background: {ACCENT_TINT};
+                color: {TEXT};
+            }}
             QTableView QLineEdit {{
                 background: white;
                 color: {TEXT};
                 border: {scaled_px(1, minimum=1)}px solid {ACCENT};
+                border-radius: {_radius()}px;
                 padding: 0px {scaled_px(4, minimum=2)}px;
                 font: {fluent_font_size()}pt "{FONT}";
+                selection-background-color: {ACCENT_TINT};
+                selection-color: {TEXT};
             }}
             QHeaderView::section {{
                 background: {BG};
@@ -4254,6 +4265,28 @@ class FluentTableView(QtWidgets.QTableView):
             """
         )
         apply_fluent_scrollbars(self)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        """One click opens the cell it lands on.
+
+        A click on a number is a request to see it, and selection paint --
+        any selection paint -- covers the very digits being asked about.
+        The editor shows the exact stored value in a plain field, so the
+        cheapest gesture answers the commonest question and the second
+        click has nothing left to add.  Keyboard navigation is deliberately
+        NOT an edit trigger: arrow keys must still walk the grid instead of
+        being swallowed by an editor at every step.
+        """
+
+        super().mousePressEvent(event)
+        if event.button() != QtCore.Qt.LeftButton:
+            return
+        index = self.indexAt(event.pos())
+        if not index.isValid():
+            return
+        if not bool(index.flags() & QtCore.Qt.ItemIsEditable):
+            return
+        self.edit(index)
 
     def _selected_bounds(self) -> tuple[tuple[QtCore.QModelIndex, ...], int, int, int, int] | None:
         selected = tuple(self.selectionModel().selectedIndexes())

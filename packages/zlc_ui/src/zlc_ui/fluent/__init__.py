@@ -36,7 +36,7 @@ for _name in (
 ):
     _EXPORTS[_name] = ("zlc_ui.fluent.fluent", _name)
 for _name in (
-    "ACCENT", "API_VIOLET", "API_VIOLET_DARK", "AXIS_GROUP_COLORS", "BG",
+    "ACCENT", "ACCENT_TINT", "API_VIOLET", "API_VIOLET_DARK", "AXIS_GROUP_COLORS", "BG",
     "CARD_PAD", "CARD_TITLE_PAD", "CARD_TITLE_PX",
     "COMBO_TRI_SIZE", "COMBO_WIDTH", "DIVIDER", "EDIT_PADDING_H", "FLUENT_SCALE_MAX",
     "FLUENT_SCALE_MIN", "FONT", "FONT_SIZE", "GREEN", "GRAPHITE", "GREY", "HINT",

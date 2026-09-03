@@ -298,3 +298,75 @@ for field in fields:
     assert field.verticalScrollBar().maximum() == 0
 """
     )
+
+
+def test_a_data_table_shows_its_number_on_the_first_click() -> None:
+    """A click on a cell is a request to READ it, and one white ground.
+
+    Selection paint -- any of it -- covers the digits the click was asking
+    about, and the accent is a BUTTON colour that carries white text.  So
+    the cheapest gesture opens the cell instead: the stored value in a
+    plain field, legible, with the second click left with nothing to add.
+    The banding goes with it: every other Fluent surface here is one white
+    ground separated by hairlines, and a striped table belongs to another
+    toolkit.
+    """
+
+    _run_qt_smoke(
+        """
+from PyQt5 import QtCore, QtGui, QtWidgets
+from zlc_ui import ensure_qt_app
+from zlc_ui.fluent import ACCENT_TINT, FluentTableView
+
+class Model(QtCore.QAbstractTableModel):
+    def rowCount(self, _p=QtCore.QModelIndex()):
+        return 4
+    def columnCount(self, _p=QtCore.QModelIndex()):
+        return 4
+    def data(self, index, role=QtCore.Qt.DisplayRole):
+        if role in (QtCore.Qt.DisplayRole, QtCore.Qt.EditRole):
+            return f'{index.row() * 4 + index.column()}.5'
+        return None
+    def flags(self, index):
+        return (
+            QtCore.Qt.ItemIsEnabled
+            | QtCore.Qt.ItemIsSelectable
+            | QtCore.Qt.ItemIsEditable
+        )
+
+app = ensure_qt_app(['zlc-ui-tests'])
+table = FluentTableView()
+table.setModel(Model())
+table.resize(420, 200); table.show(); app.processEvents()
+
+assert not table.alternatingRowColors(), 'a Fluent table is not striped'
+assert 'alternate-background-color' not in table.styleSheet()
+assert f'selection-background-color: {ACCENT_TINT}' in table.styleSheet()
+
+target = table.model().index(1, 2)
+point = table.visualRect(target).center()
+QtWidgets.QApplication.sendEvent(
+    table.viewport(),
+    QtGui.QMouseEvent(
+        QtCore.QEvent.MouseButtonPress,
+        QtCore.QPointF(point),
+        QtCore.Qt.LeftButton,
+        QtCore.Qt.LeftButton,
+        QtCore.Qt.NoModifier,
+    ),
+)
+app.processEvents()
+editor = table.findChild(QtWidgets.QLineEdit)
+assert editor is not None, 'one click must open the cell'
+assert editor.text() == '6.5', editor.text()
+
+# Arrow keys still WALK the grid: navigation is not an edit trigger.
+table.closePersistentEditor(target)
+table.setCurrentIndex(table.model().index(0, 0))
+table.setFocus()
+from PyQt5 import QtTest
+QtTest.QTest.keyClick(table, QtCore.Qt.Key_Right)
+QtTest.QTest.keyClick(table, QtCore.Qt.Key_Down)
+assert table.currentIndex() == table.model().index(1, 1), table.currentIndex()
+"""
+    )

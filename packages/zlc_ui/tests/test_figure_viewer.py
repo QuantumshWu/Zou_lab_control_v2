@@ -275,8 +275,16 @@ assert editor.axis_value_model.rowCount() == 1
 assert editor.axis_value_model.columnCount() == 100_000
 assert editor.axis_value_table.horizontalScrollBar().maximum() > 0
 assert editor.axis_value_table.sizeAdjustPolicy() == QtWidgets.QAbstractScrollArea.AdjustIgnored
-assert 'spatial-y' in editor.row_axis_label.text()
-assert 'spatial-x' in editor.column_axis_label.text()
+# The role controls ARE the statement of what rows and columns are; a
+# second line repeating the choice just made is not a second fact.
+assert not hasattr(editor, 'row_axis_label')
+assert not hasattr(editor, 'column_axis_label')
+roles = {
+    label.text().split(' (')[0]: mode.currentText()
+    for _holder, label, mode in editor._axis_view_widgets.values()
+}
+assert roles.get('spatial-y') == 'Rows ↓', roles
+assert roles.get('spatial-x') == 'Columns →', roles
 assert editor.value_model.rowCount() == 100_000
 assert editor.value_model.columnCount() == 1_000
 assert editor.value_table.verticalScrollBar().maximum() > 0

@@ -325,24 +325,36 @@ class _DataEditorView(QtWidgets.QWidget):
         axes_layout = QtWidgets.QVBoxLayout(axes_group)
         axes_layout.setContentsMargins(window_pad(0.75), window_pad(0.75), window_pad(0.75), window_pad(0.6))
         axes_layout.setSpacing(window_pad(0.35))
+        axis_label_width = setting_label_width(
+            ("Name", "Length", "Unit", "Domain", "Editing"),
+            minimum=68,
+        )
+        # Creating an axis and choosing which one to edit are two different
+        # sentences.  Sharing a row said they were one control with three
+        # buttons, so the row above is the CREATE action and the row below
+        # is the chooser -- labelled, because every other control in this
+        # form says what it is.
+        add_axis_row = QtWidgets.QHBoxLayout()
+        add_axis_row.setSpacing(window_pad(0.25))
+        self.add_axis_button = FluentButton("Add axis", color=ACCENT)
+        self.add_axis_button.setToolTip("Create a new axis")
+        add_axis_row.addStretch(1)
+        add_axis_row.addWidget(self.add_axis_button)
+        axes_layout.addLayout(add_axis_row)
         axis_choice_row = QtWidgets.QHBoxLayout()
         axis_choice_row.setSpacing(window_pad(0.25))
         self.axis_combo = FluentComboBox()
         self.axis_combo.setMinimumContentsLength(13)
-        axis_choice_row.addWidget(self.axis_combo, 1)
-        self.add_axis_button = FluentButton("Add axis", color=ACCENT)
-        self.add_axis_button.setToolTip("Create a new axis")
         self.remove_axis_button = FluentButton("Delete", color=GREY)
         self.remove_axis_button.setToolTip(
             "Delete selected axis and keep its current Scope slice"
         )
-        axis_choice_row.addWidget(self.add_axis_button)
+        self.axis_choice_row = FluentSettingRow(
+            "Editing", self.axis_combo, label_width=axis_label_width
+        )
+        axis_choice_row.addWidget(self.axis_choice_row, 1)
         axis_choice_row.addWidget(self.remove_axis_button)
         axes_layout.addLayout(axis_choice_row)
-        axis_label_width = setting_label_width(
-            ("Name", "Length", "Unit", "Domain"),
-            minimum=68,
-        )
         self.domain_combo = FluentComboBox()
         self.axis_size_spin = FluentSpinBox()
         self.axis_size_spin.setRange(1, 2_147_483_647)
@@ -397,21 +409,30 @@ class _DataEditorView(QtWidgets.QWidget):
         self._axis_view_layout.setHorizontalSpacing(window_pad(0.35))
         self._axis_view_layout.setVerticalSpacing(window_pad(0.2))
         data_layout.addWidget(self._axis_view_holder)
-        axes_readout = QtWidgets.QHBoxLayout()
-        self.row_axis_label = FluentLabel("Rows ↓ —")
-        self.column_axis_label = FluentLabel("Columns → —")
-        axes_readout.addWidget(self.row_axis_label, 1)
-        axes_readout.addWidget(self.column_axis_label, 1)
-        data_layout.addLayout(axes_readout)
-        component_row = QtWidgets.QHBoxLayout()
-        component_row.addWidget(FluentLabel("Table"))
+        # One sentence, one row: what the table below is showing, and the
+        # switch that decides whether "sigma" is even on offer.  A setting
+        # row is a width CONSUMER, so the pair travels inside its control
+        # slot rather than beside it in a box that would collapse it.
         self.component_combo = FluentComboBox()
         self.component_combo.setMinimumContentsLength(10)
-        component_row.addWidget(self.component_combo)
         self.sigma_check = FluentCheckBox("Enable sigma")
-        component_row.addWidget(self.sigma_check)
-        component_row.addStretch(1)
-        data_layout.addLayout(component_row)
+        component_controls = QtWidgets.QWidget(data_group)
+        component_controls.setStyleSheet("background: transparent;")
+        component_layout = QtWidgets.QHBoxLayout(component_controls)
+        component_layout.setContentsMargins(0, 0, 0, 0)
+        component_layout.setSpacing(window_pad(0.5))
+        component_layout.addWidget(self.component_combo)
+        component_layout.addWidget(self.sigma_check)
+        component_layout.addStretch(1)
+        data_layout.addWidget(
+            FluentSettingRow(
+                "Table shows",
+                component_controls,
+                label_width=setting_label_width(
+                    ("Table shows",), minimum=68
+                ),
+            )
+        )
         self.blank_help_label = muted_note_label("")
         data_layout.addWidget(self.blank_help_label)
         self.value_model = _VirtualTextTableModel(self)
@@ -657,22 +678,6 @@ class _DataEditorView(QtWidgets.QWidget):
             table = dict(data.get("table", {}))
             self._set_structure(table.get("structure", ()))
             self._set_axis_view_controls(table.get("axes", ()))
-            row = next(
-                (item for item in tuple(table.get("axes", ())) if dict(item).get("mode") == "rows"),
-                None,
-            )
-            column = next(
-                (item for item in tuple(table.get("axes", ())) if dict(item).get("mode") == "columns"),
-                None,
-            )
-            self.row_axis_label.setText(
-                "Rows ↓ —" if row is None else f"Rows ↓ {dict(row).get('name', '')}"
-            )
-            self.column_axis_label.setText(
-                "Columns → —"
-                if column is None
-                else f"Columns → {dict(column).get('name', '')}"
-            )
             _fill_choice_combo(
                 self.component_combo,
                 table.get("component_choices", ()),
@@ -794,13 +799,18 @@ class FigureViewerView(QtWidgets.QWidget):
         self.data_combo.setMinimumContentsLength(15)
         self.data_combo.setEnabled(False)
         data_row.addWidget(self.data_combo, 1)
-        self.new_data_button = FluentButton("New data", color=ACCENT)
-        self.new_data_button.clicked.connect(self.new_data_requested)
-        data_row.addWidget(self.new_data_button)
+        # The button beside a chooser acts ON what the chooser holds; the
+        # one after it does something else entirely.  Both rows of this bar
+        # read that way now -- Edit data / Add panel answer the box to their
+        # left, New data and Save image do not -- so a creating action never
+        # sits between a chooser and the thing that reads it.
         self.edit_data_button = FluentButton("Edit data", color=ACCENT)
         self.edit_data_button.setEnabled(False)
         self.edit_data_button.clicked.connect(self._edit_selected_data)
         data_row.addWidget(self.edit_data_button)
+        self.new_data_button = FluentButton("New data", color=ACCENT)
+        self.new_data_button.clicked.connect(self.new_data_requested)
+        data_row.addWidget(self.new_data_button)
         bar_layout.addLayout(data_row)
         panel_row = QtWidgets.QHBoxLayout()
         panel_row.setContentsMargins(0, 0, 0, 0)
