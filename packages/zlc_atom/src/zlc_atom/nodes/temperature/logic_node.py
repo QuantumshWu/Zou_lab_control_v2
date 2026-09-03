@@ -41,6 +41,8 @@ from zlc_atom.nodes.scan import (
     SCAN_OUTPUT,
     SCAN_PULSE_CONTRACT,
     STEPPED_PULSE_RESOURCE,
+    api_overrides_from_authored,
+    apply_api_overrides,
     plan_from_authored,
 )
 
@@ -80,6 +82,14 @@ TEMPERATURE_SCHEMA = AuthoringSchema(
             "Release plan",
             DEFAULT_RELEASE_PLAN,
             required=True,
+        ),
+        # The pulse's other API slots, set once for this run.  The release
+        # itself is swept by the plan and never appears here.
+        AuthoringField(
+            "api_values",
+            "text",
+            "API values",
+            "",
         ),
         AuthoringField(
             "repeats",
@@ -147,7 +157,10 @@ def _build(
         camera=camera,
         camera_key=camera_key,
         signal_plane=signal_plane,
-        sequence=pulse_resource.value,
+        sequence=apply_api_overrides(
+            pulse_resource.value,
+            api_overrides_from_authored(authored["api_values"]),
+        ),
         calibration=calibration.value,
         calibration_path=calibration.path,
         plan=plan_from_authored(authored["plan"]),

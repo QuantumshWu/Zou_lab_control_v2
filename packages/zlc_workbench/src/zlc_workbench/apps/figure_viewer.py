@@ -70,7 +70,7 @@ def build(
         workspace=workspace,
         installation=SimpleNamespace(devices={}, revision=0),
         device_use=DeviceUseCoordinator(),
-        day_folder=lambda: workspace.today,
+        day_folder_path=lambda: workspace.today,
         resolve_device_setting_records=lambda _records: (),
     )
 

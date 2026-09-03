@@ -75,6 +75,35 @@ class DatasetRevisionRef:
             raise TypeError("revision must be DatasetRevision")
 
 
+@dataclass(frozen=True)
+class IndexedWindow:
+    """Where one indexed materialization sits in its history, in shot numbers.
+
+    ``start``..``latest`` are the absolute primary indices the block's shots
+    were taken from (holes allowed); ``stable_since`` is the last sequence
+    at which a retained shot was OVERWRITTEN rather than appended.  A
+    consumer that carried something derived from an earlier revision of the
+    same block may keep it exactly when that revision is not older than
+    ``stable_since``: every shot the two revisions share is then byte-equal,
+    and the difference between them is the shots that entered and left.
+    That is the whole fact an incremental consumer needs, and it is a fact
+    only the producer knows, which is why it travels on the block.
+    """
+
+    start: int
+    latest: int
+    stable_since: int
+
+    def __post_init__(self) -> None:
+        for name in ("start", "latest", "stable_since"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+                raise TypeError(f"{name} must be an integer")
+            object.__setattr__(self, name, int(value))
+        if self.latest < self.start:
+            raise ValueError("latest must not precede start")
+
+
 @dataclass(frozen=True, eq=False)
 class DataBlock:
     block_id: BlockId
@@ -92,6 +121,11 @@ class DataBlock:
     #: It cannot be recovered downstream, so it travels here, beside the
     #: values, sliced by the same code that slices them.
     sigma: np.ndarray | None = None
+    #: For a block that IS a window of a Runtime indexed history: which
+    #: shots, and since when they have been stable.  None for every other
+    #: block.  Read by a consumer that would otherwise recount the whole
+    #: window every shot to learn what one shot changed.
+    window: IndexedWindow | None = None
     __hash__ = None
 
     def __post_init__(self) -> None:
@@ -122,6 +156,8 @@ class DataBlock:
             if bool(np.any(finite & (sigma < 0.0))):
                 raise ValueError("sample sigma must be non-negative")
             object.__setattr__(self, "sigma", sigma)
+        if self.window is not None and not isinstance(self.window, IndexedWindow):
+            raise TypeError("window must be IndexedWindow or None")
 
     def ref(self, stream_generation: StreamGenerationId) -> DatasetRevisionRef:
         return DatasetRevisionRef(
@@ -208,6 +244,7 @@ def owned_snapshot_from_arrays(
     sigma: object | None = None,
     block_id: BlockId | str | None = None,
     stream_generation: StreamGenerationId | str | None = None,
+    window: IndexedWindow | None = None,
 ) -> OwnedSnapshot:
     """Build one immutable :class:`OwnedSnapshot` from ordinary arrays.
 
@@ -300,6 +337,7 @@ def owned_snapshot_from_arrays(
         resolved_validity,
         resolved_schema,
         sigma,
+        window,
     )
     return OwnedSnapshot(block.ref(resolved_generation), block)
 
@@ -424,6 +462,7 @@ def _validate_dataset_validity(
 __all__ = [
     "BlockId",
     "DataBlock",
+    "IndexedWindow",
     "DatasetRevision",
     "DatasetRevisionRef",
     "INVALID",

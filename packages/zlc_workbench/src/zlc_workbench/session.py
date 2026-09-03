@@ -24,7 +24,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
-from zlc_durable import atomic_write_bytes, day_folder, readable_json_bytes
+from zlc_durable import atomic_write_bytes, day_folder, day_folder_path, readable_json_bytes
 from zlc_durable.paths import resolve_under
 
 from .device_use import DeviceClaim, DeviceUseCoordinator
@@ -155,6 +155,21 @@ def seed_packaged_pulses(pulses: Path) -> None:
     )
 
 
+def seed_current_api_values(directory: Path) -> None:
+    """The empty set of API parameter values, present so it can be edited.
+
+    Empty on purpose: a seeded number would silently overwrite whatever the
+    operator had authored in a pulse the first time they opened it.
+    """
+
+    from zlc_atom.pulse_values import CURRENT_API_VALUES, write_api_values
+
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / CURRENT_API_VALUES
+    if not path.exists():
+        write_api_values(path, {}, name="current")
+
+
 @dataclass(frozen=True)
 class Workspace:
     """Where an experiment's own files live: its pulses and its saved data.
@@ -201,6 +216,21 @@ class Workspace:
         return self.root / "apparatus.json"
 
     @property
+    def api_values(self) -> Path:
+        """Saved sets of pulse API parameter values.
+
+        A bias code or a MOT duration measured once belongs to the apparatus,
+        not to whichever pulse happened to be open: an operator who
+        recalibrated had to retype it into every pulse.  A set saved here is
+        applied to any pulse that declares the same ids, and ``CURRENT_VALUES``
+        is the one every pulse picks up by itself.
+        """
+
+        from zlc_atom.pulse_values import API_VALUES_DIRECTORY
+
+        return self.root / API_VALUES_DIRECTORY
+
+    @property
     def data(self) -> Path:
         return self.root / "data"
 
@@ -211,6 +241,7 @@ class Workspace:
         """Create the directories a session writes into."""
 
         self.data.mkdir(parents=True, exist_ok=True)
+        seed_current_api_values(self.api_values)
         return self
 
     #: Where an experiment lives when nobody has said otherwise.  Overridable,
@@ -908,13 +939,21 @@ class ExperimentSession:
     # ---------------------------------------------------------------- keeping
 
     def day_folder(self) -> Path:
-        """Where today's saved work lands.
+        """Where today's saved work lands, made to exist durably.
 
         Asked, not computed: zlc_durable owns the rule that a day is the
         organising key, and a second place deciding it is a second answer.
+        This is the WRITE side -- a run root, a save -- and creates the
+        folder with durability evidence; anything that only needs to name
+        the folder asks :meth:`day_folder_path`.
         """
 
         return day_folder(self.workspace.data, _date.today())
+
+    def day_folder_path(self) -> Path:
+        """Where today's saved work lands, without touching the disk."""
+
+        return day_folder_path(self.workspace.data, _date.today())
 
     # ----------------------------------------------------------------- closing
 

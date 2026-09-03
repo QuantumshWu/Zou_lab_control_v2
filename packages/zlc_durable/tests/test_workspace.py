@@ -8,7 +8,7 @@ from threading import Barrier
 
 import pytest
 
-from zlc_durable import day_folder, unique_path
+from zlc_durable import day_folder, day_folder_path, unique_path
 from zlc_durable.workspace import DAY_FOLDER_PATTERN, day_folder_name
 
 
@@ -180,3 +180,22 @@ def test_a_run_folder_takes_a_free_name_and_is_created(tmp_path) -> None:
         ).name
         == "calibration.json"
     )
+
+
+def test_day_folder_path_names_the_day_without_making_it(tmp_path) -> None:
+    """A form that shows today's folder must not create it, let alone flush it."""
+
+    named = day_folder_path(tmp_path, date(2026, 8, 5))
+    assert named == tmp_path / "2026_08_05"
+    assert not named.exists()
+    # Naming is pure; only making refuses a root that is not there.
+    assert day_folder_path(tmp_path / "missing", date(2026, 8, 5)) == (
+        tmp_path / "missing" / "2026_08_05"
+    )
+    with pytest.raises(NotADirectoryError):
+        day_folder(tmp_path / "missing", date(2026, 8, 5))
+    with pytest.raises(ValueError):
+        day_folder_path("relative/root", date(2026, 8, 5))
+    # The write-side twin makes exactly that path.
+    assert day_folder(tmp_path, date(2026, 8, 5)) == named.resolve()
+    assert named.is_dir()

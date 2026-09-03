@@ -15,23 +15,24 @@ from typing import Any
 from PyQt5 import QtCore, QtWidgets
 
 from zlc_ui.fluent import (
-    stamped_file_name,
     ACCENT,
-    GREY,
-    ORANGE,
     FluentButton,
     FluentComboBox,
     FluentFrame,
     FluentGroupBox,
     FluentLabel,
     FluentLineEdit,
+    FluentPageBody,
     FluentPathEdit,
     FluentReadoutEdit,
     FluentScrollArea,
     FluentSettingRow,
     FluentSwitch,
+    GREY,
+    ORANGE,
     scaled_px,
     setting_label_width,
+    stamped_file_name,
 )
 from zlc_ui.form import (
     FluentParameterForm,
@@ -90,8 +91,8 @@ class PanelEditorView(QtWidgets.QWidget):
         outer.setSpacing(0)
         self.scroll = FluentScrollArea()
         self.scroll.setWidgetResizable(True)
-        body = QtWidgets.QWidget()
-        body.setStyleSheet("background: transparent;")
+        # Opaque, so a scroll blits the page instead of repainting it whole.
+        body = FluentPageBody()
         body_layout = QtWidgets.QVBoxLayout(body)
         margin = scaled_px(14, minimum=8)
         body_layout.setContentsMargins(margin, margin, margin, margin)

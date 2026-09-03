@@ -846,3 +846,142 @@ The solve is within 3 ms of the Gaussian's; the rest of `fit_total` is
 forty overlays through the kernel at widths of tens of photons, where a
 bin's window is hundreds of nodes.  The lattice round measured 22.3 / 13.9
 here.
+
+## Edit surface actions at depth (September 2026, fourth pass)
+
+The scenario: the four-panel board an operator actually runs -- a qCMOS
+camera preview, an ROI over it, a histogram of the ROI over a 1000-shot
+window, a FacetGrid of curve cells over the same window (35 rows as
+cells, 495 columns as x, a gaussian_offset fit per cell) and an ROI
+curve -- and the things the operator does on the Edit tab of the grid
+and of the histogram.  The bench is `bench/plot_perf/run_edit_actions.py
+--window 1000` (device pixel ratio 3, the hard case).  Each action is
+timed to its visible outcome, with the longest single event-loop turn
+beside it: that number is the freeze an operator feels.  Pushed
+baseline -> this tree, medians over several runs:
+
+| action                          | before (wall / longest turn) | after (wall / longest turn) |
+|---------------------------------|-----------------------------:|----------------------------:|
+| grid: open Edit                 | 1.55 s / 100-220 ms          | 0.9-1.3 s / 60-150 ms       |
+| grid: scroll the editor (step)  | 15 ms median, 56-78 ms worst | 7 ms median, 26-40 ms worst |
+| grid: Refresh snapshot          | 1.0-1.2 s / 172 ms           | 0.2-0.35 s / 15-25 ms       |
+| grid: Save Fig                  | 4.7-4.9 s / 194-264 ms       | 1.4-1.7 s / 15-30 ms        |
+| histogram: open Edit            | 0.37 s / 40 ms               | 0.32-0.37 s / 25-40 ms      |
+| histogram: Refresh snapshot     | 0.19 s                       | 0.11-0.2 s                  |
+| histogram: Save Fig             | 2.2-2.4 s                    | 0.33-0.38 s                 |
+| change window / uncertainty     | --                           | 0.2-0.25 s / 15-22 ms       |
+| change panel size               | --                           | 50-110 ms / 8-15 ms         |
+| add a histogram panel           | --                           | 95-140 ms / 11-27 ms        |
+
+What changed:
+
+* Refresh advances the editor's own host through `update_data`, the
+  same prepare/solve/commit pair the live card uses, instead of building
+  a second PlotSession over the frozen history (its projection, its fit
+  and a first paint of 35 cells).  A freeze arriving while one is still
+  on its way supersedes it on the same host; the settle loop no longer
+  retires a host it merely advanced; every editor-host operation wakes
+  the owner that settles it.
+* Save Fig renders the preview through the settled editor host, which
+  already shows exactly that freeze, instead of building a third host.
+  The archive deflates at level 1: on a 17 MB camera-history member
+  zlib's default level took 1.9-2.7 s for 7.3 MB where level 1 takes
+  0.2 s for 7.9 MB.
+* Naming today's folder is pure.  Every Edit projection, every open
+  dialog and the layout/console titles used to CREATE the day folder --
+  mkdir plus a directory flush -- on the GUI thread, once per panel
+  state the console published; then merely to resolve it three times
+  over.  Only the write side makes it.
+* The Edit page's scrolled body is opaque (`FluentPageBody`).  A
+  scrolled widget Qt can see through is repainted whole on every step of
+  the wheel -- the plot surface's frame under it -- where an opaque one
+  is moved by blitting the backing store.  The surface also no longer
+  fills white under a frame that covers it.
+* A shot pending when Edit opens goes to the staged host: the owed
+  presentation used to replace the first host before it had run a single
+  operation.
+* Uncertainty bars are built directly on their shared segment buffer:
+  `axes.errorbar` cost masked-array copies, a Path per segment, three
+  transform trees and a datalim update per series per build -- most of a
+  second on a 35-cell grid whenever the scene materialized (an export, a
+  hit test).
+
+Where the rest goes, and what is not going to move without a different
+design:
+
+* Opening Edit on the grid is now ~130 ms of synchronous Qt form
+  construction (93 widgets, 247 signal connections; no single hot spot)
+  plus a PlotSession build on the raster worker: 35 matplotlib Axes at
+  ~7 ms each (`add_axes` -> `Axes.__init__`, `_create_axes` 370 ms of a
+  450 ms build), the projection over the window (65 ms), then the
+  configuration with 35 fits and a first paint (~300 ms).  A fresh
+  35-cell figure per Edit is the floor of this design; sharing artists
+  with the live card would be a new one.
+* The live board at window 1000 runs every card at ~3.5 frames a second
+  (steady-state section of the bench): the grid card's commit is ~110 ms
+  a frame (compose of 35 natively stroked cells with 17k error bars and
+  the capture), and coherent presentation paces the group by its slowest
+  member.  Per-shot data work is not the limit: the projection's
+  reductions are ~20 ms and the plane roll copies 17 MB.
+* The remaining 100-200 ms owner turns are sporadic and carry no Python
+  frame, no Qt event over 35 ms and no presenter step over 15 ms: they
+  are the machine (ten worker threads, a virtual camera rendering frames
+  in Python, four cards committing), not a slot.
+* A cell-kind change on a facet grid over a deep frame history is
+  refused by design: the default facet is the live history, 1000 cells
+  exceeds `facet_max_cells`, and the revert inherits the same default.
+  The bench records it as a finding; the auto-fate table decides it.
+
+## Window histogram from a carried frequency table (September 2026, fifth pass)
+
+A pixel-pool histogram over a deep window -- the ROI histogram card at
+window 1000 -- recounted every value of the window on every shot: a masked
+gather of seventeen million `uint16` samples and a bincount over them, plus
+a masked min/max pass for the domain, about 90 ms a shot on a 128 x 132
+ROI, for a picture that one shot's worth of pixels had changed by a
+thousandth.
+
+The count of each value is a sum over shots, so it is kept and moved rather
+than rebuilt.  Three pieces, each in the package that owns the fact:
+
+* **zlc_data** -- `IndexedWindow(start, latest, stable_since)` on
+  `DataBlock.window`: the absolute shot numbers a block holds and the last
+  sequence at which a retained shot was OVERWRITTEN.  A consumer may keep
+  work derived from an earlier revision of the same block exactly when that
+  revision is not older than `stable_since`; every shot the two revisions
+  share is then byte-equal.  `restrict_snapshot` keeps the stamp, because a
+  restriction that keeps the shot structure keeps the shots' numbers.
+* **zlc_runtime** -- every indexed materialization is stamped from the
+  history's `replaced_at`; a re-run for the same parent moves the fence.
+* **zlc_plot** -- `DataView.window_frequency(window)` keeps one table
+  (`counts[v - offset]`) per view, inherits the previous view's through the
+  same `inherit_domains_from` hand-over the coordinate domains use, and
+  advances it by the shots that entered and left (matched by absolute shot
+  number, so holes and window changes are ordinary).  A narrow integer
+  dtype gets its whole range (65 536 levels for 16-bit pixels); a wider one
+  its observed span up to `_FREQUENCY_LEVEL_LIMIT`, growing as values
+  arrive; floats and unindexed data get no table.  `_histogram_bins` reads
+  the extrema off the table's first and last occupied level, and the
+  aligned integer bins are summed from it (`_counts_from_frequency`, the
+  same summation the from-values path already used).  Anything the table
+  cannot answer -- non-aligned edges, a reduction, a replacement past the
+  carried revision, more than a quarter of the window changed -- falls back
+  to counting the values, so the answer is always the fresh count.
+
+Measured (`update_data` per shot, 128 x 132 uint16 ROI, window 1000,
+64 bins, thirty shots after the window is full):
+
+| path | median | p90 | max |
+| --- | --- | --- | --- |
+| count the window | 90.9 ms | 105.4 ms | 109.2 ms |
+| carried frequency table | 3.9 ms | 4.4 ms | 5.0 ms |
+
+Of the 3.9 ms, about 1.5 ms is the view itself (validity plane, layout,
+copying the 65 536-level table) and the rest the payload and the session's
+bookkeeping; the counting is one shot's bincount.  The contract is
+exactness -- `test_histogram_window_frequency.py` compares the moved table
+with a fresh count at every step through fill-up, rolling, a hole, an
+invalid shot, a replacement and window changes, and the session's payload
+with a count against its own edges -- and the cost is one reference: the
+previous revision's snapshot stays alive one revision longer, because the
+shots that leave are subtracted from it.

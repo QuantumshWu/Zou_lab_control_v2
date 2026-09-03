@@ -344,3 +344,78 @@ def test_export_draws_the_data_a_native_scene_was_hiding() -> None:
         ), "export must draw from materialized artists, not a hidden scene"
     finally:
         session.close()
+
+
+def test_bars_are_built_directly_on_their_shared_buffer() -> None:
+    """The bar artists are built directly; their segments live in one buffer.
+
+    ``axes.errorbar`` cost masked-array copies of every bound, a Path per
+    segment, three ``plot`` calls with their transform trees, a datalim
+    update and a container to remove again -- per cell per build, most
+    of a second on a 40-cell grid's first paint.  A grid strokes its cells natively and paints these artists when
+    the scene materializes -- an export, a hit test -- which is where
+    the cost sat and where the contract is pinned: no container, a vertical segment per point in the buffer the
+    native stroke reads, two caps on the bounds, matplotlib's own Paths
+    following the buffer whenever it or an export asks, and a same-size
+    revision writing the buffer in place.
+    """
+
+    import io
+
+    from matplotlib.lines import Line2D
+    from zlc_plot import FacetGridPlot
+
+    rng = np.random.default_rng(5)
+    schema = make_dataset_schema(
+        repeat_domain(size=24),
+        mapped_domain_from_columns({"x": [0.0, 1.0, 2.0, 3.0]}),
+        cell_axes=(axis("site", values=[0.0, 1.0]),),
+        dtype=np.float64,
+    )
+
+    def shot(revision: int, scale: float) -> OwnedSnapshot:
+        values = 0.5 + scale * rng.standard_normal((24, 4, 2))
+        return make_snapshot(schema, values, revision=revision)
+
+    session = PlotSession(
+        shot(1, 0.2),
+        FacetGridPlot(AxisRef.cell_data("site"), CurvePlot(AxisRef.point("x"))),
+        parameters={"uncertainty": True},
+    )
+    try:
+        renderer = session._renderer
+        renderer.draw()
+        renderer._materialize_prepared_curve()
+        assert not any(axes.containers for axes in renderer.figure.axes), (
+            "the bars must not be an ErrorbarContainer"
+        )
+        groups = [
+            group
+            for bars in renderer._series_bars.values()
+            for group in bars.values()
+        ]
+        assert len(groups) == 2, "one bar group per cell"
+        capped = renderer.style.render.uncertainty_bar_capsize_pt > 0
+        for group in groups:
+            collection = group[-1]
+            buffer = collection._zlc_segment_buffer
+            assert isinstance(buffer, np.ndarray) and buffer.shape == (4, 2, 2)
+            assert np.all(buffer[:, 0, 0] == buffer[:, 1, 0]), "a bar is vertical"
+            assert np.all(buffer[:, 0, 1] <= buffer[:, 1, 1])
+            caps = group[:-1]
+            assert len(caps) == (2 if capped else 0)
+            assert all(isinstance(cap, Line2D) for cap in caps)
+            for cap, edge in zip(caps, (buffer[:, 0, 1], buffer[:, 1, 1])):
+                assert np.array_equal(np.asarray(cap.get_ydata()), edge)
+            assert np.array_equal(np.asarray(collection.get_segments()), buffer)
+        collection = groups[0][-1]
+        buffer = collection._zlc_segment_buffer
+        renderer.save(io.BytesIO(), format="png")
+        assert len(collection.get_paths()) == 4
+        session.update_data(shot(2, 0.4))
+        renderer.draw()
+        renderer._materialize_prepared_curve()
+        assert collection._zlc_segment_buffer is buffer, "same size: same buffer"
+        assert np.array_equal(np.asarray(collection.get_segments()), buffer)
+    finally:
+        session.close()

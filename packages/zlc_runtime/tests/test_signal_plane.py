@@ -1467,3 +1467,89 @@ def test_slimming_reads_the_commit_s_recorded_selection_not_the_live_state() -> 
         if roi_tap is not None:
             roi_tap.close()
         plane.close()
+
+
+def test_indexed_history_stamps_its_window_and_the_last_replacement() -> None:
+    """The stamp a consumer keeps work across revisions by.
+
+    ``start``..``latest`` name the retained shots; ``stable_since`` is -1
+    until a retained index is overwritten, and then the sequence that
+    overwrote it -- the fence past which no carried work is valid.
+    """
+
+    source_declaration = DatasetOutputDeclaration("frame", "test.frame")
+    derived_declaration = DatasetOutputDeclaration(
+        "value",
+        "test.value",
+        index_by_source=True,
+    )
+    source = _node("stamped-source", source_declaration)
+
+    class Derived:
+        instance_id = "stamped-derived"
+        dataset_output_declarations = (derived_declaration,)
+
+        @staticmethod
+        def signal_key(name: str) -> str:
+            return f"stamped-derived/{name}"
+
+        validate_processor_source = staticmethod(lambda _source: None)
+        evaluate_processor = staticmethod(
+            lambda _source, _publication: (_ for _ in ()).throw(AssertionError())
+        )
+        accept_processor_result = staticmethod(lambda *_args: None)
+        accept_processor_failure = staticmethod(lambda error: (_ for _ in ()).throw(error))
+        accept_processor_cancelled = staticmethod(lambda: None)
+        request_processor_owner_wake = staticmethod(lambda: None)
+
+    derived = Derived()
+    plane = SignalDataPlane()
+    history = None
+    try:
+        plane.begin_generation(source)
+        plane.commit_live(source, {"frame": _latest(source_declaration, 1.0)})
+        publication = plane.latest_publication("stamped-source/frame")
+        plane.attach_latest_only_processor(
+            derived,
+            source_name="stamped-source/frame",
+            initial_publication=publication,
+            paused=True,
+        )
+        for revision in range(1, 7):
+            if revision > 1:
+                plane.commit_live(
+                    source, {"frame": _latest(source_declaration, float(revision))}
+                )
+                publication = plane.latest_publication("stamped-source/frame")
+            plane.commit_processor(
+                derived,
+                {"value": _latest(derived_declaration, float(revision))},
+                source_publication=publication,
+            )
+            if revision == 1:
+                history = plane.acquire_indexed_history("stamped-derived/value", 4)
+        before = plane.current_dataset("stamped-derived/value")
+        window = before.block.window
+        assert window is not None
+        assert window.latest - window.start == 3
+        assert window.stable_since == -1
+
+        # The latest index published again with another value -- a re-run
+        # for the same parent -- is a REPLACEMENT of a retained shot, which
+        # every table carried across revisions must notice.
+        plane.commit_processor(
+            derived,
+            {"value": _latest(derived_declaration, 60.0)},
+            source_publication=publication,
+            trigger=("rerun", 1),
+        )
+        after = plane.current_dataset("stamped-derived/value")
+        assert after.block.window.start == window.start
+        assert after.block.window.latest == window.latest
+        assert DatasetRevision(after.block.window.stable_since) == after.block.revision
+        assert float(after.block.values.reshape(-1)[-1]) == 60.0
+    finally:
+        if history is not None:
+            history.close()
+        plane.close()
+

@@ -36,6 +36,7 @@ from zlc_data import (
     DatasetRevision,
     DatasetSchema,
     DomainSpec,
+    IndexedWindow,
     OwnedSnapshot,
     StreamGenerationId,
     owned_snapshot_from_arrays,
@@ -734,6 +735,7 @@ def _materialize_indexed_dataset(
         sigma=sigma,
         block_id=BlockId(f"{materialization.signal_name}.indexed"),
         stream_generation=materialization.generation,
+        window=IndexedWindow(start, latest_index, materialization.stable_since),
     )
 
 
@@ -877,6 +879,11 @@ class _IndexedMaterialization:
     basis: _MaterializedIndexed | None
     record: Mapping[str, object]
     raw_record: Mapping[str, object]
+    #: The history's ``replaced_at`` at this materialization: the last
+    #: sequence at which a retained shot was overwritten.  Stamped on the
+    #: block so a consumer carrying work from an earlier revision knows
+    #: whether the shots the two share are still the same shots.
+    stable_since: int = -1
 
 
 def _validate_indexed_event(
@@ -1030,6 +1037,7 @@ def _indexed_materialization_input(
         basis,
         _freeze_run_record(raw_record),
         raw_record,
+        stable_since=history.replaced_at,
     )
 
 

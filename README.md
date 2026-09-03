@@ -67,9 +67,23 @@ Manager and Init starts the server in-process; once published with Remote,
 the device card's Log button tails that device's own narration. The headless `pulse_server` / `slm_server` commands remain
 for a machine without a bench window.
 
-Run experiment windows from the folder owning `pulses\`, `data\`, and
-`apparatus.json`, or pass `--workspace`. Set `ZLC_PY_CMD` only when the intended
-Python is outside normal discovery.
+Run experiment windows from the folder owning `pulses\`, `data\`,
+`api_values\`, and `apparatus.json`, or pass `--workspace`. Set `ZLC_PY_CMD`
+only when the intended Python is outside normal discovery.
+
+`api_values\current.json` is what the apparatus is set to today: the bias
+codes and durations your pulses' API slots hold, by name. It is a set you pull
+from, never something that changes a run behind you -- press **Load values**
+in the Pulse Editor, which writes it into the pulse you have open, or in a
+scan node's form, which fills that run's boxes. A scan node also says when
+`current.json` differs from what its boxes hold, so a recalibration nobody
+pulled in is visible rather than silently absent.
+
+Write the file by hand, or press **Save values** in the Pulse Editor to get
+one filled in from the pulse you have open -- the names and units are then the
+pulse's own. Names the pulse does not declare are skipped and listed; a value
+in the wrong unit, or outside a DAC's range, is refused with the parameter
+named.
 
 ## One runtime path
 

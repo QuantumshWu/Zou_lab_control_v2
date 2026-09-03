@@ -34,6 +34,8 @@ from .model import (
 
 #: What a reader checks before trusting the rest.
 PULSE_TREE_FORMAT = "zlc.pulse"
+#: ...and the same for one saved set of API parameter values.
+API_VALUES_FORMAT = "zlc.pulse.api_values"
 PULSE_EDITOR_FIELDS = (
     "visible_ports",
     "scan_source",
@@ -427,9 +429,87 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
     )
 
 
+def api_values_to_tree(
+    values: Mapping[str, tuple[int | float, str]],
+    *,
+    name: str = "",
+    source: str = "hand",
+) -> dict[str, Any]:
+    """One named set of API parameter values, as a tree a file can hold.
+
+    Written from a pulse, so the ids and units are the pulse's own and an
+    operator editing the numbers by hand cannot invent a name that nothing
+    declares.  ``source`` is free text: whoever produced these numbers stamps
+    itself there, and a reader does not care who that was.
+    """
+
+    if not isinstance(values, Mapping):
+        raise TypeError("API values must be a mapping")
+    entries: dict[str, Any] = {}
+    for parameter_id, entry in values.items():
+        number, unit = entry
+        if not isinstance(parameter_id, str) or not parameter_id:
+            raise ValueError("API value ids must be non-empty text")
+        if not isinstance(number, Real) or isinstance(number, bool):
+            raise TypeError(f"API value {parameter_id!r} must be a number")
+        if not isinstance(unit, str) or not unit:
+            raise ValueError(f"API value {parameter_id!r} must carry a unit")
+        entries[parameter_id] = {"value": _plain_number(float(number)), "unit": unit}
+    return {
+        "format": API_VALUES_FORMAT,
+        "name": str(name),
+        "source": str(source),
+        "values": entries,
+    }
+
+
+def api_values_from_tree(
+    tree: Mapping[str, Any],
+) -> tuple[str, str, dict[str, tuple[float, str]]]:
+    """``(name, source, {parameter_id: (value, unit)})`` from a saved set.
+
+    The grammar is closed the way a pulse's is: an alternate root, a missing
+    field or an unknown one is refused here rather than becoming a silently
+    half-applied set of values.
+    """
+
+    tree = _object(tree, ("format", "name", "source", "values"), "API values")
+    if tree["format"] != API_VALUES_FORMAT:
+        raise ValueError(
+            f"API values must declare format {API_VALUES_FORMAT!r}"
+        )
+    for field in ("name", "source"):
+        if not isinstance(tree[field], str):
+            raise TypeError(f"API values {field} must be text")
+    body = tree["values"]
+    if not isinstance(body, Mapping):
+        raise TypeError("API values body must be an object")
+    entries: dict[str, tuple[float, str]] = {}
+    for parameter_id, entry in body.items():
+        if not isinstance(parameter_id, str) or not parameter_id:
+            raise ValueError("API value ids must be non-empty text")
+        entry = _object(entry, ("value", "unit"), f"API value {parameter_id!r}")
+        number = entry["value"]
+        if not isinstance(number, Real) or isinstance(number, bool):
+            raise TypeError(f"API value {parameter_id!r} must be a number")
+        unit = entry["unit"]
+        if not isinstance(unit, str) or not unit:
+            raise ValueError(f"API value {parameter_id!r} must carry a unit")
+        entries[parameter_id] = (float(number), unit)
+    return tree["name"], tree["source"], entries
+
+
+def _plain_number(value: float) -> int | float:
+    return int(value) if float(value).is_integer() else float(value)
+
+
+
 __all__ = [
+    "API_VALUES_FORMAT",
     "PULSE_TREE_FORMAT",
     "PULSE_EDITOR_FIELDS",
+    "api_values_from_tree",
+    "api_values_to_tree",
     "parse_pulse_tree_json",
     "sequence_from_document_tree",
     "sequence_from_tree",

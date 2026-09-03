@@ -41,6 +41,9 @@ class PulseEditorHandle(QtCore.QObject):
     clear_all_requested = QtCore.pyqtSignal()
     save_requested = QtCore.pyqtSignal()
     load_requested = QtCore.pyqtSignal()
+    values_save_requested = QtCore.pyqtSignal()
+    values_load_requested = QtCore.pyqtSignal()
+    binding_renamed = QtCore.pyqtSignal(str, str)
 
     # -- the schedule ----------------------------------------------------
     port_label_committed = QtCore.pyqtSignal(str, str)
@@ -110,6 +113,7 @@ class PulseEditorHandle(QtCore.QObject):
             "visible_ports_committed", "clear_port_requested",
             "feedback_requested", "connection_requested", "stop_requested",
             "sync_requested", "save_requested", "load_requested",
+            "values_save_requested", "values_load_requested",
             "scan_array_load_requested",
         ):
             getattr(schedule, name).connect(getattr(self, name))
@@ -123,6 +127,7 @@ class PulseEditorHandle(QtCore.QObject):
         scan.run_requested.connect(self.scan_run_requested)
         scan.save_array_requested.connect(self.scan_array_save_requested)
         scan.progress_refresh_requested.connect(self.scan_progress_refresh_requested)
+        scan.binding_renamed.connect(self.binding_renamed)
         preview.include_off_toggled.connect(self.preview_include_off_toggled)
         preview.size_committed.connect(self.preview_size_committed)
         preview.selectors_toggled.connect(self.preview_selectors_toggled)

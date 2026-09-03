@@ -945,7 +945,7 @@ class PlotSession(FitSessionMixin, LiveSessionMixin, GestureSessionMixin):
             if name not in self._parameter_schema:
                 continue
             compatible = []
-            for symbol in registry.canonical_symbols():
+            for symbol in registry.distinct_symbols():
                 target = resolve_unit(symbol, registry)
                 if source.canonical_unit.compatible_with(target):
                     compatible.append(symbol)

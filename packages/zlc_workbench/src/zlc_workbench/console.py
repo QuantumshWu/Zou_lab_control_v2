@@ -659,6 +659,9 @@ class ConsolePresenter:
         draft_changed = getattr(self.view, "logic_draft_changed", None)
         if draft_changed is not None:
             draft_changed.connect(self._guarded(self._logic_draft_changed))
+        logic_refresh = getattr(self.view, "logic_refresh_requested", None)
+        if logic_refresh is not None:
+            logic_refresh.connect(self._guarded(self.refresh_logic_files))
         publisher_edit = getattr(self.view, "panel_publisher_edit_requested", None)
         if publisher_edit is not None:
             publisher_edit.connect(self._guarded(self.edit_panel_publisher))
@@ -1420,6 +1423,7 @@ class ConsolePresenter:
                 self._publish_panel_state(binding)
             return
         binding.refresh_requested = False
+        previous = binding.frozen_data
         binding.frozen_data = self._panel_frozen_data(
             binding,
             publication=publication,
@@ -1431,7 +1435,7 @@ class ConsolePresenter:
         self._publish_panel_state(binding)
         if binding.editor_open:
             try:
-                self._replace_panel_editor_host(binding)
+                self._advance_panel_editor_host(binding, previous)
             except Exception as error:
                 self._report(
                     f"cannot refresh {binding.state.title} plot editor: "
@@ -1770,11 +1774,24 @@ class ConsolePresenter:
                 style=DEFAULTS.style,
             ).declared_subset(display_updates)
         pending = host.configure(**configuration)
-        if host is binding.host:
-            add = getattr(pending, "add_done_callback", None)
-            if callable(add):
-                add(lambda _future: self.board.wake.request_owner_wake())
+        self._wake_when_done(pending)
         return pending
+
+    def _wake_when_done(self, pending: object) -> None:
+        """Have a host's finished operation start the owner turn that consumes it.
+
+        Every pending host operation is settled on the owner -- the live
+        card's presentation, but also the Edit surface's mount, its gesture
+        subscription and the clearing of its pending entry.  Only the live
+        host used to ask for the wake; an editor's finished configuration
+        or freeze then waited for whatever woke the owner next -- a shot,
+        or the display beat -- one such wait per hop of opening Edit, of
+        Refresh, of a moved target.
+        """
+
+        add = getattr(pending, "add_done_callback", None)
+        if callable(add):
+            add(lambda _future: self.board.wake.request_owner_wake())
 
     def _remember_panel_view(self, binding: PanelBinding, **changes: Any) -> None:
         """Write down how this panel is being looked at.
@@ -3490,7 +3507,9 @@ class ConsolePresenter:
                             self._publish_panel_state(binding)
                     if old_selections is not None:
                         old_selections.close()
-                    if old_host is not None:
+                    # An advanced host is the one just mounted: it took the
+                    # newer freeze in place.  Only a replaced one retires.
+                    if old_host is not None and old_host is not editor_host:
                         self._retire_plot_host(old_host)
                 except Exception as error:
                     if editor_host is not binding.editor_host:
@@ -3544,7 +3563,7 @@ class ConsolePresenter:
             "stale": bool(binding.frozen_configuration_incompatible),
             "data_advanced": bool(binding.frozen_data_advanced),
             "producer_node_id": producer_node_id,
-            "save_directory": str(self.session.day_folder()),
+            "save_directory": str(self.session.day_folder_path()),
         }
 
     def refresh_panel_editor(self, panel_id: str) -> bool:
@@ -3766,6 +3785,59 @@ class ConsolePresenter:
         )
         return host
 
+    def _advance_panel_editor_host(
+        self,
+        binding: PanelBinding,
+        previous: PanelFrozenData | None,
+    ) -> None:
+        """Show a newer freeze on the editor's own host, as the card shows a shot.
+
+        Refresh used to tear the Edit surface down and build another: a new
+        PlotSession over the frozen history, its projection, its fit, its
+        first paint -- 1.2 s on a 40-cell grid over a thousand shots, for a
+        picture the card beside it had just drawn incrementally in a tenth
+        of that.  The editor host takes the new data the way the live host
+        does, through the same prepare/solve/commit pair, and keeps its
+        artists, caches and configuration.  The pending operation settles
+        through the one editor-configuration path, so the frozen
+        description is the host's own.  A host that cannot take the data --
+        the target moved, the geometry changed -- is replaced, as before.
+        """
+
+        entry = binding.editor_configuration
+        # The surface Edit has, or the one being staged for it: a host
+        # built for the previous freeze takes this one through its data
+        # pipeline, queued behind its own configuration.  Opening Edit
+        # under a live source used to build a second host here -- the
+        # owed presentation arrived while the first was still starting,
+        # and the first was retired before it ran a single operation.
+        host = binding.editor_host
+        if host is None and entry is not None:
+            host = entry[0]
+        if (
+            host is None
+            or previous is None
+            or (entry is not None and entry[0] is not host)
+            or not _same_panel_plot_target(previous.target, binding.state)
+        ):
+            # No host at all, or a moved target: stage a complete host.
+            self._replace_panel_editor_host(binding)
+            return
+        frozen = binding.frozen_data
+        assert frozen is not None
+        try:
+            pending = host.update_data(frozen.plot_input)
+        except Exception:
+            self._replace_panel_editor_host(binding)
+            return
+        # A freeze still on its way to this host is superseded, not failed:
+        # the host keeps only the latest waiting frame and cancels the rest
+        # itself, and the entry simply points at the newest.  A live source
+        # makes this the common case -- every owed presentation while the
+        # previous adoption is still painting.
+        self._wake_when_done(pending)
+        binding.editor_configuration = (host, pending, True, binding.state, frozen)
+
     def _refresh_panel_editor_selection(self, binding: PanelBinding) -> None:
         """Rebind one unchanged editor host to a replaced frozen record."""
 
@@ -3954,7 +4026,7 @@ class ConsolePresenter:
                     if previous is not None and previous.plot_input is shown_input:
                         self._refresh_panel_editor_selection(binding)
                     else:
-                        self._replace_panel_editor_host(binding)
+                        self._advance_panel_editor_host(binding, previous)
                 except Exception as error:
                     # Frozen record and Frozen pixels are one transaction.
                     # Restore the previous record if its replacement host
@@ -4030,11 +4102,22 @@ class ConsolePresenter:
         # reads the live binding again, so Refresh/Edit cannot change a save
         # that is already archive-first in flight.
         state = binding.state
+        # The Edit surface already IS this freeze, configured and painted;
+        # rendering the export through it costs one draw at export scale,
+        # where a fresh host cost a session, a projection, a fit and a
+        # first paint over the whole frozen history before the same draw.
+        host = (
+            binding.editor_host
+            if binding.editor_configuration is None
+            and binding.editor_host is not None
+            else None
+        )
         def work() -> object:
             return _save_panel_figure(
                 selected,
                 state=state,
                 frozen=frozen,
+                host=host,
             )
 
         title = state.title
@@ -4219,7 +4302,7 @@ class ConsolePresenter:
         if self._open_saved is None:
             self._report("this console cannot open saved figures", severity="warning")
             return None
-        return self._open_saved(str(self.session.day_folder()))
+        return self._open_saved(str(self.session.day_folder_path()))
 
     def offered_signals(
         self, *, include_shown: bool = False
@@ -4631,7 +4714,7 @@ class ConsolePresenter:
             # A name, not an empty box: a board is a thing you keep and
             # reload, so it is named plainly and the dialog warns before it
             # replaces one.
-            str(Path(self.session.day_folder()) / "layout.json"),
+            str(Path(self.session.day_folder_path()) / "layout.json"),
             "Layouts (*.json)",
         )
         if not path:
@@ -4650,7 +4733,7 @@ class ConsolePresenter:
         """Restore a layout as stopped drafts without building devices."""
 
         path = self.view.ask_open_path(
-            "Load TaskConsole layout", str(self.session.day_folder()), "Layouts (*.json)"
+            "Load TaskConsole layout", str(self.session.day_folder_path()), "Layouts (*.json)"
         )
         if not path:
             return False
@@ -4668,7 +4751,7 @@ class ConsolePresenter:
 
         path = self.view.ask_save_path(
             "Save TaskConsole screenshot",
-            str(Path(self.session.day_folder()) / "console.png"),
+            str(Path(self.session.day_folder_path()) / "console.png"),
             "PNG images (*.png)",
         )
         if not path:
@@ -6654,6 +6737,25 @@ class ConsolePresenter:
             )
         self._refresh_console_projection()
         self.refresh_logic_editor(binding.node_id)
+        return True
+
+    def refresh_logic_files(self, node_id: str) -> bool:
+        """Re-read this node's chosen files, without re-picking them.
+
+        A pulse is edited in the Pulse Editor and a calibration is written by
+        a run; both were decoded when the draft last finalized and nothing
+        since then looks at the filesystem -- deliberately, because the beat
+        must never poll it.  Opening Edit and pressing Start were therefore
+        the only ways to see a change, and both are side doors.  This is the
+        front door, and it does exactly what opening Edit already did.
+        """
+
+        binding = self.logic.get(str(node_id))
+        if binding is None:
+            return False
+        self._finalize_logic_binding(binding, force=True)
+        self.refresh_logic_editor(node_id)
+        self._refresh_console_projection()
         return True
 
     def edit_logic(self, node_id: str) -> bool:

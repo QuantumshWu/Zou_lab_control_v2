@@ -232,6 +232,7 @@ def test_the_seamless_node_asks_nothing_about_gating_or_advance() -> None:
     assert set(names) == {
         "pulse_template",
         "plan",
+        "api_values",
         "repeats",
         "shots_per_point",
         "settle_seconds",

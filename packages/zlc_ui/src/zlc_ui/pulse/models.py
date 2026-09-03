@@ -186,8 +186,23 @@ class ScheduleVM:
 
 
 @dataclass(frozen=True)
+class BindingRecord:
+    """One bound field, as the Scan page lists it.
+
+    ``binding_id`` is the NAME a plan, a saved value set and a run record all
+    use; ``label`` is where it sits on the pulse.  They are different things,
+    which is why the id can be renamed without the field moving.
+    """
+
+    binding_id: str
+    label: str
+    kind: str
+
+
+@dataclass(frozen=True)
 class ScanPageRecord:
     slots_text: str = ""
+    bindings: tuple[BindingRecord, ...] = ()
     table_text: str = ""
     source_text: str = ""
     source_dirty: bool = False
@@ -216,6 +231,7 @@ class TargetWidthRule:
 
 
 __all__ = [
+    "BindingRecord",
     "ConnectionChoiceVM",
     "ConnectionVM",
     "DelayRowVM",

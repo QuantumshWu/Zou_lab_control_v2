@@ -635,6 +635,35 @@ class _FacetHistogramPlan:
     pool: NDArray[Any]
 
 
+#: The most integer levels a window frequency table is kept for.  A narrow
+#: dtype's whole range is always kept (65 536 levels for 16-bit pixels);
+#: a wider one is kept over its observed span while that stays small.
+_FREQUENCY_LEVEL_LIMIT = 1 << 18
+
+
+@dataclass(slots=True)
+class _WindowFrequency:
+    """One view's window frequency table and what it was counted from.
+
+    ``counts[v - offset]`` is how many valid samples of the last ``window``
+    shots equal ``v``.  ``ids`` are those shots' absolute numbers in
+    ``positions`` order; ``snapshot`` and ``valid`` are what the shots that
+    later LEAVE will be subtracted from, which is why the previous revision
+    is kept alive here one revision longer than it otherwise would be.
+    """
+
+    snapshot: OwnedSnapshot
+    valid: NDArray[np.bool_]
+    revision: int
+    window: int
+    inner_count: int
+    dtype: np.dtype
+    ids: NDArray[np.int64]
+    positions: NDArray[np.int64]
+    offset: int
+    counts: NDArray[np.int64]
+
+
 class DataView:
     """Resolve and aggregate one immutable dataset revision for renderers."""
 
@@ -653,6 +682,7 @@ class DataView:
         "_unit_registry_revision",
         "_history_layout",
         "_history_mask_cache",
+        "_frequency_carry",
     )
 
     def __init__(
@@ -730,6 +760,11 @@ class DataView:
             schema
         )
         self._history_mask_cache: dict[int, NDArray[np.bool_]] = {}
+        #: The previous view's window frequency table, to be moved by the
+        #: shots that entered and left rather than rebuilt: ``window_frequency``.
+        self._frequency_carry: _WindowFrequency | None = None
+        if isinstance(inherit_domains_from, DataView):
+            self._frequency_carry = inherit_domains_from._frequency_carry
         #: Whole-dataset domains carried from the PREVIOUS revision's view.
         #: A schema fingerprint includes axis domains and codes, so an exact
         #: fingerprint/unit match proves this small derived domain remains
@@ -3024,6 +3059,156 @@ class DataView:
         count = min(window, max(1, schema_repeat_count(self._schema)))
         return values[-count:], validity[-count:]
 
+    def window_frequency(
+        self, window: int
+    ) -> tuple[int, NDArray[np.int64]] | None:
+        """How many samples of each integer value the last ``window`` shots hold.
+
+        A pixel-pool histogram at a deep window recounted every value in
+        the window on every shot -- seventeen million values, seventy
+        milliseconds -- for a picture that one shot's worth of pixels had
+        changed by a thousandth.  The count of each value is a sum over
+        shots, so it moves by adding the shot that arrived and subtracting
+        the one that left.  The block says which those are -- its
+        ``IndexedWindow`` names the shots by absolute number and says since
+        when the retained ones have been untouched -- and the previous
+        revision's view hands its table across, so the steady state costs
+        one shot's bincount, not the window's.
+
+        Returns ``(offset, counts)`` with ``counts[v - offset]`` the number
+        of valid samples equal to ``v``, or None when this dataset is not an
+        integer indexed history or spans more levels than a table is worth;
+        the callers then count from the values as before.  Exactness is the
+        contract: the table equals a fresh count of the same window, always.
+        """
+
+        layout = self._history_layout
+        provenance = self._snapshot.block.window
+        values = self._samples.value.canonical
+        if layout is None or provenance is None or values.dtype.kind not in "iu":
+            return None
+        window = _history_window(window)
+        carry = self._frequency_carry
+        if (
+            carry is not None
+            and carry.snapshot is self._snapshot
+            and carry.window == window
+        ):
+            return carry.offset, carry.counts
+        keep = min(window, layout.shot_count)
+        positions = np.arange(
+            layout.shot_count - keep, layout.shot_count, dtype=np.int64
+        )
+        ids = np.asarray(provenance.latest + layout.cells[positions], dtype=np.int64)
+        revision = snapshot_revision(self._snapshot)
+        counted = None
+        if (
+            carry is not None
+            and carry.window == window
+            and carry.inner_count == int(layout.inner_count)
+            and carry.dtype == values.dtype
+            and carry.snapshot.ref.block_id == self._snapshot.ref.block_id
+            and carry.snapshot.ref.stream_generation
+            == self._snapshot.ref.stream_generation
+            and provenance.stable_since <= carry.revision <= revision
+        ):
+            counted = self._advance_frequency(carry, ids, positions)
+        if counted is None:
+            counted = self._count_frequency(window)
+        if counted is None:
+            self._frequency_carry = None
+            return None
+        offset, counts = counted
+        counts.setflags(write=False)
+        self._frequency_carry = _WindowFrequency(
+            self._snapshot,
+            self._samples.valid_mask,
+            revision,
+            window,
+            int(layout.inner_count),
+            values.dtype,
+            ids,
+            positions,
+            offset,
+            counts,
+        )
+        return offset, counts
+
+    def _count_frequency(self, window: int) -> tuple[int, NDArray[np.int64]] | None:
+        """The window's frequency table from scratch: every valid sample once."""
+
+        values = self._samples.value.canonical
+        usable = self.history_validity(window)
+        selected = (
+            values.reshape(-1) if _stride_zero_all_true(usable) else values[usable]
+        )
+        span = _frequency_span(values.dtype, selected)
+        if span is None:
+            return None
+        offset, size = span
+        if not selected.size:
+            return offset, np.zeros(size, dtype=np.int64)
+        shifted = np.subtract(selected, offset, dtype=np.int64)
+        return offset, np.bincount(shifted, minlength=size)
+
+    def _advance_frequency(
+        self,
+        carry: _WindowFrequency,
+        ids: NDArray[np.int64],
+        positions: NDArray[np.int64],
+    ) -> tuple[int, NDArray[np.int64]] | None:
+        """The carried table moved to this window, or None when it is not worth it."""
+
+        layout = self._history_layout
+        assert layout is not None
+        leaving = np.isin(carry.ids, ids, invert=True)
+        arriving = np.isin(ids, carry.ids, invert=True)
+        changed = int(np.count_nonzero(leaving)) + int(np.count_nonzero(arriving))
+        if changed == 0:
+            return carry.offset, carry.counts
+        if changed > max(1, ids.size // 4):
+            return None
+        inner = int(layout.inner_count)
+        offset = carry.offset
+        table = carry.counts.copy()
+        previous_values = snapshot_values(carry.snapshot)
+        for position in carry.positions[leaving]:
+            moved = _apply_shot(
+                table, offset, previous_values, carry.valid, inner, int(position), -1
+            )
+            if moved is None:
+                return None
+            table, offset = moved
+        values = self._samples.value.canonical
+        valid = self._samples.valid_mask
+        for position in positions[arriving]:
+            moved = _apply_shot(table, offset, values, valid, inner, int(position), 1)
+            if moved is None:
+                return None
+            table, offset = moved
+        return offset, table
+
+    def histogram_from_frequency(
+        self,
+        *,
+        bins: int | Sequence[float],
+        frequency: tuple[int, NDArray[np.int64]],
+    ) -> HistogramData | None:
+        """The histogram of a window from its frequency table.
+
+        None when the bins are not integer-aligned -- then the values must
+        be counted against the edges themselves.
+        """
+
+        canonical_bins = self._canonical_histogram_bins(bins)
+        if isinstance(canonical_bins, int):
+            return None
+        offset, table = frequency
+        counts = _counts_from_frequency(offset, table, np.asarray(canonical_bins))
+        if counts is None:
+            return None
+        return self._histogram_from_counts(canonical_bins, counts)
+
     def pooled_values(self) -> NDArray[Any]:
         """Every value this revision would pool, in canonical units.
 
@@ -4383,21 +4568,9 @@ def _uniform_integer_counts(
 
     source = np.asarray(values)
     flat = source.reshape(-1)
-    if source.dtype.kind not in "biu" or edges.size < 2:
+    if source.dtype.kind not in "biu" or _aligned_integer_bins(edges) is None:
         return None
-    widths = np.diff(edges)
     int64 = np.iinfo(np.int64)
-    if (
-        not np.all(np.isfinite(widths))
-        or float(edges[0]) < int64.min
-        or float(edges[-1]) > int64.max
-    ):
-        return None
-    width = int(round(float(widths[0])))
-    first = int(round(float(edges[0]) + 0.5))
-    expected = (first - 0.5) + width * np.arange(edges.size, dtype=float)
-    if width <= 0 or not np.array_equal(edges, expected):
-        return None
 
     usable = None if valid is None else np.asarray(valid, dtype=np.bool_)
     if usable is None or (
@@ -4421,12 +4594,121 @@ def _uniform_integer_counts(
         return None
     shifted = selected if low == 0 else np.subtract(selected, low, dtype=np.int64)
     frequency = np.bincount(shifted, minlength=span)
+    return _counts_from_frequency(low, frequency, edges)
+
+
+def _aligned_integer_bins(edges: NDArray[Any]) -> tuple[int, int] | None:
+    """``(first, width)`` of integer-aligned uniform edges, or None.
+
+    The edges this library makes for integer samples sit on half-open
+    ``k - 0.5`` boundaries with an integer width; these are the only edges
+    a frequency table can be summed into without asking which bin a value
+    on a boundary belongs to.
+    """
+
+    if edges.size < 2:
+        return None
+    widths = np.diff(edges)
+    int64 = np.iinfo(np.int64)
+    if (
+        not np.all(np.isfinite(widths))
+        or float(edges[0]) < int64.min
+        or float(edges[-1]) > int64.max
+    ):
+        return None
+    width = int(round(float(widths[0])))
+    first = int(round(float(edges[0]) + 0.5))
+    expected = (first - 0.5) + width * np.arange(edges.size, dtype=float)
+    if width <= 0 or not np.array_equal(edges, expected):
+        return None
+    return first, width
+
+
+def _counts_from_frequency(
+    offset: int,
+    frequency: NDArray[np.int64],
+    edges: NDArray[Any],
+) -> NDArray[np.int64] | None:
+    """Sum a frequency table (``frequency[v - offset]`` samples equal ``v``) into aligned integer bins."""
+
+    aligned = _aligned_integer_bins(edges)
+    if aligned is None:
+        return None
+    first, width = aligned
+    counts = np.zeros(edges.size - 1, dtype=np.int64)
+    if not frequency.size:
+        return counts
+    low = int(offset)
+    high = low + int(frequency.size) - 1
     for index in range(counts.size):
         start = max(first + index * width, low) - low
         stop = min(first + (index + 1) * width, high + 1) - low
         if stop > start:
             counts[index] = np.sum(frequency[start:stop], dtype=np.int64)
     return counts
+
+
+def _frequency_span(dtype: np.dtype, selected: NDArray[Any]) -> tuple[int, int] | None:
+    """``(offset, size)`` of the table one integer pool is counted into.
+
+    A dtype of two bytes or fewer gets its whole range, so the table never
+    has to grow whatever a later shot brings; a wider one gets the span the
+    pool actually uses, while that stays within the limit.
+    """
+
+    if dtype.kind not in "iu":
+        return None
+    info = np.iinfo(dtype)
+    if dtype.itemsize <= 2:
+        return int(info.min), int(info.max) - int(info.min) + 1
+    if not selected.size:
+        return 0, 1
+    low = int(np.min(selected))
+    high = int(np.max(selected))
+    if high - low + 1 > _FREQUENCY_LEVEL_LIMIT:
+        return None
+    return low, high - low + 1
+
+
+def _apply_shot(
+    table: NDArray[np.int64],
+    offset: int,
+    values: NDArray[Any],
+    valid: NDArray[np.bool_],
+    inner: int,
+    position: int,
+    sign: int,
+) -> tuple[NDArray[np.int64], int] | None:
+    """Add (``sign`` 1) or remove (-1) one shot's valid samples from a table.
+
+    The table is grown when a shot brings a value outside it -- only a wide
+    dtype can -- and given up when growing it would pass the limit.
+    """
+
+    rows = slice(position * inner, (position + 1) * inner)
+    chunk = values[:, rows]
+    if _stride_zero_all_true(valid):
+        selected = chunk.reshape(-1)
+    else:
+        selected = chunk[valid[:, rows]]
+    if not selected.size:
+        return table, offset
+    low = int(np.min(selected))
+    high = int(np.max(selected))
+    if low < offset or high >= offset + table.size:
+        new_offset = min(offset, low)
+        new_end = max(offset + table.size, high + 1)
+        if new_end - new_offset > _FREQUENCY_LEVEL_LIMIT:
+            return None
+        grown = np.zeros(new_end - new_offset, dtype=np.int64)
+        grown[offset - new_offset : offset - new_offset + table.size] = table
+        table, offset = grown, new_offset
+    delta = np.bincount(np.subtract(selected, offset, dtype=np.int64), minlength=table.size)
+    if sign > 0:
+        table += delta
+    else:
+        table -= delta
+    return table, offset
 
 
 def _uniform_counts(

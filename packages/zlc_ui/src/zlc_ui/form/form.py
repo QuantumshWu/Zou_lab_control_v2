@@ -158,6 +158,11 @@ class FormFieldProps:
     path_mode: Literal["file", "dir"] = "file"
     file_filter: str = "All files (*)"
     base_dir: str = ""
+    #: A path whose CONTENT is read, not merely named: a pulse, a saved
+    #: artifact.  The field then offers Refresh, because the file is edited
+    #: somewhere else and re-picking it through the dialog was the only way
+    #: to see the change.
+    refreshable: bool = False
     unavailable_reason: str = ""
     automatic: bool = False
     #: ``(field key, values)``: editable only while that field holds one of

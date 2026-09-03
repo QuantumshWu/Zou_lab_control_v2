@@ -797,6 +797,7 @@ class FitProjection:
         *,
         binned_values: np.ndarray | None = None,
         binned_valid: np.ndarray | None = None,
+        frequency: tuple[int, np.ndarray] | None = None,
     ) -> np.ndarray:
         """Return stable display-unit edges for one histogram projection.
 
@@ -806,11 +807,28 @@ class FitProjection:
         is narrower than the raw pool's by construction -- taken from the raw
         values, a reduced histogram landed in two bins out of twelve.  Named
         for the history alone, this argument only ever answered half of that.
+        A window that is binned from its frequency table hands the table
+        instead: its extrema are its first and last occupied level, read
+        without a pass over the pool.
         """
 
         count = int(state["bin_count"])
         samples = view.samples
-        if binned_values is None:
+        if frequency is not None:
+            if binned_values is not None:
+                raise ValueError("a frequency table describes the whole binned pool")
+            canonical = np.asarray(samples.value.canonical)
+            offset, table = frequency
+            occupied = np.flatnonzero(table)
+            has_values = bool(occupied.size)
+            if has_values:
+                data_low = float(offset + int(occupied[0]))
+                data_high = float(offset + int(occupied[-1]))
+            edge_values = np.empty(
+                0,
+                dtype=canonical.dtype if has_values else float,
+            )
+        elif binned_values is None:
             canonical = np.asarray(samples.value.canonical)
             valid = np.asarray(samples.valid_mask, dtype=bool)
         else:
@@ -819,7 +837,9 @@ class FitProjection:
             canonical = np.asarray(binned_values)
             valid = np.asarray(binned_valid, dtype=bool)
         integral = canonical.dtype.kind in "biu"
-        if integral:
+        if frequency is not None:
+            pass
+        elif integral:
             has_values = bool(canonical.size) and bool(np.any(valid))
             if has_values:
                 limits = (
@@ -2251,9 +2271,20 @@ class FitProjection:
     def _display_scalar_to_canonical(
         self, value: float, source: AxisRef | Any
     ) -> float:
+        """One painted coordinate back in the DATASET's unit.
+
+        The exact inverse of ``_canonical_scalar_to_display``.  It used to
+        convert to the unit system's BASE unit (microseconds to seconds)
+        instead of the dataset's own unit -- the two agree only for a
+        dataset written in base units, so every selector on metres and volts
+        round-tripped while a column in microseconds had every drawn box
+        stored a million times too small.
+        """
+
         quantity = self._coordinate(source) if isinstance(source, AxisRef) else source
-        unit = quantity.display_unit
-        return float(np.asarray(unit.to_canonical([value])).reshape(-1)[0])
+        display = quantity.display_unit
+        canonical = quantity.canonical_unit
+        return float(np.asarray(display.convert_value_to([value], canonical)).reshape(-1)[0])
 
     def _canonical_scalar_to_display(
         self, value: float, source: AxisRef | Any

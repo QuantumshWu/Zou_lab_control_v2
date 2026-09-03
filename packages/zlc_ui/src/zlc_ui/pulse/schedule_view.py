@@ -876,6 +876,8 @@ class PulseScheduleView(QtWidgets.QWidget):
     sync_requested = QtCore.pyqtSignal()
     save_requested = QtCore.pyqtSignal()
     load_requested = QtCore.pyqtSignal()
+    values_save_requested = QtCore.pyqtSignal()
+    values_load_requested = QtCore.pyqtSignal()
     connection_requested = QtCore.pyqtSignal(str, str)
     scan_array_load_requested = QtCore.pyqtSignal()
     left_panels_collapsed = QtCore.pyqtSignal(bool)
@@ -1007,10 +1009,16 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.save_button = FluentButton("Save*", color=YELLOW)
         self.load_button = FluentButton("Load", color=ORANGE)
         self.collapse_button = FluentButton("Collapse", color=GREY)
+        # The API slots hold numbers measured elsewhere -- a bias code, a
+        # MOT duration.  These carry a whole set of them in and out, so a
+        # recalibration is loaded once instead of retyped per pulse.
+        self.load_values_button = FluentButton("Load values", color=ORANGE)
+        self.save_values_button = FluentButton("Save values", color=YELLOW)
         control_buttons = (
             self.run_button, self.stop_button, self.sync_button,
             self.add_button, self.remove_button, self.bracket_button,
             self.save_button, self.load_button, self.collapse_button,
+            self.load_values_button, self.save_values_button,
         )
         for index, button in enumerate(control_buttons):
             button.setFixedHeight(control_height)
@@ -1102,6 +1110,8 @@ class PulseScheduleView(QtWidgets.QWidget):
         self.sync_button.clicked.connect(self.sync_requested)
         self.save_button.clicked.connect(self.save_requested)
         self.load_button.clicked.connect(self.load_requested)
+        self.load_values_button.clicked.connect(self.values_load_requested)
+        self.save_values_button.clicked.connect(self.values_save_requested)
         self.add_button.clicked.connect(lambda: self.insert_period_requested.emit(self._selected_before_id()))
         self.remove_button.clicked.connect(self._request_remove_period)
         self.bracket_button.clicked.connect(self._request_toggle_bracket)

@@ -34,6 +34,8 @@ class LogicEditorView(QtWidgets.QWidget):
     """Editable projection of one stopped/running Logic row draft."""
 
     draft_changed = QtCore.pyqtSignal(object)
+    #: A file this node reads was edited elsewhere; re-read it.
+    refresh_requested = QtCore.pyqtSignal()
     start_requested = QtCore.pyqtSignal()
     stop_requested = QtCore.pyqtSignal()
     remove_requested = QtCore.pyqtSignal()
@@ -91,10 +93,16 @@ class LogicEditorView(QtWidgets.QWidget):
         self.artifact_form = FluentParameterForm(empty, {})
         self._body_layout.addWidget(self.artifact_form)
         self.artifact_form.changed.connect(self._artifact_changed)
+        self.artifact_form.refresh_requested.connect(
+            lambda _key: self.refresh_requested.emit()
+        )
 
         self.form = FluentParameterForm(empty, {})
         self._body_layout.addWidget(self.form)
         self.form.changed.connect(self._parameter_changed)
+        self.form.refresh_requested.connect(
+            lambda _key: self.refresh_requested.emit()
+        )
 
         self._artifact_result_frame = FluentFrame()
         self._artifact_result_layout = QtWidgets.QFormLayout(

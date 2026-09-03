@@ -7,6 +7,7 @@ from io import BytesIO
 from pathlib import Path
 import warnings
 import zipfile
+import zlib
 
 import numpy as np
 import pytest
@@ -351,15 +352,28 @@ def test_figure_archive_round_trip_validates_members_and_dataset_shape():
     assert read_dataset(info, arrays, "data").exactly_equals(snapshot)
 
 
-def test_figure_archive_compresses_only_members_that_shrink_materially():
+def test_figure_archive_compresses_only_members_that_shrink_materially(monkeypatch):
     rng = np.random.default_rng(7)
     compressible = np.zeros(2 << 20, dtype=np.uint8)
     camera_noise = rng.integers(0, 256, size=2 << 20, dtype=np.uint8)
+    # The archive does not record its deflate level, so the compressor
+    # construction is the witness.  Level 1: zlib's default took ten times
+    # as long on a thousand-shot camera history for 8 % of the size, and a
+    # Save is waited for.
+    levels: list[int] = []
+    real_compressobj = zlib.compressobj
+
+    def spying_compressobj(level=-1, *args, **kwargs):
+        levels.append(level)
+        return real_compressobj(level, *args, **kwargs)
+
+    monkeypatch.setattr(zlib, "compressobj", spying_compressobj)
     stream = _figure_stream(
         "adaptive compression",
         arrays={"compressible": compressible, "camera_noise": camera_noise},
         sections={},
     )
+    assert levels and set(levels) == {1}, levels
 
     with zipfile.ZipFile(stream) as archive:
         assert archive.getinfo("compressible.npy").compress_type == zipfile.ZIP_DEFLATED
