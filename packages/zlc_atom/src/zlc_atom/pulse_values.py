@@ -22,12 +22,7 @@ import json
 from pathlib import Path
 
 from zlc_durable import atomic_write_bytes, readable_json_bytes
-from zlc_pulse import (
-    PulseSequence,
-    api_values_from_tree,
-    api_values_to_tree,
-    apply_api_values,
-)
+from zlc_pulse import api_values_from_tree, api_values_to_tree
 
 
 #: Beside ``pulses/`` in the workspace, because these values belong to the
@@ -79,31 +74,9 @@ def current_api_values_path(pulse_path: str | Path) -> Path:
     )
 
 
-def apply_current_api_values(
-    sequence: PulseSequence, pulse_path: str | Path
-) -> PulseSequence:
-    """The pulse as the apparatus is set today.
-
-    Silent when there is no set to apply: a fresh workspace is seeded with an
-    empty one, and a folder that has none is an experiment that has not
-    measured anything yet.  A set that names ids this pulse does not declare
-    is not an error either -- that is the ordinary case for a shared set.
-    """
-
-    path = current_api_values_path(pulse_path)
-    if not path.is_file():
-        return sequence
-    _name, _source, entries = read_api_values(path)
-    if not entries:
-        return sequence
-    applied, _ids, _unknown = apply_api_values(sequence, entries)
-    return applied
-
-
 __all__ = [
     "API_VALUES_DIRECTORY",
     "CURRENT_API_VALUES",
-    "apply_current_api_values",
     "current_api_values_path",
     "read_api_values",
     "write_api_values",
