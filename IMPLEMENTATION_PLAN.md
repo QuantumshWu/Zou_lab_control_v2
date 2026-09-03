@@ -232,25 +232,26 @@
 - Exact Scan Panel恢复当前证据：真实event chunk为`1×1×3×5`、canonical为`2×(65×2×2)×3×5`的Signal经实际SignalPlane与Plot host由真实`field.x=65`触发>64拒绝；拒绝前后Setting均保留`field.x/y/z` fate且不再出现phantom `point`，独立Curve Panel title保持canonical axes，Fluent form在`fit_unavailable`同时仍含三个Semantic controls。精确目标`20×(10×10×10)×3×35`的title authority输出`(20)×(10×10×10)×(3×35)`。多维FacetGrid默认最外层真实scan axis，不再以flattened point rows制造1000 cells或phantom point-row restriction。相同live projection与仅title metadata变化均不reconcile Setting form；固定Plot kind不再进入Setting，FacetGrid只保留可编辑Cell kind；Facet默认、feasibility、真实拒绝与Fluent Setting聚焦证据`22 passed`。
 - Exact Scan terminal/Frozen根修当前证据：真实`20×(10×10×10)×(3×35)`canonical Dataset从partial Live publication开始，原子提交`field.x→Facet, field.y→Y, field.z→X, pair/site→Reduced`后，Live、运行中Frozen及terminal seal后重新创建的Frozen host均保持同一schema fingerprint、物理shape `(20,1000,3,35)`、resolved roles和`[-0.5,9.5]×[-0.5,9.5]` limits。根因三处均删除：multi-fate逐行修复导致回退默认35×3、host accept后以1×1×3×35 event schema覆盖canonical surface、以及histogram threshold/shape-only viewport无条件重放到image。当前实现使用atomic fate assignment、canonical accept metadata、resolved capability interaction和schema/spec view identity；Plot semantic/feasibility/facet/threshold聚焦`52 passed`，Workbench canonical/Frozen/retarget/save交叉聚焦`10 passed`。
 - Plot/Runtime/Workbench当前candidate直接回归：Plot `534 passed`、Runtime `107 passed`、Workbench `435 passed`；Atom对Figure/hosted-node新contract的direct用例`1 passed`。这些结果来自当前tree，不复用旧Exact Scan cut的计数。
-- Seamless duration scan根修当前证据：绝对period保留32-bit nominal base，25-bit signed slot只承载delta；整张table自动选择最小整数tick scale，最大127且DAC恒为1，不改RTL/bitstream。实际量化rows统一进入compiler、wire、readback、Pulse Editor Run/Sync/Hold/Step、Seamless Dataset coordinates/run record与Temperature companion/artifact；distinct authored points若量化坍缩会在device前拒绝。Pulse全包`140 passed, 4 skipped`，Pulse Editor`98 passed`，Seamless＋Temperature直接纵向`10 passed`；三路冻结审查无第二量化owner、compat fallback或未闭合consumer。
+- Pulse repeat三层根修：`PulseBracket/PulseSequence.bracket`只负责timeline内部连续区间；主界面新增持久化`run_repeats`（默认0=∞），Pulse Scan保留`scan_repeats`。无scan时Run repeats控制完整Pulse；有scan时每个row执行Run repeats次后才前进，整张table由Scan repeats重走。`shots_per_point`与Seamless `repeats`分别只做本次run_repeats/scan_repeats override，不改写Bracket或复制rows。Wire/RTL使用独立`LOOP_COUNT/RUN_REPEAT_COUNT/SCAN_COUNT/SCAN_REPEAT_COUNT`并在同一FIRE内完成全部seam，三层不再压平到一套execution count或保留旧兼容路径。Bracket左右post复用Schedule drag owner，可拖到任意合法gap。
+- Seamless duration scan根修当前证据：绝对period保留32-bit nominal base，25-bit signed slot只承载delta；整张table自动选择最小整数tick scale，最大127且DAC恒为1。实际量化rows统一进入compiler、wire、readback、Pulse Editor Run/Sync/Hold/Step、Seamless Dataset coordinates/run record与Temperature companion/artifact；distinct authored points若量化坍缩会在device前拒绝。三层repeat改造后已重跑Pulse/Editor/Seamless/Temperature纵向与RTL oracle，并以新ABI完成Vivado纯build；结果见第4节，不复用旧bitstream证据。
 - 通用Fit表达式减量候选：Panel Setting/Edit只提供单行`name=value`精确fixed与`name=guess(value)`初始猜测；fixed复用既有bounds请求通道的相等端点作为内部exact marker，但普通及regular-image solver都会把该维度真正移出optimizer，free-only计算DOF/Jacobian/covariance，all-fixed不启动optimizer。表达式按painted单位输入，PanelState/Figure只保存canonical fixed/initial；语法、unknown或domain错误只在DisplayDescription保留transient draft/warning并继续同model自动fit。Curve/Histogram/Image/Facet/Rolling共用FitSession请求，Console与Viewer共用同一Panel投影；fixed参数的误差publication为invalid。相对`17629d1`无新增production文件或类、production净增376行、test净增163行；此前临时`fit_target.py`与第二套canonical validator已删除。减量后直接聚焦`38 passed`，Plot全包`534 passed`、Console View全文件`31 passed`，另直接验证普通/regular all-fixed均返回`all parameters fixed`。Workbench全包在先运行36项后仍稳定暴露既有camera-restart selector顺序失败，目标test单独运行`1 passed`；该问题属于下一独立cut，不混入Fit提交。
 - Camera restart selector顺序根修：`_refresh_signal_choices`原来把“首个surface尚未accept、因此`binding.host is None`”误当成“panel尚未mount”，在已有initial `PlotPanelPort`忙于首帧时又启动第二个retarget port；后完成的候选会关闭已接受crosshair的port。恢复路径现在只在唯一生命周期真相`binding.port is None`时创建port，Board继续独占已有port的首帧accept；没有新增状态、helper、selector/restart特判或测试函数。原必现的auto-inference→camera-restart顺序`2 passed`；Workbench全包该缺陷已消失，结果`436 passed`，唯一剩余失败是当前master新增`warm_numba_cache.bat`直接运行layer module的launcher约束，与本cut无关。
 - 长Task partial artifacts：Runtime在worker failure/Stop边界调用domain writer；Feedback普通异常从最后完成candidate生成6组Figure后rollback，Temperature从已提交survival保存partial curve/Figure，Calibration从最新完整三帧cycle保存partial capture（分析完成则保存完整报告）。`run.json`只索引这些已完成文件，不再是失败run唯一内容。
 - Feedback的`candidates/candidate-XXXX.npz`现为标准Science Context；operator可在既有Science Context输入中手动选择它作为新run起点。过程数组移至`data/measurements/measurement-XXXX.npz`。新run从candidate 1开始并使用本次authored update预算；没有resume输入、自动旧run查找、续编号或旧run预算继承。
-- Pulse STATUS ABI当前为LOADED/RUNNING/DONE/ENGINE_ERROR/UNDERFLOW/LINK_ERROR；UART fault不再置engine ERROR，observer failure不再伪装成board error，Remote日志使用ERROR/DONE真实事件名并写status/cursor双读、observer exception与FIRE总elapsed。该ABI令layout fingerprint更新为`0x5A55DF95`，实验板必须重build/program。
+- Pulse STATUS ABI当前为LOADED/RUNNING/DONE/ENGINE_ERROR/UNDERFLOW/LINK_ERROR；UART fault不再置engine ERROR，observer failure不再伪装成board error，Remote日志使用ERROR/DONE真实事件名并写status/cursor双读、observer exception与FIRE总elapsed。三层repeat register layout令layout fingerprint更新为`0x5A86511A`，实验板必须重build/program。
 - 第一次installed software尝试曾在重负载下出现一次本地SLM测试TCP connect timeout；
   同一wheel的精确case随后连续5/5通过，第二次完整installed software lane通过，因此没有
   用该不可复现事件改动产品remote timeout或server逻辑。
 
 ## 4. 仍有效的FPGA build/timing证据
 
-以下证据描述已完成的硬件构建结果，不证明当前Python tree，也不代替实验板验收：
+以下证据来自2026-09-03在当前三层repeat tree上强制执行的Vivado 2019.1纯build，不代替实验板验收：
 
 - Vivado 2019.1 fresh project完成全部IP、top synth、place/route、reports和bitstream。
-- Routed setup WNS `+0.726 ns`、TNS `0`；hold WHS `+0.036 ns`、THS `0`。
-- 12条bus-skew全部MET，0 violated，最差`+18.988 ns`。
-- 资源：20075/20800 LUT、14053/41600 FF、76/90 DSP、40 RAMB36 + 2 RAMB18。
-- Bitstream SHA256：`82A8E04DC3BD4F21E3ACED22D16E4544C7CBC3E9C7A642337F4D689702994A6C`。
+- Routed setup WNS `+0.193 ns`、TNS `0`；hold WHS `+0.036 ns`、THS `0`；全部约束MET。
+- 12条bus-skew全部MET，0 violated，最差实际skew `0.905 ns`、slack `+19.095 ns`。
+- 资源：19632/20800 Slice LUT（94.38%）、14138/41600 FF（33.99%）、76/90 DSP（84.44%）、41/50 Block RAM tile（40 RAMB36 + 2 RAMB18，82.00%）。
+- 新register layout fingerprint：`0x5A86511A`；Bitstream SHA256：`FD7BDF79A8865A6961BA536275AF070BA84D74B24B479248D2FDC2CA62D5656C`。
 - Engine/UART oracle、full-top FIRE和SAFE pin gate的已有结果仍是build/simulation evidence。
 
 ## 5. 明确未执行的实验机验收

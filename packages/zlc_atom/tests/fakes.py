@@ -115,7 +115,7 @@ class ScriptedScanBench:
     * every frame is a constant image whose value is that publication's
       index, so a kept shot can be named in an assertion;
     * one ``fire`` produces exactly ``publications_per_fire`` of them.  The
-      stepped test may pace those publications by the finite cycle count;
+      stepped test may pace those publications by the finite Run-repeat count;
       the seamless test publishes its whole hardware table at once.
 
     Everything else is the production path: the real virtual board compiles,
@@ -179,8 +179,9 @@ class ScriptedScanBench:
         self._loaded_program = None
         self._publisher: threading.Thread | None = None
         self.scan_tables: list[np.ndarray] = []
-        self.fired_cycles: list[int | None] = []
+        self.fired_repeats: list[tuple[int, int]] = []
         self._next_value = 0
+        self._loaded_rows: tuple[tuple[int, ...], ...] = ()
 
     # ------------------------------------------------------- the source
 
@@ -220,24 +221,33 @@ class ScriptedScanBench:
         self.loaded_sources.append(source)
         self._loaded_program = prog
         normalized = tuple(tuple(row) for row in rows)
+        self._loaded_rows = normalized
         if normalized:
             self.scan_tables.append(np.asarray(normalized))
         self._sequencer.load(prog, source=source, rows=normalized)
 
-    def fire(self, *, cycles: int | None = 1) -> None:
+    def fire(self, *, run_repeats: int, scan_repeats: int = 1) -> None:
         self.events.append(("fire", time.monotonic()))
-        self.fired_cycles.append(cycles)
-        self._sequencer.fire(cycles=cycles)
+        self.fired_repeats.append((int(run_repeats), int(scan_repeats)))
+        self._sequencer.fire(
+            run_repeats=run_repeats,
+            scan_repeats=scan_repeats,
+        )
         if not self.paced_by_cycle:
             for _ in range(self.publications_per_fire):
                 self.publish(self._next_value)
                 self._next_value += 1
             return
         program = self._loaded_program
-        if cycles is None:
+        if run_repeats == 0 or scan_repeats == 0:
             raise AssertionError("scripted scan tests require a finite fire")
+        executions = (
+            run_repeats
+            * scan_repeats
+            * (len(self._loaded_rows) if self._loaded_rows else 1)
+        )
         per_cycle = (
-            self.publications_per_fire // cycles
+            self.publications_per_fire // executions
             if self.publications_per_cycle is None
             else self.publications_per_cycle
         )
@@ -245,7 +255,7 @@ class ScriptedScanBench:
         started = time.monotonic()
 
         def publish_cycles() -> None:
-            for shot in range(cycles):
+            for shot in range(executions):
                 deadline = started + shot * period + min(0.01, period * 0.25)
                 remaining = deadline - time.monotonic()
                 if remaining > 0.0:

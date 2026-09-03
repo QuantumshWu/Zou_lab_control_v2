@@ -137,7 +137,7 @@ class _RecordingSequencer:
         self.events.append(("describe", None))
         return self.sequencer.describe()  # type: ignore[attr-defined]
 
-    def fire(self, *, cycles: int | None = 1) -> None:
+    def fire(self, *, run_repeats: int, scan_repeats: int = 1) -> None:
         """Fire, and nothing else.
 
         This used to wait for the shot as well, which is what the code under
@@ -146,10 +146,13 @@ class _RecordingSequencer:
         test hides whether the real code performs it.
         """
 
-        self.events.append(("fire", cycles))
+        self.events.append(("fire", (run_repeats, scan_repeats)))
         if self.fail_on_fire:
             raise RuntimeError("recording sequencer fire failure")
-        self.sequencer.fire(cycles=cycles)  # type: ignore[attr-defined]
+        self.sequencer.fire(  # type: ignore[attr-defined]
+            run_repeats=run_repeats,
+            scan_repeats=scan_repeats,
+        )
 
     def wait_done(self, timeout: float | None = None) -> object:
         self.events.append(("wait_done", timeout))
@@ -301,7 +304,8 @@ def test_pulse_resolver_uses_the_project_json_document(
         "slots",
         "api_parameters",
         "delays",
-        "repeat",
+        "bracket",
+        "run_repeats",
     )
     assert tree["format"] == PULSE_TREE_FORMAT == "zlc.pulse"
     assert not {
@@ -409,7 +413,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         capture = camera_node.prepare()
         arm_sequencer(sequencer, pulse)
         assert sequencer.sequencer.applied().source == pulse.sequence
-        sequencer.fire()
+        sequencer.fire(run_repeats=1, scan_repeats=1)
         sequencer.wait_done(1.0)
         manual_result = capture.collect()
         assert len(manual_result.frames) == 3
@@ -509,7 +513,7 @@ def test_discovered_descriptors_build_and_exercise_declared_devices(tmp_path: Pa
         # camera's own transfer.
         assert [
             value for event, value in sequencer.events if event == "fire"
-        ][fires_before_task:] == [30]
+        ][fires_before_task:] == [(30, 1)]
         assert len(
             [event for event, _ in sequencer.events if event == "wait_done"]
         ) == waits_before_task

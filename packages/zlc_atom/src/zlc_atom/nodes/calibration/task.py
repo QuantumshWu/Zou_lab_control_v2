@@ -1287,19 +1287,6 @@ class CalibrationTask:
             photoelectrons = measurement.reads_photoelectrons
             value_unit = measurement.frame_value_unit
             arm_sequencer(self.sequencer, pulse)
-            sequencer_state = self.sequencer.snapshot()
-            if not isinstance(sequencer_state, Mapping):
-                raise TypeError("sequencer snapshot must be a mapping")
-            sequencer_snapshot = sequencer_archive_snapshot(
-                state=sequencer_state
-            )
-            run_record = self._run_record(
-                actual,
-                sequencer_snapshot,
-                pulse_facts,
-                photoelectrons=photoelectrons,
-            )
-            self._partial_run_record = dict(run_record)
             if context is not None:
                 context.report_progress(
                     "Capturing calibration",
@@ -1317,8 +1304,26 @@ class CalibrationTask:
             # board and a handshake, serialised the sequence against the
             # camera's own transfer, and could fail a run whose frames were
             # perfectly fine because a report arrived late.
-            self.sequencer.fire(cycles=self.request.repeats)
+            self.sequencer.fire(
+                run_repeats=self.request.repeats,
+                scan_repeats=1,
+            )
             firing = True
+            # Archive the execution state, not LOAD's neutral counters.  FIRE
+            # is the authority that applies this run's M/S values.
+            sequencer_state = self.sequencer.snapshot()
+            if not isinstance(sequencer_state, Mapping):
+                raise TypeError("sequencer snapshot must be a mapping")
+            sequencer_snapshot = sequencer_archive_snapshot(
+                state=sequencer_state
+            )
+            run_record = self._run_record(
+                actual,
+                sequencer_snapshot,
+                pulse_facts,
+                photoelectrons=photoelectrons,
+            )
+            self._partial_run_record = dict(run_record)
             for _ in range(self.request.repeats):
                 if context is not None and context.cancel_requested():
                     raise RuntimeError("calibration was cancelled")

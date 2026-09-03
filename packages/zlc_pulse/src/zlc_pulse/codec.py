@@ -20,15 +20,16 @@ from typing import Any
 
 from .model import (
     AnalogStep,
+    MAXIMUM_REPEAT_COUNT,
     OutputDelay,
     PulseApiParameter,
+    PulseBracket,
     PulseFieldRef,
     PulsePeriod,
     PulsePortSpec,
     PulseSequence,
     PulseSlot,
     PulseTarget,
-    RepeatRegion,
 )
 
 
@@ -118,6 +119,8 @@ def split_pulse_document_tree(
         raise TypeError("editor.scan_repeats must be an integer")
     if repeats < 0:
         raise ValueError("editor.scan_repeats must be non-negative")
+    if repeats > MAXIMUM_REPEAT_COUNT:
+        raise ValueError("editor.scan_repeats does not fit the hardware 32-bit count")
     return sequence_tree, editor
 
 
@@ -219,15 +222,16 @@ def sequence_to_tree(sequence: PulseSequence) -> dict[str, Any]:
             {"port": delay.port, "value": delay.value, "unit": delay.unit}
             for delay in sequence.delays
         ],
-        "repeat": (
+        "bracket": (
             None
-            if sequence.repeat is None
+            if sequence.bracket is None
             else {
-                "start_period_id": sequence.repeat.start_period_id,
-                "end_period_id": sequence.repeat.end_period_id,
-                "count": sequence.repeat.count,
+                "start_period_id": sequence.bracket.start_period_id,
+                "end_period_id": sequence.bracket.end_period_id,
+                "count": sequence.bracket.count,
             }
         ),
+        "run_repeats": sequence.run_repeats,
     }
 
 
@@ -249,7 +253,8 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
             "slots",
             "api_parameters",
             "delays",
-            "repeat",
+            "bracket",
+            "run_repeats",
         ),
         "pulse",
     )
@@ -405,15 +410,15 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
             for item in _array(tree["delays"], "pulse delays")
         )
     )
-    repeat_tree = tree["repeat"]
-    repeat = (
+    bracket_tree = tree["bracket"]
+    bracket = (
         None
-        if repeat_tree is None
-        else RepeatRegion(
+        if bracket_tree is None
+        else PulseBracket(
             **_object(
-                repeat_tree,
+                bracket_tree,
                 ("start_period_id", "end_period_id", "count"),
-                "pulse repeat",
+                "pulse bracket",
             )
         )
     )
@@ -425,7 +430,8 @@ def sequence_from_tree(tree: Mapping[str, Any]) -> PulseSequence:
         slots=slots,
         api_parameters=api_parameters,
         delays=delays,
-        repeat=repeat,
+        bracket=bracket,
+        run_repeats=tree["run_repeats"],
     )
 
 

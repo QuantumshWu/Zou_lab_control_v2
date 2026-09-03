@@ -39,7 +39,7 @@ from tests.pulse_fixture import CALIBRATION_FRAMES_PER_CYCLE, build_calibration_
 
 
 def _fire_windows(sequencer, windows: int) -> None:
-    sequencer.fire()
+    sequencer.fire(run_repeats=1, scan_repeats=1)
     sequencer.wait_done(1.0)
 
 

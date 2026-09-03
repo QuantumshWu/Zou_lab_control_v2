@@ -14,7 +14,7 @@ from zlc_pulse import (
     PulseSequence,
     PulseSlot,
     PulseTarget,
-    RepeatRegion,
+    PulseBracket,
     compile_sequence,
     pulse_target_from_xdc,
 )
@@ -82,7 +82,7 @@ def test_build_fingerprint_covers_each_geometry_field_except_host_cap() -> None:
 
 
 def test_default_geometry_is_pinned_to_deployed_word63() -> None:
-    assert build_fingerprint(StreamerParams()) == 0x5A55DF95
+    assert build_fingerprint(StreamerParams()) == 0x5A86511A
 
 
 def test_host_rejects_affine_geometry_beyond_the_shipped_four_dsp_lanes() -> None:
@@ -107,13 +107,10 @@ def test_pack_sparse_image_matches_frozen_byte_baseline() -> None:
     assert 0 not in words
     assert words[CtrlWords.PROG_COUNT] == 3
     assert words[CtrlWords.SCAN_COUNT] == 0
-    assert words[CtrlWords.RESERVED_19] == 0
-    invalid = dict(words)
-    invalid[CtrlWords.RESERVED_19] = 1
-    with pytest.raises(ValueError, match="reserved control word 19"):
-        unpack_program(invalid, geom)
+    assert words[CtrlWords.RUN_REPEAT_COUNT] == 1
+    assert words[CtrlWords.SCAN_REPEAT_COUNT] == 1
     assert hashlib.sha256(payload).hexdigest() == (
-        "9fa95a92e7c93c8b16c329ef8f662e9c749dc122799230262113a6cac2080854"
+        "7dca4fa028b460fd5cd7e7d9d3303775b36789165395e34671b73c56d0ea28de"
     )
 
 
@@ -123,7 +120,8 @@ def test_pack_slot_scan_image_matches_frozen_byte_baseline() -> None:
     words = pack_program(program, geom)
     assert words[CtrlWords.SCAN_COUNT] == 0
     assert words[CtrlWords.SCAN_ENABLE] == 0
-    assert words[CtrlWords.REPEAT_FOREVER] == 0
+    assert words[CtrlWords.RUN_REPEAT_COUNT] == 1
+    assert words[CtrlWords.SCAN_REPEAT_COUNT] == 1
     bases = region_bases(geom)
     assert not any(bases["scan"] <= address < bases["bus"] for address in words)
 
@@ -137,7 +135,7 @@ def test_fire_applies_the_loaded_rows_without_rewriting_edge_regions() -> None:
     rows = ((1,), (2,), (1,))
     streamer.load(program, rows=rows)
     before = len(transport.write_batches)
-    streamer.fire(cycles=3)
+    streamer.fire(run_repeats=3)
     delta = [address for batch in transport.write_batches[before:] for address, _ in batch]
     bases = region_bases(geom)
     assert not any(bases["tick"] <= address < bases["coeff"] for address in delta)
@@ -146,10 +144,11 @@ def test_fire_applies_the_loaded_rows_without_rewriting_edge_regions() -> None:
     assert CtrlWords.SCAN_COUNT in delta
     assert any(address >= bases["scan"] for address in delta)
     assert streamer.applied().rows == rows
-    assert streamer.applied().cycles == 3
+    assert streamer.applied().run_repeats == 3
+    assert streamer.applied().scan_repeats == 1
 
 
-def test_unslotted_program_uses_the_same_finite_cycle_entry() -> None:
+def test_unslotted_program_uses_run_repeats_without_a_scan_cursor() -> None:
 
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     program = compile_sequence(_sequence(), geom, 50e6)
@@ -159,12 +158,15 @@ def test_unslotted_program_uses_the_same_finite_cycle_entry() -> None:
     streamer.open()
     streamer.load(program)
 
-    streamer.fire(cycles=5)
+    streamer.fire(run_repeats=5)
     applied = streamer.applied()
-    assert applied is not None and applied.rows == () and applied.cycles == 5
-    assert streamer.snapshot()["scan_count"] == 5
-    assert transport.words[CtrlWords.SCAN_COUNT] == 5
-    assert streamer.wait_done(1.0) is not None
+    assert applied is not None and applied.rows == () and applied.run_repeats == 5
+    assert applied.scan_repeats == 1
+    assert streamer.snapshot()["scan_count"] == 0
+    assert transport.words[CtrlWords.SCAN_COUNT] == 0
+    report = streamer.wait_done(1.0)
+    assert report is not None
+    assert report.cursor == 0
 
 
 def test_short_timeline_is_valid_once_but_rejected_before_a_seam() -> None:
@@ -177,25 +179,25 @@ def test_short_timeline_is_valid_once_but_rejected_before_a_seam() -> None:
     streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
     streamer.load(program)
-    streamer.fire(cycles=1)
+    streamer.fire(run_repeats=1)
     assert streamer.wait_done(1.0) is not None
 
     before = list(transport.write_batches)
     with pytest.raises(ValueError, match="at least 3 hardware ticks"):
-        streamer.fire(cycles=2)
+        streamer.fire(run_repeats=2)
     with pytest.raises(ValueError, match="at least 3 hardware ticks"):
-        streamer.fire(cycles=None)
+        streamer.fire(run_repeats=0)
     assert transport.write_batches == before
 
     repeated = compile_sequence(
-        replace(short, repeat=RepeatRegion("p0", "p1", 2)),
+        replace(short, bracket=PulseBracket("p0", "p1", 2)),
         geom,
         50e6,
     )
     other_transport = MemoryRegisterTransport(geom=geom, auto_done=True)
     other = PulseStreamer(other_transport, geom, 50e6, target=_BOARD_TARGET)
     other.open()
-    with pytest.raises(ValueError, match="RepeatRegion boundary.*tick 3"):
+    with pytest.raises(ValueError, match="PulseBracket boundary.*tick 3"):
         other.load(repeated)
     assert other_transport.write_batches == []
 
@@ -206,11 +208,11 @@ def test_short_timeline_is_valid_once_but_rejected_before_a_seam() -> None:
     # Point 0 spans 3 ticks and may hand off to a 2-tick final point.  That
     # final point needs no boundary cache in a two-cycle finite run.
     scan.load(scanned, rows=((1,), (0,)))
-    scan.fire(cycles=2)
+    scan.fire(run_repeats=1)
     assert scan.wait_done(1.0) is not None
     before = list(scan_transport.write_batches)
     with pytest.raises(ValueError, match="at least 3 hardware ticks"):
-        scan.fire(cycles=3)
+        scan.fire(run_repeats=1, scan_repeats=2)
     assert scan_transport.write_batches == before
 
     low = (0,) * len(_BOARD_TARGET.raw_lanes)
@@ -223,32 +225,32 @@ def test_short_timeline_is_valid_once_but_rejected_before_a_seam() -> None:
             PulsePeriod("body0", 20, "ns", high),
             PulsePeriod("body1", 20, "ns", low),
         ),
-        repeat=RepeatRegion("body0", "body1", 2),
+        bracket=PulseBracket("body0", "body1", 2),
     )
     late_program = compile_sequence(late_short_loop, geom, 50e6)
     late_transport = MemoryRegisterTransport(geom=geom, auto_done=True)
     late = PulseStreamer(late_transport, geom, 50e6, target=_BOARD_TARGET)
     late.open()
     # The only inner rewind can prefetch at absolute tick 10, so one execution
-    # is valid even though the loop span is two ticks.  A second outer cycle is
+    # is valid even though the bracket span is two ticks.  A second whole-Pulse run is
     # not: after the rewind only two ticks remain before the frame boundary.
     late.load(late_program)
-    late.fire(cycles=1)
+    late.fire(run_repeats=1)
     assert late.wait_done(1.0) is not None
     before = list(late_transport.write_batches)
     with pytest.raises(ValueError, match="after its final restart"):
-        late.fire(cycles=2)
+        late.fire(run_repeats=2)
     assert late_transport.write_batches == before
 
     too_many_short_loops = compile_sequence(
-        replace(late_short_loop, repeat=RepeatRegion("body0", "body1", 3)),
+        replace(late_short_loop, bracket=PulseBracket("body0", "body1", 3)),
         geom,
         50e6,
     )
     rejected_transport = MemoryRegisterTransport(geom=geom, auto_done=True)
     rejected = PulseStreamer(rejected_transport, geom, 50e6, target=_BOARD_TARGET)
     rejected.open()
-    with pytest.raises(ValueError, match="RepeatRegion span.*3 hardware ticks"):
+    with pytest.raises(ValueError, match="PulseBracket span.*3 hardware ticks"):
         rejected.load(too_many_short_loops)
     assert rejected_transport.write_batches == []
 
@@ -260,7 +262,7 @@ def test_short_timeline_is_valid_once_but_rejected_before_a_seam() -> None:
                 late_short_loop.periods[1],
                 replace(late_short_loop.periods[2], duration=40),
             ),
-            repeat=RepeatRegion("body0", "body1", 3),
+            bracket=PulseBracket("body0", "body1", 3),
         ),
         geom,
         50e6,
@@ -319,7 +321,7 @@ def test_load_rejects_compiler_identity_before_touching_hardware() -> None:
     streamer.load(program)
 
 
-def test_finite_cycle_count_is_strict_and_never_wraps() -> None:
+def test_repeat_counts_are_strict_and_zero_is_the_only_infinite_value() -> None:
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
     program = compile_sequence(_sequence(), geom, 50e6)
     transport = MemoryRegisterTransport(geom=geom, auto_done=True)
@@ -327,15 +329,31 @@ def test_finite_cycle_count_is_strict_and_never_wraps() -> None:
     streamer.open()
     streamer.load(program)
     before = list(transport.write_batches)
-    for invalid in (True, 1.5, 0, -1, 2**32):
+    for invalid in (True, 1.5, None, -1, 2**32):
         with pytest.raises((TypeError, ValueError)):
-            streamer.fire(cycles=invalid)
+            streamer.fire(run_repeats=invalid)
         assert transport.write_batches == before
+    for invalid in (True, 1.5, None, -1, 2**32):
+        with pytest.raises((TypeError, ValueError)):
+            streamer.fire(run_repeats=1, scan_repeats=invalid)
+        assert transport.write_batches == before
+    with pytest.raises(ValueError, match="scan_repeats must be 1"):
+        streamer.fire(run_repeats=1, scan_repeats=0)
+    with pytest.raises(ValueError, match="scan_repeats must be 1"):
+        streamer.fire(run_repeats=1, scan_repeats=2)
     with pytest.raises(ValueError, match="loop metadata"):
         replace(program, loop_count=2**32)
 
+    scan_program = compile_sequence(_sequence(slotted=True), geom, 50e6)
+    scan_transport = MemoryRegisterTransport(geom=geom, auto_done=True)
+    scan = PulseStreamer(scan_transport, geom, 50e6, target=_BOARD_TARGET)
+    scan.open()
+    scan.load(scan_program, rows=((1,), (2,)))
+    with pytest.raises(ValueError, match="32-bit CURSOR"):
+        scan.fire(run_repeats=1, scan_repeats=(1 << 31) + 1)
 
-def test_load_rejects_ttl_and_dac_delay_fifo_overflow() -> None:
+
+def test_delay_capacity_covers_load_repeat_seams_and_terminal_safe() -> None:
     geom = replace(
         StreamerParams(),
         max_edges=256,
@@ -383,6 +401,36 @@ def test_load_rejects_ttl_and_dac_delay_fifo_overflow() -> None:
             streamer.load(program)
         assert transport.write_batches == []
 
+    # One delayed DAC descriptor per four-tick Pulse fits a two-entry FIFO for
+    # one sweep.  With two finite one-row sweeps, the terminal SAFE descriptor
+    # lands at tick 8 beside the descriptors from ticks 0 and 4; omitting final
+    # SAFE would incorrectly admit the run.
+    terminal_geom = replace(
+        StreamerParams(),
+        max_edges=8,
+        bank_size=2,
+        bus_evt_fifo_depth=2,
+    )
+    terminal_source = replace(
+        _sequence(slotted=True),
+        delays=(OutputDelay(_DAC_PORT.key, 160, "ns"),),
+    )
+    terminal_program = compile_sequence(terminal_source, terminal_geom, 50e6)
+    terminal_transport = MemoryRegisterTransport(
+        geom=terminal_geom,
+        auto_done=True,
+    )
+    terminal_streamer = PulseStreamer(
+        terminal_transport,
+        terminal_geom,
+        50e6,
+        target=_BOARD_TARGET,
+    )
+    terminal_streamer.open()
+    terminal_streamer.load(terminal_program, rows=((0,),))
+    with pytest.raises(ValueError, match="DAC bus.*needs 3 delayed events"):
+        terminal_streamer.fire(run_repeats=1, scan_repeats=2)
+
 
 def test_applied_state_round_trip_and_gui_sync() -> None:
     geom = replace(StreamerParams(), max_edges=8, bank_size=2)
@@ -399,16 +447,18 @@ def test_applied_state_round_trip_and_gui_sync() -> None:
     assert loaded.program == program
     assert loaded.source == source
     assert loaded.rows == rows
-    assert loaded.cycles == 1
+    assert loaded.run_repeats == 1
+    assert loaded.scan_repeats == 1
     assert loaded.loaded_at > 0
 
-    streamer.fire(cycles=None)
+    streamer.fire(run_repeats=0)
     state = streamer.applied()
     assert state is not None
     assert state.rows == rows
-    assert state.cycles is None
+    assert state.run_repeats == 0
+    assert state.scan_repeats == 1
     with pytest.raises(FrozenInstanceError):
-        state.cycles = 2
+        state.run_repeats = 2
 
     # A GUI can discard its local objects and rebuild the same static image from
     # the echoed source; the active row is a separate scan-bank write.
@@ -418,9 +468,9 @@ def test_applied_state_round_trip_and_gui_sync() -> None:
     assert echoed_source is not None
     rebuilt = compile_sequence(echoed_source, geom, 50e6)
     assert pack_program(rebuilt, geom) == pack_program(state.program, geom)
-    packed = pack_scan_rows(echoed_rows, geom, 0, 0, len(rows))
-    assert packed == pack_scan_rows(rows, geom, 0, 0, len(rows))
-    remainder = pack_scan_rows(echoed_rows, geom, 1, 1, len(rows))
+    packed = pack_scan_rows(echoed_rows, geom, 0, 0)
+    assert packed == pack_scan_rows(rows, geom, 0, 0)
+    remainder = pack_scan_rows(echoed_rows, geom, 1, 1)
     slot_words = (
         [packed[key] for key in sorted(packed)][:: geom.num_slots]
         + [remainder[key] for key in sorted(remainder)][:: geom.num_slots]
@@ -437,19 +487,23 @@ def test_applied_state_tracks_scan_table_and_survives_done_and_safe() -> None:
     streamer.open()
     rows = ((1,), (2,), (1,))
     streamer.load(program, source=source, rows=rows)
-    streamer.fire(cycles=3)
-    assert streamer.wait_done(1.0) is not None
+    streamer.fire(run_repeats=2, scan_repeats=3)
+    report = streamer.wait_done(1.0)
+    assert report is not None
+    assert report.cursor == len(rows) * 3 - 1
     after_done = streamer.applied()
     assert after_done is not None
     assert after_done.rows == rows
-    assert after_done.cycles == 3
-    streamer.fire(cycles=None)
+    assert after_done.run_repeats == 2
+    assert after_done.scan_repeats == 3
+    streamer.fire(run_repeats=0, scan_repeats=1)
     safe = streamer.safe()
     assert safe.stable
     after_safe = streamer.applied()
     assert after_safe is not None
     assert after_safe.rows == rows
-    assert after_safe.cycles is None
+    assert after_safe.run_repeats == 0
+    assert after_safe.scan_repeats == 1
     streamer.close()
     assert streamer.applied() is None
 
@@ -491,10 +545,10 @@ def test_repeated_fire_reloads_the_resident_image_before_the_rtl_gate() -> None:
         for address, _value in batch
     )
 
-    streamer.fire()
+    streamer.fire(run_repeats=1)
     assert streamer.snapshot()["reloaded_before_fire"] is False
     assert streamer.wait_done(1.0) is not None
-    streamer.fire()
+    streamer.fire(run_repeats=1)
     assert streamer.snapshot()["reloaded_before_fire"] is True
     assert streamer.wait_done(1.0) is not None
 
@@ -517,7 +571,7 @@ def test_fire_after_safe_reloads_the_resident_image_before_firing() -> None:
     streamer.load(program)
     streamer.safe()
 
-    streamer.fire()
+    streamer.fire(run_repeats=1)
     assert streamer.wait_done(1.0) is not None
     assert transport.accepted_loads == 2
     assert transport.accepted_fires == 1
@@ -540,7 +594,7 @@ def test_safe_readback_uses_stable_status_and_zero_clock_mask() -> None:
     streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
     streamer.load(program)
-    streamer.fire()
+    streamer.fire(run_repeats=1)
     assert streamer.wait_done(1.0) is not None
     safe = streamer.safe()
     assert safe.stable
@@ -587,7 +641,7 @@ def test_wait_done_uses_observer_owned_terminal_double_reads() -> None:
     streamer.open()
     streamer.load(program)
     transport.read_log.clear()
-    streamer.fire()
+    streamer.fire(run_repeats=1)
     report = streamer.wait_done(1.0)
     assert report is not None
     assert report.status_reads == (STATUS_DONE, STATUS_DONE)
@@ -653,7 +707,7 @@ def test_safe_cancels_blocked_observer_and_leaves_no_late_operation() -> None:
     streamer.open()
     streamer.load(program)
     transport.block_observer = True
-    streamer.fire(cycles=None)
+    streamer.fire(run_repeats=0)
     assert transport.observer_entered.wait(1.0)
     observer = streamer._worker
     assert observer is not None
@@ -669,7 +723,7 @@ def test_safe_cancels_blocked_observer_and_leaves_no_late_operation() -> None:
 
         transport.block_observer = False
         transport.auto_done = True
-        streamer.fire(cycles=1)
+        streamer.fire(run_repeats=1)
         assert streamer.wait_done(1.0) is not None
         assert transport.late_operations == []
     finally:
@@ -689,7 +743,7 @@ def test_safe_does_not_claim_observer_exit_when_transport_ignores_stop() -> None
     streamer.open()
     streamer.load(program)
     transport.block_observer = True
-    streamer.fire(cycles=None)
+    streamer.fire(run_repeats=0)
     assert transport.observer_entered.wait(1.0)
     observer = streamer._worker
     assert observer is not None
@@ -736,7 +790,7 @@ def test_observer_refills_a_freed_scan_bank() -> None:
     streamer.open()
     rows = tuple((value,) for value in (1, 2, 1, 3, 1, 2))
     streamer.load(program, rows=rows)
-    streamer.fire(cycles=len(rows))
+    streamer.fire(run_repeats=1)
     report = streamer.wait_done(1.0)
     assert report is not None
     assert report.status == STATUS_DONE
@@ -757,7 +811,7 @@ def test_observer_refill_failure_becomes_terminal_error() -> None:
     rows = tuple((value,) for value in (1, 2, 1, 3, 1, 2))
     streamer.load(program, rows=rows)
     transport.fail_refill = True
-    streamer.fire(cycles=len(rows))
+    streamer.fire(run_repeats=1)
     report = streamer.wait_done(1.0)
     assert report is not None
     assert report.status == STATUS_ERROR
@@ -810,7 +864,7 @@ def test_one_failed_poll_is_a_warning_and_the_shot_still_reports_done() -> None:
     streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
     streamer.load(program)
-    streamer.fire()
+    streamer.fire(run_repeats=1)
     report = streamer.wait_done(1.0)
     assert report is not None
     assert report.fault == ""
@@ -831,7 +885,7 @@ def test_two_consecutive_failed_polls_end_the_observation_in_error() -> None:
     streamer = PulseStreamer(transport, geom, 50e6, target=_BOARD_TARGET)
     streamer.open()
     streamer.load(program)
-    streamer.fire()
+    streamer.fire(run_repeats=1)
     report = streamer.wait_done(1.0)
     assert report is not None
     assert report.status == STATUS_ERROR
@@ -862,7 +916,7 @@ def test_recovered_link_error_is_visible_but_not_an_engine_fault() -> None:
 def test_pack_scan_rows_only_targets_the_requested_bank_chunk() -> None:
     geom = replace(StreamerParams(), bank_size=2)
     words = pack_scan_rows(
-        ((1, 2), (3, 4), (5, 6)), geom, bank=1, chunk=1, cycles=3
+        ((1, 2), (3, 4), (5, 6)), geom, bank=1, chunk=1
     )
     base = region_bases(geom)["scan"] + geom.bank_size * geom.scan_words
     assert set(words) == {base, base + 1, base + 2, base + 3}

@@ -351,7 +351,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         finite_host.start()
         _wait_armed(finite_host, camera)
         for _ in range(3):
-            sequencer.fire()
+            sequencer.fire(run_repeats=1, scan_repeats=1)
             assert sequencer.wait_done(1.0) is not None
         _wait_terminal(finite_host, phase="done")
         assert finite_host.final_result == {
@@ -513,7 +513,7 @@ def test_guard_a_headless_virtual_chain(tmp_path: Path) -> None:
         previous_revision = 0
         live_generation = None
         for _ in range(2):
-            sequencer.fire()
+            sequencer.fire(run_repeats=1, scan_repeats=1)
             assert sequencer.wait_done(1.0) is not None
             live_publication, live_value, revision = _wait_revision(
                 infinite_host,

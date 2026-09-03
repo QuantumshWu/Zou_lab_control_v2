@@ -472,35 +472,42 @@ class OutputDelay:
             raise ValueError("delay unit must be a time unit")
 
 
-#: The smallest count that IS a repeat: once is the sequence itself.
-MINIMUM_REPEAT_COUNT = 2
+#: The smallest count that makes a timeline bracket meaningful.
+MINIMUM_BRACKET_COUNT = 2
 MAXIMUM_REPEAT_COUNT = (1 << 32) - 1
 
 
 @dataclass(frozen=True)
-class RepeatRegion:
-    """Play these periods ``count`` times over, at least twice."""
+class PulseBracket:
+    """Loop one continuous range of timeline periods, at least twice."""
 
     start_period_id: str
     end_period_id: str
     count: int
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "start_period_id", _identifier(self.start_period_id, "repeat start"))
-        object.__setattr__(self, "end_period_id", _identifier(self.end_period_id, "repeat end"))
-        object.__setattr__(self, "count", _nonnegative_int(self.count, "repeat count"))
-        if self.count < MINIMUM_REPEAT_COUNT:
-            raise ValueError(f"a repeat plays at least {MINIMUM_REPEAT_COUNT} times; once is not a repeat")
+        object.__setattr__(
+            self,
+            "start_period_id",
+            _identifier(self.start_period_id, "bracket start"),
+        )
+        object.__setattr__(
+            self,
+            "end_period_id",
+            _identifier(self.end_period_id, "bracket end"),
+        )
+        object.__setattr__(
+            self,
+            "count",
+            _nonnegative_int(self.count, "bracket count"),
+        )
+        if self.count < MINIMUM_BRACKET_COUNT:
+            raise ValueError(
+                f"a bracket loops at least {MINIMUM_BRACKET_COUNT} times; "
+                "once needs no bracket"
+            )
         if self.count > MAXIMUM_REPEAT_COUNT:
-            raise ValueError("repeat count does not fit the hardware 32-bit count")
-
-    @property
-    def start(self) -> str:
-        return self.start_period_id
-
-    @property
-    def end(self) -> str:
-        return self.end_period_id
+            raise ValueError("bracket count does not fit the hardware 32-bit count")
 
 
 @dataclass(frozen=True, init=False)
@@ -512,7 +519,8 @@ class PulseSequence:
     slots: tuple[PulseSlot, ...]
     api_parameters: tuple[PulseApiParameter, ...]
     delays: tuple[OutputDelay, ...]
-    repeat: RepeatRegion | None
+    bracket: PulseBracket | None
+    run_repeats: int
     _period_by_id: Mapping[str, PulsePeriod] = field(init=False, repr=False, compare=False)
     _slot_by_id: Mapping[str, PulseSlot] = field(init=False, repr=False, compare=False)
     _api_parameter_by_id: Mapping[str, PulseApiParameter] = field(
@@ -528,7 +536,8 @@ class PulseSequence:
         slots: tuple[PulseSlot, ...] = (),
         api_parameters: tuple[PulseApiParameter, ...] = (),
         delays: tuple[OutputDelay, ...] = (),
-        repeat: RepeatRegion | None = None,
+        bracket: PulseBracket | None = None,
+        run_repeats: int = 0,
     ) -> None:
         if target is None:
             raise TypeError("PulseSequence requires a target")
@@ -603,13 +612,19 @@ class PulseSequence:
                 port = target.by_key.get(ref.port)
                 if port is None or port.kind not in (PORT_DIGITAL, PORT_DAC):
                     raise ValueError(f"binding references missing delay port {ref.port!r}")
-        if repeat is not None:
-            if not isinstance(repeat, RepeatRegion):
-                raise TypeError("repeat must be RepeatRegion or None")
-            if repeat.start_period_id not in by_period or repeat.end_period_id not in by_period:
-                raise ValueError("repeat references a missing period")
-            if ids.index(repeat.end_period_id) < ids.index(repeat.start_period_id):
-                raise ValueError("repeat end precedes repeat start")
+        if bracket is not None:
+            if not isinstance(bracket, PulseBracket):
+                raise TypeError("bracket must be PulseBracket or None")
+            if (
+                bracket.start_period_id not in by_period
+                or bracket.end_period_id not in by_period
+            ):
+                raise ValueError("bracket references a missing period")
+            if ids.index(bracket.end_period_id) < ids.index(bracket.start_period_id):
+                raise ValueError("bracket end precedes bracket start")
+        run_repeats = _nonnegative_int(run_repeats, "run_repeats")
+        if run_repeats > MAXIMUM_REPEAT_COUNT:
+            raise ValueError("run_repeats does not fit the hardware 32-bit count")
         object.__setattr__(self, "name", _text(name, "sequence name"))
         object.__setattr__(self, "target", target)
         object.__setattr__(self, "time_step_ns", float(time_step_ns))
@@ -617,7 +632,8 @@ class PulseSequence:
         object.__setattr__(self, "slots", slot_values)
         object.__setattr__(self, "api_parameters", api_values)
         object.__setattr__(self, "delays", delay_values)
-        object.__setattr__(self, "repeat", repeat)
+        object.__setattr__(self, "bracket", bracket)
+        object.__setattr__(self, "run_repeats", run_repeats)
         object.__setattr__(self, "_period_by_id", MappingProxyType(by_period))
         object.__setattr__(self, "_slot_by_id", MappingProxyType({slot.slot_id: slot for slot in slot_values}))
         object.__setattr__(
@@ -670,10 +686,13 @@ __all__ = [
     "FIELD_DELAY",
     "FIELD_DURATION",
     "FIELD_KINDS",
+    "MAXIMUM_REPEAT_COUNT",
+    "MINIMUM_BRACKET_COUNT",
     "OutputDelay",
     "PulseFieldRef",
     "PulseApiParameter",
     "PulsePeriod",
+    "PulseBracket",
     "PulsePortSpec",
     "PulseSequence",
     "PulseSlot",
@@ -681,7 +700,6 @@ __all__ = [
     "PORT_CLOCK",
     "PORT_DAC",
     "PORT_DIGITAL",
-    "RepeatRegion",
     "TIME_UNIT_CHOICES",
     "TIME_UNIT_TO_NS",
     "exact_ticks",

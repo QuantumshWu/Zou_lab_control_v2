@@ -361,8 +361,12 @@ def _effective_rows(
     zeros = (0, tuple(0 for _ in sequence.slots))
     events.setdefault(zeros, [])
     events.setdefault(starts[-1], [])
-    if sequence.repeat is not None and sequence.repeat.count > 1:
-        start_index = next(index for index, period in enumerate(sequence.periods) if period.period_id == sequence.repeat.start_period_id)
+    if sequence.bracket is not None:
+        start_index = next(
+            index
+            for index, period in enumerate(sequence.periods)
+            if period.period_id == sequence.bracket.start_period_id
+        )
         events.setdefault(starts[start_index], [])
     ordered = sorted(
         events,
@@ -545,21 +549,33 @@ def compile_sequence(
     masks = [mask & ~clk_enable for mask in masks]
     bus_names, bus_segments = _bus_segments(sequence, starts, binding)
     channel_delays, bus_delays = _delay_values(sequence)
-    repeat_start_index = 0
+    bracket_start_index = 0
     loop_end_tick, loop_end_coeffs = starts[-1]
     loop_count = 1
-    if sequence.repeat is not None:
-        start_period = next(index for index, period in enumerate(sequence.periods) if period.period_id == sequence.repeat.start_period_id)
-        end_period = next(index for index, period in enumerate(sequence.periods) if period.period_id == sequence.repeat.end_period_id)
+    if sequence.bracket is not None:
+        start_period = next(
+            index
+            for index, period in enumerate(sequence.periods)
+            if period.period_id == sequence.bracket.start_period_id
+        )
+        end_period = next(
+            index
+            for index, period in enumerate(sequence.periods)
+            if period.period_id == sequence.bracket.end_period_id
+        )
         start_expr = starts[start_period]
-        repeat_matches = [index for index, row in enumerate(zip(ticks, coeffs)) if row == start_expr]
-        if repeat_matches:
-            repeat_start_index = repeat_matches[0]
+        bracket_matches = [
+            index
+            for index, row in enumerate(zip(ticks, coeffs))
+            if row == start_expr
+        ]
+        if bracket_matches:
+            bracket_start_index = bracket_matches[0]
         loop_end_tick, loop_end_coeffs = starts[end_period + 1]
-        loop_count = sequence.repeat.count
+        loop_count = sequence.bracket.count
     final_tick = evaluate_affine_tick(ticks[-1], coeffs[-1], reference, frac_bits)
     loop_start = evaluate_affine_tick(
-        ticks[repeat_start_index], coeffs[repeat_start_index], reference, frac_bits
+        ticks[bracket_start_index], coeffs[bracket_start_index], reference, frac_bits
     )
     nominal_loop_end = evaluate_affine_tick(
         loop_end_tick, loop_end_coeffs, reference, frac_bits
@@ -584,7 +600,7 @@ def compile_sequence(
         ticks=tuple(ticks),
         masks=tuple(masks),
         duration_seconds=duration,
-        loop_start_index=repeat_start_index,
+        loop_start_index=bracket_start_index,
         loop_end_tick=loop_end_tick,
         loop_count=loop_count,
         slot_kinds=tuple(slot.kind for slot in sequence.slots),

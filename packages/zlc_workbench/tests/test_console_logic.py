@@ -721,7 +721,7 @@ def test_notebook_fire_holds_the_session_lease_through_wait_done(
 
     def wait_done(timeout):
         try:
-            session.fire(shots=0)
+            session.fire(shots=1)
         except DeviceUseBusy as error:
             reentrant_blocked.append("ExperimentSession" in str(error))
         else:
@@ -773,7 +773,7 @@ def test_pulse_drive_rejects_whole_logic_candidate_before_any_logic_is_stopped(
 
     _view, pulse = _pulse_presenter_on_session(presenter)
     try:
-        assert pulse.fire(cycles=None) is True
+        assert pulse.fire() is True
         assert pulse.running is True
         assert presenter.start_logic(candidate_id) is False
         assert pulse.running is True

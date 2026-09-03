@@ -12,7 +12,7 @@ from .models import (
     FieldVM,
     PeriodVM,
     PortRowVM,
-    RepeatVM,
+    BracketVM,
     BindingRecord,
     ScanPageRecord,
     ScheduleVM, TargetPortRecord, TargetWidthRule,
@@ -20,7 +20,7 @@ from .models import (
 from .preview_view import PulsePreviewView
 from .scan_line_edit import FluentScanLineEdit
 from .scan_view import PulseScanView
-from .schedule_view import ChannelNamesPanel, ChannelPanel, PeriodCard, PulseDragContainer, PulseScheduleView, RepeatBracket
+from .schedule_view import BracketPost, ChannelNamesPanel, ChannelPanel, PeriodCard, PulseDragContainer, PulseScheduleView
 from .target_view import PulseTargetView
 
 __all__ = [
@@ -33,6 +33,6 @@ __all__ = [
     "PulseEditorHandle",
     "PulseEditorView", "PulsePreviewView", "PulseScanView",
     "PulseScheduleView", "PulseTargetView", "PulseDragContainer",
-    "RepeatBracket", "RepeatVM", "ScanPageRecord", "ScheduleVM",
+    "BracketPost", "BracketVM", "ScanPageRecord", "ScheduleVM",
     "TargetPortRecord", "TargetWidthRule",
 ]

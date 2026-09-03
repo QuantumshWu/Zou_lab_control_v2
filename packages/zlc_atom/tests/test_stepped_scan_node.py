@@ -97,7 +97,7 @@ def _seed_the_mot_monitor(sequencer, monitor, plane) -> str:
     sequencer.load(
         compile_sequence(seeded, board.geometry, board.clock_hz), source=seeded
     )
-    sequencer.fire()
+    sequencer.fire(run_repeats=1, scan_repeats=1)
     sequencer.wait_done(5.0)
     deadline = time.monotonic() + 10.0
     signal_name = ""
@@ -125,7 +125,7 @@ def _scripted_run(
 ) -> tuple[np.ndarray, ScriptedScanBench]:
     """Run the node over a source whose every publication is named.
 
-    Returns the kept shots as (visit, plan row) values -- each cell is the
+    Returns the kept shots as (scan/run repeat, plan row) values -- each cell is the
     index of the publication that landed in it -- and the bench that scripted
     them.
     """
@@ -178,8 +178,9 @@ def _scripted_run(
         assert parent.value(bench.signal_name) is not None
         value = plane.current_dataset(signal)
         block = np.asarray(value.block.values, dtype=float)
-        # (visit, plan row, y, x): every pixel of a scripted frame carries the
-        # publication's index, so the cell mean IS the shot that landed there.
+        # (scan repeat x run repeat, plan row, y, x): every pixel of a
+        # scripted frame carries the publication's index, so the cell mean IS
+        # the shot that landed there.
         return block.mean(axis=(2, 3)), bench
     finally:
         if host is not None and not host.observation.terminal:
@@ -262,7 +263,7 @@ def test_each_resolved_point_is_preflighted_before_its_load(monkeypatch) -> None
         assert "invalid second camera cadence" in str(host.observation.error)
         assert validations == 2
         assert bench.loads == 1, "the invalid second program reached LOAD"
-        assert bench.fired_cycles == [1]
+        assert bench.fired_repeats == [(1, 1)]
     finally:
         if host is not None:
             host.shutdown()
@@ -272,8 +273,8 @@ def test_each_resolved_point_is_preflighted_before_its_load(monkeypatch) -> None
         installation.close()
 
 
-def test_shots_are_fire_cycles_and_repeats_rescan_the_plan() -> None:
-    """The board executes finite cycles; the host reapplies each point once."""
+def test_shots_are_run_repeats_and_repeats_rescan_the_plan() -> None:
+    """The board executes finite Run repeats; the host reapplies each point once."""
 
     kept, bench = _scripted_run(
         gating="sw_gated", shots=2, repeats=2, settle=0.0
@@ -283,21 +284,21 @@ def test_shots_are_fire_cycles_and_repeats_rescan_the_plan() -> None:
     assert bench.published == [SCRIPTED_SEED_VALUE, *range(64)]
     assert bench.loads == 4
     assert bench.loaded_loop_counts == [1, 1, 1, 1]
-    assert all(source.repeat is None for source in bench.loaded_sources)
-    assert bench.fired_cycles == [2, 2, 2, 2]
+    assert all(source.bracket is None for source in bench.loaded_sources)
+    assert bench.fired_repeats == [(2, 1)] * 4
     assert sum(kind == "fire" for kind, _when in bench.events) == 4
     assert len(bench.stop_intervals()) == 4
 
 
 def test_pulse_gated_keeps_exactly_one_publication_per_fired_shot() -> None:
-    """The fire's cycle count owns the shots; the host applies each point once."""
+    """The fire's Run-repeat count owns shots; the host applies each point once."""
 
     kept, bench = _scripted_run(gating="pulse_gated", shots=2, settle=0.0)
     assert kept.tolist() == [[0.0, 2.0], [1.0, 3.0]]
     assert bench.published == [SCRIPTED_SEED_VALUE, 0, 1, 2, 3]
     assert bench.loads == 2
     assert bench.loaded_loop_counts == [1, 1]
-    assert bench.fired_cycles == [2, 2]
+    assert bench.fired_repeats == [(2, 1)] * 2
     assert sum(kind == "fire" for kind, _when in bench.events) == 2
 
 
@@ -556,9 +557,17 @@ def test_scan_planner_keeps_chunk_storage_linear_for_50_and_100_points() -> None
         )
         payload = 0
         for row in range(points):
-            output = writer.write(source, row=row, visit=0)
+            output = writer.write(
+                source,
+                row=row,
+                scan_repeat=0,
+                run_repeat=0,
+            )
             assert output.snapshot is source.snapshot
             assert output.cell_origin == (0, row)
+            assert tuple(
+                axis.name for axis in output.canonical_schema.repeat_domain.axes[-2:]
+            ) == ("scan repeat", "run repeat")
             payload += output.snapshot.block.values.nbytes
         assert not hasattr(writer, "_values")
         assert not hasattr(writer, "snapshot")
@@ -586,7 +595,14 @@ def test_partial_scan_current_dataset_has_invalid_future_points() -> None:
         for row in range(2):
             plane.commit_live(
                 producer,
-                {SCAN_OUTPUT.name: writer.write(source, row=row, visit=0)},
+                {
+                    SCAN_OUTPUT.name: writer.write(
+                        source,
+                        row=row,
+                        scan_repeat=0,
+                        run_repeat=0,
+                    )
+                },
             )
         assert plane.seal_committed(producer, cut_short=True)
         current = plane.current_dataset(producer.signal_key(SCAN_OUTPUT.name))

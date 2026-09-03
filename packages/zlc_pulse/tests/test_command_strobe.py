@@ -267,7 +267,7 @@ def test_every_fire_in_a_scan_loop_reaches_the_board() -> None:
     streamer, transport, program = _streamer()
     streamer.load(program, rows=((1,),))
     for _ in range(3):
-        streamer.fire(cycles=1)
+        streamer.fire(run_repeats=1)
         streamer.wait_done(2.0)
 
     assert _acted(transport.commands).count(CMD_FIRE) == 3, (
@@ -289,14 +289,14 @@ def test_no_command_the_host_issues_is_ever_dropped() -> None:
 
     streamer, transport, program = _streamer()
     streamer.load(program, rows=((1,),))
-    streamer.fire(cycles=1)
+    streamer.fire(run_repeats=1)
     streamer.wait_done(2.0)
-    streamer.fire(cycles=1)
+    streamer.fire(run_repeats=1)
     streamer.wait_done(2.0)
     streamer.safe()
     streamer.safe()
     streamer.load(program, rows=((1,),))
-    streamer.fire(cycles=1)
+    streamer.fire(run_repeats=1)
     streamer.wait_done(2.0)
 
     assert _dropped(transport.commands) == [], (
@@ -344,13 +344,13 @@ def test_replaying_a_scan_table_re_arms_the_banks_at_point_zero() -> None:
     streamer, transport, program = _streamer()
     rows = tuple((value,) for value in range(1, 3 * StreamerParams().bank_size))
     streamer.load(program, rows=rows)
-    streamer.fire(cycles=len(rows))
+    streamer.fire(run_repeats=1)
     streamer.wait_done(2.0)
 
     streamer._refill(2 * StreamerParams().bank_size)  # the observer's own path
     assert transport.read_word(CtrlWords.BANK0_CHUNK) != 0
 
-    streamer.fire(cycles=len(rows))
+    streamer.fire(run_repeats=1)
     streamer.wait_done(2.0)
     assert transport.read_word(CtrlWords.BANK0_CHUNK) == 0
     assert transport.read_word(CtrlWords.BANK1_CHUNK) == 1
@@ -519,7 +519,7 @@ def test_the_description_survives_the_wire() -> None:
 
 
 def test_the_host_refills_one_chunk_ahead_of_the_cursor() -> None:
-    """The contract the RTL is built to, and the cycle model implements.
+    """The one-ahead contract shared by the RTL and host refill path.
 
     When the engine crosses from chunk c into c+1 it frees the bank holding c
     and the host refills it with c+2.  The host used to wait for the cursor to
@@ -535,11 +535,21 @@ def test_the_host_refills_one_chunk_ahead_of_the_cursor() -> None:
         rows=tuple((value,) for value in range(1, 4 * bank)),
     )
     try:
-        streamer.fire(cycles=4 * bank)
+        streamer.fire(run_repeats=1, scan_repeats=2)
+        # Drive the observer's private refill path deterministically below.
+        streamer._stop_worker()
+        streamer._stop.clear()
         armed = streamer.snapshot()["scan_next_chunk"]
         # The cursor has only entered chunk 1; chunk 2 must already be on its way.
         streamer._refill(bank)
         assert streamer.snapshot()["scan_next_chunk"] > armed
+        # CURSOR is cumulative, so the first row of sweep 2 is 4*bank rather
+        # than another zero.  Refill derives the sweep directly even if no
+        # observer poll happened near the table boundary.
+        streamer._refill(3 * bank)
+        before_wrap = streamer.snapshot()["scan_next_chunk"]
+        streamer._refill(4 * bank)
+        assert streamer.snapshot()["scan_next_chunk"] > before_wrap
     finally:
         streamer.safe()
 
@@ -608,7 +618,7 @@ def test_a_fire_whose_acknowledgement_dies_is_verified_not_guessed() -> None:
         rows=((1,),),
     )
 
-    streamer.fire(cycles=1)
+    streamer.fire(run_repeats=1)
     assert streamer.wait_done(1.0) is not None
     # Verified as executed: CMD_FIRE was strobed exactly once.
     assert transport.commands.count(CMD_FIRE) == 1
@@ -651,7 +661,7 @@ def test_a_fire_that_provably_never_ran_is_strobed_again() -> None:
         rows=((1,),),
     )
 
-    streamer.fire(cycles=1)
+    streamer.fire(run_repeats=1)
     assert streamer.wait_done(1.0) is not None
     # Two attempts on the wire, one commit: the drop, then the verified retry.
     assert transport.fire_attempts == 2, "verified idle, so strobed again"
@@ -674,7 +684,7 @@ def test_safe_and_load_strobes_ride_the_resending_line() -> None:
 
     transport.write_words = _watch
     streamer.load(program, rows=((1,),))
-    streamer.fire(cycles=1)
+    streamer.fire(run_repeats=1)
     assert streamer.wait_done(1.0) is not None
     streamer.safe()
 
@@ -723,7 +733,7 @@ def test_a_verified_strobe_leaves_the_acknowledgement_window_to_the_line() -> No
         compile_sequence(_sequence(slotted=True), geom, 50e6),
         rows=((1,),),
     )
-    streamer.fire(cycles=1)
+    streamer.fire(run_repeats=1)
     assert streamer.wait_done(1.0) is not None
 
     assert transport.fire_deadlines, "the FIRE strobe must have reached the line"
@@ -763,7 +773,7 @@ def test_a_transport_that_never_loses_anything_gets_no_verify_machinery() -> Non
         compile_sequence(_sequence(slotted=True), geom, 50e6),
         rows=((1,),),
     )
-    streamer.fire(cycles=1)
+    streamer.fire(run_repeats=1)
     assert streamer.wait_done(1.0) is not None
 
     assert transport.fire_deadlines == [None], (

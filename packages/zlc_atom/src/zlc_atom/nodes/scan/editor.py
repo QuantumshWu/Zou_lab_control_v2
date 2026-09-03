@@ -16,7 +16,7 @@ inner plan, so they are outside it by construction.
 Ports are read from the projection -- the resolved pulse template's API
 parameters, plus the bench's tunable devices for a node that can move them --
 the same set that node's binding enforces.  A board-advanced scan cannot make
-a host call between two cycles of one table, so its editor never offers a
+a host call between two rows of one table, so its editor never offers a
 device port: the form shows what the node would accept, not what some scan
 somewhere could.  An axis whose values are not a uniform grid (authored in a
 notebook, say) is shown as "custom" and left untouched until a spin is edited,

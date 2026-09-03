@@ -81,7 +81,7 @@ def test_editable_runtime_and_pulse_packages_run_the_virtual_chain_to_frozen_ora
             },
         )
         arm_sequencer(sequencer, pulse)
-        sequencer.fire()
+        sequencer.fire(run_repeats=1, scan_repeats=1)
         sequencer.wait_done(1.0)
         assert monitor.poll() is not None
         monitor_front = plane.freeze()

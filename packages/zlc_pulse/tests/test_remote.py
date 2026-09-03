@@ -323,17 +323,19 @@ def test_remote_replays_device_path_with_short_done_poll() -> None:
         client = _client(server)
         try:
             client.load(program, source=source, rows=((1,),))
-            client.fire()
+            client.fire(run_repeats=2, scan_repeats=3)
             report = client.wait_done(1.0)
             assert report is not None
             assert report.status_reads == (4, 4)
+            assert report.cursor == 2
             safe = client.safe()
             assert safe.stable
             state = client.applied()
             assert state is not None
             assert state.source == source
             assert state.rows == ((1,),)
-            assert state.cycles == 1
+            assert state.run_repeats == 2
+            assert state.scan_repeats == 3
         finally:
             client.close()
 
@@ -348,7 +350,7 @@ def test_remote_safe_interrupts_forever_fire_on_the_same_connection() -> None:
         client = _client(server)
         try:
             client.load(program)
-            client.fire(cycles=None)
+            client.fire(run_repeats=0)
             result: list[object] = []
 
             def interrupt() -> None:
@@ -378,7 +380,7 @@ def test_remote_logs_lifecycle_events_without_payload_dump(capsys) -> None:
             assert client.snapshot()["opened"] is True
             assert client.cursor() == 0
             assert client.applied() is not None
-            client.fire()
+            client.fire(run_repeats=1)
             assert client.wait_done(1.0) is not None
             safe = client.safe()
             assert safe.stable
@@ -391,7 +393,8 @@ def test_remote_logs_lifecycle_events_without_payload_dump(capsys) -> None:
     assert "ZLC LOAD" in output
     assert "edges=3" in output
     assert "ZLC FIRE" in output
-    assert "cycles=1" in output
+    assert "run_repeats=1" in output
+    assert "scan_repeats=1" in output
     assert "reloaded_before_fire=False" in output
     assert "ZLC SNAPSHOT client=127.0.0.1:" in output
     assert "ZLC CURSOR client=127.0.0.1:" in output
@@ -458,7 +461,7 @@ def test_a_quiet_owner_is_never_disconnected_for_being_quiet() -> None:
         client = _client(server)
         try:
             client.load(program)
-            client.fire(cycles=None)
+            client.fire(run_repeats=0)
             owner = server.owner_status()[0]
             time.sleep(0.3)  # not one word from us
             assert streamer.snapshot()["firing"] is True
@@ -814,11 +817,12 @@ def test_remote_disconnect_preserves_applied_for_the_next_client(capsys) -> None
             assert state is not None
             assert state.source == source
             assert state.rows == ((1,),)
-            assert state.cycles == 1
+            assert state.run_repeats == 1
+            assert state.scan_repeats == 1
             assert state.source is not None
             rebuilt = compile_sequence(state.source, geom, 50e6)
             assert pack_program(rebuilt, geom) == pack_program(state.program, geom)
-            assert pack_scan_rows(state.rows, geom, 0, 0, state.cycles) == pack_scan_rows(((1,),), geom, 0, 0, 1)
+            assert pack_scan_rows(state.rows, geom, 0, 0) == pack_scan_rows(((1,),), geom, 0, 0)
         finally:
             client_b.close()
     assert streamer.applied() is None

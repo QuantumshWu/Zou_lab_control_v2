@@ -1,9 +1,9 @@
 """The seamless scan node: the BOARD advances the points from its scan table.
 
 Two things have to be true and nothing else matters.  The plan must reach the
-board as a scan table whose rows are EXACTLY the plan's rows -- shots play
-inside one point as the pulse's outermost repeat bracket, sweeps as extra
-fired cycles over the same table -- and the publications that come back must
+board as a scan table whose rows are EXACTLY the plan's rows -- Run repeats
+hold each point for its shots, Scan repeats re-walk the table, and the
+independent PulseBracket stays inside every shot -- and the publications that come back must
 land on the rows that produced them, in played order.
 The first is asserted against the table the board was handed; the second
 twice: once against a source whose every publication is named, and once
@@ -11,7 +11,7 @@ against the virtual world's own physics, where a wrong order would show up as
 a survival curve that does not fall.
 
 A ``device:`` axis is refused here, by name, pointing at the node that can
-run it: a host call between two cycles of one fired table is exactly what
+run it: a host call between two rows of one fired table is exactly what
 does not happen.
 """
 
@@ -26,7 +26,7 @@ import pytest
 from dataclasses import replace
 
 from zlc_pulse import (
-    RepeatRegion,
+    PulseBracket,
     compile_sequence,
     resolve_api_parameters,
     sequence_from_tree,
@@ -115,16 +115,14 @@ def _scripted_run(
     repeats: int,
     settle: float,
     sequence: object | None = None,
-    readouts: int | None = None,
     seed: bool = True,
 ) -> tuple[np.ndarray, ScriptedScanBench]:
     """Play the table over a source whose every publication is named.
 
-    Returns the kept shots as (visit, plan row) values -- each cell is the
+    Returns the kept shots as (scan/run repeat, plan row) values -- each cell is the
     index of the publication that landed in it -- and the bench that scripted
     them.  One fire hands over every publication the table plays, which is
-    what a board-driven source does.  ``readouts`` is how many that is when a
-    template's own bracket multiplies the shots.
+    what a board-driven source does.
     """
 
     installation = create_installation("virtual")
@@ -136,9 +134,7 @@ def _scripted_run(
         bench = ScriptedScanBench(
             installation.device("sequencer"),
             plane,
-            publications_per_fire=(
-                repeats * len(values) * shots if readouts is None else readouts
-            ),
+            publications_per_fire=repeats * len(values) * shots,
         )
         if seed:
             bench.publish(SCRIPTED_SEED_VALUE)
@@ -173,8 +169,9 @@ def _scripted_run(
         assert parent.value(bench.signal_name) is not None
         value = plane.current_dataset(host.signal_key("scan"))
         block = np.asarray(value.block.values, dtype=float)
-        # (visit, plan row, y, x): every pixel of a scripted frame carries the
-        # publication's index, so the cell mean IS the shot that landed there.
+        # (scan repeat x run repeat, plan row, y, x): every pixel of a
+        # scripted frame carries the publication's index, so the cell mean IS
+        # the shot that landed there.
         return block.mean(axis=(2, 3)), bench
     finally:
         if host is not None and not host.observation.terminal:
@@ -283,14 +280,14 @@ def test_source_preflight_rejects_before_the_board_is_loaded(monkeypatch) -> Non
         installation.close()
 
 
-def test_the_table_is_the_plan_and_the_shots_ride_the_bracket(monkeypatch) -> None:
+def test_the_table_is_the_plan_and_the_shots_are_run_repeats(monkeypatch) -> None:
     """One load, one fire: the table IS the plan, and order is the assignment.
 
     Two points, two shots each, two sweeps: the board is handed one TWO-row
-    table -- the shots live in the pulse's own repeat bracket, not as
-    repeated rows -- one fired cycle per point per sweep, and the
-    publications land on (visit, row) in played order, red the moment a shot
-    is credited to the point beside it.
+    table -- shots are Run repeats at one row, not Bracket iterations or
+    repeated rows -- and the
+    publications land on (scan repeat, run repeat, row) in played order, read
+    the moment a shot is credited to the point beside it.
     """
 
     kept, bench = _scripted_run(
@@ -309,8 +306,8 @@ def test_the_table_is_the_plan_and_the_shots_ride_the_bracket(monkeypatch) -> No
     assert len(table) == 2, "one wire row per plan row; shots are not rows"
     first, second = (tuple(row) for row in np.asarray(table))
     assert first != second, "the two plan points must reach the board apart"
-    assert bench.fired_cycles == [4], "one fired cycle per point per sweep"
-    assert bench.loaded_loop_counts == [2], "the shot count IS the bracket"
+    assert bench.fired_repeats == [(2, 2)]
+    assert bench.loaded_loop_counts == [1], "shots must not rewrite the Bracket"
 
     # A long duration is still a full-width period; only its variation rides
     # the signed slot multiplier.  Make the requested span wider than one
@@ -322,8 +319,16 @@ def test_the_table_is_the_plan_and_the_shots_ride_the_bracket(monkeypatch) -> No
     canonical = []
     original_write = ScanDatasetWriter.write
 
-    def record_canonical(writer, value, *, row, visit):
-        output = original_write(writer, value, row=row, visit=visit)
+    def record_canonical(
+        writer, value, *, row, scan_repeat, run_repeat
+    ):
+        output = original_write(
+            writer,
+            value,
+            row=row,
+            scan_repeat=scan_repeat,
+            run_repeat=run_repeat,
+        )
         canonical.append(output)
         return output
 
@@ -393,19 +398,13 @@ def test_the_table_is_the_plan_and_the_shots_ride_the_bracket(monkeypatch) -> No
     assert "package_pins" in sequencer["target"]
 
 
-def test_an_authored_whole_bracket_multiplies_with_the_shots() -> None:
-    """Every iteration of a whole-sequence bracket is one shot.
-
-    The template already plays its whole span twice; the operator asks for
-    two shots on top.  One point is then four bracket iterations -- four
-    readouts -- and the dataset says so: four visits per sweep, in played
-    order, over an unchanged two-row table.
-    """
+def test_an_authored_whole_bracket_stays_independent_of_run_repeats() -> None:
+    """A whole Bracket remains internal while Run repeats supplies shots."""
 
     template = _template_sequence()
     template = replace(
         template,
-        repeat=RepeatRegion(
+        bracket=PulseBracket(
             template.periods[0].period_id, template.periods[-1].period_id, 2
         ),
     )
@@ -415,78 +414,33 @@ def test_an_authored_whole_bracket_multiplies_with_the_shots() -> None:
         repeats=1,
         settle=0.0,
         sequence=template,
-        readouts=8,
     )
     assert kept.tolist() == [
-        [0.0, 4.0],  # shot 0 = the bracket's first authored play
-        [1.0, 5.0],
-        [2.0, 6.0],
-        [3.0, 7.0],
+        [0.0, 2.0],
+        [1.0, 3.0],
     ]
     assert len(bench.scan_tables[0]) == 2
-    assert bench.fired_cycles == [2]
-    assert bench.loaded_loop_counts == [4], "authored twice x two shots"
+    assert bench.fired_repeats == [(2, 1)]
+    assert bench.loaded_loop_counts == [2]
 
 
-def test_a_partial_bracket_refuses_more_than_one_shot_and_plays_at_one() -> None:
-    """The board has ONE hardware loop; a partial bracket already spends it.
-
-    Two shots of a partially-bracketed template cannot nest, so the run is
-    refused before the board is touched, in words that name the way out.  At
-    one shot the authored bracket is the author's own business and plays
-    untouched.
-    """
+def test_a_partial_bracket_and_multiple_run_repeats_are_independent() -> None:
+    """A partial Bracket no longer consumes the per-point Run-repeat layer."""
 
     template = _template_sequence()
     partial = replace(
         template,
-        repeat=RepeatRegion(
+        bracket=PulseBracket(
             template.periods[0].period_id, template.periods[1].period_id, 2
         ),
     )
 
-    installation = create_installation("virtual")
-    plane = SignalDataPlane()
-    descriptors = {value.api_name: value for value in discover_logic_nodes()}
-    bench = None
-    host = None
-    try:
-        bench = ScriptedScanBench(
-            installation.device("sequencer"), plane, publications_per_fire=1
-        )
-        bench.publish(SCRIPTED_SEED_VALUE)
-        node = descriptors["seamless_scan"].instantiate(
-            sequencer=bench,
-            signal_plane=plane,
-            source_signal=bench.signal_name,
-            pulse_resource=_pulse_resource(TEMPLATE_NAME, partial),
-            plan=ScanPlan((ScanAxis(BIAS_X_PORT, (0.0,)),)).to_tree(),
-            repeats=1,
-            shots_per_point=2,
-            settle_seconds=0.0,
-        )
-        host = _scan_host(node, plane)
-        host.start()
-        deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline and not host.observation.terminal:
-            host.poll()
-        message = str(host.observation.error)
-        assert "whole-sequence bracket" in message, message
-        assert "shots_per_point" in message, message
-        assert bench.loads == 0, "the board was touched by a refused run"
-    finally:
-        if host is not None:
-            host.shutdown()
-        if bench is not None:
-            bench.close()
-        plane.close()
-        installation.close()
-
     kept, bench = _scripted_run(
-        values=(0.0,), shots=1, repeats=1, settle=0.0, sequence=partial
+        values=(0.0,), shots=2, repeats=1, settle=0.0, sequence=partial
     )
-    assert kept.tolist() == [[0.0]]
-    assert bench.loaded_loop_counts == [2], "one shot leaves the author's bracket"
+    assert kept.tolist() == [[0.0], [1.0]]
+    assert bench.fired_repeats == [(2, 1)]
+    assert bench.loaded_loop_counts == [2]
 
 
 def test_the_authored_settle_time_stops_the_board_before_the_table() -> None:
@@ -552,7 +506,7 @@ def test_the_board_advanced_scan_recovers_the_planted_trap_loss() -> None:
         sequencer.load(
             compile_sequence(seeded, board.geometry, board.clock_hz), source=seeded
         )
-        sequencer.fire()
+        sequencer.fire(run_repeats=1, scan_repeats=1)
         sequencer.wait_done(5.0)
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
@@ -797,7 +751,7 @@ def test_a_manual_axis_is_the_outer_loop_and_its_answers_are_the_axis() -> None:
         values=(-256.0, 256.0),
     )
 
-    assert bench.fired_cycles == [2, 2, 2], (
+    assert bench.fired_repeats == [(1, 1)] * 3, (
         "one fire per manual point, each playing the whole inner table"
     )
     assert len(bench.scan_tables) == 3, "the inner table is written per fire"
@@ -839,12 +793,17 @@ def test_repeats_walk_the_whole_plan_again_and_stop_again() -> None:
         repeats=2,
     )
 
-    assert bench.fired_cycles == [2, 2, 2, 2], "two walks of two manual points"
+    assert bench.fired_repeats == [(1, 1)] * 4, "two walks of two manual points"
     stops = [request.payload["value"] for request in asked]
     assert stops == pytest.approx([1.0, 2.0, 1.0, 2.0])
 
     schema = value.block.schema
-    assert schema.repeat_domain.size == 2, "a walk is a visit, not a new point"
+    assert schema.repeat_domain.size == 2
+    assert tuple(axis.name for axis in schema.repeat_domain.axes[-2:]) == (
+        "scan repeat",
+        "run repeat",
+    )
+    assert tuple(axis.size for axis in schema.repeat_domain.axes[-2:]) == (2, 1)
     assert schema.point_domain.size == 4
     block = np.asarray(value.block.values, dtype=float)
     # Walk 0 played publications 0-3, walk 1 played 4-7, both over the same
@@ -917,7 +876,7 @@ def test_stopping_at_the_question_stops_the_run() -> None:
             host.poll()
         assert host.observation.terminal
         assert host.observation.phase == "cancelled"
-        assert bench.fired_cycles == [], "nothing fired before the hand answered"
+        assert bench.fired_repeats == [], "nothing fired before the hand answered"
     finally:
         if host is not None:
             host.shutdown()
@@ -1047,7 +1006,7 @@ def test_a_device_axis_is_the_outer_loop_and_the_device_is_verified() -> None:
         values=(-256.0, 256.0),
     )
 
-    assert bench.fired_cycles == [2, 2, 2], (
+    assert bench.fired_repeats == [(1, 1)] * 3, (
         "one fire per device point, each playing the whole inner table"
     )
 

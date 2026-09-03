@@ -195,7 +195,10 @@ depth deliberately places ordinary optical nonuniformity near that edge.
 
 ### Pulse and FPGA
 
-Pulse cycle count, Camera frames-per-cycle and Dataset repeat are independent.
+Pulse execution has three explicit hardware layers: Scan repeats walk the
+complete table, Run repeats play the complete Pulse at one row, and the single
+draggable PulseBracket loops only its authored timeline subset. Camera
+frames-per-cycle and Dataset repeat remain independent acquisition facts.
 The Pulse server alone owns UART/JTAG hardware; normal disconnect drives SAFE,
 UART auto-selection requires the word-63 fingerprint, and explicit UART failure
 does not silently choose another port.

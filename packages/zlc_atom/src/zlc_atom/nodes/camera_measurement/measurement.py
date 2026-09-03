@@ -419,13 +419,14 @@ class CameraCycleSource:
         program: object,
         table: object = None,
         *,
-        cycles: int | None = None,
+        run_repeats: int = 1,
+        scan_repeats: int = 1,
     ) -> None:
         """Freeze the camera working point before the plan arms devices."""
 
         if self._cycles is None:
             raise RuntimeError("the camera cycle source was not opened")
-        del program, table, cycles
+        del program, table, run_repeats, scan_repeats
         if self._capture is None:
             self.camera_node._configure_capture()
 

@@ -14,9 +14,11 @@ code zero after `$fatal`.
 The maintained benches are self-contained except where explicitly noted:
 
 - `tb_1tick.v`, `tb_gapsweep.v`, and `tb_loop.v` cover
-  exact 1/2-tick finite one-shots, dense edge prefetch, gap-dependent full-cycle
-  repeats, and a non-zero-start finite `RepeatRegion` with distinct preamble/body/tail.
-- `tb_scan_wrap.v` covers a streamed three-chunk scan and cyclic two-bank wrap.
+  exact 1/2-tick finite one-shots, dense edge prefetch, gap-dependent
+  complete-Pulse Run repeats, and a non-zero-start finite `PulseBracket` with
+  distinct preamble/body/tail.
+- `tb_scan_wrap.v` covers PulseBracket, per-row Run repeats, finite Scan repeats,
+  a streamed three-chunk table, cumulative row cursor, and cyclic two-bank wrap.
 - `tb_delay_sched.v`, `tb_delay_compact.v`, `tb_evt_depth.v`, and
   `tb_bus_delay.v` cover the current 32-bit TTL event and DAC segment delay
   schedulers.

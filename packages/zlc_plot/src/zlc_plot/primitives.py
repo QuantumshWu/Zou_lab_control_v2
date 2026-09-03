@@ -562,19 +562,19 @@ class PulseAnalogTrace:
 
 
 @dataclass(frozen=True, slots=True)
-class PulseRepeatMarker:
+class PulseLoopMarker:
     start: float
     stop: float
     label: str
 
     def __post_init__(self) -> None:
-        start = _nonnegative_time(self.start, "repeat start")
-        stop = _nonnegative_time(self.stop, "repeat stop")
+        start = _nonnegative_time(self.start, "loop start")
+        stop = _nonnegative_time(self.stop, "loop stop")
         if stop <= start:
-            raise ValueError("repeat stop must be greater than start")
+            raise ValueError("loop stop must be greater than start")
         object.__setattr__(self, "start", start)
         object.__setattr__(self, "stop", stop)
-        object.__setattr__(self, "label", _text(self.label, "repeat label"))
+        object.__setattr__(self, "label", _text(self.label, "loop label"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -611,8 +611,7 @@ class PulseTimelineData:
     time_unit: str = "s"
     total_duration: float | None = None
     analog_traces: tuple[PulseAnalogTrace, ...] = ()
-    repeat_markers: tuple[PulseRepeatMarker, ...] = ()
-    repeat_notation: str = ""
+    loop_markers: tuple[PulseLoopMarker, ...] = ()
     scan_dac_segments: tuple[PulseDacScanSegment, ...] = ()
 
     def __post_init__(self) -> None:
@@ -643,9 +642,9 @@ class PulseTimelineData:
         names = tuple(item.name for item in analog_traces)
         if len(names) != len(set(names)):
             raise ValueError("analog trace names must be unique")
-        repeat_markers = tuple(self.repeat_markers)
-        if any(not isinstance(item, PulseRepeatMarker) for item in repeat_markers):
-            raise TypeError("repeat_markers must contain PulseRepeatMarker values")
+        loop_markers = tuple(self.loop_markers)
+        if any(not isinstance(item, PulseLoopMarker) for item in loop_markers):
+            raise TypeError("loop_markers must contain PulseLoopMarker values")
         scan_dac_segments = tuple(self.scan_dac_segments)
         if any(not isinstance(item, PulseDacScanSegment) for item in scan_dac_segments):
             raise TypeError("scan_dac_segments must contain PulseDacScanSegment values")
@@ -667,7 +666,7 @@ class PulseTimelineData:
                 [0.0]
                 + [item.stop for item in blocks]
                 + [item.stop for item in regions]
-                + [item.stop for item in repeat_markers]
+                + [item.stop for item in loop_markers]
                 + [item.stop for item in scan_dac_segments]
                 + [item.starts[-1] for item in analog_traces if item.starts]
             )
@@ -675,12 +674,7 @@ class PulseTimelineData:
                 raise ValueError("total_duration cannot end before pulse content")
         object.__setattr__(self, "total_duration", total_duration)
         object.__setattr__(self, "analog_traces", analog_traces)
-        object.__setattr__(self, "repeat_markers", repeat_markers)
-        object.__setattr__(
-            self,
-            "repeat_notation",
-            _text(self.repeat_notation, "repeat_notation"),
-        )
+        object.__setattr__(self, "loop_markers", loop_markers)
         object.__setattr__(self, "scan_dac_segments", scan_dac_segments)
 
 
@@ -700,7 +694,7 @@ __all__ = [
     "PulseAnalogTrace",
     "PulseChannel",
     "PulseDacScanSegment",
-    "PulseRepeatMarker",
+    "PulseLoopMarker",
     "PulseScanRegion",
     "PulseTimelineData",
 ]

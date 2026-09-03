@@ -11,10 +11,10 @@ HOW A FRESH VALUE IS TAKEN IS THE OPERATOR'S DECLARATION.  Between two points
 the world changes, and whether the publication that straddles the change must
 be thrown away depends on the SOURCE, not on the board:
 
-Each point is applied and fired once.  ``shots_per_point`` is the finite cycle
-count handed to that fire; ``repeats`` returns to the beginning and walks the
-whole plan again.  A timeline ``RepeatRegion`` remains the pulse author's
-internal loop and never stands in for either fact.
+Each point is applied and fired once. ``shots_per_point`` is the finite
+Run-repeat override handed to that fire; ``repeats`` returns to the beginning
+and walks the whole plan again in the host. A timeline ``PulseBracket`` remains
+the pulse author's internal loop and never stands in for either fact.
 
 * ``pulse_gated``: each outer pulse iteration produces one publication, so
   the next ``shots_per_point`` publications are retained.  Nothing is discarded.
@@ -221,8 +221,8 @@ class SteppedScanMeasurement:
             "pulse": self.sequence.name,
             "plan": self.plan.to_tree(),
             "scan_shape": self.plan.shape,
-            "repeats": self.repeats,
-            "shots_per_point": shots,
+            "scan_repeats": self.repeats,
+            "run_repeats": shots,
             "settle_seconds": self.settle_seconds,
             "gating": self.gating,
             "free_run_delay_seconds": self.free_run_delay_seconds,
@@ -230,20 +230,25 @@ class SteppedScanMeasurement:
         writer = ScanDatasetWriter(
             rows,
             [(port.label, port.unit) for port in self.ports],
-            visits=self.repeats * shots,
+            scan_repeats=self.repeats,
+            run_repeats=shots,
             run_record=run_record,
         )
         self.source.open(context, cycles=self.repeats * len(rows) * shots)
         try:
-            # Sweeps are the OUTERMOST host loop.  Shots are the fire's finite
-            # cycle count, so one point is loaded and fired once while the
-            # board plays all of its shots.
+            # Sweeps are the OUTERMOST host loop. Shots are one fire's finite
+            # Run repeats, so one point is loaded once while the board plays
+            # all of its complete-Pulse shots.
             total_shots = self.repeats * len(rows) * shots
             for sweep in range(self.repeats):
                 for index, row in enumerate(rows):
                     check_cancelled(context)
                     source, program = self._apply(row, board)
-                    self.source.validate(program, cycles=shots)
+                    self.source.validate(
+                        program,
+                        run_repeats=shots,
+                        scan_repeats=1,
+                    )
                     self.sequencer.load(program, source=source)
                     self.source.arm()
                     self._collect(
@@ -305,7 +310,7 @@ class SteppedScanMeasurement:
         """Fire one point and retain every outer pulse iteration."""
 
         shots = self.shots_per_point
-        self.sequencer.fire(cycles=shots)
+        self.sequencer.fire(run_repeats=shots, scan_repeats=1)
         fired_at = time.monotonic()
         if self.gating == "sw_gated":
             single_repeat_seconds = float(program.duration_seconds)
@@ -344,8 +349,12 @@ class SteppedScanMeasurement:
         total_shots: int,
     ) -> None:
         value, source_publication = self.source.next_value(context)
-        visit = sweep * self.shots_per_point + shot
-        output = writer.write(value, row=index, visit=visit)
+        output = writer.write(
+            value,
+            row=index,
+            scan_repeat=sweep,
+            run_repeat=shot,
+        )
         context.commit_live(
             {SCAN_OUTPUT.name: output},
             source_publication=source_publication,
