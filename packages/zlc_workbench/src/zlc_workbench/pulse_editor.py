@@ -50,6 +50,7 @@ from zlc_pulse import (
     align_to_grid,
     apply_api_values,
     authored_api_entries,
+    field_label,
     resolve_api_parameters,
     resolve_scan_point,
 )
@@ -68,6 +69,7 @@ from zlc_ui import (
     VALIDATOR_FLOAT,
     VALIDATOR_INT,
     DelayRowVM,
+    BindingRecord,
     ScanPageRecord,
     TargetWidthRule,
     FieldVM,
@@ -1135,6 +1137,7 @@ class PulseEditorPresenter:
         view.save_requested.connect(self._guarded(self.save_pulse))
         view.values_load_requested.connect(self._guarded(self.load_api_values))
         view.values_save_requested.connect(self._guarded(self.save_api_values))
+        view.binding_renamed.connect(self._guarded(self.rename_binding))
         view.load_requested.connect(self._guarded(self.ask_for_pulse))
         view.preview_include_off_toggled.connect(self._guarded(self._on_include_off))
         view.preview_size_committed.connect(self._guarded(self.set_preview_size))
@@ -1214,6 +1217,75 @@ class PulseEditorPresenter:
         if not changed:
             return state, ()
         return replace(state, sequence=sequence), changed
+
+    def _binding_records(self) -> tuple[BindingRecord, ...]:
+        """Every bound field, its id beside where it sits on the pulse."""
+
+        if self.sequence is None:
+            return ()
+        return tuple(
+            BindingRecord(
+                binding.slot_id if kind == "scan" else binding.parameter_id,
+                field_label(self.sequence, binding.field_ref),
+                kind,
+            )
+            for kind, group in (
+                ("scan", self.sequence.slots),
+                ("api", self.sequence.api_parameters),
+            )
+            for binding in group
+        )
+
+    def rename_binding(self, old_id: str, new_id: str) -> bool:
+        """Give one bound field the name everything else will call it by.
+
+        A binding's id is minted from the period it happens to sit in, which
+        is fine until a saved set of values, or a plan, has to name the same
+        slot in another pulse.  The FIELD does not move -- only the name --
+        so nothing inside the document has to be repointed.  Outside it, an
+        authored plan naming the old id is refused by name when it next
+        binds, which is the loud failure that makes this safe to offer.
+        """
+
+        if self.sequence is None:
+            self._warn("no pulse is open")
+            return False
+        was, wanted = str(old_id), str(new_id).strip()
+        if not wanted or wanted == was:
+            return False
+        known = {slot.slot_id for slot in self.sequence.slots} | {
+            parameter.parameter_id for parameter in self.sequence.api_parameters
+        }
+        if was not in known:
+            self._warn(f"this pulse has no bound field named {was!r}")
+            return False
+        try:
+            # The model validates an id the moment it is constructed, which is
+            # before _rebuilt would see it, so a name that is not an identifier
+            # is caught here rather than escaping a Qt slot.
+            slots = tuple(
+                replace(slot, slot_id=wanted) if slot.slot_id == was else slot
+                for slot in self.sequence.slots
+            )
+            parameters = tuple(
+                replace(parameter, parameter_id=wanted)
+                if parameter.parameter_id == was
+                else parameter
+                for parameter in self.sequence.api_parameters
+            )
+        except Exception as error:
+            self._warn(str(error))
+            self.refresh()
+            return False
+        candidate = self._rebuilt(slots=slots, api_parameters=parameters)
+        if candidate is None:
+            # Refused -- a duplicate id, or not an identifier.  _rebuilt has
+            # already said why; put the boxes back to what the pulse holds so
+            # the rejected text is not left standing on screen.
+            self.refresh()
+            return False
+        self._apply(candidate)
+        return True
 
     def load_api_values(self) -> bool:
         """Overwrite the API slots from one saved set of values.
@@ -3294,9 +3366,10 @@ class PulseEditorPresenter:
                 slots_text=(
                     "No bound fields: click a dot on a duration or DAC value to "
                     "make it a scan column."
-                    if not columns
-                    else "Bound: " + ", ".join(column.name for column in columns)
+                    if not columns and not self.sequence.api_parameters
+                    else "Bound fields, and the name everything else calls them by:"
                 ),
+                bindings=self._binding_records(),
                 table_text=_scan_table_text(rows, columns),
                 source_text=self._state.scan_source,
                 source_dirty=self._state.scan_source_dirty,

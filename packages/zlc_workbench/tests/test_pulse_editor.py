@@ -359,7 +359,7 @@ class _EditorView:
         "visible_ports_committed", "clear_port_requested",
         "feedback_requested", "connection_requested", "fire_requested",
         "stop_requested", "sync_requested", "save_requested", "load_requested",
-        "values_save_requested", "values_load_requested",
+        "values_save_requested", "values_load_requested", "binding_renamed",
         "scan_array_load_requested", "scan_source_edited",
         "scan_repeats_committed", "scan_hold_requested", "scan_step_requested",
         "scan_program_load_requested", "scan_template_requested",

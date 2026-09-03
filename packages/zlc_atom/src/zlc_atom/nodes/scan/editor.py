@@ -102,8 +102,16 @@ class _AxisRow(QtWidgets.QWidget):
         self._apply_port_limits()
         if axis is not None:
             at = self.port_combo.findData(axis.port)
-            if at >= 0:
-                self.port_combo.setCurrentIndex(at)
+            if at < 0:
+                # The pulse no longer offers this port -- it was renamed, or
+                # the binding was taken off the field.  Keep saying what the
+                # operator authored: silently selecting whatever sits at index
+                # zero re-points their axis at an unrelated knob, and the run
+                # would sweep it without a word.  Left as it is, bind_plan
+                # refuses by name before anything arms.
+                self.port_combo.addItem(f"{axis.port} (not in this pulse)", axis.port)
+                at = self.port_combo.count() - 1
+            self.port_combo.setCurrentIndex(at)
             self._apply_port_limits()
             self.start_spin.setValue(axis.values[0])
             self.stop_spin.setValue(axis.values[-1])
