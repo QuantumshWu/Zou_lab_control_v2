@@ -44,6 +44,7 @@ _VALUE_TAG = "zlc-render-value"
 _MAPPING_OPENED = object()
 _MAPPING_RELEASED = object()
 _RETIRE_MAPPINGS = object()
+_STOP_WRITER = object()
 
 
 def _send_message(connection: Connection, message: object) -> None:
@@ -58,6 +59,37 @@ def _send_message(connection: Connection, message: object) -> None:
     """
 
     connection.send_bytes(pickle.dumps(message, protocol=5))
+
+
+def _write_messages(connection: Connection, outbox: Queue, closed: Callable[[], None]) -> None:
+    """The ONLY thread that writes to one end of the pipe.
+
+    ``Connection.send_bytes`` blocks until the peer reads, and on Windows it
+    waits INFINITE with no timeout to pass.  The pipe buffer is 8192 bytes and
+    a legal 64-cell facet grid's front message is 9750, so a write that has to
+    wait is ordinary rather than exceptional.  Any thread that ALSO has to
+    read -- the child's service loop, the parent's GUI thread -- must therefore
+    never perform the write itself: while it waited, it stopped draining, the
+    peer's own write filled, and both ends held a send lock forever.  One
+    writer per direction, fed by a queue, removes the cycle by construction:
+    the readers keep reading no matter how far behind the writes fall, and
+    ordering is the queue's.
+    """
+
+    while True:
+        message = outbox.get()
+        if message is _STOP_WRITER:
+            return
+        try:
+            _send_message(connection, message)
+        except BaseException:
+            # The peer is gone.  Say so once and drain, so nothing waits on a
+            # queue nobody will ever write out; the reader's own EOF is what
+            # fails the pending requests.
+            closed()
+            while True:
+                if outbox.get() is _STOP_WRITER:
+                    return
 
 
 def _receive_message(connection: Connection) -> object:
@@ -828,7 +860,6 @@ class RenderProcess:
         if not selected:
             raise ValueError("render process name must be non-empty")
         self.name = selected
-        self._send_lock = Lock()
         self._lock = RLock()
         self._pending: dict[int, _Pending] = {}
         self._callbacks: dict[int, Callable[..., object]] = {}
@@ -892,6 +923,14 @@ class RenderProcess:
         self._reader_stopped = stopped
         self._closed = False
         self._close_started = None
+        self._outbox: Queue = Queue()
+        self._writer = Thread(
+            target=_write_messages,
+            args=(parent, self._outbox, self._mark_write_failed),
+            name=f"zlc-render-{self.name}-requests",
+            daemon=True,
+        )
+        self._writer.start()
         self._reader = Thread(
             target=self._read_messages,
             name=f"zlc-render-{self.name}-responses",
@@ -1261,10 +1300,22 @@ class RenderProcess:
         return completion
 
     def _send(self, message: object) -> None:
-        with self._send_lock:
-            if self._closed:
-                raise RuntimeError("render process is closed")
-            _send_message(self._connection, message)
+        """Hand one message to the writer.  Never touches the pipe.
+
+        A caller on the Qt owner thread must not wait for the child to read:
+        see :func:`_write_messages`.  Ordering is the queue's, so an ``input``
+        enqueued before the ``request`` that names its token still arrives
+        first.
+        """
+
+        if self._closed:
+            raise RuntimeError("render process is closed")
+        self._outbox.put(message)
+
+    def _mark_write_failed(self) -> None:
+        """The writer lost the pipe.  The reader's EOF fails the requests."""
+
+        self._closed = True
 
     @staticmethod
     def _input_key(value: object) -> object:
@@ -1288,85 +1339,83 @@ class RenderProcess:
                     self._input_refcounts[token] += 1
                     used.add(token)
                 return _INPUT_REF, token
-        # Publish the token while holding the same send lane that carries its
-        # registration.  A concurrent host call may see the token, but its
-        # request cannot overtake this input message on the pipe.
-        with self._send_lock:
+        # Register the token, then enqueue its input.  A concurrent host
+        # call may see the token, but its request cannot overtake this
+        # message: one writer per direction drains the queue in order.
+        with self._lock:
+            token = self._input_tokens.get(key)
+            if token is not None:
+                if token not in used:
+                    self._input_refcounts[token] += 1
+                    used.add(token)
+                return _INPUT_REF, token
+            if self._closing or self._closed:
+                raise RuntimeError("render process is closing")
+            self._input_serial += 1
+            token = self._input_serial
+            self._input_tokens[key] = token
+            self._input_keys[token] = key
+            self._input_identity_owners[token] = value
+            self._input_kinds[token] = str(key[0])
+            self._input_refcounts[token] = 1
+            used.add(token)
+        buffers: list[pickle.PickleBuffer] = []
+        released_buffers = 0
+        shared: list[SharedMemory] = []
+        descriptors: list[tuple[str, int]] = []
+        try:
+            payload = pickle.dumps(
+                value, protocol=5, buffer_callback=buffers.append
+            )
+            for item in buffers:
+                source = None
+                destination = None
+                try:
+                    source = memoryview(item).cast("B")
+                    nbytes = source.nbytes
+                    block = SharedMemory(create=True, size=max(1, nbytes))
+                    shared.append(block)
+                    destination = block.buf
+                    if nbytes:
+                        destination[:nbytes] = source
+                    descriptors.append((block.name, nbytes))
+                finally:
+                    if destination is not None:
+                        destination.release()
+                    if source is not None:
+                        source.release()
+                    # PickleBuffer itself owns an export independently of
+                    # the derived memoryview; release both as soon as the
+                    # shared transport copy is complete.
+                    item.release()
+                    released_buffers += 1
+            buffers.clear()
             with self._lock:
-                token = self._input_tokens.get(key)
-                if token is not None:
-                    if token not in used:
-                        self._input_refcounts[token] += 1
-                        used.add(token)
-                    return _INPUT_REF, token
-                if self._closing or self._closed:
-                    raise RuntimeError("render process is closing")
-                self._input_serial += 1
-                token = self._input_serial
-                self._input_tokens[key] = token
-                self._input_keys[token] = key
-                self._input_identity_owners[token] = value
-                self._input_kinds[token] = str(key[0])
-                self._input_refcounts[token] = 1
-                used.add(token)
-            buffers: list[pickle.PickleBuffer] = []
-            released_buffers = 0
-            shared: list[SharedMemory] = []
-            descriptors: list[tuple[str, int]] = []
-            try:
-                payload = pickle.dumps(
-                    value, protocol=5, buffer_callback=buffers.append
-                )
-                for item in buffers:
-                    source = None
-                    destination = None
-                    try:
-                        source = memoryview(item).cast("B")
-                        nbytes = source.nbytes
-                        block = SharedMemory(create=True, size=max(1, nbytes))
-                        shared.append(block)
-                        destination = block.buf
-                        if nbytes:
-                            destination[:nbytes] = source
-                        descriptors.append((block.name, nbytes))
-                    finally:
-                        if destination is not None:
-                            destination.release()
-                        if source is not None:
-                            source.release()
-                        # PickleBuffer itself owns an export independently of
-                        # the derived memoryview; release both as soon as the
-                        # shared transport copy is complete.
-                        item.release()
-                        released_buffers += 1
-                buffers.clear()
-                with self._lock:
-                    self._input_uploads[token] = tuple(shared)
-                _send_message(
-                    self._connection,
-                    ("input", token, payload, tuple(descriptors))
-                )
-            except BaseException:
-                for item in buffers[released_buffers:]:
-                    try:
-                        item.release()
-                    except Exception:
-                        pass
-                buffers.clear()
-                with self._lock:
-                    self._input_tokens.pop(key, None)
-                    self._input_keys.pop(token, None)
-                    self._input_identity_owners.pop(token, None)
-                    self._input_kinds.pop(token, None)
-                    self._input_refcounts.pop(token, None)
-                    self._input_uploads.pop(token, None)
-                for block in shared:
-                    try:
-                        block.close()
-                        block.unlink()
-                    except Exception:
-                        pass
-                raise
+                self._input_uploads[token] = tuple(shared)
+            self._outbox.put(
+                ("input", token, payload, tuple(descriptors))
+            )
+        except BaseException:
+            for item in buffers[released_buffers:]:
+                try:
+                    item.release()
+                except Exception:
+                    pass
+            buffers.clear()
+            with self._lock:
+                self._input_tokens.pop(key, None)
+                self._input_keys.pop(token, None)
+                self._input_identity_owners.pop(token, None)
+                self._input_kinds.pop(token, None)
+                self._input_refcounts.pop(token, None)
+                self._input_uploads.pop(token, None)
+            for block in shared:
+                try:
+                    block.close()
+                    block.unlink()
+                except Exception:
+                    pass
+            raise
         return _INPUT_REF, token
 
     def _replace_inputs(self, value: object, used: set[int]) -> object:
@@ -1739,6 +1788,13 @@ class RenderProcess:
             self._process.join(timeout=max(0.0, float(timeout)))
         if not self._reader_stopped.is_set():
             return False
+        # The child is gone; retire its writer so the thread does not outlive
+        # the pipe it was created for.  A restart makes a fresh pair.  Mark the
+        # service closed FIRST: past this point nothing may enqueue, because
+        # nothing will drain, and a message dropped into a dead queue is a
+        # request that never fails and never completes.
+        self._closed = True
+        self._outbox.put(_STOP_WRITER)
         self._process.join(timeout=0.0)
         return not self._process.is_alive()
 
@@ -1950,7 +2006,6 @@ def _render_process_main(connection: Connection, name: str) -> None:
     from .raster import RasterPlotHost
     from .session import PlotSession
 
-    send_lock = Lock()
     state_lock = RLock()
     hosts: dict[str, RasterPlotHost] = {}
     closing_hosts: set[str] = set()
@@ -1966,9 +2021,25 @@ def _render_process_main(connection: Connection, name: str) -> None:
     )
     closer_threads: set[Thread] = set()
 
+    outbox: Queue = Queue()
+    write_failed = Event()
+    writer = Thread(
+        target=_write_messages,
+        args=(connection, outbox, write_failed.set),
+        name=f"zlc-render-{name}-out",
+        daemon=True,
+    )
+    writer.start()
+
     def send(message: object) -> None:
-        with send_lock:
-            _send_message(connection, message)
+        """Hand one message to the writer, so this loop keeps reading.
+
+        The service loop's own answers -- an input acknowledgement, a refusal
+        -- used to wait behind whatever front was mid-write, which stopped it
+        draining the parent's requests.  See :func:`_write_messages`.
+        """
+
+        outbox.put(message)
 
     def publish_front(host_id: str, front: RasterFront) -> None:
         sequence = int(front.identity.sequence)
@@ -2378,6 +2449,10 @@ def _render_process_main(connection: Connection, name: str) -> None:
         inputs.clear()
         schemas.clear()
         fronts.close()
+        # Flush what is still queued before the pipe goes: a refusal already
+        # handed to the writer is the operator's only word about why.
+        outbox.put(_STOP_WRITER)
+        writer.join(timeout=30.0)
         try:
             send(("stopped",))
         except Exception:

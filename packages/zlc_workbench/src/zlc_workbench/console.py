@@ -2576,15 +2576,33 @@ class ConsolePresenter:
                 str(name): value
                 for name, value in dict(changes["semantic"]).items()
             }
+            # Seed from the EFFECTIVE table, not the authored one.  A row can
+            # hold a role because the kind's default gave it one and nobody
+            # ever wrote it into PanelState -- which is exactly the frame axis
+            # of a camera signal, holding facet by default.  Reading only what
+            # was authored made that owner invisible, so taking its role
+            # displaced it with nothing handed back, and the operator's pick
+            # looked like it simply would not take.
             authored = {
                 str(name): value
                 for name, value in dict(current.semantic).items()
             }
+            try:
+                effective = project_panel_state(
+                    candidate_schema, base_spec, base_state
+                ).semantic
+            except (KeyError, TypeError, ValueError):
+                effective = {}
+            for name, value in dict(effective).items():
+                authored.setdefault(str(name), value)
             for name, value in edited.items():
                 if value not in ROLE_FATES:
                     continue
                 for other, held in tuple(authored.items()):
                     if other != name and held == value:
+                        # Hand the displaced axis the role the taker was
+                        # holding, so one gesture trades two roles instead of
+                        # dropping one to the kind's default.
                         authored[other] = authored.get(name, FATE_REDUCE)
             patch_state = replace(
                 base_state,
@@ -2988,6 +3006,12 @@ class ConsolePresenter:
                     pending,
                     True,
                     candidate,
+                    # What to go back to if the host refuses.  A panel edit is
+                    # a transaction: the plot session already rolls its own
+                    # sixteen fields back, and the record on this side has to
+                    # roll back with it or the panel permanently claims a
+                    # setting nothing ever drew.
+                    current,
                 )
             else:
                 self._remount_panel_editor(binding)
@@ -3297,6 +3321,34 @@ class ConsolePresenter:
         except Exception:
             pass
 
+    def _restore_refused_panel_state(
+        self, binding: PanelBinding, fallback: object
+    ) -> None:
+        """Put the panel record back to what the host last accepted.
+
+        A refused edit used to leave three things standing: the panel's own
+        state, the Runtime history lease already resized to the new window,
+        and the live port already retargeted at the refused spec.  The picture
+        stayed on the previous spec, so the panel claimed a setting nothing
+        had ever drawn -- and the next shot was projected through the refused
+        one.  The plot session rolls its own state back; this is the same
+        transaction on this side of the boundary.
+        """
+
+        if not isinstance(fallback, PanelState) or binding.state == fallback:
+            return
+        binding.state = fallback
+        try:
+            self._sync_panel_history(binding, fallback)
+        except Exception:
+            # The lease could not go back; the reported condition already
+            # says the edit failed, and a second line about the lease would
+            # not tell the operator anything they can act on.
+            pass
+        if binding.port is not None:
+            binding.port.retarget(fallback)
+        self._publish_panel_state(binding)
+
     def _settle_panel_hosts(self) -> None:
         """Project metadata and selectors only after each initial render finished."""
 
@@ -3415,11 +3467,13 @@ class ConsolePresenter:
                     pending,
                     normalize_state,
                     configuration_target,
+                    refused_fallback,
                 ) = configuration_entry
             else:
                 pending = None
                 normalize_state = False
                 configuration_target = None
+                refused_fallback = None
             if pending is not None and pending.done():
                 binding.configuration = None
                 if not pending.cancelled():
@@ -3445,6 +3499,9 @@ class ConsolePresenter:
                         )
                     except Exception as error:
                         condition = _error_text(error)
+                        self._restore_refused_panel_state(
+                            binding, refused_fallback
+                        )
                         if binding.reported_condition != condition:
                             binding.reported_condition = condition
                             self._report(

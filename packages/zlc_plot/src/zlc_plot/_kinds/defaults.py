@@ -222,22 +222,42 @@ def _facet(families: AxisFamilies, plan: _Plan) -> AxisRef | None:
     free dimension, then an event sequence, then the shot history -- and
     with none of those, an event axis of one: a one-frame cycle still
     names its cell, so the grid's meaning does not depend on the count.
+
+    An axis the layout cannot lay out is not a candidate.  The shot history
+    is as long as the panel's window, so a grid over a thousand-shot window
+    used to DEFAULT to a thousand cells: the surface then refused the only
+    spec the panel had, the host never started, and the panel sat there with
+    a refusal and no picture before the operator had chosen anything.  A
+    default has to be drawable; choosing a facet nobody asked for and that
+    cannot be drawn is worse than facing nothing.
     """
 
+    from ..layout import DEFAULT_LAYOUT
+
+    capacity = int(DEFAULT_LAYOUT.facet_max_cells)
     consumed = set(plan.consumed)
-    for ref, _size in families.live_scan():
-        if ref not in consumed:
+
+    def offered(ref: AxisRef, size: object) -> bool:
+        return ref not in consumed and int(size) <= capacity
+
+    for ref, size in families.live_scan():
+        if offered(ref, size):
             return ref
-    for ref, _size in families.live_events():
-        if ref not in consumed:
+    for ref, size in families.live_events():
+        if offered(ref, size):
             return ref
-    history = _live_history(families)
-    if history is not None and history not in consumed:
-        return history
+    history = families.history
+    if (
+        history is not None
+        and int(history[1]) > 1
+        and history[0] not in consumed
+        and int(history[1]) <= capacity
+    ):
+        return history[0]
     # An event axis names a sub-measurement even at one coordinate; a scan's
     # degenerate axis is provenance but does not create a visible grid cell.
-    for ref, _size in families.events:
-        if ref not in consumed:
+    for ref, size in families.events:
+        if offered(ref, size):
             return ref
     return None
 
