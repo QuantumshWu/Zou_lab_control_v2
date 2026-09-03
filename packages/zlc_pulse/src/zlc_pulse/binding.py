@@ -135,6 +135,52 @@ def replace_pulse_field(
     return replace(sequence, periods=tuple(periods))
 
 
+def prune_orphaned_bindings(
+    sequence: PulseSequence,
+) -> tuple[PulseSequence, tuple[str, ...]]:
+    """Drop every binding whose field the pulse no longer has, and name them.
+
+    A binding is a statement ABOUT a field, so it cannot outlive one.  A DAC
+    field exists only while its period carries a step on that port, and the
+    gestures that take a step away -- clearing a port, choosing Hold -- used
+    to leave the binding behind.  Every reader then raised on a pulse that
+    looked fine on screen: reading the value of a field that is not there.
+
+    Durations and delays are never orphaned this way (a period always has a
+    duration, and a missing delay reads as zero), and the model already
+    refuses a binding whose period is gone, so this is the DAC case.
+    """
+
+    if not isinstance(sequence, PulseSequence):
+        raise TypeError("sequence must be PulseSequence")
+
+    def held(reference: PulseFieldRef) -> bool:
+        if reference.kind != FIELD_DAC:
+            return True
+        period = sequence.period_by_id.get(str(reference.period_id))
+        return period is not None and any(
+            step.port == reference.port for step in period.analog_steps
+        )
+
+    slots = tuple(slot for slot in sequence.slots if held(slot.field_ref))
+    parameters = tuple(
+        parameter
+        for parameter in sequence.api_parameters
+        if held(parameter.field_ref)
+    )
+    dropped = tuple(
+        [slot.slot_id for slot in sequence.slots if not held(slot.field_ref)]
+        + [
+            parameter.parameter_id
+            for parameter in sequence.api_parameters
+            if not held(parameter.field_ref)
+        ]
+    )
+    if not dropped:
+        return sequence, ()
+    return replace(sequence, slots=slots, api_parameters=parameters), dropped
+
+
 def field_label(sequence: PulseSequence, reference: PulseFieldRef) -> str:
     """One physical field, said the way it reads on the pulse.
 
@@ -171,13 +217,21 @@ def authored_api_entries(sequence: PulseSequence) -> dict[str, tuple[float, str]
 
     if not isinstance(sequence, PulseSequence):
         raise TypeError("sequence must be PulseSequence")
-    return {
-        parameter.parameter_id: (
-            float(pulse_field_value(sequence, parameter.field_ref, parameter.unit)),
-            parameter.unit,
-        )
-        for parameter in sequence.api_parameters
-    }
+    entries: dict[str, tuple[float, str]] = {}
+    for parameter in sequence.api_parameters:
+        try:
+            value = pulse_field_value(
+                sequence, parameter.field_ref, parameter.unit
+            )
+        except ValueError as error:
+            # Say WHICH binding has no field.  "period 'load' has no DAC step
+            # on port 'da_dipole'" is true and unactionable on its own; the
+            # operator needs the name they can see on the Scan page.
+            raise ValueError(
+                f"API parameter {parameter.parameter_id!r} has no field: {error}"
+            ) from None
+        entries[parameter.parameter_id] = (float(value), parameter.unit)
+    return entries
 
 
 def authored_api_values(sequence: PulseSequence) -> dict[str, float]:
@@ -331,6 +385,7 @@ __all__ = [
     "authored_api_values",
     "convert_time",
     "field_label",
+    "prune_orphaned_bindings",
     "pulse_field_value",
     "replace_pulse_field",
     "resolve_api_parameters",

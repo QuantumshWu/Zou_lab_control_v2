@@ -51,6 +51,7 @@ from zlc_pulse import (
     apply_api_values,
     authored_api_entries,
     field_label,
+    prune_orphaned_bindings,
     resolve_api_parameters,
     resolve_scan_point,
 )
@@ -1327,7 +1328,11 @@ class PulseEditorPresenter:
         if self.sequence is None:
             self._warn("there is no pulse to save values from")
             return False
-        entries = authored_api_entries(self.sequence)
+        try:
+            entries = authored_api_entries(self.sequence)
+        except ValueError as error:
+            self._warn(str(error))
+            return False
         if not entries:
             self._warn("this pulse declares no API parameters")
             return False
@@ -3281,7 +3286,15 @@ class PulseEditorPresenter:
                     ),
                 ),
             )
-        candidate = self._rebuilt(slots=slots, api_parameters=api_parameters)
+        changes: dict[str, Any] = {
+            "slots": slots,
+            "api_parameters": api_parameters,
+        }
+        if wanted is not None:
+            owning = self._periods_owning(reference)
+            if owning is not None:
+                changes["periods"] = owning
+        candidate = self._rebuilt(**changes)
         if candidate is None:
             return
         self._accept_state(
@@ -3322,6 +3335,39 @@ class PulseEditorPresenter:
             "(click a dot in the Edit tab)"
         )
         return False
+
+    def _periods_owning(self, reference) -> tuple[PulsePeriod, ...] | None:
+        """The periods, with this DAC field given a step of its own.
+
+        A DAC field exists only while its period sets that port, so binding a
+        cell that is merely HOLDING has to make the period own the level it
+        was showing.  Bound without that, the binding named a field that was
+        not there and every read of it raised; the operator saw a dot on a
+        pulse that would not load.  ``None`` when nothing has to change.
+        """
+
+        period = self.sequence.period_by_id.get(str(reference.period_id))
+        if period is None or any(
+            step.port == reference.port for step in period.analog_steps
+        ):
+            return None
+        port = self.sequence.target.by_key.get(str(reference.port))
+        if port is None:
+            return None
+        materialised = replace(
+            period,
+            analog_steps=period.analog_steps + (
+                AnalogStep(
+                    str(reference.port),
+                    ANALOG_MODE_CHOICES[0],
+                    _held_value(self.sequence, period, port),
+                ),
+            ),
+        )
+        return tuple(
+            materialised if item.period_id == period.period_id else item
+            for item in self.sequence.periods
+        )
 
     def _field_reference(self, kind: str, period_id: object, port_key: object):
         from zlc_pulse import PulseFieldRef
@@ -4171,7 +4217,20 @@ class PulseEditorPresenter:
         if self.sequence is None:
             return None
         try:
-            return replace_sequence(self.sequence, **changes)
+            candidate = replace_sequence(self.sequence, **changes)
+            # A binding cannot outlive the field it is about.  Clearing a port
+            # and choosing Hold both take a DAC step away, and the binding on
+            # it used to stay: every later read raised on a pulse that looked
+            # fine.  Pruning here covers every gesture that changes shape,
+            # including ones written after this one.
+            pruned, dropped = prune_orphaned_bindings(candidate)
+            if dropped:
+                self._warn(
+                    "unbound "
+                    + ", ".join(dropped)
+                    + ": the field it named is no longer set here"
+                )
+            return pruned
         except Exception as error:
             self._warn(str(error))
             return None

@@ -426,7 +426,15 @@ class ScanPlanEditor(QtWidgets.QWidget):
             if parameter.parameter_id not in scanned
         )
         self._sequence = sequence
-        self._authored = authored_api_entries(sequence) if parameters else {}
+        broken = ""
+        try:
+            self._authored = authored_api_entries(sequence) if parameters else {}
+        except ValueError as error:
+            # A pulse saved with a binding whose field was later cleared.  Say
+            # so, rather than leaving a Qt slot on a raise.
+            self._authored = {}
+            offered = ()
+            broken = str(error)
         overrides = self._current_overrides()
 
         self._loading = True
@@ -454,9 +462,13 @@ class ScanPlanEditor(QtWidgets.QWidget):
                 self._value_rows[name] = box
         finally:
             self._loading = False
-        shown = bool(offered)
+        shown = bool(offered) or bool(broken)
         self.values_title.setVisible(shown)
         self.values_note.setVisible(shown)
+        self.load_values_button.setEnabled(bool(offered))
+        if broken:
+            self.values_note.setText(broken)
+            return
         self._refresh_values_note(scanned & set(self._authored))
 
     def _current_overrides(self) -> dict[str, float]:
