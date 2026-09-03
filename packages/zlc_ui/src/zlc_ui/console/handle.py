@@ -70,6 +70,8 @@ class TaskConsoleHandle(QtCore.QObject):
     logic_edit_requested = QtCore.pyqtSignal(str)
     logic_remove_requested = QtCore.pyqtSignal(str)
     logic_draft_changed = QtCore.pyqtSignal(str, object)
+    #: One node's files should be re-read from disk.
+    logic_refresh_requested = QtCore.pyqtSignal(str)
     panel_publisher_edit_requested = QtCore.pyqtSignal(str)
     panel_publisher_draft_changed = QtCore.pyqtSignal(str, object)
 
@@ -629,6 +631,9 @@ class TaskConsoleHandle(QtCore.QObject):
             editor.draft_changed.connect(
                 lambda patch, pid=key: self.panel_publisher_draft_changed.emit(pid, patch)
             )
+            editor.refresh_requested.connect(
+                lambda _=None, pid=key: self.logic_refresh_requested.emit(pid)
+            )
             self._panel_publisher_editors[key] = editor
             title = str(dict(projection).get("api_name") or key)
             self._view.add_editor_tab(editor, f"Edit · {title}")
@@ -670,6 +675,9 @@ class TaskConsoleHandle(QtCore.QObject):
             editor.set_mutation_enabled(not self._task_takeover)
             editor.draft_changed.connect(
                 lambda patch, nid=key: self.logic_draft_changed.emit(nid, patch)
+            )
+            editor.refresh_requested.connect(
+                lambda _=None, nid=key: self.logic_refresh_requested.emit(nid)
             )
             editor.start_requested.connect(
                 lambda _=None, nid=key: self.logic_start_requested.emit(nid)

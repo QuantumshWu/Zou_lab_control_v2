@@ -665,6 +665,9 @@ class ConsolePresenter:
         draft_changed = getattr(self.view, "logic_draft_changed", None)
         if draft_changed is not None:
             draft_changed.connect(self._guarded(self._logic_draft_changed))
+        logic_refresh = getattr(self.view, "logic_refresh_requested", None)
+        if logic_refresh is not None:
+            logic_refresh.connect(self._guarded(self.refresh_logic_files))
         publisher_edit = getattr(self.view, "panel_publisher_edit_requested", None)
         if publisher_edit is not None:
             publisher_edit.connect(self._guarded(self.edit_panel_publisher))
@@ -6745,6 +6748,25 @@ class ConsolePresenter:
             )
         self._refresh_console_projection()
         self.refresh_logic_editor(binding.node_id)
+        return True
+
+    def refresh_logic_files(self, node_id: str) -> bool:
+        """Re-read this node's chosen files, without re-picking them.
+
+        A pulse is edited in the Pulse Editor and a calibration is written by
+        a run; both were decoded when the draft last finalized and nothing
+        since then looks at the filesystem -- deliberately, because the beat
+        must never poll it.  Opening Edit and pressing Start were therefore
+        the only ways to see a change, and both are side doors.  This is the
+        front door, and it does exactly what opening Edit already did.
+        """
+
+        binding = self.logic.get(str(node_id))
+        if binding is None:
+            return False
+        self._finalize_logic_binding(binding, force=True)
+        self.refresh_logic_editor(node_id)
+        self._refresh_console_projection()
         return True
 
     def edit_logic(self, node_id: str) -> bool:

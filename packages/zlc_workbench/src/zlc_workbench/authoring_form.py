@@ -134,6 +134,8 @@ def project_artifact_inputs(
                 description=f"Artifact contract: {spec.contract_id}",
                 file_filter=str(spec.codec.file_filter),
                 base_dir=str(base_dir),
+                # Written by a run that may finish after this row was set up.
+                refreshable=True,
             )
             for spec in specs
         )
@@ -229,6 +231,10 @@ def _project_resource_field(
         description=f"Choose a file from {directory}",
         file_filter=f"{field.label} ({patterns})",
         base_dir=str(directory),
+        # Its CONTENT is decoded, and it is authored somewhere else -- a pulse
+        # in the Pulse Editor.  Offer Refresh rather than making the operator
+        # re-pick the same file to see an edit.
+        refreshable=True,
     )
 
 

@@ -1425,13 +1425,22 @@ class FluentPathEdit(QtWidgets.QWidget):
     opens a folder chooser; ``mode="file"`` an open-file chooser filtered by
     ``file_filter``.  Quacks like a line edit (``text`` / ``setText`` /
     ``setPlaceholderText`` / ``setToolTip``) and emits ``changed(str)`` so a form can
-    treat it exactly like a ``FluentLineEdit``."""
+    treat it exactly like a ``FluentLineEdit``.
+
+    ``refreshable=True`` adds a Refresh button that emits ``refresh_requested``
+    without changing the path.  A file field points at something that is edited
+    elsewhere -- a pulse in the Pulse Editor, a calibration a run has just
+    written -- and the only way to re-read it was to pick the same file again
+    through the dialog, or to touch some other field so the whole draft
+    re-finalized.  Both worked by accident; this says it."""
 
     changed = QtCore.pyqtSignal(str)
     selected = QtCore.pyqtSignal(str)
+    refresh_requested = QtCore.pyqtSignal()
 
     def __init__(self, text: str = "", *, mode: str = "file", caption: str = "Choose",
-                 file_filter: str = "All files (*)", base_dir: str = "", parent=None):
+                 file_filter: str = "All files (*)", base_dir: str = "",
+                 refreshable: bool = False, parent=None):
         super().__init__(parent)
         self._mode = "dir" if str(mode) == "dir" else "file"
         self._caption = str(caption)
@@ -1456,8 +1465,16 @@ class FluentPathEdit(QtWidgets.QWidget):
         self.browse.setFixedWidth(
             fluent_text_width(self.browse.fontMetrics(), "Browse…") + scaled_px(22, minimum=16))
         self.browse.clicked.connect(self._browse)
+        self.refresh = FluentButton("Refresh", color=GREY)
+        self.refresh.setFixedWidth(
+            fluent_text_width(self.refresh.fontMetrics(), "Refresh") + scaled_px(22, minimum=16))
+        self.refresh.setToolTip("Re-read this file from disk")
+        self.refresh.clicked.connect(self.refresh_requested)
+        self.refresh.setVisible(bool(refreshable))
+        self.refresh.setEnabled(bool(refreshable))
         row.addWidget(self.edit, 1)
         row.addWidget(self.browse, 0)
+        row.addWidget(self.refresh, 0)
 
     def _browse(self) -> None:
         start = self._dialog_start()
